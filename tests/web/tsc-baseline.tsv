@@ -8,7 +8,6 @@ crates/plurxd/src/web/core/api.js	TS2339	9
 crates/plurxd/src/web/core/auth.js	TS2304	10
 crates/plurxd/src/web/core/auth.js	TS2339	2
 crates/plurxd/src/web/core/auth.js	TS2554	3
-crates/plurxd/src/web/core/chrome.js	TS2339	2
 crates/plurxd/src/web/core/errors.js	TS2339	1
 crates/plurxd/src/web/core/keyboard-reach.js	TS2339	6
 crates/plurxd/src/web/core/keyboard-reach.js	TS2551	1
@@ -21,7 +20,7 @@ crates/plurxd/src/web/detail/preplay-selection.js	TS2769	1
 crates/plurxd/src/web/detail/watch-browser.js	TS2339	20
 crates/plurxd/src/web/detail/watch-browser.js	TS2551	1
 crates/plurxd/src/web/detail/watch-browser.js	TS2769	1
-crates/plurxd/src/web/layouts/catalog.js	TS2339	4
+crates/plurxd/src/web/layouts/catalog.js	TS2339	2
 crates/plurxd/src/web/layouts/catalog.js	TS2551	1
 crates/plurxd/src/web/layouts/catalog.js	TS2769	1
 crates/plurxd/src/web/layouts/library-grids.js	TS2339	2
@@ -30,7 +29,6 @@ crates/plurxd/src/web/layouts/library-grids.js	TS2365	1
 crates/plurxd/src/web/layouts/library-grids.js	TS2551	2
 crates/plurxd/src/web/layouts/renderers.js	TS2339	4
 crates/plurxd/src/web/layouts/renderers.js	TS2363	1
-crates/plurxd/src/web/layouts/theater.js	TS2339	2
 crates/plurxd/src/web/layouts/theater.js	TS2769	1
 crates/plurxd/src/web/pages/activity-stream.js	TS2339	8
 crates/plurxd/src/web/pages/analysis.js	TS2339	10
@@ -55,7 +53,6 @@ crates/plurxd/src/web/pages/settings-live-tv.js	TS2339	8
 crates/plurxd/src/web/pages/settings-panels.js	TS2322	1
 crates/plurxd/src/web/pages/settings-panels.js	TS2339	21
 crates/plurxd/src/web/pages/settings-playback.js	TS2339	40
-crates/plurxd/src/web/pages/settings-system.js	TS2339	1
 crates/plurxd/src/web/pages/settings.js	TS2339	1
 crates/plurxd/src/web/pages/users-admin.js	TS2339	9
 crates/plurxd/src/web/pages/users-admin.js	TS2362	1

@@ -89,6 +89,8 @@ const BORROWED = [
   "leavePanel",
   "joinTokenHtml",
   "clusterPanel",
+  "settingsClusterEnabled",
+  "setHead",
   "clusterTransportRecoveryCard",
   "setCard",
   "cardHead",
@@ -103,9 +105,10 @@ const BORROWED = [
 
 // One sandbox per test so a mutation of ME or CLUSTER_REFUSAL cannot leak into
 // the next assertion.
-function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [] } = {}) {
+function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [], clustered } = {}) {
   const source = `
     const CLUSTER_OPS_RECEIVED_AT = new WeakMap();
+    const SERVER={cluster_enabled:${JSON.stringify(clustered)}},SETTINGS_DATA={};
     let ME = ${JSON.stringify({ is_admin: isAdmin })};
     let CLUSTER_REFUSAL = ${JSON.stringify(refusal)};
     let CLUSTER_TOKEN = ${JSON.stringify(token)};
@@ -1894,13 +1897,12 @@ test("a never-joined install is offered no roster and no join control", () => {
       },
     },
   });
-  assert.match(html, /Not clustered/);
+  assert.match(html, /Clustering is not enabled\./);
   // A "Create a join token" button here would mint nothing and refuse — the
   // dead end this panel is supposed to not have.
   assert.equal(html.includes("Create a join token"), false);
   assert.equal(html.includes("<table"), false);
-  // The one lag answer is still the shared #233 projection and its renderer.
-  assert.match(html, /SQLite single-node/);
+  assert.doesNotMatch(html, /SQLite|Replication|<button|<input/);
 });
 
 test("a failed roster read never claims a clustered node is not clustered", () => {
@@ -3009,53 +3011,24 @@ test("the freshness row ages while the tab stays open", () => {
   assert.equal(ui.clusterSampleAge(ops, null), null);
 });
 
-test("a cold load into the Cluster tab still knows it is a single-node install", () => {
-  // `sys` is not in this tab's manifest, so opening Settings straight onto
-  // Cluster has no replication projection at all. Reporting that as "status
-  // unavailable" under a banner saying nothing is wrong made the verdict
-  // depend on which tab you happened to visit first.
-  const ui = sandbox();
-  const html = ui.clusterPanel({ cluster: { unavailable: true, code: "membership_unavailable", nodes: [] } });
-  assert.match(html, /class="pill"[^>]*>Single node</);
-  assert.match(html, /SQLite single-node/);
-  assert.doesNotMatch(html, /Status unavailable/);
-  assert.match(html, /<dt>Backend<\/dt><dd>SQLite · single node<\/dd>/);
+test("standalone Cluster settings contain only the disabled message", () => {
+  for(const d of [{}, {cluster:{nodes:[{node_id:"local",is_leader:true}],capacity:{voting_nodes:1}}}]){
+    const html=sandbox({clustered:false}).clusterPanel(d);
+    assert.match(html,/<h1>Cluster<\/h1><p>Clustering is not enabled\.<\/p>/);
+    assert.doesNotMatch(html,/button|input|select|textarea|Maintenance|Replicated|cluster-dashboard|cluster-operations/);
+  }
 });
 
-test("a machine that is not clustered is not told to preserve a voter", () => {
-  // The restart-safety verdict and the roster both belong to a cluster. Left
-  // mounted on a SQLite install, /cluster/status's 503 was patched into the
-  // page as "Do not restart another voter", beside an empty node card.
-  const ui = sandbox();
-  const html = ui.clusterPanel({ cluster: { unavailable: true, code: "membership_unavailable", nodes: [] } });
-  assert.doesNotMatch(html, /id="cluster-operations"/);
-  assert.doesNotMatch(html, /<h3>Cluster nodes<\/h3>/);
-  assert.doesNotMatch(html, /<h3>Maintenance<\/h3>/);
-  // Nor a ledger of eleven "unknown" rows: there is no Raft here to fail to
-  // read, so the section says what is true about a single machine.
-  assert.match(html, /<dt>Peers<\/dt><dd>none — watch state is durable here/);
-  assert.doesNotMatch(html, /<dt>Quorum commit<\/dt>/);
-  // And the readings pane must not answer with arithmetic over zero voters.
-  assert.match(html, /No committed voter roster is readable/);
-  assert.doesNotMatch(html, /of 0 voters must agree/);
+test("configured cluster settings remain visible during membership recovery", () => {
+  const html=sandbox({clustered:true}).clusterPanel({cluster:{unavailable:true,code:"membership_unavailable"}});
+  assert.doesNotMatch(html,/Clustering is not enabled/);
+  assert.match(html,/cluster-dashboard/);
 });
 
-test("a single-node install reads as one node, never as redundancy", () => {
-  const ui = sandbox();
-  const sqlite = {
-    backend: "sqlite",
-    health: "healthy",
-    clustered: false,
-    explanation: "Watch state is stored on this server only.",
-  };
-  const html = ui.clusterPanel({
-    cluster: { unavailable: true, code: "membership_unavailable", nodes: [] },
-    sys: { replication: sqlite },
-  });
-  assert.match(html, /<h3>Replicated database<\/h3>/);
-  assert.match(html, /SQLite single-node/);
-  assert.match(html, /class="pill"[^>]*>Single node</);
-  assertNoRedundancyClaim(html, "the single-node database section");
+test("a SQLite membership refusal shows only that clustering is not enabled", () => {
+  const html=sandbox().clusterPanel({cluster:{unavailable:true,code:"membership_unavailable",nodes:[]}});
+  assert.match(html,/Clustering is not enabled\./);
+  assert.doesNotMatch(html,/button|input|select|textarea|SQLite|voter|Replicated|Status unavailable/);
 });
 
 // ---- folding, and remembering it ------------------------------------------
@@ -3212,7 +3185,7 @@ test("the fold is restored where the panel is written, and saved by every contro
   // Both are call sites: the helpers can be perfect while the panel never
   // calls them. Deleting either line leaves the feature dead with the rest of
   // these tests green.
-  assert.match(shippedSource("renderSettings"), /if\(tab==="cluster"\)\{ applyClusterFolds\(\); return refreshClusterLogs\(\); \}/);
+  assert.match(shippedSource("renderSettings"), /if\(tab==="cluster"&&settingsClusterEnabled\(\)\)\{ applyClusterFolds\(\); return refreshClusterLogs\(\); \}/);
   assert.match(shippedSource("toggleClusterNodes"), /clusterNodeFoldSave\(\);/);
   assert.match(shippedSource("selectClusterTab"), /clusterFoldSave\(\{tab:id\}\)/);
 });
@@ -3990,7 +3963,7 @@ test("transport observer age advances the repaint projection", () => {
 
 // A settingsTick harness that can actually run the cluster branch: the tick
 // itself is shipped source, everything it reaches for is supplied here.
-function tickHarness({ cluster, ops, now }) {
+function tickHarness({ cluster, ops, now, clustered=true }) {
   const requests = [];
   const painted = [];
   const paintedTransport = [];
@@ -4009,6 +3982,8 @@ function tickHarness({ cluster, ops, now }) {
     `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,
        TRAKT=null,CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=0,
        SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
+     const SERVER={cluster_enabled:${JSON.stringify(clustered)}};
+     ${shippedSource("settingsClusterEnabled")}
      const cacheTrakt=(value)=>value;
      const Date={now:clock};
      const performance={now:clock};
@@ -4726,6 +4701,12 @@ test("the model reaches for nothing the shell owns", () => {
   // One esc, one escaping contract to review.
   assert.doesNotMatch(source, /function esc\(/);
   assert.match(shippedSource("clenv"), /return \{esc,fmtAgo,fmtBytes\};/);
+});
+
+test("standalone Settings never polls cluster status even with a cached roster", async () => {
+  const h=tickHarness({clustered:false,cluster:{nodes:[{node_id:"local",maintenance:true}]},ops:{},now:{value:100000}});
+  await h.harness.settingsTick(1,"cluster");
+  assert.deepEqual(h.requests,[]);
 });
 
 main().catch((error) => {

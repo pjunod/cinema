@@ -2625,11 +2625,11 @@ async fn encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid() {
         original,
         "reordered bytes need their own rendition"
     );
-    assert_encoded_neighbor_continuity(base.path(), &file, &encoding).await;
+    Box::pin(assert_encoded_neighbor_continuity(base.path(), &file, &encoding)).await;
     let encoding = encoding
         .clone_with_admissions_for_test(crate::admission::Admissions::new())
         .await;
-    assert_encoded_restarts(base.path(), file, encoding).await;
+    Box::pin(assert_encoded_restarts(base.path(), file, encoding)).await;
 }
 
 /// Explicit qualification benchmark, not part of the fast unit lane. The

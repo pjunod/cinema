@@ -574,6 +574,13 @@ pub struct TranscodeManager {
     /// artifact qualification this changes no cache identity, so the Settings
     /// checkbox can apply immediately to attempts created after the write.
     automatic_decoder_recovery: AtomicBool,
+    /// Saved operator choice; captured with one node-local compatibility
+    /// report for each new immutable plan, never used as a probe gate.
+    macos_video_processing_enabled: Arc<AtomicBool>,
+    /// Serialize durable preference writes and replicated reload publication;
+    /// a stale read cannot overwrite a just-saved hot value.
+    macos_video_preference_update: Mutex<()>,
+    macos_video_probe: Arc<crate::macos_video::MacosVideoProbe>,
     /// The manager's test points (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8), in
     /// every build. Production never fills the slot, so every point reads
     /// [`NoopTranscodeManagerHooks`] (Decision D-M8-I).
@@ -603,6 +610,8 @@ pub struct TranscodeManager {
     /// [`Pipeline::for_session`] — because a proven graph is a claim about the
     /// box, not about the session.
     pipeline: Pipeline,
+    /// Saved node choice, activated with its tone-map graph at startup.
+    encoder_override: Option<String>,
     /// The hardware budget, and what this box has learned about its own speed.
     admissions: Admissions,
     /// Where finished transcodes live, and what identifies them here. `None`
@@ -808,7 +817,7 @@ const QUALIFICATION_ENCODERS: [Encoder; 5] = [
     Encoder::VideoToolbox,
 ];
 const QUALIFICATION_GRADES: [OutputGrade; 2] = [OutputGrade::Sdr, OutputGrade::Hdr10];
-const QUALIFICATION_PIPELINES: [Pipeline; 9] = [
+const QUALIFICATION_PIPELINES: [Pipeline; 13] = [
     Pipeline::VppQsv,
     Pipeline::TonemapVaapi,
     Pipeline::Libplacebo,
@@ -818,6 +827,10 @@ const QUALIFICATION_PIPELINES: [Pipeline; 9] = [
     Pipeline::Hdr10Passthrough,
     Pipeline::Cpu,
     Pipeline::LibplaceboVaapi,
+    Pipeline::TonemapCuda,
+    Pipeline::VtScaleSdr,
+    Pipeline::VtToneMapMetal,
+    Pipeline::LibplaceboSoftware,
 ];
 
 // split: begin terminal-admission

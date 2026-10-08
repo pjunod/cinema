@@ -36,6 +36,7 @@ struct SettingsStore {
         static let preparedHandoff = "plurx.preparedHandoff"
         static let boundedResume = "plurx.boundedResume"
         static let liveTvLayout = "plurx.liveTvLayout"
+        static let tvHomeLayout = "plurx.tvHomeLayout"
         static let liveTvMobileGuide = "plurx.liveTvMobileGuide"
     }
 
@@ -204,6 +205,11 @@ struct SettingsStore {
                 ?? .guidePreview
         }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.liveTvLayout) }
+    }
+
+    var tvHomeLayout: TvHomeLayout {
+        get { TvHomeLayout(rawValue: defaults.string(forKey: Key.tvHomeLayout) ?? "") ?? .classic }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.tvHomeLayout) }
     }
 
     var liveTvMobileGuideUsesGrid: Bool {

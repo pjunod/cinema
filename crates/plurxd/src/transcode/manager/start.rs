@@ -730,6 +730,7 @@ impl TranscodeManager {
         }
         let plan =
             self.resolve_movie_plan_from_probe(&file, &opts, encoder, probe_json.as_deref())?;
+        opts.pipeline = plan.options().pipeline;
         // Freeze the master shape from the same settings read as the plan.
         let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
             plurx_core::store::stored_switch(
@@ -806,6 +807,7 @@ impl TranscodeManager {
                 }
             };
             if let Some((retained_plan, Ok(execution))) = retained_plan.map(|plan| {
+                retained_opts.pipeline = plan.options().pipeline;
                 let execution = TranscodeExecution::from_options(
                     &file,
                     &retained_opts,
@@ -837,6 +839,7 @@ impl TranscodeManager {
                         &producer_ffmpeg_bin(),
                     )
                     .await
+                    .filter(|production| production.executable_matches_plan(&retained_plan))
                     {
                         let kind = SessionKind::Transcode {
                             height: target_height,
@@ -892,7 +895,7 @@ impl TranscodeManager {
         // Explicit candidate bindings and takeovers already name their exact
         // recipe and must never be redirected to a different one.
         if takeover.is_none() && candidate_context.is_none() {
-            if let Some(cached_options) = self
+            if let Some(mut cached_options) = self
                 .measured_content_cache_options_from(
                     &file,
                     &opts,
@@ -911,6 +914,7 @@ impl TranscodeManager {
                     encoder,
                     probe_json.as_deref(),
                 ) {
+                    cached_options.pipeline = cached_plan.options().pipeline;
                     if let Some(info) = self
                         .serve_cached(
                             &file,
@@ -1057,6 +1061,10 @@ impl TranscodeManager {
         // neither the old encoder nor its decode surface is patched in place.
         let plan =
             self.resolve_movie_plan_from_probe(&file, &opts, encoder, probe_json.as_deref())?;
+        // Retries, descriptors and attribution carry the graph resolution
+        // selected, including its verdict-aware software downgrade.
+        opts.pipeline = plan.options().pipeline;
+        let macos_executable = capture_macos_plan_executable(&plan, &producer_ffmpeg_bin()).await?;
         // Every object FFmpeg's muxer writes for this session passes a
         // scratch grant before it reaches the disk, so the session starts on
         // its startup allowance and grows, instead of reserving the whole
@@ -1115,6 +1123,8 @@ impl TranscodeManager {
         } else {
             None
         };
+        let rolling_provenance =
+            rolling_provenance.filter(|production| production.executable_matches_plan(&plan));
         if let Some(provenance) = &rolling_provenance {
             execution.source_path = provenance.input_path();
         }
@@ -1137,13 +1147,12 @@ impl TranscodeManager {
         // not. Without it `pipeline=cpu` on a 4K HDR title reads as the GPU
         // path being broken, when the usual answer is that the source is Dolby
         // Vision and the CPU chain is the *correct* choice.
-        let declined = Pipeline::declined_with_scan(
+        let declined = Pipeline::declined(
             self.pipeline,
             encoder,
             transcode::routing_hdr(&file),
             transcode::heavy_source(&file),
             opts.subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
-            plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
         );
         tracing::info!(
             target: "plurxd::transcode",
@@ -1234,7 +1243,12 @@ impl TranscodeManager {
                     rate_control.effective_for(Encoder::Software),
                 ) {
                     Ok(prepared) => self
-                        .resolve_movie_plan(&file, &prepared.opts, prepared.encoder)
+                        .resolve_movie_processing_retry(
+                            &file,
+                            &prepared.opts,
+                            prepared.encoder,
+                            opts.pipeline,
+                        )
                         .await
                         .map(|retry_plan| (prepared, retry_plan)),
                     Err(error) => Err(error),
@@ -1596,13 +1610,26 @@ impl TranscodeManager {
             provenance.bind_initial_attempt(generation);
         }
         session.bind_retry_compatibility_attempt(generation).await;
+        if let Some(executable) = &macos_executable {
+            if !executable.is_current().await {
+                let reason = "macos_processing_implementation_changed: captured encoder changed before launch".to_owned();
+                fail_prepublication_transaction(&session, reason.clone()).await;
+                start_settlement.disarm();
+                return Err(reason);
+            }
+        }
         if let Err(reason) = session
             .spawn_and_install_prepublication_child(generation, || {
                 spawn_ffmpeg_at(
-                    session
-                        .rolling_provenance
+                    macos_executable
                         .as_ref()
-                        .map(|proof| proof.executable_path())
+                        .map(|executable| executable.path.as_path())
+                        .or_else(|| {
+                            session
+                                .rolling_provenance
+                                .as_ref()
+                                .map(|proof| proof.executable_path())
+                        })
                         .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
                     &args,
                     crate::process_control::ChildWork::realtime("playback transcode"),

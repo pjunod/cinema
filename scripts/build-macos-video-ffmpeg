@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Assemble a private, pinned Jellyfin macOS package; never install it globally.
+
+Package mode retains the official portable binary's complete dependency set,
+rather than rebuilding a reduced FFmpeg with incidental host libraries. The
+upstream release API publishes the archive hashes below. Source, patch series,
+dependency recipes, licenses, configure and linked-library facts accompany the
+candidate. Capability declarations are not graph or media qualification.
+
+Usage: build-macos-video-ffmpeg --output /absolute/new/directory
+Offline: add --archive ARCHIVE --source-archive SOURCE_ARCHIVE.
+The source archive is from the pinned tag URL; its checksum is also fixed.
+"""
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+
+TAG = "v8.1.3-1"
+COMMIT = "253db2a7b0a8045c54ce68ce33d7f601229b1822"
+SOURCE_URL = f"https://codeload.github.com/jellyfin/jellyfin-ffmpeg/tar.gz/refs/tags/{TAG}"
+SOURCE_SHA256 = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140"
+ARCHIVES = {
+    "arm64": ("macarm64", "22445d7299742749ad2eeb9ce87963d50def0357e45b3e6c7b69987c8365dbf6"),
+    "x86_64": ("mac64", "cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a167b093d4bb6fb"),
+}
+REQUIRED = {
+    "filters": ["scale_vt", "tonemap_videotoolbox", "tonemapx", "zscale", "tonemap",
+                "ass", "subtitles", "overlay", "bwdif", "hwupload", "hwdownload", "sidedata"],
+    "decoders": ["ac4", "h264", "hevc", "aac", "ac3", "eac3", "dca"],
+    "encoders": ["h264_videotoolbox", "hevc_videotoolbox", "libx264", "aac", "ac3", "libopus"],
+    "bsfs": ["dovi_rpu", "hevc_metadata", "hevc_mp4toannexb", "h264_mp4toannexb", "aac_adtstoasc"],
+    "muxers": ["hls", "mp4", "mpegts", "matroska"],
+    "demuxers": ["ac4", "mpegts", "mov", "matroska"],
+}
+FILTER_OPTIONS = {
+    "scale_vt": ["w", "h", "format", "color_matrix", "color_primaries", "color_transfer"],
+    "tonemap_videotoolbox": ["tonemap", "tonemap_mode", "format", "transfer", "matrix", "primaries", "range", "apply_dovi"],
+    "tonemapx": ["tonemap", "format", "transfer", "matrix", "primaries", "range", "apply_dovi"],
+}
+
+
+def digest(path):
+    checksum = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            checksum.update(block)
+    return checksum.hexdigest()
+
+
+def run(argv):
+    # Do not leak the operator environment into child logs or provenance.
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=30, check=True,
+                            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"})
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def acquire(local, url, expected, destination):
+    if local:
+        shutil.copyfile(local, destination)
+    else:
+        subprocess.run(["/usr/bin/curl", "--proto", "=https", "--tlsv1.2", "--fail",
+                        "--location", "--retry", "2", "--max-time", "180", url,
+                        "--output", str(destination)], check=True, timeout=190)
+    actual = digest(destination)
+    if actual != expected:
+        raise ValueError(f"archive checksum mismatch: expected {expected}, got {actual}")
+
+
+def source_provenance(archive, destination):
+    files = {}
+    with tarfile.open(archive) as source:
+        for member in source:
+            # Retain inspectable patch/license/dependency recipes. The complete
+            # original source archive is retained alongside this selection.
+            relative = Path(*Path(member.name).parts[1:])
+            if not member.isfile() or relative.is_absolute() or ".." in relative.parts:
+                continue
+            selected = (str(relative).startswith(("debian/patches/", "builder/"))
+                        or str(relative) in ["COPYING.GPLv2", "COPYING.GPLv3", "COPYING.LGPLv2.1",
+                                             "COPYING.LGPLv3", "LICENSE.md", "debian/changelog"])
+            if not selected:
+                continue
+            contents = source.extractfile(member).read()
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            files[str(relative)] = hashlib.sha256(contents).hexdigest()
+    if "debian/patches/series" not in files or "builder/buildmac.sh" not in files:
+        raise ValueError("source archive lacks pinned Jellyfin patch/build provenance")
+    return files
+
+
+def inventory(binary, evidence):
+    facts = {}
+    for kind, names in REQUIRED.items():
+        output = run([str(binary), "-hide_banner", f"-{kind}"])
+        (evidence / f"{kind}.txt").write_text(output)
+        if kind == "bsfs":
+            declared = {line.strip() for line in output.splitlines()}
+        else:
+            declared = set(re.findall(r"^\s*[A-Z.]{1,6}\s+(\S+)\s", output, re.MULTILINE))
+            declared = {alias for name in declared for alias in name.split(",")}
+        missing = sorted(set(names) - declared)
+        if missing:
+            raise ValueError(f"candidate lacks required {kind}: {', '.join(missing)}")
+        facts[kind] = {name: "declared" for name in names}
+    for name, options in FILTER_OPTIONS.items():
+        output = run([str(binary), "-hide_banner", "-h", f"filter={name}"])
+        (evidence / f"filter-{name}.txt").write_text(output)
+        if not re.search(rf"^Filter {re.escape(name)}$", output, re.MULTILINE):
+            raise ValueError(f"candidate does not declare filter {name}")
+        declared = set(re.findall(r"^\s+(\w+)\s+<", output, re.MULTILINE))
+        if not set(options) <= declared:
+            raise ValueError(f"candidate filter {name} lacks required options")
+    full_help = run([str(binary), "-hide_banner", "-h", "full"])
+    (evidence / "full-help.txt").write_text(full_help)
+    for option in ["readrate", "readrate_initial_burst", "fps_mode"]:
+        if not re.search(rf"^-{option}(?:\[:[^\]]+\])?\s", full_help, re.MULTILINE):
+            raise ValueError(f"candidate lacks pacing/presentation option {option}")
+    return facts
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True, help="new private package directory")
+    parser.add_argument("--archive", type=Path, help="checksum-verified local official binary archive")
+    parser.add_argument("--source-archive", type=Path, help="checksum-verified local pinned source archive")
+    args = parser.parse_args()
+    if platform.system() != "Darwin" or platform.machine() not in ARCHIVES:
+        parser.error("native arm64 or x86_64 macOS is required")
+    output = args.output
+    if not output.is_absolute() or output.exists():
+        parser.error("output must be an absolute, new directory")
+    repo = Path(__file__).resolve().parent.parent
+    output = output.resolve()
+    if output.is_relative_to(repo) or any(output.is_relative_to(Path(root)) for root in
+                                         ["/Applications", "/Library", "/System", "/usr", "/opt"]):
+        parser.error("use a private task directory outside the checkout and global install paths")
+    target, expected = ARCHIVES[platform.machine()]
+    name = f"jellyfin-ffmpeg_8.1.3-1_portable_{target}-gpl.tar.xz"
+    url = f"https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/{TAG}/{name}"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".mac-video-package-", dir=output.parent) as work:
+        stage = Path(work)
+        evidence = stage / "provenance"
+        evidence.mkdir()
+        archive = evidence / name
+        source = evidence / "jellyfin-ffmpeg-source.tar.gz"
+        acquire(args.archive, url, expected, archive)
+        acquire(args.source_archive, SOURCE_URL, SOURCE_SHA256, source)
+        with tarfile.open(archive) as package:
+            members = package.getmembers()
+            if {member.name for member in members} != {"ffmpeg", "ffprobe"} or len(members) != 2:
+                raise ValueError("unexpected official package members")
+            for member in members:
+                if not member.isfile():
+                    raise ValueError("official executables must be regular files")
+                executable = stage / member.name
+                executable.write_bytes(package.extractfile(member).read())
+                executable.chmod(0o755)
+        files = source_provenance(source, evidence / "source")
+        binaries = {}
+        for name in ["ffmpeg", "ffprobe"]:
+            executable = stage / name
+            version = run([str(executable), "-version"])
+            if not version.startswith(f"{name} version 8.1.3-Jellyfin"):
+                raise ValueError("unexpected Jellyfin executable version")
+            architecture = run(["/usr/bin/lipo", "-archs", str(executable)]).splitlines()[-1].strip()
+            if architecture != platform.machine():
+                raise ValueError("candidate architecture does not match native host")
+            closure = run(["/usr/bin/otool", "-L", str(executable)])
+            dependencies = re.findall(r"^\s+(\S+) \(", closure, re.MULTILINE)
+            if not dependencies or any(not item.startswith(("/System/Library/", "/usr/lib/"))
+                                       for item in dependencies):
+                raise ValueError("candidate has an external/nonportable library dependency")
+            (evidence / f"{name}-version.txt").write_text(version)
+            (evidence / f"{name}-libraries.txt").write_text("\n".join(dependencies) + "\n")
+            (evidence / f"{name}-load-commands.txt").write_text(
+                run(["/usr/bin/otool", "-l", str(executable)]))
+            binaries[name] = {"sha256": digest(executable), "architecture": architecture,
+                              "linked_libraries": dependencies}
+        facts = inventory(stage / "ffmpeg", evidence)
+        receipt = {
+            "schema_version": 1, "mode": "official-portable-package", "source_tag": TAG,
+            "source_commit": COMMIT, "source_url": SOURCE_URL, "source_sha256": SOURCE_SHA256,
+            "binary_archive_url": url, "binary_archive_sha256": expected,
+            "release_metadata_url": f"https://api.github.com/repos/jellyfin/jellyfin-ffmpeg/releases/tags/{TAG}",
+            "checksum_authority": "GitHub official release asset digest",
+            "source_recipe_sha256": files, "binaries": binaries, "capabilities": facts,
+            "patch_digest": hashlib.sha256(json.dumps(
+                {name: value for name, value in files.items() if name.startswith("debian/patches/")},
+                sort_keys=True).encode()).hexdigest(),
+            "qualification": "declarations-only",
+            "limitations": ["No installed-daemon baseline inferred", "No graph/performance/quality qualification",
+                            "AC-4 and Dolby sample acceptance remain required", "No global install performed",
+                            "Private candidate: redistribution dependency-source/license closure remains required"],
+        }
+        (evidence / "manifest.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        # Publish only after verification. Never overwrite an existing package.
+        if output.exists():
+            raise ValueError("output appeared during packaging; refusing replacement")
+        stage.rename(output)
+    print(json.dumps({"output": str(output), "manifest": str(output / "provenance/manifest.json"),
+                      "ffmpeg_sha256": binaries["ffmpeg"]["sha256"]}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
+        print(f"macOS video package failed: {error}", file=sys.stderr)
+        sys.exit(1)

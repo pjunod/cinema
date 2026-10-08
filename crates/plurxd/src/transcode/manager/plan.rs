@@ -112,13 +112,62 @@ impl TranscodeManager {
         encoder: Encoder,
         restrictions: &AttemptRestrictions,
     ) -> Result<ResolvedTranscode, String> {
+        self.resolve_movie_plan_with_processing_exclusion(
+            file,
+            options,
+            encoder,
+            restrictions,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_movie_processing_retry(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        failed_pipeline: Pipeline,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_movie_plan_with_processing_exclusion(
+            file,
+            options,
+            encoder,
+            &AttemptRestrictions::none(),
+            Some(failed_pipeline),
+        )
+        .await
+    }
+
+    async fn resolve_movie_plan_with_processing_exclusion(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        restrictions: &AttemptRestrictions,
+        excluded_pipeline: Option<Pipeline>,
+    ) -> Result<ResolvedTranscode, String> {
         let stored_probe = self
             .store
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| format!("reading decoder planning facts: {error}"))?;
         let facts = Self::planning_facts(file, stored_probe.as_deref())?;
-        self.resolve_movie_plan_with_facts(file, options, encoder, &facts, restrictions)
+        let context = self
+            .macos_video_report()
+            .context(self.macos_video_processing_enabled())
+            .map(|context| match excluded_pipeline {
+                Some(pipeline) => context.excluding_pipeline(pipeline),
+                None => context,
+            });
+        self.resolve_movie_plan_with_processing_context(
+            file,
+            options,
+            encoder,
+            &facts,
+            restrictions,
+            context.as_ref(),
+        )
     }
 
     /// [`Self::resolve_movie_plan`] from the stored probe a caller already
@@ -184,6 +233,28 @@ impl TranscodeManager {
         facts: &DecodeFacts,
         restrictions: &AttemptRestrictions,
     ) -> Result<ResolvedTranscode, String> {
+        let context = self
+            .macos_video_report()
+            .context(self.macos_video_processing_enabled());
+        self.resolve_movie_plan_with_processing_context(
+            file,
+            options,
+            encoder,
+            facts,
+            restrictions,
+            context.as_ref(),
+        )
+    }
+
+    fn resolve_movie_plan_with_processing_context(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: &DecodeFacts,
+        restrictions: &AttemptRestrictions,
+        macos_context: Option<&plurx_core::transcode::MacosProcessingContext>,
+    ) -> Result<ResolvedTranscode, String> {
         use plurx_core::transcode::ArtifactQualification;
 
         if self.hooks.get().forces_artifact_qualification() {
@@ -194,6 +265,7 @@ impl TranscodeManager {
                 facts,
                 restrictions,
                 self.artifact_qualification(),
+                macos_context,
             );
         }
 
@@ -208,6 +280,7 @@ impl TranscodeManager {
             facts,
             restrictions,
             ArtifactQualification::Unqualified,
+            macos_context,
         )?;
         if !self.published_artifact_qualification().requested {
             return Ok(unqualified);
@@ -239,6 +312,7 @@ impl TranscodeManager {
             facts,
             restrictions,
             ArtifactQualification::HealthQualified,
+            macos_context,
         )?;
         if qualified.decode().backend() != backend
             || qualified.decode().input_codec() != Some(codec)
@@ -254,6 +328,7 @@ impl TranscodeManager {
         Ok(qualified)
     }
 
+    #[allow(clippy::too_many_arguments)] // Independent frozen source, policy and implementation inputs.
     fn resolve_movie_plan_with_qualification(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -262,6 +337,7 @@ impl TranscodeManager {
         facts: &DecodeFacts,
         restrictions: &AttemptRestrictions,
         qualification: plurx_core::transcode::ArtifactQualification,
+        macos_context: Option<&plurx_core::transcode::MacosProcessingContext>,
     ) -> Result<ResolvedTranscode, String> {
         // Recheck the same contract against the facts actually used by this
         // plan. A stale catalogue preview cannot admit a different held source
@@ -319,8 +395,12 @@ impl TranscodeManager {
         )
         .map_err(|error| format!("decoder capability snapshot is invalid: {error}"))?;
         let compatibility = std::env::var("PLURX_HWDECODE").ok();
-        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
-            .qualifying_artifacts(qualification);
+        let mut policy =
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
+                .qualifying_artifacts(qualification);
+        if let Some(context) = macos_context {
+            policy = policy.with_macos_processing(context.clone());
+        }
         let request = TranscodeRequest::new(
             encoder,
             TranscodeMediaOptions::from_options_with_facts(file, options, facts),
@@ -336,6 +416,10 @@ impl TranscodeManager {
         };
         transcode::resolve_transcode(&request, facts, &capabilities, &policy, restrictions)
             .map(|plan| {
+                if let Some(selection) = plan.macos_processing_selection() {
+                    tracing::debug!(target: "plurxd::transcode", selection = selection.name(),
+                        pipeline = plan.options().pipeline.name(), "resolved Mac processing for new movie plan");
+                }
                 let frame_rate = facts.frame_rate();
                 let cadence = (frame_rate.provenance() != transcode::FrameRateProvenance::Variable)
                     .then(|| frame_rate.value())
@@ -1145,7 +1229,7 @@ impl TranscodeManager {
             && plurx_core::playback::hdr_route(file).is_some()
             && matches!(target_height, HDR10_HEIGHT | HDR10_4K_HEIGHT)
         {
-            let preferred = self.caps.choose(preference);
+            let preferred = self.encoder_for_preference(preference);
             let qsv_proved = match plurx_core::playback::hdr_route(file) {
                 Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough_qsv,
                 _ => self.hdr10_passthrough_qsv,
@@ -1173,7 +1257,7 @@ impl TranscodeManager {
                 target_height,
                 hdr_candidate,
                 subtitle_burn,
-                self.caps.choose(preference),
+                self.encoder_for_preference(preference),
             )
             .await?;
         if grade == OutputGrade::Hdr10 {
@@ -1217,7 +1301,7 @@ impl TranscodeManager {
             // been proved at boot; an unproved pairing falls back to software
             // rather than failing in front of a viewer. Pinning it to x264
             // used to cap 4K Dolby Vision at 720p for every non-DV client.
-            let preferred = self.caps.choose(requested);
+            let preferred = self.encoder_for_preference(requested);
             if preferred != Encoder::Software
                 && crate::ffmpeg::has_dovi_reshape_with(preferred).await
             {
@@ -1226,7 +1310,7 @@ impl TranscodeManager {
                 Ok(Encoder::Software)
             }
         } else {
-            Ok(self.caps.choose(requested))
+            Ok(self.encoder_for_preference(requested))
         }
     }
 
@@ -1276,9 +1360,9 @@ impl TranscodeManager {
             },
             // The node proved a graph; this session may still not be entitled
             // to it (HLG, non-compatible Dolby Vision, a light source, an
-            // encoder it cannot feed). Deciding once, here,
-            // is what keeps the log line honest — `pipeline=` is what actually
-            // ran, not what the box is capable of. Routed by `routing_hdr`
+            // encoder it cannot feed). This chooses the candidate; resolution
+            // owns its final scan-dependent graph, which later execution and
+            // diagnostics retain. Routed by `routing_hdr`
             // rather than the raw column: a DV base layer that is
             // HDR10-compatible is an hdr10 stream to a tone-map, and a bitmap
             // subtitle burn keeps the GPU graph (it downloads once for
@@ -1305,13 +1389,15 @@ impl TranscodeManager {
             } else if dovi_reshape {
                 Pipeline::DoviTonemapx
             } else {
-                Pipeline::for_session_with_scan(
+                // This is a candidate graph. Descriptor-bound decode facts
+                // decide deinterlace in resolve_transcode; a catalog flag can
+                // be overruled by idet and must not discard the graph here.
+                Pipeline::for_session(
                     self.pipeline,
                     encoder,
                     transcode::routing_hdr(file),
                     transcode::heavy_source(file),
                     subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
-                    plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
                 )
             },
             subtitle_burn,

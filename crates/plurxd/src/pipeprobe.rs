@@ -387,14 +387,6 @@ async fn burn_filters_with<T: Tools>(tools: &T) -> BurnFilters {
 }
 
 async fn probe_with<T: Tools>(tools: &T, work_dir: &Path, encoder: Encoder) -> PipelineReport {
-    // Nothing to keep on the GPU if the encode is on the CPU: the frames would
-    // have to come down for it anyway.
-    if encoder == Encoder::Software {
-        return PipelineReport::cpu_only(
-            "software encoder — a GPU graph would download every frame anyway",
-        );
-    }
-
     let fixture = match fixture(tools, work_dir).await {
         Ok(p) => p,
         Err(e) => {
@@ -560,10 +552,24 @@ async fn run<T: Tools>(
 ) -> Result<Sample, String> {
     let args = probe_args(fixture, out, candidate, encoder);
 
+    if candidate == Pipeline::TonemapCuda {
+        // Compile the CUDA kernels into the same writable cache playback
+        // uses. A one-frame warm-up is not a throughput measurement.
+        let mut warmup = args.clone();
+        warmup.splice(
+            warmup.len() - 1..warmup.len() - 1,
+            ["-frames:v".into(), "1".into()],
+        );
+        check_exit(&tools.ffmpeg(warmup, Stdout::Discard).await?)?;
+    }
+
     let started = Instant::now();
     let output = tools.ffmpeg(args, Stdout::Discard).await?;
     let elapsed = started.elapsed();
     check_exit(&output)?;
+    if candidate == Pipeline::LibplaceboSoftware {
+        check_software_vulkan_device(&output.stderr)?;
+    }
 
     // Tagged BT.709, or a correctly tone-mapped picture still renders wrong on
     // every SDR display — and this is the failure that looks like nothing at
@@ -573,6 +579,62 @@ async fn run<T: Tools>(
 
     let (y, u, v) = signal_stats(tools, out).await?;
     Ok(Sample { y, u, v, elapsed })
+}
+
+fn check_software_vulkan_device(stderr: &[u8]) -> Result<(), String> {
+    // libplacebo cee9b076 context.c logs inventory before this selected-device
+    // block. Inspect only its ordered properties, never the inventory's CPU ICDs.
+    const FIELDS: [&str; 10] = [
+        "device name:",
+        "device id:",
+        "device uuid:",
+        "driver version:",
+        "api version:",
+        "driver id:",
+        "driver name:",
+        "driver info:",
+        "conformance version:",
+        "driver uuid:",
+    ];
+    let log = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let mut lines = log.lines().map(|line| {
+        line.split_once("] ")
+            .map_or(line, |(_, message)| message)
+            .trim()
+    });
+    let mut selected = None;
+    while let Some(line) = lines.next() {
+        if line != "vulkan device properties:" {
+            continue;
+        }
+        let mut identity = Vec::new();
+        for field in &FIELDS {
+            let value = lines
+                .next()
+                .and_then(|line| line.strip_prefix(*field))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "malformed selected Vulkan device properties".to_owned())?;
+            if ["lavapipe", "llvmpipe", "swiftshader", "(cpu)"]
+                .iter()
+                .any(|name| value.contains(name))
+            {
+                return Err("software Vulkan driver cannot qualify GPU tone mapping".to_owned());
+            }
+            identity.push(value);
+        }
+        if selected
+            .as_ref()
+            .is_some_and(|previous| previous != &identity)
+        {
+            return Err("ambiguous selected Vulkan device properties".to_owned());
+        }
+        selected = Some(identity);
+    }
+    if selected.is_none() {
+        return Err("software-frame Vulkan graph did not identify its GPU device".to_owned());
+    }
+    Ok(())
 }
 
 /// Did the tool succeed, and if not, what did it say?
@@ -602,6 +664,9 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
         "error".into(),
         "-y".into(),
     ];
+    if candidate == Pipeline::LibplaceboSoftware {
+        args[2] = "verbose".into();
+    }
     args.extend(candidate.device_args(encoder));
     args.extend(candidate.decode_args());
     args.push("-i".into());
@@ -1244,8 +1309,6 @@ mod tests {
         }
     }
 
-    /// A software encode has nothing to keep on the GPU — the frames would come
-    /// down for the encoder anyway — so no candidate is even run.
     /// A stock Homebrew ffmpeg ships without zscale (no libzimg), so the guard
     /// that reads this listing decides whether the CPU tone-map chain can run
     /// at all — and a substring match would say yes on a build that cannot.
@@ -1368,7 +1431,7 @@ mod tests {
         let mut command = tools.command("/bin/sh");
         command.env("HOME", "/").args([
             "-c",
-            "test \"$AV_LOG_FORCE_NOCOLOR\" = 1 && printf shader > \"$XDG_CACHE_HOME/probe-cache\"",
+            "test \"$AV_LOG_FORCE_NOCOLOR\" = 1 && test \"$CUDA_CACHE_PATH\" = \"$XDG_CACHE_HOME\" && printf shader > \"$CUDA_CACHE_PATH/probe-cache\"",
         ]);
         let output = crate::process_control::output_job_owned(
             &mut command,
@@ -1384,29 +1447,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_software_encoder_skips_the_probe_entirely() {
-        let dir = crate::test_tempdir().expect("workdir");
-        // Through the real entry point: a software encode must not reach the
-        // tools at all, so this cannot spawn anything.
+    async fn software_encoder_probes_only_software_frame_vulkan_against_cpu() {
+        let recorder = Recorder::new(vec![
+            (Pipeline::Cpu, Ok(sample(84.0, 4.0))),
+            (Pipeline::LibplaceboSoftware, Ok(sample(85.0, 2.0))),
+        ]);
+        let report = probe_candidates(Encoder::Software, |pipeline| {
+            std::future::ready(recorder.run(pipeline))
+        })
+        .await;
+        assert_eq!(report.selected(), Pipeline::LibplaceboSoftware);
         assert_eq!(
-            probe(dir.path(), dir.path(), Encoder::Software)
-                .await
-                .selected(),
-            Pipeline::Cpu
+            *recorder.asked.borrow(),
+            vec![Pipeline::Cpu, Pipeline::LibplaceboSoftware]
         );
-        let report = probe_with(&Recorded::default(), dir.path(), Encoder::Software).await;
-        assert_eq!(report.selected(), Pipeline::Cpu);
+    }
+
+    #[test]
+    fn software_vulkan_device_proof_refuses_cpu_driver_or_absent_identity() {
+        // Selected properties follow the exact pinned context.c schema and real
+        // V3DV evidence; an unselected software ICD is harmless.
+        let gpu = "Vulkan device properties:\nDevice Name: V3D 7.1.10.2\nDevice ID: 14e4:55701c33\nDevice UUID: 5f:d8\nDriver version: 6400007\nAPI version: 1.3.305\nDriver ID: VK_DRIVER_ID_MESA_V3DV\nDriver name: V3DV Mesa\nDriver info: Mesa 25.0.7\nConformance version: 1.3.8.3\nDriver UUID: 96:50\n";
+        let inventory =
+            "Probing for vulkan devices:\nGPU 0: V3D (integrated)\nGPU 1: llvmpipe (software)\n";
+        assert!(check_software_vulkan_device(format!("{inventory}{gpu}").as_bytes()).is_ok());
+        let prefixed = gpu
+            .lines()
+            .map(|line| format!("[libplacebo @ 0x123] {line}\n"))
+            .collect::<String>();
+        assert!(check_software_vulkan_device(prefixed.as_bytes()).is_ok());
+        assert!(check_software_vulkan_device(format!("{gpu}{gpu}").as_bytes()).is_ok());
+        for cpu in ["llvmpipe (LLVM 19)", "SwiftShader Device", "lavapipe (cpu)"] {
+            let selected_cpu = gpu.replace("V3D 7.1.10.2", cpu);
+            assert!(
+                check_software_vulkan_device(format!("{inventory}{selected_cpu}").as_bytes())
+                    .is_err()
+            );
+        }
         assert!(
-            !report.ran,
-            "nothing was measured, so nothing may be claimed"
+            check_software_vulkan_device(gpu.replace("V3DV Mesa", "llvmpipe").as_bytes()).is_err()
         );
-        assert!(report.verdicts[0]
-            .rejected
-            .as_deref()
-            .unwrap_or_default()
-            .contains("software encoder"));
-        // And it did not leave a fixture behind on the way out.
-        assert!(!dir.path().join("hdr10-probe.mkv").exists());
+        for malformed in [
+            inventory,
+            "no device identity",
+            "Device Name: V3D",
+            "Vulkan device properties:\nDevice Name: V3D",
+            "Vulkan device properties:\nDevice Name: ",
+        ] {
+            assert!(check_software_vulkan_device(malformed.as_bytes()).is_err());
+        }
+        assert!(check_software_vulkan_device(
+            gpu.replace("Driver ID:", "Unexpected ID:").as_bytes()
+        )
+        .is_err());
+        let other_gpu = gpu.replace("V3D 7.1.10.2", "Other hardware GPU");
+        assert!(check_software_vulkan_device(format!("{gpu}{other_gpu}").as_bytes()).is_err());
+    }
+
+    #[tokio::test]
+    async fn cuda_warms_its_shader_cache_before_the_measured_encode() {
+        let tools = Recorded {
+            ffmpeg: vec![ok_output(""), ok_output("")],
+            ffprobe: vec![ok_output(BT709_TAGS), ok_output(SIGNALSTATS)],
+            ..Recorded::default()
+        };
+        let result = run(
+            &tools,
+            Path::new("hdr.mkv"),
+            Path::new("out.mp4"),
+            Pipeline::TonemapCuda,
+            Encoder::Nvenc,
+        )
+        .await
+        .expect("measured CUDA sample");
+        assert!(result.y > 0.0);
+        let calls = tools.ffmpeg_args.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].windows(2).any(|pair| pair == ["-frames:v", "1"]));
+        assert!(!calls[1].contains(&"-frames:v".to_owned()));
+        for args in calls.iter() {
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-hwaccel_output_format", "cuda"]));
+            assert!(!args.join(" ").contains("hwdownload"));
+        }
     }
 
     /// No fixture means no measurement, and no measurement means the CPU chain
@@ -1565,8 +1689,8 @@ mod tests {
     async fn a_candidate_that_is_the_same_picture_and_faster_wins_the_probe() {
         let dir = crate::test_tempdir().expect("workdir");
         let tools = Recorded {
-            // fixture, reference encode, candidate encode
-            ffmpeg: vec![ok_output(""), ok_output(""), ok_output("")],
+            // fixture, reference, CUDA warm-up and measured encode
+            ffmpeg: vec![ok_output(""), ok_output(""), ok_output(""), ok_output("")],
             ffprobe: vec![
                 ok_output(BT709_TAGS),
                 ok_output(SIGNALSTATS),
@@ -1585,8 +1709,8 @@ mod tests {
         let candidate = report
             .verdicts
             .iter()
-            .find(|v| v.pipeline == Pipeline::Libplacebo.name())
-            .expect("libplacebo was tried");
+            .find(|v| v.pipeline == Pipeline::TonemapCuda.name())
+            .expect("CUDA was tried");
         assert!(
             candidate
                 .rejected
@@ -1702,17 +1826,17 @@ mod tests {
         let rec = Recorder::new(vec![
             (Pipeline::Cpu, Ok(sample(84.0, 10.0))),
             // Same picture, three times the speed.
-            (Pipeline::Libplacebo, Ok(sample(86.0, 3.0))),
+            (Pipeline::TonemapCuda, Ok(sample(86.0, 3.0))),
             (Pipeline::TonemapOpencl, Ok(sample(84.0, 1.0))),
         ]);
         let r = &rec;
         let report = probe_candidates(Encoder::Nvenc, |p| async move { r.run(p) }).await;
 
-        assert_eq!(report.selected(), Pipeline::Libplacebo);
+        assert_eq!(report.selected(), Pipeline::TonemapCuda);
         assert!(report.ran);
         assert_eq!(
             *rec.asked.borrow(),
-            vec![Pipeline::Cpu, Pipeline::Libplacebo],
+            vec![Pipeline::Cpu, Pipeline::TonemapCuda],
             "a faster candidate behind a winner must not be run"
         );
         // The CPU chain is always in the report, as the yardstick at 1.0x.
@@ -1740,7 +1864,12 @@ mod tests {
 
         assert_eq!(
             *rec.asked.borrow(),
-            vec![Pipeline::Cpu, Pipeline::Libplacebo, Pipeline::TonemapOpencl],
+            vec![
+                Pipeline::Cpu,
+                Pipeline::TonemapCuda,
+                Pipeline::Libplacebo,
+                Pipeline::TonemapOpencl
+            ],
             "the QSV and VA-API graphs do not pair with NVENC"
         );
         // Everything failed, so the node falls back — and says which graph

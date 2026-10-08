@@ -52,6 +52,18 @@ pub enum SourceCustodyWrite {
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
+// Bare Core has no replicated Source installation or admission authority.
+// Keep its SQL guard closed without importing the Hiqlite-only schema module.
+fn installed_source_guard() -> String {
+    #[cfg(feature = "hiqlite-store")]
+    {
+        super::sharing_source_schema::installed_guard()
+    }
+    #[cfg(not(feature = "hiqlite-store"))]
+    {
+        "0".to_owned()
+    }
+}
 fn source_guard(assignment: &SourceDispatchAssignment) -> String {
     let b = assignment.binding();
     let exact = format!(
@@ -70,7 +82,7 @@ fn source_guard(assignment: &SourceDispatchAssignment) -> String {
     );
     format!(
         "({}) AND EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key JOIN sharing_identity s ON s.singleton=1 AND s.server_id=b.source_server_id AND s.catalogue_epoch=b.catalogue_epoch WHERE {exact} AND r.owner_node_id={} AND r.state IN('starting','resolved','failed'))",
-        super::sharing_source_schema::installed_guard(),
+        installed_source_guard(),
         quote(assignment.owner_node_id())
     )
 }
@@ -445,14 +457,32 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
         &self,
         assignment: &SourceDispatchAssignment,
     ) -> Result<SourceCustodyWrite, StoreError> {
-        let Some(snapshot) = snapshot(self, assignment).await? else {
+        let Some(mut observed) = snapshot(self, assignment).await? else {
             return Ok(SourceCustodyWrite::Refused);
         };
-        let mut next = snapshot.state.clone();
-        if next.seal() == CustodyMutation::Replay {
-            return Ok(SourceCustodyWrite::ExactReplay);
+        for _ in 0..4 {
+            let mut next = observed.state.clone();
+            if next.seal() == CustodyMutation::Replay {
+                return Ok(SourceCustodyWrite::ExactReplay);
+            }
+            match replace(self, assignment, &observed, &next, "1", vec![]).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => {
+                    // Natural driver closure may acknowledge a registration
+                    // between this read and the seal CAS. Retry only when the
+                    // exact ledger moved; unchanged authority/SQL faults remain
+                    // failures and no closure receipt is inferred.
+                    let Some(current) = snapshot(self, assignment).await? else {
+                        return Err(error);
+                    };
+                    if current.revision == observed.revision {
+                        return Err(error);
+                    }
+                    observed = current;
+                }
+            }
         }
-        replace(self, assignment, &snapshot, &next, "1", vec![]).await
+        Err(invalid())
     }
     async fn acknowledge_source_ingress_custody(
         &self,
@@ -505,7 +535,7 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
         }
         let sql = format!(
             "SELECT json_quote(count(*)) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key JOIN sharing_ingress_custody c ON c.principal_kind='source' AND c.incarnation_id=b.incarnation_id JOIN sharing_identity s ON s.singleton=1 AND s.server_id=b.source_server_id AND s.catalogue_epoch=b.catalogue_epoch WHERE b.incarnation_id=$1 AND b.dispatch_generation=1 AND b.reservation_state='held' AND r.owner_node_id=$2 AND c.owner_identity=$3 AND ({})",
-            super::sharing_source_schema::installed_guard()
+            installed_source_guard()
         );
         Ok(self
             .sharing_read(

@@ -626,9 +626,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_m3c2_a_resumed_part_recovers_only_a_record_still_bound_to_it(self) -> None:
         """Reading a record back may recover a conclusion, never invent one.
 
-        Every way of failing to read one has to land on `unobserved`, because
-        the alternative — treating an unreadable record as clean — is the same
-        false certificate the effort exists to prevent, reached by a new route.
+        Ordinary unreadable records remain unobserved. A Mac-bound part also
+        needs its exact executable completion fence; missing evidence discards
+        the dependent parts rather than treating unreadable evidence as clean.
         """
         health = CORE_HEALTH.read_text(encoding="utf-8")
         daemon = module_source(DAEMON_TRANSCODE)
@@ -658,7 +658,16 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # The fallback is in `resume_parts`, and it is the one line that decides
         # what an unreadable record means.
         resume = daemon.split("async fn resume_parts(", 1)[1].split("\n}\n", 1)[0]
-        self.assertIn("resumed_part_health(&dir, plan_digest, &shape)", resume)
+        self.assertIn(
+            "resumed_part_health(&dir, plan_digest, &shape, macos_completion_sha256)",
+            resume,
+        )
+        self.assertIn("if let Some(expected_sha256) = macos_completion_sha256", resumed)
+        self.assertIn("completion.ffmpeg_sha256 != expected_sha256", resumed)
+        self.assertIn("completion.digest", resumed)
+        self.assertIn("mac_completion_digest(", resumed)
+        self.assertIn("if macos_completion_sha256.is_some() && retained.is_none()", resume)
+        self.assertIn("discard_dependent_parts(temp, parts.len(), true).await?", resume)
         self.assertIn("ProducerHealthReceipt::unobserved(", resume)
         self.assertNotIn("Qualification::Qualified", resume)
 
@@ -1446,7 +1455,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             inventory, r"DecodeBackend::V4l2Request\s*\.input_args\(true\)"
         )
         production = CORE_TRANSCODE.read_text(encoding="utf-8")
-        self.assertIn("decode.backend().input_args(matches!(", production)
+        self.assertRegex(
+            production,
+            r"decode\.backend\(\)\.input_args\(\s*matches!\(\s*"
+            r"decode\.surface\(\)\.decode_domain\(\),\s*"
+            r"FrameDomain::Cuda\s*\|\s*FrameDomain::VideoToolbox\s*"
+            r"\)\s*\|\| matches!\(",
+        )
         self.assertIn(
             "DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request",
             production,

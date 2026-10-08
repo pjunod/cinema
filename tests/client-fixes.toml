@@ -1,6 +1,31 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "apple.tv-theater-preserves-classic-preference"
+commits = ["f69f8ae94"]
+source = "clients/apple/Sources/SettingsStore.swift"
+source_anchor = 'get { TvHomeLayout(rawValue: defaults.string(forKey: Key.tvHomeLayout) ?? "") ?? .classic }'
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testClassicRemainsDefaultAndTheaterPersistsIndependently"
+
+[[fixes]]
+id = "apple.tv-theater-video-feature-and-shelf-preservation"
+commits = []
+supplements = "apple.tv-theater-preserves-classic-preference"
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "if let item = continueWatching.first(where: video) {"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterFeaturesVideoWithoutDroppingOtherContinueWatchingItems"
+
+[[fixes]]
+id = "apple.tv-theater-skips-unavailable-files"
+commits = ["6dec4b114"]
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "guard let file = detail.files?.first(where: { $0.available != false }) else { return nil }"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterPlaybackSkipsUnavailableFilesAndRejectsUnavailableTitles"
+
 # 2026-10-06 — fix(sharing): bound initial Apple successor parking.
 # Current regression definitions for 39a72929; execution qualification is
 # recorded separately by the main fast lane, never inferred from this mapping.
@@ -657,7 +682,7 @@ test_anchor = "testApplePlayerTreatsDolbyVisionRejectionsAsCompatibilityFailures
 id = "apple.dolby-vision-profile5-black-frame-watchdog"
 commits = ["47c06809"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "struct BlackFrameWatchdog: Equatable"
+source_anchor = "struct BlackFrameWatchdog"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testBlackFrameWatchdogFiresOnlyWhenNothingIsEverDecoded"
 
@@ -4618,3 +4643,60 @@ source = "crates/plurxd/src/web/pages/settings-developer.js"
 source_anchor = "Current Source activation"
 test = "tests/web/settings-sections.test.js"
 test_anchor = "Cinema sharing reports current activation during rolling upgrade without a restart gate"
+
+[[fixes]]
+id = "web.sharing-invitation-address-setup"
+commits = ["7a4facf648713c5b1035117669971bebf9467777"]
+source = "crates/plurxd/src/web/pages/sharing-management.js"
+source_anchor = "async function sharingConfigureAddresses()"
+test = "tests/web/sharing-management.test.js"
+test_anchor = "invitation address setup preserves selected libraries and never posts until configured"
+
+[[fixes]]
+id = "apple.current-visible-frame-evidence"
+commits = ["98826e725185e8214645f02b81b5668ed37a687c"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "enum PlaybackFirstOutputEvidence"
+test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
+test_anchor = "testVideoTTFFRejectsClockAndDimensionsWithoutLayerReadiness"
+
+[[fixes]]
+id = "apple.cancelled-black-frame-recovery-rearms-owner"
+commits = ["2dc76591683429735419e33acf68e98448bd9b59"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func queueBlackFrameRecovery"
+test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
+test_anchor = "testQueuedBlackFrameRecoveryRearmsAfterViewerActionSupersedesTrigger"
+
+[[fixes]]
+id = "apple.growing-resume-preparation-budget"
+commits = ["2bc3425f5a5f08160ca6bb121a21e0bf7f20efab"]
+source = "clients/apple/Sources/PlayerItemReadiness.swift"
+source_anchor = "enum PlayerItemReadiness"
+test = "clients/apple/Tests/AppleItemReadinessTests.swift"
+test_anchor = "testGrowingResumeWaitsForPublicationAtTwentyOneSeconds"
+
+[[fixes]]
+id = "apple.staged-poll-continuation-fence"
+commits = ["46bf6fe8a1438d4a3f22ab68afe8b7bb3cfcae61"]
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case recoveryEvidenceAfterStagedPoll ="
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
+
+[[fixes]]
+id = "android.prepared-video-surface-coordinate-space"
+commits = ["32b2111d9", "142d9f4e0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "host.width, host.height, output.surfaceWidth, output.surfaceHeight,"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PreparedVideoSurfaceRenderingTest.kt"
+test_anchor = "decoderFrameFillsThePreparedSurfaceWidth"
+
+[[fixes]]
+id = "android.playback-panel-light-theme-contrast"
+commits = []
+supplements = "android.prepared-video-surface-coordinate-space"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "color = if (selected) Accent else OnBg"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
+test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"

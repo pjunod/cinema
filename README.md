@@ -202,8 +202,15 @@ it holds accounts, keys, library metadata, and watch state.
 
 All server variants serve the web app and API on port `32400` by default.
 
+On a Pi, `make pi-setup` defaults to Docker for the server and a managed browser
+in your desktop session. Select `PI_SETUP_FLAGS='--server-runtime native'` for
+the native/systemd alternate, or `PI_SETUP_FLAGS='--role server'` for a headless
+server. The [Pi installation contract](docs/clients/RASPBERRY-PI-INSTALLATION.md)
+records setup, upgrades, ownership and hardware acceptance.
+
 | Deployment | Start here | Requirements |
 |---|---|---|
+| Raspberry Pi 5 (server and HDMI Cinema) | `make pi-setup` | 64-bit Pi OS Trixie Desktop; provisions Docker/media tools and browser; native/systemd selectable |
 | Docker / Compose | `make install-docker`, then `make docker-up` | Docker with Compose; configured media and data mounts |
 | Native service (systemd, launchd, or the Windows service) | `make install` | Repository-pinned Rust toolchain, or a prebuilt `plurxd` via `INSTALL_FLAGS=--binary` |
 | Native binary, no service | `make install-binary`, then `plurxd run` | `ffmpeg` and `ffprobe` (installed for you when missing) |
@@ -230,6 +237,7 @@ Windows, systemd, launchd, Unraid, storage, GPU access, and ports. The
 | Connect an application | [API](docs/API.md) · [Integrations](docs/INTEGRATION.md) |
 | Understand authentication and exposure | [Security](docs/SECURITY.md) |
 | Contribute and validate a change | [Development pipeline](docs/DEVELOPMENT_PIPELINE.md) · [Validation](docs/VALIDATION.md) |
+| Find designed projects and unfinished work | [Project backlog](docs/features/PROJECT-BACKLOG.md) |
 | Find plans, delivery status, or test evidence | [Documentation index](docs/README.md) |
 | Follow releases and changes | [Releasing](docs/RELEASING.md) · [Changelog](CHANGELOG.md) |
 

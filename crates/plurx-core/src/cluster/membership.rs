@@ -1416,6 +1416,24 @@ pub struct ClusterPeer {
     pub api_address: String,
 }
 
+impl ClusterPeer {
+    /// The private one-voter store uses loopback for both transports.
+    #[must_use]
+    pub fn is_loopback(&self) -> bool {
+        [&self.raft_address, &self.api_address]
+            .into_iter()
+            .all(|address| {
+                address
+                    .parse::<std::net::SocketAddr>()
+                    .is_ok_and(|address| address.ip().is_loopback())
+            })
+    }
+}
+
+fn cluster_enabled_for_peer(explicitly_configured: bool, local: Option<&ClusterPeer>) -> bool {
+    explicitly_configured || local.is_some_and(|peer| !peer.is_loopback())
+}
+
 impl From<&Node> for ClusterPeer {
     fn from(node: &Node) -> Self {
         Self {
@@ -4888,6 +4906,16 @@ impl MembershipManager {
     #[must_use]
     pub fn is_replicated(&self) -> bool {
         self.inner.is_some()
+    }
+
+    /// Deployment mode follows explicit configuration or the durable local
+    /// peer, never peer reachability or the current voter count.
+    #[must_use]
+    pub fn cluster_enabled(&self, explicitly_configured: bool) -> bool {
+        cluster_enabled_for_peer(
+            explicitly_configured,
+            self.inner.as_ref().map(|inner| &inner.local),
+        )
     }
 
     #[must_use]
@@ -9677,9 +9705,9 @@ impl MembershipManager {
         node_id: &str,
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
-        require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
         let clock = self.clock_guard();
         let prepared_admission = clock.acquire();
+        require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
         self.require_learner_lifecycle_capability().await?;
         if self.maintenance_operation_pending().await? {
             return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
@@ -13859,6 +13887,26 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cluster_mode_retains_persisted_members_without_explicit_advertisement() {
+        assert!(!super::cluster_enabled_for_peer(false, None));
+        assert!(super::cluster_enabled_for_peer(true, None));
+        for (raft, api, network) in [
+            ("127.0.0.1:32401", "[::1]:32402", false),
+            ("plurx-a.lan:32401", "plurx-a.lan:32402", true),
+            ("192.0.2.4:32401", "192.0.2.4:32402", true),
+            ("127.0.0.1:32401", "192.0.2.4:32402", true),
+        ] {
+            let peer = super::ClusterPeer {
+                raft_id: 1,
+                raft_address: raft.into(),
+                api_address: api.into(),
+            };
+            assert_eq!(super::cluster_enabled_for_peer(false, Some(&peer)), network);
+            assert!(super::cluster_enabled_for_peer(true, Some(&peer)));
+        }
+    }
+
     #[test]
     fn sharing_purpose_master_proof_requires_canonical_256_bit_fingerprint() {
         for rejected in [

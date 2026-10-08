@@ -91,7 +91,7 @@ version = 1
 [fences]
 seekPresentationDeadline = { function = "beginSeekPresentationMonitor", scopes = ["open", "viewerAction", "seek"] }
 seekTelemetrySupersession = { function = "beginSeekPresentationMonitor", scopes = ["seek"] }
-blackFrameDecodeFailure = { function = "makePeriodicPlaybackObservation", scopes = ["lifecycle", "viewerAction"] }
+blackFrameDecodeFailure = { function = "queueBlackFrameRecovery", scopes = ["lifecycle", "viewerAction"] }
 stallRecovery = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
 itemFailureLadder = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }
 # Exact original pre/post-ACK continuations; each case remains single-use.
@@ -114,6 +114,7 @@ autoBoundaryReplanCurrent = { function = "tickDisplayAwareAuto", scopes = ["life
 nativeSeekCompletion = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
 nativeSeekAfterSelection = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
 recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }
+recoveryEvidenceAfterStagedPoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }
 autoInitialLayout = { function = "load", scopes = ["initialDecision"] }
 autoCatalogRefresh = { function = "refreshAutoCatalogForViewerRecipe", scopes = ["lifecycle", "viewerAction"] }
 autoQualityOffer = { function = "tickDisplayAwareAuto", scopes = ["lifecycle", "viewerAction"] }

@@ -1645,6 +1645,9 @@ container-smoke: docker ## Build, start, probe, restart, re-probe, then back up 
 # `-f` also moves the project directory to the repo root, so `deploy/.env` stops
 # being read on the way past.
 #
+# Generate one temporary hardware overlay, keeping the selected base and host
+# override files. The same COMPOSE_FILE applies to the proof and rollout; the
+# trap removes only this invocation's overlay, including on failure.
 # Resolve Compose first so shell variables, deploy/.env, defaults, and override
 # files are evaluated with the same precedence as the mutation below. The
 # checker refuses a health grace shorter than snapshot recovery plus the named
@@ -1661,7 +1664,11 @@ container-smoke: docker ## Build, start, probe, restart, re-probe, then back up 
 # not a way to overrule somebody who chose to fail fast.
 .PHONY: docker-startup-budget-check
 docker-startup-budget-check: ## Prove the resolved Compose startup budget before deployment
-	cd deploy && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
+	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
+	  && compose_files="$$(python3 ../scripts/docker-hardware --output "$$hardware")" \
+	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
+	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget
 
 # The mutation below is character-for-character what somebody runs by hand in
@@ -1676,7 +1683,11 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 # `compose up` applies another is not a preflight.
 .PHONY: docker-up
 docker-up: ## Build + (re)start Compose after its startup budget passes
-	cd deploy && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
+	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
+	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
+	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
 	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
@@ -1690,7 +1701,11 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 # swap the artifact after it was inspected.
 .PHONY: docker-image-up
 docker-image-up: ## Pull + (re)start the prebuilt image after its startup budget passes
-	cd deploy && image_ref="$$(docker compose config --images plurxd)" \
+	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
+	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
+	  && compose_files="$$(python3 ../scripts/docker-hardware --output "$$hardware")" \
+	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
+	  && image_ref="$$(docker compose config --images plurxd)" \
 	  && test -n "$$image_ref" \
 	  && docker compose pull plurxd \
 	  && image_id="$$(docker image inspect --format '{{.Id}}' "$$image_ref")" \
@@ -1741,6 +1756,20 @@ release-check: ## Verify the tree is ready to tag the current version
 # `make install INSTALL_FLAGS='--binary ~/Downloads/plurxd'` to skip the build
 # or `make install-docker INSTALL_FLAGS=--dry-run` to see the plan first.
 INSTALL_FLAGS ?=
+PI_SETUP_FLAGS ?=
+
+.PHONY: pi-setup pi-upgrade pi-status pi-uninstall
+pi-setup: ## Set up Pi server and HDMI playback (Docker default; native/systemd selectable)
+	@python3 deploy/pi-setup install $(PI_SETUP_FLAGS)
+
+pi-upgrade: ## Upgrade an owned Pi installation, preserving its choices and data
+	@python3 deploy/pi-setup upgrade $(PI_SETUP_FLAGS)
+
+pi-status: ## Report the Pi installation, runtime and readiness
+	@python3 deploy/pi-setup status $(PI_SETUP_FLAGS)
+
+pi-uninstall: ## Remove an owned Pi installation while retaining data and browser profiles
+	@python3 deploy/pi-setup uninstall $(PI_SETUP_FLAGS)
 
 .PHONY: install install-linux install-macos install-windows install-docker install-binary uninstall uninstall-docker
 install: ## Install plurxd as a service on this OS (systemd, launchd, or the Windows service)

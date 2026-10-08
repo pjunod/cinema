@@ -206,6 +206,17 @@ had to be edited.
 
 ## 3. Adding a file
 
+The three layouts share `wireSearchInput` in
+[`core/chrome.js`](../../crates/plurxd/src/web/core/chrome.js). Search input
+events may navigate only while that field is focused; a delayed search also
+belongs to the route and connected header that scheduled it. This prevents
+saved-login autofill beside a Settings API-key field from starting a username
+search, and prevents an old debounce from overriding navigation. Search
+fields declare `type="search"` and opt out of autocomplete; Metadata keys
+declare `autocomplete="new-password"`. Those hints complement the shared
+navigation contract rather than carrying it. The behavior is covered by
+[`tests/web/local-search.test.js`](../../tests/web/local-search.test.js).
+
 Three places, one commit, or a test says so:
 
 1. The file, under the folder for its area, opening with `"use strict";`.

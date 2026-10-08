@@ -559,7 +559,7 @@ async fn invite(
         expires_at_ms: now.checked_add(ttl * 1000).ok_or_else(invalid)?,
     };
     let blob = invite.encode().map_err(|_| invalid())?;
-    let _ = mutation(
+    let _created = mutation(
         state
             .store
             .create_share_invitation(InvitationRecord {
@@ -1054,7 +1054,7 @@ async fn re_pair(
         import_id,
     )
     .await?;
-    let _ = mutation(
+    let _repaired = mutation(
         state
             .store
             .re_pair_share_import(import, request.expected_lifecycle_generation)

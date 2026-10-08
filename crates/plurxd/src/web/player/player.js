@@ -844,7 +844,19 @@ function createHlsStartupLoader(StockLoader,episode){
         });
       }
       if(hlsStartupManifestRequest(context)){
-        const current=hlsStartupCurrent(episode.player,episode)
+        const attached=hlsStartupCurrent(episode.player,episode);
+        // A replacement can finish attaching while the viewer is paused.
+        // Suppress its request without retiring the attachment: cancelled
+        // startup cannot be resumed and an already-started player skips its
+        // watchdog, leaving the preparation surface up forever.
+        if(attached&&episode.player.wantsPlayback===false
+          &&['active','paused'].includes(episode.state)){
+          pauseHlsStartup(episode.player);
+          try{this.abort()}catch(e){}
+          try{this.destroy()}catch(e){}
+          return;
+        }
+        const current=attached
           &&this.plurxIntentGeneration===(episode.player.controlIntentGeneration||0)
           &&episode.player.wantsPlayback!==false;
         // Presentation retires startup accounting, not the loader. Ordinary

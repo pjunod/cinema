@@ -172,7 +172,7 @@ impl TranscodeManager {
     pub fn content_encoding_applicability(&self, encoder_preference: &str) -> serde_json::Value {
         let policy = self.rate_control_snapshot();
         serde_json::json!({
-            "selected_encoder": self.caps.choose(encoder_preference).family_name(),
+            "selected_encoder": self.encoder_for_preference(encoder_preference).family_name(),
             "explicit_rate_control": policy.requested_mode.is_some() || policy.requested_quality.is_some(),
             "software_quality_supported": policy.quality_rc.supported_by(Encoder::Software),
         })

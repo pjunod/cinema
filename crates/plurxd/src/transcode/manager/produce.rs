@@ -1152,6 +1152,7 @@ impl TranscodeManager {
             }
             None => self.resolve_movie_plan(file, &opts, encoder).await?,
         };
+        opts.pipeline = plan.options().pipeline;
         let deadline =
             retain_production_budget_after_planning(deadline, planning_started.elapsed());
         let digest = self.digest().ok_or("no cache digest")?;
@@ -1390,6 +1391,10 @@ impl TranscodeManager {
         };
         let opts = self.offline_package_options(encoder, file, spec, subtitle_burn);
         let plan = self.resolve_movie_plan(file, &opts, encoder).await?;
+        let opts = TranscodeOptions {
+            pipeline: plan.options().pipeline,
+            ..opts
+        };
         let digest = self.digest().ok_or("no cache digest")?;
         let primary_hash = self.effective_recipe(&digest, &plan, false).hash();
         let mut recovery_state = OfflineRecoveryState::parse(&package.decoder_recovery_state)?;
@@ -2585,6 +2590,12 @@ impl TranscodeManager {
             bound_source,
         } = request.clone();
         let encoder = plan.encoder();
+        // Bind before reading/resuming cached parts, so the configured encoder
+        // cannot enter an older Mac implementation's generation.
+        let macos_executable = capture_macos_plan_executable(plan, &producer_ffmpeg_bin()).await?;
+        let macos_completion_sha256 = plan
+            .macos_processing_identity()
+            .map(|identity| identity.ffmpeg_sha256());
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
@@ -2592,7 +2603,7 @@ impl TranscodeManager {
         let ResumedParts {
             mut parts,
             receipts: inherited_receipts,
-        } = resume_parts(temp, &plan_digest).await?;
+        } = resume_parts(temp, &plan_digest, macos_completion_sha256).await?;
         let mut generation_health = GenerationObservation::inheriting(
             inherited_receipts,
             carried_generation_health(temp, &plan_digest).await,
@@ -2613,6 +2624,11 @@ impl TranscodeManager {
                     segments = published.segments,
                     "resuming an assembled generation awaiting integrity publication"
                 );
+                if let Some(executable) = &macos_executable {
+                    if !executable.is_current().await {
+                        return Err("macos_processing_implementation_changed: captured offline encoder changed before cached publication".to_owned());
+                    }
+                }
                 return Ok(ProductionProgress::Ready(published));
             }
         }
@@ -2696,6 +2712,9 @@ impl TranscodeManager {
                 .create_child_directory(&part_name)
                 .await
                 .map_err(|e| format!("creating {part_name}: {e}"))?;
+            if macos_completion_sha256.is_some() {
+                invalidate_mac_part_completion(&part_dir).await?;
+            }
             let resume_ms = crate::produce::resume_at_ms(&parts);
             let part_opts = TranscodeOptions {
                 start_seconds: resume_ms as f64 / 1000.0,
@@ -2808,7 +2827,16 @@ impl TranscodeManager {
             );
             let progress = Arc::new(Progress::new());
             let generation = progress.begin_attempt();
-            let (mut child, _child_job, diagnostics) = spawn_ffmpeg(
+            if let Some(executable) = &macos_executable {
+                if !executable.is_current().await {
+                    return Err("macos_processing_implementation_changed: captured offline encoder changed before launch".to_owned());
+                }
+            }
+            let (mut child, _child_job, diagnostics) = spawn_ffmpeg_at(
+                macos_executable
+                    .as_ref()
+                    .map(|executable| executable.path.as_path())
+                    .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
                 &args,
                 crate::process_control::ChildWork::background("pre-transcode cache producer"),
                 encoder.label(),
@@ -2855,10 +2883,26 @@ impl TranscodeManager {
             report_producer_health(&format!("{hash} part {}", parts.len()), &receipt);
             let ValidatedPart { part, shape, .. } = read_part(&part_dir).await;
             let produced = !part.is_empty();
+            if let Some(executable) = &macos_executable {
+                if !executable.is_current().await {
+                    let _ = remove_staged_child(temp, &part_name).await;
+                    return Err("macos_processing_implementation_changed: captured offline encoder changed before part publication".to_owned());
+                }
+            }
             if produced {
                 // Sealed beside the bytes it describes, so whichever pass
                 // resumes this film does not have to call the part unobserved.
-                retain_part_health(&part_dir, &shape, &receipt).await;
+                if macos_completion_sha256.is_some() {
+                    retain_part_health_checked(
+                        &part_dir,
+                        &shape,
+                        &receipt,
+                        macos_completion_sha256,
+                    )
+                    .await?;
+                } else {
+                    retain_part_health(&part_dir, &shape, &receipt).await;
+                }
             }
             // Recorded whether or not it produced. An attempt that decoded
             // nothing and exited zero writes no segment, and that receipt is
@@ -2927,6 +2971,11 @@ impl TranscodeManager {
                 PartEnd::Finished => {
                     if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         return Ok(ProductionProgress::Yielded("ownership_lost"));
+                    }
+                    if let Some(executable) = &macos_executable {
+                        if !executable.is_current().await {
+                            return Err("macos_processing_implementation_changed: captured offline encoder changed before generation publication".to_owned());
+                        }
                     }
                     return publish_from(temp, &parts, generation_health.settle())
                         .await

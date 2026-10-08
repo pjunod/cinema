@@ -115,6 +115,7 @@ fn metrics_encoder_inventory_has_closed_labels_and_records_successful_starts() {
     metrics.record_encoder(Encoder::Qsv, OutputGrade::Hdr10);
     metrics.record_pipeline(Pipeline::DoviPassthrough);
     metrics.record_pipeline(Pipeline::LibplaceboVaapi);
+    metrics.record_pipeline(Pipeline::TonemapCuda);
     let rendered = metrics.prometheus(&EncoderCaps {
         qsv: true,
         vaapi: true,
@@ -144,6 +145,8 @@ fn metrics_encoder_inventory_has_closed_labels_and_records_successful_starts() {
     );
     assert!(rendered
         .contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"libplacebo_vaapi\"} 1\n"));
+    assert!(rendered
+        .contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"tonemap_cuda\"} 1\n"));
     assert!(rendered.contains("plurx_encoder_available{family=\"software\"} 1\n"));
     assert!(rendered.contains("plurx_encoder_available{family=\"qsv\"} 1\n"));
     assert!(rendered.contains("plurx_encoder_available{family=\"nvenc\"} 0\n"));
@@ -2626,6 +2629,177 @@ fn profile5_file() -> plurx_core::domain::MediaFile {
     }
 }
 
+#[tokio::test]
+async fn manager_routes_misflagged_heavy_source_from_resolved_interlace_verdict() {
+    use plurx_core::transcode::{Deinterlace, InterlaceVerdict};
+
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let work = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        store,
+        work.path().to_owned(),
+        EncoderCaps {
+            qsv: true,
+            ..EncoderCaps::default()
+        },
+        Pipeline::VppQsv,
+    )
+    .with_decoders(vec!["hevc".to_owned()]);
+    let mut file = profile5_file();
+    file.hdr = Some("hdr10".to_owned());
+    file.hdr_format = Some("HDR10".to_owned());
+    file.field_order = Some("tt".to_owned());
+    let requested = manager.options_for_tone_map(
+        Encoder::Qsv,
+        &file,
+        1080,
+        0.0,
+        None,
+        None,
+        None,
+        ToneMap::Zscale,
+        OutputGrade::Sdr,
+    );
+    assert_eq!(requested.pipeline, Pipeline::VppQsv);
+    let mut probe = TranscodeManager::catalog_plan_probe(&file);
+    probe["streams"][0]["field_order"] = serde_json::json!("tt");
+    let facts = DecodeFacts::from_ffprobe_json(
+        &probe,
+        TranscodeManager::plan_source_identity(&file).expect("source"),
+    )
+    .expect("facts");
+    for (verdict, pipeline, deinterlace) in [
+        (InterlaceVerdict::FlagOverruled, Pipeline::VppQsv, Deinterlace::None),
+        (InterlaceVerdict::FlagConfirmed, Pipeline::Cpu, Deinterlace::BwdifSendFrame),
+        (InterlaceVerdict::IdetUnavailable, Pipeline::Cpu, Deinterlace::BwdifSendFrame),
+    ] {
+        let plan = manager
+            .resolve_movie_plan_with_facts(
+                &file,
+                &requested,
+                Encoder::Qsv,
+                &facts.clone().with_interlace_verdict(verdict),
+                &AttemptRestrictions::none(),
+            )
+            .expect("resolved plan");
+        assert_eq!(plan.options().pipeline, pipeline, "{verdict:?}");
+        assert_eq!(plan.deinterlace(), deinterlace, "{verdict:?}");
+    }
+}
+
+#[tokio::test]
+async fn media_offer_reports_resolved_pipeline_without_gating_unresolved_candidate() {
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let work = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        work.path().to_owned(),
+        EncoderCaps {
+            qsv: true,
+            ..EncoderCaps::default()
+        },
+        Pipeline::VppQsv,
+    )
+    .with_decoders(vec!["hevc".to_owned()]);
+    store
+        .put_settings(&[(keys::HWACCEL, "qsv")])
+        .await
+        .expect("encoder preference");
+    let mut file = profile5_file();
+    file.hdr = Some("hdr10".to_owned());
+    file.hdr_format = Some("HDR10".to_owned());
+    file.field_order = Some("tt".to_owned());
+    file.path = work.path().join("absent-heavy-source.mkv");
+    let mut probe = TranscodeManager::catalog_plan_probe(&file);
+    probe["streams"][0]["field_order"] = serde_json::json!("tt");
+    file.id = seed_file_with_probe_at(
+        &store,
+        file.path.to_str().expect("path"),
+        plurx_core::domain::ProbeResult {
+            raw_json: Some(probe.to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let requested = manager.options_for_tone_map(
+        Encoder::Qsv,
+        &file,
+        1080,
+        0.0,
+        None,
+        None,
+        None,
+        ToneMap::Zscale,
+        OutputGrade::Sdr,
+    );
+    assert_eq!(
+        requested.pipeline,
+        Pipeline::VppQsv,
+        "the request proposes GPU"
+    );
+    let plan = manager
+        .resolve_movie_plan(&file, &requested, Encoder::Qsv)
+        .await
+        .expect("plan");
+    assert_eq!(
+        plan.options().pipeline,
+        Pipeline::Cpu,
+        "unverified interlace declines GPU"
+    );
+    let offer = manager
+        .media_offer_probe(&file, 1080, 0.0, None, None, false)
+        .await
+        .expect("offer");
+    assert_eq!(
+        offer.pipeline,
+        plan.options().pipeline.name(),
+        "offer reports the resolved graph, not the GPU request"
+    );
+    assert!(!offer.cache_hit);
+
+    // Resolution can fail while the ordinary offer remains usable. Preserve
+    // that fallback without representing an unplanned GPU graph as actual.
+    let item_id = store
+        .get_file(file.id)
+        .await
+        .expect("seeded file lookup")
+        .expect("seeded file")
+        .item_id;
+    file.path = work.path().join("absent-unresolved-source.mkv");
+    file.id = store
+        .upsert_file(
+            item_id,
+            file.path.to_str().expect("path"),
+            1,
+            1,
+            &plurx_core::domain::ProbeResult {
+                raw_json: Some("{}".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("unresolved fixture file");
+    assert!(manager
+        .resolve_movie_plan(&file, &requested, Encoder::Qsv)
+        .await
+        .is_err());
+    let unresolved = manager
+        .media_offer_probe(&file, 1080, 0.0, None, None, false)
+        .await
+        .expect("existing fallback still offers");
+    assert!(unresolved.pipeline.is_empty());
+    assert!(!unresolved.cache_hit);
+    assert_eq!(unresolved.target_supported, offer.target_supported);
+    assert_eq!(unresolved.decoder_supported, offer.decoder_supported);
+    assert_eq!(unresolved.encoder, offer.encoder);
+    assert!(
+        !file.path.exists(),
+        "offer fanout never opens the absent source"
+    );
+}
+
 #[test]
 fn frozen_codec_evidence_changes_identity_without_rewriting_the_legacy_shape() {
     let file = profile5_file();
@@ -3867,5 +4041,284 @@ async fn vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_
     assert!(
         !manager.vaapi_hdr10_source_fits(&file, HDR10_HEIGHT).await,
         "missing cadence is not 24 fps"
+    );
+}
+
+
+#[tokio::test]
+async fn macos_manager_freezes_selected_identity_and_keeps_saved_choice_on_probe_failure() {
+    use plurx_core::transcode::{MacosProcessingAvailability as Availability,
+        MacosProcessingContext, MacosProcessingIdentity};
+    let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(store.clone(), dir.path().to_owned(), EncoderCaps {
+        videotoolbox: true, ..EncoderCaps::default()
+    }, Pipeline::Cpu).with_decoders(vec!["hevc".to_owned()]);
+    let mut file = profile5_file();
+    file.hdr = None;
+    file.hdr_format = None;
+    file.video_profile = Some("Main".into());
+    file.bit_depth = Some(8);
+    let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+        "codec_name":"hevc","profile":"Main","width":3840,"height":2160,
+        "pix_fmt":"yuv420p","color_transfer":"bt709","color_primaries":"bt709",
+        "color_space":"bt709","color_range":"tv","field_order":"progressive",
+        "sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1",
+        "disposition":{"attached_pic":0}}]});
+    file.id = seed_file_with_probe_at(&store, "/media/mac-manager.mkv", plurx_core::domain::ProbeResult {
+        raw_json: Some(probe.to_string()), ..Default::default()
+    }).await;
+    let identity = MacosProcessingIdentity::new("1".repeat(64),"2".repeat(64),"3".repeat(64),
+        "4".repeat(64),"test-os".into(),"arm64".into(),"Apple test SoC".into()).expect("identity");
+    let context = MacosProcessingContext::new(false, identity.clone(), Availability::Available,
+        Availability::Available);
+    manager.macos_video_probe.publish_context_for_test(&context);
+    manager.apply_macos_video_processing_setting(true).await.expect("save independent of probe preference");
+    let options = TranscodeOptions { target_height:1080, pipeline:Pipeline::Cpu, ..Default::default() };
+    let selected = manager.resolve_movie_plan(&file, &options, Encoder::VideoToolbox).await.expect("plan");
+    assert_eq!(selected.options().pipeline, Pipeline::VtScaleSdr);
+    let frozen_digest = selected.plan_digest();
+    manager.macos_video_probe.publish_context_for_test(&MacosProcessingContext::new(false,
+        identity, Availability::Unavailable, Availability::Unavailable));
+    let fallback = manager.resolve_movie_plan(&file, &options, Encoder::VideoToolbox).await.expect("fallback");
+    assert_eq!(fallback.options().pipeline, Pipeline::Cpu);
+    assert!(fallback.macos_processing_identity().is_none());
+    assert!(manager.macos_video_processing_enabled(), "probe failure must not rewrite saved true");
+    assert_eq!(selected.options().pipeline, Pipeline::VtScaleSdr, "in-flight plan stays frozen");
+    assert_eq!(selected.plan_digest(), frozen_digest);
+    assert_ne!(fallback.plan_digest(), frozen_digest, "new CPU work cannot reuse native identity");
+    manager.macos_video_probe.publish_context_for_test(&context);
+    let retry = manager.resolve_movie_processing_retry(&file, &options, Encoder::VideoToolbox,
+        Pipeline::VtScaleSdr).await.expect("existing retry fallback");
+    assert_eq!(retry.options().pipeline, Pipeline::Cpu, "failed processing must not be reselected");
+    assert!(retry.macos_processing_identity().is_none());
+    assert!(manager.macos_video_processing_enabled());
+    let next = manager.resolve_movie_plan(&file, &options, Encoder::VideoToolbox).await.expect("new independent plan");
+    assert_eq!(next.options().pipeline, Pipeline::VtScaleSdr, "retry exclusion is attempt-local");
+}
+
+
+#[cfg(unix)]
+#[tokio::test]
+async fn macos_launch_binds_frozen_plan_to_canonical_encoder_across_alias_retarget() {
+    use plurx_core::transcode::{
+        MacosProcessingAvailability as Availability, MacosProcessingContext,
+        MacosProcessingIdentity,
+    };
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = crate::test_tempdir().expect("private encoder objects");
+    let encoder_a = dir.path().join("encoder-a");
+    let encoder_b = dir.path().join("encoder-b");
+    let alias = dir.path().join("configured-encoder");
+    for (path, marker) in [(&encoder_a, "encoder-A"), (&encoder_b, "encoder-B")] {
+        std::fs::write(path, format!("#!/bin/sh\nprintf '{marker}\n'\n"))
+            .expect("encoder stand-in");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .expect("executable stand-in");
+    }
+    symlink(&encoder_a, &alias).expect("configured alias A");
+    let captured_a =
+        crate::ffmpeg::EncodedExecutable::capture_program(alias.to_str().expect("alias path"))
+            .await
+            .expect("capture A");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let manager = TranscodeManager::new(
+        store,
+        dir.path().join("work"),
+        EncoderCaps {
+            videotoolbox: true,
+            ..EncoderCaps::default()
+        },
+        Pipeline::Cpu,
+    )
+    .with_decoders(vec!["hevc".into()]);
+    let mut file = profile5_file();
+    file.hdr = None;
+    file.hdr_format = None;
+    file.video_profile = Some("Main".into());
+    file.bit_depth = Some(8);
+    let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+        "codec_name":"hevc","profile":"Main","width":3840,"height":2160,
+        "pix_fmt":"yuv420p","color_transfer":"bt709","color_primaries":"bt709",
+        "color_space":"bt709","color_range":"tv","field_order":"progressive",
+        "sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1",
+        "disposition":{"attached_pic":0}}]});
+    let facts = DecodeFacts::from_ffprobe_json(
+        &probe,
+        TranscodeManager::plan_source_identity(&file).expect("source"),
+    )
+    .expect("complete SDR facts");
+    let identity = MacosProcessingIdentity::new(
+        captured_a.digest.clone(),
+        "2".repeat(64),
+        "3".repeat(64),
+        "4".repeat(64),
+        "test-os".into(),
+        "arm64".into(),
+        "Apple test SoC".into(),
+    )
+    .expect("frozen report A");
+    manager
+        .macos_video_probe
+        .publish_context_for_test(&MacosProcessingContext::new(
+            true,
+            identity,
+            Availability::Available,
+            Availability::Available,
+        ));
+    manager.set_macos_video_processing_enabled(true);
+    let options = TranscodeOptions {
+        target_height: 1080,
+        pipeline: Pipeline::Cpu,
+        ..Default::default()
+    };
+    let plan = manager
+        .resolve_movie_plan_with_facts(
+            &file,
+            &options,
+            Encoder::VideoToolbox,
+            &facts,
+            &AttemptRestrictions::none(),
+        )
+        .expect("selected Mac plan A");
+    assert_eq!(plan.options().pipeline, Pipeline::VtScaleSdr);
+    let frozen = capture_macos_plan_executable(&plan, alias.to_str().expect("alias path"))
+        .await
+        .expect("matched launch accepted")
+        .expect("Mac executable capture");
+    assert!(frozen.matches_macos_plan(&plan));
+    assert!(frozen.is_current().await);
+    // Exercise the actual portable owner without a hardware child: a matched
+    // capture reaches its elapsed-budget yield after normal resume inspection.
+    let output_path = std::fs::canonicalize(dir.path())
+        .expect("canonical output parent")
+        .join("portable-output");
+    std::fs::create_dir(&output_path).expect("portable staging");
+    let output_directory = plurx_core::fs_secure::SecureDirectory::open(&output_path)
+        .await
+        .expect("held portable staging");
+    let request = PortableProduction {
+        file: &file,
+        opts: &options,
+        plan: &plan,
+        deadline: Instant::now(),
+        yield_to_offline: false,
+        cancelled: None,
+        offline_package_id: None,
+        offline_claim_generation: None,
+        publication_fence: None,
+        pretranscode_fence: None,
+        expected_policy_generation: None,
+        expected_source_snapshot: None,
+        bound_source: None,
+    };
+    with_producer_ffmpeg_for_test(alias.to_str().expect("alias path"));
+    let accepted = manager
+        .produce_into(&output_directory, "mac-portable-A", &request, None)
+        .await
+        .expect("matched portable encoder accepted");
+    assert!(matches!(
+        accepted,
+        ProductionProgress::Yielded("production_deadline")
+    ));
+    let resumed_part = output_path.join(crate::produce::part_dir(0));
+    std::fs::create_dir(&resumed_part).expect("resumed part marker");
+    let marker = resumed_part.join("existing-A-state");
+    std::fs::write(&marker, b"do not resume or replace under B").expect("resumed state");
+    std::fs::remove_file(&alias).expect("retarget configured alias");
+    symlink(&encoder_b, &alias).expect("configured alias B");
+    assert_eq!(
+        frozen.path,
+        std::fs::canonicalize(&encoder_a).expect("canonical A")
+    );
+    assert!(
+        frozen.is_current().await,
+        "alias retarget cannot mutate frozen A"
+    );
+    let output = crate::ffmpeg::bounded_command_output_cancellable(
+        tokio::process::Command::new(&frozen.path),
+        Duration::from_secs(2),
+        1024,
+        "frozen Mac encoder fixture",
+        None,
+        crate::process_control::ChildWork::background("frozen Mac encoder fixture"),
+    )
+    .await
+    .expect("bounded launch of actual captured program");
+    assert_eq!(
+        output.stdout, b"encoder-A\n",
+        "launch uses A, never the retargeted alias B"
+    );
+    let refusal = capture_macos_plan_executable(&plan, alias.to_str().expect("alias path"))
+        .await
+        .expect_err("new B capture cannot execute frozen Mac plan A");
+    assert!(refusal.starts_with("macos_processing_implementation_changed:"));
+    let captured_b =
+        crate::ffmpeg::EncodedExecutable::capture_program(alias.to_str().expect("alias path"))
+            .await
+            .expect("capture B");
+    assert!(!captured_b.matches_macos_plan(&plan));
+    let offline_refusal = manager
+        .produce_into(&output_directory, "mac-portable-A", &request, None)
+        .await
+        .expect_err("actual portable owner rejects B before resuming A state");
+    assert!(offline_refusal.starts_with("macos_processing_implementation_changed:"));
+    assert_eq!(
+        std::fs::read(&marker).expect("preserved resumed state"),
+        b"do not resume or replace under B"
+    );
+    // Returning the configured alias to A must not rehabilitate a part from
+    // a rejected attempt. Invalidate a real older completion, replace bytes
+    // with the identical shape, and force bounded cleanup to fail.
+    std::fs::remove_file(&alias).expect("restore configured alias");
+    symlink(&encoder_a, &alias).expect("configured alias restored to A");
+    let part_dir = output_directory.open_child_directory(&crate::produce::part_dir(0))
+        .await.expect("retained part capability");
+    part_dir.atomic_write_child("index.m3u8", b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.000,\nseg00000.ts\n#EXT-X-ENDLIST\n")
+        .await.expect("valid retained playlist");
+    part_dir.atomic_write_child("seg00000.ts", b"old A bytes")
+        .await.expect("old part bytes");
+    let shape = read_validated_part(&part_dir, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+        .await.expect("valid old part").shape;
+    let receipt = crate::decoder_health::ProducerHealthReceipt::unobserved(
+        plan.plan_digest(), crate::decoder_health::ExitDisposition::CleanEnd);
+    retain_part_health_checked(&part_dir, &shape, &receipt, Some(&captured_a.digest))
+        .await.expect("old positive completion");
+    invalidate_mac_part_completion(&part_dir).await.expect("invalidate before replacement child");
+    part_dir.atomic_write_child("seg00000.ts", b"bad B bytes")
+        .await.expect("same-shaped rejected part bytes");
+    std::fs::create_dir_all(resumed_part.join("too/deep/for/cleanup"))
+        .expect("deterministic bounded cleanup failure");
+    assert!(remove_staged_child(&output_directory, &crate::produce::part_dir(0)).await.is_err());
+    assert!(quarantine_remove_cache_tree(&output_path, 1).await.is_err());
+    assert!(output_path.is_dir(), "failed outer cleanup restores the staging name");
+    for _ in 0..2 {
+        let retained_refusal = manager.produce_into(&output_directory, "mac-portable-A", &request, None)
+            .await.expect_err("restored A cannot resume rejected bytes after failed cleanup");
+        assert!(retained_refusal.contains("removing retained directory"));
+        assert_eq!(std::fs::read(resumed_part.join("seg00000.ts")).expect("rejected bytes remain"), b"bad B bytes");
+    }
+    std::fs::remove_dir_all(resumed_part.join("too")).expect("allow normal cleanup");
+    let repaired = manager.produce_into(&output_directory, "mac-portable-A", &request, None)
+        .await.expect("owner discards incomplete bytes once cleanup succeeds");
+    assert!(matches!(repaired, ProductionProgress::Yielded("production_deadline")));
+    assert!(!resumed_part.exists(), "rejected bytes are never adopted as a completed part");
+    manager.set_macos_video_processing_enabled(false);
+    let ordinary = manager
+        .resolve_movie_plan_with_facts(
+            &file,
+            &options,
+            Encoder::VideoToolbox,
+            &facts,
+            &AttemptRestrictions::none(),
+        )
+        .expect("ordinary incumbent plan");
+    assert!(captured_b.matches_macos_plan(&ordinary));
+    assert!(
+        capture_macos_plan_executable(&ordinary, "nonexistent-unused-encoder")
+            .await
+            .expect("ordinary plan retains existing selection")
+            .is_none()
     );
 }

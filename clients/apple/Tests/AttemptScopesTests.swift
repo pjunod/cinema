@@ -113,6 +113,7 @@ final class AttemptScopesTests: XCTestCase {
         .autoBoundaryReplanCurrent: [.lifecycle, .viewerAction],
         // Status sampling follows an attachment through Pause but not reopen.
         .recoveryEvidencePoll: [.open],
+        .recoveryEvidenceAfterStagedPoll: [.open],
         .autoInitialLayout: [.initialDecision],
         .autoCatalogRefresh: [.lifecycle, .viewerAction],
         .autoQualityOffer: [.lifecycle, .viewerAction],
@@ -162,7 +163,8 @@ final class AttemptScopesTests: XCTestCase {
                 [.viewerAction],
                 "a Pause is expected to move the viewer-action epoch and nothing else"
             )
-            if fence == .recoveryEvidencePoll || fence == .seekTelemetrySupersession || fence == .autoInitialLayout
+            if fence == .recoveryEvidencePoll || fence == .recoveryEvidenceAfterStagedPoll
+                || fence == .seekTelemetrySupersession || fence == .autoInitialLayout
                 || fence == .preparedPipelineRollback {
                 XCTAssertTrue(controller.attemptStillCurrent(captured, fence: fence),
                               "status sampling, seek telemetry and prepared rollback must survive a viewer Pause")
@@ -204,6 +206,7 @@ final class AttemptScopesTests: XCTestCase {
             .nativeSeekCompletion: .open,
             .nativeSeekAfterSelection: .open,
             .recoveryEvidencePoll: .open,
+            .recoveryEvidenceAfterStagedPoll: .open,
             .autoInitialLayout: .initialDecision,
             .autoCatalogRefresh: .lifecycle,
             .autoQualityOffer: .lifecycle,

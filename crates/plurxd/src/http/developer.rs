@@ -228,6 +228,53 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
     }
 }
 
+/// `POST /api/v1/developer/macos-video-processing/reprobe` — admin, bounded,
+/// asynchronous and independent of the preference's Save operation.
+pub(crate) async fn reprobe_macos_video(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let manager = std::sync::Arc::clone(&state.transcode);
+    let cancelled = state.shutdown.clone();
+    let report = manager.macos_video_diagnostics();
+    tokio::spawn(async move {
+        manager.reprobe_macos_video(&cancelled).await;
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "accepted": true, "report": report,
+            "note": "A bounded worker-local compatibility observation is requested; saved preference and running plans are unchanged"
+        })),
+    )
+}
+
+fn macos_video_processing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let report = state.transcode.macos_video_report();
+    let requirement = |id, title, observation: &crate::macos_video::GraphObservation| {
+        DeveloperRequirement {
+        id, title,
+        status: match observation.availability {
+            plurx_core::transcode::MacosProcessingAvailability::Available => RequirementStatus::Met,
+            plurx_core::transcode::MacosProcessingAvailability::Pending => RequirementStatus::Unknown,
+            plurx_core::transcode::MacosProcessingAvailability::Unavailable => RequirementStatus::Unmet,
+        },
+        evidence: format!("This worker's bounded runtime observation is {} (generation {}). Compatibility requires a working /usr/bin/otool dependency inventory (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both tools, and no DYLD override. It is separate from performance, visual and client qualification.", observation.reason.as_str(), report.generation),
+    }
+    };
+    DeveloperEnableItem {
+        id: "macos_video_processing", title: "Mac video processing", enabled: Some(enabled),
+        setting: Some("macos_video_processing_enabled"),
+        requirements: vec![
+            requirement("sdr_scale", "Progressive SDR scaling", &report.sdr_scale),
+            requirement("hdr10_metal", "HDR10 to SDR processing", &report.hdr10_metal),
+            DeveloperRequirement { id: "delivery_qualification", title: "Visual and streaming qualification",
+                status: RequirementStatus::Unobservable,
+                evidence: "This daemon does not hold an exact-implementation display/client, startup, concurrency or soak qualification receipt. Normalized continuous VOD also requires platform-supported bound source and decoder planning; the production bound decoder-probe path is currently unavailable on Mac. Runtime smoke availability never claims these checks passed and never overrides the saved choice.".into() },
+        ],
+    }
+}
+
 /// `GET /api/v1/developer/readiness` — admin, read-only, advisory.
 pub(crate) async fn readiness(
     _admin: AdminUser,
@@ -349,6 +396,8 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            macos_video_processing(&state, plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED).map(String::as_str), false)),
             cinema_sharing(
                 &state,
                 plurx_core::store::stored_switch(
@@ -2657,18 +2706,37 @@ fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
     ]}
 }
 
+fn sharing_endpoint_requirement(
+    observed: Result<Option<plurx_core::sharing::EndpointManifest>, plurx_core::error::StoreError>,
+) -> DeveloperRequirement {
+    let (status, evidence) = match observed {
+        Ok(None) => (RequirementStatus::Unmet, "No private Sharing endpoints are configured. In Settings → Sharing, open This Cinema’s endpoints and save the Tailnet address, private .ts.net name, forwarded port and verified certificate pin before creating an invitation. Enabling Sharing does not configure these endpoints.".into()),
+        Ok(Some(manifest)) if manifest.revision > 0 && plurx_core::sharing::validate_endpoints(&manifest.endpoints).is_ok() => (RequirementStatus::Met, format!("{} approved private Sharing endpoint(s) are configured at revision {}. This confirms configuration only; Tailscale reachability, TCP forwarding and access policy have not been verified here.", manifest.endpoints.len(), manifest.revision)),
+        Ok(Some(_)) => (RequirementStatus::Unmet, "The configured Sharing endpoints are invalid. Review This Cinema’s endpoints in Settings → Sharing and verify the private addresses, forwarded port and certificate pins.".into()),
+        Err(_) => (RequirementStatus::Unknown, "The configured Sharing endpoints could not be read. Reload before changing them; this observation does not establish whether an endpoint is configured or reachable.".into()),
+    };
+    DeveloperRequirement {
+        id: "endpoints",
+        title: "Configured private Sharing endpoints",
+        status,
+        evidence,
+    }
+}
+
 async fn cinema_sharing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
     // Refresh through this existing admin read, without a background task or
     // mutating the saved enablement choice.
     state
         .sharing
         .observe_source_activation_current(state.membership.source_layout_ready().await.ok());
+    let endpoints = sharing_endpoint_requirement(state.store.sharing_endpoint_manifest().await);
     let status = state.sharing.status();
     DeveloperEnableItem {id:"cinema_sharing",title:"Cinema shared libraries",enabled:Some(enabled),setting:Some("sharing_enabled"),requirements:vec![
         DeveloperRequirement {id:"source_activation",title:"Current Source activation",status:match status.source_activation_current {Some(true)=>RequirementStatus::Met,Some(false)=>RequirementStatus::Unmet,None=>RequirementStatus::Unknown},evidence:match status.source_activation_current {Some(true)=>"The current Source layout is verified. Startup activation remains a separate historical observation; playback still requires its live authority checks.".into(),Some(false)=>"Source activation is pending. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Your saved choice is unchanged.".into(),None=>"The current Source layout could not be verified. Readiness is advisory and saving remains available.".into()}},
-        DeveloperRequirement {id:"listener",title:"Private sharing listener",status:if status.listener=="listening" {RequirementStatus::Met}else{RequirementStatus::Unmet},evidence:format!("This node reports {} at {}. Ordinary local APIs never mount private peer routes.",status.listener,status.listener_address)},
+        DeveloperRequirement {id:"listener",title:"Private sharing listener",status:if status.listener=="listening" {RequirementStatus::Met}else{RequirementStatus::Unmet},evidence:format!("This node reports {} at {} inside its process network namespace. A listening socket does not prove another Cinema can reach it. Ordinary local APIs never mount private peer routes.",status.listener,status.listener_address)},
         DeveloperRequirement {id:"tls",title:"Node certificate and pin",status:if status.certificate.is_some() && status.certificate_renewal=="healthy" {RequirementStatus::Met}else{RequirementStatus::Unknown},evidence:status.certificate.map(|certificate|format!("Certificate expires at {} ms UTC. Renewal status: {}. The identity pin is shown under sharing status.",certificate.expires_at_ms,status.certificate_renewal)).unwrap_or_else(||"No active node certificate was observed. Enabling may create one; a missing key beside an existing certificate requires repair.".into())},
-        DeveloperRequirement {id:"network",title:"Tailscale reachability and access policy",status:RequirementStatus::Unknown,evidence:"This process has no two-home Serve, outbound interface, node-key expiry or access-policy qualification receipt.".into()},
+        endpoints,
+        DeveloperRequirement {id:"network",title:"Tailscale reachability and access policy",status:RequirementStatus::Unknown,evidence:"Sharing requires Tailscale installed and signed in on the host, private TCP forwarding to the Sharing TLS listener, a reachable container ingress path and qualified outbound egress, and an access policy allowing the other Cinema. This process has not detected or verified the host installation, sign-in, forwarding or two-home reachability; a listener or configured endpoints alone do not prove them.".into()},
         DeveloperRequirement {id:"qualification",title:"Shared catalogue and client qualification",status:RequirementStatus::Unknown,evidence:"S3–S8 session, catalogue, playback, private history and native device qualification remain in progress. No supported media is advertised yet.".into()},
     ]}
 }
@@ -2708,6 +2776,41 @@ fn jellyfin_standard_port(state: &AppState) -> DeveloperRequirement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sharing_endpoint_readiness_distinguishes_missing_configured_and_unreadable() {
+        use plurx_core::sharing::{Endpoint, EndpointManifest};
+        let missing = sharing_endpoint_requirement(Ok(None));
+        assert_eq!(missing.status, RequirementStatus::Unmet);
+        assert!(missing.evidence.contains("before creating an invitation"));
+        let manifest = EndpointManifest {
+            revision: 1,
+            endpoints: vec![Endpoint {
+                ipv4: "100.64.0.1".parse().expect("valid Tailnet fixture address"),
+                ipv6: None,
+                ts_fqdn: "cinema.example.ts.net".into(),
+                port: 32443,
+                spki_sha256: "a".repeat(64),
+            }],
+        };
+        let configured = sharing_endpoint_requirement(Ok(Some(manifest.clone())));
+        assert_eq!(configured.status, RequirementStatus::Met);
+        assert!(configured.evidence.contains("configuration only"));
+        assert!(configured.evidence.contains("have not been verified"));
+        assert!(!configured
+            .evidence
+            .contains(&manifest.endpoints[0].spki_sha256));
+        let invalid = sharing_endpoint_requirement(Ok(Some(EndpointManifest {
+            revision: 1,
+            endpoints: vec![],
+        })));
+        assert_eq!(invalid.status, RequirementStatus::Unmet);
+        let unavailable = sharing_endpoint_requirement(Err(
+            plurx_core::error::StoreError::Database("private detail".into()),
+        ));
+        assert_eq!(unavailable.status, RequirementStatus::Unknown);
+        assert!(!unavailable.evidence.contains("private detail"));
+    }
 
     #[test]
     fn developer_item_renders_each_requirement_from_real_probes() {

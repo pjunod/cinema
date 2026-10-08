@@ -366,7 +366,7 @@ private struct NowPlayingState: Equatable {
     let isPlaying: Bool
 }
 
-private enum PlaybackPreparationError: LocalizedError {
+enum PlaybackPreparationError: LocalizedError {
     case timedOut
     case failed
 
@@ -632,9 +632,10 @@ struct ApplePlaybackTTFFLog: Encodable {
         encoder: String?,
         sessionId: String?,
         attempt: String,
-        reason: String
+        reason: String,
+        evidence: String = "video-frame-ready"
     ) {
-        self.message = "first frame after \(max(0, ms)) ms"
+        self.message = "\(evidence) after \(max(0, ms)) ms"
         self.method = method
         self.title = title
         self.fileId = fileId
@@ -655,9 +656,27 @@ struct ApplePlaybackTTFFLog: Encodable {
     }
 }
 
-/// Monotonic, one-shot first-progress gate. AVPlayer readiness is not a frame,
-/// and a playing intent can still be waiting for data, so the measurement ends
-/// only when the film clock advances while AVPlayer reports actual playback.
+enum PlaybackFirstOutputEvidence {
+    case unknown, audioProgress, videoFrameReady
+
+    static func observed(hasVideoSource: Bool?, localTargetExpected: Bool, evidence: LocalVideoEvidence) -> Self {
+        switch hasVideoSource {
+        case false: return .audioProgress
+        case true: return localTargetExpected && evidence.frameReady ? .videoFrameReady : .unknown
+        case nil: return .unknown
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .unknown: return "unobserved"
+        case .audioProgress: return "audio-progress"
+        case .videoFrameReady: return "video-frame-ready"
+        }
+    }
+}
+
+/// Monotonic, one-shot observation of a local ready frame or confirmed audio progress.
 struct ApplePlaybackTTFFState: Equatable {
     private var openedAt: TimeInterval?
     private var openedPositionMs = 0
@@ -673,12 +692,17 @@ struct ApplePlaybackTTFFState: Equatable {
     mutating func observe(
         positionMs: Int,
         playing: Bool,
+        evidence: PlaybackFirstOutputEvidence,
+        seekPending: Bool = false,
         observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) -> Int? {
-        guard let openedAt,
-              playing,
-              positionMs >= openedPositionMs + 250
-        else { return nil }
+        guard let openedAt, !seekPending else { return nil }
+        switch evidence {
+        case .unknown: return nil
+        case .audioProgress:
+            guard playing, positionMs >= openedPositionMs + 250 else { return nil }
+        case .videoFrameReady: break
+        }
         self.openedAt = nil
         return max(0, Int(((observedAt - openedAt) * 1_000).rounded()))
     }
@@ -928,10 +952,11 @@ struct ApplePlaybackProbeLog: Encodable {
     let sessionId: String?
     let attempt: String
     let snapshot: ApplePlaybackDiagnosticSnapshot
+    var detail: String? = nil
     let ua = "Apple AVPlayer"
 
     enum CodingKeys: String, CodingKey {
-        case level, event, message, method, title, vcodec, height, encoder, attempt, snapshot, ua
+        case level, event, message, method, title, vcodec, height, encoder, attempt, snapshot, detail, ua
         case fileId = "file_id"
         case sessionId = "session_id"
     }
@@ -1659,52 +1684,69 @@ struct PlayerAttachmentRecoveryState: Equatable {
     }
 }
 
-/// A decoder that accepts the stream and renders nothing is invisible to every
-/// other detector here: audio advances the film clock, so both stall detectors
-/// reset on each sample, AVPlayer's stall counter never moves, and no NSError
-/// is ever produced. The one piece of evidence is `AVPlayerItem.presentationSize`,
-/// which stays `.zero` until a frame has actually been decoded. Dolby Vision
-/// Profile 5 on a device with no Profile 5 decoder fails exactly this way.
-///
-/// This deliberately does not reuse `PlayerAttachmentRecoveryState`: that gate
-/// arms after five seconds of clock progress whether or not a picture ever
-/// appeared, which is *below* this threshold, so it would disarm the watchdog
-/// before it could ever fire. A rendered frame is what establishes video here,
-/// and the first non-zero presentation size retires the watchdog for good.
-struct BlackFrameWatchdog: Equatable {
+/// Detect sustained clock progress without a ready frame on the current visible
+/// local layer. Dimensions are metadata, not decoded-frame evidence.
+struct BlackFrameWatchdog {
+    private weak var item: AVPlayerItem?
     private(set) var lastPositionMs: Int?
     private(set) var blackMs = 0
     private(set) var presentedVideo = false
     private(set) var fired = false
 
     mutating func opened() {
+        item = nil
         lastPositionMs = nil
         blackMs = 0
         presentedVideo = false
         fired = false
     }
 
-    /// True exactly once, on the sample that proves the film clock ran for
-    /// `PlayerController.blackFrameDecodeFailureMs` with nothing on screen.
-    ///
-    /// `hasVideoSource` keeps audiobooks and other audio-only playbacks out:
-    /// their presentation size is legitimately `.zero` forever.
+    mutating func bind(_ currentItem: AVPlayerItem?) {
+        guard let currentItem else { opened(); return }
+        guard item !== currentItem else { return }
+        opened()
+        item = currentItem
+    }
+
+    /// A stale task can retire its own trigger, never a replacement item's.
+    mutating func cancelRecovery(for currentItem: AVPlayerItem) {
+        guard item === currentItem else { return }
+        fired = false
+        lastPositionMs = nil
+        blackMs = 0
+    }
+
+    /// Cancellation must rearm the same unready item, not permanently latch it.
+    mutating func recoveryIsEligible(for currentItem: AVPlayerItem, frameReady: Bool, eligible: Bool) -> Bool {
+        guard item === currentItem else { return false }
+        if frameReady { presentedVideo = true }
+        guard eligible, !presentedVideo else {
+            cancelRecovery(for: currentItem)
+            return false
+        }
+        return fired
+    }
+
     @MainActor
     mutating func observe(
+        item currentItem: AVPlayerItem,
         positionMs: Int,
-        presentationSize: CGSize,
+        frameReady: Bool,
+        localTargetExpected: Bool,
         hasVideoSource: Bool,
         playing: Bool
     ) -> Bool {
-        guard !fired, !presentedVideo else { return false }
-        if presentationSize.width > 0 && presentationSize.height > 0 {
+        bind(currentItem)
+        if frameReady {
             presentedVideo = true
             lastPositionMs = nil
             blackMs = 0
             return false
         }
-        guard hasVideoSource, playing else {
+        guard !fired, !presentedVideo else { return false }
+        guard hasVideoSource, playing, localTargetExpected else {
             lastPositionMs = nil
+            blackMs = 0
             return false
         }
         guard let lastPositionMs else {
@@ -1713,9 +1755,6 @@ struct BlackFrameWatchdog: Equatable {
         }
         let delta = positionMs - lastPositionMs
         self.lastPositionMs = positionMs
-        // Only elapsed film time counts. A seek, an item replacement, or any
-        // other discontinuity larger than one sampling interval can explain is
-        // a new baseline rather than more of the same black screen.
         guard delta >= 0, delta <= PlayerController.blackFrameSampleCeilingMs else {
             blackMs = 0
             return false
@@ -2154,7 +2193,9 @@ final class PlayerController: ObservableObject {
     }
 
     struct ItemPreparation {
-        var ready: @MainActor (AVPlayerItem) async throws -> Void = { try await PlayerController.awaitItemReady($0) }
+        var ready: @MainActor (AVPlayerItem, PlayerItemReadiness.Context) async throws -> Void = {
+            try await PlayerController.awaitItemReady($0, context: $1)
+        }
         var seek: @MainActor (AVPlayer, Int) async -> Void = { player, ms in
             _ = await player.seek(
                 to: CMTime(seconds: Double(ms) / 1000.0, preferredTimescale: 600),
@@ -2186,6 +2227,7 @@ final class PlayerController: ObservableObject {
     }
 
     private let requestPlaybackDecision: @MainActor (AppModel, PlaybackFileContext, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps)
+    private let requestHlsStatus: @MainActor (AppModel, String) async throws -> PlaybackSessionStatus
     private let requestHlsSession: @MainActor (AppModel, PlaybackFileContext, CreateSessionRequest) async throws -> HlsStart
     private let readControlSequence: @MainActor (PlaybackControlSession) async -> UInt64?
     private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
@@ -2232,6 +2274,9 @@ final class PlayerController: ObservableObject {
             await $0.endHlsSession($1)
         },
         requestHlsSession: (@MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart)? = nil,
+        requestHlsStatus: @escaping @MainActor (AppModel, String) async throws -> PlaybackSessionStatus = {
+            try await $0.hlsStatus($1)
+        },
         readControlSequence: @escaping @MainActor (PlaybackControlSession) async -> UInt64? = {
             await $0.controlSequence
         },
@@ -2266,6 +2311,7 @@ final class PlayerController: ObservableObject {
             if let requestHlsSession { return try await requestHlsSession(model, id, body) }
             return try await model.createHlsSession(fileId: id, body: body, fileContext: context)
         }
+        self.requestHlsStatus = requestHlsStatus
         self.readControlSequence = readControlSequence
         self.reportPlaybackIntent = reportPlaybackIntent
         self.resumeNow = resumeNow
@@ -2285,7 +2331,7 @@ final class PlayerController: ObservableObject {
     /// spent. A resume has always been bounded by this because it had to seek;
     /// a fresh start was not bounded at all, which is what let a title AVPlayer
     /// neither readies nor fails hold the open forever behind a black screen.
-    static let itemReadinessDeadlineSeconds = 15
+    nonisolated static let itemReadinessDeadlineSeconds = 15
     /// Separate from the observed readiness path: these delays coalesce seek
     /// intent and sample resume presentation, respectively.
     private static let seekCoalescingDelay: Duration = .milliseconds(100)
@@ -2382,6 +2428,25 @@ final class PlayerController: ObservableObject {
     }
     @Published private(set) var stagedSurfacePlayer: AVPlayer?
     private weak var playbackSurface: PlayerSurfaceView?
+    #if DEBUG
+    var localVideoEvidenceForTesting: ((AVPlayer, AVPlayerItem) -> LocalVideoEvidence)?
+    func setBlackFrameWatchdogForTesting(_ watchdog: BlackFrameWatchdog) { blackFrameWatchdog = watchdog }
+    var blackFrameWatchdogForTesting: BlackFrameWatchdog { blackFrameWatchdog }
+    /// Enter the real queued continuation without opening a network stream.
+    func queueBlackFrameRecoveryForTesting(for item: AVPlayerItem, at position: Int) -> Task<Void, Never> {
+        started = true
+        return queueBlackFrameRecovery(for: item, at: position)
+    }
+    #endif
+
+    func currentLocalVideoEvidence() -> LocalVideoEvidence {
+        guard let item = player.currentItem else { return .unavailable }
+        #if DEBUG
+        if let read = localVideoEvidenceForTesting { return read(player, item) }
+        #endif
+        return playbackSurface?.videoEvidence(for: player, item: item) ?? .unavailable
+    }
+
     private var warmPredecessor: AVPlayer?
 
     func attachPlaybackSurface(_ surface: PlayerSurfaceView, attached: Bool) {
@@ -2494,6 +2559,7 @@ final class PlayerController: ObservableObject {
     /// how old it was.
     private var diagnosticSessionStatus: PlaybackSessionStatus?
     private var diagnosticSessionStatusObservedAt: Date?
+    private var preparationSample: PlayerItemReadiness.Sample?
     var sessionStatusAgeMs: Int? {
         guard sessionStatus != nil, let observedAt = diagnosticSessionStatusObservedAt else {
             return nil
@@ -5461,6 +5527,7 @@ final class PlayerController: ObservableObject {
         sessionStatus = nil
         diagnosticSessionStatus = nil
         diagnosticSessionStatusObservedAt = nil
+        preparationSample = nil
         if wasStarted { report(position) }
         if let sessionId {
             self.sessionId = nil
@@ -6225,7 +6292,7 @@ final class PlayerController: ObservableObject {
             // that cannot decode it — held this open forever, which is the
             // black screen viewers reported.
             do {
-                try await itemPreparation.ready(item)
+                try await itemPreparation.ready(item, readinessContext(for: item))
             } catch {
                 if isSuperseded(generation) { return }
                 if item.status == .failed {
@@ -6295,6 +6362,7 @@ final class PlayerController: ObservableObject {
         sessionStatus = nil
         diagnosticSessionStatus = nil
         diagnosticSessionStatusObservedAt = nil
+        preparationSample = nil
     }
 
     /// Retire a superseded HLS session, best effort.
@@ -6633,12 +6701,15 @@ final class PlayerController: ObservableObject {
     /// Recovery keeps its two-second cadence regardless of panel visibility.
     private func startRecoveryEvidencePoll() {
         statusTask?.cancel()
+        preparationSample = nil
         guard let polledSessionId = sessionId else { return }
         let pollAttempt = snapshotAttempt()
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let model = self.model else { return }
-                let status = try? await model.hlsStatus(polledSessionId)
+                let requestedAtMs = PlaybackControlSession.monotonicMs()
+                let status = try? await self.requestHlsStatus(model, polledSessionId)
+                let observedAtMs = PlaybackControlSession.monotonicMs()
                 guard !Task.isCancelled,
                       self.started,
                       self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidencePoll),
@@ -6647,7 +6718,9 @@ final class PlayerController: ObservableObject {
                 if self.autoPreparing, self.autoVoluntary,
                    let staged = self.preparedReplacement.activeAction {
                     let stagedStatus = try? await model.hlsStatus(staged.sessionId)
-                    guard !Task.isCancelled, self.sessionId == polledSessionId else { return }
+                    guard !Task.isCancelled, self.started,
+                          self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidenceAfterStagedPoll),
+                          self.sessionId == polledSessionId else { return }
                     if self.preparedReplacement.activeAction?.sessionId == staged.sessionId {
                         self.autoStagedStatus = stagedStatus
                         self.autoStagedStatusObservedMs = stagedStatus == nil ? nil : PlaybackControlSession.monotonicMs()
@@ -6670,9 +6743,13 @@ final class PlayerController: ObservableObject {
                     // cancellation) and this loop ends; the successor
                     // session starts its own poll.
                     let recovered = self.observeDeliveryStarvation(status)
+                    self.preparationSample = PlayerItemReadiness.Sample(
+                        status: status, requestedAtMs: requestedAtMs, observedAtMs: observedAtMs
+                    )
                     self.publishPanelTelemetry(status)
                     if recovered { return }
                 } else {
+                    self.preparationSample = nil
                     self.publishPanelTelemetry(nil)
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -8129,21 +8206,17 @@ final class PlayerController: ObservableObject {
     }
 
     /// One evidence sample from the client's existing presentation proof. No
-    /// detector and no timer of its own: the periodic observer already runs,
-    /// the position delta is already computed, and the first-frame proof is
-    /// the black-frame ladder's.
-    private func sampleSurfacePresentation(at observedPosition: Int) {
+    /// detector and no timer of its own: the periodic observer supplies the
+    /// same current-layer snapshot used by TTFF and the black-frame watchdog.
+    private func sampleSurfacePresentation(at observedPosition: Int, evidence: LocalVideoEvidence) {
         // Nothing attached is nothing to prove.
         guard let attached = surface.attached else { return }
         let hasVideoSource = decision?.source?.videoCodec != nil
-        let size = presentationSize
         // Declared, not guessed: an AirPlay or PiP picture is presenting on a
         // screen this process cannot measure.
         let declared = player.isExternalPlaybackActive || pictureInPictureIsActive
-        let picture = !hasVideoSource
-            || blackFrameWatchdog.presentedVideo
-            || (size.width > 0 && size.height > 0)
-            || declared
+        let picture = (decision?.source != nil && !hasVideoSource)
+            || evidence.frameReady || declared
         let presenting = Self.surfaceIsPresenting(
             observedPosition: observedPosition,
             lastSampleMs: lastSurfaceSampleMs,
@@ -8434,7 +8507,11 @@ final class PlayerController: ObservableObject {
         let observedPlayer = player
         return { [weak self, weak observedPlayer] in
                 guard let self, self.isCurrentLifecycle(lifecycle), self.player === observedPlayer,
-                      let item = self.player.currentItem, !self.isChangingStream else { return }
+                      !self.isChangingStream else { return }
+                guard let item = self.player.currentItem else {
+                    self.blackFrameWatchdog.bind(nil)
+                    return
+                }
                 // Keep an interactive target on screen while its item is being
                 // prepared. Reading the predecessor here was the visible snap
                 // back after a progress-bar or skip-button command.
@@ -8450,39 +8527,33 @@ final class PlayerController: ObservableObject {
                 // The last rate the viewer was genuinely playing at, so a
                 // pause at 1.5× is restored as 1.5× and not as the 0 the
                 // transport reports while paused (P2-5).
+                guard self.player === observedPlayer, self.player.currentItem === item else { return }
                 let observedPosition = self.realPositionMs()
                 let isActuallyPlaying = self.player.timeControlStatus == .playing
                     && self.player.rate > 0
+                let evidence = self.currentLocalVideoEvidence()
+                let localTargetExpected = self.localVideoTargetExpected(evidence)
                 self.reportPlaybackTTFFIfNeeded(
                     at: observedPosition,
-                    playing: isActuallyPlaying
+                    playing: isActuallyPlaying,
+                    evidence: evidence
                 )
                 // Sampled outside the playing branch so a picture that arrives
                 // while paused still retires the watchdog.
                 if self.blackFrameWatchdog.observe(
+                    item: item,
                     positionMs: observedPosition,
-                    presentationSize: self.presentationSize,
+                    frameReady: localTargetExpected && evidence.frameReady,
+                    localTargetExpected: localTargetExpected,
                     hasVideoSource: self.decision?.source?.videoCodec != nil,
                     playing: isActuallyPlaying
                 ) {
-                    // `started` and `lifecycleGeneration == lifecycle` both
-                    // hold here — the observer's own opening guard is
-                    // `isCurrentLifecycle(lifecycle)` and there has been no
-                    // suspension since — so the lifecycle scope below compares
-                    // against the same generation the old conjunction did.
-                    let attempt = self.snapshotAttempt()
-                    Task { @MainActor [weak self] in
-                        guard let self, self.started,
-                              self.attemptStillCurrent(attempt, fence: .blackFrameDecodeFailure),
-                              self.player.currentItem === item,
-                              !self.isChangingStream else { return }
-                        await self.handleBlackFrameDecodeFailure(at: observedPosition)
-                    }
+                    self.queueBlackFrameRecovery(for: item, at: observedPosition)
                 }
                 // The surface's evidence, taken from the samples this
                 // observer already has: the position delta, the rate, and the
                 // first-frame proof for an item that has never presented one.
-                self.sampleSurfacePresentation(at: observedPosition)
+                self.sampleSurfacePresentation(at: observedPosition, evidence: evidence)
                 // In the same turn as the evidence, never before it: AVPlayer
                 // invokes this observer when playback stops as well as while
                 // it runs, so a wait raised here is raised against a model
@@ -8872,7 +8943,7 @@ final class PlayerController: ObservableObject {
     /// resurrects a player nobody is watching — audible, with background audio
     /// on — and a status callback in `open()`'s own post-`isChangingStream`
     /// window can clobber the item that open is still configuring.
-    private func retryMediaOnNextNode(_ failedItem: AVPlayerItem) async -> Bool {
+    func retryMediaOnNextNode(_ failedItem: AVPlayerItem) async -> Bool {
         #if os(iOS)
         if offlineId != nil { return false }
         #endif
@@ -8910,6 +8981,9 @@ final class PlayerController: ObservableObject {
         if resumeAttempt?.repairAdmitted == true {
             bindResumeRepairSuccessor(item, generation: generation)
         }
+        // Failover advanced the open fence. Rebind its one poll before waiting;
+        // a late predecessor response must not supply preparation evidence.
+        startRecoveryEvidencePoll()
         if wantsPlayback { player.play() } else { player.pause() }
         // The overlay is per-item and was just torn down; `open()` rebuilds it
         // at this point and so must this, or a PGS-subtitled film loses its
@@ -9083,11 +9157,49 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    private func reportPlaybackTTFFIfNeeded(at positionMs: Int, playing: Bool) {
+    @discardableResult
+    private func queueBlackFrameRecovery(for item: AVPlayerItem, at position: Int) -> Task<Void, Never> {
+        let attempt = snapshotAttempt()
+        return Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard self.started,
+                  self.attemptStillCurrent(attempt, fence: .blackFrameDecodeFailure),
+                  self.player.currentItem === item,
+                  self.blackFrameRecoveryIsEligible(for: item) else {
+                // Epoch/item refusals can short-circuit before eligibility is
+                // sampled. They must still release this attachment's trigger.
+                self.blackFrameWatchdog.cancelRecovery(for: item)
+                return
+            }
+            await self.handleBlackFrameDecodeFailure(at: position)
+        }
+    }
+
+    private func localVideoTargetExpected(_ evidence: LocalVideoEvidence) -> Bool {
+        evidence.bindingMatches && evidence.targetVisible
+            && !player.isExternalPlaybackActive && !pictureInPictureIsActive
+            && seekState.pendingMs == nil && !isChangingStream
+    }
+
+    func blackFrameRecoveryIsEligible(for item: AVPlayerItem) -> Bool {
+        guard player.currentItem === item else { return false }
+        let evidence = currentLocalVideoEvidence()
+        let local = localVideoTargetExpected(evidence)
+        return blackFrameWatchdog.recoveryIsEligible(
+            for: item, frameReady: local && evidence.frameReady,
+            eligible: started && local && decision?.source?.videoCodec != nil
+                && player.timeControlStatus == .playing && player.rate > 0)
+    }
+
+    private func reportPlaybackTTFFIfNeeded(at positionMs: Int, playing: Bool, evidence: LocalVideoEvidence) {
         #if os(iOS)
         if offlineId != nil { return }
         #endif
-        guard let ms = ttffMeasurement.observe(positionMs: positionMs, playing: playing) else {
+        let firstOutput = PlaybackFirstOutputEvidence.observed(
+            hasVideoSource: decision?.source.map { $0.videoCodec != nil },
+            localTargetExpected: localVideoTargetExpected(evidence), evidence: evidence)
+        guard let ms = ttffMeasurement.observe(positionMs: positionMs, playing: playing,
+            evidence: firstOutput, seekPending: seekState.pendingMs != nil) else {
             return
         }
         lastTTFFMs = ms
@@ -9105,7 +9217,8 @@ final class PlayerController: ObservableObject {
             encoder: encoder,
             sessionId: sessionId,
             attempt: playbackAttemptId,
-            reason: ttffReason
+            reason: ttffReason,
+            evidence: firstOutput.label
         ))
     }
 
@@ -9126,8 +9239,19 @@ final class PlayerController: ObservableObject {
             encoder: encoder,
             sessionId: sessionId,
             attempt: playbackAttemptId,
-            snapshot: playbackDiagnosticSnapshot(at: positionMs)
+            snapshot: playbackDiagnosticSnapshot(at: positionMs),
+            detail: localVideoDiagnosticDetail()
         ))
+    }
+
+    private func localVideoDiagnosticDetail() -> String {
+        let evidence = currentLocalVideoEvidence()
+        let size = presentationSize
+        let source = decision?.source.map { $0.videoCodec == nil ? "audio" : "video" } ?? "unknown"
+        return "source=\(source) binding=\(evidence.bindingMatches) visible=\(evidence.targetVisible)"
+            + " ready=\(evidence.readyForDisplay) item=\(player.currentItem?.status.rawValue ?? -1)"
+            + " dimensions=\(size.width)x\(size.height) playing=\(player.timeControlStatus == .playing && player.rate > 0)"
+            + " external=\(player.isExternalPlaybackActive) pip=\(pictureInPictureIsActive) black_ms=\(blackFrameWatchdog.blackMs)"
     }
 
     private func reportPlaybackStall(
@@ -9688,12 +9812,16 @@ final class PlayerController: ObservableObject {
     /// so it now does what every other spent owner does — stop the player,
     /// then say so.
     private func handleBlackFrameDecodeFailure(at position: Int) async {
-        guard started, !isChangingStream, player.currentItem != nil else { return }
+        guard let decoderItem = player.currentItem,
+              blackFrameRecoveryIsEligible(for: decoderItem) else { return }
         let decoderAttempt = snapshotAttempt()
-        let decoderItem = player.currentItem
         _ = await noteAutoDecodeFailure()
         guard player.currentItem === decoderItem,
-              attemptStillCurrent(decoderAttempt, fence: .blackFrameDecoderAcknowledgement) else { return }
+              attemptStillCurrent(decoderAttempt, fence: .blackFrameDecoderAcknowledgement),
+              blackFrameRecoveryIsEligible(for: decoderItem) else {
+            blackFrameWatchdog.cancelRecovery(for: decoderItem)
+            return
+        }
         let fallback = plannedCompatibilityFallback
         guard fallback != .none else {
             stopForBlockingSurface()
@@ -9750,34 +9878,30 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    /// Wait for the attached item to reach `.readyToPlay`, or give up.
-    ///
-    /// Subscribe before inspecting the status so a ready transition cannot
-    /// fall between the initial read and observation. A separate timer keeps
-    /// the original finite deadline even when AVFoundation emits nothing.
-    private static func awaitItemReady(_ item: AVPlayerItem) async throws {
+    /// Bind evidence to this attachment's lifecycle/open/session, including
+    /// poll responses which arrived before the initial item was attached.
+    func readinessContext(for item: AVPlayerItem) -> PlayerItemReadiness.Context {
+        let generation = openGeneration
+        let lifecycle = lifecycleGeneration
+        let expectedSession = sessionId
+        return PlayerItemReadiness.Context(
+            growingSessionID: isVOD ? nil : expectedSession,
+            ownsItem: { [weak self, weak item] in
+                guard let self, let item else { return false }
+                return self.isCurrentLifecycle(lifecycle) && !self.isSuperseded(generation)
+                    && self.player.currentItem === item && self.sessionId == expectedSession
+            },
+            sample: { [weak self] in self?.preparationSample }
+        )
+    }
+
+    /// Subscribe before inspecting so no native status transition is lost.
+    private static func awaitItemReady(_ item: AVPlayerItem, context: PlayerItemReadiness.Context) async throws {
         let observer = AVPlayerItemObserver(item: item)
         defer { observer.cancel() }
-        if item.status == .failed {
-            throw item.error ?? PlaybackPreparationError.failed
-        }
-        if item.status == .readyToPlay { return }
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { @MainActor in
-                for await event in observer.events {
-                    guard case .status(let status) = event else { continue }
-                    if status == .readyToPlay { return }
-                    if status == .failed { throw item.error ?? PlaybackPreparationError.failed }
-                }
-                throw PlaybackPreparationError.failed
-            }
-            group.addTask {
-                try await Task.sleep(for: .seconds(Self.itemReadinessDeadlineSeconds))
-                throw PlaybackPreparationError.timedOut
-            }
-            defer { group.cancelAll() }
-            guard let _ = try await group.next() else { throw PlaybackPreparationError.failed }
-        }
+        try await PlayerItemReadiness.wait(
+            events: observer.events, status: { item.status }, failure: { item.error }, context: context
+        )
     }
 
     func seekPreparationOwner(at targetMs: Int) -> SeekPreparationOwner {
@@ -9798,7 +9922,7 @@ final class PlayerController: ObservableObject {
                 && !Task.isCancelled
         }
         guard ownsSeek() else { return }
-        do { try await itemPreparation.ready(item) }
+        do { try await itemPreparation.ready(item, readinessContext(for: item)) }
         catch {
             guard ownsSeek() else { return }
             throw error

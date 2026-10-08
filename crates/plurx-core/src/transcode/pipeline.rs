@@ -1,7 +1,7 @@
 //! How one session's video gets from an HDR source to SDR output.
 //!
-//! Today's path decodes on the GPU, downloads every frame to system memory,
-//! tone-maps it through a float chain on the CPU, and uploads it back for the
+//! Some paths decode through an accelerator and transfer frames to system memory,
+//! tone-map through a float chain on the CPU, and upload it back for the
 //! encoder. PERF-PLAN §2.9 measured what that costs on identical work — same
 //! resolution, same codec, same rung, same encoder, the only difference being
 //! this chain:
@@ -14,8 +14,9 @@
 //! A quarter of the pipeline's throughput, and it is the quarter that takes a
 //! session from above realtime to below it — which is the whole difference
 //! between a stream that builds reserve and one that drains the viewer's.
-//! A pipeline that keeps frames on the GPU deletes both copies and the float
-//! maths with them.
+//! A hardware-surface graph avoids that explicit transfer/filter sequence.
+//! Frame domains do not establish physical copies or their cost, especially
+//! on Apple unified memory; complete-graph experiments establish the benefit.
 //!
 //! Which one a node uses is decided by *probe*, never by version sniffing or
 //! by what the hardware claims. A graph that parses is not a graph that works:
@@ -29,12 +30,20 @@ use crate::domain::ScanType;
 
 /// The video path for one session, from decoded frames to the encoder's input.
 ///
-/// Ordered from most to least preferred; the probe walks candidates in this
-/// order and takes the first that proves itself. [`Pipeline::Cpu`] is last and
+/// The legacy probe walks [`CANDIDATES`] from most to least preferred; Apple
+/// processing uses its separate runtime compatibility context. [`Pipeline::Cpu`] is last and
 /// unconditional — it needs no hardware, it is what every other variant falls
 /// back to, and it is the reference the others are checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Pipeline {
+    /// VideoToolbox surfaces → native SDR scale → H.264 VideoToolbox encode.
+    /// Selected only by the macOS compatibility context in the resolver.
+    VtScaleSdr,
+    /// HDR10 VideoToolbox surfaces → native P010 scale → Jellyfin BT.2390/ITP
+    /// Metal mapping → H.264 VideoToolbox encode. Dolby/HLG are excluded.
+    VtToneMapMetal,
+    /// NVDEC → CUDA tone-map/scale → NVENC, without a system-memory handoff.
+    TonemapCuda,
     /// Intel, frames never leave the GPU: `vpp_qsv` scales and tone-maps in
     /// one pass on the video-processing block.
     VppQsv,
@@ -49,6 +58,9 @@ pub enum Pipeline {
     /// `PLURX_TONEMAP=libplacebo`; the probe is what turns a blind preference
     /// into a checked capability.
     Libplacebo,
+    /// Vulkan shaders with system-memory AVFrames on both sides. The filter
+    /// owns its uploads; no external Vulkan frame context is required.
+    LibplaceboSoftware,
     /// OpenCL, jellyfin-ffmpeg's portable alternate. Needs an explicit
     /// download after the map — `tonemap_opencl` outputs OpenCL surfaces the
     /// H.264 encoders cannot take directly.
@@ -110,11 +122,13 @@ pub enum Pipeline {
 
 /// Every pipeline the probe may consider, best first.
 pub const CANDIDATES: &[Pipeline] = &[
+    Pipeline::TonemapCuda,
     Pipeline::VppQsv,
     Pipeline::TonemapVaapi,
     Pipeline::LibplaceboVaapi,
     Pipeline::Libplacebo,
     Pipeline::TonemapOpencl,
+    Pipeline::LibplaceboSoftware,
     Pipeline::Cpu,
 ];
 
@@ -122,9 +136,13 @@ impl Pipeline {
     /// Stable identifier for settings, logs, and the stats overlay.
     pub fn name(self) -> &'static str {
         match self {
+            Pipeline::VtScaleSdr => "vt_scale_sdr",
+            Pipeline::VtToneMapMetal => "vt_tonemap_metal",
+            Pipeline::TonemapCuda => "tonemap_cuda",
             Pipeline::VppQsv => "vpp_qsv",
             Pipeline::TonemapVaapi => "tonemap_vaapi",
             Pipeline::Libplacebo => "libplacebo",
+            Pipeline::LibplaceboSoftware => "libplacebo_software",
             Pipeline::LibplaceboVaapi => "libplacebo_vaapi",
             Pipeline::TonemapOpencl => "tonemap_opencl",
             Pipeline::DoviTonemapx => "dovi_tonemapx",
@@ -139,6 +157,8 @@ impl Pipeline {
             .iter()
             .copied()
             .chain([
+                Pipeline::VtScaleSdr,
+                Pipeline::VtToneMapMetal,
                 Pipeline::DoviTonemapx,
                 Pipeline::DoviPassthrough,
                 Pipeline::Hdr10Passthrough,
@@ -149,9 +169,13 @@ impl Pipeline {
     /// Human label for the overlay and the admin log.
     pub fn label(self) -> &'static str {
         match self {
+            Pipeline::VtScaleSdr => "VideoToolbox SDR scaling",
+            Pipeline::VtToneMapMetal => "Metal HDR10 tone-map (BT.2390 / ITP)",
+            Pipeline::TonemapCuda => "GPU tone-map (CUDA)",
             Pipeline::VppQsv => "GPU tone-map (QSV)",
             Pipeline::TonemapVaapi => "GPU tone-map (VA-API)",
             Pipeline::Libplacebo => "GPU tone-map (Vulkan)",
+            Pipeline::LibplaceboSoftware => "GPU tone-map (Vulkan / CPU frame transfer)",
             Pipeline::LibplaceboVaapi => "GPU tone-map (Vulkan / VA-API)",
             Pipeline::TonemapOpencl => "GPU tone-map (OpenCL)",
             Pipeline::DoviTonemapx => "Dolby Vision reshape (tonemapx)",
@@ -161,7 +185,7 @@ impl Pipeline {
         }
     }
 
-    /// True when tone mapping runs on the GPU (frame transfers may still occur).
+    /// Processing uses an accelerator; this does not measure physical copies.
     pub fn on_gpu(self) -> bool {
         !matches!(
             self,
@@ -182,18 +206,22 @@ impl Pipeline {
     /// anyway, which is the copy this exists to remove.
     pub fn pairs_with(self, encoder: Encoder) -> bool {
         match self {
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal => encoder == Encoder::VideoToolbox,
+            Pipeline::TonemapCuda => encoder == Encoder::Nvenc,
             Pipeline::VppQsv => encoder == Encoder::Qsv,
             Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => encoder == Encoder::Vaapi,
             Pipeline::Libplacebo | Pipeline::TonemapOpencl => encoder != Encoder::Software,
-            // Software DECODE is non-negotiable and stays so: the HEVC
-            // decoder is what attaches the DOVI frame side data that
-            // `apply_dovi=1` consumes, and an inherited hardware decode drops
-            // it silently (`requires_software_decode`). The ENCODER was pinned
-            // here too, but neither stated reason — side data attached,
-            // system-memory frames for the SIMD filter — is about the encode
-            // half. It cost every non-DV-capable client a 720p ceiling on 4K
-            // Dolby Vision while an idle hardware encoder sat next to it. The
-            // filtered frames reach a vendor encoder through the same
+            Pipeline::LibplaceboSoftware => encoder == Encoder::Software,
+            // Current production policy pins software decode until each
+            // hardware tuple proves DOVI metadata/PTS transport, strict mapper
+            // consumption and seek behavior (`requires_software_decode`).
+            // A bounded artificial FATE sample transported metadata through
+            // VideoToolbox, but RPU pixel influence and real-content visual
+            // qualification remain unmeasured; transport alone does not meet
+            // the RPU-positive visual criterion. This is a qualification policy,
+            // not a universal hardware decoder limitation. The encoder is
+            // independent: filtered system-memory frames reach it through the
+            // same
             // `filter_suffix()` upload every other CPU-filtered path uses, and
             // the pairing is probed at boot (`has_dovi_reshape_with`) before it
             // is ever attempted — unproved pairings fall back to software.
@@ -225,6 +253,9 @@ impl Pipeline {
     /// (PERF-PLAN §5 scope guards).
     pub fn handles(self, hdr_format: Option<&str>) -> bool {
         match (self, hdr_format) {
+            (Pipeline::VtScaleSdr, None | Some("sdr")) => true,
+            (Pipeline::VtToneMapMetal, Some("hdr10")) => true,
+            (Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal, _) => false,
             (Pipeline::Cpu, _) => true,
             (Pipeline::DoviTonemapx, Some("dolby_vision")) => true,
             (Pipeline::DoviTonemapx, _) => false,
@@ -254,6 +285,18 @@ impl Pipeline {
     pub fn decode_args(self) -> Vec<String> {
         let a = |s: &str| s.to_owned();
         match self {
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal => vec![
+                a("-hwaccel"),
+                a("videotoolbox"),
+                a("-hwaccel_output_format"),
+                a("videotoolbox_vld"),
+            ],
+            Pipeline::TonemapCuda => vec![
+                a("-hwaccel"),
+                a("cuda"),
+                a("-hwaccel_output_format"),
+                a("cuda"),
+            ],
             Pipeline::VppQsv => vec![
                 a("-hwaccel"),
                 a("qsv"),
@@ -271,6 +314,7 @@ impl Pipeline {
             // uploads. Deriving decode flags here would fight `decode_setup`,
             // which knows things this type does not (source codec, bit depth).
             Pipeline::Libplacebo
+            | Pipeline::LibplaceboSoftware
             | Pipeline::TonemapOpencl
             | Pipeline::DoviTonemapx
             | Pipeline::DoviPassthrough
@@ -284,6 +328,12 @@ impl Pipeline {
     pub fn init_args(self) -> Vec<String> {
         let a = |s: &str| s.to_owned();
         match self {
+            Pipeline::TonemapCuda => vec![
+                a("-init_hw_device"),
+                a("cuda=cu:0"),
+                a("-filter_hw_device"),
+                a("cu"),
+            ],
             // libplacebo wants a Vulkan device; ffmpeg derives one from the
             // existing hardware context where it can, but naming it is what
             // makes the graph work on a box whose encoder is VA-API.
@@ -364,7 +414,25 @@ impl Pipeline {
         let hdr = hdr_format.is_some();
         let w = width.map_or_else(|| "-1".to_owned(), |w| w.to_string());
         Some(match self {
+            Pipeline::VtScaleSdr => format!("scale_vt=w={w}:h={height}:format=nv12"),
+            Pipeline::VtToneMapMetal => format!(
+                "scale_vt=w={w}:h={height}:format=p010le,\
+                 tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:transfer=bt709:matrix=bt709:\
+                 primaries=bt709:range=tv:format=nv12:apply_dovi=0"
+            ),
             Pipeline::Cpu => return None,
+            Pipeline::TonemapCuda => {
+                let w = width.map_or_else(|| "-2".to_owned(), |w| w.to_string());
+                let scale = format!("scale_cuda=w={w}:h={height}");
+                if hdr {
+                    // Match the CPU reference's Hable/max-channel operator.
+                    // Jellyfin's auto mode selects ITP on newer GPUs, which
+                    // is a different picture, not a faster implementation.
+                    format!("tonemap_cuda=tonemap=hable:tonemap_mode=max:desat=0:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,{scale}")
+                } else {
+                    format!("{scale}:format=nv12")
+                }
+            }
             // vpp_qsv does scale and tone-map in one pass. `w=-1` keeps the
             // aspect; the output is nv12 in GPU memory, which is what h264_qsv
             // wants, so no format conversion is needed on either side.
@@ -399,6 +467,14 @@ impl Pipeline {
                 } else {
                     format!("hwupload,{renderer},hwdownload,format=nv12")
                 }
+            }
+            Pipeline::LibplaceboSoftware => {
+                // RGB conversion changes the matrix, not the source transfer or
+                // primaries. Preserve those tags so SDR is never stamped as PQ.
+                // Convert rendered RGB samples to limited-range BT.709 YUV; a
+                // pixel-format change alone can retain the RGB matrix tag.
+                let tm = if hdr { ":tonemapping=bt.2390" } else { "" };
+                format!("format=rgba64le,setparams=colorspace=gbr,libplacebo=w={w}:h={height}{tm}:colorspace=gbr:color_primaries=bt709:color_trc=bt709:format=rgba,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p")
             }
             // tonemap_opencl maps only, so the scale stays on the CPU side of
             // it. Its output is an OpenCL surface no H.264 encoder takes, hence
@@ -460,10 +536,12 @@ impl Pipeline {
         })
     }
 
-    /// Whether every frame stays in vendor surfaces from decode to encode.
+    /// Whether the unburned graph retains vendor surfaces from decode to encode.
     ///
     /// The vendor VPP graphs and the VA-API/Vulkan interop graph hand the
-    /// encoder hardware surfaces directly. Everything else touches the CPU on
+    /// encoder hardware surfaces directly, as do the Apple processing graphs.
+    /// This describes FFmpeg frame domains, not physical copy counts or PCIe.
+    /// The remaining graphs use system-memory stages on
     /// every frame, and the amounts are not small — the CPU float tone-map is
     /// the 0.71x measurement this module's header records, `libplacebo` ends
     /// with `hwdownload` into system memory, and `tonemap_opencl` leaves the
@@ -474,13 +552,19 @@ impl Pipeline {
     pub fn keeps_frames_off_the_cpu(self) -> bool {
         matches!(
             self,
-            Pipeline::VppQsv | Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
+            Pipeline::VtScaleSdr
+                | Pipeline::VtToneMapMetal
+                | Pipeline::TonemapCuda
+                | Pipeline::VppQsv
+                | Pipeline::TonemapVaapi
+                | Pipeline::LibplaceboVaapi
         )
     }
 
-    /// Whether the renderer requires software-decoded frames. Dolby Vision
-    /// metadata is parsed onto AVFrames by the HEVC decoder; an inherited
-    /// hardware decode/download path is not allowed to drop it silently.
+    /// Whether current production qualification requires software decode.
+    /// Dolby hardware tuples remain excluded pending per-frame metadata/PTS
+    /// transport, strict renderer consumption, seek and real-content visual
+    /// proof. Artificial-sample transport does not prove RPU pixel influence.
     pub fn requires_software_decode(self) -> bool {
         matches!(self, Pipeline::DoviTonemapx | Pipeline::DoviPassthrough)
     }
@@ -495,9 +579,13 @@ impl Pipeline {
     pub fn output_grade(self) -> OutputGrade {
         match self {
             Pipeline::DoviPassthrough | Pipeline::Hdr10Passthrough => OutputGrade::Hdr10,
-            Pipeline::VppQsv
+            Pipeline::VtScaleSdr
+            | Pipeline::VtToneMapMetal
+            | Pipeline::TonemapCuda
+            | Pipeline::VppQsv
             | Pipeline::TonemapVaapi
             | Pipeline::Libplacebo
+            | Pipeline::LibplaceboSoftware
             | Pipeline::LibplaceboVaapi
             | Pipeline::TonemapOpencl
             | Pipeline::DoviTonemapx
@@ -593,6 +681,9 @@ impl Pipeline {
         if proven == Pipeline::Cpu {
             return None;
         }
+        if matches!(proven, Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal) {
+            return Some("macOS processing requires its resolved compatibility context");
+        }
         if !heavy {
             return Some("light source — a GPU graph is not worth the handoff");
         }
@@ -626,9 +717,11 @@ impl Pipeline {
         if matches!(scan_type, ScanType::Interlaced(_))
             && matches!(
                 proven,
-                Pipeline::VppQsv
+                Pipeline::TonemapCuda
+                    | Pipeline::VppQsv
                     | Pipeline::TonemapVaapi
                     | Pipeline::Libplacebo
+                    | Pipeline::LibplaceboSoftware
                     | Pipeline::LibplaceboVaapi
                     | Pipeline::TonemapOpencl
             )
@@ -670,6 +763,31 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::domain::FieldOrder;
+
+    #[test]
+    fn software_frame_vulkan_route_preserves_transfer_and_reports_cpu_handoff() {
+        let pipeline = Pipeline::LibplaceboSoftware;
+        assert!(pipeline.pairs_with(Encoder::Software));
+        assert!(!pipeline.pairs_with(Encoder::Vaapi));
+        assert!(pipeline.on_gpu());
+        assert!(!pipeline.keeps_frames_off_the_cpu());
+        assert!(pipeline.device_args(Encoder::Software).is_empty());
+        assert!(pipeline.decode_args().is_empty());
+        assert_eq!(Pipeline::parse("libplacebo_software"), Some(pipeline));
+        for hdr in [None, Some("hdr10")] {
+            let graph = pipeline
+                .filters(Some(1280), 720, hdr)
+                .expect("software-frame Vulkan has a filter graph");
+            assert!(graph.starts_with("format=rgba64le,setparams=colorspace=gbr,"));
+            assert!(!graph.contains("hwupload"));
+            assert!(!graph.contains("hwdownload"));
+            assert!(!graph.contains("smpte2084"));
+            assert!(!graph.contains("color_primaries=bt2020"));
+            assert!(graph
+                .ends_with("format=rgba,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p"));
+            assert_eq!(graph.contains("tonemapping=bt.2390"), hdr.is_some());
+        }
+    }
 
     #[test]
     fn paired_devices_preserve_other_pipeline_encoder_contracts() {

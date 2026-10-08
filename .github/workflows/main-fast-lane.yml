@@ -11,14 +11,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Returning a PR to draft cancels the active run: `converted_to_draft` enters
-# this group and every job below declines it, so the run in flight is
-# superseded and nothing replaces it. Marking it ready again starts one
-# exact-head promotion attempt. That is what removing and reapplying the
-# `fast-lane` label used to do.
+# Preserve per-method success journals through head updates and draft changes.
+# Queued runs still fail the current-head/base guard when superseded.
 concurrency:
   group: main-fast-lane-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   scope:
@@ -92,6 +89,47 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Install the job-local Python receipt runtime
+        id: python-runtime
+        run: |
+          set -euo pipefail
+          test -d "$RUNNER_TEMP" && test ! -L "$RUNNER_TEMP"
+          plurx_python_dir="$(mktemp -d "$RUNNER_TEMP/plurx-python312.XXXXXXXX")"
+          printf 'directory=%s\n' "$plurx_python_dir" >> "$GITHUB_OUTPUT"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 20 --max-time 180 --max-filesize 34285590 \
+            --output "$plurx_python_dir/runtime.tgz" \
+            'https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15%2B20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+          test "$(wc -c < "$plurx_python_dir/runtime.tgz")" -eq 34285590
+          printf '%s  %s\n' '731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91' \
+            "$plurx_python_dir/runtime.tgz" | sha256sum --check --status
+          tar -xzf "$plurx_python_dir/runtime.tgz" -C "$plurx_python_dir"
+          "$plurx_python_dir/python/bin/python3" -c \
+            'import platform, sys; assert sys.version_info[:2] == (3, 12) and sys.platform == "linux" and platform.machine() == "x86_64"'
+          printf '%s\n' "$plurx_python_dir/python/bin" >> "$GITHUB_PATH"
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.23.2"
+      - name: Restore attributable main Python successes
+        id: receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 -m validation.main_unit_receipts prepare
+      - name: Publish main Python attempt-start marker
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}
+          path: .main-python-unit-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish preflight attempt-start journal
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.adoption_receipt_key }}-start-${{ github.run_id }}
+          path: .main-preflight-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Audit corrective-history evidence
         run: make history-check
       # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
@@ -115,21 +153,43 @@ jobs:
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint
-          python3 -m unittest discover -s tests/validation -p 'test_*.py'
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
       - name: Check CI, deploy, and shipping contracts
-        run: make operations-check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations
+      - name: Preserve main Python success journal even on unit failure
+        if: always() && steps.receipts.outcome == 'success'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}
+          path: .main-python-unit-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Check the shared player input contract
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.main_preflight_adoption node
+      - name: Preserve per-ID preflight journal even on failure
+        if: always() && steps.receipts.outcome == 'success'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.adoption_receipt_key }}
+          path: .main-preflight-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Remove the exact job-local Python receipt runtime
+        if: always()
+        env:
+          PLURX_PYTHON_DIRECTORY: ${{ steps.python-runtime.outputs.directory }}
         run: |
-          node tests/playback/player-input-contract.test.js
-          node tests/playback/web-policy.test.js
-          node tests/playback/web-control.test.js
-          node --test tests/web/seek-telemetry.test.js
-          node tests/web/player-dom.test.js
-          node tests/web/read-after.test.js
-          node tests/web/live-tv.test.js
+          set -euo pipefail
+          if [ -n "$PLURX_PYTHON_DIRECTORY" ]; then
+            test "$(dirname "$PLURX_PYTHON_DIRECTORY")" = "$RUNNER_TEMP"
+            case "$(basename "$PLURX_PYTHON_DIRECTORY")" in plurx-python312.????????) ;; *) exit 1 ;; esac
+            test ! -L "$PLURX_PYTHON_DIRECTORY"
+            rm -rf -- "$PLURX_PYTHON_DIRECTORY"
+          fi
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; compiler surfaces are skipped."
@@ -143,13 +203,16 @@ jobs:
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
     container: ubuntu:24.04
-    # A cold shared-runner build used 12 minutes before tests, and the core
-    # and SQLite suites used another 17. Allow the daemon and restart suites
-    # to finish as well, with bounded headroom for shared-runner contention.
-    # Measured 2026-10-04 on the architecture promotion: 16.5 min to the first
-    # test, core lib 15 min, store contracts 11.4 min, daemon ~11 min, which
-    # leaves no headroom under 60; 90 keeps the same bound with room again.
-    timeout-minutes: 90
+    # Compile all targets and enforce workspace/vendor Clippy here. The full
+    # Rust unit and SQLite suites belong to manual full CI, while each change
+    # carries its named, locally run focused regression through preflight.
+    # A cold run spent 21m36s provisioning before compilation. Budget for
+    # that setup plus all-target checking and both Clippy stages; no tests
+    # are added by this ceiling.
+    timeout-minutes: 60
+    env:
+      # Keep compilation within the shared guest's memory budget.
+      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Install Rust gate prerequisites
         run: |
@@ -183,9 +246,6 @@ jobs:
       - name: Lint the workspace
         run: |
           make lint
-      - name: Run the fast Rust unit and SQLite contract lane
-        run: |
-          make unit
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         continue-on-error: true
@@ -201,11 +261,15 @@ jobs:
           chown -R "$owner" "$GITHUB_WORKSPACE"
   windows_compile:
     name: fast Windows compile
-    needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
+    # Both code-generation lanes share a bounded guest. Windows must not
+    # compete with the Rust gate's daemon/test targets for that memory.
+    needs: [scope, preflight, rust_compile]
+    if: needs.scope.outputs.rust == 'true' && needs.rust_compile.result == 'success'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container: ubuntu:26.04
-    timeout-minutes: 30
+    # Cold prerequisites/driver setup took 12 minutes before the intentionally
+    # serial all-target build. Keep its memory bound and allow it to finish.
+    timeout-minutes: 60
     steps:
       - name: Install Windows cross-build prerequisites
         run: |

@@ -20,7 +20,7 @@ run it, in order of how most people do:
 # Docker / Compose (recommended for homelabs) — builds from source the first time
 make install-docker          # writes deploy/.env + the override file, creates the data dir, runs docker-up
 $EDITOR deploy/docker-compose.override.yml                          # your mounts + GPU
-make docker-up               # builds + starts, and stamps the commit so the server can name it
+make docker-up               # detects Linux GPUs, builds + starts, and stamps the commit
 
 # As a service — systemd on Linux, launchd on macOS, the native Windows service
 make install                 # builds, installs, starts, and waits for /readyz; `make uninstall` reverses it
@@ -35,6 +35,12 @@ plurxd run            # serves :32400
 # From source (development)
 cargo run -p plurxd   # or: make run
 ```
+
+Both Docker startup targets detect local Linux GPU devices and their numeric
+access groups. NVIDIA hosts also need NVIDIA Container Toolkit; the container
+receives the video encode/decode libraries automatically. Explicit GPU
+selections remain authoritative. See the [hardware deployment contract](../deploy/README.md#hardware-transcode--recent-intel-gpus)
+for manual configuration, remote engines, and native macOS VideoToolbox.
 
 Open `http://<host>:32400`, create the admin account, add a library. Library
 paths you type in the UI are **container-side** paths under Docker (e.g.
@@ -3369,6 +3375,7 @@ In Settings → Libraries, the Status column is the truth about each library:
 | Status | Meaning | What to check |
 |---|---|---|
 | `idle` | No scan running; last scan finished | Item count looks right? |
+| `queued` | Accepted work has not started | Read the local library-root error; a free worker cannot scan an unreadable path |
 | `scanning… N / M files` | File pass in progress | — |
 | `fetching metadata…` | Files done, enrichment running | TMDB key set? |
 | `error: …` (red) | The scan failed, with the reason | Almost always a path the **server** can't see |
@@ -3377,6 +3384,17 @@ In Settings → Libraries, the Status column is the truth about each library:
 files while you can see the folder full of media. That means the path you typed
 isn't the path the server process has — under Docker, the container-side mount
 path must match. Fix the mount, not the library name.
+
+After adding mounts to a Compose override, `docker compose restart` still
+uses the container's old mounts. Run `docker compose up -d --force-recreate`
+from the Compose directory, preserving any explicit `-f` options needed to
+load that override. Mount changes do not require an image rebuild. Accepted
+scan and metadata-refresh jobs retry automatically when their roots become
+readable. Activity's job list shows the local path error in Reason; the
+header says **Library work queued** until execution begins.
+Local path observations are tied to the roots that were checked. Editing a
+library's roots suppresses the old diagnosis immediately, including when the
+edit came through another cluster member or an old check finishes late.
 
 When a scan reports that one directory is owned by duplicate catalogue items,
 it still indexes the file. The note lists every candidate item ID and the ID
@@ -4490,6 +4508,11 @@ leases identify a previous owner awaiting recovery, not a running worker.
 The assignment list is bounded to 100 running and 100 cancelling jobs and
 labels itself partial when either page has more results.
 
+A standalone setup shows **Server work**, labels its worker **This server**,
+and omits cluster totals and the node filter. This follows the server's
+cluster mode, not the number of nodes that answered: a cluster with only one
+reachable node keeps its cluster diagnostics.
+
 Each node admits **one heavy background pipeline** at a time. Preparation,
 indexing, subtitles, probing, artwork, semantic indexing, verification and
 transcode copies share this permit. A media-probe batch may execute up to two
@@ -4837,6 +4860,40 @@ hour when no interval is supplied. Provider failures leave existing tracks
 available. The caption limit is eight tracks per source revision, each at
 most 256 KiB of normalized WebVTT. Downloaded tracks survive cache cleanup
 and ordinary rescans; replacing the media invalidates its old associations.
+
+## Sharing Cinema addresses — set up before creating invitations
+
+Settings → Sharing always lists the observed local TLS listener and sharing
+certificate, whether private addresses are configured, and the host network
+setup that remains unverified. A listening socket inside the container is
+not evidence that Tailscale is installed on the host or that another Cinema
+can reach it. Missing address information and a failed address read are
+shown separately. The Developer switch remains available.
+
+Settings → Sharing → Create invitation reads this Cinema's saved address
+manifest before allowing Create. If it is absent, choose **Configure this
+Cinema’s addresses**. Your selected movie/show libraries stay in the draft;
+**Return to invitation** reloads current address information and retains that
+selection. Saving addresses does not create an invitation or verify that the
+recipient can connect. Create remains an explicit action.
+
+Get each host's Tailscale IPv4 address (`100.64.0.0/10`), optional Tailscale
+IPv6 address and private `.ts.net` name from that host's Tailscale setup.
+Enter the published private TCP Serve port, normally **32443**, rather than
+the internal TLS listener port **32444**. Ask the Cinema administrator for
+the sharing certificate's SHA-256 public-key (SPKI) pin: its authenticated
+`GET /api/v1/sharing/status` exposes `certificate.spki_sha256` when that
+serving node has a certificate. Match each address to that host's certificate
+and verify the pin through a trusted channel. The form neither installs
+Tailscale nor configures Serve; follow the private transport setup in
+[Shared libraries implementation §2.1](features/SHARED-LIBRARIES-IMPLEMENTATION.md).
+
+A `409 sharing_endpoints_unavailable` during invitation creation means the
+address manifest was absent when the server handled the request. The form
+offers the same configuration action and keeps the draft. It never retries
+an invitation POST automatically. Other failures retain their error and
+require a fresh read before another mutation. API details are in
+[Sharing administration](API.md#24-sharing-administration--local-owners-manage-private-peer-authority).
 
 ## Pairing another application (Curator) — the runbook
 
@@ -5745,6 +5802,48 @@ Its media-tool, durable-store, held-source, and compatibility-inventory rows are
 advisory evidence only. An unmet or unavailable row never disables the switch.
 
 ## Hardware transcode & recent Intel GPUs
+
+**Settings → System → Transcoding backend** selects Auto, NVIDIA NVENC,
+Intel Quick Sync, VA-API, Apple VideoToolbox or CPU for the responding node.
+Only supported backends appear in the menu. Each measured option shows frames
+per second and its speed relative to CPU, where CPU is 1.00×. Auto names its
+measured winner and shows the same numbers.
+
+Every startup checks encoder support and benchmarks a fixed 720p H.264 VBR
+workload: 240 frames at 4 Mb/s, one warm-up and the median of three timed runs.
+Auto chooses the fastest successful backend, including CPU when it wins. An
+explicit preference is preserved. The benchmark measures encoding, process
+startup and frame upload; it does not predict every source decoder or HDR
+workload. The startup benchmark has a 180-second total deadline; if CPU cannot
+complete or the deadline expires, startup uses the validated fallback order.
+
+**Optimize** reruns support checks, benchmarks, and each available backend's
+HDR pipeline. It runs once per node, yields to playback, and stops after ten
+minutes. Failed or interrupted reruns retain the last complete results. You
+can leave Settings while it runs; return to see its status and measurements.
+
+Save records a node-specific preference. Restart that node to activate a new
+backend and its matching HDR graph; the next startup measures speeds again.
+The card reports a pending restart when a rerun changes Auto's winner. Existing
+sessions keep their original pipeline. A saved backend that is no longer
+supported is omitted from the menu and explained separately. Other nodes
+retain their own preferences. Nodes without an override keep the legacy
+`PLURX_HWACCEL`/stored cluster preference.
+
+Speculative jobs explicitly pinned to a different encoder family remain for
+compatible workers. A node advertises the backend it will execute, and CPU
+selection advertises the software resolution ceiling. The legacy cluster
+preference still defines queued job requirements; an Auto job can be claimed
+by either GPU family without changing its cluster-wide policy generation.
+
+For NVIDIA HDR10, the probe first tries NVDEC → `tonemap_cuda` → `scale_cuda`
+→ NVENC, keeping frames on the GPU unless subtitles need a CPU composite.
+This needs an FFmpeg build with the CUDA filters and NVIDIA compute/video
+device access in the container. CUDA uses the writable runtime cache for
+compiled shaders; the startup probe warms one frame before timing the graph.
+The existing SDR color checks and speed threshold still apply. A missing
+filter, device failure, color mismatch or slow candidate is reported in
+**HDR → Probe details**, then the probe considers its remaining candidates.
 
 The Docker image defaults to **jellyfin-ffmpeg**, which bundles a current Intel
 media driver + libva + oneVPL. This matters for newer silicon: an Arc / Meteor

@@ -426,3 +426,10 @@ this.setup=(r,f)=>sharedPlaybackFileContextFromDetail(r,f);this.begin=(c)=>begin
  assert.throws(()=>ctx.compare({fileId:null,file_base:""},c));
  ctx.logout();assert.throws(()=>ctx.compare({fileId:"7",fileContext:c},c));
 });
+
+test("episode preparation ignores the unbound player after an early startup failure",()=>{
+  const ctx=vm.createContext({AUTH_GENERATION:0,API:"/api/v1"});
+  vm.runInContext(source+shippedFunction("player/autoplay-next.js","prepareNextEpisodeIfNearEnd")+
+    '\nthis.tick=prepareNextEpisodeIfNearEnd;',ctx);
+  assert.doesNotThrow(()=>ctx.tick({fileId:null,started:false},{paused:true}));
+});

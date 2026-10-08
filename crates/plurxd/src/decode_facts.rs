@@ -25,6 +25,37 @@ use plurx_core::transcode::{
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
+#[cfg(target_os = "linux")]
+mod pi_namespace;
+
+/// Internal synchronous launcher dispatch; normal daemon startup stays unchanged.
+pub(crate) fn dispatch_probe_bootstrap() -> Option<std::io::Result<()>> {
+    #[cfg(target_os = "linux")]
+    {
+        pi_namespace::dispatch()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn probe_launch_path(
+    snapshot: &ExecutableSnapshot,
+    mode: ProbeLaunchMode,
+) -> Result<PathBuf, DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    {
+        pi_namespace::launch_path(snapshot, mode)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mode;
+        Ok(snapshot_execution_path(snapshot))
+    }
+}
+
 const MAX_PROBE_STDOUT_BYTES: usize = 256 * 1024;
 const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
 const MAX_PROBE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
@@ -340,20 +371,25 @@ impl DecodeFactMetrics {
                     let _ = writeln!(
                         out,
                         "plurx_decode_facts_phase_seconds_bucket{{phase=\"{}\",outcome=\"{}\",le=\"{}\"}} {}",
-                        phase.label(), outcome.label(), upper, cumulative
+                        phase.label(),
+                        outcome.label(),
+                        upper,
+                        cumulative
                     );
                 }
                 let count = cell.count.load(Ordering::Relaxed);
                 let _ = writeln!(
                     out,
                     "plurx_decode_facts_phase_seconds_bucket{{phase=\"{}\",outcome=\"{}\",le=\"+Inf\"}} {count}",
-                    phase.label(), outcome.label()
+                    phase.label(),
+                    outcome.label()
                 );
                 let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
                 let _ = writeln!(
                     out,
                     "plurx_decode_facts_phase_seconds_sum{{phase=\"{}\",outcome=\"{}\"}} {seconds:.9}",
-                    phase.label(), outcome.label()
+                    phase.label(),
+                    outcome.label()
                 );
                 let _ = writeln!(
                     out,
@@ -446,6 +482,8 @@ pub(crate) enum ProbeStreamSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeLaunchMode {
     Production,
+    #[cfg(all(test, target_os = "linux"))]
+    ProductionNamespace,
     #[cfg(test)]
     Fixture,
     #[cfg(all(test, target_os = "linux"))]
@@ -503,7 +541,8 @@ impl ProbeLaunchMode {
             #[cfg(test)]
             Self::Fixture => false,
             #[cfg(all(test, target_os = "linux"))]
-            Self::ProductionPidfdOpenFailure
+            Self::ProductionNamespace
+            | Self::ProductionPidfdOpenFailure
             | Self::ProductionPidfdReadFailure
             | Self::ProductionSupervisorDelay
             | Self::ProductionSupervisorReceiveFailure
@@ -2554,6 +2593,20 @@ fn configure_probe_execution(
     arguments: &[OsString],
     class: crate::process_control::ChildClass,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    if command.as_std().get_program() == OsStr::new("/usr/bin/bwrap") {
+        return pi_namespace::configure(
+            command,
+            launch_mode,
+            executable_fd,
+            source_fd,
+            arg0,
+            arguments,
+            class,
+            launch_deadline,
+        );
+    }
+    command.args(arguments);
     #[cfg(not(target_os = "linux"))]
     let _ = launch_deadline;
     #[cfg(target_os = "linux")]
@@ -3239,10 +3292,10 @@ async fn probe_version_with_deadline_on(
         let _version_permit = version_permit;
         let executable_fd = executable.as_file().as_raw_fd();
         let arguments = vec![OsString::from("-version")];
-        let mut command = tokio::process::Command::new(snapshot_execution_path(&executable));
+        let mut command =
+            tokio::process::Command::new(probe_launch_path(&executable, launch_mode)?);
         command.as_std_mut().arg0(&configured_path);
         command
-            .args(&arguments)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -4179,13 +4232,14 @@ async fn collect_idet_verdict(
         OsString::from("compact=p=0:nk=1"),
     ];
     let executable_fd = probe.executable_snapshot.as_file().as_raw_fd();
-    let mut command =
-        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    let mut command = tokio::process::Command::new(probe_launch_path(
+        &probe.executable_snapshot,
+        probe.launch_mode,
+    )?);
     command.as_std_mut().arg0(probe.executable());
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
     command
-        .args(&arguments)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4393,12 +4447,13 @@ async fn collect(
         .map(OsString::from)
         .collect::<Vec<_>>();
     arguments.push(OsString::from("/dev/fd/3"));
-    let mut command =
-        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    let mut command = tokio::process::Command::new(probe_launch_path(
+        &probe.executable_snapshot,
+        probe.launch_mode,
+    )?);
     command.as_std_mut().arg0(probe.executable());
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
-    command.args(&arguments);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -5024,6 +5079,11 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn build_static_probe(path: &std::path::Path, mode: u8) {
+        build_static_probe_with_private_path(path, mode, Path::new("/unavailable-parent-marker"));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_static_probe_with_private_path(path: &Path, mode: u8, private_path: &Path) {
         use std::os::unix::fs::PermissionsExt;
 
         let source = path.with_extension("c");
@@ -5049,6 +5109,10 @@ mod tests {
 #define NR_EXIT 60
 #define NR_MEMFD_CREATE 319
 #define NR_EXECVEAT 322
+#define NR_OPENAT 257
+#define NR_PTRACE 101
+#define NR_PROCESS_VM_READV 310
+#define NR_GETDENTS64 217
 #if defined(__aarch64__)
 #undef NR_READ
 #undef NR_WRITE
@@ -5065,6 +5129,14 @@ mod tests {
 #undef NR_EXIT
 #undef NR_MEMFD_CREATE
 #undef NR_EXECVEAT
+#undef NR_OPENAT
+#undef NR_PTRACE
+#undef NR_PROCESS_VM_READV
+#undef NR_GETDENTS64
+#define NR_OPENAT 56
+#define NR_PTRACE 117
+#define NR_PROCESS_VM_READV 270
+#define NR_GETDENTS64 61
 #define NR_READ 63
 #define NR_WRITE 64
 #define NR_CLOSE 57
@@ -5251,6 +5323,75 @@ void probe_main(unsigned long *stack) {
         unsigned long delay[2] = { 5, 0 };
         syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
     }
+#elif PROBE_MODE == 7
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PRIVATE_PATH, 0, 0, 0, 0) >= 0) finish(96);
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_ROOT_PATH, 0, 0, 0, 0) >= 0) finish(97);
+    if (syscall6(NR_OPENAT, -100, (long)("/proc/self/root" PROBE_PRIVATE_PATH), 0, 0, 0, 0) >= 0) finish(100);
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_PROC_PATH, 0, 0, 0, 0) >= 0) finish(101);
+    if (syscall6(NR_OPENAT, -100, (long)"/proc/1", 0, 0, 0, 0) >= 0) finish(102);
+    // Enumerate all inherited capabilities, not just low-numbered bootstrap
+    // and supervisor FDs. The directory opened for this check is the sole
+    // allowed descriptor above the held source/parser pair.
+    long directory = syscall6(NR_OPENAT, -100, (long)"/proc/self/fd", 0, 0, 0, 0);
+    if (directory < 0) finish(103);
+    char entries[4096];
+    for (;;) {
+        long count = syscall6(NR_GETDENTS64, directory, (long)entries, sizeof(entries), 0, 0, 0);
+        if (count < 0) finish(104);
+        if (count == 0) break;
+        for (long offset = 0; offset < count;) {
+            if (count - offset < 20) finish(105);
+            unsigned short size = *(unsigned short *)(entries + offset + 16);
+            if (size < 20 || size > count - offset) finish(106);
+            const char *name = entries + offset + 19;
+            long fd = 0;
+            long index = 0;
+            while (19 + index < size && name[index] >= '0' && name[index] <= '9') {
+                if (fd > 214748364) finish(107);
+                fd = fd * 10 + name[index++] - '0';
+            }
+            if (index > 0 && (19 + index >= size || name[index] != 0 || (fd > 4 && fd != directory))) finish(108);
+            offset += size;
+        }
+    }
+    syscall6(NR_CLOSE, directory, 0, 0, 0, 0, 0);
+    if (!(argc > 1 && same(argv[1], "-version"))) {
+        long source_fd = syscall6(NR_OPENAT, -100, (long)"/proc/self/fd/3", 0, 0, 0, 0);
+        if (source_fd < 0) finish(109);
+        char source[64];
+        long count = syscall6(NR_READ, source_fd, (long)source, sizeof(source) - 1, 0, 0, 0);
+        if (count != 23) finish(110);
+        source[count] = 0;
+        if (!same(source, "production-bound source")) finish(111);
+        syscall6(NR_CLOSE, source_fd, 0, 0, 0, 0, 0);
+    }
+    if (syscall6(NR_PTRACE, 0, 0, 0, 0, 0, 0) != -1) finish(98);
+    if (syscall6(NR_PROCESS_VM_READV, PROBE_PARENT_PID, 0, 0, 0, 0, 0) != -1) finish(99);
+#elif PROBE_MODE == 8 || PROBE_MODE == 9
+    if (argc > 1 && same(argv[1], "-version")) {
+        write_text(1, facts);
+        finish(0);
+    }
+    long child;
+#if defined(__x86_64__)
+    child = syscall6(NR_FORK, 0, 0, 0, 0, 0, 0);
+#else
+    child = syscall6(NR_FORK, SIGCHLD, 0, 0, 0, 0, 0);
+#endif
+    if (child < 0) finish(89);
+    if (child == 0) {
+#if PROBE_MODE == 9
+        syscall6(NR_LSEEK, 3, 0, 0, 0, 0, 0);
+        write_text(3, "namespace-child-started");
+#endif
+        unsigned long delay[2] = { 60, 0 };
+        syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
+        finish(0);
+    }
+#if PROBE_MODE == 9
+    unsigned long delay[2] = { 60, 0 };
+    syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
+#endif
 #endif
     write_text(1, facts);
     finish(0);
@@ -5267,6 +5408,23 @@ void probe_main(unsigned long *stack) {
             .arg("-Wl,--build-id=none")
             .arg("-Wl,-e,_start")
             .arg(format!("-DPROBE_MODE={mode}"))
+            .arg(format!(
+                "-DPROBE_PRIVATE_PATH={:?}",
+                private_path.to_str().expect("private marker path")
+            ))
+            .arg(format!(
+                "-DPROBE_PARENT_ROOT_PATH={:?}",
+                format!(
+                    "/proc/{}/root{}",
+                    std::process::id(),
+                    private_path.display()
+                )
+            ))
+            .arg(format!("-DPROBE_PARENT_PID={}", std::process::id()))
+            .arg(format!(
+                "-DPROBE_PARENT_PROC_PATH={:?}",
+                format!("/proc/{}", std::process::id())
+            ))
             .arg(&source)
             .arg("-o")
             .arg(path)
@@ -5436,6 +5594,138 @@ void probe_main(unsigned long *stack) {
             .expect("sealed production collection");
         assert_eq!(facts.input_video_stream(), 4);
         assert_eq!(facts.codec(), Some("h264"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_executes_bound_source_and_denies_secondary_images() {
+        assert!(
+            std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some(),
+            "provide the exact compiled daemon bootstrap"
+        );
+        let root = crate::test_tempdir().expect("tempdir");
+        for mode in 0..=3 {
+            let probe = root.path().join(format!("namespace-probe-{mode}"));
+            build_static_probe(&probe, mode);
+            let identity = DecodeProbeIdentity::discover_with_mode(
+                probe.to_str().expect("probe path"),
+                ProbeLaunchMode::ProductionNamespace,
+            )
+            .await
+            .expect("namespace-bound sealed discovery and one-shot exec");
+            if mode == 0 {
+                let media = root.path().join("namespace-media.bin");
+                std::fs::write(&media, b"production-bound source").expect("media");
+                let source = Arc::new(std::fs::File::open(media).expect("source"));
+                let facts = DecodeFactCache::new()
+                    .get_or_probe(
+                        &identity,
+                        DecodeFactSource::isolated(source),
+                        None,
+                        ProbeStreamSelection::Absolute(4),
+                        Duration::from_secs(5),
+                        None,
+                    )
+                    .await
+                    .expect("namespace-bound exact FD source collection");
+                assert_eq!(facts.input_video_stream(), 4);
+                assert_eq!(facts.codec(), Some("h264"));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_hides_parent_files_and_reaps_descendants() {
+        assert!(std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some());
+        let root = crate::test_tempdir().expect("tempdir");
+        let marker = root.path().join("parent-private-marker");
+        std::fs::write(&marker, b"must not enter probe namespace").expect("parent marker");
+        for mode in [7, 8] {
+            let probe = root.path().join(format!("isolated-probe-{mode}"));
+            build_static_probe_with_private_path(&probe, mode, &marker);
+            let identity = DecodeProbeIdentity::discover_with_mode(
+                probe.to_str().expect("probe path"),
+                ProbeLaunchMode::ProductionNamespace,
+            )
+            .await
+            .expect("isolated production bootstrap");
+            let media = root.path().join(format!("media-{mode}"));
+            std::fs::write(&media, b"production-bound source").expect("media");
+            let source = Arc::new(std::fs::File::open(media).expect("source"));
+            let facts = tokio::time::timeout(Duration::from_secs(7), DecodeFactCache::new().get_or_probe(&identity, DecodeFactSource::isolated(source), None, ProbeStreamSelection::Absolute(4), Duration::from_secs(5), None)).await.expect("namespace child retaining pipes for60s must be killed within unchanged probe deadline").expect("isolated parser facts");
+            assert_eq!(facts.codec(), Some("h264"));
+        }
+        assert_eq!(
+            std::fs::read(marker).expect("parent marker remains"),
+            b"must not enter probe namespace"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_cancellation_kills_started_descendants() {
+        assert!(std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some());
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("cancellable-namespace-probe");
+        build_static_probe(&probe, 9);
+        let identity = DecodeProbeIdentity::discover_with_mode(
+            probe.to_str().expect("probe path"),
+            ProbeLaunchMode::ProductionNamespace,
+        )
+        .await
+        .expect("isolated production bootstrap");
+        let media = root.path().join("owned-cancellation-marker-source");
+        std::fs::write(&media, b"production-bound source").expect("media");
+        // This owned test source is deliberately writable solely to signal that
+        // the hostile descendant has started, before cancellation is requested.
+        let source = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&media)
+                .expect("owned marker source"),
+        );
+        let cleanup_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let probe_gate = Arc::clone(&cleanup_gate);
+        let token = tokio_util::sync::CancellationToken::new();
+        let probe_token = token.clone();
+        let task = tokio::spawn(async move {
+            DecodeFactCache::new()
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::new(source, probe_gate, TEST_FACT_WORK),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    Duration::from_secs(10),
+                    Some(&probe_token),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(&media)
+                .expect("owned source marker")
+                .starts_with(b"namespace-child-started")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("actual descendant must start before cancellation");
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancellation must not wait for the descendant60s sleep")
+            .expect("probe task joins");
+        assert!(matches!(result, Err(DecodeFactError::Cancelled)));
+        let _reaped_source =
+            tokio::time::timeout(Duration::from_secs(2), cleanup_gate.acquire_owned())
+                .await
+                .expect("descendant cleanup must reap before returning source ownership")
+                .expect("source ownership remains available");
     }
 
     #[cfg(target_os = "linux")]

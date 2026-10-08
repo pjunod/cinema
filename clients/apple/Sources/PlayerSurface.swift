@@ -329,6 +329,17 @@ struct PlayerSurface: UIViewRepresentable {
     }
 }
 
+/// Values read together on the main actor from the active (never staged) layer.
+struct LocalVideoEvidence: Equatable {
+    var bindingMatches: Bool
+    var targetVisible: Bool
+    var readyForDisplay: Bool
+
+    static let unavailable = LocalVideoEvidence(
+        bindingMatches: false, targetVisible: false, readyForDisplay: false)
+    var frameReady: Bool { bindingMatches && targetVisible && readyForDisplay }
+}
+
 final class PlayerSurfaceView: UIView {
     private(set) var playerLayer = AVPlayerLayer()
     private var stagedLayer = AVPlayerLayer()
@@ -371,29 +382,42 @@ final class PlayerSurfaceView: UIView {
         }
     }
 
-    func reportPresentationTarget() {
+    func videoEvidence(for expectedPlayer: AVPlayer, item expectedItem: AVPlayerItem) -> LocalVideoEvidence {
+        let matches = playerLayer.player === expectedPlayer && expectedPlayer.currentItem === expectedItem
+        return LocalVideoEvidence(
+            bindingMatches: matches,
+            targetVisible: visibleTargetSize != nil,
+            readyForDisplay: matches && expectedItem.status == .readyToPlay && playerLayer.isReadyForDisplay
+        )
+    }
+
+    private var visibleTargetSize: CGSize? {
         var ancestor: UIView? = self
         while let view = ancestor {
-            if view.isHidden || view.alpha <= 0 {
-                presentationTargetChanged?(nil, nil)
-                return
-            }
+            guard !view.isHidden, view.alpha > 0 else { return nil }
             ancestor = view.superview
         }
         guard let window, window.windowScene?.activationState == .foregroundActive,
-              !bounds.isEmpty, !convert(bounds, to: window).intersection(window.bounds).isEmpty else {
+              !playerLayer.isHidden, playerLayer.opacity > 0,
+              Self.finiteNonempty(playerLayer.frame), Self.finiteNonempty(bounds),
+              Self.finiteNonempty(convert(bounds, to: window).intersection(window.bounds)),
+              Self.finiteNonempty(playerLayer.frame.intersection(bounds)) else { return nil }
+        let size = CGSize(width: bounds.width * window.screen.scale, height: bounds.height * window.screen.scale)
+        guard size.width >= 1, size.height >= 1, size.width <= 16384, size.height <= 16384 else { return nil }
+        return size
+    }
+
+    private static func finiteNonempty(_ rect: CGRect) -> Bool {
+        !rect.isEmpty && !rect.isNull && rect.origin.x.isFinite && rect.origin.y.isFinite
+            && rect.width.isFinite && rect.height.isFinite
+    }
+
+    func reportPresentationTarget() {
+        guard let size = visibleTargetSize else {
             presentationTargetChanged?(nil, nil)
             return
         }
-        let scale = window.screen.scale
-        let width = bounds.width * scale
-        let height = bounds.height * scale
-        guard width.isFinite, height.isFinite,
-              width >= 1, height >= 1, width <= 16384, height <= 16384 else {
-            presentationTargetChanged?(nil, nil)
-            return
-        }
-        presentationTargetChanged?(Int(width.rounded()), Int(height.rounded()))
+        presentationTargetChanged?(Int(size.width.rounded()), Int(size.height.rounded()))
     }
 
     override func didMoveToWindow() {
@@ -435,11 +459,11 @@ final class PlayerSurfaceView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        reportPresentationTarget()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         playerLayer.frame = bounds
         stagedLayer.frame = bounds
+        reportPresentationTarget()
         let videoRect = playerLayer.videoRect
         synchronizedLayer?.frame = videoRect
         let destination = CGRect(origin: .zero, size: videoRect.size)

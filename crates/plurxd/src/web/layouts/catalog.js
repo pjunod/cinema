@@ -240,7 +240,7 @@ function catalogChrome(active, inner){
      <aside class="px-side">
        <div class="px-head">
          <div class="px-brand"><a href="#/" class="logo">${APP_NAME}</a></div>
-         <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
+         <input class="search" id="q" type="search" name="q" autocomplete="off" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
        </div>
        <div class="px-scroll" id="pxnav">
          <button class="ghost sm px-sheetx" type="button" aria-label="Close libraries" onclick="catalogToggleLibs(event)">✕</button>
@@ -285,7 +285,7 @@ function catalogChrome(active, inner){
   // with the real thing a moment later.
   catalogFillNav();
   const q=document.getElementById("q");
-  let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  wireSearchInput(q);
   restoreSearchFocus(searchFocus);
   catalogWireOnce();
   pollActivity();

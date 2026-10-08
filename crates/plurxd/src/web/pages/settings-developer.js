@@ -98,6 +98,39 @@ function devStaticReq(title,status,detail,tone){
 function devGraduation(waitingOn,then){
   return `<p class="devcheck-note devgrad"><b>Leaves Developer when:</b> ${waitingOn} <b>Then:</b> ${then}</p>`;
 }
+function macosVideoProcessingCard(settings,readiness){
+  const enabled=!!settings.macos_video_processing_enabled;
+  return setCard(`${cardHead("Mac video processing","Use available Mac processing for progressive SDR resizing and HDR10 conversion in new sessions.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
+    ${togRow("pmacosvideo","Use Mac video processing","Applied to new sessions. Unsupported sources retain their existing processing.",enabled)}
+    <div class="hint">The saved choice is always accepted. Runtime compatibility and qualification below are advisory. Dependency checks require a working /usr/bin/otool (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both FFmpeg tools, and no DYLD override.</div>
+    ${devReq(readiness,"macos_video_processing","sdr_scale","Progressive SDR scaling","This worker checks a small embedded 8-bit and 10-bit source corpus.")}
+    ${devReq(readiness,"macos_video_processing","hdr10_metal","HDR10 to SDR processing","HDR is resized at 10-bit precision before mapping to SDR. Dolby Vision, HLG, burns and interlaced sources retain their existing routes.")}
+    ${devReq(readiness,"macos_video_processing","delivery_qualification","Visual and streaming qualification","Runtime smoke checks do not approve visual quality, startup, concurrency, a sustained soak or physical clients. Normalized continuous VOD also awaits supported bound source and decoder planning on Mac.")}
+    <div class="row"><button class="ghost sm" onclick="reprobeMacosVideoProcessing(this)">Check compatibility again</button></div>
+    ${devGraduation("real daemon rolling HLS and encoded VOD pass seek/resume, cancellation and recovery, cache and cluster revalidation; visual checks on a named display and target Mac/client startup, concurrency and soak evidence are recorded.","the permanent switch moves to Playback → Advanced server delivery, preserving the saved choice.")}
+    <div class="err" id="macos-video-error" role="alert"></div>${setCardFoot("saveMacosVideoProcessing")}`,{id:"macos-video-card"});
+}
+
+async function saveMacosVideoProcessing(btn){
+  const err=document.getElementById("macos-video-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{macos_video_processing_enabled:!!/** @type {HTMLInputElement} */ (document.getElementById("pmacosvideo")).checked}}));
+    const card=btn?.closest(".setcard");if(card)card.outerHTML=macosVideoProcessingCard(saved,DEVELOPER_READINESS);
+    toast("Mac video processing saved; applies to new sessions");
+  }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
+}
+
+async function reprobeMacosVideoProcessing(btn){
+  const err=document.getElementById("macos-video-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    await api("/developer/macos-video-processing/reprobe",{method:"POST",body:{}});
+    applyDeveloperReadiness(await api("/developer/readiness"));
+    toast("Compatibility check requested; refresh Settings for its result");
+  }catch(error){if(err)err.textContent=error.message||String(error);}
+  finally{if(btn)btn.disabled=false;}
+}
 function clusterTransportRecoveryCard(readiness){
   return setCard(`${cardHead("Transport recovery","Automatic recovery for interrupted cluster transfers. No enable switch is required.",`<span class="pill ok">automatic</span>`)}
       <details class="setdetails"><summary>Deployment guidance and readiness</summary><div class="setdetails-body">
@@ -385,7 +418,7 @@ function liveTvEnableCard(settings){
   queueMicrotask(()=>{const mount=document.getElementById("dev-live-tv-readiness");if(mount)refreshLiveTvEnableReadiness(mount);});
   return setCard(`${cardHead("Enable Live TV","Allow eligible servers to use the network tuner.",`<span class="pill">${settings.live_tv_enabled?"enabled":"off"}</span>`)}
     ${togRow("dev-live-tv-enable","Enable Live TV","This saved choice is authoritative. Readiness observations never disable the control.",!!settings.live_tv_enabled)}
-    <p class="hint">For safe operation, upgrade cluster servers, keep their clocks synchronized, and keep a ready voter majority. At least one server needs tuner connectivity and writable scratch. DVR workers need writable recording storage; matching paths alone do not prove shared storage.</p>
+    <p class="hint">${settingsClusterEnabled()?"For safe operation, upgrade cluster servers, keep their clocks synchronized, and keep a ready voter majority. At least one server needs tuner connectivity and writable scratch. DVR workers need writable recording storage; matching paths alone do not prove shared storage.":"This server needs tuner connectivity and writable scratch. DVR recordings need writable recording storage."}</p>
     <div id="dev-live-tv-readiness" aria-live="polite">Checking current prerequisites…</div>
     <p class="hint">A lost worker can leave a physical tuner connection behind temporarily. Other free tuners remain available. DRM remains unsupported.</p>
     ${devGraduation("the Live TV plans' outstanding fleet prompts are recorded: L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) prompts, and L-03's capacity offer and caption-positive pass.","the switch moves to Settings → Live TV as a permanent on/off.")}<div id="dev-live-tv-error" class="err" role="alert"></div>${setCardFoot("saveLiveTvEnable")}`);
@@ -444,9 +477,10 @@ function cinemaSharingCard(settings,readiness){
   return setCard(`${cardHead("Cinema shared libraries","Invite another Cinema to selected libraries through your private Tailscale connection.",'<span class="pill">Qualification pending</span>')}
     ${togRow("cinema-sharing-enabled","Enable shared libraries","The saved switch applies to this Cinema. Readiness observations never prevent saving.",!!settings.sharing_enabled)}
     ${devReq(readiness,"cinema_sharing","source_activation","Current Source activation","Source activation is pending during the rolling upgrade. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Readiness never changes your saved choice.")}
-    ${devReq(readiness,"cinema_sharing","listener","Private sharing listener","A separate TLS listener serves only scoped peer requests.")}
+    ${devReq(readiness,"cinema_sharing","listener","Private sharing listener","A separate TLS listener serves only scoped peer requests inside this process or container. Listening here does not prove the host private network path is configured.")}
     ${devReq(readiness,"cinema_sharing","tls","Node certificate and pin","Keep the node key and verify the invitation pin through your trusted channel.")}
-    ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Both homes need qualified private transport and explicit recipient access.")}
+    ${devReq(readiness,"cinema_sharing","endpoints","Configured private Sharing endpoints","Before creating an invitation, configure this Cinema’s private addresses and verified certificate pins in <a href=\"#/settings/sharing\">Settings → Sharing</a>. Saved endpoints do not prove connectivity.")}
+    ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Each serving host needs Tailscale installed and signed in, private TCP Serve forwarding from port 32443 to the internal TLS listener on 32444, a working Docker-to-host path, qualified egress and recipient access policy. A container cannot infer host installation or remote reachability; unverified means host setup must be checked.")}
     ${devReq(readiness,"cinema_sharing","qualification","Catalogue and client qualification","Shared catalogue and playback are implemented; private network, cluster recovery and device qualification remain in progress.")}
     ${devGraduation("S3–S8 shared catalogue, playback, private history and device qualification are complete.","sharing controls move to Settings → Sharing after S8 evidence and promotion.")}<div class="err" id="cinema-sharing-error" role="alert"></div>${setCardFoot("saveCinemaSharing")}`,{id:"cinema-sharing-settings"});
 }
@@ -522,10 +556,11 @@ async function saveRollingRetention(btn){
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
 function developerPanel(settings,readiness){
+  const clustered=settingsClusterEnabled();
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
     <a href="#/settings/playback"><strong>Playback <span aria-hidden="true">↗</span></strong><span>Defaults, streaming and compatibility</span></a>
-    <a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health and recovery</span></a>
+    ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health and recovery</span></a>`:""}
   </nav>`;
   const browser=setCard(`${cardHead("Second player in this browser","Advertise this browser's ability to prepare a replacement stream.",`<span class="pill acc">this browser</span>`)}
       ${togRow("pdp","Allow a second player","Uses additional device memory and decoder capacity. Saved automatically in this browser; the next reporter exchange sends the change.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
@@ -534,22 +569,24 @@ function developerPanel(settings,readiness){
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
-      <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
-      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}${cinemaSharingCard(settings,readiness)}
+      <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Use the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
+      ${clustered?`<div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}`:""}
+      <div class="setsection"><h2>Shared libraries</h2><p>Private sharing between separate Cinemas.</p></div>${cinemaSharingCard(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
+      <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
-      <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
+      ${clustered?`<div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}`:""}
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}
-      <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep tracks during indexing and share verified tracks across the cluster.</p></div>${subtitlePlaybackRangesCard(readiness)}${subtitleStoredSourcesCard(settings,readiness)}${subtitleClusterSourcesCard(settings,readiness)}${subtitleBackfillCard(settings,readiness)}`;
+      <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep tracks during indexing${clustered?" and share verified tracks across the cluster":""}.</p></div>${clustered?subtitlePlaybackRangesCard(readiness):""}${subtitleStoredSourcesCard(settings,readiness)}${clustered?subtitleClusterSourcesCard(settings,readiness):""}${subtitleBackfillCard(settings,readiness)}`;
 }
 // Refusing a subtitle segment whose extraction failed.
 //

@@ -47,6 +47,10 @@ def locations():
     return home / '.local/share/plurx-hdmi', home / '.local/share/applications/plurx-hdmi.desktop'
 
 
+def autostart_path():
+    return Path.home() / '.config/autostart/plurx-hdmi.desktop'
+
+
 def safe_path(path):
     for item in [path, *path.parents]:
         if item.is_symlink():
@@ -75,13 +79,13 @@ def owned(state, desktop):
         if data['owner'] != MARKER:
             raise ValueError('unrecognized launcher owner')
         for filename, expected in data['files'].items():
-            if filename not in ('launcher', 'config.json', 'desktop'):
+            if filename not in ('launcher', 'config.json', 'desktop', 'autostart'):
                 raise ValueError('unrecognized owned file')
-            path = desktop if filename == 'desktop' else state / filename
+            path = autostart_path() if filename == 'autostart' else desktop if filename == 'desktop' else state / filename
             safe_path(path)
             if not path.is_file() or digest(path) != expected:
                 raise ValueError('installed launcher was modified; preserve it and remove manually')
-        if set(data['files']) not in (set(), {'launcher', 'config.json', 'desktop'}):
+        if set(data['files']) not in (set(), {'launcher', 'config.json', 'desktop'}, {'launcher', 'config.json', 'desktop', 'autostart'}):
             raise ValueError('incomplete ownership receipt')
         return data
     except (OSError, KeyError, json.JSONDecodeError) as exc:
@@ -92,12 +96,17 @@ def install(args):
     url = web_url(args.url)
     browser = browser_path(args.chromium)
     state, desktop = locations()
+    autostart = autostart_path()
+    safe_path(autostart)
     safe_path(state)
     safe_path(desktop)
+    receipt = {'files': {}}
     if state.exists() or desktop.exists():
         receipt = owned(state, desktop)
         if not receipt['files'] and any(path.exists() or path.is_symlink() for path in (desktop, state / 'launcher', state / 'config.json')):
             raise ValueError('unowned launcher file')
+    if autostart.exists() and 'autostart' not in receipt['files']:
+        raise ValueError('existing autostart entry is not owned')
     if args.dry_run:
         print('Would install normal-user launcher and desktop entry; existing owned profile is retained.')
         return
@@ -111,6 +120,12 @@ def install(args):
     config.chmod(0o600)
     desktop.write_text('[Desktop Entry]\nType=Application\nName=Plurx HDMI\nTerminal=false\nExec=' + desktop_quote(sys.executable) + ' ' + desktop_quote(str(launcher)) + ' launch\n')
     receipt = {'owner': MARKER, 'files': {'launcher': digest(launcher), 'config.json': digest(config), 'desktop': digest(desktop)}}
+    if getattr(args, 'autostart', False):
+        autostart.parent.mkdir(parents=True, exist_ok=True)
+        autostart.write_text(desktop.read_text())
+        receipt['files']['autostart'] = digest(autostart)
+    elif autostart.exists():
+        autostart.unlink()
     (state / 'ownership.json').write_text(json.dumps(receipt) + '\n')
     (state / 'ownership.json').chmod(0o600)
     print('Installed Plurx HDMI application. Open it in your desktop session and sign in normally.')
@@ -128,6 +143,8 @@ def uninstall(args):
     if receipt['files']:
         for path in (desktop, state / 'launcher', state / 'config.json'):
             path.unlink()
+        if 'autostart' in receipt['files']:
+            autostart_path().unlink()
     (state / 'ownership.json').write_text(json.dumps({'owner': MARKER, 'files': {}}) + '\n')
     print('Removed launcher. Profile is retained for your explicit manual removal after Chromium exits.')
 
@@ -245,6 +262,7 @@ def main():
     setup.add_argument('--url', required=True)
     setup.add_argument('--chromium')
     setup.add_argument('--dry-run', action='store_true')
+    setup.add_argument('--autostart', action='store_true', help='launch in the existing graphical login session')
     remove = commands.add_parser('uninstall')
     remove.add_argument('--dry-run', action='store_true')
     commands.add_parser('launch')

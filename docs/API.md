@@ -425,12 +425,15 @@ of never storing it.
 | GET | `/api/v1/settings` | admin | Full settings snapshot, from one store read |
 | PUT | `/api/v1/settings` | admin | Partial update; returns the new full snapshot |
 | GET | `/api/v1/system` | admin | Environment diagnostics and counters |
+| PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
+| POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
 | GET | `/api/v1/system/logs` | admin | Tail of the in-memory log ring |
 | GET | `/api/v1/system/playback-events` | admin | Node-local playback observations |
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
 | POST | `/api/v1/system/storage` | admin | Re-measures storage. Costs real I/O |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Cluster and Developer settings; never gates controls |
+| POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
@@ -526,6 +529,38 @@ minute and anything shorter would be a lie dressed as a setting.
 
 ### 5.2 `GET /api/v1/system`
 
+`node_id` identifies the responding node. `hwaccel_pref` is the preference
+applied at startup; `encoder_selected` and `tone_map` report what its probes
+actually selected. `hwaccel_requested` is the saved node preference, and
+`hwaccel_restart_required` distinguishes a pending change from active state.
+
+`PUT /api/v1/system/transcoder` accepts `{"node_id":"…","preference":"qsv"}`.
+The preference is one of `auto`, `nvenc`, `qsv`, `vaapi`, `videotoolbox` or
+`software`. The response contains `node_id`, `preference` and
+`restart_required`. A request routed to a different node returns 409 rather
+than changing that node by accident; an unknown preference returns 400.
+Unavailable hardware is advisory, so any recognized choice can be saved.
+The setting is stored under `node.<node_id>.transcode.hwaccel` and overrides
+the legacy cluster preference on that node after restart. Saving does not
+change active sessions. Restart selects the encoder and probes its HDR graph
+together; unavailable preferred hardware uses the existing encoder fallback.
+
+`transcoder_optimization` contains `running`, `error`, `restart_required`, and
+`report`. A report has `measured_at` (Unix seconds) and `results`, ordered
+fastest first. Each result has `backend`, `fps`, and `relative_to_cpu` (CPU is
+1.0). Startup creates a fresh measurement after capability detection; Auto
+selects its fastest supported backend before probing the active HDR graph.
+Results are stored under `node.<node_id>.transcode.benchmark` for diagnostics;
+previous-boot measurements are never used as capability evidence.
+
+`POST /api/v1/system/transcoder` accepts `{"node_id":"…"}` and returns
+`{"running":true}`. Only an administrator may start it. A different node,
+active playback, or an already running optimization returns 409. Poll
+`GET /api/v1/system` for completion; disconnecting does not cancel the job.
+Background admission contention, playback preemption and timeouts appear in
+`error`; the last complete report remains visible. A changed Auto winner
+requires restart so the active encoder and HDR graph stay paired.
+
 Two of its sub-objects are shaped by a diagnostic argument rather than by
 convenience.
 
@@ -606,7 +641,10 @@ three missing nodes and counting the rest.
 
 `GET /api/v1/activity/detail` is readable by any user — it is their household
 server — but three parts of the payload are admin-gated and the four stop
-actions are admin-only. `node_hostnames` is present for a clustered admin
+actions are admin-only. `clustered` identifies whether this response covers
+cluster activity; a standalone server reports `false`. A single responding
+node does not make a configured cluster standalone. `node_hostnames` is present
+for a clustered admin
 **even when empty**, deliberately: the field's presence answers "may this
 reader see machine names", and making an empty roster look identical to a
 refused one would leave the gate untestable from the wire. `analysis` is
@@ -620,7 +658,9 @@ node's children only, not its peers'.
 
 Analysis progress may include paired `durable_job_id` and `durable_fence`
 fields for an explicitly correlated execution attempt. Job summaries include
-`fence`, the monotonic attempt number, without claim or boot tokens. A stage
+`fence`, the monotonic attempt number, and `library_id` for library work,
+without claim or boot tokens. Activity uses the library identity to show a
+queued job's local path-readiness error from its scan status. A stage
 belongs to the job only while ID, fence and owner match, the lease is still
 live, and the observation is fresh. Old peers omit the correlation fields.
 Media probes report stage and elapsed time; they do not measure byte progress
@@ -3525,6 +3565,17 @@ including errors, carries `Cache-Control: no-store`.
 | DELETE | `/api/v1/sharing/imports/{id}` | Disconnect the import and advance its lifecycle. |
 | ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
 | ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
+
+`GET /api/v1/sharing/endpoints` returns `{ "manifest": null }` before
+initial address setup; a configured manifest contains `revision` and
+`endpoints`. Invitation creation refuses an absent manifest with
+`409 sharing_endpoints_unavailable`. The web invitation editor reads it
+before Create and offers the existing address editor, retaining the selected
+libraries for return. Address updates remain explicit `expected_revision`
+CAS writes with pin confirmation; no invitation POST is replayed.
+Configuration does not prove reachability. See
+[Cinema address setup](OPERATIONS.md#sharing-cinema-addresses--set-up-before-creating-invitations)
+for the private Serve port and trusted pin source.
 
 The separate listener mounts only the peer router in
 [sharing.rs](../crates/plurxd/src/http/sharing.rs). It accepts the dedicated

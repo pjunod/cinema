@@ -1332,3 +1332,23 @@ PQ/BT.2020 tags, complete decode and a continuous neutral ramp on lab6. A separa
 discontinuous fixture exceeded its worst-pixel limit; see the
 [execution ledger](../performance/VIDEO-QUALITY-STATUS.md#final-qualification--retained-per-check-receipts)
 for that failed result and the exact limits of the passing capture.
+
+**2026-10-08 sharp-panel input continuation (gpt-6.1-sol,
+`agent:/root/remaining_requirements_audit_sol61`):** the original historical
+generator was recovered, independently source-reviewed and invoked once in
+an encoder-free local restoration. Its one 1920×1080 `yuv420p10le` frame is
+6,220,800 bytes with the exact original raw SHA-256
+`777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9`;
+the private restoration receipt SHA-256 is
+`09ed50aa1a7130b8cfabd41db791ee0955777c533a347cf80a51666a96085586`.
+The [existing harness](../evidence/video-quality-2026-10-03/qualify-vaapi.py)
+and [wrapper](../evidence/video-quality-2026-10-03/run-vaapi.sh) now expose
+only the fixed optional `original-sharp-panels` selector; the default
+continuous ramp remains byte-identical. The wrapper's second argument follows
+the unchanged first recipe argument. Selection is validated before work,
+raw identity is pinned and requested/actual signal is reported explicitly.
+Capture version 2 and every encoder/graph/timing/fidelity bar remain unchanged.
+Authoring used source-only syntax/AST checks, not regression or media runs.
+The original encoded/decoded failure pixels and source-media container remain
+lost; max 35 is not fixed or localized. This closes only historical input
+reproducibility, not §3.5/§3.6, M6, physical/client or full S-11 acceptance.
