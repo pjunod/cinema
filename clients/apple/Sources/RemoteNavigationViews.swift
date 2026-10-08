@@ -55,6 +55,7 @@ private struct RemoteControlModifier: ViewModifier {
     let label: String
     let activate: () -> Void
     let enabled: Bool
+    let admission: () -> RemoteNavigationCoordinator.Outcome?
     func body(content: Content) -> some View {
         content
             .simultaneousGesture(TapGesture().onEnded { navigation.physicalInput() })
@@ -72,13 +73,22 @@ private struct RemoteControlModifier: ViewModifier {
                 if value == key && navigation.activeScope == scope { focused = true }
             }
             .background(RemoteActualFocusObserver(scope: scope, key: key).allowsHitTesting(false))
+            .background(RemoteRegistrationUpdate(update: register).allowsHitTesting(false))
             .onDisappear { navigation.unregister(scope: scope, key: key, id: registration) }
     }
     private func register() {
         guard enabled else { navigation.unregister(scope: scope, key: key, id: registration); return }
         navigation.register(scope: scope, key: key,
-                            entry: .init(id: registration, label: label, frame: frame, activate: activate))
+                            entry: .init(id: registration, label: label, frame: frame, admission: admission, activate: activate))
     }
+}
+
+/// SwiftUI can replace an action at identical geometry. Refresh the callback
+/// on each native view update while retaining the same realization identity.
+private struct RemoteRegistrationUpdate: UIViewRepresentable {
+    let update: () -> Void
+    func makeUIView(context: Context) -> UIView { let view = UIView(); update(); return view }
+    func updateUIView(_ uiView: UIView, context: Context) { update() }
 }
 
 /// isFocused comes from the native focus environment, not the requested
@@ -107,15 +117,29 @@ private struct RemoteScopeLifecycle: ViewModifier {
     }
 }
 
+private struct RemoteScrollRealization: ViewModifier {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @Environment(\.remoteNavigationScope) private var scope
+    func body(content: Content) -> some View {
+        ScrollViewReader { proxy in
+            content.onChange(of: navigation.requestedFocus) { _, key in
+                guard navigation.activeScope == scope, let key else { return }
+                proxy.scrollTo(key, anchor: .center)
+            }
+        }
+    }
+}
+
 extension View {
+    func remoteScrollRealization() -> some View { modifier(RemoteScrollRealization()) }
     func remoteScope(_ scope: String) -> some View {
         environment(\.remoteNavigationScope, scope).modifier(RemoteScopeLifecycle(scope: scope))
     }
     func remoteRestricted(_ restricted: Bool = true) -> some View {
         modifier(RemoteRestrictedModifier(restricted: restricted))
     }
-    func remoteControl(_ key: String, label: String, enabled: Bool = true, activate: @escaping () -> Void) -> some View {
-        modifier(RemoteControlModifier(key: key, label: label, activate: activate, enabled: enabled))
+    func remoteControl(_ key: String, label: String, enabled: Bool = true, admission: @escaping () -> RemoteNavigationCoordinator.Outcome? = { nil }, activate: @escaping () -> Void) -> some View {
+        modifier(RemoteControlModifier(key: key, label: label, activate: activate, enabled: enabled, admission: admission))
     }
 }
 
@@ -133,6 +157,7 @@ struct RemoteChoicePanel: View {
     let scope: String
     let title: String
     let choices: [RemoteChoice]
+    var admission: () -> RemoteNavigationCoordinator.Outcome? = { nil }
     var body: some View {
         ScrollViewReader { proxy in
         ScrollView {
@@ -140,6 +165,7 @@ struct RemoteChoicePanel: View {
             Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
             ForEach(choices) { choice in
                 Button {
+                    guard admission() == nil else { return }
                     choice.choose()
                     navigation.closeModal()
                 } label: {
@@ -152,15 +178,15 @@ struct RemoteChoicePanel: View {
                 .id("choice:" + choice.id)
                 .buttonStyle(.bordered)
                 .accessibilityAddTraits(choice.selected ? .isSelected : [])
-                .remoteControl("choice:" + choice.id, label: choice.label) {
+                .remoteControl("choice:" + choice.id, label: choice.label, admission: admission) {
                     choice.choose()
                     navigation.closeModal()
                 }
             }
-            Button("Close") { navigation.closeModal() }
+            Button("Close") { if admission() == nil { navigation.closeModal() } }
                 .buttonStyle(.bordered)
                 .id("choice:close")
-                .remoteControl("choice:close", label: "Close") { navigation.closeModal() }
+                .remoteControl("choice:close", label: "Close", admission: admission) { navigation.closeModal() }
         }
         .padding(30)
         }

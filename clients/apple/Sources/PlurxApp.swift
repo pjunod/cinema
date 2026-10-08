@@ -85,6 +85,9 @@ struct PlurxApp: App {
 enum Route: Hashable {
     case collection(LibraryCollection)
     case item(Int)
+    case sharedLibraries
+    case sharedLibrary(SharedLibraryRow, parent: SharedPlaybackReference?, title: String?)
+    case sharedItem(SharedPlaybackReference, SharedLibraryRow)
 }
 
 struct RootView: View {
