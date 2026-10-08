@@ -26,7 +26,7 @@ pub(super) fn add_work(
     let doc: Value = serde_json::from_slice(MANIFEST).map_err(|_| invalid)?;
     let cases = doc["cases"].as_array().ok_or(invalid)?;
     if doc["schema_version"] != 1
-        || doc["generator_recipe_version"] != 1
+        || doc["generator_recipe_version"] != 2
         || doc["license"] != "CC0-1.0"
         || doc["source_shape"] != serde_json::json!([320, 180])
         || doc["frame_count"] != 24
@@ -126,6 +126,219 @@ fn observe_negative(
     Ok(())
 }
 
+// showinfo is metadata-only with checksum=0; its position immediately before
+// the mapper observes the selected decoder's AVFrame after any layout adapter.
+const METADATA_OBSERVER: &str = "showinfo@plurx_p5_contract=checksum=0,";
+
+fn observed_filter(pipeline: Pipeline) -> Result<String, ProbeReason> {
+    let filter = pipeline
+        .filters(Some(160), 90, Some("dovi"))
+        .ok_or(ProbeReason::GraphFailed)?;
+    let mapper = if matches!(pipeline, Pipeline::DoviMetal | Pipeline::VtDoviMetal) {
+        "tonemap_videotoolbox="
+    } else {
+        "tonemapx="
+    };
+    let offset = filter.find(mapper).ok_or(ProbeReason::GraphFailed)?;
+    let mut observed = filter;
+    observed.insert_str(offset, METADATA_OBSERVER);
+    Ok(observed)
+}
+
+fn log_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let mut tokens = line.split_ascii_whitespace();
+    while let Some(token) = tokens.next() {
+        if let Some(value) = token.strip_prefix(key) {
+            let value = if value.is_empty() {
+                tokens.next()?
+            } else {
+                value
+            };
+            return Some(value.trim_end_matches(';')).filter(|value| !value.is_empty());
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+struct SelectedFrameMetadata {
+    header: bool,
+    mapping: bool,
+    signature: Option<(u64, u64)>,
+}
+
+fn observe_selected_metadata(
+    stderr: &[u8],
+    pipeline: Pipeline,
+    variable: bool,
+) -> Result<(), ProbeReason> {
+    let fail = ProbeReason::OutputContractFailed;
+    let text = std::str::from_utf8(stderr).map_err(|_| fail)?;
+    let reference: Value =
+        serde_json::from_slice(MANIFEST).map_err(|_| ProbeReason::InvalidEmbeddedCorpus)?;
+    let expected_format = if matches!(pipeline, Pipeline::DoviMetal | Pipeline::VtDoviMetal) {
+        "videotoolbox_vld"
+    } else {
+        "yuv420p10le"
+    };
+    let mut frames = Vec::<SelectedFrameMetadata>::new();
+    let mut configured = false;
+    for line in text
+        .lines()
+        .filter(|line| line.starts_with("[showinfo@plurx_p5_contract @ "))
+    {
+        let body = line.split_once(']').ok_or(fail)?.1.trim();
+        if body.starts_with("config in time_base:") {
+            if configured || body != "config in time_base: 1/12288, frame_rate: 12/1" {
+                return Err(fail);
+            }
+            configured = true;
+        } else if body.starts_with("n:") {
+            let number = log_field(body, "n:")
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or(fail)?;
+            let pts = log_field(body, "pts:")
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or(fail)?;
+            let time = log_field(body, "pts_time:")
+                .and_then(|v| v.parse::<f64>().ok())
+                .ok_or(fail)?;
+            if !configured
+                || number != frames.len()
+                || number >= 24
+                || pts != number as u64 * 1024
+                || !time.is_finite()
+                || (time - number as f64 / 12.0).abs() > 0.00001
+                || log_field(body, "fmt:") != Some(expected_format)
+                || log_field(body, "sar:") != Some("1/1")
+                || log_field(body, "s:") != Some("320x180")
+                || log_field(body, "i:") != Some("P")
+            {
+                return Err(fail);
+            }
+            frames.push(SelectedFrameMetadata::default());
+        } else if body.contains("rpu_type=") {
+            let frame = frames.last_mut().ok_or(fail)?;
+            if frame.header {
+                return Err(fail);
+            }
+            for (key, expected) in [
+                ("rpu_type=", "2"),
+                ("vdr_rpu_profile=", "0"),
+                ("bl_bit_depth=", "10"),
+                ("disable_residual_flag=", "1"),
+            ] {
+                if log_field(body, key) != Some(expected) {
+                    return Err(fail);
+                }
+            }
+            frame.header = true;
+        } else if body.contains("color metadata:") {
+            let index = frames.len().checked_sub(1).ok_or(fail)?;
+            let frame = &mut frames[index];
+            if frame.mapping
+                || body.matches("channel ").count() != 3
+                || !body.contains("channel 0:")
+                || !body.contains("channel 1:")
+                || !body.contains("channel 2:")
+            {
+                return Err(fail);
+            }
+            frame.mapping = true;
+            for (key, expected) in [
+                ("signal_eotf=", "65535"),
+                ("signal_color_space=", "2"),
+                ("signal_bit_depth=", "12"),
+            ] {
+                if log_field(body, key) != Some(expected) {
+                    return Err(fail);
+                }
+            }
+            let dm = log_field(body, "dm_metadata_id=")
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or(fail)?;
+            let peak = log_field(body, "source_max_pq=")
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or(fail)?;
+            let expected = if variable {
+                let signature = &reference["variable_frame_metadata"][index];
+                (
+                    signature["dm_metadata_id"].as_u64().ok_or(fail)?,
+                    signature["source_max_pq"].as_u64().ok_or(fail)?,
+                )
+            } else {
+                (0, 3079)
+            };
+            if (dm, peak) != expected || frame.signature.replace((dm, peak)).is_some() {
+                return Err(fail);
+            }
+        }
+    }
+    if frames.len() != 24
+        || frames
+            .iter()
+            .any(|frame| !frame.header || !frame.mapping || frame.signature.is_none())
+    {
+        return Err(fail);
+    }
+    Ok(())
+}
+
+fn observe_colors(raw: &[u8]) -> Result<(), ProbeReason> {
+    let fail = ProbeReason::OutputContractFailed;
+    if raw.len() != 24 * 160 * 90 * 3 / 2 {
+        return Err(fail);
+    }
+    let reference: Value =
+        serde_json::from_slice(MANIFEST).map_err(|_| ProbeReason::InvalidEmbeddedCorpus)?;
+    let oracle = &reference["color_interpretation_oracle"];
+    let ranges = oracle["yuv420p_ranges"].as_array().ok_or(fail)?;
+    let centers = oracle["sample_centers"].as_array().ok_or(fail)?;
+    if ranges.len() != 6 || centers.len() != 6 {
+        return Err(fail);
+    }
+    for (patch, (range, center)) in ranges.iter().zip(centers).enumerate() {
+        if range.as_array().map(Vec::len) != Some(3)
+            || center != &serde_json::json!([10 + 20 * patch, 67])
+        {
+            return Err(fail);
+        }
+        let x = 10 + 20 * patch;
+        let y = 67;
+        for (component, (width, offset, cx, cy)) in [
+            (160, 0, x, y),
+            (80, 14400, x / 2, y / 2),
+            (80, 18000, x / 2, y / 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let lo = range[component][0]
+                .as_u64()
+                .filter(|v| *v <= 255)
+                .ok_or(fail)? as f64;
+            let hi = range[component][1]
+                .as_u64()
+                .filter(|v| *v <= 255)
+                .ok_or(fail)? as f64;
+            if lo > hi {
+                return Err(fail);
+            }
+            for frame in 0..24 {
+                let mean = (cy - 1..=cy + 1)
+                    .flat_map(|yy| (cx - 1..=cx + 1).map(move |xx| (yy, xx)))
+                    .map(|(yy, xx)| f64::from(raw[frame * 21600 + offset + yy * width + xx]))
+                    .sum::<f64>()
+                    / 9.0;
+                if !(lo..=hi).contains(&mean) {
+                    return Err(fail);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn observe(document: &Value, raw: &[u8]) -> Result<(), ProbeReason> {
     let fail = ProbeReason::OutputContractFailed;
     let stream = &document["streams"][0];
@@ -203,7 +416,7 @@ fn observe(document: &Value, raw: &[u8]) -> Result<(), ProbeReason> {
             }
         }
     }
-    Ok(())
+    observe_colors(raw)
 }
 
 fn observe_source_pixels(raw: &[u8]) -> Result<(), ProbeReason> {
@@ -298,9 +511,9 @@ pub(super) async fn run(
     deadline: tokio::time::Instant,
 ) -> Result<(), ProbeReason> {
     let required = if matches!(pipeline, Pipeline::DoviMetal | Pipeline::VtDoviMetal) {
-        &["tonemap_videotoolbox", "scale_vt"][..]
+        &["tonemap_videotoolbox", "scale_vt", "showinfo"][..]
     } else {
-        &["tonemapx", "scale"][..]
+        &["tonemapx", "scale", "showinfo"][..]
     };
     if !crate::pipeprobe::declares_filters(&implementation.filters, required) {
         return Err(ProbeReason::MissingFilter);
@@ -370,7 +583,12 @@ pub(super) async fn run(
     command.args([
         "-hide_banner",
         "-loglevel",
-        "warning",
+        if fixture.input_pixels["negative_max_frames"].is_null() {
+            "info"
+        } else {
+            "warning"
+        },
+        "-nostats",
         "-nostdin",
         "-xerror",
         "-threads",
@@ -389,9 +607,13 @@ pub(super) async fn run(
         .arg("-i")
         .arg(argument)
         .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf"]);
-    let mut filter = pipeline
-        .filters(Some(160), 90, Some("dovi"))
-        .ok_or(ProbeReason::GraphFailed)?;
+    let mut filter = if fixture.input_pixels["negative_max_frames"].is_null() {
+        observed_filter(pipeline)?
+    } else {
+        pipeline
+            .filters(Some(160), 90, Some("dovi"))
+            .ok_or(ProbeReason::GraphFailed)?
+    };
     if fixture.input_pixels["negative_max_frames"]
         .as_u64()
         .is_some()
@@ -464,7 +686,34 @@ pub(super) async fn run(
         "frag_keyframe+empty_moov+default_base_moof",
         "pipe:1",
     ]);
-    let encoded = bounded_probe_command(command, deadline, CORPUS_BUDGET as u64, cancelled).await?;
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(ProbeReason::GraphTimedOut);
+    }
+    let output = crate::ffmpeg::bounded_command_output_cancellable(
+        command,
+        remaining,
+        CORPUS_BUDGET as u64,
+        "Mac strict Dolby graph",
+        Some(cancelled),
+        PROBE_WORK,
+    )
+    .await
+    .map_err(|_| {
+        if cancelled.is_cancelled() {
+            ProbeReason::Cancelled
+        } else if tokio::time::Instant::now() >= deadline {
+            ProbeReason::GraphTimedOut
+        } else {
+            ProbeReason::GraphFailed
+        }
+    })?;
+    observe_selected_metadata(
+        &output.stderr,
+        pipeline,
+        fixture.input_pixels["id"] == "variable",
+    )?;
+    let encoded = output.stdout;
     let name = format!("p5-probe-{}.mp4", uuid::Uuid::new_v4().simple());
     let token = cancelled.clone();
     settle_probe_publication(
@@ -631,5 +880,157 @@ mod tests {
             observe_source(&document, true),
             Err(ProbeReason::OutputContractFailed)
         );
+    }
+    fn selected_trace() -> Vec<[String; 3]> {
+        let reference: Value = serde_json::from_slice(MANIFEST).expect("valid metadata reference");
+        (0..24).map(|index| {
+            let signature=&reference["variable_frame_metadata"][index];
+            let dm=signature["dm_metadata_id"].as_u64().expect("DM identifier");
+            let peak=signature["source_max_pq"].as_u64().expect("PQ signature");
+            [format!("[showinfo@plurx_p5_contract @ 0x1] n: {index} pts: {} pts_time:{} fmt:videotoolbox_vld sar:1/1 s:320x180 i:P\n",index*1024,index as f64/12.0),
+             "[showinfo@plurx_p5_contract @ 0x1] rpu_type=2; vdr_rpu_profile=0; bl_bit_depth=10; disable_residual_flag=1\n".into(),
+             format!("[showinfo@plurx_p5_contract @ 0x1] channel 0: channel 1: channel 2: color metadata: dm_metadata_id={dm}; source_max_pq={peak}; signal_eotf=65535; signal_color_space=2; signal_bit_depth=12\n")]
+        }).collect()
+    }
+
+    fn trace_bytes(rows: &[[String; 3]]) -> Vec<u8> {
+        let mut log =
+            "[showinfo@plurx_p5_contract @ 0x1] config in time_base: 1/12288, frame_rate: 12/1\n"
+                .to_owned();
+        for row in rows {
+            for line in row {
+                log.push_str(line);
+            }
+        }
+        log.into_bytes()
+    }
+
+    #[test]
+    fn selected_graph_metadata_rejects_stale_shuffled_missing_and_wrong_surface_frames() {
+        let rows = selected_trace();
+        let pipeline = Pipeline::VtDoviMetal;
+        assert_eq!(
+            observe_selected_metadata(&trace_bytes(&rows), pipeline, true),
+            Ok(())
+        );
+        let mut stale = rows.clone();
+        for row in &mut stale {
+            row[2] = rows[0][2].clone();
+        }
+        let mut shuffled = rows.clone();
+        shuffled[1][2] = rows[2][2].clone();
+        shuffled[2][2] = rows[1][2].clone();
+        let mut missing = rows.clone();
+        missing[12][2].clear();
+        let mut wrong_surface = rows.clone();
+        wrong_surface[1][0] = wrong_surface[1][0].replace("videotoolbox_vld", "yuv420p10le");
+        let mut wrong_pts = rows.clone();
+        wrong_pts[1][0] = wrong_pts[1][0].replace("pts: 1024", "pts: 2048");
+        for invalid in [stale, shuffled, missing, wrong_surface, wrong_pts] {
+            assert_eq!(
+                observe_selected_metadata(&trace_bytes(&invalid), pipeline, true),
+                Err(ProbeReason::OutputContractFailed)
+            );
+        }
+        let mut absent = rows;
+        absent[0][1].clear();
+        assert_eq!(
+            observe_selected_metadata(&trace_bytes(&absent), pipeline, true),
+            Err(ProbeReason::OutputContractFailed)
+        );
+    }
+
+    #[test]
+    fn metadata_only_observer_preserves_selected_mapper_and_opaque_adapters() {
+        for pipeline in [
+            Pipeline::DoviStrictTonemapx,
+            Pipeline::VtDoviTonemapx,
+            Pipeline::DoviMetal,
+            Pipeline::VtDoviMetal,
+        ] {
+            let production = pipeline
+                .filters(Some(160), 90, Some("dovi"))
+                .expect("strict mapper graph");
+            let observed = observed_filter(pipeline).expect("observable strict mapper graph");
+            assert_eq!(observed.replace(METADATA_OBSERVER, ""), production);
+            assert_eq!(observed.matches(METADATA_OBSERVER).count(), 1);
+            let tail = &observed
+                [observed.find(METADATA_OBSERVER).expect("observer") + METADATA_OBSERVER.len()..];
+            assert!(tail.starts_with("tonemapx=") || tail.starts_with("tonemap_videotoolbox="));
+        }
+    }
+
+    fn synthetic_observed_output() -> (Value, Vec<u8>) {
+        let mut raw = vec![128; 24 * 21600];
+        let reference: Value = serde_json::from_slice(MANIFEST).expect("valid color oracle");
+        for frame in 0..24 {
+            for (patch, y) in [16, 40, 79, 170, 200, 223, 233, 235]
+                .into_iter()
+                .enumerate()
+            {
+                raw[frame * 21600 + 23 * 160 + 10 + 20 * patch] = y;
+            }
+            for patch in 0..6 {
+                let x = 10 + 20 * patch;
+                let y = 67;
+                for (component, (width, offset, cx, cy)) in [
+                    (160, 0, x, y),
+                    (80, 14400, x / 2, y / 2),
+                    (80, 18000, x / 2, y / 2),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let bounds = &reference["color_interpretation_oracle"]["yuv420p_ranges"][patch]
+                        [component];
+                    let code = ((bounds[0].as_u64().expect("lower bound")
+                        + bounds[1].as_u64().expect("upper bound"))
+                        / 2) as u8;
+                    for yy in cy - 1..=cy + 1 {
+                        for xx in cx - 1..=cx + 1 {
+                            raw[frame * 21600 + offset + yy * width + xx] = code;
+                        }
+                    }
+                }
+            }
+        }
+        let stream = serde_json::json!({"codec_name":"h264","sample_aspect_ratio":"1:1","avg_frame_rate":"12/1","field_order":"progressive","pix_fmt":"yuv420p","width":160,"height":90,"color_primaries":"bt709","color_transfer":"bt709","color_space":"bt709","color_range":"tv"});
+        let frames = (0..24)
+            .map(|index| {
+                let mut frame = stream.clone();
+                frame["best_effort_timestamp_time"] =
+                    serde_json::json!((index as f64 / 12.0).to_string());
+                frame
+            })
+            .collect::<Vec<_>>();
+        (serde_json::json!({"streams":[stream],"frames":frames}), raw)
+    }
+
+    #[test]
+    fn every_colored_patch_must_match_interpretation_even_when_gray_is_unchanged() {
+        let (document, raw) = synthetic_observed_output();
+        assert_eq!(observe(&document, &raw), Ok(()));
+        for patch in 0..6 {
+            for offset in [14400, 18000] {
+                let mut corrupt = raw.clone();
+                let x = (10 + 20 * patch) / 2;
+                let y = 67 / 2;
+                for yy in y - 1..=y + 1 {
+                    for xx in x - 1..=x + 1 {
+                        corrupt[12 * 21600 + offset + yy * 80 + xx] = 255;
+                    }
+                }
+                assert_eq!(
+                    &corrupt[12 * 21600..12 * 21600 + 14400],
+                    &raw[12 * 21600..12 * 21600 + 14400],
+                    "gray/luma has not changed"
+                );
+                assert_eq!(
+                    observe(&document, &corrupt),
+                    Err(ProbeReason::OutputContractFailed),
+                    "patch{patch} chroma plane{offset}"
+                );
+            }
+        }
     }
 }

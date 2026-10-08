@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +21,47 @@ CASES = (
 )
 
 
+# Original fixture linear RGB values in BT.2020 primaries, in cd/m2. The
+# interpretation oracle is independent of FFmpeg and Dolby renderer output.
+COLOR_RGB_NITS = ((100, 30, 20), (30, 100, 20), (20, 30, 100),
+                  (100, 100, 20), (20, 100, 100), (100, 20, 100))
+BT2020_TO_BT709 = ((1.660491, -0.587641, -0.072850),
+                  (-0.124550, 1.132900, -0.008350),
+                  (-0.018151, -0.100579, 1.118730))
+
+
+def color_interpretation_oracle():
+    """Bound hue interpretation, not an exact/mastered SDR tone curve.
+
+    Convert original BT.2020 linear RGB to BT.709; allow a common gain from
+    0.2 to 0.9 at the 100-nit patches, clip gamut and apply BT.709's OETF.
+    A 12-code margin covers nonuniform ITP gamut/tone treatment and lossy
+    encoding. Bounds remain chromatically distinct from neutral/green-only
+    interpretation. No rendered pixels are used to calculate these bounds.
+    """
+    def oetf(value):
+        value = min(1.0, max(0.0, value))
+        return 4.5 * value if value < 0.018 else 1.099 * value ** 0.45 - 0.099
+
+    ranges = []
+    for rgb in COLOR_RGB_NITS:
+        linear = [sum(c * v for c, v in zip(row, rgb)) / 100 for row in BT2020_TO_BT709]
+        samples = []
+        for gain_step in range(200, 901):
+            r, g, b = [oetf(value * gain_step / 1000) for value in linear]
+            y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            samples.append((16 + 219 * y, 128 + 224 * (b - y) / 1.8556,
+                            128 + 224 * (r - y) / 1.5748))
+        ranges.append([[max(0, math.floor(min(row[c] for row in samples)) - 12),
+                        min(255, math.ceil(max(row[c] for row in samples)) + 12)]
+                       for c in range(3)])
+    return dict(scope="color interpretation only; not per-frame tone-map influence or a mastered SDR target",
+                source_rgb_nits=COLOR_RGB_NITS, bt2020_to_bt709=BT2020_TO_BT709,
+                common_gain_interval=[0.2, 0.9], code_margin=12,
+                sample_centers=[[10 + 20 * i, 67] for i in range(6)],
+                yuv420p_ranges=ranges)
+
+
 def materialize(source, output):
     output.mkdir(parents=True, exist_ok=True)
     cases = []
@@ -32,9 +74,10 @@ def materialize(source, output):
     bindings = sorted(json.loads((source / "frame-bound-association.json").read_text()),
                       key=lambda row: row["presentation_pts"])
     reference = json.loads((source / "reference.json").read_text())
-    manifest = dict(schema_version=1, generator_recipe_version=1, license="CC0-1.0",
+    manifest = dict(schema_version=1, generator_recipe_version=2, license="CC0-1.0",
                     source_shape=[320, 180], frame_count=24, frame_rate=[12, 1],
                     source_sample_aspect_ratio="1:1", source_codes=reference["patches_source_codes"],
+                    color_interpretation_oracle=color_interpretation_oracle(),
                     variable_frame_metadata=[dict(pts=row["presentation_pts"],
                         dm_metadata_id=row["dm_metadata_id"], source_max_pq=row["source_max_pq"])
                         for row in bindings], cases=cases)
