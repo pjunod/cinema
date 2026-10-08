@@ -1,7 +1,9 @@
 # Raspberry Pi status — existing Plurx on a Pi 5
 
 **Status:** built — software implementation and bounded Pi physical acceptance
-complete; final candidate CI and merge pending.
+complete.
+
+Final candidate CI and merge remain pending.
 **Updated:** 2026-10-08
 
 Companion to the [implementation plan](RASPBERRY-PI-IMPLEMENTATION.md). This

@@ -4,7 +4,7 @@
 passed; physical incident acceptance remains open · **Inspected base:** `eb547f35d` · **Written:** 2026-10-08
 
 Current merge qualification and landing are recorded in
-[PR #888](http://192.168.4.7:3000/noirr/plurx/pulls/888).
+[PR #888](http://forge.lan:3000/noirr/plurx/pulls/888).
 
 This records the physical incident and the build contract for the verified
 Apple-client detection defects that hid it.
@@ -744,7 +744,7 @@ phase. These retained results do not substitute for a current-head gate.
 affected check and the current-head/base promotion guard. PR 900's single
 adversarial review found no actionable issues. It landed as
 `f4eb3cb9db0757d3f6feda10dc9cb1586afaf6d0` after run 4450
-([UI 4429](http://192.168.4.7:3000/noirr/plurx/actions/runs/4429)) passed
+([UI 4429](http://forge.lan:3000/noirr/plurx/actions/runs/4429)) passed
 preflight, Rust, Windows, and Main promotion on head
 `3d0f08a481d9915b31ef26e81b883e48878e783f` and base
 `eb1ef52290743e9eea1517a1579fa2c2ee840278`. All five declared regression

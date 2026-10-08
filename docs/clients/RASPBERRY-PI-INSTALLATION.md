@@ -1,7 +1,9 @@
 # Raspberry Pi installation — Docker by default, native by choice
 
 **Status:** built — software implementation and bounded Pi application
-acceptance complete; final candidate CI and merge pending · **Updated:** 2026-10-08
+acceptance complete · **Updated:** 2026-10-08
+
+Final candidate CI and merge remain pending.
 
 Companion to [the decoder implementation](RASPBERRY-PI-IMPLEMENTATION.md)
 and [the live status](RASPBERRY-PI-STATUS.md). This plan closes the installation

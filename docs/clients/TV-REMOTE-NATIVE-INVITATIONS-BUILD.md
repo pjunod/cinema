@@ -1,5 +1,8 @@
 # Native invitation adapters: build and review contract
 
+**Status:** open — implemented adapter contract; physical native invitation delivery
+awaits qualification · **Updated:** 2026-10-08
+
 This document answers how the native B09 adapters enroll notifications, handle a
 cold-launch tap and stop resident work without taking over the existing media or
 reminder services. It records the implemented contract; the
