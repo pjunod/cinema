@@ -91,8 +91,21 @@ an unnecessarily fixed family ceiling, and Vulkan device validation rejected
 unselected CPU drivers listed in the inventory. Both findings are addressed
 with focused regression cases. Exclusive families retain their original
 ceiling; ordinary sharing remains bounded by current global capacity. GPU
-validation reads the selected device-properties block. Corrected-source
-compilation, the fast lane and physical transcoding remain pending.
+validation reads the selected device-properties block. Corrected source
+`bad8ceca4` passed pinned Linux all-target checking, Clippy, formatting and
+ARM64 linking. Fast-lane run 4391 stopped before tests because the earlier
+canceled run 4389 has no final journal; its stored Forgejo task steps confirm
+cancellation during the history audit before Python or Node execution.
+Recovery or an explicitly approved qualification exception remains pending.
+
+The complete Pi FFmpeg build passed its decoder, AC-4, Dolby Vision, DRM,
+Vulkan and libplacebo capability checks. The final image executed real V3DV
+shaders. A physical color-conversion check found that a plain final YUV format
+conversion retained RGB matrix metadata; the shared pipeline now explicitly
+converts to limited-range BT.709 YUV. A red-pixel coefficient control and
+ffprobe tags confirmed actual conversion, rather than only retagging.
+Both isolated app modes reached `/readyz` successfully; their playback helpers
+need a corrected fresh-scratch setup before final playback qualification.
 
 The initial PR creation API ignored its draft flag and scheduled run 4389.
 The PR was converted to draft and that run was cancelled before Rust or

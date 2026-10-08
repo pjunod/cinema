@@ -441,8 +441,10 @@ impl Pipeline {
             Pipeline::LibplaceboSoftware => {
                 // RGB conversion changes the matrix, not the source transfer or
                 // primaries. Preserve those tags so SDR is never stamped as PQ.
+                // Convert rendered RGB samples to limited-range BT.709 YUV; a
+                // pixel-format change alone can retain the RGB matrix tag.
                 let tm = if hdr { ":tonemapping=bt.2390" } else { "" };
-                format!("format=rgba64le,setparams=colorspace=gbr,libplacebo=w={w}:h={height}{tm}:colorspace=gbr:color_primaries=bt709:color_trc=bt709:format=rgba,format=yuv420p")
+                format!("format=rgba64le,setparams=colorspace=gbr,libplacebo=w={w}:h={height}{tm}:colorspace=gbr:color_primaries=bt709:color_trc=bt709:format=rgba,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p")
             }
             // tonemap_opencl maps only, so the scale stays on the CPU side of
             // it. Its output is an OpenCL surface no H.264 encoder takes, hence
@@ -741,7 +743,8 @@ mod tests {
             assert!(!graph.contains("hwdownload"));
             assert!(!graph.contains("smpte2084"));
             assert!(!graph.contains("color_primaries=bt2020"));
-            assert!(graph.ends_with("format=rgba,format=yuv420p"));
+            assert!(graph
+                .ends_with("format=rgba,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p"));
             assert_eq!(graph.contains("tonemapping=bt.2390"), hdr.is_some());
         }
     }
