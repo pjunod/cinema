@@ -9104,3 +9104,69 @@ APT sources fail official-domain validation; independently signed official
 repository preparation continues separately without host changes.
 No final adversarial review, Fable release, qualification receipt or ready
 merge handoff is claimed.
+
+
+### 10.292 Cache non-reuse isolated; diagnostic and capture repairs integrated (2026-10-08)
+
+Instrumented pinned4 reproduces cache non-reuse on0d989755e. The retained
+seg00000 member matches its manifest before and after HTTP delivery:
+535,225 bytes, unchanged inode/link count and SHA. The actual HTTP200 body
+is536,131 different bytes, no Range requested, with no retained ETag UUID
+and a newly active owned FFmpeg. This establishes non-reuse, not corruption;
+it does not identify the refusing comparison. Normal APIs do not expose the
+private origin, full binding and logical production fields. No720 job or
+phone campaign is admitted. Exact guard1476595, daemon1477212 and encoder
+1481766 retire; original settings restore with readback, runtime/private
+control retire. Raw backend log is never transferred and is removed after
+retaining its hash. Seven structured receipt files are copied with verified
+hashes; handoff SHA is
+a9d756ebe3f727e9edc2f75bff83ee0479496d0e38bc592dc14bf2deab13e3e2.
+
+Integrate ecd3c1c773 as52eb48500: bounded debug equality facts under the
+dedicated plurxd::retained_reuse target cover early candidate/audio refusals
+and private artifact matching. No paths, raw arguments, tokens or identities
+are logged; differing argument positions are capped at32. All authority
+predicates remain unchanged. Own pinned1.97.1 check passes before editing,
+then final check and normal catalog/fmt/all-target Clippy/served-JS hook pass.
+No log-mirroring tests are added or units executed. One new exact-source
+compiled diagnostic reproduction is required before a behavioral fix.
+
+Integrate43dc5db19 asb352a70be: an optional calibrated alternate video ROI
+is sampled in the same synchronous XGetImage and clock bracket. One valid
+counter or agreeing valid counters resolve; conflicting valid counters fail
+the whole capture, while neither valid remains unknown. Single-ROI default
+and timing/integrity limits remain. Four meaningful regressions are authored
+and named in draft844; none execute here. Normal pinned hook passes. Actual
+fullscreen geometry calibration and state-plus-switch campaign remain open.
+No VOD mute control is invented for qualification; observed browser-native
+controls must be measured before any trusted mute claim.
+
+QA242 compiles/signs/installs the separate bundle216, with83 production
+files inverse-byte-equivalent to0d and36 unit-source files compile-only.
+Its ignored harness uses absolute probe counts and bounded full-series facts.
+No run occurs. A generic-name preinstall check failed but the shell continued
+to install; canonical reconciliation proves PID6767 belongs another QA bundle
+and bundle216 had no running process. The other bundle remains untouched.
+The helper now stops dependent actions on failed exact-scope checks.
+Superseded owned build artifacts reclaim726,982,656 allocated bytes.
+
+AndroidUI4 fails before UI because its metadata wait was only five seconds.
+The corrected monotonic setup wait permits UI5 on the unchanged0d daemon:
+actual720 first frame in3295ms, followed by a six-node native hierarchy
+without expected player controls. No quality tap or switch occurs. Foreground
+owner is unresolved because package identity was not retained; future bounded
+diagnostics now preserve package/resource/foreground owner and own-process
+crash classifications without raw text/logs. UI5 finishes101.240 seconds;
+normal Signout, app stop, reverse/proxy/private cleanup and daemon1490074
+retirement are verified. Both attempts remain scoped and preserved.
+
+Private Pulse17 packages and modules pass signed official Ubuntu metadata,
+package hash, version and dependency checks, without host changes or daemon
+runtime. Owned download temporaries reclaim18,558,810 bytes. A60-second
+nonperiodic stereo48k audio reference is materialized: copied H264 payloads
+and rational timestamps match1,442 original packets; AAC decodes2,880,000
+samples/channel, with600 unique reference windows. Captured-window thresholds
+and physical speakers remain unvalidated. Short nonzero-origin stream-copy
+and18-second VFR inputs are also measured; preparation does not qualify
+production normalization, family compatibility, joins or full20 acceptance.
+No final adversarial, Fable release, qualification or merge handoff is claimed.
