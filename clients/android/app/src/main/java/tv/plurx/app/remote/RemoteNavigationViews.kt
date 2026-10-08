@@ -10,7 +10,6 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.geometry.Rect
@@ -46,7 +45,7 @@ internal fun Modifier.remoteAction(key: String, label: String, enabled: Boolean 
         .focusRequester(requester)
         .onGloballyPositioned { navigation?.geometry(scope, key, identity, it.boundsInWindow()) }
         .onFocusChanged { nativeFocused = it.isFocused; if (enabled) navigation?.nativeFocus(scope, key, identity, it.isFocused && view.hasWindowFocus()) }
-        .onPreviewKeyEvent { navigation?.physicalInput(); false }
+        .observeRemotePhysicalKeys { navigation?.physicalInput() }
 }
 @Composable
 internal fun RemoteRestricted(active: Boolean = true) {

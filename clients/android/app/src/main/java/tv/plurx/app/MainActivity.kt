@@ -111,7 +111,7 @@ class MainActivity : ComponentActivity() {
         return super.dispatchTouchEvent(event)
     }
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (tv.plurx.app.remote.RemotePhysicalInput.retiresCredits(event.action, event.keyCode)) RemoteRuntime.get(applicationContext).physicalInput()
+        tv.plurx.app.remote.RemotePhysicalInput.observe(event) { RemoteRuntime.get(applicationContext).physicalInput() }
         return super.dispatchKeyEvent(event)
     }
     override fun onNewIntent(intent: Intent) {

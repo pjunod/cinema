@@ -69,8 +69,10 @@ function cinemaRemoteWireDirection(button){
   const release=()=>{CINEMA_WEB_CONTROLLER?.stopHold();clearTimeout(releaseTimer);releaseTimer=setTimeout(()=>{physicalActivation=false;},0);};
   button.addEventListener("pointerdown",event=>{if(!event.isTrusted||event.button!==0)return;event.preventDefault();button.setPointerCapture(event.pointerId);begin();});
   for(const type of ["pointerup","pointercancel","lostpointercapture","blur"])button.addEventListener(type,release);
+  // companion-direction-key-adapter:begin
   button.addEventListener("keydown",event=>{if(!event.isTrusted||!["Enter"," "].includes(event.key))return;event.preventDefault();if(!event.repeat)begin();});
   button.addEventListener("keyup",event=>{if(!event.isTrusted||!["Enter"," "].includes(event.key))return;event.preventDefault();release();});
+  // companion-direction-key-adapter:end
   button.addEventListener("click",event=>{
     if(!event.isTrusted)return;
     // A native pointer/key activation already started this gesture. Its click

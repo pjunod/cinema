@@ -4921,3 +4921,29 @@ source = "clients/desktop-remote/extension/bridge.js"
 source_anchor = 'if(typeof CinemaRemoteLocalPhysical!=="undefined")return CinemaRemoteLocalPhysical.dispatch(action,offered.context);'
 test = "clients/desktop-remote/tests/extension.browser.cjs"
 test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"
+
+[[fixes]]
+id = "android.cinema-remote-physical-observer-adapter"
+commits = ["d2c287b96c2ae3eda0a29a84659ca4e560f07554"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePhysicalInputAdapter.kt"
+source_anchor = "fun retiresCredits(action: Int, keyCode: Int)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "dedicatedPhysicalPlayPauseStopRetireCreditsAndPreservePhysicalScrub"
+
+[[fixes]]
+id = "android.cinema-remote-observer-fence-boundary"
+commits = []
+supplements = "android.cinema-remote-physical-observer-adapter"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigationViews.kt"
+source_anchor = ".observeRemotePhysicalKeys"
+test = "tests/operations/test_player_input_fence.py"
+test_anchor = "test_companion_android_adapter_does_not_exempt_neighboring_raw_handlers"
+
+[[fixes]]
+id = "android.cinema-remote-typed-track-menu"
+commits = []
+supplements = "android.cinema-remote-physical-observer-adapter"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "mutableStateOf<RemoteTrackMenuKind?>(null)"
+test = "tests/operations/test_playback_surface_fence.py"
+test_anchor = "test_the_android_player_carries_no_pre_contract_surface_write"

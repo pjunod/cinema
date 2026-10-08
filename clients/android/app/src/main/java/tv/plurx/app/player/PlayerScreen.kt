@@ -348,6 +348,10 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
 }
 
 internal enum class PlayerPanel { Tracks, Settings, Info }
+internal enum class RemoteTrackMenuKind(val wireName: String) {
+    All("all"), Audio("audio"), Subtitles("subtitles"), Quality("quality");
+    companion object { fun fromWire(kind: String) = entries.firstOrNull { it != All && it.wireName == kind } }
+}
 
 internal enum class PlayerControlId {
     SkipBack30,
@@ -1163,7 +1167,7 @@ private fun PlayerContent(
     val remoteScope = LocalRemoteScope.current
     val remoteOwnerToken = remember(controller, remoteScope) { UUID.randomUUID().toString() }
     val remotePreview = remember(controller) { RemotePreviewOwnership() }
-    var remoteTrackKind by remember(controller) { mutableStateOf<String?>(null) }
+    var remoteTrackMenu by remember(controller) { mutableStateOf<RemoteTrackMenuKind?>(null) }
     data class OwnedTrack(val kind: String, val id: String, val label: String, val selected: Boolean, val choose: () -> RemoteOutcome)
     fun ownedTracks(): List<OwnedTrack> {
         val result = mutableListOf<OwnedTrack>()
@@ -1215,17 +1219,17 @@ private fun PlayerContent(
         if (action.type !in remoteCapabilities()) return RemoteOutcome.Unsupported
         if (action.type == "open_tracks") {
             val kind = action.text("kind") ?: return RemoteOutcome.Invalid
-            if (remoteTrackKind != null || ownedTracks().none { it.kind == kind }) return RemoteOutcome.Unsupported
-            cancelNetworkPreview(); remoteNavigation?.changedContext(); remoteTrackKind = kind; return RemoteOutcome.Applied
+            if (remoteTrackMenu != null || ownedTracks().none { it.kind == kind }) return RemoteOutcome.Unsupported
+            cancelNetworkPreview(); remoteNavigation?.changedContext(); remoteTrackMenu = RemoteTrackMenuKind.fromWire(kind) ?: return RemoteOutcome.Unsupported; return RemoteOutcome.Applied
         }
         if (action.type == "choose_track") {
             val kind = action.text("kind")
-            if (remoteNavigation?.ownedChoicesReady != true || remoteTrackKind == null || (remoteTrackKind != "all" && remoteTrackKind != kind)) return RemoteOutcome.Unsupported
+            if (remoteNavigation?.ownedChoicesReady != true || remoteTrackMenu == null || (remoteTrackMenu != RemoteTrackMenuKind.All && remoteTrackMenu?.wireName != kind)) return RemoteOutcome.Unsupported
             val choice = ownedTracks().firstOrNull { it.kind == kind && it.id == action.text("option_id") } ?: return RemoteOutcome.Unavailable
-            val result = choice.choose(); if (result == RemoteOutcome.Applied) { remoteNavigation?.dispatch(RemoteAction("back", buildJsonObject {}), remoteNavigation.context); remoteTrackKind = null }
+            val result = choice.choose(); if (result == RemoteOutcome.Applied) { remoteNavigation?.dispatch(RemoteAction("back", buildJsonObject {}), remoteNavigation.context); remoteTrackMenu = null }
             return result
         }
-        if (remoteTrackKind != null && action.type in setOf("navigate", "select", "back"))
+        if (remoteTrackMenu != null && action.type in setOf("navigate", "select", "back"))
             return remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unavailable
         if (action.type == "set_playing") {
             // Desired state still observes the existing pending-scrub commit boundary.
@@ -1269,15 +1273,15 @@ private fun PlayerContent(
                 put("position_ms", controller.realPosition().coerceAtLeast(0)); put("duration_ms", plan.durationMs.coerceAtLeast(0))
                 put("tracks", JsonArray(ownedTracks().map { track -> buildJsonObject { put("kind", track.kind); put("option_id", track.id); put("label", RemoteWire.safeLabel(track.label)) } }))
             }
-        }, ::remoteDispatch, ::cancelNetworkPreview, { controller.remoteCommandsAvailable() && panel == null && blockingFault == null && !isInPip && (remoteTrackKind == null || remoteNavigation?.ownedChoicesReady == true) }))
+        }, ::remoteDispatch, ::cancelNetworkPreview, { controller.remoteCommandsAvailable() && panel == null && blockingFault == null && !isInPip && (remoteTrackMenu == null || remoteNavigation?.ownedChoicesReady == true) }))
     }
     DisposableEffect(remoteClient, remoteOwnerToken) { onDispose { controller.onPhysicalTransport = null; remoteClient?.playback?.detach(remoteOwnerToken) } }
     if (panel != null || blockingFault != null || isInPip) RemoteRestricted()
-    if (remoteTrackKind != null) {
-        val kind = remoteTrackKind
-        RemoteChoiceDialog(if (kind == "all") "Audio and subtitles" else "Choose $kind", ownedTracks().filter { kind == "all" && it.kind != "quality" || it.kind == kind }.map { track ->
+    if (remoteTrackMenu != null) {
+        val kind = remoteTrackMenu
+        RemoteChoiceDialog(if (kind == RemoteTrackMenuKind.All) "Audio and subtitles" else "Choose ${kind?.wireName}", ownedTracks().filter { kind == RemoteTrackMenuKind.All && it.kind != "quality" || it.kind == kind?.wireName }.map { track ->
             RemoteChoice(track.id, RemoteWire.safeLabel(track.label), track.selected, track.choose)
-        }) { remoteTrackKind = null; poke(); focus(panelOpener) }
+        }) { remoteTrackMenu = null; poke(); focus(panelOpener) }
     }
 
     BackHandler(enabled = !isInPip) {
@@ -1706,7 +1710,7 @@ private fun PlayerContent(
                 },
                 onTracks = {
                     panelOpener = PlayerControlId.Tracks
-                    if (isTelevision(context)) remoteTrackKind = "all" else panel = PlayerPanel.Tracks
+                    if (isTelevision(context)) remoteTrackMenu = RemoteTrackMenuKind.All else panel = PlayerPanel.Tracks
                 },
                 onSettings = {
                     panelOpener = PlayerControlId.Settings
