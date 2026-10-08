@@ -96,7 +96,9 @@ pub(crate) struct SegmentRequest {
     pub(crate) admission: TranscodePermit,
     pub(crate) producer: Arc<ProducerSlot>,
     pub(crate) at: u32,
-    pub(crate) deadline: Instant,
+    /// Bounds renderer/mux preparation up to encoder handoff. The existing
+    /// producer controller owns encoder cancellation, suspension and retirement.
+    pub(crate) preparation_deadline: Instant,
     pub(crate) cancel: CancellationToken,
 }
 
@@ -171,56 +173,116 @@ fn fd(number: u8) -> String {
         format!("/dev/fd/{number}")
     }
 }
+fn one_thread_cap(scope: &[String], flags: &[&str]) -> Result<usize, String> {
+    let caps: Vec<_> = scope
+        .windows(2)
+        .filter(|p| flags.contains(&p[0].as_str()))
+        .collect();
+    if caps.len() != 1 {
+        return Err("encoder recipe needs one unambiguous scoped thread cap".into());
+    }
+    caps[0][1]
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| "encoder recipe has an automatic or invalid thread cap".into())
+}
+
 fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
+    // Only the concrete finite x265 recipe is supported. Input decoder options
+    // precede their own -i; output codec caps follow the last input.
+    let inputs: Vec<_> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| *a == "-i")
+        .map(|(i, _)| i)
+        .collect();
+    if !(1..=2).contains(&inputs.len())
+        || args.get(inputs[0] + 1) != Some(&fd(3))
+        || (inputs.len() == 2 && args.get(inputs[1] + 1) != Some(&fd(4)))
+        || args
+            .iter()
+            .any(|a| a.starts_with("-threads:") && a != "-threads:v" && a != "-threads:a")
+    {
+        return Err("unsupported segment encoder input or thread scope".into());
+    }
     let mut threads = 0usize;
-    let mut codec_caps = 0;
-    let mut filter_cap = false;
-    for pair in args.windows(2) {
-        if pair[0] == "-threads"
-            || pair[0].starts_with("-threads:")
-            || pair[0] == "-filter_threads"
-            || pair[0] == "-filter_complex_threads"
-        {
-            let count = pair[1]
-                .parse::<usize>()
-                .ok()
-                .filter(|n| *n > 0)
-                .ok_or("encoder recipe contains an automatic or invalid thread cap")?;
-            threads = threads
-                .checked_add(count)
-                .ok_or("encoder thread budget overflow")?;
-            if pair[0].starts_with("-threads") {
-                codec_caps += 1;
-            }
-            if pair[0] == "-filter_threads" {
-                filter_cap = true;
-            }
+    let mut start = 0;
+    for &input in &inputs {
+        let scope = &args[start..input];
+        if scope.iter().any(|a| a.starts_with("-threads:")) {
+            return Err("segment inputs require one generic decoder thread cap".into());
         }
+        threads = threads
+            .checked_add(one_thread_cap(scope, &["-threads"])?)
+            .ok_or("thread budget overflow")?;
+        start = input + 2;
     }
-    if codec_caps < 2 || !filter_cap || threads > cpu {
-        return Err("encoder decoder/filter/codec caps exceed concrete CPU admission".into());
+    let output = &args[start..];
+    threads = threads
+        .checked_add(one_thread_cap(output, &["-threads", "-threads:v"])?)
+        .ok_or("thread budget overflow")?;
+    let codecs: Vec<_> = output.windows(2).filter(|p| p[0] == "-c:v").collect();
+    if codecs.len() != 1
+        || codecs[0][1] != "libx265"
+        || args.iter().any(|a| {
+            a == "-codec"
+                || a == "-c"
+                || a == "-vcodec"
+                || a == "-acodec"
+                || a.starts_with("-codec:")
+                || (a.starts_with("-c:") && a != "-c:v" && a != "-c:a")
+                || (a.starts_with("-x265-params") && a != "-x265-params")
+        })
+    {
+        return Err("finite segment adapter requires its bounded x265 video recipe".into());
     }
-    if args.iter().any(|arg| arg == "libx265") {
-        let parameters = args
-            .windows(2)
-            .find(|pair| pair[0] == "-x265-params")
-            .ok_or("x265 recipe needs explicit pool and frame-thread bounds")?;
-        let values: Vec<_> = parameters[1].split(':').collect();
-        if !values.contains(&"pools=none")
-            || !values.contains(&"frame-threads=1")
-            || values
-                .iter()
-                .filter(|value| value.starts_with("pools="))
-                .count()
-                != 1
-            || values
-                .iter()
-                .filter(|value| value.starts_with("frame-threads="))
-                .count()
-                != 1
-        {
-            return Err("x265 recipe must disable pools and cap frame threads to one".into());
+    let audio: Vec<_> = output.windows(2).filter(|p| p[0] == "-c:a").collect();
+    if audio.len() > 1 || (inputs.len() == 2 && audio.is_empty()) {
+        return Err("ambiguous audio encoder".into());
+    }
+    if audio.first().is_some_and(|p| p[1] != "copy") {
+        if audio[0][1] != "aac" || inputs.len() != 2 {
+            return Err("unsupported bounded audio recipe".into());
         }
+        threads = threads
+            .checked_add(one_thread_cap(output, &["-threads:a"])?)
+            .ok_or("thread budget overflow")?;
+    } else if output.iter().any(|a| a == "-threads:a") {
+        return Err("unexpected audio thread cap".into());
+    }
+    threads = threads
+        .checked_add(one_thread_cap(args, &["-filter_threads"])?)
+        .ok_or("thread budget overflow")?;
+    if args
+        .iter()
+        .any(|a| a == "-filter_complex" || a == "-filter_complex_threads")
+    {
+        threads = threads
+            .checked_add(one_thread_cap(args, &["-filter_complex_threads"])?)
+            .ok_or("thread budget overflow")?;
+    }
+    if threads > cpu {
+        return Err("encoder scopes exceed concrete CPU admission".into());
+    }
+    let params: Vec<_> = output
+        .windows(2)
+        .filter(|p| p[0] == "-x265-params")
+        .collect();
+    if params.len() != 1 {
+        return Err("x265 needs one explicit pool/frame-thread bound".into());
+    }
+    let values: Vec<_> = params[0][1].split(':').collect();
+    if !values.contains(&"pools=none")
+        || !values.contains(&"frame-threads=1")
+        || values.iter().filter(|v| v.starts_with("pools=")).count() != 1
+        || values
+            .iter()
+            .filter(|v| v.starts_with("frame-threads="))
+            .count()
+            != 1
+    {
+        return Err("x265 must disable pools and cap frame threads to one".into());
     }
     Ok(())
 }
@@ -282,9 +344,13 @@ async fn run(
     {
         return Err("segment encoder recipe must retain NUT source timestamps on fd3".into());
     }
+    let reservation = request
+        .producer
+        .try_reserve_empty()
+        .map_err(|e| e.to_string())?;
     let lane = tokio::select! {
         _ = cancel.cancelled() => return Err("segment cancelled".into()),
-        _ = tokio::time::sleep_until(request.deadline) => return Err("segment deadline expired".into()),
+        _ = tokio::time::sleep_until(request.preparation_deadline) => return Err("segment deadline expired".into()),
         lane = request.source_offsets.acquire_owned() => lane.map_err(|_| "source offset lane closed")?,
     };
     check_source(&request.source)?;
@@ -339,7 +405,7 @@ async fn run(
     stage(
         render,
         resources.clone(),
-        request.deadline,
+        request.preparation_deadline,
         &cancel,
         "renderer",
     )
@@ -379,7 +445,14 @@ async fn run(
             work: crate::process_control::ChildWork::realtime("DV timestamped NUT mux"),
         },
     )?;
-    stage(mux, resources.clone(), request.deadline, &cancel, "muxer").await?;
+    stage(
+        mux,
+        resources.clone(),
+        request.preparation_deadline,
+        &cancel,
+        "muxer",
+    )
+    .await?;
     let nut_bytes = nut.metadata().map_err(|e| e.to_string())?.len();
     if nut_bytes == 0 || nut_bytes > raw_limit + 1024 * 1024 {
         return Err("NUT intermediate exceeds bounded output envelope".into());
@@ -389,7 +462,7 @@ async fn run(
         .seek(SeekFrom::Start(0))
         .map_err(|e| e.to_string())?;
     check_source(&resources.source)?;
-    if cancel.is_cancelled() || Instant::now() >= request.deadline {
+    if cancel.is_cancelled() || Instant::now() >= request.preparation_deadline {
         return Err("segment cancelled before encoder".into());
     }
     let encoded = producer_spawn::spawn(
@@ -408,15 +481,12 @@ async fn run(
             work: crate::process_control::ChildWork::realtime("DV segment encoder"),
         },
     )?;
-    let (registration, writers) = request
-        .producer
-        .attach_registered_job_owned(
-            encoded.child,
-            encoded.child_job,
-            request.at,
-            Some(Box::new((resources, nut))),
-        )
-        .await;
+    let (registration, writers) = reservation.attach_registered_job_owned(
+        encoded.child,
+        encoded.child_job,
+        request.at,
+        Box::new((resources, nut)),
+    );
     let watched = registration.clone();
     // The observer must not keep the controlling slot alive after its caller
     // disappears: ProducerSlot::drop owns actual retirement in that case.
@@ -503,6 +573,281 @@ async fn stage<R: Send + Sync + 'static>(
     result
 }
 
+/// Explicit compile-time physical probe, never a daemon route or receipt.
+#[cfg(any(test, plurx_dv_segment_probe))]
+pub(crate) async fn physical_probe() {
+    use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
+    use plurx_core::domain::MediaFile;
+    let source_path =
+        PathBuf::from(std::env::var("PLURX_DV_SEGMENT_SOURCE").expect("actual finite source"));
+    let metadata = std::fs::metadata(&source_path).expect("source metadata");
+    let file = MediaFile {
+        id: 1,
+        item_id: 1,
+        path: source_path,
+        size: metadata.len() as i64,
+        mtime: metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64,
+        duration_ms: Some(250),
+        container: Some("mkv".into()),
+        video_codec: Some("hevc".into()),
+        video_codec_tag: None,
+        field_order: None,
+        video_profile: None,
+        width: Some(64),
+        height: Some(64),
+        bit_depth: Some(10),
+        hdr: None,
+        hdr_format: None,
+        max_cll: None,
+        max_fall: None,
+        mastering_max_luminance: None,
+        luminance_source: None,
+        dolby_vision: Default::default(),
+        bitrate: None,
+        audio_streams: vec![],
+        subtitle_streams: vec![],
+        downloaded_subtitles: vec![],
+        scanned_at: 1,
+        audio_offset_ms: 0,
+        probed: true,
+    };
+    let source = Arc::new(
+        crate::fragment_index_cluster::open_source_fence(&file, None)
+            .await
+            .expect("held actual source"),
+    );
+    (&source.handle)
+        .seek(SeekFrom::Start(7))
+        .expect("nonzero borrowed offset");
+    let original = (&source.handle).stream_position().expect("original offset");
+    let offsets = Arc::new(Semaphore::new(1));
+    let admissions = Admissions::new();
+    let estimate = TranscodeResourceEstimate {
+        hardware_slot: true,
+        cpu_threads: 3,
+        decoder_threads: Some(2),
+    };
+    let admission = admissions
+        .try_admit_bundle(1, 3, &estimate, Priority::Live)
+        .expect("concrete graph admission");
+    let cache = tempfile::tempdir().expect("private graph cache");
+    let slot = Arc::new(ProducerSlot::new());
+    let args: Vec<String>=["-nostdin","-v","error","-threads","1","-copyts","-i",&fd(3),"-filter_threads","1",
+    "-vf","zscale=matrixin=gbr:transferin=smpte2084:primariesin=2020:rangein=full:matrix=2020_ncl:transfer=smpte2084:primaries=2020:range=limited:chromal=center:filter=point,format=yuv420p10le",
+    "-c:v","libx265","-threads","1","-profile:v","main10","-x265-params",
+    "pools=none:frame-threads=1:qp=0:bframes=0:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:chromaloc=1",
+    "-fps_mode","passthrough","-enc_time_base","1/1000","-an","-f","matroska","pipe:1"].into_iter().map(str::to_owned).collect();
+    // A real retired predecessor with held writers must refuse a cancelled
+    // successor before source/helper/encoder ownership starts.
+    let predecessor = tokio::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .expect("real predecessor");
+    let predecessor_job =
+        crate::process_control::ChildJob::attach(&predecessor).expect("owned predecessor");
+    let (old, old_writers) = slot
+        .attach_registered_job_owned(predecessor, predecessor_job, 0, None)
+        .await;
+    slot.request_registered_retirement(&old)
+        .await
+        .expect("retire predecessor");
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let refused = tokio::time::timeout(
+        Duration::from_millis(500),
+        spawn(SegmentRequest {
+            renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
+                .expect("renderer")
+                .into(),
+            muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
+                .expect("muxer")
+                .into(),
+            encoder: "/usr/bin/ffmpeg".into(),
+            encoder_args: args.clone(),
+            runtime_cache: cache.path().to_owned(),
+            shape: SegmentShape {
+                video_index: 0,
+                max_frames: 6,
+                bl: (64, 64),
+                el: (64, 64),
+            },
+            source: source.clone(),
+            source_offsets: offsets.clone(),
+            admission,
+            producer: slot.clone(),
+            at: 0,
+            preparation_deadline: Instant::now() + Duration::from_secs(30),
+            cancel: cancelled,
+        }),
+    )
+    .await
+    .expect("held predecessor never parks successor");
+    match refused {
+        Err(error) => assert!(error.contains("producer slot is not ready"), "{error}"),
+        Ok(_) => panic!("busy predecessor admitted successor"),
+    }
+    assert_eq!(offsets.available_permits(), 1);
+    assert_eq!(
+        (&source.handle)
+            .stream_position()
+            .expect("unborrowed offset"),
+        original
+    );
+    let admission = admissions
+        .try_admit_bundle(1, 3, &estimate, Priority::Live)
+        .expect("refused successor returns real capacity");
+    old_writers.settled();
+    old.wait_confirmed_reap().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if slot.try_reserve_empty().is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("predecessor slot fully settled");
+    let producer = spawn(SegmentRequest {
+        renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
+            .expect("renderer")
+            .into(),
+        muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
+            .expect("muxer")
+            .into(),
+        encoder: "/usr/bin/ffmpeg".into(),
+        encoder_args: args.clone(),
+        runtime_cache: cache.path().to_owned(),
+        shape: SegmentShape {
+            video_index: 0,
+            max_frames: 6,
+            bl: (64, 64),
+            el: (64, 64),
+        },
+        source: source.clone(),
+        source_offsets: offsets.clone(),
+        admission,
+        producer: slot.clone(),
+        at: 0,
+        preparation_deadline: Instant::now() + Duration::from_secs(30),
+        cancel: CancellationToken::new(),
+    })
+    .await
+    .expect("physical graph handoff");
+    let (registration, writers, stdout, stderr) = producer.into_parts();
+    assert_eq!(
+        offsets.available_permits(),
+        0,
+        "source offset custody follows encoder"
+    );
+    assert!(
+        admissions
+            .try_admit_bundle(1, 3, &estimate, Priority::Live)
+            .is_none(),
+        "actual graph still owns GPU and CPU"
+    );
+    let (encoded, diagnostic) =
+        tokio::try_join!(drain(stdout), drain(stderr)).expect("encoder pipes");
+    let status = loop {
+        if let Some(status) = slot
+            .try_wait_registered(&registration)
+            .await
+            .expect("exact encoder wait")
+        {
+            break status;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        status.success(),
+        "encoder: {}",
+        String::from_utf8_lossy(&diagnostic)
+    );
+    assert!(encoded.len() > 100, "actual encoded Matroska output");
+    assert!(source.unchanged(), "same source revision retained");
+    assert!(
+        admissions
+            .try_admit_bundle(1, 3, &estimate, Priority::Live)
+            .is_none(),
+        "exited child alone does not release writer admission"
+    );
+    // Losing the actual controller must retire its child even though
+    // the cancellation observer still retains the registration receipt.
+    drop(slot);
+    writers.settled();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), registration.wait_confirmed_reap())
+            .await
+            .expect("dropped actual encoder controller reaps")
+            .matches(&registration)
+    );
+
+    assert_eq!(offsets.available_permits(), 1);
+    assert_eq!(
+        (&source.handle).stream_position().expect("restored offset"),
+        original
+    );
+    assert!(
+        admissions
+            .try_admit_bundle(1, 3, &estimate, Priority::Live)
+            .is_some(),
+        "confirmed graph releases concrete admission"
+    );
+    let slot = Arc::new(ProducerSlot::new());
+    let unaccepted = spawn(SegmentRequest {
+        renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
+            .expect("renderer")
+            .into(),
+        muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
+            .expect("muxer")
+            .into(),
+        encoder: "/usr/bin/ffmpeg".into(),
+        encoder_args: args,
+        runtime_cache: cache.path().to_owned(),
+        shape: SegmentShape {
+            video_index: 0,
+            max_frames: 6,
+            bl: (64, 64),
+            el: (64, 64),
+        },
+        source: source.clone(),
+        source_offsets: offsets.clone(),
+        admission: admissions
+            .try_admit_bundle(1, 3, &estimate, Priority::Live)
+            .expect("second actual graph admission"),
+        producer: slot.clone(),
+        at: 1,
+        preparation_deadline: Instant::now() + Duration::from_secs(30),
+        cancel: CancellationToken::new(),
+    })
+    .await
+    .expect("actual unaccepted encoder handoff");
+    let abandoned = unaccepted.registration.clone();
+    assert_eq!(offsets.available_permits(), 0);
+    drop(unaccepted);
+    let receipt = tokio::time::timeout(Duration::from_secs(5), abandoned.wait_confirmed_reap())
+        .await
+        .expect("dropped actual handoff retires encoder");
+    assert!(receipt.matches(&abandoned));
+    assert_eq!(
+        receipt.writers(),
+        crate::prodrun::WriterSettlement::Abandoned
+    );
+    assert_eq!(offsets.available_permits(), 1);
+    assert!(admissions
+        .try_admit_bundle(1, 3, &estimate, Priority::Live)
+        .is_some());
+    assert!(source.unchanged());
+    if let Ok(path) = std::env::var("PLURX_DV_SEGMENT_ENCODED_OUTPUT") {
+        std::fs::write(path, encoded).expect("save actual graph observation");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,11 +855,45 @@ mod tests {
 
     #[test]
     fn shape_and_actual_helper_cli_are_bounded() {
-        let recipe =
-            ["-threads", "1", "-filter_threads", "1", "-threads:v", "1"].map(str::to_owned);
+        let recipe = [
+            "-threads",
+            "1",
+            "-i",
+            &fd(3),
+            "-filter_threads",
+            "1",
+            "-c:v",
+            "libx265",
+            "-threads:v",
+            "1",
+            "-x265-params",
+            "pools=none:frame-threads=1",
+        ]
+        .map(str::to_owned);
         assert!(check_encoder_budget(&recipe, 3).is_ok());
         assert!(check_encoder_budget(&recipe, 2).is_err());
-        assert!(check_encoder_budget(&["-threads".into(), "0".into()], 3).is_err());
+        let duplicate_input = [
+            "-threads",
+            "1",
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-i",
+            &fd(3),
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "pools=none:frame-threads=1",
+        ]
+        .map(str::to_owned);
+        assert!(check_encoder_budget(&duplicate_input, 8).is_err());
+        let mut uncapped_audio = recipe.to_vec();
+        uncapped_audio.splice(4..4, ["-i".into(), fd(4)]);
+        assert!(check_encoder_budget(&uncapped_audio, 8).is_err());
+        let mut duplicate_filter = recipe.to_vec();
+        duplicate_filter.extend(["-filter_threads".into(), "0".into()]);
+        assert!(check_encoder_budget(&duplicate_filter, 8).is_err());
         let mut shape = SegmentShape {
             video_index: 2,
             max_frames: 6,
@@ -652,209 +1031,9 @@ mod tests {
             );
         }
     }
-    // Runs the physical renderer/muxer/encoder graph only when the reviewed
-    // Linux helper runtime is explicitly supplied. It grants no route receipt.
     #[tokio::test]
     #[ignore = "requires reviewed Linux FEL helper and bounded timestamped source"]
     async fn actual_segment_helper_nut_encoder_preserves_owned_custody() {
-        use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
-        use plurx_core::domain::MediaFile;
-        let source_path =
-            PathBuf::from(std::env::var("PLURX_DV_SEGMENT_SOURCE").expect("actual finite source"));
-        let metadata = std::fs::metadata(&source_path).expect("source metadata");
-        let file = MediaFile {
-            id: 1,
-            item_id: 1,
-            path: source_path,
-            size: metadata.len() as i64,
-            mtime: metadata
-                .modified()
-                .expect("mtime")
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("epoch")
-                .as_secs() as i64,
-            duration_ms: Some(250),
-            container: Some("mkv".into()),
-            video_codec: Some("hevc".into()),
-            video_codec_tag: None,
-            field_order: None,
-            video_profile: None,
-            width: Some(64),
-            height: Some(64),
-            bit_depth: Some(10),
-            hdr: None,
-            hdr_format: None,
-            max_cll: None,
-            max_fall: None,
-            mastering_max_luminance: None,
-            luminance_source: None,
-            dolby_vision: Default::default(),
-            bitrate: None,
-            audio_streams: vec![],
-            subtitle_streams: vec![],
-            downloaded_subtitles: vec![],
-            scanned_at: 1,
-            audio_offset_ms: 0,
-            probed: true,
-        };
-        let source = Arc::new(
-            crate::fragment_index_cluster::open_source_fence(&file, None)
-                .await
-                .expect("held actual source"),
-        );
-        (&source.handle)
-            .seek(SeekFrom::Start(7))
-            .expect("nonzero borrowed offset");
-        let original = (&source.handle).stream_position().expect("original offset");
-        let offsets = Arc::new(Semaphore::new(1));
-        let admissions = Admissions::new();
-        let estimate = TranscodeResourceEstimate {
-            hardware_slot: true,
-            cpu_threads: 3,
-            decoder_threads: Some(2),
-        };
-        let admission = admissions
-            .try_admit_bundle(1, 3, &estimate, Priority::Live)
-            .expect("concrete graph admission");
-        let cache = tempfile::tempdir().expect("private graph cache");
-        let slot = Arc::new(ProducerSlot::new());
-        let args: Vec<String>=["-nostdin","-v","error","-threads","1","-copyts","-i",&fd(3),"-filter_threads","1",
-            "-vf","zscale=matrixin=gbr:transferin=smpte2084:primariesin=2020:rangein=full:matrix=2020_ncl:transfer=smpte2084:primaries=2020:range=limited:chromal=center:filter=point,format=yuv420p10le",
-            "-c:v","libx265","-threads","1","-profile:v","main10","-x265-params",
-            "pools=none:frame-threads=1:qp=0:bframes=0:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:chromaloc=1",
-            "-fps_mode","passthrough","-enc_time_base","1/1000","-an","-f","matroska","pipe:1"].into_iter().map(str::to_owned).collect();
-        let producer = spawn(SegmentRequest {
-            renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
-                .expect("renderer")
-                .into(),
-            muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
-                .expect("muxer")
-                .into(),
-            encoder: "/usr/bin/ffmpeg".into(),
-            encoder_args: args.clone(),
-            runtime_cache: cache.path().to_owned(),
-            shape: SegmentShape {
-                video_index: 0,
-                max_frames: 6,
-                bl: (64, 64),
-                el: (64, 64),
-            },
-            source: source.clone(),
-            source_offsets: offsets.clone(),
-            admission,
-            producer: slot.clone(),
-            at: 0,
-            deadline: Instant::now() + Duration::from_secs(30),
-            cancel: CancellationToken::new(),
-        })
-        .await
-        .expect("physical graph handoff");
-        let (registration, writers, stdout, stderr) = producer.into_parts();
-        assert_eq!(
-            offsets.available_permits(),
-            0,
-            "source offset custody follows encoder"
-        );
-        assert!(
-            admissions
-                .try_admit_bundle(1, 3, &estimate, Priority::Live)
-                .is_none(),
-            "actual graph still owns GPU and CPU"
-        );
-        let (encoded, diagnostic) =
-            tokio::try_join!(drain(stdout), drain(stderr)).expect("encoder pipes");
-        let status = loop {
-            if let Some(status) = slot
-                .try_wait_registered(&registration)
-                .await
-                .expect("exact encoder wait")
-            {
-                break status;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert!(
-            status.success(),
-            "encoder: {}",
-            String::from_utf8_lossy(&diagnostic)
-        );
-        assert!(encoded.len() > 100, "actual encoded Matroska output");
-        assert!(source.unchanged(), "same source revision retained");
-        assert!(
-            admissions
-                .try_admit_bundle(1, 3, &estimate, Priority::Live)
-                .is_none(),
-            "exited child alone does not release writer admission"
-        );
-        // Losing the actual controller must retire its child even though
-        // the cancellation observer still retains the registration receipt.
-        drop(slot);
-        writers.settled();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), registration.wait_confirmed_reap())
-                .await
-                .expect("dropped actual encoder controller reaps")
-                .matches(&registration)
-        );
-
-        assert_eq!(offsets.available_permits(), 1);
-        assert_eq!(
-            (&source.handle).stream_position().expect("restored offset"),
-            original
-        );
-        assert!(
-            admissions
-                .try_admit_bundle(1, 3, &estimate, Priority::Live)
-                .is_some(),
-            "confirmed graph releases concrete admission"
-        );
-        let slot = Arc::new(ProducerSlot::new());
-        let unaccepted = spawn(SegmentRequest {
-            renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
-                .expect("renderer")
-                .into(),
-            muxer: std::env::var("PLURX_DV_SEGMENT_MUXER")
-                .expect("muxer")
-                .into(),
-            encoder: "/usr/bin/ffmpeg".into(),
-            encoder_args: args,
-            runtime_cache: cache.path().to_owned(),
-            shape: SegmentShape {
-                video_index: 0,
-                max_frames: 6,
-                bl: (64, 64),
-                el: (64, 64),
-            },
-            source: source.clone(),
-            source_offsets: offsets.clone(),
-            admission: admissions
-                .try_admit_bundle(1, 3, &estimate, Priority::Live)
-                .expect("second actual graph admission"),
-            producer: slot.clone(),
-            at: 1,
-            deadline: Instant::now() + Duration::from_secs(30),
-            cancel: CancellationToken::new(),
-        })
-        .await
-        .expect("actual unaccepted encoder handoff");
-        let abandoned = unaccepted.registration.clone();
-        assert_eq!(offsets.available_permits(), 0);
-        drop(unaccepted);
-        let receipt = tokio::time::timeout(Duration::from_secs(5), abandoned.wait_confirmed_reap())
-            .await
-            .expect("dropped actual handoff retires encoder");
-        assert!(receipt.matches(&abandoned));
-        assert_eq!(
-            receipt.writers(),
-            crate::prodrun::WriterSettlement::Abandoned
-        );
-        assert_eq!(offsets.available_permits(), 1);
-        assert!(admissions
-            .try_admit_bundle(1, 3, &estimate, Priority::Live)
-            .is_some());
-        assert!(source.unchanged());
-        if let Ok(path) = std::env::var("PLURX_DV_SEGMENT_ENCODED_OUTPUT") {
-            std::fs::write(path, encoded).expect("save actual graph observation");
-        }
+        physical_probe().await;
     }
 }
