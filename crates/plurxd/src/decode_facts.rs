@@ -3019,66 +3019,80 @@ fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, Dec
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
+    snapshot_executable_in(source, None)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn snapshot_executable_in(
+    source: &std::fs::File,
+    directory: Option<&Path>,
+) -> Result<ExecutableSnapshot, DecodeFactError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mut snapshot = tempfile::Builder::new()
-        .prefix("plurx-ffprobe-")
-        .tempfile()
-        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    copy_executable(source, snapshot.as_file_mut())?;
-    snapshot
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("plurx-ffprobe-");
+    let mut temporary = match directory {
+        Some(directory) => builder.tempfile_in(directory),
+        None => builder.tempfile(),
+    }
+    .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    copy_executable(source, temporary.as_file_mut())?;
+    temporary
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o700))
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    // Install the cleanup owner before setting immutability on the exact
+    // copied object. Reopening readonly and initializing the parser can both
+    // fail; neither may leave an immutable file outside its cleanup owner.
+    let (file, path) = temporary.into_parts();
+    let mut snapshot = ExecutableSnapshot {
+        file,
+        _path: path,
+        #[cfg(target_os = "macos")]
+        parser: None,
+        #[cfg(target_os = "macos")]
+        parser_image_digest: None,
+    };
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;
 
-        if unsafe { libc::fchflags(snapshot.as_file().as_raw_fd(), libc::UF_IMMUTABLE) } == -1 {
+        if unsafe { libc::fchflags(snapshot.file.as_raw_fd(), libc::UF_IMMUTABLE) } == -1 {
             return Err(DecodeFactError::ProbeIdentity(
                 std::io::Error::last_os_error().to_string(),
             ));
         }
     }
-    let path = snapshot.into_temp_path();
-    let file = std::fs::File::open(&path)
+    snapshot.file = std::fs::File::open(snapshot.path())
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     #[cfg(target_os = "macos")]
-    let (parser, parser_image_digest) = {
+    {
         use std::os::unix::fs::FileExt;
-        let size = file
+
+        let size = snapshot
+            .file
             .metadata()
             .map_err(|e| DecodeFactError::ProbeIdentity(e.to_string()))?
             .len();
         let mut magic = [0; 8];
-        if file.read_exact_at(&mut magic, 0).is_ok() && magic == *b"\0asm\x01\0\0\0" {
+        if snapshot.file.read_exact_at(&mut magic, 0).is_ok() && magic == *b"\0asm\x01\0\0\0" {
             if size > 32 * 1024 * 1024 {
                 return Err(DecodeFactError::ProbeIdentity(
                     "source parser exceeds image bound".into(),
                 ));
             }
             let mut bytes = vec![0; size as usize];
-            file.read_exact_at(&mut bytes, 0)
+            snapshot
+                .file
+                .read_exact_at(&mut bytes, 0)
                 .map_err(|e| DecodeFactError::ProbeIdentity(e.to_string()))?;
-            let digest = hex::encode(Sha256::digest(&bytes));
-            (
-                Some(Arc::new(
-                    macos_wasm::Parser::new(&bytes).map_err(DecodeFactError::ProbeIdentity)?,
-                )),
-                Some(digest),
-            )
-        } else {
-            (None, None)
+            snapshot.parser_image_digest = Some(hex::encode(Sha256::digest(&bytes)));
+            snapshot.parser = Some(Arc::new(
+                macos_wasm::Parser::new(&bytes).map_err(DecodeFactError::ProbeIdentity)?,
+            ));
         }
-    };
-    Ok(ExecutableSnapshot {
-        file,
-        _path: path,
-        #[cfg(target_os = "macos")]
-        parser,
-        #[cfg(target_os = "macos")]
-        parser_image_digest,
-    })
+    }
+    Ok(snapshot)
 }
 
 #[cfg(windows)]
@@ -5042,6 +5056,51 @@ async fn terminate_windows_probe(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn invalid_parser_initialization_removes_the_immutable_snapshot() {
+        let root = crate::test_tempdir().expect("private source root");
+        let snapshots = root.path().join("snapshots");
+        std::fs::create_dir(&snapshots).expect("private snapshot directory");
+        let artifact = root.path().join("invalid.wasm");
+        // Valid magic followed by an invalid section; initialization must fail
+        // with a parser error or unsupported signing, and both paths clean up.
+        std::fs::write(&artifact, b"\0asm\x01\0\0\0\xff").expect("malformed parser");
+        let source = std::fs::File::open(artifact).expect("held source");
+        assert!(snapshot_executable_in(&source, Some(&snapshots)).is_err());
+        assert_eq!(
+            std::fs::read_dir(&snapshots)
+                .expect("snapshot entries")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn successful_snapshot_drop_removes_the_immutable_file() {
+        let root = crate::test_tempdir().expect("private source root");
+        let snapshots = root.path().join("snapshots");
+        std::fs::create_dir(&snapshots).expect("private snapshot directory");
+        let artifact = root.path().join("native-fixture");
+        std::fs::write(&artifact, b"native fixture bytes").expect("source bytes");
+        let source = std::fs::File::open(artifact).expect("held source");
+        let snapshot = snapshot_executable_in(&source, Some(&snapshots)).expect("snapshot");
+        let immutable_path = snapshot.path().to_path_buf();
+        assert!(
+            std::fs::remove_file(&immutable_path).is_err(),
+            "snapshot retains immutability until its owner drops"
+        );
+        drop(snapshot);
+        assert!(!immutable_path.exists());
+        assert_eq!(
+            std::fs::read_dir(&snapshots)
+                .expect("snapshot entries")
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn idet_verdict_uses_the_final_multi_frame_summary_and_a_strict_ninety_percent_bound() {
