@@ -191,12 +191,12 @@ function prePlayBurnNeeded(decision, index){
 // What a pre-play selection means for the cold start, decided in one place so
 // it can be reasoned about — and checked — without standing a player up.
 //
-// `subtitle` is null unless the viewer chose one explicitly. The server echoes
-// its OWN policy subtitle in `selection` for an audio-only request, and reading
-// that echo as a choice would burn a track nobody asked for into a film that
-// was direct-playing.
+// A transcode decision's default subtitle is part of its candidate recipe.
+// Carry it on the first create, while leaving defaults on copy routes to the
+// existing subtitle setup. An echoed `selection` alone is not a viewer choice.
 function prePlayApplication(decision, selection){
-  const sub=selection&&selection.subtitle!=null?selection.subtitle:null;
+  const sub=selection&&selection.subtitle!=null?selection.subtitle:
+    decision.method==='transcode'?(decision.subtitles||[]).find(s=>s.default)?.index??null:null;
   const action=prePlayBurnNeeded(decision, sub)
     ? PlaybackPolicy.subtitleBurnAction({requiresBurn:true,
         deliveredRange:decision.delivered_dynamic_range})

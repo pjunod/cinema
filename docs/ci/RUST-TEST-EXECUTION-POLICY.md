@@ -1,6 +1,7 @@
 # Rust test execution policy — where the suite runs, and what red means
 
-**Status:** implementation merged; M1 runner evidence bounded by the recorded FFmpeg drift · **Executes:** §2.2 / §4.8 / F-build-1 /
+**Status:** built — implementation merged; historical evidence limitations
+accepted, current non-ignored failure repair remains open · **Executes:** §2.2 / §4.8 / F-build-1 /
 F-hist-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
@@ -9,17 +10,22 @@ F-hist-7 from
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
 Companion to [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (the
-ruling this document asks Paul to revisit), [VALIDATION.md](../VALIDATION.md)
+current ruling), [VALIDATION.md](../VALIDATION.md)
 (how paths select evidence) and
 [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) (the earlier lane
 design). Read review §2.2, §4.8 and §7.1, then assessment correction 10 and
 rows `2.2`, `F-build-ops-codehealth-1`, `F-hist-7`, then this document. §3
 presents the options with their measured and estimated cost; **§7 records
-Paul's decision.** Paul delegated option (a): workspace Clippy and `make unit`
-run only in the ready-PR fast lane, with no periodic schedule. M1's intended
-Forgejo runner measurements were blocked by runner-image drift, so §2.4
-records the failed runs and one bounded source-only fallback without
-misrepresenting it as Forgejo-run evidence.
+Paul's decisions.** The 2026-09-20 option (a) implementation and its original
+receipts remain historical below. Paul's 2026-10-07 amendment in `a3162e446`
+supersedes its lane placement: ready Rust compiles all targets and runs
+workspace/vendor Clippy. Full `ci.yml` qualification remains manual or
+release-tag triggered; configured coverage independently executes workspace
+units on `main` pushes. No recurring runtime schedule was added. M1's missing Forgejo
+comparison is an accepted infrastructure deviation; its actually executed
+source-only fallback remains relative sizing evidence. M2's unrecovered
+throwaway-unit negative is an accepted historical gap, not an executed pass
+(§7.1). This does not close the current non-ignored failure obligation.
 
 The standing instruction: **if a step seems to require changing
 `make unit`'s definition, the `plurx-cluster-check` exclusion, the cluster
@@ -27,7 +33,7 @@ lanes' features, or the draft-gate semantics of `main-fast-lane.yml`, stop
 and flag it.** This plan changes *when* the existing lane runs, not what it
 is.
 
-**Correction to the review:** two additions, one narrowing.
+**Historical correction to the review (2026-09-20):** two additions, one narrowing.
 (1) `ci.yml`'s `publish_main` job (`ci.yml:1452-1473`) runs only when
 `github.event_name == 'push' && github.ref == 'refs/heads/main'`. Since
 `3cd127e2` (2026-09-10) `ci.yml` has no `push: branches` trigger, so the
@@ -42,10 +48,11 @@ depends on this. (2) The policy is pinned by text contracts:
 `tests/operations/test_contracts.py:1692-1745` pins the fast lane's Rust
 step to `make effort-rust-check` + `make hiqlite-vendor-clippy`. Either
 option changes those tests in the same PR; that is the policy change made
-visible, not a workaround. (3) The review's "no Rust test runs anywhere on
-any trigger" is exact for CI; the tracked pre-commit hook and AGENTS.md's
-focused-regression duty do run tests, on the contributor's machine, which
-is enforcement by convention.
+visible, not a workaround. (3) The tracked pre-commit hook runs catalog lint,
+Rust formatting/Clippy and embedded JavaScript syntax, **not tests**;
+AGENTS.md's focused-regression duty is separate contributor evidence.
+The historical trigger finding is not the current policy: §2.1 and §7.1
+record the later lane amendment and configured coverage producer.
 
 ---
 
@@ -64,6 +71,11 @@ is enforcement by convention.
 Done means: the decision is recorded in §7 with a date, this plan PR is
 merged under it, and M1–M6 evidence is recorded in the Execution log.
 
+**2026-10-08 disposition:** the source implementation is built, not a claim
+of whole-plan Done. §7.1 distinguishes historical evidence and accepted gaps
+from the current non-ignored failure queue; an empty catalog cannot make a
+failing test green.
+
 ---
 
 ## 2. Contract today
@@ -74,11 +86,17 @@ Re-verify at build time.
 
 | Trigger | Workflow | Rust content |
 |---|---|---|
-| PR to `main`, ready (not draft) | `main-fast-lane.yml` `rust_compile` | pinned Ubuntu 24.04 / FFmpeg 6; `make effort-rust-check`; vendored and workspace Clippy; `make unit` |
-| `v*` tag, `workflow_dispatch` | `ci.yml:6-9` | `check` job (`:260-291`): `make ci-rust-gate` = `fmt-check spike-lock-check lint test-socket-permission-check` + `cargo test --workspace --locked --exclude plurx-cluster-check --no-fail-fast` + `vodencode-restart-check`, on `ffmpeg-6` runners; cluster lanes; `publish_main` (push-to-main only) |
+| PR to `main`, ready (not draft) | `main-fast-lane.yml` `rust_compile` | pinned Rust 1.97.1 / Ubuntu 24.04 / FFmpeg 6; `make effort-rust-check`; `make hiqlite-vendor-clippy`; `make lint`; no full Rust unit execution |
+| `v*` tag, `workflow_dispatch` | `ci.yml` | `check`: `make ci-rust-gate` plus workspace Rust/SQLite tests and serial restart fixtures, on `ffmpeg-6` runners; cluster lanes; `publish_main` only on manual `main` dispatch without promotion inputs |
 | `v*` tag, dispatch | `lint.yml:3-6` | `make fmt-check lint` (workspace Clippy), badge |
 | weekly cron | `rust-audit.yml` | advisories only |
 | commit (local) | `scripts/pre-commit` → `precommit-check` (`Makefile:88-90`) | `validation-lint fmt-check lint` + `js-check` — Clippy, no tests |
+| push to `main`, manual retry | `coverage.yml` | configured coverage measures the source it checks out; a failed run retains the last successful badge/date, not a green current suite |
+
+Re-verified at `8e242787c` on 2026-10-08: the ready Rust job has a 60-minute
+ceiling and `CARGO_BUILD_JOBS=1`. These are compile/Clippy bounds, not test
+execution or fresh cold/warm timings. Python/Node preflight is a separate
+receipt-producing lane; applicable per-PR successes are retained.
 
 `make unit` (`Makefile:44-46`) is `spike-lock-check test-socket-permission-check`
 then `cargo test --workspace --exclude plurx-cluster-check --no-fail-fast`
@@ -94,7 +112,7 @@ the one adversarial review. The implementation makes that statement true.
 
 ### 2.3 The ruling
 
-DEVELOPMENT_PIPELINE.md's opening block, quoted so the conflict is visible:
+The historical opening ruling in DEVELOPMENT_PIPELINE.md:
 
 > **Workflow correction, 2026-09-10, amended 2026-09-13:** Main-bound pull
 > requests use only main-fast-lane.yml: open as draft, obtain exactly one
@@ -105,12 +123,23 @@ DEVELOPMENT_PIPELINE.md's opening block, quoted so the conflict is visible:
 > build or deploy an image. Runtime-test schedules are disabled; the weekly
 > dependency audit remains.
 
-**Decider: Paul.** The review's §7.1 adds that Paul's 09-17 instruction
+**Historical decision context:** the review's §7.1 adds that Paul's 09-17 instruction
 made the fast lane "the one place tests run", which conflicts with the
 09-10 text that makes it compile-only — either reading leaves no automatic
 Rust test execution, and the 09-10 record's assumption that "a batch
 process picks up full-suite failures" has no producer (review §1 item 1,
 §2.2).
+
+**Current ruling:** Paul's 2026-10-07 [test-lane amendment](../DEVELOPMENT_PIPELINE.md)
+in `a3162e446094238ce2e17bafdebf96a68ef5a3f3` keeps full Rust/SQLite units
+outside the ready lane. Named focused regression evidence and affected
+compile/Clippy checks remain merge prerequisites. Preflight resolves
+`Regression-Test:` anchors in the merge candidate; it does not execute
+arbitrary commands from a PR body. Keep applicable per-PR positives; retry
+only failed, new or actually invalidated checks. For this architecture
+continuation, the coordinator hands reviewed, merge-ready work to the
+batching owner; this reconciliation neither
+authorizes a worker to merge `main` nor creates a new runtime schedule.
 
 ### 2.4 Measured timings
 
@@ -185,9 +214,9 @@ command form, which is exactly the form AGENTS.md asks contributors to run.
   neither shipped ordering logic nor the 400 ms bound was changed. Both files
   now run in the fast-lane preflight under the pinned Node 22 runtime.
 
-### 2.7 Ignored tests today
+### 2.7 Historical ignored-test receipt
 
-Eleven `#[ignore = "…"]` in `crates/`, every one attached to a test and
+The 2026-09-21 receipt recorded eleven `#[ignore = "…"]` in `crates/`, every one attached to a test and
 carrying a reason (600 MB store probe, 620 MiB EPUB proof, two-hour audio
 benchmark, the two serial FFmpeg restart fixtures, MiniLM download opt-in,
 nightly runner capability, private ATSC capture, macOS VideoToolbox, and
@@ -197,11 +226,19 @@ the module graph and `include!`, and gives each ignore an exact
 duplicate, unreachable and ambiguous ignores fail closed; Cargo-list
 matching is exact rather than a bare-name suffix match.
 
+That eleven is historical, not a newly measured current inventory.
+`validation/known-red.toml` has an empty debt catalog and separate explicit
+opt-in fixtures. Neither fact proves that non-ignored current tests pass;
+§3.6 still treats a non-ignored red result as a build break, not an entry.
+
 ---
 
 ## 3. Change
 
 ### 3.1 The three options, with cost
+
+These are the original 2026-09-20 decision inputs, not the current ready-lane
+instruction. Paul's later amendment and its consequences are in §7.1.
 
 ```
                      red merge visible after…    who is told      extra cost per PR
@@ -427,6 +464,10 @@ scheduled run's checkout and the run's job list contains `check`,
 `web_layout`, `android_jvm` and no `cluster_*` job; `make operations-check`
 green with the updated assertions.
 
+The literal throwaway failing-unit negative was not recovered. §7.1 accepts
+that obsolete historical proof gap under delegated authority, explicitly as
+**not claimed as executed**; the real bootstrap failure is not substituted for it.
+
 ### 5.3 M3 — `lint.yml` comment, `unit-core`, AGENTS.md rule, count floor
 
 Per §3.2 and §3.3.
@@ -466,6 +507,11 @@ test fails it.
 
 ## 6. Verification and rollout
 
+The procedure below records the original 2026-09-21 implementation. Current
+changes follow [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) and §7.1;
+this documentation-only reconciliation runs no unit/discovery sweep and
+does not repeat successful historical checks.
+
 This plan is one draft PR into `main`; milestones are logical commits and
 Execution-log rows. M2 changes the lane itself, so the same PR's first
 post-review ready run is its Forgejo acceptance evidence. Node
@@ -482,8 +528,12 @@ produce a meaningful lane-cost measurement.
 
 ## 7. Decisions
 
-1. **Execution policy:** option (a), decided by Paul on 2026-09-20. Run
-   workspace Clippy and `make unit` in the ready-PR fast lane only.
+1. **Execution policy, dated history:** Paul selected option (a) on
+   2026-09-20: workspace Clippy and `make unit` in the ready-PR lane. Paul
+   superseded that placement on 2026-10-07 in `a3162e446`: ready Rust runs
+   all-target compile and workspace/vendor Clippy. Full `ci.yml` qualification
+   is manual or release-tag triggered; configured coverage independently
+   executes workspace units. The original evidence is retained, not relabelled current.
 2. **Schedule, image publication, notification:** no schedule, so these
    option-(b) questions are not applicable to P-01.
 3. **Node version:** CI asserts Node 22. Local diagnosis also ran Node 26;
@@ -492,6 +542,57 @@ produce a meaningful lane-cost measurement.
 4. **Runner environment:** pin Ubuntu 24.04 / FFmpeg 6 in the Rust job and
    keep generic high-CPU selection. Run 2392 proved the host image itself no
    longer supplied the pinned FFmpeg major.
+
+### 7.1 Current policy and acceptance disposition — 2026-10-08
+
+Under the user's delegated authority for routine architecture decisions,
+M1's recorded runner-image deviation and M2's obsolete, unrecovered
+throwaway-unit negative are accepted historical limitations. Neither is
+called an executed pass. No replacement cold/warm or old-policy full-suite
+campaign is required. The original authors, decisions and Execution log
+remain intact; this disposition can be overturned by the owner.
+
+| Milestone | Historical evidence and exact limit |
+|---|---|
+| M1 | Failed runs in §2.4 and one source-only sizing receipt; the named Forgejo cold/warm table was not obtained. Accepted infrastructure deviation, not invented timings. |
+| M2 | [Display 2413](http://forge.lan:3000/noirr/plurx/actions/runs/2413) / API 2431 failed before Rust because Node was absent. [Display 2415](http://forge.lan:3000/noirr/plurx/actions/runs/2415) / API 2433 genuinely passed at `2114f4e5`, before [#401](http://forge.lan:3000/noirr/plurx/pulls/401) merged as `21eab120`. This proves actual aggregate/bootstrap behavior, not the unrecovered throwaway-unit negative. |
+| M3 | Original `53be36f9` receipt: 1,142 core tests and failing 99,999 negative floor. Current `unit-core` still enables `hiqlite-store` and the 1,100 minimum. No fresh core execution claimed. |
+| M4–M5 | Original `2f5fc142` receipt records Node 22.22.2/26.8.1 and Android JVM/lint; the finite-recovery case remains. Later web source changes require their own applicable evidence, not an old whole-file green claim. |
+| M6 | Original [review 3187](http://forge.lan:3000/noirr/plurx/pulls/401#issuecomment-3187) and [disposition 3194](http://forge.lan:3000/noirr/plurx/pulls/401#issuecomment-3194) record lexical/identity repair, nine parser positives, exact Cargo-list reconciliation and zero debt entries. That is historical parser evidence, not a current full-suite verdict. |
+
+Authenticated historical run 2415 completed at 2026-09-21 06:04:27 UTC,
+before #401 merged at 06:05:16. Preflight job 27976/task 10553 actually ran
+199 validation and 418 operations tests; Rust job 27977/task 10554 used
+Rust 1.97.1/FFmpeg 6.1.1, with core 1,146 passed/0 failed and daemon
+2,438 passed/0 failed/8 ignored, plus both serial restart cases passed.
+Aggregate job 27982/task 10556 was genuinely successful. These retained
+raw outcomes close the ready-head provenance gap without replaying them.
+
+An additional retained **pre-`a3162e446` historical unit-negative** is
+[#847](http://forge.lan:3000/noirr/plurx/pulls/847), API run 4301/display
+4280, ready attempt 1 at `831da491`: Rust job 43928/task 16528 genuinely
+failed units, and aggregate job 43933/task 16569 failed at 2026-10-07
+20:59:19 UTC with `Job rust_compile failed`. Its raw unit log SHA-256 is
+`e1670d641b325cc45328413a3832452a8d75d6181fe378e11d66deda3b3624f5`;
+the 859-byte gate log is
+`29f13ca02ad1339e02b0c43adbef5e03736f90dcdf0844f900407a219277c58b`.
+This is real old-policy fail-closed evidence, not the literal M2 throwaway
+negative, current compile-only acceptance, a repair pass, or new execution.
+
+**Current failure repair is open.** Configured coverage API 4340/display
+4319, job 44252/task 16617, checked out `c8884f6` and ended exit 101 at
+2026-10-08 00:33:53 UTC: 88 ordinary failed records plus one separate
+stack-overflow/SIGABRT test identity make **89 observed adverse IDs**.
+The daemon produced no final summary, so this is not a complete census.
+Original #847 job 43928 maps 40 of those IDs to actual passes and 49 to
+actual failures. Its complete core/daemon summaries contain 51 ordinary
+failures in total (core 1; daemon 50), including two additional direct
+shared-source cases absent from aborted coverage: `sharing_source_direct_range_matches_local_serve_file_range`
+and `sharing_source_direct_symlink_or_resized_file_refuses`. Absence from
+that aborted run is not a pass. The overlapping 49 remain a recorded unresolved cohort, not proof
+that every later `main` has exactly 49 failures. New repair source or a
+passing Darwin diagnostic does not establish the failing Linux result.
+Do not hide this queue in the empty catalog or mark whole-plan Done.
 
 ---
 
@@ -514,3 +615,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | `f62eb0ab`–`75ed2823` / #401 | Temporary branch instrumentation was committed and removed. Runs 2382/2384/2386/2388 did not measure; run 2392 exposed FFmpeg drift. One bounded source-only fallback measured 155 s compile, 85 s Clippy and ~610 s unit, all green. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Exact-main reconciliation | final reconciliation / #401 | One 336-second workspace confirmation found four fixture failures after merging `882862e8`; all four exact tests then passed together, and Rustfmt plus workspace Clippy passed. No broad retry was spent. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Adversarial review P1 | review fix / [#401 comment 3187](http://forge.lan:3000/noirr/plurx/pulls/401#issuecomment-3187) | Replaced regex and suffix matching with lexical, attached-attribute scanning, stable source/module identities, duplicate rejection and exact Cargo-list reconciliation; executable positives and negatives cover every reported bypass. |
+| 2026-10-08 | gpt-6.1-sol | agent:/root/remaining_requirements_audit_sol61 | Current-policy and evidence reconciliation | docs-only continuation on `8e242787c` | Preserves Paul `a3162e446` compile-only ready-Rust policy and original M1–M6 authors/receipts; accepts M1's infrastructure deviation and unrecovered M2 unit-negative as historical limitations, not executed passes. Historical 2413/2415 run/job/raw identities verified; current 89-adverse/49-unresolved cohort remains open. Zero unit/discovery replay, release or deployment; root hands merge-ready work to the batching coordinator. |

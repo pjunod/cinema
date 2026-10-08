@@ -60,7 +60,9 @@ async function resolveNextEpisodePage(itemId,preparation){
 function prepareNextEpisodeIfNearEnd(p,video){
   const state=p?.nextEpisodePreparation;
   if(state&&(!state.current()||!autoNextOn()))cancelNextEpisodePreparation(p);
-  if(!p||playbackFileContextForPlayer(p).source_ref.kind!=="local"||!autoNextOn()||p.libraryChannel||p.bookParts||video.paused||video.seeking
+  // A cold start can fail before it has a file-bound player. Progress/Close
+  // still tick the initial object, which has no episode to prepare.
+  if(!p?.fileId||playbackFileContextForPlayer(p).source_ref.kind!=="local"||!autoNextOn()||p.libraryChannel||p.bookParts||video.paused||video.seeking
     ||!playbackOwnsAttachedMedia(p))return;
   const remaining=pbTotalSec()-pbPosSec();
   if(!(pbTotalSec()>0&&remaining>0&&remaining<=NEXT_EPISODE_PREPARE_SEC))return;
@@ -301,4 +303,3 @@ function endedStillOurs(p,generation,actionGeneration,fileId,pos){
     && (p.controlIntentGeneration||0)===actionGeneration
     && !!v && !v.seeking;
 }
-

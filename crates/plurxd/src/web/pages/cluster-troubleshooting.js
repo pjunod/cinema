@@ -69,6 +69,7 @@ function clusterPanel(d){
   // Belt and braces: viewSettings already turns a non-admin away at the door,
   // and the endpoints behind this are admin-only on their own account.
   if(!ME||!ME.is_admin) return "";
+  if(!settingsClusterEnabled(d)) return setHead("Cluster","Clustering is not enabled.");
   const cluster=d.cluster;
   if(!cluster) return `<div class="card"><h2 class="section" style="margin-top:0">Cluster</h2>
     <div class="empty">Loading…</div></div>`;
@@ -387,6 +388,7 @@ async function refreshAll(){
 }
 async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab()){
   const h=location.hash;
+  if(tab==="cluster"&&!settingsClusterEnabled()) return;
   if(generation!==PAGE_RENDER_GENERATION||!isSettingsRoute(h)||settingsTab()!==tab||document.visibilityState==="hidden"||
      (SETTINGS_TICKING&&SETTINGS_TICKING.generation===generation&&SETTINGS_TICKING.authGeneration===AUTH_GENERATION)) return;
   const owner={generation,authGeneration:AUTH_GENERATION};

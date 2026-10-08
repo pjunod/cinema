@@ -5038,6 +5038,21 @@ test("a pre-play burn rides the first session open rather than a restart", () =>
   });
 });
 
+test("a default subtitle in a transcode decision rides the first session recipe", () => {
+  const decision={...PGS_DECISION,
+    subtitles:PGS_DECISION.subtitles.map(s=>({...s,default:s.index===2}))};
+  const h=detailHarness();
+  for(const selection of [null,{audio:0,subtitle:null}]){
+    const applied=h.prePlayApplication(decision,selection);
+    assert.equal(applied.subtitle,2);
+    assert.equal(applied.burnedSub,2,"the chosen candidate includes this burn");
+  }
+  assert.equal(h.prePlayApplication(decision,{subtitle:-1}).burnedSub,null,
+    "explicit Off overrides the server default");
+  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,null,
+    "a default must not force a copy decision into transcode");
+});
+
 test("a pre-play text subtitle is a <track>, not a second session", () => {
   const applied = detailHarness().prePlayApplication(
     {
