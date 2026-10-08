@@ -176,9 +176,12 @@ seek/resume or long-session acceptance. The public live presentation returns
 `410 live_presentation_removed`; no rolling client result is claimed.
 
 The experiment binary identifies its exact SHA in each receipt. It was built
-on `a17de21fe` plus the daemon integration changes, before advisory wording and
-test-only lint corrections. This is behavioral experiment evidence, not final
-branch compilation or merge qualification.
+on `a17de21fe` plus the daemon integration changes, before advisory wording,
+test-only lint corrections and the AR-01–AR-05 implementation-review repairs.
+The measured processing graphs are unchanged by those repairs, but these
+receipts do not execute the final dependency inventory, recovery or producer
+identity fences. This is behavioral experiment evidence, not final-branch
+runtime qualification, compilation or merge qualification.
 
 **Normalized continuous VOD remains unavailable on native macOS.** Its bound
 source probe deliberately requires Linux's executable/dependency confinement.
@@ -258,6 +261,25 @@ python3 daemon-evidence/exercise-delivery.py \
 Only receipts, decoded-frame observations and selected planner-log excerpts
 are retained from those runs. Database/configuration files, generated credentials,
 full daemon logs and encoded media are excluded.
+
+### Runtime dependency scope after implementation review
+
+Runtime admission is limited to the measured Jellyfin packaging model: both
+FFmpeg and FFprobe carry non-Apple dependencies statically and link only canonical
+Apple system libraries/frameworks. The runtime inventories both programs with
+`/usr/bin/otool`, binds those inventories and the OS build, and rejects unresolved
+or non-system dependency closures and `DYLD` overrides. Other dynamic Jellyfin
+packages are not qualified by these experiments. The saved processing switch is
+still accepted; an unverified implementation retains the incumbent route.
+
+A functioning `otool` is a runtime inventory requirement and may require Apple's
+[Command Line Tools](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools/)
+on a fresh machine. No installer or network fallback is added.
+Clean-install packaging acceptance remains open. The identity deadline covers
+asynchronous resolution and inventory; cancellation waits for an already-started
+private output write to settle before cleanup. An in-flight filesystem syscall
+can extend that settlement beyond the nominal deadline; no detached writer is
+left able to publish after cleanup.
 
 ## 7. Evidence still owed
 

@@ -13,7 +13,11 @@ measurements, negative results, provenance and reproducible raw receipts.
 ## 1. Current position
 
 M0–M3 implementation is integrated at `93658e211`; independent adversarial
-review of the main-bound candidate is active. No installed packages or
+review found four P2 defects and one producer-identity defect. All findings are corrected and independently accepted. The complete source
+is integrated at `575a68abc`, including AR-05 launch binding and positive
+offline part completion. Draft PR #870
+is ready for the designated merge coordinator; units and main qualification
+belong to that queue. No installed packages or
 live services have changed. The initial delivery remains measured SDR scaling
 and HDR10-to-SDR processing; P5 experiments occur early without prematurely
 enabling Dolby processing. Extensions retain their independent acceptance.
@@ -25,8 +29,8 @@ enabling Dolby processing. Extensions retain their independent acceptance.
 | M0/M1 measurement harness | Sol harness builder | integrated; revised HDR measured | `44050ab2a`: inventory/run CLI; five valid SDR pairs show 87.80% lower CPU cost and +0.71% throughput on synthetic material |
 | M1 embedded smoke corpus | Sol fixture builder | integrated; sustained sources built | `0cd06e92b`: three 320×180, 12-frame clips, 8,846 aggregate bytes; repeat generation hashes match; separate synthetic 60-second 4K sources |
 | M2 core / shared M4–M5 argv | Sol native builder | integrated, including metadata correction | `47eab3a75`: immutable optional Mac context, only demonstrated SDR/Metal graphs, pinned compile and normal hook passed |
-| M3 probes / manager / settings | Sol fixture and harness builders | integrated; independent review active | `532e78d5f`: bounded probe module; `93658e211`: registered all-targets compile and normal hook passed; isolated settings, repair/restart and actual SDR/HDR VOD bytes observed |
-| M6 acceptance / main promotion | Manager and builders | isolated daemon evidence recorded; full acceptance open | Exact integrated candidate and adversarial review, then coordinator-owned validation/merge |
+| M3 probes / manager / settings | Sol fixture and harness builders | integrated; independent review accepted | `532e78d5f`: bounded probe module; `93658e211`: registered all-targets compile and normal hook passed; isolated settings, repair/restart and actual SDR/HDR VOD bytes observed |
+| M6 acceptance / main promotion | Manager and builders | isolated daemon evidence recorded; full acceptance open | Reviewed source `575a68abc`; coordinator-owned validation/merge remains pending |
 | E1–E4 extensions | subsequent scoped work | not started | Separate evidence and demand; no capability inherited from an HDR10 result |
 
 Jellyfin FFmpeg is the required implementation baseline. Local Homebrew
@@ -191,7 +195,8 @@ compiler load to avoid contaminating measurements.
   confinement follow-up, not permission to bypass the source boundary.
 - Adversarial implementation review: active on `93658e211`, with independent
   core/package, harness/daemon integration and fixture/runtime reviewers.
-- Main PR: not opened.
+- Main PR: [#870](http://192.168.4.7:3000/noirr/plurx/pulls/870), draft;
+  five confirmed findings are being corrected before queue handoff.
 
 Later entries will record commit IDs, root-cause observations, commands,
 accepted graphs, failed checks and their targeted reruns, qualification
@@ -274,7 +279,7 @@ sections remain the detailed acceptance specifications.
 | Q-09 | Real plurxd rolling/VOD playback, two-minute play, seek/resume, errors/rebuffer/A/V | First SDR/HDR non-normalized VOD fragments produced and decoded; two-minute client playback and the remaining delivery matrix await evidence |
 | Q-10 | Correctness first, then ≥20% throughput or ≥20% CPU/≥15% energy benefit within throughput bound | SDR/revised HDR synthetic CPU criterion met; visual/production correctness still unqualified |
 | M6-01 · implementation §10 | Full incumbent AC-4 and P5 package acceptance in daemon environment | Awaiting decodable lawful samples and actual environment; declarations insufficient |
-| M6-02 | Native install, runtime libraries, signing/distribution and architecture compatibility | Complete official package retained; actual install/signing workflow verification planned |
+| M6-02 | Native install, runtime libraries, signing/distribution and architecture compatibility | Complete official package retained; system-only runtime inventory needs functioning /usr/bin/otool (possibly Apple CLT); clean install/signing workflow verification pending |
 | M6-03 | Fresh offline install, empty/corrupt/full/unwritable cache and reprobe | Isolated daemon reached both graphs Available and repaired deliberately corrupted cache; distribution install/full/unwritable cases still pending |
 | M6-04 | Upgrade/rollback while workers active, old binaries retained or workers drained | Planned; no installed package changed yet |
 | M6-05 | Switch off affects new plans, existing sessions retain captured implementation | Isolated false→true→false→true saves, explicit reprobe and restart persistence passed; live-session behavior still pending |
@@ -311,13 +316,13 @@ Separate scope does not imply that implementation or qualification is done.
 | ID | Agreed item | State / remaining work |
 |---|---|---|
 | R-01 | All builders receive user constraints and have disjoint ownership | Done for active builders; packet applies to subsequent assignments |
-| R-02 | Normal commits, tracked hooks, pinned compile loop before pushing Rust | Application candidate `93658e211` integrated; registered compile and normal hook passed |
-| R-03 | Explicit adversarial coverage of native/package/core builder | Active: independent core/package reviewer on frozen integrated candidate |
-| R-04 | Explicit adversarial coverage of harness/manager/settings builder | Active: independent harness/daemon reviewer, including measurement validity, retry and saved choice |
-| R-05 | Explicit adversarial coverage of fixture/runtime builder | Active: independent fixture/runtime reviewer, including integrity, bounds and lifetime |
-| R-06 | Cross-builder integration review, root causes and no watchdog/gate cruft | Active: all reviewers check cross-builder interfaces; no builder self-review substitutes |
-| R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Pending; no unit suites during building; coordinator retains valid evidence and reruns failed/invalidated checks only |
-| R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Merge coordinator owns queue and main landing; effort supplies reviewed code and handles behavior-changing fixes; no PR open yet |
+| R-02 | Normal commits, tracked hooks, pinned compile loop before pushing Rust | Complete source `575a68abc` integrated; pinned all-target checks and normal catalog/format/Clippy/JS hooks passed |
+| R-03 | Explicit adversarial coverage of native/package/core builder | Complete: original candidate reviewed; AR-01 correction independently accepted |
+| R-04 | Explicit adversarial coverage of harness/manager/settings builder | Complete: harness/daemon candidate and AR-05 launch/receipt repairs independently accepted |
+| R-05 | Explicit adversarial coverage of fixture/runtime builder | Complete: original candidate reviewed; AR-02–AR-04 corrections independently accepted |
+| R-06 | Cross-builder integration review, root causes and no watchdog/gate cruft | Complete: all three builders and cross-builder interfaces independently reviewed; final offline completion repair accepted |
+| R-07 | Address findings, then hand off for coordinator-owned fast lane/regressions | Ready for coordinator: all findings resolved; no unit suites during building; coordinator retains valid evidence and reruns failed/invalidated checks only |
+| R-08 | Current-main integration, exact-tree gate/qualification receipt and regression landing lines | Merge coordinator owns queue and main landing; effort supplies reviewed code and handles behavior-changing fixes; reviewed draft #870 ready for queue admission; main landing not yet qualified |
 | R-09 | Retain reproducible sanitized receipts, exact commands, limits and autonomous decisions | Initial/revised experiments plus VOD/P5 diagnostics retained in indexed evidence document and 1.20 MB raw archive, including isolated settings/probe and actual SDR/HDR VOD receipts; full production qualification pending |
 | R-10 | Remove own transient clones, benchmark media, caches and obsolete branches after retention | Pending completion; do not remove user files or useful unmerged work |
 
@@ -354,12 +359,13 @@ proof of the new behavior.
 Use the pinned Rust 1.97.1 environment. The core tests require `hiqlite-store`.
 
 ```bash
-cargo test --locked -p plurx-core --features hiqlite-store --test decoder_selection macos_processing_
+cargo test --locked -p plurx-core --features hiqlite-store --test decoder_selection macos_
 cargo test --locked -p plurx-core --features hiqlite-store --test decoder_selection cpu_hdr_to_sdr_consumes_only_static_hdr_metadata_in_both_producers
 cargo test --locked -p plurx-core --features hiqlite-store --test decoder_selection consumed_hdr_metadata_policy_leaves_unaffected_routes_unchanged
 cargo test --locked -p plurx-core --features hiqlite-store --lib transcode::recipe::tests::planned_v4_recipe_hash_is_a_golden_fixture
 cargo test --locked -p plurx-core --features hiqlite-store --lib transcode::recipe::tests::output_codec_contract_is_in_recipe_identity_without_invalidating_legacy_bytes
 cargo test --locked -p plurxd --bin plurxd macos_
+cargo test --locked -p plurxd --bin plurxd a_part_with_no_record_resumes_unobserved
 python3 tests/operations/test_macos_video_bench.py
 python3 tests/operations/test_macos_video_fixtures.py
 node tests/web/settings-sections.test.js
@@ -375,3 +381,28 @@ soak gaps remain the open acceptance rows above, not unit-test substitutes.
 The PR carries concrete `Regression-Test:` fields that must survive in the
 landing commit. Superficial test repairs may be made by the coordinator;
 behavior-changing findings return to this effort for implementation and review.
+
+## 8. Independent implementation review
+
+Three independent reviewers examined candidate `93658e211` against main
+`8e242787c`. The core/package and harness/daemon reviewers independently
+confirmed the same recovery defect; it is counted once. Runtime/fixture review
+found three additional defects. Repair review exposed one further producer
+identity mismatch, confirmed by tracing existing launch ownership. No reviewer
+ran unit tests or compiled source.
+
+| ID | Priority / owner | Confirmed issue | Disposition |
+|---|---|---|---|
+| AR-01 | P2 · native builder | Re-resolving already-selected Mac options under required software decode rejects before the existing grade-preserving downgrade; production recovery alternate disappears | Resolved: `85e1d9b24` uses existing CPU downgrade under software restriction; selected-options and stale-readiness regressions compiled; independent core re-review accepted |
+| AR-02 | P2 · runtime builder | FFprobe-only dynamic dependencies are not covered by the FFmpeg-derived implementation digest | Resolved: `4e93665ef`; both-program system-only inventories and OS identity; independent re-review and pinned compile/hook passed |
+| AR-03 | P2 · runtime builder | Dependency capture/stat awaits escape the identity deadline and cancellation owner | Resolved: `4e93665ef`; one aggregate identity deadline and off-runtime resolution; independent re-review and pinned compile/hook passed |
+| AR-04 | P2 · runtime builder | Dropped blocking output writer can rename after cleanup, leaving an unowned probe file | Resolved: `4e93665ef`; writer settles before cleanup; deterministic regressions compiled, not run; independent re-review accepted |
+| AR-05 | P1 · daemon builder | Configured FFmpeg symlink can resolve to B while the frozen Mac plan records observed implementation A, including offline parts | Resolved: `181a9494b` binds VOD/rolling/offline launches to the frozen implementation; `575a68abc` requires sealed positive Mac part completion before resume, invalidates stale receipts before launch and refuses failed writes/cleanup. Both deltas independently accepted; pinned compile and normal hooks passed |
+
+Coverage includes all three builders: official package acquisition and every
+core plan/recipe change; harness/provenance, daemon manager/settings/auth/UI,
+metrics and retry ownership; corpus/generator/runtime probes, private cache,
+child lifetime and identity. Cross-builder interfaces were traced. The review
+is complete for this source candidate: every correction was independently
+checked. Review and compilation do not substitute for coordinator-owned
+regression execution or the open M6 acceptance rows.
