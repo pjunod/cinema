@@ -624,6 +624,7 @@ paths = [
   "crates/plurxd/src/transcode.rs",
   "crates/plurxd/src/transcode/**",
   "crates/plurxd/fixtures/macos-processing/**",
+  "crates/plurxd/src/macos_video.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
