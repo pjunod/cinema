@@ -211,6 +211,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
         "planned numbers cannot substitute for complete bytes"
     );
     let sink = RenditionSink {
+        retirement: tokio_util::sync::CancellationToken::new(),
         shared: Arc::clone(&serve.shared),
         rendition: Arc::clone(&rendition),
         epoch: 0,
@@ -1756,6 +1757,7 @@ mod tests {
             .expect("init");
         serve.shared.retained_artifacts.collect(temp.path()).await;
         let sink = RenditionSink {
+            retirement: tokio_util::sync::CancellationToken::new(),
             shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition),
             epoch: 0,
@@ -2284,6 +2286,7 @@ mod tests {
             "complete_cache and planned numbers are not measurement"
         );
         let sink = RenditionSink {
+            retirement: tokio_util::sync::CancellationToken::new(),
             shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition),
             epoch: 0,

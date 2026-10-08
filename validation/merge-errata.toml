@@ -257,3 +257,11 @@ parents = ["cca4a09b997171ba91136b396f7d484097305fd0", "397dfa991fcd185d9c8199f7
 title = "fix(sharing): promote shared libraries with Source-owned playback and custody"
 pull = "828"
 reason = "Verified PR828 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All100 original trailers remain mandatory own-tree evidence; this row recognizes identity only and waives no checks."
+
+[[errata]]
+commit = "4e98734d17790c822aaa7afe5289d4d3e32c71ba"
+reason = "Fast lane for PR #915 found this existing corrective commit in main ancestry outside an audited PR landing. Its own immutable message carries Regression-Test: crates/plurx-core/src/store/sharing_source_session_tests.rs::sharing_source_ingress_admission_accepts_current_accounting_but_refuses_changed_authority. Record the missing landing attribution without changing the audit boundary or claiming a new test run; #915 carries its own checked regression trailers into its landing."
+
+[[errata]]
+commit = "b6ebc3f6e7ccacf7d04efd24f0f312f81d797315"
+reason = "Fast lane for PR #915 found this existing corrective commit in main ancestry outside an audited PR landing. Its immutable message carries four Regression-Test anchors in tests/operations/test_vaapi_failure_capture.py, including test_fixed_signal_selection_preserves_ramp_and_original_sharp_reference and test_failed_luma_keeps_full_identity_coordinates_and_reference_regions. Record the missing landing attribution without changing the audit boundary or claiming a new test run; #915 carries its own checked regression trailers into its landing."
