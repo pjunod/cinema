@@ -1772,7 +1772,6 @@ jobs:
       - android_jvm
       - apple
       - android_device
-      - coverage
       - package_smoke
       - publish
       - publish_main
@@ -1795,7 +1794,7 @@ jobs:
             ${{ needs.cluster_wal.result }} ${{ needs.cluster_daemon.result }}
             ${{ needs.web_layout.result }} ${{ needs.vod_web.result }}
             ${{ needs.android_jvm.result }} ${{ needs.apple.result }}
-            ${{ needs.android_device.result }} ${{ needs.coverage.result }}
+            ${{ needs.android_device.result }}
             ${{ needs.package_smoke.result }} ${{ needs.publish.result }}
             ${{ needs.publish_main.result }} ${{ needs.pr_gate.result }}
         run: |

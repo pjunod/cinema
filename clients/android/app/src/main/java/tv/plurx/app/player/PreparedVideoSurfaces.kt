@@ -30,7 +30,12 @@ import java.util.concurrent.Executor
 // Construction is private and the sole factory verifies the platform API.
 @SuppressLint("NewApi")
 internal class PreparedVideoSurfaces private constructor() {
-    private class Output(val player: ExoPlayer, val control: SurfaceControl) {
+    private class Output(
+        val player: ExoPlayer,
+        val control: SurfaceControl,
+        val surfaceWidth: Int,
+        val surfaceHeight: Int,
+    ) {
         val surface = Surface(control)
         val pendingFrame = PreparedFirstFrameSlot()
         lateinit var metadata: VideoFrameMetadataListener
@@ -188,12 +193,14 @@ internal class PreparedVideoSurfaces private constructor() {
         val host = view ?: return
         if (!host.holder.surface.isValid || !host.surfaceControl.isValid) return
         check(outputs.size < 2) { "Prepared output overlap exceeds two decoders" }
+        val surfaceWidth = host.width.coerceAtLeast(1)
+        val surfaceHeight = host.height.coerceAtLeast(1)
         val control = SurfaceControl.Builder()
             .setName("plurx-video-output")
             .setParent(host.surfaceControl)
-            .setBufferSize(host.width.coerceAtLeast(1), host.height.coerceAtLeast(1))
+            .setBufferSize(surfaceWidth, surfaceHeight)
             .build()
-        val output = Output(player, control)
+        val output = Output(player, control, surfaceWidth, surfaceHeight)
         output.width = player.videoSize.width
         output.height = player.videoSize.height
         output.pixelRatio = player.videoSize.pixelWidthHeightRatio
@@ -237,13 +244,12 @@ internal class PreparedVideoSurfaces private constructor() {
         if (!host.holder.surface.isValid) return
         SurfaceControl.Transaction().use { change ->
             for (output in outputs.values) {
-                if (output.width <= 0 || output.height <= 0) continue
-                val displayWidth = output.width * output.pixelRatio
-                val scale = minOf(host.width.toFloat() / displayWidth, host.height.toFloat() / output.height)
-                if (!scale.isFinite() || scale <= 0) continue
-                change.setScale(output.control, scale * output.pixelRatio, scale)
-                    .setPosition(output.control, (host.width - displayWidth * scale) / 2,
-                        (host.height - output.height * scale) / 2)
+                val geometry = preparedVideoGeometry(
+                    host.width, host.height, output.surfaceWidth, output.surfaceHeight,
+                    output.width, output.height, output.pixelRatio,
+                ) ?: continue
+                change.setScale(output.control, geometry.scaleX, geometry.scaleY)
+                    .setPosition(output.control, geometry.left, geometry.top)
             }
             change.apply()
         }

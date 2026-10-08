@@ -1,6 +1,23 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Reviewed Mac completion client changes: source/test anchors, not execution receipts.
+[[fixes]]
+id = "android.hls-hevc-retains-measured-envelope"
+commits = ["0d6a466cd521963dcec5bfb13604c31d86496f6e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = 'if (displayAwareAuto || (entry.codec == "hevc" && !hlsHevcSampleEntries.isNullOrEmpty())) {'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "hlsHevcKeepsMeasuredEnvelopeWhenDisplayAwareAutoIsOff"
+
+[[fixes]]
+id = "apple.hls-hevc-independent-transport-claim"
+commits = ["a542ab1403a979fb1cbd84f306363560e4615955"]
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = 'return supported ? ["hvc1"] : []'
+test = "clients/apple/Tests/SharedDecisionClientTests.swift"
+test_anchor = "testHlsHevcPackagingClaimIsIndependentAndPreservesExplicitEmpty"
+
 # Cinema B03: current source/test anchor for the authored navigation commit.
 # Execution evidence remains in PR863's focused XCTest receipt.
 [[fixes]]
@@ -5780,3 +5797,20 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func queueBlackFrameRecovery"
 test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
 test_anchor = "testQueuedBlackFrameRecoveryRearmsAfterViewerActionSupersedesTrigger"
+
+[[fixes]]
+id = "android.prepared-video-surface-coordinate-space"
+commits = ["32b2111d9", "142d9f4e0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "host.width, host.height, output.surfaceWidth, output.surfaceHeight,"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PreparedVideoSurfaceRenderingTest.kt"
+test_anchor = "decoderFrameFillsThePreparedSurfaceWidth"
+
+[[fixes]]
+id = "android.playback-panel-light-theme-contrast"
+commits = []
+supplements = "android.prepared-video-surface-coordinate-space"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "color = if (selected) Accent else OnBg"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
+test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
