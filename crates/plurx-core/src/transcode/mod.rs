@@ -2874,6 +2874,35 @@ mod tests {
     }
 
     #[test]
+    fn software_encoder_vulkan_graph_uses_cpu_frame_handoff_without_upload_context() {
+        let source = file(Some("hdr10"));
+        let options = TranscodeOptions {
+            pipeline: Pipeline::LibplaceboSoftware,
+            target_height: 720,
+            ..Default::default()
+        };
+        let args = hls_args(
+            &source,
+            Encoder::Software,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/session",
+        );
+        let vf = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("production video arguments include a filter graph")
+            + 1];
+        assert!(vf.contains("format=rgba64le,setparams=colorspace=gbr,libplacebo="));
+        assert!(!vf.contains("hwupload"));
+        assert!(!vf.contains("hwdownload"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "-init_hw_device" || arg == "-filter_hw_device"));
+        assert!(args.iter().any(|arg| arg == "libx264"));
+    }
+
+    #[test]
     fn vulkan_playback_returns_frames_to_the_vaapi_encoder() {
         let source = file(Some("hdr10"));
         let options = TranscodeOptions {

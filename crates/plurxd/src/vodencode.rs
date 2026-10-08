@@ -318,23 +318,40 @@ struct EncodeReservation {
 pub(crate) struct RetainedEncodeAdmission {
     reservation: Mutex<std::sync::Weak<EncodeReservation>>,
 }
+/// Stabilize the weak binding during a family's one atomic pool decision.
+/// This synchronous guard is held only after all asynchronous policy reads.
+pub(crate) struct RetainedEncodeBinding<'a> {
+    reservation: std::sync::MutexGuard<'a, std::sync::Weak<EncodeReservation>>,
+}
+
 impl RetainedEncodeAdmission {
+    pub(crate) fn lock_binding(&self) -> RetainedEncodeBinding<'_> {
+        RetainedEncodeBinding {
+            reservation: self
+                .reservation
+                .lock()
+                .expect("retained rendition admission"),
+        }
+    }
+
     pub(crate) fn current(&self) -> Option<EncodePermit> {
-        self.reservation
-            .lock()
-            .expect("retained rendition admission")
-            .upgrade()
-            .map(|reservation| EncodePermit {
-                _reservation: reservation,
-            })
+        self.lock_binding().current()
     }
 
     pub(crate) fn bind(&self, admitted: EncodePermit) -> EncodePermit {
-        let mut binding = self
-            .reservation
-            .lock()
-            .expect("retained rendition admission");
-        if let Some(existing) = binding.upgrade() {
+        self.lock_binding().bind(admitted)
+    }
+}
+
+impl RetainedEncodeBinding<'_> {
+    pub(crate) fn current(&self) -> Option<EncodePermit> {
+        self.reservation.upgrade().map(|reservation| EncodePermit {
+            _reservation: reservation,
+        })
+    }
+
+    pub(crate) fn bind(&mut self, admitted: EncodePermit) -> EncodePermit {
+        if let Some(existing) = self.reservation.upgrade() {
             // An attachment arriving while ordinary admission was in flight
             // already owns this rendition's exact credit. Release the newly
             // admitted duplicate and preserve the existing worker claim.
@@ -342,7 +359,7 @@ impl RetainedEncodeAdmission {
                 _reservation: existing,
             }
         } else {
-            *binding = Arc::downgrade(&admitted._reservation);
+            *self.reservation = Arc::downgrade(&admitted._reservation);
             admitted
         }
     }
@@ -356,6 +373,17 @@ pub(crate) struct EncodeWorkerPermit {
 }
 
 impl EncodePermit {
+    pub(crate) fn retained_resources(&self) -> crate::admission::RetainedTranscodePermit<'_> {
+        crate::admission::RetainedTranscodePermit {
+            hardware: self._reservation._hardware.as_ref(),
+            software: self._reservation._software.as_ref(),
+        }
+    }
+
+    pub(crate) fn family_id(&self) -> Option<u64> {
+        self.retained_resources().family_id()
+    }
+
     pub(crate) fn try_claim_worker(self) -> Option<EncodeWorkerPermit> {
         self._reservation
             .worker_claimed
