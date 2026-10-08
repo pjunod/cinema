@@ -2,6 +2,11 @@
 
 package tv.plurx.app.livetv
 
+import androidx.compose.runtime.SideEffect
+import tv.plurx.app.remote.*
+import kotlinx.serialization.json.*
+import java.util.UUID
+
 import tv.plurx.app.player.PlaybackInfoPanel
 import tv.plurx.app.player.PlaybackInfoFact
 import tv.plurx.app.player.PlaybackStatsMode
@@ -453,6 +458,70 @@ fun LiveTvScreen(
         overlayVisible -> LiveTvInputState.FullscreenControls
         else -> LiveTvInputState.FullscreenHidden
     }
+    val remoteClient = LocalRemoteClient.current
+    val remoteNavigation = LocalRemoteNavigation.current
+    val remoteScope = LocalRemoteScope.current
+    val remoteOwnerToken = remember(controller, remoteScope) { UUID.randomUUID().toString() }
+    var remoteCaptions by remember { mutableStateOf(false) }
+    data class OwnedCaption(val id: String, val label: String, val selected: Boolean, val choose: () -> RemoteOutcome)
+    fun captionOptions(): List<OwnedCaption> {
+        val player = controller.player ?: return emptyList()
+        val text = player.currentTracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
+        if (text.isEmpty()) return emptyList()
+        val options = mutableListOf(OwnedCaption("captions-off", "Off", !player.currentTracks.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_TEXT)) {
+            if (controller.player !== player) RemoteOutcome.Unavailable else {
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT).setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build(); RemoteOutcome.Applied
+            }
+        })
+        text.forEachIndexed { groupIndex, group -> for (index in 0 until group.length) if (group.isTrackSupported(index)) options += OwnedCaption("caption:" + UUID.nameUUIDFromBytes((group.mediaTrackGroup.id + ":" + index + ":" + group.getTrackFormat(index).id).toByteArray()), group.getTrackFormat(index).label ?: group.getTrackFormat(index).language ?: "Caption ${index + 1}", group.isTrackSelected(index)) {
+            if (controller.player !== player || group !in player.currentTracks.groups) RemoteOutcome.Unavailable else {
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, index)).setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false).build(); RemoteOutcome.Applied
+            }
+        } }
+        return options.take(64)
+    }
+    fun remoteCapabilities(): Set<String> = if (isInPip || showingInfo || showingMore || showingCaptions || detail != null) emptySet() else
+        setOf("navigate", "select", "back") + (if (state.playing && !state.busy) setOf("set_playing", "stop") else emptySet()) +
+            (if (captionOptions().isNotEmpty()) setOf("open_tracks", "choose_track") else emptySet())
+    fun remoteDispatch(action: RemoteAction): RemoteOutcome {
+        if (action.type !in remoteCapabilities()) return RemoteOutcome.Unsupported
+        when (action.type) {
+            "set_playing" -> return if (controller.requestRemotePlaying(action.boolean("playing") == true)) RemoteOutcome.Applied else RemoteOutcome.Unavailable
+            "stop" -> { if (!controller.requestRemotePlaying(false)) return RemoteOutcome.Unavailable; controller.stop(); fullscreen = false; return RemoteOutcome.Applied }
+            "open_tracks" -> { if (action.text("kind") != "subtitles" || remoteCaptions || captionOptions().isEmpty()) return RemoteOutcome.Unsupported; remoteNavigation?.changedContext(); remoteCaptions = true; return RemoteOutcome.Applied }
+            "choose_track" -> {
+                if (remoteNavigation?.ownedChoicesReady != true || !remoteCaptions || action.text("kind") != "subtitles") return RemoteOutcome.Unsupported
+                val option = captionOptions().firstOrNull { it.id == action.text("option_id") } ?: return RemoteOutcome.Unavailable
+                val result = option.choose()
+                if (result == RemoteOutcome.Applied) { remoteNavigation?.dispatch(RemoteAction("back", buildJsonObject {}), remoteNavigation.context); remoteCaptions = false }
+                return result
+            }
+        }
+        if (remoteCaptions) return remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unavailable
+        val input = when (action.type) {
+            "navigate" -> when (action.text("direction")) { "left" -> LiveTvContractInput.Left; "right" -> LiveTvContractInput.Right; "up" -> LiveTvContractInput.Up; else -> LiveTvContractInput.Down }
+            "select" -> LiveTvContractInput.Select
+            "back" -> LiveTvContractInput.Back
+            else -> return RemoteOutcome.Unsupported
+        }
+        val outcome = LiveTvInputPolicy.route(surface, inputState(), input)
+        if (outcome == LiveTvInputOutcome.Ignore) return RemoteOutcome.Unsupported
+        if (outcome in setOf(LiveTvInputOutcome.ChannelUp, LiveTvInputOutcome.ChannelDown) && LiveTvGuideReducer.adjacent(visible.map { it.id }, state.watching?.id, if (outcome == LiveTvInputOutcome.ChannelUp) -1 else 1) == null) return RemoteOutcome.Unsupported
+        return if (applyOutcome(outcome)) RemoteOutcome.Applied else remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unsupported
+    }
+    SideEffect {
+        remoteClient?.playback?.attach(RemotePlaybackAdapter.Owner(remoteOwnerToken, remoteScope, ::remoteCapabilities, {
+            state.watching?.takeIf { state.playing }?.let { channel -> buildJsonObject {
+                put("media", buildJsonObject { put("type", "live_channel"); put("channel_id", channel.id) })
+                put("title", RemoteWire.safeLabel(channel.title)); put("playing", !state.paused)
+                put("position_ms", 0); put("duration_ms", 0)
+                put("tracks", JsonArray(captionOptions().map { option -> buildJsonObject { put("kind", "subtitles"); put("option_id", option.id); put("label", RemoteWire.safeLabel(option.label)) } }))
+            } }
+        }, ::remoteDispatch, {}, { !isInPip && !showingInfo && !showingMore && !showingCaptions && detail == null && (!remoteCaptions || remoteNavigation?.ownedChoicesReady == true) }))
+    }
+    DisposableEffect(remoteClient, remoteOwnerToken) { onDispose { remoteClient?.playback?.detach(remoteOwnerToken) } }
+    if (isInPip || showingInfo || showingMore || showingCaptions || detail != null) RemoteRestricted()
+    if (remoteCaptions) RemoteChoiceDialog("Captions", captionOptions().map { option -> RemoteChoice(option.id, option.label, option.selected, option.choose) }) { remoteCaptions = false; lastInteraction += 1 }
     // Each host builds its own PlayerView; see LiveTvPlayerSurface.
     val playerSurface: @Composable () -> Unit = remember(controller) {
         { LiveTvPlayerSurface(controller) }
@@ -569,7 +638,7 @@ fun LiveTvScreen(
                     guideAnchorTime = anchor
                     tvFocusedChannelId = target.channelId
                 },
-                onCaptions = { showingCaptions = true },
+                onCaptions = { if (television) remoteCaptions = true else showingCaptions = true },
                 onReload = controller::refresh,
                 onClearFilters = {
                     search = ""
@@ -718,7 +787,7 @@ fun LiveTvScreen(
                         onChannels = { fullscreen = false },
                         onTogglePause = { controller.togglePause(); lastInteraction += 1 },
                         onInfo = { showingInfo = true; lastInteraction += 1 },
-                        onCaptions = { showingCaptions = true; lastInteraction += 1 },
+                        onCaptions = { if (television) remoteCaptions = true else showingCaptions = true; lastInteraction += 1 },
                         onMore = { showingMore = true; lastInteraction += 1 },
                         onDismissMore = { showingMore = false; lastInteraction += 1 },
                         layout = tvLayout,
@@ -762,7 +831,7 @@ fun LiveTvScreen(
                     onTogglePause = controller::togglePause,
                     onToggleMute = controller::toggleMute,
                     onInfo = { showingInfo = true },
-                    onCaptions = { showingCaptions = true },
+                    onCaptions = { if (television) remoteCaptions = true else showingCaptions = true },
                     onStop = { controller.stop() },
                 )
             }

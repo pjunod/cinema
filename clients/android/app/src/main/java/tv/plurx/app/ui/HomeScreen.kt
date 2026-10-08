@@ -3,7 +3,6 @@ package tv.plurx.app.ui
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
-
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -69,6 +68,7 @@ import tv.plurx.app.ui.components.imageUrl
 import tv.plurx.app.ui.components.itemResolutionFact
 import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
+import tv.plurx.app.remote.*
 
 /** The "Group by" picker's place in the vertical D-pad chain. */
 private const val GROUPING_KEY = "grouping"
@@ -78,6 +78,7 @@ private data class HomeCollection(
     val libraries: List<Library>,
     val items: List<Item>,
 )
+
 
 @Composable
 fun HomeScreen(
@@ -145,6 +146,15 @@ fun HomeScreen(
                         add("collection-${it.title}")
                     }
                 }
+                RemoteOrder(buildList {
+                    add("home:search"); add("home:live")
+                    listOf("Continue watching" to continueShelfItems, "Next up" to state.hubs.next_up, "Recently added" to state.hubs.recently_added).forEach { (key, items) -> items.forEach { add("row:" + key + ":item:" + it.id) } }
+                    add("choice:Group by")
+                    collections.forEach { collection ->
+                        val key = "collection:" + collection.libraries.joinToString(",") { it.id.toString() }
+                        add("row:" + key + ":all"); collection.items.forEach { add("row:" + key + ":item:" + it.id) }
+                    }
+                }.distinct().take(16384))
                 val shelfFocus = remember(visibleShelfKeys) {
                     visibleShelfKeys.associateWith { FocusRequester() }
                 }
@@ -270,6 +280,7 @@ fun HomeScreen(
                         val key = "collection-${collection.title}"
                         MediaRow(
                             title = collection.title,
+                            remoteKey = "collection:" + collection.libraries.joinToString(",") { it.id.toString() },
                             items = collection.items,
                             posterWidth = posterWidth,
                             onViewAll = { onOpenCollection(collection.title, collection.libraries) },
@@ -452,10 +463,10 @@ internal fun HomeTopBar(
         TvIconButton(onClick = onRefresh) {
             Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = Muted)
         }
-        TvIconButton(onClick = onSearch) {
+        TvIconButton(onClick = onSearch, modifier = Modifier.remoteAction("home:search", "Search") { onSearch(); RemoteOutcome.Applied }) {
             Icon(Icons.Filled.Search, contentDescription = "Search", tint = Muted)
         }
-        TvIconButton(onClick = onOpenLiveTv) {
+        TvIconButton(onClick = onOpenLiveTv, modifier = Modifier.remoteAction("home:live", "Live TV") { onOpenLiveTv(); RemoteOutcome.Applied }) {
             Icon(Icons.Filled.LiveTv, contentDescription = "Live TV", tint = Muted)
         }
         TvIconButton(onClick = onOpenRecordings) {
