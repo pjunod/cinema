@@ -576,12 +576,63 @@ fn macos_processing_continuous_vod_does_not_relax_rate_or_auto_quality_contracts
         .with_auto_quality_rate_profile(AutoQualityRateProfile::H264Sdr1440P30V1);
     let plan = resolve_transcode(&auto, &input, &caps, &policy, &AttemptRestrictions::none())
         .expect("existing auto quality route");
-    assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+    assert_eq!(plan.options().pipeline, Pipeline::VtScaleSdr);
     assert_eq!(
         plan.macos_processing_selection(),
+        Some(MacosProcessingSelection::Selected)
+    );
+    assert!(plan.macos_processing_identity().is_some());
+    assert_eq!(plan.output_contract().effective_width(), Some(2560));
+    assert_eq!(plan.output_contract().effective_height(), Some(1440));
+    assert_eq!(plan.output_contract().output_profile(), Some("high"));
+    assert_eq!(plan.options().video_bitrate_kbps, 12_000);
+    let source = execution_file("/fixture/source.mkv");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let args = hls_args(&plan, &execution);
+    let graph = &args[args.iter().position(|arg| arg == "-vf").expect("vf") + 1];
+    assert!(graph.starts_with("fps=24/1,"));
+    assert!(graph.contains(
+        &Pipeline::VtScaleSdr
+            .filters(Some(2560), 1440, Some("sdr"))
+            .expect("native scale")
+    ));
+    assert!(graph.ends_with(",setsar=1"));
+    assert!(!graph.contains("hwdownload"));
+    let mut too_fast = macos_stream(false);
+    too_fast["avg_frame_rate"] = json!("60/1");
+    too_fast["r_frame_rate"] = json!("60/1");
+    assert_eq!(
+        resolve_transcode(
+            &auto,
+            &facts(too_fast),
+            &caps,
+            &policy,
+            &AttemptRestrictions::none()
+        ),
+        Err(PlanError::InvalidMediaOption("auto_quality_rate_profile"))
+    );
+    let mut anamorphic = macos_stream(false);
+    anamorphic["width"] = json!(2880);
+    anamorphic["sample_aspect_ratio"] = json!("4:3");
+    let incumbent = resolve_transcode(
+        &auto,
+        &facts(anamorphic),
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("existing normalization path");
+    assert_eq!(incumbent.options().pipeline, Pipeline::Cpu);
+    assert_eq!(
+        incumbent.macos_processing_selection(),
         Some(MacosProcessingSelection::PresentationConstraint)
     );
-    assert!(plan.macos_processing_identity().is_none());
 }
 
 #[test]

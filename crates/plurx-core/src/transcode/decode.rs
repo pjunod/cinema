@@ -3701,7 +3701,14 @@ fn select_macos_processing(
         )
         || (options.pipeline.output_grade() == OutputGrade::Hdr10
             && options.subtitle_burn.is_some())
-        || request.rate_profile.is_some()
+        || (request.rate_profile.is_some()
+            && !(request.rate_profile == Some(AutoQualityRateProfile::H264Sdr1440P30V1)
+                && request.normalized_geometry
+                && options.pipeline.output_grade() == OutputGrade::Sdr
+                && options.output_codec != Some(super::VideoCodec::Hevc)
+                && options.subtitle_burn.is_none()
+                && facts.scan_type() == ScanType::Progressive
+                && facts.dynamic_range_class() == Some(DynamicRangeClass::Sdr)))
         || !matches!(
             options.video_sample_envelope,
             VideoSampleEnvelope::EncoderDefault | VideoSampleEnvelope::ContinuousAvcHigh50
