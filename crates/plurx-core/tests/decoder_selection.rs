@@ -235,6 +235,124 @@ fn macos_processing_respects_software_and_failed_graph_restrictions() {
 }
 
 #[test]
+fn macos_selected_options_preserve_software_decode_recovery_for_sdr_and_hdr10() {
+    for hdr in [false, true] {
+        let input = facts(macos_stream(hdr));
+        let caps = unqualified_software_capabilities("hevc");
+        let policy = macos_policy(macos_context(true, MacosProcessingAvailability::Available));
+        let original = resolve(
+            Encoder::VideoToolbox,
+            Pipeline::Cpu,
+            &input,
+            &caps,
+            policy.clone(),
+        )
+        .expect("selected Mac plan");
+        assert!(original.macos_processing_identity().is_some());
+        let selected_request =
+            TranscodeRequest::new(original.encoder(), original.options().clone());
+        let restrictions = AttemptRestrictions::requiring(DecodeBackend::Software);
+        let alternate = resolve_transcode(&selected_request, &input, &caps, &policy, &restrictions)
+            .expect("software alternate from selected media options");
+        assert_eq!(alternate.decode().backend(), DecodeBackend::Software);
+        assert_eq!(alternate.options().pipeline, Pipeline::Cpu);
+        assert_eq!(alternate.output_contract().output_grade(), OutputGrade::Sdr);
+        assert_eq!(
+            alternate.output_contract().output_grade(),
+            original.output_contract().output_grade()
+        );
+        assert_eq!(alternate.macos_processing_identity(), None);
+        assert_eq!(
+            alternate.macos_processing_selection(),
+            Some(MacosProcessingSelection::RecoveryRestriction)
+        );
+        assert_ne!(alternate.plan_digest(), original.plan_digest());
+        let cpu = resolve_transcode(
+            &TranscodeRequest::new(Encoder::VideoToolbox, options(Pipeline::Cpu)),
+            &input,
+            &caps,
+            &policy,
+            &restrictions,
+        )
+        .expect("ordinary restricted CPU plan");
+        assert_eq!(alternate.plan_digest(), cpu.plan_digest());
+        let source = execution_file("/fixture/source.mkv");
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("execution");
+        assert_eq!(hls_args(&alternate, &execution), hls_args(&cpu, &execution));
+        assert!(hls_args(&alternate, &execution)
+            .windows(2)
+            .any(|pair| pair == ["-hwaccel", "none"]));
+    }
+}
+
+#[test]
+fn macos_software_recovery_survives_readiness_changes_without_authorizing_mac_graphs() {
+    for hdr in [false, true] {
+        let input = facts(macos_stream(hdr));
+        let caps = unqualified_software_capabilities("hevc");
+        let original = resolve(
+            Encoder::VideoToolbox,
+            Pipeline::Cpu,
+            &input,
+            &caps,
+            macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+        )
+        .expect("selected Mac plan before readiness changes");
+        let request = TranscodeRequest::new(original.encoder(), original.options().clone());
+        let restrictions = AttemptRestrictions::requiring(DecodeBackend::Software);
+        let baseline = resolve_transcode(
+            &TranscodeRequest::new(Encoder::VideoToolbox, options(Pipeline::Cpu)),
+            &input,
+            &caps,
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &restrictions,
+        )
+        .expect("CPU software identity");
+        for policy in [
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            macos_policy(macos_context(false, MacosProcessingAvailability::Available)),
+            macos_policy(macos_context(true, MacosProcessingAvailability::Pending)),
+            macos_policy(macos_context(
+                true,
+                MacosProcessingAvailability::Unavailable,
+            )),
+            macos_policy(
+                macos_context(true, MacosProcessingAvailability::Available)
+                    .excluding_pipeline(original.options().pipeline),
+            ),
+        ] {
+            let alternate = resolve_transcode(&request, &input, &caps, &policy, &restrictions)
+                .expect("software recovery does not execute the unavailable Mac graph");
+            assert_eq!(alternate.decode().backend(), DecodeBackend::Software);
+            assert_eq!(alternate.options().pipeline, Pipeline::Cpu);
+            assert_eq!(
+                alternate.output_contract().output_grade(),
+                original.output_contract().output_grade()
+            );
+            assert!(alternate.macos_processing_identity().is_none());
+            assert_eq!(alternate.plan_digest(), baseline.plan_digest());
+            assert_eq!(
+                resolve_transcode(
+                    &request,
+                    &input,
+                    &caps,
+                    &policy,
+                    &AttemptRestrictions::none()
+                ),
+                Err(PlanError::IncompatibleRenderer),
+                "unrestricted unqualified Mac graph must still reject"
+            );
+        }
+    }
+}
+
+#[test]
 fn macos_processing_cannot_be_selected_without_context_or_for_burns() {
     let input = facts(macos_stream(false));
     let caps = unqualified_software_capabilities("hevc");

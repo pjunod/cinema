@@ -3124,7 +3124,17 @@ pub fn resolve_transcode(
         options.pipeline,
         Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal
     ) {
-        return Err(PlanError::IncompatibleRenderer);
+        // Recovery re-resolves the selected plan's media options. Software
+        // decode must reach the existing grade-preserving renderer downgrade,
+        // even if the saved Mac preference or readiness has changed. This
+        // restriction cannot execute a Mac graph and needs no Mac identity.
+        // Unrestricted explicit Mac requests still require authorization.
+        let software_restricted = restrictions.permits(DecodeBackend::Software)
+            && (policy.force_software_decode()
+                || !restrictions.permits(DecodeBackend::VideoToolbox));
+        if !software_restricted {
+            return Err(PlanError::IncompatibleRenderer);
+        }
     }
     if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50
         && (!request.normalized_geometry
