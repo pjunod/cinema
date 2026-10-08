@@ -4831,7 +4831,7 @@ class Controller internal constructor(
         }
         preparedPlayer = built.player
         if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
-            abandonPreparedReplacement(failed = true)
+            abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.CONSTRUCTION_OVERLAP)
             return
         }
         val openedAtMs = preparedStartedAtMs
@@ -4839,7 +4839,7 @@ class Controller internal constructor(
         preparedReadinessDeadlineJob = scope.launch {
             delay((PREPARED_OVERLAP_BOUND_MS - (monotonicNowMs() - openedAtMs)).coerceAtLeast(1))
             if (preparedPlayer === built.player && preparedStartedAtMs == openedAtMs) {
-                abandonPreparedReplacement(failed = true)
+                abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.OVERLAP_WATCHDOG)
             }
         }
         try {
@@ -4881,7 +4881,7 @@ class Controller internal constructor(
                 // session's one preparation slot on a stale event.
                 val errored = built.player
                 scope.launch {
-                    if (preparedPlayer === errored) abandonPreparedReplacement(failed = true)
+                    if (preparedPlayer === errored) abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.PLAYER_ERROR, errorCode = error.errorCode)
                 }
             }
 
@@ -4988,13 +4988,13 @@ class Controller internal constructor(
             if (observation == null || !autoStagedObservationCurrent(observation, now) ||
                 player.bufferedPosition - player.currentPosition < 10_000L || pressure || linkPressure ||
                 (autoBoundaryAttempt?.let(::autoBoundaryIsCurrent) != true && !autoUpgradeEvidence.allowsUpgrade(now))) {
-                abandonPreparedReplacement(failed = true)
+                abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.AUTO_READINESS_REVOKED)
                 return
             }
         }
         if (monotonicNowMs() - preparedStartedAtMs >=
             minOf(PREPARED_READINESS_BOUND_MS, PREPARED_OVERLAP_BOUND_MS)) {
-            abandonPreparedReplacement(failed = true)
+            abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.READINESS_OVERLAP)
             return
         }
         if (successor.playbackState != Player.STATE_READY) return
@@ -5048,7 +5048,7 @@ class Controller internal constructor(
                 val successor = preparedPlayer ?: return@launch
                 if (!preparedLedger.isLive) return@launch
                 if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
-                    abandonPreparedReplacement(failed = true)
+                    abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.RENDEZVOUS_OVERLAP)
                     return@launch
                 }
                 if (!hold.isReady) {
@@ -5113,7 +5113,7 @@ class Controller internal constructor(
                             mediaMutationEpoch,
                             "prepared successor missed the rendezvous (${step.reason})",
                         )
-                        abandonPreparedReplacement(failed = true)
+                        abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.RENDEZVOUS_EXHAUSTED)
                         return@launch
                     }
                 }
@@ -5136,7 +5136,7 @@ class Controller internal constructor(
         val action = preparedLedger.action ?: return false
         val originMs = action.mediaOriginMs ?: return false
         if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
-            abandonPreparedReplacement(failed = true)
+            abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.COMMIT_OVERLAP)
             return false
         }
         val stagedFilmLocalVod = autoStagedObservation?.let {
@@ -5148,7 +5148,7 @@ class Controller internal constructor(
                 playbackIntent.desiredQuality == PlaybackQuality.Auto && tv.plurx.app.data.Session.autoAbr,
                 presentationForeground && player.isPlaying,
                 playbackIntent.pendingSeek != null)) {
-            abandonPreparedReplacement(failed = true)
+            abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.AUTO_COMMIT_REVOKED)
             return false
         }
         val desired = autoDesiredCandidate
@@ -5516,12 +5516,38 @@ class Controller internal constructor(
      * settling snapshot looks like — now live in `PreparedReplacement.kt`
      * where they are tested; this is the residue that genuinely needs a player.
      */
-    private fun abandonPreparedReplacement(failed: Boolean) {
+    private fun abandonPreparedReplacement(
+        failed: Boolean,
+        reason: PreparedFailureReason = PreparedFailureReason.UNSPECIFIED,
+        errorCode: Int? = null,
+    ) {
         // §3.3 row 18: a successor that failed is dropped and the incumbent is
         // untouched, so nothing is drawn and this event is the only trace the
         // viewer's session keeps of it. A deliberate abandonment — a seek, a
         // quality change, a release — is not a failure and says nothing.
         if (failed) {
+            // Capture before release resets readiness. Diagnostics must not own
+            // recovery, extend overlap, or fail teardown if a player read races.
+            runCatching {
+                val successor = preparedPlayer
+                val action = preparedLedger.action
+                val originMs = action?.mediaOriginMs
+                val target = rendezvous?.rendezvousFilmMs
+                val bufferedReady = if (successor != null && originMs != null && target != null)
+                    successorIsBuffered(successorFilmPositionMs(originMs, successor.bufferedPosition), target) else null
+                val warmReady = if (successor != null && originMs != null && target != null)
+                    preparedVideoSurfaces?.ready(successor, (target - originMs).coerceAtLeast(0)) else null
+                val diagnostic = PreparedFailureDiagnostic(
+                    reason, preparedLedger.phase, successor?.playbackState,
+                    successor?.currentTracks?.groups?.size, rendezvous != null,
+                    rendezvousSeekObserved, bufferedReady, warmReady,
+                    monotonicNowMs() - preparedStartedAtMs,
+                    action?.effectiveSelection?.height, errorCode,
+                )
+                playbackTelemetry.report(event = "prepared_successor_failure", level = "warn",
+                    message = "Prepared successor failed; incumbent outcome is reported separately.",
+                    code = errorCode, detail = diagnostic.detail())
+            }
             surfaceOwner.logOnly(
                 mediaMutationEpoch,
                 "prepared successor abandoned after it failed",
