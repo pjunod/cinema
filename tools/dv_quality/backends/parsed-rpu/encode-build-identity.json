@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "stage": "encode",
+  "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+  "platform": "linux/arm64",
+  "status": "passed",
+  "dependency_resolution": "prior replay image; live apt/pip may drift"
+}

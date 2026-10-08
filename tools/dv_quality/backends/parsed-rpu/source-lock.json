@@ -1,0 +1,13 @@
+{
+  "libdovi": {
+    "repo": "quietvoid/dovi_tool",
+    "sha": "83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+    "archive_sha256": "57d13f03d04a7a1b3d7dcb139b976dc3748c745c1720d4b6e44b61e5ef67b69b"
+  },
+  "libplacebo": "0d043c7f6f79cd3687c023454bdacbe615e4d96f",
+  "libplacebo_library_sha256": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1",
+  "header_source": "DoViBakerffba39830b694ddca0bf5f73dcf1b462713bb7f4/include/dovi/rpu_parser.h",
+  "header_sha256": "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82",
+  "workspace_patch": "appendworkspace dolby_vision; same approvedCPUsource-only build",
+  "resolved_lock_sha256": "715faa8e92b23a00dd7cb317ebf4cf17741c0a955ffc5710da69c505ee494309"
+}
