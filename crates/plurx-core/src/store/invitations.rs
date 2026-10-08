@@ -340,6 +340,10 @@ pub const ADVANCE_REVISION: &str = "UPDATE invitation_phones SET last_revision=m
 pub const COOLDOWN:&str="INSERT INTO invitation_cooldowns SELECT receiver_id,phone_id,created_at FROM invitation_events WHERE id=$1 ON CONFLICT(receiver_id,phone_id) DO UPDATE SET last_admitted_at=max(invitation_cooldowns.last_admitted_at,excluded.last_admitted_at)";
 #[async_trait]
 pub trait InvitationStore: Send + Sync {
+    async fn invitation_broker_health(
+        &self,
+        scope_hash: &str,
+    ) -> Result<InvitationBrokerHealth, StoreError>;
     async fn invitation_cleanup_budget(&self, user: i64) -> Result<i64, StoreError>;
     async fn start_invitation_transport(
         &self,

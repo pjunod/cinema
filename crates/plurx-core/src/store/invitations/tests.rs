@@ -402,3 +402,48 @@ fn invitations_legacy_orphan_and_mismatch_refuse_restore_and_fk_cascade() {
         }
     }
 }
+
+#[test]
+fn invitations_broker_health_retains_malformed_queued_references() {
+    let c = rusqlite::Connection::open_in_memory().expect("raw legacy queue");
+    c.execute_batch(SCHEMA).expect("adjunct schema");
+    let ticket = Uuid::new_v4().to_string();
+    let scope = "b".repeat(64);
+    let mut values = vec![
+        "not-json".to_owned(),
+        json_reference(&ticket, &"c".repeat(64)),
+    ];
+    values.push(format!(
+        "{{\"ticket_id\":\"{ticket}\",\"scope_hash\":null}}"
+    ));
+    for value in values {
+        c.execute(
+            "INSERT INTO invitation_broker_revocations VALUES(?1,1,?2,1,0,0,0)",
+            rusqlite::params![value, ticket],
+        )
+        .expect("legacy work");
+    }
+    let (budget, invalid, mismatched): (i64, i64, i64) = c
+        .query_row(&broker_health_query(), [scope], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .expect("bounded safe verdict");
+    assert_eq!((budget, invalid, mismatched), (3, 2, 1));
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM invitation_broker_revocations",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("retained rows"),
+        3
+    );
+}
+fn json_reference(ticket: &str, scope: &str) -> String {
+    BrokerReference {
+        ticket_id: ticket.to_owned(),
+        scope_hash: scope.to_owned(),
+    }
+    .encode()
+    .expect("reference")
+}

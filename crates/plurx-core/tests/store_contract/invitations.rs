@@ -4,7 +4,7 @@ use plurx_core::{
     store::{
         invitations::*,
         remote::{NewRemoteGrant, NewRemoteReceiver, RemoteGrant, RemoteReceiver},
-        RemoteStore,
+        RemoteStore, SettingsStore,
     },
 };
 fn id() -> String {
@@ -934,6 +934,41 @@ async fn invitations_reserved_limit_refuses_start_but_off_and_delete_complete() 
         store.invitation_cleanup_budget(f.user).await.expect("cap"),
         100000
     );
+    // Execute the exact reservation statements at capacity to model the budget
+    // filling after Hiqlite's advisory read and before its replicated txn.
+    let replacement = BrokerReference {
+        ticket_id: id(),
+        scope_hash: "b".repeat(64),
+    }
+    .encode()
+    .expect("reference");
+    let values = rusqlite::params![
+        f.phone,
+        f.receiver,
+        f.user,
+        f.phash,
+        f.grant,
+        f.ghash,
+        1,
+        2,
+        replacement,
+        "pending",
+        f.phone_digest
+    ];
+    let tx = raw
+        .unchecked_transaction()
+        .expect("capacity race transaction");
+    assert_eq!(
+        tx.execute(&start_cleanup_query(), values)
+            .expect("cleanup refuses at cap"),
+        0
+    );
+    assert_eq!(
+        tx.execute(&start_query(), values)
+            .expect("reserve refuses at cap"),
+        0
+    );
+    tx.commit().expect("no-effect transaction");
     start.expected_consent_generation = 2;
     start.reference.ticket_id = id();
     assert!(!store
@@ -1048,6 +1083,97 @@ async fn invitations_attempt_is_single_use_and_rechecks_current_authority() {
             .attempt_invitation(second)
             .await
             .expect("authoritative logout fences effect"));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invitations_scope_replacement_fences_issuance_and_retains_cleanup() {
+    for_each_backend(|store, _| async move {
+        let f = Fixture::new(store.as_ref()).await;
+        let mut consent = f.consent(0, true);
+        consent.enable = Some((f.grant.clone(), f.ghash.clone(), InvitationTransport::Fcm));
+        assert!(store
+            .save_invitation_consent(consent)
+            .await
+            .expect("consent"));
+        let reference = BrokerReference {
+            ticket_id: id(),
+            scope_hash: "b".repeat(64),
+        };
+        let start = StartInvitationTransport {
+            phone_id: f.phone.clone(),
+            receiver_id: f.receiver.clone(),
+            user_id: f.user,
+            phone_hash: f.phash.clone(),
+            grant_id: f.grant.clone(),
+            grant_hash: f.ghash.clone(),
+            login_digest: f.phone_digest.clone(),
+            expected_phone_generation: 1,
+            expected_consent_generation: 1,
+            reference: reference.clone(),
+            provider_available: true,
+            now: f.now,
+        };
+        assert!(store
+            .start_invitation_transport(start.clone())
+            .await
+            .expect("reserve"));
+        let health = store
+            .invitation_broker_health(&reference.scope_hash)
+            .await
+            .expect("scope snapshot");
+        assert_eq!(
+            (health.budget, health.invalid, health.mismatched),
+            (1, 0, 0)
+        );
+        let replacement = "c".repeat(64);
+        let mut other = start;
+        other.expected_consent_generation = 2;
+        other.reference = BrokerReference {
+            ticket_id: id(),
+            scope_hash: replacement.clone(),
+        };
+        assert!(!store
+            .start_invitation_transport(other)
+            .await
+            .expect("replacement refused"));
+        assert!(store
+            .invitation_revocations()
+            .await
+            .expect("no side effect on refused replacement")
+            .is_empty());
+        let old = store
+            .invitation_consent(&f.phone, &f.receiver, f.user)
+            .await
+            .expect("old consent")
+            .expect("row");
+        assert_eq!(old.generation, 2);
+        assert_eq!(
+            old.broker_ticket.as_deref(),
+            Some(reference.encode().expect("reference").as_str())
+        );
+        store
+            .revoke_invitation_phone(&f.phone, f.user)
+            .await
+            .expect("delete transfers reservation");
+        let health = store
+            .invitation_broker_health(&replacement)
+            .await
+            .expect("replacement still fenced");
+        assert_eq!(
+            (health.budget, health.invalid, health.mismatched),
+            (1, 0, 1)
+        );
+        assert_eq!(
+            store
+                .invitation_revocations()
+                .await
+                .expect("cleanup retained")
+                .len(),
+            1
+        );
+        assert!(store.invitation_broker_health("bad").await.is_err());
     })
     .await;
 }

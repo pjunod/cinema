@@ -63,6 +63,25 @@ fn event(r: &rusqlite::Row<'_>) -> rusqlite::Result<InvitationEvent> {
 }
 #[async_trait]
 impl InvitationStore for SqliteStore {
+    async fn invitation_broker_health(
+        &self,
+        scope_hash: &str,
+    ) -> Result<InvitationBrokerHealth, StoreError> {
+        if !valid_digest(scope_hash) {
+            return Err(StoreError::Identity("invalid broker scope".into()));
+        }
+        let scope_hash = scope_hash.to_owned();
+        self.with_read(move |c| {
+            Ok(c.query_row(&broker_health_query(), [scope_hash], |r| {
+                Ok(InvitationBrokerHealth {
+                    budget: r.get(0)?,
+                    invalid: r.get(1)?,
+                    mismatched: r.get(2)?,
+                })
+            })?)
+        })
+        .await
+    }
     async fn invitation_cleanup_budget(&self, user: i64) -> Result<i64, StoreError> {
         validate_invitation_ids(&[], user)?;
         self.with_read(move |c| Ok(c.query_row(CLEANUP_BUDGET, [user], |r| r.get(0))?))

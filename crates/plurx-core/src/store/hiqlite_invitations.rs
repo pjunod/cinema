@@ -101,8 +101,33 @@ impl From<&mut Row<'_>> for InvitationEvent {
         }
     }
 }
+impl From<&mut Row<'_>> for InvitationBrokerHealth {
+    fn from(r: &mut Row<'_>) -> Self {
+        Self {
+            budget: r.get("budget"),
+            invalid: r.get("invalid"),
+            mismatched: r.get("mismatched"),
+        }
+    }
+}
 #[async_trait]
 impl InvitationStore for HiqliteAuthStore {
+    async fn invitation_broker_health(
+        &self,
+        scope_hash: &str,
+    ) -> Result<InvitationBrokerHealth, StoreError> {
+        if !valid_digest(scope_hash) {
+            return Err(StoreError::Identity("invalid broker scope".into()));
+        }
+        self.client()
+            .query_consistent_map::<InvitationBrokerHealth, _>(
+                broker_health_query(),
+                params!(scope_hash.to_owned()),
+            )
+            .await?
+            .pop()
+            .ok_or_else(|| StoreError::Identity("missing broker scope verdict".into()))
+    }
     async fn invitation_cleanup_budget(&self, user: i64) -> Result<i64, StoreError> {
         validate_invitation_ids(&[], user)?;
         Ok(self
