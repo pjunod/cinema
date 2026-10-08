@@ -13,7 +13,13 @@ use axum::{
 use plurx_core::{
     auth,
     error::StoreError,
-    store::invitations::{InvitationPhone, NewInvitationPhone},
+    store::{
+        invitations::{
+            InvitationConsent, InvitationPhone, InvitationTransport, NewInvitationPhone,
+            SaveInvitationConsent,
+        },
+        remote::RemoteProof,
+    },
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -41,7 +47,12 @@ pub(crate) fn eligible(method: &Method, path: &str) -> bool {
     let Some(p) = path.strip_prefix("/api/remote/v1/") else {
         return false;
     };
-    if *method == Method::POST && matches!(p, "phones" | "phones/list") {
+    if *method == Method::POST
+        && matches!(
+            p,
+            "phones" | "phones/list" | "invitations/consent" | "invitations/consents/list"
+        )
+    {
         return true;
     }
     let parts = p.split('/').collect::<Vec<_>>();
@@ -209,6 +220,143 @@ async fn perform(
             None
         };
         json!({"version":"cinema.invitation.v1","phones":rows.into_iter().map(phone).collect::<Vec<_>>(),"next_cursor":cursor})
+    } else if p == "invitations/consent" {
+        let r: Consent = decode(body)?;
+        if !valid_id(&r.installation_id) || !valid_id(&r.receiver_id) {
+            return Err(fail(400, "invalid"));
+        }
+        let hash =
+            proof(headers, "x-cinema-phone-secret")?.ok_or_else(|| fail(401, "unauthorized"))?;
+        let phone = state
+            .store
+            .invitation_phone_authority(&r.installation_id, user, &hash)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| fail(401, "unauthorized"))?;
+        if phone.generation != r.expected_phone_generation {
+            return Err(fail(409, "stale_generation"));
+        }
+        let prior = state
+            .store
+            .invitation_consent(&r.installation_id, &r.receiver_id, user)
+            .await
+            .map_err(store_error)?;
+        if !r.enabled && prior.is_none() {
+            if r.expected_consent_generation != 0 {
+                return Err(fail(409, "stale_generation"));
+            }
+            json!({"version":"cinema.invitation.v1","consent":{"receiver_id":r.receiver_id,"grant_id":null,"enabled":false,"transport":null,"consent_generation":0,"transport_generation":0,"readiness":{"eligible":false,"status":"disabled","provider_delivery_verified":false}}})
+        } else {
+            let enable = if r.enabled {
+                let grant = r
+                    .grant_id
+                    .filter(|v| valid_id(v))
+                    .ok_or_else(|| fail(400, "invalid"))?;
+                let transport = r.transport.ok_or_else(|| fail(400, "invalid"))?;
+                if (phone.platform == "apple") != (transport == InvitationTransport::Apns) {
+                    return Err(fail(400, "invalid"));
+                }
+                if state
+                    .store
+                    .invitation_phone_binding(&r.installation_id, user, &hash)
+                    .await
+                    .map_err(store_error)?
+                    .as_deref()
+                    != Some(&digest)
+                {
+                    return Err(fail(409, "login_changed"));
+                }
+                let grant_hash = proof(headers, "x-cinema-grant-secret")?
+                    .ok_or_else(|| fail(401, "unauthorized"))?;
+                if state
+                    .store
+                    .remote_authority(
+                        &r.receiver_id,
+                        user,
+                        RemoteProof::Grant {
+                            grant_id: grant.clone(),
+                            secret_hash: grant_hash.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(store_error)?
+                    .is_none()
+                {
+                    return Err(fail(401, "unauthorized"));
+                }
+                Some((grant, grant_hash, transport))
+            } else {
+                None
+            };
+            if !state
+                .store
+                .save_invitation_consent(SaveInvitationConsent {
+                    id: prior
+                        .as_ref()
+                        .map(|p| p.id.clone())
+                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    phone_id: r.installation_id.clone(),
+                    receiver_id: r.receiver_id.clone(),
+                    user_id: user,
+                    phone_hash: hash,
+                    expected_generation: r.expected_consent_generation,
+                    expected_phone_generation: r.expected_phone_generation,
+                    enable,
+                })
+                .await
+                .map_err(store_error)?
+            {
+                return Err(fail(409, "stale_generation"));
+            }
+            state.invitations.changed.notify_waiters();
+            let item = state
+                .store
+                .invitation_consent(&r.installation_id, &r.receiver_id, user)
+                .await
+                .map_err(store_error)?
+                .ok_or_else(|| fail(503, "unavailable"))?;
+            json!({"version":"cinema.invitation.v1","consent":consent_value(state,item,&digest).await?})
+        }
+    } else if p == "invitations/consents/list" {
+        let r: ConsentList = decode(body)?;
+        if !valid_id(&r.installation_id)
+            || r.after_receiver_id.as_ref().is_some_and(|v| !valid_id(v))
+            || !(1..=20).contains(&r.limit)
+        {
+            return Err(fail(400, "invalid"));
+        }
+        let hash =
+            proof(headers, "x-cinema-phone-secret")?.ok_or_else(|| fail(401, "unauthorized"))?;
+        if state
+            .store
+            .invitation_phone_authority(&r.installation_id, user, &hash)
+            .await
+            .map_err(store_error)?
+            .is_none()
+        {
+            return Err(fail(401, "unauthorized"));
+        }
+        let mut rows = state
+            .store
+            .invitation_consents(
+                &r.installation_id,
+                user,
+                r.after_receiver_id.as_deref().unwrap_or(""),
+            )
+            .await
+            .map_err(store_error)?;
+        let more = rows.len() > usize::from(r.limit);
+        rows.truncate(usize::from(r.limit));
+        let cursor = if more {
+            rows.last().map(|p| p.receiver_id.clone())
+        } else {
+            None
+        };
+        let mut values = Vec::new();
+        for item in rows {
+            values.push(consent_value(state, item, &digest).await?);
+        }
+        json!({"version":"cinema.invitation.v1","consents":values,"next_cursor":cursor})
     } else {
         let parts = p.split('/').collect::<Vec<_>>();
         let id = parts[1];
@@ -301,3 +449,60 @@ async fn perform(
 
 #[cfg(test)]
 mod tests;
+
+async fn consent_value(
+    state: &AppState,
+    item: InvitationConsent,
+    digest: &str,
+) -> Result<Value, ApiError> {
+    let scope = state
+        .store
+        .invitation_scope(&item.phone_id, &item.receiver_id, item.user_id)
+        .await
+        .map_err(store_error)?;
+    let status = if !item.enabled {
+        "disabled"
+    } else if scope.is_none() {
+        "grant_revoked"
+    } else if scope.as_ref().is_some_and(|s| s.phone_digest != digest) {
+        "login_changed"
+    } else if state
+        .store
+        .get_setting("cinema.remote_invitations")
+        .await
+        .map_err(store_error)?
+        .as_deref()
+        != Some("1")
+        || state
+            .store
+            .get_setting("cinema.remote_control")
+            .await
+            .map_err(store_error)?
+            .as_deref()
+            != Some("1")
+    {
+        "global_disabled"
+    } else if scope.as_ref().is_some_and(|s| {
+        !s.permission_granted || (item.transport == "android_resident" && !s.resident_active)
+    }) {
+        "permission_unavailable"
+    } else if item.transport == "android_resident" {
+        "ready"
+    } else if scope
+        .as_ref()
+        .is_some_and(|s| item.transport_phone_generation != s.phone_generation)
+    {
+        "transport_unavailable"
+    } else {
+        match item.transport_status.as_str() {
+            "ready" => "ready",
+            "pending" => "transport_pending",
+            "provider_unconfigured" => "provider_unconfigured",
+            "migration_remediation" => "migration_remediation",
+            _ => "transport_unavailable",
+        }
+    };
+    Ok(
+        json!({"receiver_id":item.receiver_id,"grant_id":item.grant_id,"enabled":item.enabled,"transport":item.transport,"consent_generation":item.generation,"transport_generation":item.transport_generation,"readiness":{"eligible":status=="ready","status":status,"provider_delivery_verified":false}}),
+    )
+}

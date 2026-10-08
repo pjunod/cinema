@@ -52,3 +52,34 @@ fn positive_generation<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D:
     }
     i64::try_from(value).map_err(serde::de::Error::custom)
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Consent {
+    pub version: Version,
+    pub installation_id: String,
+    pub receiver_id: String,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_phone_generation: i64,
+    #[serde(deserialize_with = "nonnegative_generation")]
+    pub expected_consent_generation: i64,
+    pub enabled: bool,
+    pub grant_id: Option<String>,
+    pub transport: Option<plurx_core::store::invitations::InvitationTransport>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsentList {
+    pub version: Version,
+    pub installation_id: String,
+    pub after_receiver_id: Option<String>,
+    pub limit: u8,
+}
+
+fn nonnegative_generation<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let value = u64::deserialize(d)?;
+    if value >= 9_007_199_254_740_991 {
+        return Err(serde::de::Error::custom("invalid generation"));
+    }
+    i64::try_from(value).map_err(serde::de::Error::custom)
+}
+envelope!(Consent, ConsentList);
