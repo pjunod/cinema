@@ -4706,3 +4706,11 @@ source = "clients/desktop-remote/extension/worker.js"
 source_anchor = "documentIds:[binding.documentId]"
 test = "clients/desktop-remote/tests/extension.browser.cjs"
 test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"
+
+[[fixes]]
+id = "desktop.cec-effect-document-focus"
+commits = ["58e0eaa58920b49d07d08a5b46a1c567e0b0680a"]
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "!document.hasFocus()"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "visible background document rejects queued MAIN input at the effect boundary"
