@@ -706,6 +706,15 @@ pub(super) struct Session {
 }
 
 impl Session {
+    /// An immutable retained response keeps the viewer's control identity,
+    /// but has no missing bytes for this rendition's producer to generate.
+    pub(super) fn attachment_reader(&self, frontier: u32) -> Reader {
+        let mut reader = Reader::new(frontier);
+        reader.authority_only =
+            self.retained_output.is_some() || self.children.iter().any(|child| child.controlled);
+        reader
+    }
+
     pub(super) fn invalidate_observational_attachment(&self) {
         self.control
             .lock()

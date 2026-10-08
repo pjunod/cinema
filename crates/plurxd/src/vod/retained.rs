@@ -2112,6 +2112,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_attachment_serves_retained_bytes_without_driver_demand() {
+        let (temp, serve, completed, facts) = durable_fixture().await;
+        // A new attachment can have no live manifest bytes, even though its
+        // independently verified immutable response covers the whole title.
+        let mut fresh =
+            crate::vodserve::tests::synthetic_rendition(&temp.path().join("incoming")).await;
+        let incoming = Arc::get_mut(&mut fresh).expect("new incoming rendition");
+        incoming.key = "b".repeat(64);
+        incoming.recipe.file = completed.recipe.file.clone();
+        incoming.recipe.retained_logical = completed.recipe.retained_logical.clone();
+        incoming.source = Some(
+            crate::fragment_index_cluster::open_source_fence(&incoming.recipe.file, None)
+                .await
+                .expect("same held source"),
+        );
+        let artifact = serve
+            .shared
+            .retained_artifacts
+            .acquire_expected_for_request(&facts, &fresh, &fresh.recipe.retained_logical)
+            .expect("verified incoming cached attachment");
+        let mut session = Session {
+            children: Vec::new(),
+            passive_grant: None,
+            rendition: Some(Arc::clone(&fresh)),
+            retained_output: Some(artifact),
+            rendition_key: fresh.key.clone(),
+            file: Arc::new(fresh.recipe.file.clone()),
+            playback_id: "cached-attachment".into(),
+            user_name: "fixture".into(),
+            item_title: "Fixture".into(),
+            started_unix: 1,
+            target_height: 360,
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            supersession_user: "fixture".into(),
+            block_budget: Duration::from_secs(1),
+            sdr_master_codecs: false,
+            lifecycle: serve.shared.session_lifecycle("cached"),
+            incarnation: Arc::new(()),
+            last_touch: StdMutex::new(Instant::now()),
+            delivery: Arc::new(crate::meter::Meter::default()),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
+            marker_destinations: Vec::new(),
+            control_observed_at: None,
+            last_control_snapshot: None,
+            control_end: None,
+            control_end_snapshot: None,
+            prepared_incarnation: None,
+            terminal_cleanup: None,
+            tombstone: None,
+        };
+        let owner = session.response_owner();
+        let mut cached = session.attachment_reader(0);
+        cached.accept_control(1, 33);
+        fresh.readers.lock().await.insert("cached".into(), cached);
+        let cached_wait = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: fresh.key.clone(),
+                    index: 33,
+                },
+                "cached",
+            )
+            .expect("bounded accidental cached wait");
+        {
+            let readers = fresh.readers.lock().await;
+            let manifest = fresh.manifest.lock().await;
+            assert!(
+                super::super::driver::playback_demands(
+                    &serve.shared.pool,
+                    &fresh,
+                    &readers,
+                    &manifest
+                )
+                .is_empty(),
+                "neither cached frontier nor a cached waiter starts a producer"
+            );
+            assert_eq!(readers["cached"].control_sequence, Some(1));
+            assert_eq!(readers["cached"].frontier, 33);
+        }
+        assert!(fresh.reader_windows().await.is_empty());
+        let member = owner
+            .retained_output
+            .as_ref()
+            .expect("response owns exact lease")
+            .open(
+                Some(0),
+                &session.delivery,
+                &serve.shared,
+                &fresh,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("retained bytes remain available without a producer");
+        assert_eq!(member.len, 1000);
+        assert!(member.etag.contains(&facts.artifact_id));
+
+        session.retained_output = None;
+        fresh
+            .readers
+            .lock()
+            .await
+            .insert("ordinary".into(), session.attachment_reader(2));
+        let ordinary_wait = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: fresh.key.clone(),
+                    index: 2,
+                },
+                "ordinary",
+            )
+            .expect("ordinary missing media");
+        {
+            let readers = fresh.readers.lock().await;
+            let manifest = fresh.manifest.lock().await;
+            let demands = super::super::driver::playback_demands(
+                &serve.shared.pool,
+                &fresh,
+                &readers,
+                &manifest,
+            );
+            assert!(
+                demands
+                    .iter()
+                    .any(|d| d.blocked_on == Some(2) && d.foreground),
+                "an ordinary missing byte still demands production"
+            );
+            assert!(!demands.iter().any(|d| d.blocked_on == Some(33)));
+        }
+        fresh.detach_reader(&serve.shared.pool, "ordinary").await;
+        fresh.detach_reader(&serve.shared.pool, "cached").await;
+        drop(ordinary_wait);
+        drop(cached_wait);
+        {
+            let readers = fresh.readers.lock().await;
+            let manifest = fresh.manifest.lock().await;
+            assert!(readers.is_empty());
+            assert!(
+                super::super::driver::playback_demands(
+                    &serve.shared.pool,
+                    &fresh,
+                    &readers,
+                    &manifest
+                )
+                .is_empty(),
+                "actual detach retires every frontier and waiter"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn durable_manifest_commits_only_complete_exact_full_mux_observation() {
         let (_temp, serve, rendition, facts) = durable_fixture().await;
         let artifact = serve

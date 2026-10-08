@@ -1389,8 +1389,7 @@ impl VodServe {
             }
         }
         replacement.children = std::mem::take(&mut private_media);
-        let mut authority = Reader::new(start_entry);
-        authority.authority_only = replacement.children.iter().any(|child| child.controlled);
+        let authority = replacement.attachment_reader(start_entry);
         replacement_readers.insert(session_id.clone(), authority);
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         // A live entry with this id is replaced rather than refused, and the
