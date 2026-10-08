@@ -12,7 +12,7 @@ function harness(fetcher=async()=>reply({updated:true})){
  const c=vm.createContext({TextDecoder,TextEncoder,Uint8Array,URL,URLSearchParams,Response,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/settings/sharing",origin:"https://b.example"},PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   SETTINGS_DATA:{},SETTINGS_LOADED:new Set(),readAfterRequest:()=>({index:"",generation:1,epoch:0}),observeReadAfter(){},forgetReadAfter(){},clearLocalSession(){c.AUTH_GENERATION++;c.TOKEN=null;},
   esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),setHead:()=>"",setCard:v=>v,cardHead:()=>"",document:{getElementById(){return element;}},fetch:async(path,options)=>{requests.push({path,options});return fetcher(path,options,c);}});
- vm.runInContext(catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,endpointEdit:sharingEndpointEdit,endpointCount:sharingEndpointCount,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,state:()=>SHARING_MANAGEMENT};",c);
+ vm.runInContext(catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,copyInvitation:sharingCopyInvitation,endpointEdit:sharingEndpointEdit,endpointCount:sharingEndpointCount,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,state:()=>SHARING_MANAGEMENT};",c);
  const data={sharingImports:{imports:[imported()]},sharingExports:{exports:[exported()],next:null},sharingStatus:{listener:"ready"}};
  c.m.panel(data);return {c,m:c.m,requests,element,data};
 }
@@ -286,4 +286,53 @@ test("endpoint save feedback stays beside Save through pending success validatio
  assert.match(unknown.element.innerHTML,/Save not confirmed. Connection lost/);
  assert.doesNotMatch(unknown.element.innerHTML,/Addresses saved/);
  assert.equal(unknown.m.state().editor.ready,false);
+});
+
+test("creating an invitation immediately displays its secret and next step without pressing Back",async()=>{
+ const secret="cinema-share-v1:visible-result";
+ const h=harness(async(path,options)=>reply(path==="/api/v1/libraries"?[{id:large,name:"Movies",kind:"movies"}]:path==="/api/v1/sharing/endpoints"?{manifest:{revision:1n,endpoints:[endpoint]}}:{id,invitation:secret,expires_at_ms:large}));
+ let focused=0;h.element.focus=()=>focused++;
+ await h.m.open("invite");h.m.select(0,true);await h.m.save();
+ assert.match(h.element.innerHTML,/Invitation created/);
+ assert.match(h.element.innerHTML,new RegExp(secret));
+ assert.match(h.element.innerHTML,/other Cinema/);
+ assert.match(h.element.innerHTML,/Import invitation/);
+ assert.equal(h.m.state().editor,null);
+ assert.equal(focused,1);
+ assert.equal(h.requests.filter(r=>r.options.method==="POST").length,1);
+});
+
+
+test("invitation creation shows pending and failed results by Create and never retries a failed POST",async()=>{
+ let release;const gate=new Promise(resolve=>release=resolve);
+ const h=harness(async(path,options)=>{
+  if(path==="/api/v1/libraries")return reply([{id:large,name:"Movies",kind:"movies"}]);
+  if(path==="/api/v1/sharing/endpoints")return reply({manifest:{revision:1n,endpoints:[endpoint]}});
+  await gate;return reply({message:"Sharing service unavailable"},503);
+ });
+ let focused=0;h.element.focus=()=>focused++;
+ await h.m.open("invite");await h.m.save();
+ assert.match(h.element.innerHTML,/Invitation not created. Select at least one library/);
+ assert.equal(h.requests.some(r=>r.options.method==="POST"),false);
+ h.m.select(0,true);const pending=h.m.save();
+ assert.match(h.element.innerHTML,/>Creating…<\/button>/);
+ assert.match(h.element.innerHTML,/Creating invitation…/);
+ assert.doesNotMatch(h.element.innerHTML,/Select at least one library/);
+ assert.ok(h.element.innerHTML.indexOf("sharing-editor-feedback")>h.element.innerHTML.indexOf("</label>"));
+ release();await pending;
+ assert.match(h.element.innerHTML,/Invitation creation not confirmed. Sharing service unavailable/);
+ assert.ok(h.element.innerHTML.indexOf('role="alert"')>h.element.innerHTML.indexOf("</label>"));
+ assert.equal(h.m.state().invitation,null);assert.equal(h.m.state().editor.ready,false);
+ assert.equal(focused,2);
+ await h.m.save();assert.equal(h.requests.filter(r=>r.options.method==="POST").length,1);
+});
+
+
+test("invitation copy confirms the exact secret or offers manual selection without restoring retired state",async()=>{
+ const h=harness();const secret="cinema-share-v1:copy-me";h.m.state().invitation={id,invitation:secret};
+ let copied,selected=0;h.c.navigator={clipboard:{writeText:async text=>{copied=text;}}};h.element.select=()=>selected++;
+ await h.m.copyInvitation();assert.equal(copied,secret);assert.match(h.element.innerHTML,/Invitation copied/);assert.equal(selected,0);
+ h.c.navigator={};await h.m.copyInvitation();assert.match(h.element.innerHTML,/Automatic copy is unavailable/);assert.equal(selected,1);
+ let release;const gate=new Promise(resolve=>release=resolve);h.c.navigator={clipboard:{writeText:async()=>gate}};
+ const pending=h.m.copyInvitation();h.m.retire();release();await pending;assert.equal(h.element.innerHTML,"");assert.equal(h.m.state(),null);
 });

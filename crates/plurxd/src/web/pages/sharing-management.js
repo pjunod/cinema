@@ -176,11 +176,20 @@ function sharingManagementHTML(){
   const s=SHARING_MANAGEMENT;if(!s)return "";
   if(s.editor)return sharingRequirementsHTML(s.status)+sharingEditorHTML(s.editor);
   const disabled=s.busy;
-  return sharingRequirementsHTML(s.status)+`<h3>Connect Cinemas</h3>${sharingButton("Create invitation","sharingOpen('invite')",disabled)} ${sharingButton("Import invitation","sharingOpen('import')",disabled)} ${sharingButton("This Cinema's endpoints","sharingOpen('manifest')",disabled)} ${sharingButton("Reload","sharingReload()",disabled)}${s.error?`<p role="alert">${esc(s.error)}</p>`:""}${s.invitation?`<section><h4>Invitation</h4><p>Copy this secret invitation to the recipient. It is cleared when you leave Sharing.</p><textarea readonly autocomplete="off">${esc(s.invitation.invitation)}</textarea>${sharingButton("Cancel invitation","sharingCancelInvitation()",disabled)} ${sharingButton("Clear secret","sharingClearInvitation()",disabled)}</section>`:""}<h3>Imports</h3>${s.imports.map((row,i)=>`<section><h4>${esc(row.import.source_name||"Shared source")}</h4><p>${esc(row.import.state)} · Source ${esc(row.import.source_server_id)}</p>${sharingButton("Pairing code",`sharingOpen('code',${i})`,disabled)} ${sharingButton("Viewer assignments",`sharingOpen('matrix',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Source endpoints",`sharingOpen('endpoints',${i})`,disabled||!["claiming","pending","active"].includes(row.import.state))} ${sharingButton("Re-pair",`sharingOpen('repair',${i})`,disabled)} ${sharingButton("Rotate credential",`sharingOpen('rotate',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Disconnect",`sharingOpen('disconnect',${i})`,disabled)}</section>`).join("")||'<p class="muted">No imports.</p>'}<h3>Exports</h3>${s.exports.map((row,i)=>`<section><h4>${esc(row.recipient_name||"Recipient")}</h4><p>${esc(row.grant.state)} · Recipient ${esc(row.grant.recipient_server_id)}</p>${sharingButton("Approve pairing",`sharingOpen('approve',${i})`,disabled||row.grant.state!=="pending")} ${sharingButton("Library scope",`sharingOpen('scope',${i})`,disabled||row.grant.state!=="active")} ${sharingButton("Revoke",`sharingOpen('revoke',${i})`,disabled)}</section>`).join("")||'<p class="muted">No exports.</p>'}${s.next?sharingButton("More exports","sharingMoreExports()",disabled):""}`;
+  return sharingRequirementsHTML(s.status)+`<h3>Connect Cinemas</h3>${sharingButton("Create invitation","sharingOpen('invite')",disabled)} ${sharingButton("Import invitation","sharingOpen('import')",disabled)} ${sharingButton("This Cinema's endpoints","sharingOpen('manifest')",disabled)} ${sharingButton("Reload","sharingReload()",disabled)}${s.error?`<p role="alert">${esc(s.error)}</p>`:""}${s.invitation?`<section id="sharing-invitation-result" class="sharing-invitation" tabindex="-1"><h4>Invitation created</h4><p role="status">Your invitation is ready.</p><p>Copy the invitation below. On the other Cinema, open Settings → Sharing → Import invitation and paste it there. This secret is cleared when you leave Sharing.</p><textarea id="sharing-invitation-text" aria-label="Invitation to copy" readonly autocomplete="off" spellcheck="false" onfocus="this.select()">${esc(s.invitation.invitation)}</textarea><p role="status" aria-live="polite">${esc(s.invitationCopyNotice||"")}</p>${sharingButton("Copy invitation","sharingCopyInvitation()",disabled)} ${sharingButton("Cancel invitation","sharingCancelInvitation()",disabled)} ${sharingButton("Clear secret","sharingClearInvitation()",disabled)}</section>`:""}<h3>Imports</h3>${s.imports.map((row,i)=>`<section><h4>${esc(row.import.source_name||"Shared source")}</h4><p>${esc(row.import.state)} · Source ${esc(row.import.source_server_id)}</p>${sharingButton("Pairing code",`sharingOpen('code',${i})`,disabled)} ${sharingButton("Viewer assignments",`sharingOpen('matrix',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Source endpoints",`sharingOpen('endpoints',${i})`,disabled||!["claiming","pending","active"].includes(row.import.state))} ${sharingButton("Re-pair",`sharingOpen('repair',${i})`,disabled)} ${sharingButton("Rotate credential",`sharingOpen('rotate',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Disconnect",`sharingOpen('disconnect',${i})`,disabled)}</section>`).join("")||'<p class="muted">No imports.</p>'}<h3>Exports</h3>${s.exports.map((row,i)=>`<section><h4>${esc(row.recipient_name||"Recipient")}</h4><p>${esc(row.grant.state)} · Recipient ${esc(row.grant.recipient_server_id)}</p>${sharingButton("Approve pairing",`sharingOpen('approve',${i})`,disabled||row.grant.state!=="pending")} ${sharingButton("Library scope",`sharingOpen('scope',${i})`,disabled||row.grant.state!=="active")} ${sharingButton("Revoke",`sharingOpen('revoke',${i})`,disabled)}</section>`).join("")||'<p class="muted">No exports.</p>'}${s.next?sharingButton("More exports","sharingMoreExports()",disabled):""}`;
 }
 function sharingPaint(){if(!SHARING_MANAGEMENT||!sharingCurrent(SHARING_MANAGEMENT.capture))return;const node=document.getElementById("sharing-management");if(node)node.innerHTML=sharingManagementHTML();}
 function sharingEdit(key,value){const s=SHARING_MANAGEMENT,e=s?.editor;if(!e||e.busy||!sharingCurrent(s.capture))return;e[key]=value;e.revision++;}
 function sharingCloseEditor(){const s=SHARING_MANAGEMENT;if(!s)return;if(s.editor?.returnInvite)return sharingReturnInvitation();s.revision++;s.editor=null;sharingPaint();}
+async function sharingCopyInvitation(){
+  const s=SHARING_MANAGEMENT,invitation=s?.invitation;if(!invitation||!sharingCurrent(s.capture))return;
+  let copied=false;
+  try{await navigator.clipboard.writeText(invitation.invitation);copied=true;}catch{}
+  if(SHARING_MANAGEMENT!==s||s.invitation!==invitation||!sharingCurrent(s.capture))return;
+  s.invitationCopyNotice=copied?"Invitation copied. Paste it into Import invitation on the other Cinema.":"Automatic copy is unavailable. Select the invitation text and copy it using your browser’s Copy command.";
+  sharingPaint();
+  if(!copied){const input=/** @type {HTMLTextAreaElement|null} */ (document.getElementById("sharing-invitation-text"));input?.focus?.();input?.select?.();}
+}
 function sharingClearInvitation(){if(SHARING_MANAGEMENT){SHARING_MANAGEMENT.invitation=null;sharingPaint();}}
 async function sharingWork(work,action=""){
   const s=SHARING_MANAGEMENT;if(!s||s.busy||!sharingCurrent(s.capture))return;
@@ -188,7 +197,17 @@ async function sharingWork(work,action=""){
   const accepts=()=>SHARING_MANAGEMENT===s&&s.alive&&sharingCurrent(s.capture)&&(e?s.editor===e&&e.revision===revision:s.revision===revision);
   try{const result=await work(s,e);if(accepts())return result;}
   catch(error){if(accepts()){if(e){e.error=error.message;if(e.sent)e.ready=false;}else s.error=error.message;}}
-  finally{if(SHARING_MANAGEMENT===s&&s.alive&&sharingCurrent(s.capture)){s.busy=false;if(s.editor===e&&e)e.busy=false;sharingPaint();if(action==="save"&&s.editor===e&&e&&["manifest","endpoints"].includes(e.mode)&&(e.saved||e.error))document.getElementById("sharing-editor-feedback")?.focus?.();}}
+  finally{
+    if(SHARING_MANAGEMENT===s&&s.alive&&sharingCurrent(s.capture)){
+      s.busy=false;let focus=null;
+      if(s.editor===e&&e){
+        e.busy=false;
+        if(action==="save"&&e.mode==="invite"&&e.saved&&s.invitation){s.editor=null;s.revision++;focus="sharing-invitation-result";}
+        else if(action==="save"&&["manifest","endpoints","invite"].includes(e.mode)&&(e.saved||e.error))focus="sharing-editor-feedback";
+      }
+      sharingPaint();if(focus)document.getElementById(focus)?.focus?.();
+    }
+  }
 }
 async function sharingOpen(mode,index=0,draft=null){
   const s=SHARING_MANAGEMENT;if(!s||s.busy||!sharingCurrent(s.capture))return;
@@ -300,12 +319,12 @@ function sharingEditorHTML(e){
   }else if(["manifest","endpoints"].includes(e.mode)){
     content=`<p>${e.mode==="manifest"?"Configure the machine serving this Cinema’s libraries.":"Use the details of the other Cinema providing the libraries."} The addresses come from Tailscale. ${e.mode==="manifest"?"Cinema fills in this serving node’s certificate pin for its first endpoint when available.":"Use the certificate pin from the Cinema providing the libraries."} Saving addresses does not check connectivity or configure Tailscale.</p>`+e.endpoints.map((row,i)=>sharingEndpointFieldsHTML(row,i,e.busy||e.saved)).join("")+sharingButton("Add endpoint","sharingEndpointCount(true)",e.busy||e.saved||e.endpoints.length>=4)+`<p>Saving trusts the Cinema certificate pins entered above. Check that they match the serving Cinema’s Sharing page.</p>`;
   }else if(["rotate","disconnect","revoke"].includes(e.mode))content=`<p>${e.mode==="rotate"?"Replace this Source credential?":e.mode==="disconnect"?"Disconnect this Source and stop using its shared libraries?":"Revoke this recipient's library access?"}</p>`;
-  const addresses=["manifest","endpoints"].includes(e.mode),saving=e.busy&&e.action==="save";
-  const error=e.error?`<p role="alert">${addresses&&!e.saved?(e.sent?"Save not confirmed. ":"Addresses not saved. "):""}${esc(e.error)}</p>`:"";
-  const status=e.saved?(addresses?"Addresses saved. Connectivity has not been tested.":"Saved. Reload before making another change."):saving?"Saving…":"";
+  const addresses=["manifest","endpoints"].includes(e.mode),inviting=e.mode==="invite",feedbackAtEnd=addresses||inviting,saving=e.busy&&e.action==="save";
+  const error=e.error?`<p role="alert">${addresses&&!e.saved?(e.sent?"Save not confirmed. ":"Addresses not saved. "):inviting?(e.sent?"Invitation creation not confirmed. ":"Invitation not created. "):""}${esc(e.error)}</p>`:"";
+  const status=e.saved?(addresses?"Addresses saved. Connectivity has not been tested.":"Saved. Reload before making another change."):saving?(inviting?"Creating invitation…":"Saving…"):"";
   const feedback=`<div id="sharing-editor-feedback" tabindex="-1">${error}<p role="status" aria-live="polite">${esc(status)}</p></div>`;
-  const saveLabel=addresses?(e.saved?"Saved":saving?"Saving…":"Save"):e.mode==="invite"?"Create":e.mode==="approve"?"Approve":"Save";
-  return `<h3>${esc(titles[e.mode]||"Sharing")}</h3>${addresses?"":feedback}${content}${addresses?feedback:""}<p>${sharingButton(e.returnInvite?"Return to invitation":"Back","sharingCloseEditor()",e.busy)} ${e.mode!=="code"?sharingButton(saveLabel,"sharingSave()",e.busy||!e.ready||e.saved||(e.mode==="invite"&&e.needsEndpoints)):""} ${["invite","scope","matrix","manifest","endpoints"].includes(e.mode)?sharingButton(addresses&&e.saved?"Edit addresses":"Reload current data","sharingEditorReload()",e.busy):""}</p>`;
+  const saveLabel=addresses?(e.saved?"Saved":saving?"Saving…":"Save"):inviting?(saving?"Creating…":"Create"):e.mode==="approve"?"Approve":"Save";
+  return `<h3>${esc(titles[e.mode]||"Sharing")}</h3>${feedbackAtEnd?"":feedback}${content}${feedbackAtEnd?feedback:""}<p>${sharingButton(e.returnInvite?"Return to invitation":"Back","sharingCloseEditor()",e.busy)} ${e.mode!=="code"?sharingButton(saveLabel,"sharingSave()",e.busy||!e.ready||e.saved||(e.mode==="invite"&&e.needsEndpoints)):""} ${["invite","scope","matrix","manifest","endpoints"].includes(e.mode)?sharingButton(addresses&&e.saved?"Edit addresses":"Reload current data","sharingEditorReload()",e.busy):""}</p>`;
 }
 async function sharingMutation(path,method,body,capture,key="updated"){const reply=await sharingRequest(path,{method,body,capture});if(reply?.[key]!==true)throw new Error("Sharing update did not return a confirmed result");return reply;}
 async function sharingSave(){
@@ -318,7 +337,7 @@ async function sharingSave(){
       if(e.needsEndpoints)throw new Error("Set up this Cinema’s private addresses, then return to this invitation. Your selected libraries are kept.");
       let r;try{r=await sharingRequest("/sharing/invitations",{method:"POST",body:{library_ids:e.selected,ttl_seconds:86400n},capture:c});}
       catch(error){if(error.status===409&&error.code==="sharing_endpoints_unavailable"){e.needsEndpoints=true;throw new Error("This Cinema’s addresses are no longer configured. Configure them, then return to this invitation. Your selected libraries are kept.");}throw error;}
-      sharingUUID(r.id);sharingInvitation(r.invitation);s.invitation=r;
+      sharingUUID(r.id);sharingInvitation(r.invitation);s.invitation=r;s.invitationCopyNotice="";
     }else if(mode==="import"||mode==="repair"){
       const path=mode==="import"?"/sharing/imports":"/sharing/imports/"+sharingUUID(e.row.import.id)+"/re-pair";
       const body={invitation:sharingInvitation(e.text)};if(mode==="repair")body.expected_lifecycle_generation=sharingInteger(e.row.import.lifecycle_generation);
