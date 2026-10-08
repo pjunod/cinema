@@ -9050,3 +9050,57 @@ TV239 current83-source signed app installs successfully, but awake playback
 is unmeasured. Android153 normal Play/quality retry awaits the next source
 build and lab slot. No remote source/binary overwrite occurs during phone
 playback. No final adversarial, Fable release or merge handoff is claimed.
+
+
+### 10.291 Qualified costs, retention diagnosis and current phone alignment (2026-10-08)
+
+Freeze0d989755ed3d748b12ba87de1f30c7e6c19cb645. The exact pinned Linux
+build passes in2m13s; archive SHA256 is
+2b082c21263381bce94f0bd55e34f9a0cd3f6451fafa9ff22b8228c271f425d6
+and binary SHA256 is
+05bb6d2168a27c40ed65443c7346f8950ebfe3a88509df793904f6f36ec37211.
+Draft844 remains pushed and draft, with29 named regression fields. No units
+execute here; the batched merge coordinator owns final execution.
+
+The isolated full-output-cost2 campaign produces actual bound normalized
+480p and720p whole-title outputs. Both have900 observed entries, ENDLIST,
+1800-second duration and complete_full_mux_rfc8216_v1 measurement. Their
+peaks are2,443,984 and4,562,440bps. Source SHA256 remains
+d7074838fddd09bbfde0fb1585793148955ea44684da847d49677a0e42c7c28d.
+Production measurement validates member hashes; no separate rehash of every
+retained byte is claimed. Fresh native decision and installed catalogs agree:
+480p subsequently disappears through the normal300-second idle retirement,
+while720p remains. Cost queries do not renew retention. This is not evidence
+for a stale-catalog repair. The owned backend and guard retire and original
+output preparation/cache/display-aware settings restore with readback.
+
+QA240's cost2 and warm1 attempts preserve real metadata-ready successor
+failures;6888ms and7184ms are remaining budgets, not elapsed seek latency.
+QA241 adds a bounded readonly diagnostic journal to copied lab sources. All
+83 production source files are inverse-byte-equivalent to the frozen branch;
+app and36 unit-source files compile and signing verifies. Its actual focused
+fixed-high-bandwidth run completes cleanly: initial and commit seeks for
+manual and Auto entry all succeed (724/102/936/101ms), with127 valid installed
+completed-link observations. Current720p measured peak matches. Owned PID
+retirement and isolated-lab cleanup pass. No cliff, downgrade, physical
+audio/display continuity or full twenty-switch qualification is claimed.
+Earlier readiness failures remain unexplained, not erased.
+
+Android153 has byte-equivalent current sources and compile-only evidence.
+Two normal-UI followups reach actual720p first frames in3190ms and3036ms.
+Both quality helpers stop before any tap or quality request because their
+expected player semantic root is absent. Preserve these failures. A bounded
+text-free actual player-structure diagnostic is prepared; no production
+state fix is justified yet. Owned app/backend/reverse/private metadata retire.
+
+The fresh full-output-pinned3 campaign uses normal cached viewer sessions to
+retain each qualified output and verifies actual cached bytes before the next
+job. Its480p output completes, but the first holder media response does not
+match the retained-manifest SHA/length. It stops before720p or a phone run;
+cleanup completes. Diagnose actual resource selection and response semantics
+before retrying. No retention, admission, proof or overlap threshold changes.
+Private digital-audio package preparation stops before download because host
+APT sources fail official-domain validation; independently signed official
+repository preparation continues separately without host changes.
+No final adversarial review, Fable release, qualification receipt or ready
+merge handoff is claimed.
