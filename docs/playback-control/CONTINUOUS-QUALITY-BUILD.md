@@ -9331,3 +9331,53 @@ QA242 remains installed;83 production Swift files are byte-equivalent to
 regression references resolve statically; final units belong to the batched
 merge session. Final adversarial review, external Fable review and ready
 handoff remain open.
+
+
+### 10.296 Current paired reuse passes; phone Auto-entry seek fails (2026-10-08)
+
+Frozen1659a185d3d96fd2dbf250e44ab77b8adbc19766 builds on pinned Rust1.97.1
+in2m13s. Archive SHA256
+edff5ff4e3bda4c2c4c9f149ef78b7f64d9a7d834ff476ce16e58edfd043f8b1;
+binary SHA256
+71e4be7867e305a574367f43cb35582524889a540db8d51464f6cb2ebd51116d.
+Both480 and720 cached media responses match their retained member bytes and
+UUID/digest ETag, with no encoder or unexpected job. The720 preparation job
+runs within30 seconds while a legitimate480 viewer holds its completed
+output. Normal60-second media touches keep both current without retention
+changes. Actual480 average/peak are2,159,861/2,433,424 bits per second;
+720 are4,160,964/4,570,064. Historical peaks must not substitute for current
+artifact costs. Eleven safe paired receipts pass independent hash checks.
+
+QA242 passes canonical owned-bundle idle and exact daemon/source/binary
+preflight, then launches asPID7505. All83 production Swift files match the
+frozen source. Manual480-to720 alignment succeeds: initial40.784-second
+target in2808 milliseconds, commit52.578-second target in107 milliseconds.
+The old driver expected previous artifact peaks and correctly refuses the
+cliff. Preserve that setup failure. Independently, ordinary Auto-entry720
+prepared replacement fails metadataReady alignment:70.841-second target,
+origin0, nativeReady1; after4097 milliseconds item time remains0 and loaded
+range is54–57.961 seconds. Outcome is absent, cancellation false, current
+pipeline/owner match; readiness/overlap7128 milliseconds is remaining budget,
+not elapsed. No accepted Auto successor, cliff or twenty-switch pass exists.
+The actual control request includes position70844 and seek_target70841;
+a stale incumbent position is not supported. Prepare origin/start/playlist
+and segment-index projections were not retained and remain unmeasured.
+The proposed corrected retry is stopped until seek/media-request RCA exists.
+
+Owned phone/proxy/forward/control cleanup passes. Warm guard1594515 and
+daemon1594531 are independently absent; runtime/private control and raw
+backend log removed, bounded projections retained. Original lab settings
+restore by readback: preparation off/cache50/display-aware Auto false. The
+paired cache pass and native failure retain separate scopes.
+
+Integrate Android diagnostic43b99297 at this safe boundary. Finite failure
+reason/phase/player-state/track/rendezvous/seek/runway/warm-frame/error-code
+facts are captured before release; reporting is guarded and free-text decoder
+messages excluded. Existing12-second overlap and20-second readiness remain.
+The surface-ready query is read-only; exposure/invalidation mutations are
+separate. JBR21 Kotlin and unit-source compilation pass, normal pinned hook
+passes; units remain unexecuted. Signed APK154 is prepared offline with an
+explicit ignored version override, not installed yet. Future480/720 continuous
+and outside-family1080 prepared checks are separate and bind actual family,
+recipes, source and current control revision. All41 regression references
+must resolve before push; final adversarial/Fable/ready handoff remain open.
