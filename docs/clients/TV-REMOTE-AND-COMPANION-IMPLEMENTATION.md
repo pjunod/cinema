@@ -42,6 +42,11 @@ No builder merges main, starts a full test matrix, deploys, or publishes an
 extension/app-store build. The parent inspects diffs and reports actionable
 findings directly to the builder, then rechecks fixes.
 
+While an effort gate is pending, create a dependent task from the current
+effort and merge its reviewed dependency locally. Record that dependency in
+the task PR and revalidate the final integration tree; a local dependency
+merge is not permission to merge the shared effort.
+
 After review and required effort checks, integrate each packet through its
 PR. Keep corrective `Regression-Test:` lines in both PR and landing message.
 Normal hooks remain enabled. Freeze the completed effort and provide a
@@ -131,7 +136,8 @@ where the player contract requires it. `player/transport.js` remains the
 owner of VOD play intent. Add an idempotent desired-playing entry point there
 if needed; do not call `video.play/pause` from the remote module. Route Live
 TV through `PlaybackPolicy.routeLiveInput` and existing live TV owners.
-Stopping playback detaches locally before awaiting server cleanup.
+Stopping playback pauses locally immediately. Preserve existing fullscreen
+and PiP teardown ordering; server cleanup cannot delay the local pause.
 
 For B02 expose a local development dispatch entry point to prove UI behavior;
 B05 adds authenticated network admission, and B08 adds extension delivery.

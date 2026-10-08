@@ -14,7 +14,9 @@ interfaces to implement, not claims about endpoints that already exist.
 V1 pairs only installations authenticated as the **same user on the same
 server instance**. Existing `User` records have no profile/library ACL model;
 do not invent a permissions intersection which the server cannot enforce.
-Use human bearer authentication in headers. Machine API keys, URL tokens,
+Use human bearer authentication in the `Authorization: Bearer` header only.
+Reject the general extractor's alternate query and `X-Api-Key` paths.
+Machine API keys, URL tokens,
 mDNS, a device name, an installation UUID, and shared Wi-Fi confer no control.
 
 A receiver installation has a random UUID and a random 256-bit secret. A
@@ -66,8 +68,9 @@ Resolve owner IDs through `MembershipManager::operations_peers()` and use
 `PeerAuthMode::ExactRequestAndMemberResponse`. Never accept an HTTP base URL
 from a phone. Sign exact requests and replies using the existing internal
 peer helpers. Authenticated peer transport proves the peer, not the user:
-the owner rechecks the current user, receiver, and grant in authoritative
-storage before delivery. Revocation prevents subsequent admitted delivery;
+the owner rechecks the current bearer/session validity, user, receiver, and
+grant in authoritative storage before delivery. Preserve the request token
+digest for this check; a cached user ID cannot survive token revocation. Revocation prevents subsequent admitted delivery;
 it cannot undo an action already applied to a screen.
 
 `may_run_cluster_jobs()` permits multiple committed voters. It is NOT a
@@ -134,7 +137,7 @@ An actor also expires queued work after 500 ms of actor-local time. That is
 an additional bound, not a replacement for the final receiver check.
 
 Before applying a command, on the UI owner: validate protocol, active target,
-active control epoch, credit identity and local deadline, sequence,
+active grant and control epoch, credit identity and local deadline, sequence,
 context/focus, allowed semantic action and parameters. Then atomically consume sequence on the UI owner before invoking its effect.
 Rejected commands do not consume sequence. This admission is synchronous;
 never yield between semantic authorization and consumption/application. A command arriving after a stall does not get a fresh TTL.
@@ -174,7 +177,7 @@ with a new sequence number.
 | `set_playing` | `playing`: bool | Desired state through existing playback owner; not toggle |
 | `seek_relative` | `seconds`: -30/-10/10/30 | Existing policy, clamp to authorized seek range |
 | `seek_absolute` | `position_ms`: safe nonnegative integer | Current item/range only, one committed scrub |
-| `stop` | none | Detach local playback immediately; network cleanup may finish later |
+| `stop` | none | Pause immediately through the playback owner; preserve fullscreen/PiP teardown ordering without waiting for server cleanup |
 | `open_tracks` | `kind`: audio/subtitles/quality | App-owned scoped menu |
 | `choose_track` | `kind`, `option_id`: max 128 UTF-8 bytes | ID must be in current authorized menu options |
 | `text_replace` | `text_nonce`, `text`: max 512 UTF-8 bytes | Search only in v1; reject password/login/settings fields |
@@ -186,7 +189,7 @@ volume remains the TV remote's job. An unsupported action returns
 as documented in [PLAYER-INPUT-CONTRACT.md](PLAYER-INPUT-CONTRACT.md).
 
 State includes target, safe receiver name (80 UTF-8 bytes), platform,
-capabilities, available/busy status, control epoch, state revision,
+capabilities, available/busy status, active grant ID, control epoch, state revision,
 context/focus revisions, safe focused label, current credits, optional search
 nonce, and optional authorized playback summary. Never include filesystem
 paths, playable stream URLs, bearer tokens, pairing code, passwords, or an
@@ -218,6 +221,7 @@ Internal dispatch is an explicit tagged request enum, not an arbitrary proxy.
 | Method/path | Request/result | Additional proof |
 |---|---|---|
 | POST `/receivers` | name/platform -> receiver_id + secret | Fresh human login; capped 20 active installations per user |
+| DELETE `/receivers/{id}` | Revoke own installation and its grants, cancel its sessions; idempotent | Human auth; not a remote semantic action |
 | POST `/sessions` | receiver_id -> target | Receiver secret |
 | POST `/presence` | target + bounded state -> accepted | Receiver secret |
 | POST `/poll` | target + last delivery ID -> commands or empty | Receiver secret; max 20 s |
