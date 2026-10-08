@@ -4667,3 +4667,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func queueBlackFrameRecovery"
 test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
 test_anchor = "testQueuedBlackFrameRecoveryRearmsAfterViewerActionSupersedesTrigger"
+
+[[fixes]]
+id = "apple.growing-resume-preparation-budget"
+commits = ["2bc3425f5a5f08160ca6bb121a21e0bf7f20efab"]
+source = "clients/apple/Sources/PlayerItemReadiness.swift"
+source_anchor = "enum PlayerItemReadiness"
+test = "clients/apple/Tests/AppleItemReadinessTests.swift"
+test_anchor = "testGrowingResumeWaitsForPublicationAtTwentyOneSeconds"

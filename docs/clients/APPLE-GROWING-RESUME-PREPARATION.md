@@ -1,6 +1,6 @@
 # Growing HLS resume — distinguish server preparation from item readiness
 
-**Status:** open; root cause established, implementation proposed · **Written:** 2026-10-08 · **Base:** `f0c597df20297fe33c8016a6f027cc06ac54b26e`
+**Status:** built; qualification and physical acceptance open · **Written:** 2026-10-08 · **Base:** `f0c597df20297fe33c8016a6f027cc06ac54b26e`
 
 Companion to [APPLE-BLACK-VIDEO-IMPLEMENTATION.md](APPLE-BLACK-VIDEO-IMPLEMENTATION.md) (the separate diagnostic-process incident) and [PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md) (which owner may report a failure). This document explains Naked Gun's premature preparation error, specifies its bounded repair, and records the evidence that does and does not establish an incident resolution.
 
@@ -95,7 +95,7 @@ This is one ordinary main-bound fix. All changes belong to one branch and one PR
 | Apple build metadata, README, parity/status/build note and client-fix ledger | Claim the next build and record the behavioral regression |
 | This document and `docs/README.md` | Root cause, review dispositions, validation and acceptance limits |
 
-The readiness context captures the expected item, session, and open/lifecycle owner. A predecessor's status cannot extend a successor's wait. Same-session ingress failover advances the open generation, invalidates old evidence, and restarts the single status poll for the replacement owner. Initial polling begins before item attachment, so its fence binds lifecycle/open/session rather than the predecessor item. Recheck that fence after every await, including optional staged telemetry. Clear evidence when polling/session state is retired and preserve the matching observation timestamp when restoring an incumbent. Existing `seekWhenReady` checks remain before the native seek and after each await; pause retains the requested position but cannot grant permission to play.
+The readiness context captures the expected item, session, and open/lifecycle owner. A predecessor's status cannot extend a successor's wait. Same-session ingress failover advances the open generation, invalidates old evidence, and restarts the single status poll for the replacement owner. Initial polling begins before item attachment, so its fence binds lifecycle/open/session rather than the predecessor item. Recheck that fence after every await, including optional staged telemetry. Clear evidence when polling/session state is retired. Restoring an incumbent restarts polling and clears preparation evidence; it cannot grant a fresh lease to an old sample. Existing `seekWhenReady` checks remain before the native seek and after each await; pause retains the requested position but cannot grant permission to play.
 
 The production readiness bridge keeps subscribe-before-inspect ordering. A failed native item wins over a simultaneously observed publication or ready event. Test the actual observer/timer race through injected status, clock, and sleep boundaries; do not validate only a duplicated policy formula. The policy's timer is monotonic and finite. Cancellation must terminate both branches and retire observation rather than leaving a sleeping task behind.
 
@@ -132,3 +132,8 @@ Deterministic tests establish the repaired preparation decision and ownership be
 ## 7. Review and execution record
 
 Adversarial plan review found three issues, all incorporated before implementation: (P1) rebind the single status poll after same-session failover and reject delayed predecessor responses; (P2) require a known producer progress witness (`outTimeMs`) because zero idle can mean unknown; (P2) separate request-start freshness from response-observation time for the one-shot item-readiness budget. The reviewer also requested “item readiness” terminology: `.readyToPlay` is not proof of displayed video. Implementation and validation are in progress.
+
+
+Implementation is PR [#914](http://192.168.4.7:3000/noirr/plurx/pulls/914), Apple build 217. The shared production waiter is exercised directly with injected monotonic time, native status, and cancellable sleep. Two controller tests additionally traverse actual growing-session attachment and same-session failover; the latter holds the predecessor HTTP result across replacement to prove it cannot populate successor evidence.
+
+Initial validation: focused readiness/ownership suites passed on tvOS (34 tests) and iOS (40 tests). The complete tvOS suite passed (866 tests). Both Debug test builds passed. The normal commit hook passed pinned Rust formatting, workspace/all-target Clippy with warnings denied, catalog validation and all 77 served JavaScript syntax checks. Full iOS, both Release builds and PR review/qualification are still in progress.

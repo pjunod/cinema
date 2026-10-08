@@ -394,6 +394,7 @@ player obeys, subtitles and overlays, layouts and themes.
 |---|---|---|
 | [Ready-video recovery build note](apple-builds/888-ready-video-recovery.md) | Apple build claim and viewer-visible black-picture recovery changes for PR #888. | built |
 | [APPLE-BLACK-VIDEO-IMPLEMENTATION.md](clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md) | Avatar and HDR10 black-video investigation, verified false-frame evidence defects, item-bound presentation repair and physical acceptance limits. | open |
+| [Growing-resume preparation build note](apple-builds/914-growing-resume-preparation.md) | Apple build claim and bounded unpublished-session preparation repair for PR #914. | built |
 | [APPLE-GROWING-RESUME-PREPARATION.md](clients/APPLE-GROWING-RESUME-PREPARATION.md) | Why Naked Gun resumed through a premature preparation timeout, the exact server/client timing mismatch, bounded readiness repair, and remaining native-error evidence limits. | open |
 | [RASPBERRY-PI-IMPLEMENTATION.md](clients/RASPBERRY-PI-IMPLEMENTATION.md) | Build contract for existing Plurx server and web HDMI playback on Pi 5: request decoding, browser evidence, deployment and acceptance. | open |
 | [RASPBERRY-PI-INSTALLATION.md](clients/RASPBERRY-PI-INSTALLATION.md) | Implemented Docker-default Pi setup, selectable native/systemd, runtime/browser ownership and bounded acceptance; final CI pending. | built |
