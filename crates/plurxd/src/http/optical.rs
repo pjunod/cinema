@@ -979,6 +979,7 @@ async fn local_decision(
         &snapshot.state,
         &request.media_generation,
         &request.expected_disc_id,
+        false,
     )?;
     let title = state
         .store
@@ -1158,6 +1159,7 @@ async fn local_start_session(
         &snapshot.state,
         &request.media_generation,
         &request.expected_disc_id,
+        true,
     )?;
     let title = state
         .store
@@ -1422,6 +1424,7 @@ fn validate_ready_insertion(
     state: &OpticalDriveState,
     generation: &str,
     disc_id: &str,
+    allow_matching_busy: bool,
 ) -> Result<(), ApiError> {
     match state {
         OpticalDriveState::Ready {
@@ -1432,6 +1435,18 @@ fn validate_ready_insertion(
             "optical_media_changed",
             "the requested optical insertion is no longer present",
         )),
+        OpticalDriveState::Busy {
+            media_generation,
+            disc_id: current_disc_id,
+            ..
+        } if allow_matching_busy
+            && media_generation == generation
+            && current_disc_id == disc_id =>
+        {
+            // Only session creation can pass a busy insertion to the manager,
+            // which checks the exact request ID and digest before replaying.
+            Ok(())
+        }
         OpticalDriveState::Busy { .. } | OpticalDriveState::Inspecting { .. } => Err(
             optical_conflict("optical_drive_busy", "the optical drive is in use"),
         ),
@@ -2209,7 +2224,8 @@ mod tests {
     use super::{
         decide_managed_optical_delivery, eject_target, optical_audio_tracks,
         optical_subtitle_tracks, owner_wire_error, progress_audio_index, progress_selections_match,
-        progress_subtitle_selection, EjectRequest, PublicOpticalDriveState,
+        progress_subtitle_selection, validate_ready_insertion, EjectRequest,
+        PublicOpticalDriveState,
     };
     use crate::http::error::ApiError;
     use plurx_core::domain::{AudioStream, SubtitleStream};
@@ -2236,6 +2252,20 @@ mod tests {
         assert_eq!(json["title_id"], "title-a");
         assert!(json.get("session_id").is_none());
         assert!(!json.to_string().contains("secret-session-capability"));
+    }
+
+    #[test]
+    fn matching_busy_insertion_reaches_only_session_replay_admission() {
+        let busy = OpticalDriveState::Busy {
+            media_generation: "generation-a".to_owned(),
+            disc_id: "disc-a".to_owned(),
+            title_id: "title-a".to_owned(),
+            session_id: "private-session".to_owned(),
+        };
+        assert!(validate_ready_insertion(&busy, "generation-a", "disc-a", true).is_ok());
+        assert!(validate_ready_insertion(&busy, "generation-a", "disc-a", false).is_err());
+        assert!(validate_ready_insertion(&busy, "generation-b", "disc-a", true).is_err());
+        assert!(validate_ready_insertion(&busy, "generation-a", "disc-b", true).is_err());
     }
 
     #[test]
