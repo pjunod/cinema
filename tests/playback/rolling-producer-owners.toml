@@ -3018,6 +3018,15 @@ expected_occurrences = 13
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Backup passive catch-up: 1618 -> 1622, exactly +4 in backup.rs.
+# The existing publication sleep becomes sleep_until (no count delta).
+# One new timeout_at bounds local metrics, the single trigger and publication
+# with the same original deadline under the held backup:cluster lease; one
+# new sleep_until observes apply/log convergence under that deadline. Both
+# futures stay awaited by that lease owner, with no new task or producer.
+# Two test-only sleeps consume the catch-up/trigger budget on a paused clock
+# and prove the trigger cannot acquire a fresh deadline. Existing scheduler
+# sleeps, snapshot/image guards and resource authority are unchanged.
 # PR913: +2 finite monitor-join/retirement fixture bounds; timeout is a failure.
 # Main PR915: +5 finite publication/reap/completion regression bounds; each
 # requires actual settlement, with no deadline promoted to a closure receipt.
@@ -4252,7 +4261,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
 # #904: one parser stop deadline, three Live executable identity bounds and
 # one P5 unlink bound. Deadlines never replace worker or child settlement.
-expected_occurrences = 1618
+expected_occurrences = 1622
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
