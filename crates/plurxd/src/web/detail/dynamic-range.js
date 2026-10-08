@@ -1,15 +1,14 @@
 "use strict";
-// ---- dynamic range: source vs delivered vs rendered ------------------------
+// ---- dynamic range: source, delivered format and display evidence ----------
 // MEDIA-BADGES-PLAN.md §2. The chip above answers "what is this file?"; during
 // playback the viewer is asking "what am I getting?", and those two answers
 // differ constantly — a DV disc remux tone-mapped to an SDR H.264 transcode
 // still showed a full-colour "DV P7".
 //
-// Asked LIVE, not read from PLAY_CAPS: the probe's copy is the boot-time
-// answer the server was given, and a window dragged from an HDR laptop panel
-// to an SDR external monitor changes what is being rendered without changing
-// one thing about the session. A browser too old for matchMedia answers no —
-// which is exactly what the server was told, so the two stay consistent.
+// Asked live for the badge's capability note; negotiation keeps its existing
+// boot-time answer. CSS dynamic-range describes capability, not whether HDR
+// mode is active or the actual HDMI/display output. A missing query means the
+// browser did not report HDR capability, not an observed SDR rendering path.
 function displayIsHdr(){
   try{ return !!(window.matchMedia && window.matchMedia("(dynamic-range: high)").matches); }
   catch(e){ return false; }
@@ -54,13 +53,10 @@ function dynamicRangeReason(){
     return PLAYER.reasons.find(r=>r&&/dolby vision|hdr/i.test(r))||null;
   }catch(e){ return null; }
 }
-// Pure: (source file, delivered grade from the server, live display answer) →
-// the chip, or null when the source is SDR (no grade to report on).
-//
-//   {cls, text, base, arrow, full, aria, panel, off, source, rendered}
-//
-// `delivered` falsy — no session yet, an old server, or a session the store
-// could not resolve (§3.2) — degrades to exactly today's source-only chip.
+// (Source file, server-reported delivery, live browser capability) → badge.
+// Arrows describe the delivered grade/profile; CSS never supplies a rendered
+// grade. Ordinary browsers expose no observation of the actual display output.
+// Missing delivery keeps the source-only chip rather than inventing a stream.
 function dynamicRangeBadge(f, delivered, displayHdr, deliveredDvProfile){
   f=f||{};
   const chip=hdrChip(f); if(!chip) return null;
@@ -68,41 +64,35 @@ function dynamicRangeBadge(f, delivered, displayHdr, deliveredDvProfile){
   const lit={cls:chip.cls, text:chip.text, base:chip.text, arrow:null, full:chip.full,
     aria:chip.full||chip.text, panel:RANGE_LONG[source]||chip.text,
     off:false, source, rendered:null};
-  if(!delivered) return lit;                             // today's chip, exactly
-  // Delivered bits are necessary, not sufficient: HDR10 on an SDR monitor is
-  // delivered HDR and rendered SDR.
-  const displayLoss = delivered!=='sdr' && !displayHdr;
-  const rendered = displayLoss ? 'sdr' : delivered;
-  if(rendered===source){
-    // Same grade, different profile: the Profile 7 → 8.1 conversion
-    // (PLAYBACK-CAPS-V2-PLAN §4.8). Neither half dims — the base layer is
-    // copied byte for byte, nothing is re-encoded, and what reaches this
-    // browser really is Dolby Vision — but the profile on screen is not the
-    // profile on disk, and a chip that said plain `DV P7` would be describing
-    // the file rather than the picture (MEDIA-BADGES-PLAN §2.3).
+  if(!delivered) return lit;
+  const capability=displayHdr?"browser reports HDR capability":"browser has not reported HDR capability";
+  const output="display output unverified";
+  const grade=RANGE_LONG[delivered]||String(delivered).toUpperCase();
+  const profile=delivered==='dolby_vision'&&deliveredDvProfile
+    ?` Profile ${deliveredDvProfile}`:"";
+  const delivery=`Delivered ${grade}${profile}`;
+  const evidence=`${delivery} · ${output} · ${capability}`;
+  if(delivered===source){
     const sourceDv=sourceDolbyVisionProfile(f);
-    if(source==='dolby_vision' && deliveredDvProfile && sourceDv && deliveredDvProfile!==sourceDv){
+    if(source==='dolby_vision'&&deliveredDvProfile&&sourceDv&&deliveredDvProfile!==sourceDv){
       const arrow=`DV P${deliveredDvProfile}`;
-      return {cls:chip.cls, text:`${chip.text} → ${arrow}`, base:chip.text, arrow,
-        full:`${chip.full} — playing as Dolby Vision Profile ${deliveredDvProfile} `
-          +`(converted for this browser; the HDR10-compatible base layer is copied untouched)`,
-        aria:`Dolby Vision Profile ${sourceDv}, playing as Dolby Vision Profile ${deliveredDvProfile}`,
-        panel:`Dolby Vision Profile ${deliveredDvProfile} — converted for this browser`,
-        off:false, source, rendered};
+      return {...lit,text:`${chip.text} → ${arrow}`,arrow,
+        full:`${chip.full} — ${evidence} (converted for this browser)`,
+        aria:`Dolby Vision Profile ${sourceDv}; ${evidence}`,
+        panel:`${evidence} — converted for this browser`};
     }
-    return {...lit, rendered, panel:`${RANGE_LONG[source]} (rendering)`};
+    return {...lit,full:`${chip.full||chip.text} — ${evidence}`,
+      aria:`${chip.full||chip.text}; ${evidence}`,panel:evidence};
   }
-  const note = displayLoss ? "this browser did not expose HDR presentation"
-    : (dynamicRangeReason()
-      || (rendered==='sdr' ? `tone-mapped from ${RANGE_LONG[source]||'the source grade'}`
-        : source==='dolby_vision' ? "Dolby Vision removed for this browser"
-        : `delivered as ${RANGE_LONG[rendered]||rendered}`));
-  const arrow=RANGE_SHORT[rendered]||String(rendered).toUpperCase();
-  const long=RANGE_LONG[rendered]||arrow;
-  return {cls:chip.cls, text:`${chip.text} → ${arrow}`, base:chip.text, arrow,
-    full:`${chip.full} — playing as ${long} (${note})`,
-    aria:`${RANGE_LONG[source]||chip.text}, playing as ${long}`,
-    panel:`${long} — ${note}`, off:true, source, rendered};
+  // A server delivery change can explain a conversion; a CSS answer cannot.
+  const note=dynamicRangeReason()||(delivered==='sdr'
+    ?`tone-mapped from ${RANGE_LONG[source]||'the source grade'}`
+    :source==='dolby_vision'?"Dolby Vision removed for this browser":null);
+  const arrow=RANGE_SHORT[delivered]||String(delivered).toUpperCase();
+  return {...lit,text:`${chip.text} → ${arrow}`,arrow,
+    full:`${chip.full||chip.text} — ${evidence}${note?` (${note})`:""}`,
+    aria:`${RANGE_LONG[source]||chip.text}; ${evidence}`,
+    panel:`${evidence}${note?` — ${note}`:""}`,off:true};
 }
 // The badge for whatever this player is doing right now.
 //

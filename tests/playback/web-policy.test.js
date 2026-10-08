@@ -5038,6 +5038,21 @@ test("a pre-play burn rides the first session open rather than a restart", () =>
   });
 });
 
+test("a default subtitle in a transcode decision rides the first session recipe", () => {
+  const decision={...PGS_DECISION,
+    subtitles:PGS_DECISION.subtitles.map(s=>({...s,default:s.index===2}))};
+  const h=detailHarness();
+  for(const selection of [null,{audio:0,subtitle:null}]){
+    const applied=h.prePlayApplication(decision,selection);
+    assert.equal(applied.subtitle,2);
+    assert.equal(applied.burnedSub,2,"the chosen candidate includes this burn");
+  }
+  assert.equal(h.prePlayApplication(decision,{subtitle:-1}).burnedSub,null,
+    "explicit Off overrides the server default");
+  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,null,
+    "a default must not force a copy decision into transcode");
+});
+
 test("a pre-play text subtitle is a <track>, not a second session", () => {
   const applied = detailHarness().prePlayApplication(
     {
@@ -5613,7 +5628,7 @@ asyncTest("the Dolby Vision probe is unchanged by the tiering", async () => {
   assert.match(safari.capsQuery(caps), /&dv=1&dvprofile=5,8&/);
 });
 
-test("a converted Dolby Vision stream names the profile it is playing as", () => {
+test("a converted Dolby Vision stream names its delivered profile", () => {
   // The badge state PLAYBACK-CAPS-V2-PLAN §4.8 adds and MEDIA-BADGES-PLAN
   // §2.3 spells out. A Profile 7 disc remux converted to 8.1 for a browser
   // that takes 8 and not 7 is delivered `dolby_vision` — the same value a
@@ -5621,9 +5636,8 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   // apart, and a chip reading plain `DV P7` for both is describing the file
   // rather than the picture.
   //
-  // Neither half dims. The base layer is copied byte for byte and nothing is
-  // re-encoded, so the source capability is active; dimming it would say the
-  // opposite of what happened.
+  // Neither half dims: the delivered grade remains Dolby Vision. This says
+  // what the server delivered, independently of the unverified display output.
   const build = new PlaybackContextFunction(
     "RANGE_SHORT",
     "RANGE_LONG",
@@ -5651,8 +5665,8 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   assert.equal(converted.base, "DV P7", "the source half still names the source");
   assert.equal(converted.arrow, "DV P8");
   assert.equal(converted.off, false, "nothing about the grade was lost");
-  assert.equal(converted.rendered, "dolby_vision");
-  assert.match(converted.aria, /Profile 7, playing as Dolby Vision Profile 8/);
+  assert.equal(converted.rendered, null, "delivery does not observe display output");
+  assert.match(converted.aria, /Profile 7; Delivered Dolby Vision Profile 8/);
   assert.match(converted.panel, /Profile 8/, "the stats overlay reads this one");
   assert.match(converted.full, /converted for this browser/);
 
@@ -5660,8 +5674,7 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   // profile must name that one.
   assert.equal(dynamicRangeBadge(p7, "dolby_vision", true, 5).arrow, "DV P5");
 
-  // A client that decodes Profile 7 gets it untouched, and the arrow would be
-  // a lie: the profile on screen is the profile on disk.
+  // A preserved Profile 7 delivery needs no conversion arrow.
   const preserved = dynamicRangeBadge(p7, "dolby_vision", true, 7);
   assert.equal(preserved.text, "DV P7");
   assert.equal(preserved.arrow, null);
@@ -5695,6 +5708,50 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   assert.equal(agreeing.text, "DV P8", "the column wins, and 8 → 8 is no arrow");
 });
 
+test("browser_hdr_capability_never_claims_observed_display_output", () => {
+  const build=new PlaybackContextFunction("RANGE_SHORT","RANGE_LONG",[
+    shippedSource("hdrChip"),shippedSource("sourceDynamicRange"),
+    shippedSource("sourceDolbyVisionProfile"),shippedSource("dynamicRangeReason"),
+    shippedSource("dynamicRangeBadge"),"return dynamicRangeBadge;"].join("\n"));
+  const badge=build({dolby_vision:"DV",hdr10:"HDR10",hlg:"HLG",sdr:"SDR"},
+    {dolby_vision:"Dolby Vision",hdr10:"HDR10",hlg:"HLG",sdr:"SDR"});
+  const p7={hdr:"dolby_vision",hdr_format:"Dolby Vision · Profile 7 (HDR10-compatible)"};
+  for(const [delivered,profile,text,off] of [
+    ["dolby_vision",8,"DV P7 → DV P8",false],
+    ["dolby_vision",7,"DV P7",false],
+    ["hdr10",null,"DV P7 → HDR10",true],
+    ["sdr",null,"DV P7 → SDR",true],
+  ]){
+    for(const hdrCapability of [true,false]){
+      const result=badge(p7,delivered,hdrCapability,profile);
+      assert.equal(result.text,text,"CSS capability cannot change server delivery");
+      assert.equal(result.off,off,"CSS capability cannot invent a lost source grade");
+      assert.equal(result.rendered,null);
+      for(const field of ["panel","full","aria"]){
+        assert.match(result[field],/Delivered .*display output unverified/);
+        assert.doesNotMatch(result[field],/\(rendering\)|playing as/);
+      }
+      assert.match(result.panel,hdrCapability?/browser reports HDR capability/:/browser has not reported HDR capability/);
+    }
+  }
+  const hdr10={hdr:"hdr10",hdr_format:"HDR10"};
+  for(const capability of [true,false]){
+    const result=badge(hdr10,"hdr10",capability,null);
+    assert.equal(result.text,"HDR10");assert.equal(result.arrow,null);
+    assert.equal(result.rendered,null);assert.equal(result.off,false);
+    assert.match(result.panel,/Delivered HDR10 · display output unverified/);
+  }
+  const hlg={hdr:"hlg",hdr_format:"HLG"};
+  for(const capability of [true,false]){
+    const result=badge(hlg,"hlg",capability,null);
+    assert.equal(result.text,"HLG");assert.equal(result.rendered,null);
+    assert.match(result.panel,/Delivered HLG · display output unverified/);
+  }
+  const pending=badge(p7,null,true,8);
+  assert.equal(pending.text,"DV P7");assert.equal(pending.rendered,null);
+  assert.doesNotMatch(pending.panel,/Delivered/);
+});
+
 test("every surface paints the badge from the same four answers", () => {
   // The four surfaces that show this chip — the fact badges, the play overlay,
   // the stats panel and the debug ledger — used to call dynamicRangeBadge()
@@ -5707,9 +5764,8 @@ test("every surface paints the badge from the same four answers", () => {
     "PLAYER",
     "RANGE_SHORT",
     "RANGE_LONG",
-    // node has no matchMedia, so the shipped `displayIsHdr` would answer no
-    // and every case below would collapse to the display-loss branch. The
-    // display answer is not what this test is about.
+    // Keep the capability note deterministic; delivery is reported by the
+    // session and must not depend on this CSS capability answer.
     "displayIsHdr",
     [
       shippedSource("hdrChip"),

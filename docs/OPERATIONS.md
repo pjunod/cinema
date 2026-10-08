@@ -20,7 +20,7 @@ run it, in order of how most people do:
 # Docker / Compose (recommended for homelabs) — builds from source the first time
 make install-docker          # writes deploy/.env + the override file, creates the data dir, runs docker-up
 $EDITOR deploy/docker-compose.override.yml                          # your mounts + GPU
-make docker-up               # builds + starts, and stamps the commit so the server can name it
+make docker-up               # detects Linux GPUs, builds + starts, and stamps the commit
 
 # As a service — systemd on Linux, launchd on macOS, the native Windows service
 make install                 # builds, installs, starts, and waits for /readyz; `make uninstall` reverses it
@@ -35,6 +35,12 @@ plurxd run            # serves :32400
 # From source (development)
 cargo run -p plurxd   # or: make run
 ```
+
+Both Docker startup targets detect local Linux GPU devices and their numeric
+access groups. NVIDIA hosts also need NVIDIA Container Toolkit; the container
+receives the video encode/decode libraries automatically. Explicit GPU
+selections remain authoritative. See the [hardware deployment contract](../deploy/README.md#hardware-transcode--recent-intel-gpus)
+for manual configuration, remote engines, and native macOS VideoToolbox.
 
 Open `http://<host>:32400`, create the admin account, add a library. Library
 paths you type in the UI are **container-side** paths under Docker (e.g.
@@ -3369,6 +3375,7 @@ In Settings → Libraries, the Status column is the truth about each library:
 | Status | Meaning | What to check |
 |---|---|---|
 | `idle` | No scan running; last scan finished | Item count looks right? |
+| `queued` | Accepted work has not started | Read the local library-root error; a free worker cannot scan an unreadable path |
 | `scanning… N / M files` | File pass in progress | — |
 | `fetching metadata…` | Files done, enrichment running | TMDB key set? |
 | `error: …` (red) | The scan failed, with the reason | Almost always a path the **server** can't see |
@@ -3377,6 +3384,17 @@ In Settings → Libraries, the Status column is the truth about each library:
 files while you can see the folder full of media. That means the path you typed
 isn't the path the server process has — under Docker, the container-side mount
 path must match. Fix the mount, not the library name.
+
+After adding mounts to a Compose override, `docker compose restart` still
+uses the container's old mounts. Run `docker compose up -d --force-recreate`
+from the Compose directory, preserving any explicit `-f` options needed to
+load that override. Mount changes do not require an image rebuild. Accepted
+scan and metadata-refresh jobs retry automatically when their roots become
+readable. Activity's job list shows the local path error in Reason; the
+header says **Library work queued** until execution begins.
+Local path observations are tied to the roots that were checked. Editing a
+library's roots suppresses the old diagnosis immediately, including when the
+edit came through another cluster member or an old check finishes late.
 
 When a scan reports that one directory is owned by duplicate catalogue items,
 it still indexes the file. The note lists every candidate item ID and the ID
@@ -4489,6 +4507,11 @@ refresh separately every 15 seconds and show their observation time. Expired
 leases identify a previous owner awaiting recovery, not a running worker.
 The assignment list is bounded to 100 running and 100 cancelling jobs and
 labels itself partial when either page has more results.
+
+A standalone setup shows **Server work**, labels its worker **This server**,
+and omits cluster totals and the node filter. This follows the server's
+cluster mode, not the number of nodes that answered: a cluster with only one
+reachable node keeps its cluster diagnostics.
 
 Each node admits **one heavy background pipeline** at a time. Preparation,
 indexing, subtitles, probing, artwork, semantic indexing, verification and
@@ -5779,6 +5802,36 @@ Its media-tool, durable-store, held-source, and compatibility-inventory rows are
 advisory evidence only. An unmet or unavailable row never disables the switch.
 
 ## Hardware transcode & recent Intel GPUs
+
+**Settings → System → Transcoding backend** selects Auto, NVIDIA NVENC,
+Intel Quick Sync, VA-API, Apple VideoToolbox or CPU for the responding node.
+On a laptop with Intel and NVIDIA graphics, choose Quick Sync when you prefer
+the integrated GPU, or NVENC for the discrete GPU. Auto prefers NVIDIA when
+available. This selects a backend family, not an individual adapter among
+multiple GPUs of the same family; it does not measure or enforce a power budget.
+
+Save records a node-specific preference and shows whether a restart is needed.
+Restart that node to select its encoder and re-probe the matching HDR path;
+active playback is not changed by Save. A backend marked **not detected** can
+still be selected. If it remains unavailable at startup, the existing encoder
+fallback applies and **Active** shows what actually runs. Other nodes retain
+their own preferences. Nodes without an override keep the legacy
+`PLURX_HWACCEL`/stored cluster preference.
+
+Speculative jobs explicitly pinned to a different encoder family remain for
+compatible workers. A node advertises the backend it will execute, and CPU
+selection advertises the software resolution ceiling. The legacy cluster
+preference still defines queued job requirements; an Auto job can be claimed
+by either GPU family without changing its cluster-wide policy generation.
+
+For NVIDIA HDR10, the probe first tries NVDEC → `tonemap_cuda` → `scale_cuda`
+→ NVENC, keeping frames on the GPU unless subtitles need a CPU composite.
+This needs an FFmpeg build with the CUDA filters and NVIDIA compute/video
+device access in the container. CUDA uses the writable runtime cache for
+compiled shaders; the startup probe warms one frame before timing the graph.
+The existing SDR color checks and speed threshold still apply. A missing
+filter, device failure, color mismatch or slow candidate is reported in
+**HDR → Probe details**, then the probe considers its remaining candidates.
 
 The Docker image defaults to **jellyfin-ffmpeg**, which bundles a current Intel
 media driver + libva + oneVPL. This matters for newer silicon: an Arc / Meteor

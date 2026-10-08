@@ -802,7 +802,9 @@ function detailActivitySummary(d,deliveries,recording=[]){
       percent:Math.round(PlurxLiveTv.dvrCaptureProgress(row,now)*100)});
   }
   for(const scan of (d.scans||[])){
-    if(scan.status&&scan.status.running) acts.push({label:"Scanning library",detail:scan.library});
+    if(!scan.status?.running)continue;
+    const phase=scan.status.phase;
+    acts.push({label:phase==="queued"?"Library work queued":phase==="enriching"?"Fetching metadata":"Scanning library",detail:scan.library});
   }
   if(deliveries.length) acts.push({label:`${deliveries.length} active stream${deliveries.length===1?'':'s'}`});
   if(d.producing) acts.push({label:"Pre-transcoding",detail:d.producing.title});

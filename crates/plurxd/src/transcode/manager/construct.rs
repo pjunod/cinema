@@ -76,6 +76,7 @@ impl TranscodeManager {
                 crate::vodencode::CandidateProductionProofs::default(),
             ),
             pipeline,
+            encoder_override: None,
             admissions: Admissions::new(),
             cache: None,
             shared_cache: None,
@@ -191,7 +192,7 @@ impl TranscodeManager {
     }
 
     pub(crate) fn hdr10_ceiling_with_preference(&self, preference: &str) -> i64 {
-        match self.caps.choose(preference) {
+        match self.encoder_for_preference(preference) {
             Encoder::Vaapi if self.hdr10_passthrough_vaapi => HDR10_HEIGHT,
             _ if !self.hdr10_passthrough => 0,
             Encoder::Qsv if self.hdr10_passthrough_qsv => HDR10_4K_HEIGHT,
@@ -624,15 +625,21 @@ impl TranscodeManager {
                 encoder_families.push(family.to_owned());
             }
         }
+        // A saved node preference is an execution policy, not just inventory.
+        // Do not claim a pinned job through a detected GPU this node will not
+        // use, or advertise a hardware ceiling while running in CPU mode.
+        if let Some(preference) = &self.encoder_override {
+            encoder_families = vec![self
+                .encoder_for_preference(preference)
+                .family_name()
+                .to_owned()];
+        }
+        let uses_hardware = encoder_families.iter().any(|family| family != "software");
         PretranscodeWorkerCapabilities {
             version: plurx_core::domain::PretranscodeRequirements::VERSION,
             decoders: self.decoders.clone(),
             encoder_families,
-            max_target_height: if self.caps.nvenc
-                || self.caps.qsv
-                || self.caps.vaapi
-                || self.caps.videotoolbox
-            {
+            max_target_height: if uses_hardware {
                 MAX_HEIGHT
             } else {
                 AUTO_SOFTWARE_HEIGHT
@@ -775,14 +782,19 @@ impl TranscodeManager {
         // exactly the node that should serve, and answering `false` here would
         // refuse it. Plan resolution failing means we cannot name the artifact,
         // so we claim nothing and fail closed.
-        let cache_hit = match self.resolve_movie_plan(file, &opts, encoder).await {
-            Ok(plan) => self.verified_cache_hit(&plan).await,
+        let (cache_hit, pipeline) = match self.resolve_movie_plan(file, &opts, encoder).await {
+            Ok(plan) => (
+                self.verified_cache_hit(&plan).await,
+                plan.options().pipeline.name().to_owned(),
+            ),
             Err(reason) => {
                 tracing::debug!(
                     target: "plurxd::transcode",
                     file_id = file.id, %reason, "offer cannot name an artifact"
                 );
-                false
+                // Keep the existing offer fallback without claiming that
+                // an unresolved candidate is the graph that will run.
+                (false, String::new())
             }
         };
         let (hardware_used, hardware_max) = self.hardware_slots().await;
@@ -803,7 +815,7 @@ impl TranscodeManager {
             free_hardware_slots: hardware_max.saturating_sub(hardware_used),
             free_software_threads: software_max.saturating_sub(software_used),
             encoder: encoder.family_name().to_owned(),
-            pipeline: opts.pipeline.name().to_owned(),
+            pipeline,
             recent_speed: self
                 .admissions
                 .recent_speed(&workload.class(encoder.family_name())),
@@ -1037,7 +1049,14 @@ impl TranscodeManager {
         // Selection from the boot inventory performs no source probes. The
         // later bound-source planner may fall back to software, for which the
         // same conservative CPU reservation is already held.
-        let encoder = self.caps.choose(&policy.requested_encoder);
+        let encoder = self.encoder_for_preference(&policy.requested_encoder);
+        if !policy
+            .acceptable_encoder_families()
+            .iter()
+            .any(|family| family == encoder.family_name())
+        {
+            return Err("node backend does not satisfy the speculative encoder policy".to_owned());
+        }
         let threads = Workload::of(file, target_height).software_threads();
         let estimate = TranscodeResourceEstimate {
             hardware_slot: encoder != Encoder::Software,

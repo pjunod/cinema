@@ -80,6 +80,10 @@ pub(crate) fn fragment_index_validation_prometheus() -> String {
     )
 }
 
+pub(crate) fn node_hwaccel_key(node_id: &str) -> String {
+    format!("node.{node_id}.transcode.hwaccel")
+}
+
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
 /// detected hardware — not runtime state.
@@ -96,8 +100,11 @@ pub struct SystemInfo {
     /// Runtime-only binding to the executable that produced the digest.
     #[serde(skip)]
     pub(crate) decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
-    /// PLURX_HWACCEL preference, or "auto".
+    /// Backend preference applied at startup, including any node override.
     pub hwaccel_pref: String,
+    /// Node-specific choice applied at startup with the matching tone-map probe.
+    #[serde(skip)]
+    pub hwaccel_override: Option<String>,
     pub encoders: EncoderCaps,
     /// Portable video decoders reported by this exact ffmpeg at boot.
     pub decoders: Vec<String>,
@@ -1117,6 +1124,7 @@ impl AppState {
                 encoder_caps,
                 system.tone_map.selected(),
             )
+            .with_encoder_override(system.hwaccel_override.clone())
             .with_decoders(system.decoders.clone())
             // Cloned from the policy this process installed, which happens in
             // `probe_system` before this state is built. Handing it over makes

@@ -231,6 +231,9 @@ pub(crate) fn configure_ffmpeg_runtime(
     runtime_cache: &Path,
 ) {
     command.env("XDG_CACHE_HOME", runtime_cache);
+    // CUDA's driver JIT cache does not follow XDG_CACHE_HOME. In a service
+    // with HOME=/, its default is unwritable and every process recompiles.
+    command.env("CUDA_CACHE_PATH", runtime_cache);
     command.env("AV_LOG_FORCE_NOCOLOR", "1");
 }
 
@@ -254,6 +257,7 @@ mod tests {
         match std::env::var("PLURX_PRODUCER_CHILD_MODE").as_deref() {
             Ok("environment") => {
                 let cache = std::env::var("XDG_CACHE_HOME").expect("runtime cache");
+                assert_eq!(std::env::var("CUDA_CACHE_PATH").expect("CUDA cache"), cache);
                 let no_color = std::env::var("AV_LOG_FORCE_NOCOLOR").expect("no color");
                 let caller = std::env::var("PLURX_CALLER_ENV").expect("caller env");
                 println!("environment={cache}|{no_color}|{caller}");

@@ -66,7 +66,7 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
  // Details open in a bounded dialog and polling preserves its selected section.
  await page.evaluate(()=>window.hold=true);
  await page.locator('.durable-title').first().click();
- const dialog=page.getByRole('dialog',{name:'Cluster work details'});
+ const dialog=page.getByRole('dialog',{name:'Work details'});
  assert.match(await dialog.innerText(),/Loading job details/);
  await page.evaluate(()=>{window.hold=false;window.release()});
  await dialog.getByRole('button',{name:'History',exact:true}).click();

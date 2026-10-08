@@ -1446,7 +1446,12 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             inventory, r"DecodeBackend::V4l2Request\s*\.input_args\(true\)"
         )
         production = CORE_TRANSCODE.read_text(encoding="utf-8")
-        self.assertIn("decode.backend().input_args(matches!(", production)
+        self.assertRegex(
+            production,
+            r"decode\.backend\(\)\.input_args\(\s*"
+            r"decode\.surface\(\)\.decode_domain\(\) == FrameDomain::Cuda"
+            r"\s*\|\| matches!\(",
+        )
         self.assertIn(
             "DecodeBackend::Qsv | DecodeBackend::Vaapi | DecodeBackend::V4l2Request",
             production,

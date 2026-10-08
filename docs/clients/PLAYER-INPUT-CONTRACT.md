@@ -705,7 +705,7 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Aspect comparison` | – | – | ✓ | ✓ | text | grid | all |  |
 | `Stream format` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Codec, scan and cadence only. Stream frame is the sole active output dimension row. |
 | `Device audio output` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Speaker or HDMI output only when reported by the platform; never inferred from the audio track. |
-| `Dynamic range` | – | ✓ | ✓ | ✓ | text | notes | all | Mini shows the chip form ("DV P7 → HDR10"); the ledger shows the sentence. |
+| `Dynamic range` | – | ✓ | ✓ | ✓ | text | notes | all | Mini shows source-to-delivered format ("DV P7 → HDR10"); the web ledger separates server delivery, browser HDR capability and unverified display output. |
 | `Stream audio track` | – | ✓ | ✓ | ✓ | list | notes | all | Selected stream audio track metadata; not a claim about speaker or HDMI output. |
 | `Frames` | – | ✓ | ✓ | ✓ | fraction | grid | web · android | dropped / total. AVPlayer does not expose it. |
 | `Frame rate` | – | – | – | ✓ | text | grid | web |  |

@@ -16,11 +16,18 @@
 > dependency audit remains. These rules supersede the older automatic
 > qualification and post-merge instructions below pending their rewrite.
 
-> **Test-lane amendment, 2026-09-20:** The ready main-bound fast Rust job
-> runs workspace Clippy and `make unit` after its compile checks, on the
-> pinned FFmpeg 6 runner surface. Paul selected the blocking PR lane so unit
-> regressions reach the author before merge without spending runner capacity
-> on recurring runtime schedules; no periodic test schedule was added.
+> **Test-lane amendment, 2026-10-07, superseding 2026-09-20:** The ready
+> main-bound fast Rust job compiles every target and runs workspace and
+> vendored Hiqlite Clippy on the pinned FFmpeg 6 runner surface. The full
+> Rust unit and SQLite suites run in manually dispatched
+> [ci.yml](../.github/workflows/ci.yml), outside the blocking PR lane.
+> Run the smallest focused regression locally before pushing and record its
+> command in the PR, with each `Regression-Test:` anchor on its own line.
+> Preflight validates those anchors in the merge candidate; it does not
+> execute commands from the PR body. Policy, affected compile checks, and
+> named regression evidence remain prerequisites for merge. This keeps a
+> focused change from waiting for the entire Rust suite; no periodic schedule
+> was added.
 
 > **Coverage amendment, 2026-09-30:** [coverage.yml](../.github/workflows/coverage.yml)
 > refreshes the dated unit coverage badge on pushes to `main`, independently
@@ -278,9 +285,10 @@ When the project is complete:
    `integration/<project>-into-main`; the workflow treats that narrowly named
    branch as the same qualification candidate.
    Forgejo does not auto-cancel these promotion runs when a newer event arrives;
-   it retains the older result for diagnosis. Compile-only effort PRs, ordinary
-   main-bound PRs, and superseded `main` pushes still cancel obsolete work, and
-   immutable tags do not. This is an explicit event-context expression because
+   it retains the older result for diagnosis. Receipt-bearing effort and
+   ordinary main-bound PRs also serialize to preserve Python success evidence.
+   Superseded `main` pushes still cancel obsolete work, and immutable tags do
+   not. The full workflow uses an explicit event-context expression because
    workflow concurrency is evaluated before the scope job exists. The behavior
    follows Forgejo's
    [workflow concurrency contract](https://forgejo.org/docs/latest/user/actions/reference/#concurrency).
