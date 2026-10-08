@@ -32,7 +32,7 @@ test("real Chromium extension targets MAIN document and invalidates local contex
       if(key==="/home"||key==="/dvr/reminders/due")data=[];
       return route.fulfill({contentType:"application/json",body:JSON.stringify(data)});
     });
-    await page.goto("http://cinema.test/#/");await page.waitForFunction(()=>typeof CinemaRemote!=="undefined"&&ME&&document.getElementById("main")?.dataset.phase==="settled");
+    await page.goto("http://cinema.test/#/");await page.bringToFront();await page.waitForFunction(()=>typeof CinemaRemote!=="undefined"&&ME&&document.getElementById("main")?.dataset.phase==="settled");
     const outcome=await worker.evaluate(async()=>{
       const DesktopWorker=globalThis.SmokeDesktopWorker;
       const listeners=[],posts=[];

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // These fixed functions run in MAIN. No string evaluation or page-to-host API.
 export function installBridge(epoch,workerId="development",operation=1){
+  if(document.visibilityState!=="visible"||!document.hasFocus())return {ready:false};
   if(typeof CinemaRemote==="undefined"||typeof TOKEN==="undefined"||!TOKEN||typeof ME==="undefined"||!ME)return {ready:false};
   const previous=globalThis.CinemaDesktopBridge;
   if(previous?.workerId===workerId&&previous.operation>operation)return {ready:false};
@@ -10,7 +11,7 @@ export function installBridge(epoch,workerId="development",operation=1){
   const credits=new Map();
   function alive(){
     const now=performance.now(),wall=Date.now();
-    if(!enabled||TOKEN!==token||!ME||String(ME.id)!==user||location.origin!==origin||(typeof API!=="undefined"&&API!==api)||document.visibilityState!=="visible"||now<lastClock||wall<lastWall||wall-lastWall>1500){enabled=false;credits.clear();return false;}
+    if(!enabled||TOKEN!==token||!ME||String(ME.id)!==user||location.origin!==origin||(typeof API!=="undefined"&&API!==api)||document.visibilityState!=="visible"||!document.hasFocus()||now<lastClock||wall<lastWall||wall-lastWall>1500){enabled=false;credits.clear();return false;}
     lastClock=now;lastWall=wall;return true;
   }
   function disable(){enabled=false;credits.clear();CinemaRemote.physicalInput();}

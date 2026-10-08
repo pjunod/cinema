@@ -28,7 +28,7 @@ test("native duplicates arbitrary fields and unsupported keys cannot enter MAIN"
 });
 test("MAIN delivery checks its own credit after a page stall and invalidates before context capture",()=>{
   let now=0,wall=0;const calls=[];
-  const c=vm.createContext({TOKEN:"bearer",ME:{id:1},API:"/api/v1",location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible"},performance:{now:()=>now},Date:{now:()=>wall},
+  const c=vm.createContext({TOKEN:"bearer",ME:{id:1},API:"/api/v1",location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible",hasFocus:()=>true},performance:{now:()=>now},Date:{now:()=>wall},
     CinemaRemote:{physicalInput:()=>calls.push("invalidate"),snapshot:()=>{calls.push("snapshot");return {context_revision:9};},dispatch:(action,context)=>{calls.push({action,context});return "applied";}}});
   vm.runInContext("("+installBridge.toString()+")('"+epoch+"')",c);
   c.CinemaDesktopBridge.probe(credit);now=750;assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"expired");assert.deepEqual(calls,[]);
@@ -36,7 +36,7 @@ test("MAIN delivery checks its own credit after a page stall and invalidates bef
 });
 test("MAIN binding cannot survive logout account switch hidden page or wake gap",()=>{
   for(const change of [c=>{c.TOKEN=null;},c=>{c.ME={id:2};},c=>{c.document.visibilityState="hidden";},c=>{c.wall=2000;}]){
-    const c=vm.createContext({TOKEN:"bearer",ME:{id:1},API:"/api/v1",wall:0,location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible"},performance:{now:()=>0},CinemaRemote:{physicalInput:()=>{},snapshot:()=>({}),dispatch:()=>"applied"}});
+    const c=vm.createContext({TOKEN:"bearer",ME:{id:1},API:"/api/v1",wall:0,location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible",hasFocus:()=>true},performance:{now:()=>0},CinemaRemote:{physicalInput:()=>{},snapshot:()=>({}),dispatch:()=>"applied"}});
     c.Date={now:()=>c.wall};vm.runInContext("("+installBridge.toString()+")('"+epoch+"')",c);c.CinemaDesktopBridge.probe(credit);change(c);assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"unavailable");
   }
 });
@@ -69,9 +69,18 @@ test("window focus loss fences in-flight bind and content ticks cannot rearm bac
   const g=bindFixture();g.w.start();await settle();const bound=g.w.bind(tab(1));await settle();g.permissions[0].resolve(true);await bound;g.listeners.focus(-1);await settle();assert.equal(g.w.binding,null);assert.equal(g.ports[0].disconnected,true);const count=g.calls.length;await g.w.probe();assert.equal(g.calls.length,count);
 });
 test("late MAIN install or disable cannot replace a newer epoch in the same document",()=>{
-  const c=vm.createContext({TOKEN:"bearer",ME:{id:1},location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible"},performance:{now:()=>0},Date:{now:()=>0},CinemaRemote:{physicalInput:()=>{},snapshot:()=>({}),dispatch:()=>"applied"}});
+  const c=vm.createContext({TOKEN:"bearer",ME:{id:1},location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible",hasFocus:()=>true},performance:{now:()=>0},Date:{now:()=>0},CinemaRemote:{physicalInput:()=>{},snapshot:()=>({}),dispatch:()=>"applied"}});
   const invoke=(e,op)=>vm.runInContext("("+installBridge.toString()+")("+JSON.stringify(e)+",'worker',"+op+")",c);
   invoke("new",2);assert.equal(invoke("old",1).ready,false);assert.equal(c.CinemaDesktopBridge.epoch,"new");
   // Execute the actual exported epoch-specific cleanup, as Chrome would.
   vm.runInContext("("+disableBridge.toString()+")('old')",c);c.CinemaDesktopBridge.probe(credit);assert.equal(c.CinemaDesktopBridge.input("select",credit,"new"),"applied");
+});
+
+test("visible background document rejects queued MAIN input at the effect boundary",()=>{
+  let focused=true;const calls=[];
+  const c=vm.createContext({TOKEN:"bearer",ME:{id:1},location:{origin:"https://cinema.invalid"},document:{visibilityState:"visible",hasFocus:()=>focused},performance:{now:()=>0},Date:{now:()=>0},CinemaRemote:{physicalInput:()=>calls.push("invalidate"),snapshot:()=>({}),dispatch:()=>calls.push("dispatch")}});
+  const invoke=()=>vm.runInContext("("+installBridge.toString()+")('"+epoch+"')",c);
+  assert.equal(invoke().ready,true);c.CinemaDesktopBridge.probe(credit);focused=false;
+  assert.equal(c.CinemaDesktopBridge.input("select",credit,epoch),"unavailable");assert.deepEqual(calls,[]);
+  assert.equal(c.CinemaDesktopBridge.probe(credit).ready,false);assert.equal(invoke().ready,false);
 });
