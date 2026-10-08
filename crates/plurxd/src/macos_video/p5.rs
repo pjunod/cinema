@@ -15,7 +15,10 @@ pub(super) const MEDIA: &[(&str, &[u8])] = media!(
     "malformed_first",
     "malformed_midstream",
     "omitted_color_first",
-    "omitted_color_midstream"
+    "omitted_color_midstream",
+    "terminal_eos",
+    "terminal_eob",
+    "terminal_eos_eob"
 );
 
 pub(super) fn add_work(
@@ -26,7 +29,7 @@ pub(super) fn add_work(
     let doc: Value = serde_json::from_slice(MANIFEST).map_err(|_| invalid)?;
     let cases = doc["cases"].as_array().ok_or(invalid)?;
     if doc["schema_version"] != 1
-        || doc["generator_recipe_version"] != 2
+        || doc["generator_recipe_version"] != 3
         || doc["license"] != "CC0-1.0"
         || doc["source_shape"] != serde_json::json!([320, 180])
         || doc["frame_count"] != 24
@@ -44,12 +47,15 @@ pub(super) fn add_work(
             || case["byte_length"].as_u64() != Some(bytes.len() as u64)
             || bytes.is_empty()
             || case["seek_seconds"].as_u64().is_none()
-            || (matches!(*id, "fresh" | "variable") != case["negative_max_frames"].is_null())
+            || (matches!(
+                *id,
+                "fresh" | "variable" | "terminal_eos" | "terminal_eob" | "terminal_eos_eob"
+            ) != case["negative_max_frames"].is_null())
         {
             return Err(invalid);
         }
         let expected_maximum = match *id {
-            "fresh" | "variable" => None,
+            "fresh" | "variable" | "terminal_eos" | "terminal_eob" | "terminal_eos_eob" => None,
             "missing_midstream" | "malformed_midstream" | "omitted_color_midstream" => Some(10),
             _ => Some(0),
         };
@@ -813,7 +819,7 @@ mod tests {
             .expect("valid baseline corpus");
         let mut work = Vec::new();
         add_work(&corpus, &mut work).expect("valid hash-bound strict corpus");
-        assert_eq!(work.len(), 45);
+        assert_eq!(work.len(), 60);
         for graph in [
             MacosProcessingGraph::P5SoftwareCpu,
             MacosProcessingGraph::P5VtTonemapx,
@@ -827,9 +833,9 @@ mod tests {
             assert_eq!(
                 controls.len(),
                 if graph == MacosProcessingGraph::P5SoftwareCpu {
-                    18
+                    24
                 } else {
-                    9
+                    12
                 }
             );
             assert!(controls
@@ -838,6 +844,12 @@ mod tests {
             assert!(controls
                 .iter()
                 .any(|(f, _, _)| f.input_pixels["id"] == "omitted_color_midstream"));
+            for terminal in ["terminal_eos", "terminal_eob", "terminal_eos_eob"] {
+                assert!(controls
+                    .iter()
+                    .any(|(fixture, _, _)| fixture.input_pixels["id"] == terminal
+                        && fixture.input_pixels["negative_max_frames"].is_null()));
+            }
         }
     }
     #[cfg(unix)]
