@@ -585,8 +585,8 @@ queued revocation. Remove it only after the broker acknowledges its durable
 tombstone. Cover direct account deletion with foreign keys enabled and an
 issued-but-unclaimed ticket in the storage contract.
 
-A home broker reference belongs to its exact configured origin, publisher
-and server-instance scope. Configuration replacement cannot send old IDs
+A home broker reference belongs to its exact configured origin, publisher,
+server-instance and external broker-generation scope. Configuration replacement cannot send old IDs
 under a new scope and interpret that scope's successful unknown-ID tombstone
 as cleanup of the old authority. Drain held and queued old-scope references
 using the old authority before replacement. On lost authority, retain work
@@ -609,3 +609,34 @@ Recheck durable enrollment and immutable generation immediately before the
 actual APNs/FCM send. If revocation wins while authorization is pending,
 consume the admitted attempt without sending. A request already sent retains
 its honest unknown outcome and is never replayed automatically.
+
+
+The trusted home config includes a canonical UUID `broker_generation`, included
+in the immutable scope hash. Every publisher request carries exactly one
+`X-Cinema-Broker-Generation` header; the broker refuses a mismatch before any
+effect. Every broker JSON response, including errors and phone claims, carries
+that header. Home/native clients verify it before accepting status or cleanup.
+Missing, duplicate or mismatched generation leaves the result unknown and retains
+cleanup work. Transport Start supplies its authenticated native caller only the
+trusted HTTPS broker origin/generation and ticket capability; home credentials
+and OS tokens never cross to the wrong service.
+
+Portable home restore retains cleanup obligations while clearing portable
+phones, consent, events and cooldown authority. It transfers held references
+into the globally owned queue transactionally; it does not assume a broker
+rotation occurred. Incompatible legacy references, including orphaned enrollment
+or enrollment/ticket mismatch, stop restore before mutation and expose
+`migration_remediation`. Direct account cascades must also preserve or refuse
+those obligations. An over-cap restore rolls back; no revocation is silently
+pruned to fit. These home rules are distinct from the broker's offline restore
+procedure, which requires external generation/key/proof rotation.
+
+After the standalone broker packet freezes, the desktop Sol 6.1 builder takes
+the Android couch packet in a separate branch/worktree based on the coordinator's
+current candidate. The native Sol 6.1 builder retains Apple couch and then Apple
+invitations. Android invitation adapters begin only after Android couch freezes,
+so no two builders edit Android files concurrently. Server API/worker and manager
+document ownership remain unchanged. The parent personally reviews each packet
+before handing it to “Coordinate PR merge batches”; that session owns shared
+qualification, counters and main promotion. No builder runs duplicate broad
+suites or interacts with the connected television without authorization.
