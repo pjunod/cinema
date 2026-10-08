@@ -96,7 +96,12 @@ validation reads the selected device-properties block. Corrected source
 ARM64 linking. Fast-lane run 4391 stopped before tests because the earlier
 canceled run 4389 has no final journal; its stored Forgejo task steps confirm
 cancellation during the history audit before Python or Node execution.
-Recovery or an explicitly approved qualification exception remains pending.
+The authenticated zero-test task evidence is retained on PR #885.
+[PR #889](http://forge.lan:3000/noirr/plurx/pulls/889) continues the same batch
+with a fresh ordinary fast lane; no gate is waived and no passing test is
+repeated. Run 4399 retained its successful method journals and found two
+contract expectations requiring correction: the newly reviewed finite test
+threads/Barrier wait, and read-only budget derivation before Pi preparation.
 
 The complete Pi FFmpeg build passed its decoder, AC-4, Dolby Vision, DRM,
 Vulkan and libplacebo capability checks. The final image executed real V3DV
@@ -104,8 +109,17 @@ shaders. A physical color-conversion check found that a plain final YUV format
 conversion retained RGB matrix metadata; the shared pipeline now explicitly
 converts to limited-range BT.709 YUV. A red-pixel coefficient control and
 ffprobe tags confirmed actual conversion, rather than only retagging.
-Both isolated app modes reached `/readyz` successfully; their playback helpers
-need a corrected fresh-scratch setup before final playback qualification.
+Both isolated app modes reached `/readyz` successfully. Candidate `a72212b5b`
+passed automatic 1080p Main10 direct playback using platform
+`V4L2VideoDecoder`, with forward seek10 resuming at10.35s and backward seek3
+at3.41s. The actual daemon selected GPU tone mapping after its 4K-to-1080p
+HDR10 picture/tag comparison measured1.57x CPU speed; sustained throughput
+and Dolby Vision HDMI remain unqualified. The default three-thread software
+pool started the720p/480p/AAC family with actual HEVC request decoder workers
+and720p browser presentation. Its fragment check selected the480p companion
+instead of the advertised720p variant; the helper is corrected and only
+continuous playback/seeking is being retried. Completed test containers and
+browsers were removed; the user's installation remains untouched.
 
 The initial PR creation API ignored its draft flag and scheduled run 4389.
 The PR was converted to draft and that run was cancelled before Rust or
