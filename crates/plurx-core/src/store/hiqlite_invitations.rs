@@ -188,7 +188,8 @@ impl InvitationStore for HiqliteAuthStore {
                         r.expected_consent_generation,
                         reference.clone(),
                         status,
-                        r.login_digest.clone()
+                        r.login_digest.clone(),
+                        r.now
                     ),
                 ),
                 (
@@ -204,7 +205,8 @@ impl InvitationStore for HiqliteAuthStore {
                         r.expected_consent_generation,
                         reference,
                         status,
-                        r.login_digest
+                        r.login_digest,
+                        r.now
                     ),
                 ),
             ])
@@ -246,6 +248,55 @@ impl InvitationStore for HiqliteAuthStore {
             .await?
             > 0)
     }
+    async fn queue_invitation_reference(
+        &self,
+        id: &str,
+        user: i64,
+        reference: BrokerReference,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        validate_invitation_ids(&[id], user)?;
+        if now < 0 {
+            return Err(StoreError::Identity("invalid cleanup clock".into()));
+        }
+        let reference = reference.encode()?;
+        let invalid = self
+            .client()
+            .query_consistent_map::<InvitationInvalid, _>(
+                cleanup_invalid_query(),
+                params!(id.to_owned(), user),
+            )
+            .await?
+            .pop()
+            .ok_or_else(|| StoreError::Identity("missing cleanup verdict".into()))?
+            .invalid;
+        if invalid > 0 {
+            return Err(StoreError::Identity(
+                "migration_remediation: invalid broker cleanup reference".into(),
+            ));
+        }
+        let results = self
+            .client()
+            .txn([
+                (
+                    queue_reference_query(),
+                    params!(id.to_owned(), user, now, reference.clone()),
+                ),
+                (
+                    clear_reference_query(),
+                    params!(id.to_owned(), user, reference),
+                ),
+            ])
+            .await?;
+        let mut changed = false;
+        for (index, result) in results.into_iter().enumerate() {
+            let count = result.map_err(database_error)?;
+            if index == 1 {
+                changed = count > 0;
+            }
+        }
+        Ok(changed)
+    }
     async fn queue_invitation_cleanup(
         &self,
         id: &str,
@@ -257,6 +308,21 @@ impl InvitationStore for HiqliteAuthStore {
             return Err(StoreError::Identity("invalid cleanup clock".into()));
         }
         let id = id.to_owned();
+        let invalid = self
+            .client()
+            .query_consistent_map::<InvitationInvalid, _>(
+                cleanup_invalid_query(),
+                params!(id.to_owned(), user),
+            )
+            .await?
+            .pop()
+            .ok_or_else(|| StoreError::Identity("missing cleanup verdict".into()))?
+            .invalid;
+        if invalid > 0 {
+            return Err(StoreError::Identity(
+                "migration_remediation: invalid broker cleanup reference".into(),
+            ));
+        }
         let results = self
             .client()
             .txn(vec![
@@ -700,6 +766,7 @@ impl From<&mut Row<'_>> for InvitationRevocation {
             enrollment_id: r.get("enrollment_id"),
             generation: r.get("generation"),
             attempts: r.get("attempts"),
+            created_at: r.get("created_at"),
         }
     }
 }

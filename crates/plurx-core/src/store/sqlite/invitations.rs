@@ -122,7 +122,8 @@ impl InvitationStore for SqliteStore {
                 r.expected_consent_generation,
                 reference,
                 status,
-                r.login_digest
+                r.login_digest,
+                r.now
             ];
             tx.execute(&start_cleanup_query(), values)?;
             let changed = tx.execute(&start_query(), values)? > 0;
@@ -158,6 +159,35 @@ impl InvitationStore for SqliteStore {
         })
         .await
     }
+    async fn queue_invitation_reference(
+        &self,
+        id: &str,
+        user: i64,
+        reference: BrokerReference,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        validate_invitation_ids(&[id], user)?;
+        if now < 0 {
+            return Err(StoreError::Identity("invalid cleanup clock".into()));
+        }
+        let reference = reference.encode()?;
+        let id = id.to_owned();
+        self.with_conn(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let invalid: i64 =
+                tx.query_row(&cleanup_invalid_query(), params![id, user], |r| r.get(0))?;
+            if invalid > 0 {
+                return Err(StoreError::Identity(
+                    "migration_remediation: invalid broker cleanup reference".into(),
+                ));
+            }
+            tx.execute(&queue_reference_query(), params![id, user, now, reference])?;
+            let changed = tx.execute(&clear_reference_query(), params![id, user, reference])? > 0;
+            tx.commit()?;
+            Ok(changed)
+        })
+        .await
+    }
     async fn queue_invitation_cleanup(
         &self,
         id: &str,
@@ -171,6 +201,13 @@ impl InvitationStore for SqliteStore {
         let id = id.to_owned();
         self.with_conn(move |c| {
             let tx = c.unchecked_transaction()?;
+            let invalid: i64 =
+                tx.query_row(&cleanup_invalid_query(), params![id, user], |r| r.get(0))?;
+            if invalid > 0 {
+                return Err(StoreError::Identity(
+                    "migration_remediation: invalid broker cleanup reference".into(),
+                ));
+            }
             tx.execute(QUEUE_SCOPE_CLEANUP, params![id, user, now])?;
             tx.execute(CLEAR_QUEUED_REFERENCE, params![id, user])?;
             tx.commit()?;
@@ -188,6 +225,7 @@ impl InvitationStore for SqliteStore {
                         enrollment_id: r.get(2)?,
                         generation: r.get(3)?,
                         attempts: r.get(4)?,
+                        created_at: r.get(5)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?)

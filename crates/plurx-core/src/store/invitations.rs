@@ -353,6 +353,13 @@ pub trait InvitationStore: Send + Sync {
         &self,
         request: ConfirmInvitationTransport,
     ) -> Result<bool, StoreError>;
+    async fn queue_invitation_reference(
+        &self,
+        consent: &str,
+        user: i64,
+        reference: BrokerReference,
+        now: i64,
+    ) -> Result<bool, StoreError>;
     async fn queue_invitation_cleanup(
         &self,
         consent: &str,

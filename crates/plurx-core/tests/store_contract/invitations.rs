@@ -953,7 +953,8 @@ async fn invitations_reserved_limit_refuses_start_but_off_and_delete_complete() 
         2,
         replacement,
         "pending",
-        f.phone_digest
+        f.phone_digest,
+        f.now
     ];
     let tx = raw
         .unchecked_transaction()
@@ -1176,4 +1177,130 @@ async fn invitations_scope_replacement_fences_issuance_and_retains_cleanup() {
         assert!(store.invitation_broker_health("bad").await.is_err());
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invitations_late_cleanup_cannot_clear_a_newer_ticket() {
+    for_each_backend(|store, _| async move {
+        let f = Fixture::new(store.as_ref()).await;
+        let mut consent = f.consent(0, true);
+        consent.enable = Some((f.grant.clone(), f.ghash.clone(), InvitationTransport::Fcm));
+        assert!(store
+            .save_invitation_consent(consent)
+            .await
+            .expect("consent"));
+        let old = BrokerReference {
+            ticket_id: id(),
+            scope_hash: "b".repeat(64),
+        };
+        let mut start = StartInvitationTransport {
+            phone_id: f.phone.clone(),
+            receiver_id: f.receiver.clone(),
+            user_id: f.user,
+            phone_hash: f.phash.clone(),
+            grant_id: f.grant.clone(),
+            grant_hash: f.ghash.clone(),
+            login_digest: f.phone_digest.clone(),
+            expected_phone_generation: 1,
+            expected_consent_generation: 1,
+            reference: old.clone(),
+            provider_available: true,
+            now: f.now,
+        };
+        assert!(store
+            .start_invitation_transport(start.clone())
+            .await
+            .expect("first ticket"));
+        let newer = BrokerReference {
+            ticket_id: id(),
+            scope_hash: old.scope_hash.clone(),
+        };
+        start.expected_consent_generation = 2;
+        start.reference = newer.clone();
+        assert!(store
+            .start_invitation_transport(start)
+            .await
+            .expect("new ticket"));
+        assert!(!store
+            .queue_invitation_reference(&f.enrollment, f.user, old, f.now)
+            .await
+            .expect("late old failure"));
+        let current = store
+            .invitation_consent(&f.phone, &f.receiver, f.user)
+            .await
+            .expect("current")
+            .expect("row");
+        assert_eq!(
+            current.broker_ticket,
+            Some(newer.encode().expect("reference"))
+        );
+        assert_eq!(current.transport_status, "pending");
+        assert!(store
+            .queue_invitation_reference(&f.enrollment, f.user, newer, f.now)
+            .await
+            .expect("current failure"));
+        let current = store
+            .invitation_consent(&f.phone, &f.receiver, f.user)
+            .await
+            .expect("current")
+            .expect("row");
+        assert!(current.broker_ticket.is_none());
+        assert!(current.enabled);
+        let work = store.invitation_revocations().await.expect("durable work");
+        assert_eq!(work.len(), 2);
+        assert!(work
+            .iter()
+            .all(|w| w.attempts == 0 && w.created_at == f.now));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn invitations_cleanup_refuses_mismatched_legacy_held_reference() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("legacy.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let f = Fixture::new(&store).await;
+    let mut consent = f.consent(0, true);
+    consent.enable = Some((f.grant.clone(), f.ghash.clone(), InvitationTransport::Fcm));
+    assert!(store
+        .save_invitation_consent(consent)
+        .await
+        .expect("consent"));
+    let reference = BrokerReference {
+        ticket_id: id(),
+        scope_hash: "b".repeat(64),
+    };
+    let encoded = reference.encode().expect("reference");
+    let other = id();
+    let raw = rusqlite::Connection::open(path).expect("legacy seam");
+    raw.execute(
+        "UPDATE invitation_consents SET broker_ticket=?1,broker_enrollment=?2 WHERE id=?3",
+        rusqlite::params![encoded, other, f.enrollment],
+    )
+    .expect("legacy mismatch");
+    assert!(store
+        .queue_invitation_cleanup(&f.enrollment, f.user, f.now)
+        .await
+        .expect_err("legacy cleanup refuses")
+        .to_string()
+        .contains("migration_remediation"));
+    assert!(store
+        .queue_invitation_reference(&f.enrollment, f.user, reference, f.now)
+        .await
+        .expect_err("CAS cleanup refuses")
+        .to_string()
+        .contains("migration_remediation"));
+    let current = store
+        .invitation_consent(&f.phone, &f.receiver, f.user)
+        .await
+        .expect("retained")
+        .expect("row");
+    assert_eq!(current.broker_ticket, Some(encoded));
+    assert_eq!(current.broker_enrollment, Some(other));
+    assert!(store
+        .invitation_revocations()
+        .await
+        .expect("no wrong tombstone")
+        .is_empty());
 }
