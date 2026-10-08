@@ -889,6 +889,7 @@ paths = [
   "scripts/dv-timeline-check",
   "scripts/playback-lab",
   "scripts/playback-frame-clock.js",
+  "scripts/playback-optical-attribution",
   "scripts/continuous-quality-qualification",
   "scripts/continuous-quality-lifecycle",
   "scripts/continuous-quality-lab.mjs",

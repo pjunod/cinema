@@ -166,6 +166,8 @@ async function main(args) {
   // All original continuous-suite bounds remain; the clock window measures
   // elapsed media / wall time explicitly at the requested rate.
   manifest.thresholds.maximum_hitches = 0;
+  const lifecycleKind = options.case;
+  delete options.case; // executeRun reserves --case for manifest case-name filtering.
   options.suite = "continuous";
   const outcome = await lab.executeRun(manifest, options, {
     startServer: async (opts, directory) => {
@@ -177,7 +179,7 @@ async function main(args) {
         return server;
       } catch (error) {await server.close(false); throw error;}
     },
-    runOneCase: (...params) => lifecycleCase(options.case, ...params),
+    runOneCase: (...params) => lifecycleCase(lifecycleKind, ...params),
   });
   if (outcome.error) throw outcome.error;
   return outcome.code;
