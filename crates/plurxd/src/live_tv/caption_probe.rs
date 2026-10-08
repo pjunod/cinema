@@ -749,7 +749,10 @@ async fn run_live_graph(
         system.encoders.forced_idr.qsv = true;
         system.encoders.forced_idr.nvenc = true;
     }
-    let plan = LiveTvTranscodePlan::new(&system, delivery, case.encoder, None)
+    // A boot audit has no viewer admission from which to inherit an encoder
+    // budget. Exercise the ordinary plan with a finite background budget,
+    // rather than letting software encoding allocate a pool for every CPU.
+    let plan = LiveTvTranscodePlan::new(&system, delivery, case.encoder, Some(1))
         .expect("live transcode plan");
     let output = root.path().join("live");
     tokio::fs::create_dir_all(&output)

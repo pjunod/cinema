@@ -8132,3 +8132,19 @@ remedy for the browser hold. The existing byte-ground-truth regression
 regression fields resolve statically. Pinned Rust 1.97.1 is verified and the
 all-targets compiler loop runs before publication; unit execution is deferred
 to the designated merger. Exact-source runtime measurement remains needed.
+
+The exact committed-source Linux build of `4bfe03058` passes on pinned Rust
+1.97.1. Its optical case fails at 125.002ms upper hold with one capture gap.
+The role census measures synthetic generators at twenty-one threads, with
+explicit filter/encoder options of one; actual caption graph workers still
+reach ninety-seven without encoder thread options. This preserves
+`firefox-4bfe03058-half-speed-optical-caption-budget1*` as failed evidence and
+does not claim that the fixture cap fixes browser timing.
+
+The boot graph audit now supplies a one-thread software encoder budget to
+the existing production plan constructor. It had no foreground admission
+budget and passed None, allowing FFmpeg automatic encoder pools. This keeps
+the production builder, filter graph, captions and ordinary playback admission
+policy; only the background audit's encoder budget changes. The existing
+software caption-ground-truth regression covers both deinterlace modes.
+Twenty-two references are recorded for static validation; units stay deferred.
