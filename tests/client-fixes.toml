@@ -4700,3 +4700,20 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
 source_anchor = "color = if (selected) Accent else OnBg"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
 test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
+
+[[fixes]]
+id = "apple.playback-buffer-limit-hold-wording"
+commits = ["f8f7e07ec34658b9590c95b24a0a71a191cfdcab"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "The server’s playback buffer limit has been reached."
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPlaybackBufferHoldsNameTheBufferLimit"
+
+[[fixes]]
+id = "web.playback-buffer-limit-hold-wording"
+commits = []
+supplements = "apple.playback-buffer-limit-hold-wording"
+source = "crates/plurxd/src/web/player/prepared-switch-measurement.js"
+source_anchor = "The server’s playback buffer limit has been reached."
+test = "tests/playback/web-control.test.js"
+test_anchor = "buffer capacity hold wording identifies the playback buffer for both scheduler codes"
