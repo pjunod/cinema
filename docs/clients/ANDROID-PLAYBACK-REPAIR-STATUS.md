@@ -148,3 +148,76 @@ were updated alongside the visible labels. No additional unit run is required
 for this badge-only PR; current-source compilation and the PR fast lane supply
 the remaining pre-merge evidence. Playback arrival and temporary-fence control
 repairs are separate work and are not included in this change.
+
+
+## Copied Dolby Vision playback repair — 2026-10-08
+
+**Status:** implementation compiled; Android build 157. PR review, fast-lane
+qualification, merge and physical acceptance are pending.
+
+The Lenovo TB322FC advertised Dolby Vision Profiles 5 and 8 on builds 153 and
+155. Its manual 720p choice produced AVC/SDR; selecting Auto produced a
+2160p Profile 7 to Profile 8 copy using `c2.dolby.decoder.hevc` and
+`video/dolby-vision`. Pixel 10 Pro Fold advertised HDR10, HLG and HDR10+,
+without Dolby Vision. The Chrome session selected the HDR10 base; the user
+confirmed Safari instead plays Dolby Vision 7 to 8.1. Those HDR10 reports are
+resolved without changing negotiation.
+
+### Arrival root cause and correction
+
+Lenovo's requested film position was 1,291,132 ms; the copy correctly began
+at its preceding keyframe, 1,290,664 ms. The first frame was outside the
+250 ms arrival window. The later-rendered-output check admitted only
+progressive remuxes, so an HLS copy advanced past the target without settling
+the pending command. One deadline reopened the copy; the next stopped it
+with several seconds still buffered. The progressive-only condition was
+introduced by `27ce627b8` on 2026-09-24.
+
+The existing arrival owner now admits an attached HLS copy as well as a
+progressive remux. Generation, foreground, selection readiness, playing
+state, increased rendered output and the existing two-second preroll bound
+remain required. Direct and transcoded attachments cannot use this path.
+This removes the incorrect transport restriction; it adds no timer or
+recovery owner.
+
+### Control root cause and correction
+
+Razr selected a Dolby Vision decoder, then recorded `control reporting
+stopped (transport:503:serving_fenced)`. Android's retry whitelist, introduced
+by `15dc56d90` on 2026-08-30, included `control_unavailable` but omitted the
+temporary serving fence. The server's existing contract sends that refusal
+with `Retry-After: 1`. Treating it as terminal permanently abandoned the
+control owner after a temporary refusal; stale playhead/runway reports could
+then hold the producer while client buffers depleted.
+
+The existing reporter retry path now includes that specific response. Exact
+request replay, Retry-After pacing, identity cancellation and definitive
+terminal outcomes remain intact. Unknown 503 codes still stop reporting.
+The correction implements the temporary-refusal boundary in
+[the stall recovery plan](../streaming/PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md)
+§5.2; it adds no polling loop, authority bypass or recovery watchdog.
+
+### Server trigger evidence and limits
+
+At 22:08:10 local time, the serving node held fresh, accepted quorum evidence
+(age 54 ms; term 18230; leader unchanged), but its applied index was
+31,197,979 against committed index 31,197,991: a 12-entry apply gap. The
+server fenced mutable media and recovered authority 208 ms later, retaining
+the rolling session within its existing five-second grace. A 124 ms
+state-machine apply preceded the gap and a 114 ms apply completed during
+it. The expiry log does not retain the older held proof's rejection reason,
+so it cannot establish whether that proof expired or was lost to a capture
+race. No speculative server relaxation is included in this client repair.
+The permanent-reporting failure is independently reproduced and corrected
+regardless of the reason a temporary fence occurred.
+
+### Evidence
+
+Development validation before the final review passed 56 focused JVM tests
+(26 arrival, 12 control-failure, 18 badges) and assembled the debug APK. The
+control surviving-session case failed before the retry correction and passed
+afterward. Cases retain terminal refusal, cancellation, unknown-code, stale
+generation and unrendered-output boundaries. Per the user's current workflow,
+unit suites are not repeated during implementation; current-source compilation
+and the post-review fast lane supply final pre-merge evidence. Installation
+and physical stutter acceptance remain separate from source qualification.

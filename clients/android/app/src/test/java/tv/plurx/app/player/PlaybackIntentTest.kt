@@ -144,6 +144,47 @@ class PlaybackIntentTest {
     }
 
     @Test
+    fun hlsCopyPrerollSettlesBeforeTheDestinationDeadline() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(1_291_132, 1_200_000)
+        val deadline = PlaybackTargetDeadline()
+        val first = Triple(pending.sequence, 1_290_664L, 1)
+        assertTrue(intent.markExecuted(pending.sequence))
+        assertNull(deadline.sample(intent.pendingSeek, true, true, 0))
+        assertFalse(intent.presentedVideoFrame(first.second, pending.sequence))
+        // The live-copy session's first keyframe precedes the seek by 468 ms.
+        // Later decoded output and a clock past the target prove arrival.
+        assertTrue(copyPrerollHasRenderedProgress(
+            PlaybackMediaTransport.HlsCopy, pending, first, true, true, true, 30,
+        ))
+        assertFalse(intent.presentedVideoProgress(1_291_000, pending.sequence))
+        assertTrue(intent.presentedVideoProgress(1_291_800, pending.sequence))
+        assertNull(intent.pendingSeek)
+        assertNull(deadline.sample(intent.pendingSeek, true, true, 8_000))
+    }
+
+    @Test
+    fun copyPrerollCannotSettleFromStaleOrUnrenderedOutput() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(1_291_132, 1_200_000)
+        val first = Triple(pending.sequence, 1_290_664L, 1)
+        fun allowed(transport: PlaybackMediaTransport? = PlaybackMediaTransport.HlsCopy,
+                    frame: Triple<Long, Long, Int> = first, foreground: Boolean = true,
+                    playing: Boolean = true, selectionReady: Boolean = true, count: Int = 2) =
+            copyPrerollHasRenderedProgress(transport, pending, frame, foreground, playing, selectionReady, count)
+        assertTrue(allowed(PlaybackMediaTransport.ProgressiveRemux))
+        assertFalse(allowed(PlaybackMediaTransport.Direct))
+        assertFalse(allowed(PlaybackMediaTransport.HlsTranscode))
+        assertFalse(allowed(null))
+        assertFalse(allowed(frame = first.copy(first = pending.sequence - 1)))
+        assertFalse(allowed(frame = first.copy(second = pending.targetMs - 2_001)))
+        assertFalse(allowed(foreground = false))
+        assertFalse(allowed(playing = false))
+        assertFalse(allowed(selectionReady = false))
+        assertFalse(allowed(count = 1))
+    }
+
+    @Test
     fun audioSubtitleOffsetAndQualityChangesRetainAnUnpresentedSeekTarget() {
         val intent = PlaybackIntent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", PlaybackQuality.Auto)
         var pending = intent.beginSeek(90_000, 10_000)
