@@ -153,7 +153,7 @@ repairs are separate work and are not included in this change.
 
 ## Copied Dolby Vision playback repair — 2026-10-08
 
-**Status:** Android build 157 source compiled; [PR #962](http://forge.lan:3000/noirr/plurx/pulls/962)
+**Status:** Android build 157 and Apple build 220 source compiled; [PR #962](http://forge.lan:3000/noirr/plurx/pulls/962)
 is the review, fast-lane qualification and merge receipt. Physical acceptance
 is open.
 
@@ -195,6 +195,14 @@ then hold the producer while client buffers depleted.
 The existing reporter retry path now includes that specific response. Exact
 request replay, Retry-After pacing, identity cancellation and definitive
 terminal outcomes remain intact. Unknown 503 codes still stop reporting.
+Apple's local reporter has the same omitted response, introduced by
+`18f460e77`; the web reporter already recognizes it. Apple build 220 applies
+the matching correction to its existing retry owner. Its Retry-After case now
+covers both temporary 503 codes with exact request replay, and additional
+cases retain definitive terminal and unknown-code stopping. These Apple
+unit cases are added without running a suite before final review; iOS/tvOS
+compilation and the required fast lane are the pre-merge checks.
+
 The correction implements the temporary-refusal boundary in
 [the stall recovery plan](../streaming/PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md)
 §5.2; it adds no polling loop, authority bypass or recovery watchdog.
