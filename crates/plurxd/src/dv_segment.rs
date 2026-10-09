@@ -311,6 +311,68 @@ fn one_thread_cap(scope: &[String], flags: &[&str]) -> Result<usize, String> {
         .ok_or_else(|| "encoder recipe has an automatic or invalid thread cap".into())
 }
 
+fn check_streaming_clock(args: &[String], windowed: bool) -> Result<(), String> {
+    let fail = || "streaming encoder must retain the explicit reconstructed video grid".to_owned();
+    if args.iter().filter(|arg| *arg == "-copyts").count() != 1 {
+        return Err(fail());
+    }
+    let clocks: Vec<_> = args
+        .windows(2)
+        .filter(|p| matches!(p[0].as_str(), "-enc_time_base" | "-enc_time_base:v"))
+        .collect();
+    if clocks.len() != 1 {
+        return Err(fail());
+    }
+    // The retained finite/raw-NUT probe contract preserves input timestamps.
+    // A recipe assigning the reconstructed grid must use its explicit clock.
+    if clocks[0] == ["-enc_time_base", "-1"]
+        && !args
+            .windows(2)
+            .any(|p| p[0] == "-vf" && p[1].contains("setpts=N*"))
+    {
+        return Ok(());
+    }
+    if !windowed {
+        return Err(fail());
+    }
+    let scales: Vec<_> = args
+        .windows(2)
+        .filter(|p| p[0] == "-video_track_timescale")
+        .collect();
+    let filters: Vec<_> = args.windows(2).filter(|p| p[0] == "-vf").collect();
+    let modes: Vec<_> = args.windows(2).filter(|p| p[0] == "-fps_mode:v").collect();
+    if scales.len() != 1 || filters.len() != 1 || modes.len() != 1 || modes[0][1] != "passthrough" {
+        return Err(fail());
+    }
+    let scale = scales[0][1]
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0 && *value <= i32::MAX as u32)
+        .ok_or_else(fail)?;
+    let clock = format!("1/{scale}");
+    let stages: Vec<_> = filters[0][1].split(',').collect();
+    if clocks[0][0] != "-enc_time_base:v"
+        || clocks[0][1] != clock
+        || stages
+            .iter()
+            .filter(|stage| stage.starts_with("settb="))
+            .count()
+            != 1
+        || !stages.contains(&format!("settb=expr={clock}").as_str())
+        || stages
+            .iter()
+            .filter(|stage| stage.starts_with("setpts="))
+            .count()
+            != 1
+        || !stages
+            .last()
+            .is_some_and(|stage| stage.starts_with("setpts=N*"))
+    {
+        return Err(fail());
+    }
+    Ok(())
+}
+
 fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
     // Concrete x265 or NVENC recipes are supported. Input decoder options
     // precede their own -i; output codec caps follow the last input.
@@ -758,18 +820,7 @@ async fn run_streaming(
         .filter(|permit| permit.threads() >= 5)
         .ok_or("concurrent renderer and encoder require at least five admitted CPU threads")?;
     check_encoder_budget(&request.encoder_args, cpu.threads() - 2)?;
-    if !request.encoder_args.iter().any(|a| a == "-copyts")
-        || !request.encoder_args.windows(2).any(|p| {
-            p == ["-enc_time_base", "-1"]
-                || p[0] == "-enc_time_base:v"
-                    && p[1]
-                        .strip_prefix("1/")
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .is_some_and(|value| value > 0 && value <= i32::MAX as u32)
-        })
-    {
-        return Err("streaming encoder must retain the actual NUT timestamp base".into());
-    }
+    check_streaming_clock(&request.encoder_args, windowed)?;
     let reservation = request
         .producer
         .try_reserve_empty()
@@ -1561,6 +1612,181 @@ mod tests {
     #[test]
     fn retained_rpu_evidence_refuses_oversize_and_symlinks() {
         evidence_read_regression();
+    }
+
+    fn encoded_recipe_source(hdr: bool) -> plurx_core::domain::MediaFile {
+        plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
+            id: 1,
+            item_id: 1,
+            path: "/media/chaptered.mkv".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(12_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: Some(if hdr { "Main 10" } else { "Main" }.into()),
+            width: Some(640),
+            height: Some(360),
+            bit_depth: Some(if hdr { 10 } else { 8 }),
+            hdr: hdr.then(|| "hdr10".into()),
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            bitrate: Some(1_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: plurx_core::domain::DolbyVisionFacts::default(),
+        }
+    }
+
+    /// The resolved plan and execution plus the decode facts and capabilities
+    /// they were resolved against, for tests that re-resolve variants.
+    fn recipe_fixture_parts(
+        source: &plurx_core::domain::MediaFile,
+        options: &plurx_core::transcode::TranscodeOptions,
+    ) -> (
+        plurx_core::transcode::ResolvedTranscode,
+        plurx_core::transcode::TranscodeExecution,
+        plurx_core::transcode::DecodeFacts,
+        plurx_core::transcode::DecodeCapabilities,
+    ) {
+        let hdr = options.pipeline.output_grade() == plurx_core::transcode::OutputGrade::Hdr10;
+        let facts = plurx_core::transcode::DecodeFacts::from_ffprobe_json(
+            &serde_json::json!({"streams":[{
+                "index":0,"codec_type":"video","codec_name":"hevc",
+                "profile":if hdr {"Main 10"} else {"Main"},"width":640,"height":360,
+                "pix_fmt":if hdr {"yuv420p10le"} else {"yuv420p"},"avg_frame_rate":"24/1",
+                "color_transfer":if hdr {"smpte2084"} else {"bt709"},
+                "r_frame_rate":"24/1","sample_aspect_ratio":"1:1","disposition":{"attached_pic":0}
+            }]}),
+            plurx_core::transcode::DecodeSourceIdentity::from_sha256("a".repeat(64))
+                .expect("source identity"),
+        )
+        .expect("decode facts");
+        let capabilities = plurx_core::transcode::DecodeCapabilities::new(
+            plurx_core::transcode::DecodeCapabilitySnapshotIdentity::new(
+                "f".repeat(64),
+                "vod-chapter-test".to_owned(),
+                Some("e".repeat(64)),
+            )
+            .expect("capability identity"),
+            vec![],
+            vec![plurx_core::transcode::SoftwareDecoder {
+                codec: "hevc".to_owned(),
+                implementation: Some("hevc".to_owned()),
+            }],
+        )
+        .expect("capabilities");
+        let plan = plurx_core::transcode::resolve_transcode(
+            &plurx_core::transcode::TranscodeRequest::new(
+                plurx_core::transcode::Encoder::Software,
+                plurx_core::transcode::TranscodeMediaOptions::from_options(source, options),
+            ),
+            &facts,
+            &capabilities,
+            &plurx_core::transcode::DecodePolicySnapshot::new(
+                plurx_core::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &plurx_core::transcode::AttemptRestrictions::none(),
+        )
+        .expect("software plan");
+        let execution = plurx_core::transcode::TranscodeExecution::from_options(
+            source,
+            options,
+            plurx_core::transcode::Pacing::unpaced(),
+            ".",
+        )
+        .expect("execution");
+        (plan, execution, facts, capabilities)
+    }
+
+    #[test]
+    fn reconstructed_builder_clock_passes_adapter_and_rejects_mismatch() {
+        use plurx_core::transcode::*;
+        let mut source = encoded_recipe_source(true);
+        source.audio_streams = vec![plurx_core::domain::AudioStream {
+            index: 1,
+            codec: "aac".into(),
+            channels: Some(2),
+            sample_rate: Some(48000),
+            ..Default::default()
+        }];
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Hdr10Passthrough,
+            audio_index: Some(0),
+            ..Default::default()
+        };
+        let (plan, mut execution, _, _) = recipe_fixture_parts(&source, &options);
+        for grid in [
+            VodFrameGrid::new(24, 1).expect("24fps grid"),
+            VodFrameGrid::new(24000, 1001).expect("NTSC grid"),
+        ] {
+            execution.start_seconds =
+                384.0 * f64::from(grid.denominator) / f64::from(grid.numerator);
+            for encoder in [Encoder::Software, Encoder::Nvenc] {
+                let output = plan
+                    .completed_reconstructed_output(encoder)
+                    .expect("typed output");
+                let args = vod_completed_reconstructed_pipe_args(
+                    &source,
+                    &output,
+                    &execution,
+                    grid,
+                    execution.start_seconds + 2.0,
+                    &fd(3),
+                    &fd(4),
+                )
+                .expect("actual builder");
+                assert!(check_streaming_clock(&args, true).is_ok(), "{args:?}");
+                assert!(check_encoder_budget(&args, 5).is_ok());
+                assert!(args.windows(2).any(
+                    |p| p[0] == "-af" && p[1].contains("asettb=expr=1/48000,asetpts=PTS+1024")
+                ));
+                let expected = format!("1/{}", grid.numerator);
+                assert!(args
+                    .windows(2)
+                    .any(|p| p[0] == "-enc_time_base:v" && p[1] == expected));
+                let origin = vod_reconstructed_video_origin(grid, 384)
+                    .expect("nonzero audio-aligned origin");
+                assert!(args
+                    .iter()
+                    .any(|a| a.ends_with(&format!("setpts=N*{}+{origin}", grid.denominator))));
+                let mut mismatched = args.clone();
+                let at = mismatched
+                    .iter()
+                    .position(|a| a == "-video_track_timescale")
+                    .expect("actual builder clock option");
+                mismatched[at + 1] = (grid.numerator + 1).to_string();
+                assert!(check_streaming_clock(&mismatched, true).is_err());
+                let mut old_spelling = args.clone();
+                let at = old_spelling
+                    .iter()
+                    .position(|a| a == "-enc_time_base:v")
+                    .expect("actual builder clock option");
+                old_spelling[at + 1] = format!("{}:{}", grid.denominator, grid.numerator);
+                assert!(check_streaming_clock(&old_spelling, true).is_err());
+                let mut nonunit = args.clone();
+                nonunit[at + 1] = format!("1001/{}", grid.numerator);
+                assert!(check_streaming_clock(&nonunit, true).is_err());
+                let mut duplicate = args;
+                duplicate.extend(["-enc_time_base:v".into(), expected]);
+                assert!(check_streaming_clock(&duplicate, true).is_err());
+            }
+        }
+        assert!(check_streaming_clock(
+            &["-copyts".into(), "-enc_time_base".into(), "-1".into()],
+            false
+        )
+        .is_ok());
     }
 
     #[test]

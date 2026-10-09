@@ -1309,6 +1309,13 @@ pub fn vod_completed_reconstructed_pipe_args(
     let first_frame =
         (target * f64::from(grid.numerator) / f64::from(grid.denominator)).round() as u64;
     let origin = vod_reconstructed_video_origin(grid, first_frame)?;
+    // The reconstructed filter assigns one timestamp per mapped picture on
+    // this exact tick clock; retain it through encoding without touching AAC.
+    let clock = args
+        .iter()
+        .position(|arg| arg == "-enc_time_base:v")
+        .ok_or("reconstructed video encoder clock unavailable")?;
+    args[clock + 1] = format!("1/{}", grid.numerator);
     // MOV otherwise subtracts each track's first DTS, erasing the explicit
     // video phase relative to the AAC preroll on nonzero windows.
     if let Some(index) = args.iter().position(|arg| arg == "-movflags") {
