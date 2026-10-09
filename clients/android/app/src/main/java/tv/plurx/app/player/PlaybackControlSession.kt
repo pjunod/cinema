@@ -398,7 +398,7 @@ class PlaybackControlSession(
         linkReceipt: () -> String? = { null },
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
-        onProcessingGeneration: (String?) -> Unit = {},
+        onProcessingGeneration: (String?, tv.plurx.app.data.EffectiveProcessingReport?) -> Unit = { _, _ -> },
         /** The server has given up on the selected track, not merely not got to it. */
         onSubtitleUnavailable: () -> Unit = {},
         onPrepare: (ControlAction) -> Unit = {},
@@ -457,7 +457,10 @@ class PlaybackControlSession(
                 // exchange that has already come back with nothing.
                 synchronized(answerLock) {
                     if (generation == answerGeneration) {
-                        onProcessingGeneration(if (exchange.response == null) null else exchange.request.generation)
+                        if (exchange.capture.hasSameIntent(latest.get())) {
+                            onProcessingGeneration(if (exchange.response == null) null else exchange.request.generation,
+                                tv.plurx.app.data.EffectiveProcessingReport.fromJson(exchange.response?.effectiveProcessing))
+                        }
                         answersSeen += 1
                         if (exchange.failure == "transport:409:owner_changed") {
                             ownerChangesSeen += 1
