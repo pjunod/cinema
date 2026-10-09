@@ -439,3 +439,19 @@ the combined source. Every current-main count matched its source, and the
 repair's deltas remained exactly the previously reviewed additions. Compiler,
 focused regression, policy and Apple proofs must describe this combined tree
 before it is pushed for the fresh gate.
+
+The refreshed pinned Rust 1.97.1 workspace all-target check passed, and the
+expanded focused run passed 25 tests: all 21 storage regressions, the tracing
+target contract, the readiness snapshot contract, clean Plex census shutdown
+and executable creation while sibling threads fork. The tracing calls use
+the existing contract's canonical spacing. The readiness test asserts empty
+owned storage and requires inventory status and evidence to agree in one
+snapshot; asynchronous inventory completion is not claimed prematurely.
+
+Python discovery covered 386 validation and 871 operation tests. The five
+validation and eleven operation identities denied process/socket access in
+the sandbox passed on permission retries; both failed receipts remain in the
+session evidence. The checksum-provisioned K08 upstream oracle passed
+separately. Web control/settings passed 41 tests, iOS/tvOS build 219 passed,
+and both selected tvOS warning XCTest passed. The normal hook and fresh main
+gate remain required; remaining broad Linux units are watched after merge.
