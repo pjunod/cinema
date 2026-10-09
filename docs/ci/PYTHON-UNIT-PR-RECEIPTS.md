@@ -657,7 +657,85 @@ blocking. This does not allow rerunning the Python job itself or replaying an
 entire suite to replace missing evidence.
 
 
-### Completed Python phase interrupted before Node
+## PR920 — two authenticated empty effort failures
+
+The first DV M0 harness gate started at `6c61f9962`; a documentation follow-up
+moved the open task head to `bfc10ea19` before its Python run phase. Run 4501,
+job 45570, task 17017 refused the changed dispatch identity before discovery.
+Its start artifact 1942 and final artifact 1943 contain the same incomplete
+journal, with empty passes and fixture errors. Run 4502, job 45578, task 17026
+then refused that incomplete prior attempt during preparation; it published
+no artifacts and executed no Python units.
+
+Only unassigned downstream Apple/aggregate jobs were canceled after both
+preflight jobs had reached failure. The failures and incomplete journals stay
+unchanged. [The exact witness](../../validation/python-unit-empty-failure920.json)
+and [recovery helper](../../validation/python_unit_empty_recovery.py) authenticate
+the original dispatch, source/workflow hashes, complete log hashes, terminal
+eight-job inventories, and original artifact bytes or verified absence. They
+account for these two attempts while importing zero successes. No other PR,
+branch, run, outcome map or later failure receives an exception.
+
+The focused synthetic regression
+`tests/validation/test_python_empty_failure_recovery.py::test_exact_empty_attempts_preserve_no_passes_and_reject_contradictions`
+checks 28 changed/contradictory evidence cases. Live read-only restore also
+returned an empty pass map. This resolves receipt bookkeeping only: a fresh
+current-head development gate must still pass before integration. Freeze the
+task head once that run starts; finish documentation before dispatch.
+
+## Effort upstream comparison — fetched only by its pending method
+
+The effort unit step sets `PLURX_HIQLITE_FETCH_UPSTREAM=1`. When the hiqlite
+manifest comparison is pending and no `PLURX_HIQLITE_UPSTREAM_DIR` override
+exists, that method uses
+[`hiqlite_upstream_fixture.py`](../../validation/hiqlite_upstream_fixture.py)
+to fetch the genuine `hiqlite` and `hiqlite-wal` 0.14.0 crates.io packages.
+Their official registry SHA-256 checksums and exact compressed sizes are
+pinned in the helper; redirects, changed bytes and unsafe extraction refuse.
+Each archive has at most 200 regular files and at most 2 MiB expanded bytes.
+One method-owned temporary directory is removed on success or failure; an
+explicit upstream-directory override is read without being modified or removed.
+
+Download or extraction failure is an ordinary failed method inside the unit
+executor. The completed attempt journal still preserves other real successes,
+and only the failed method remains pending. There is no setup step between
+the start marker and unit execution that could leave an incomplete attempt,
+and no vendored fork substitutes for upstream. Outside the opted-in effort
+step, the existing explicit-directory comparison and offline skip remain.
+The exact method and the synthetic fixture controls declare the helper in
+[`main-preflight-inputs.json`](../../validation/main-preflight-inputs.json);
+the external input closure is the two immutable, size-and-hash-bound archives.
+
+## PR #920 history refusal — preserve only run4503 successes
+
+Run4506/job45612/task17045/attempt1 at `8148ffea9` failed `make history-check`
+before unit discovery: the Android build-152 documentation correction lacked
+its client-fix anchor. The missing mapping now names the existing build-claim
+regression in `tests/client-fixes.toml`; it does not claim new playback evidence.
+
+The start artifact1946 and final artifact1947 are different ZIP publications
+of the identical incomplete journal. All 1191 inherited successes remain
+attributed to run4503 at `c761f2d14`; no run4506 success exists. The exact
+[recovery witness](../../validation/python-unit-inherited-failure920.json) and
+[consumer](../../validation/python_unit_inherited_recovery920.py) authenticate
+the original dispatch, complete terminal eight-job inventory, immutable
+workflow/producer hashes, 135513-byte original log, both live artifact
+identities/ZIP hashes and unchanged original positive-map hash.
+
+Recovery requires the named history refusal between the two successful
+publications and no unit execution. It preserves `complete: false` and adds
+no trusted run4506 origin. Ordinary restore must still authenticate run4503's
+completed journal before using any inherited success. Changed, missing or
+contradictory evidence refuses; no other run receives an incomplete waiver.
+The synthetic control in
+`tests/validation/test_python_inherited_failure920.py` rejects changed maps,
+reattribution, missing original trust and later claims of run4506 success.
+
+Run `make history-check` on the final committed tree before pushing, as well
+as the focused regressions. An uncommitted audit does not inspect the future
+commit's subject or landing attribution. A new current-head development gate
+still must pass before integration; this recovery does not make run4506 green.
+## Completed Python phase interrupted before Node
 
 A preflight deadline can expire after every Python method passes and its
 completed log journal is emitted, before either final artifact upload. The

@@ -1,0 +1,6 @@
+{"kind":"mux_packet","coded_arrival":0,"logical_source_frame":0,"rpu_source_frame":0,"el_source_frame":0,"el_omitted":false,"rpu_omitted":false,"pts":"0/1000","dts":null}
+{"kind":"mux_packet","coded_arrival":1,"logical_source_frame":3,"rpu_source_frame":3,"el_source_frame":3,"el_omitted":false,"rpu_omitted":false,"pts":"125/1000","dts":null}
+{"kind":"mux_packet","coded_arrival":2,"logical_source_frame":2,"rpu_source_frame":2,"el_source_frame":2,"el_omitted":true,"rpu_omitted":false,"pts":"83/1000","dts":"0/1000"}
+{"kind":"mux_packet","coded_arrival":3,"logical_source_frame":1,"rpu_source_frame":1,"el_source_frame":1,"el_omitted":false,"rpu_omitted":false,"pts":"42/1000","dts":"42/1000"}
+{"kind":"mux_packet","coded_arrival":4,"logical_source_frame":5,"rpu_source_frame":5,"el_source_frame":5,"el_omitted":false,"rpu_omitted":false,"pts":"208/1000","dts":"83/1000"}
+{"kind":"mux_packet","coded_arrival":5,"logical_source_frame":4,"rpu_source_frame":4,"el_source_frame":4,"el_omitted":false,"rpu_omitted":false,"pts":"167/1000","dts":"125/1000"}

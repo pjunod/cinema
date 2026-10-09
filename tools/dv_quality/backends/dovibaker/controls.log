@@ -1,0 +1,215 @@
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded bitstream-io v2.4.1
+  Downloaded criterion-plot v0.5.0
+  Downloaded is-terminal v0.4.17
+  Downloaded crossbeam-utils v0.8.20
+  Downloaded once_cell v1.19.0
+  Downloaded autocfg v1.3.0
+  Downloaded zerocopy-derive v0.8.27
+  Downloaded ciborium-io v0.2.2
+  Downloaded anstyle v1.0.7
+  Downloaded equivalent v1.0.1
+  Downloaded tap v1.0.1
+  Downloaded unicode-ident v1.0.12
+  Downloaded crc-catalog v2.4.0
+  Downloaded clap_lex v0.7.1
+  Downloaded crc v3.2.1
+  Downloaded plotters-backend v0.3.6
+  Downloaded plotters-svg v0.3.7
+  Downloaded either v1.12.0
+  Downloaded quote v1.0.36
+  Downloaded ryu v1.0.18
+  Downloaded bitvec_helpers v3.1.5
+  Downloaded oorandom v11.1.5
+  Downloaded proc-macro2 v1.0.85
+  Downloaded tinyvec v1.6.0
+  Downloaded anes v0.1.6
+  Downloaded tinytemplate v1.2.1
+  Downloaded funty v2.0.0
+  Downloaded itoa v1.0.11
+  Downloaded ciborium-ll v0.2.2
+  Downloaded same-file v1.0.6
+  Downloaded cast v0.3.0
+  Downloaded clap v4.5.7
+  Downloaded crossbeam-deque v0.8.5
+  Downloaded cfg-if v1.0.0
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded num-traits v0.2.19
+  Downloaded serde_derive v1.0.203
+  Downloaded anyhow v1.0.86
+  Downloaded ciborium v0.2.2
+  Downloaded radium v0.7.0
+  Downloaded rayon-core v1.13.0
+  Downloaded wyz v0.5.1
+  Downloaded memchr v2.7.4
+  Downloaded half v2.7.1
+  Downloaded indexmap v2.2.6
+  Downloaded itertools v0.10.5
+  Downloaded serde v1.0.203
+  Downloaded criterion v0.5.1
+  Downloaded walkdir v2.5.0
+  Downloaded hashbrown v0.14.5
+  Downloaded plotters v0.3.6
+  Downloaded serde_json v1.0.117
+  Downloaded aho-corasick v1.1.3
+  Downloaded bitvec v1.0.1
+  Downloaded clap_builder v4.5.7
+  Downloaded rayon v1.12.0
+  Downloaded regex v1.10.5
+  Downloaded syn v2.0.66
+  Downloaded zerocopy v0.8.27
+  Downloaded regex-syntax v0.8.4
+  Downloaded regex-automata v0.4.7
+  Downloaded libc v0.2.155
+   Compiling proc-macro2 v1.0.85
+   Compiling unicode-ident v1.0.12
+   Compiling serde v1.0.203
+   Compiling crossbeam-utils v0.8.20
+   Compiling quote v1.0.36
+   Compiling zerocopy v0.8.27
+   Compiling syn v2.0.66
+   Compiling autocfg v1.3.0
+   Compiling serde_derive v1.0.203
+   Compiling zerocopy-derive v0.8.27
+   Compiling equivalent v1.0.1
+   Compiling hashbrown v0.14.5
+   Compiling serde_json v1.0.117
+   Compiling indexmap v2.2.6
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-epoch v0.9.18
+   Compiling cfg-if v1.0.0
+   Compiling rayon-core v1.13.0
+   Compiling either v1.12.0
+   Compiling itoa v1.0.11
+   Compiling ryu v1.0.18
+   Compiling crossbeam-deque v0.8.5
+   Compiling half v2.7.1
+   Compiling plotters-backend v0.3.6
+   Compiling regex-syntax v0.8.4
+   Compiling ciborium-io v0.2.2
+   Compiling clap_lex v0.7.1
+   Compiling anstyle v1.0.7
+   Compiling clap_builder v4.5.7
+   Compiling regex-automata v0.4.7
+   Compiling ciborium-ll v0.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling itertools v0.10.5
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling criterion-plot v0.5.0
+   Compiling walkdir v2.5.0
+   Compiling rayon v1.12.0
+   Compiling is-terminal v0.4.17
+   Compiling plotters v0.3.6
+   Compiling ciborium v0.2.2
+   Compiling regex v1.10.5
+   Compiling clap v4.5.7
+   Compiling tinytemplate v1.2.1
+   Compiling tinyvec v1.6.0
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling once_cell v1.19.0
+   Compiling dolby_vision v3.3.1 (/work/src/dovi_tool/dolby_vision)
+   Compiling criterion v0.5.1
+    Finished `release` profile [optimized] target(s) in 1m 16s
+     Running `work/src/dovi_tool/target/release/examples/m0_generate /work/fixtures`
+p81_identity: profile=8 EL=None bytes=160
+p7_fel_linear: profile=7 EL=Some(FEL) bytes=194
+p7_fel_nonstandard_linear_matrix: profile=7 EL=Some(FEL) bytes=194
+p7_fel_bounded_residual: profile=7 EL=Some(FEL) bytes=195
+p81_adapted_linear: profile=8 EL=None bytes=160
+{"accepted":true,"el_processing":true,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+{"accepted":true,"el_processing":true,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+{"accepted":true,"el_processing":false,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+{"accepted":true,"el_processing":false,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+{"accepted":true,"el_processing":true,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+{"accepted":true,"el_processing":true,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+DoViBaker: Expecting EL streamDoViBaker: EL stream needs higher bitdepth{"negative_control":"missing_el","exit_code":67}
+DoViBaker: Failed parsing RPU: Invalid RPU length: 16{"negative_control":"truncated_rpu","exit_code":67}
+{
+  "scope": "analytic-control",
+  "kind": "independent-arithmetic",
+  "method": "Closed-form declared identity polynomial + S=1/1024,T=S/2 residual rr/1024, followed by supplied standard P81 fixed coefficients. Independent Python integer evaluation; no independent Dolby decoding/reference fidelity approval.",
+  "width": 16,
+  "height": 16,
+  "frames": 1,
+  "output_format": "rgb48le",
+  "color_domain": "BT2020 PQ full-range under standard-P7-matrix assumption",
+  "bl_y_code": "400+2*x+y",
+  "bl_uv_codes": [
+    512,
+    512
+  ],
+  "el_code": "512 + (16 if (x+y+c)%2 else -16)",
+  "coefficient_log2_denom": 23,
+  "nlq_slope": 8192,
+  "nlq_threshold": 4096,
+  "unbounded_vdr_in_max": 1,
+  "bounded_vdr_in_max": "2/1024",
+  "expected_hashes": {
+    "nonzero": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d",
+    "zero": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+    "disabled": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+    "bounded": "0c032192c773ae2c945029edf4e1d44c82445e75641b0df4e086c2181b813891"
+  },
+  "independent_dv_reference": null
+}
+{
+  "schema": "m0-baker-cpu-output-check-v1",
+  "scope": "analytic-control; direct CPU processor, no HEVC/physicalDV/P8.1 conformance",
+  "result": "pass",
+  "controls": {
+    "nonzero": {
+      "max_code_error": 0,
+      "actual_sha256": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d",
+      "reference_sha256": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d"
+    },
+    "zero": {
+      "max_code_error": 0,
+      "actual_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+      "reference_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23"
+    },
+    "disabled": {
+      "max_code_error": 0,
+      "actual_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+      "reference_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23"
+    },
+    "bounded": {
+      "max_code_error": 0,
+      "actual_sha256": "0c032192c773ae2c945029edf4e1d44c82445e75641b0df4e086c2181b813891",
+      "reference_sha256": "0c032192c773ae2c945029edf4e1d44c82445e75641b0df4e086c2181b813891"
+    },
+    "adapted-base": {
+      "max_code_error": 0,
+      "actual_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+      "reference_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23"
+    }
+  },
+  "negative_exit_codes": {
+    "missing_el": 67,
+    "truncated_rpu": 67
+  },
+  "matrix_restriction": {
+    "accepted_mutated_rpu": true,
+    "output_unchanged": true,
+    "classification": "unsupported proof: rgb_to_lms changes ignored"
+  },
+  "independent_dv_reference": null,
+  "p81_conformance": null,
+  "reference_fidelity_improvement": null
+}
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.036s
+
+OK
+{"result": "pass", "delta_e_vectors": 9, "delta_e_max_error": 3.545756732670213e-08, "independent_dv_reference": null}
+d7f4dce9f72a6d0ff1258790eebd47bce29f66785ceec8350e2504deff9eb65c  /work/cpu_processor
+25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23  /work/cpu-outputs/adapted-base.rgb48le
+0c032192c773ae2c945029edf4e1d44c82445e75641b0df4e086c2181b813891  /work/cpu-outputs/bounded.rgb48le
+25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23  /work/cpu-outputs/disabled.rgb48le
+9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d  /work/cpu-outputs/nonstandard.rgb48le
+9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d  /work/cpu-outputs/nonzero.rgb48le
+25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23  /work/cpu-outputs/zero.rgb48le

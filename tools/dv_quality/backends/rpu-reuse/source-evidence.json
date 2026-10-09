@@ -1,0 +1,19 @@
+{
+  "status": "source inspection only; no new build/execution",
+  "files": {
+    "ffmpeg/libavcodec/bsf/dovi_rpu.c": "84d7c0dbcc74195a9853373c9406aa6fcf7b1bc93331029d8972757093106491",
+    "ffmpeg/libavcodec/dovi_rpuenc.c": "5afd7232472825123baf266268c0a6ccea72f2f5beeaf3af51cae94d1a0f7383",
+    "ffmpeg/libavcodec/dovi_rpudec.c": "3f3a216998130facec334528fd30026fa588cb1afca9d88e2a9b06801aac85c0",
+    "ffmpeg/libavcodec/dovi_rpu.c": "3979e6d60c35510f8e8275497d5f2980e794ac126452d1b5c1cb6e9e8e18e177",
+    "ffmpeg/libavcodec/dovi_rpu.h": "cc91857f1913e2c1d47989a77ac2eb18bec9a97b94ab386a868b8ecaae20745a",
+    "ffmpeg/libavcodec/hevc/hevcdec.c": "d4b5bb9e7690008ecf299cd24f7d7c1f0dfa188655fa51835add2a52da5eb297",
+    "ffmpeg/libavformat/dovi_isom.c": "7cbe2a55e48ea965afd0150c1e48cba55a7f610151f77355c47dd3cdb1dd5be4",
+    "ffmpeg/libavutil/dovi_meta.h": "e0ca4be00b203f35ceff50b53c92f448450c823eb24df7f01db0cd0d6c9077cb",
+    "ffmpeg/configure": "5b281b249ad5ad859030b4da0a24ec105b5abff7b3d87a65b302df8bf5fd9833",
+    "libdovi/dolby_vision/src/rpu/dovi_rpu.rs": "3a291106e4403569264a6e5cbf9a4c6d311817ecac702e0734c19a1c79012e9c",
+    "libdovi/dolby_vision/src/rpu/rpu_data_header.rs": "f93ebd900063f2d6c3fc15b9c441e5a048993f62061de9fb15b4fb1f01ba92b9",
+    "libdovi/dolby_vision/src/rpu/vdr_dm_data.rs": "72aaaf8ee83a5d282b5ff80414b2619b6e057305710f297fe2ad2e200a77a48d",
+    "libdovi/dolby_vision/src/rpu/profiles/profile81.rs": "32934bdb533e10b3637ccdfd03040618968c68d7e869bf77bb17cf2b4f024c51",
+    "ffmpeg/libavcodec/bsf/dovi_split.c": "05e0460e94a652a553c2b15bfc9ffce450dfb348e8ea0f4902d22006c4cbf9ed"
+  }
+}

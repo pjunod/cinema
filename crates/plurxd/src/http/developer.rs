@@ -593,6 +593,10 @@ pub(crate) async fn readiness(
             subtitle_backfill(&state, subtitle_backfill_on).await,
             chapter_thumbnails(&state).await,
             dolby_vision_convert(convert_on),
+            dolby_vision_hdr_processing(plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::DV_HDR_PROCESSING).map(String::as_str), false)),
+            dolby_vision_fel_reencode(plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::DV_FEL_REENCODE).map(String::as_str), false)),
             source_probe_comparison().await,
             output_preparation(&state, &settings).await,
             rolling_retention(&state, &settings).await,
@@ -1662,6 +1666,78 @@ fn dolby_vision_convert(enabled: bool) -> DeveloperEnableItem {
         // green tick on the one switch that never earned a reading, which is
         // exactly the "checked" tick this route exists to remove.
         requirements: Vec::new(),
+    }
+}
+
+// Readiness describes missing evidence, never permission or effective processing.
+fn dolby_vision_hdr_processing(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "dolby_vision_hdr_processing",
+        title: "Process Dolby Vision for HDR output",
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_hdr_processing"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "dv_hdr_backend_reference",
+                title: "Qualified backend and reference",
+                status: RequirementStatus::Unmet,
+                evidence: "Dolby Vision processing for HDR10 is not yet available on playback workers. Your preference is saved; compatible playback remains available.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_encoder_matrix",
+                title: "Production encoder matrix",
+                status: RequirementStatus::Unobservable,
+                evidence: "Processing still needs testing with the encoders used by playback workers.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_bitrate_quality",
+                title: "Quality at delivery bitrates",
+                status: RequirementStatus::Unobservable,
+                evidence: "Independent quality comparisons at delivery bitrates are still pending.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_physical_playback",
+                title: "Physical playback validation",
+                status: RequirementStatus::Unobservable,
+                evidence: "Startup, seeking, fallback and sustained playback still need testing on supported devices. Your saved preference remains authoritative.".into(),
+            },
+        ],
+    }
+}
+
+// Readiness describes missing evidence, never permission or effective processing.
+fn dolby_vision_fel_reencode(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "dolby_vision_fel_reencode",
+        title: "Preserve FEL when converting to Profile 8.1",
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_fel_reencode"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "dv_fel_backend_reference",
+                title: "Qualified backend and reference",
+                status: RequirementStatus::Unmet,
+                evidence: "FEL-preserving Profile 8.1 conversion is not yet available on playback workers. Your preference is saved; permitted conversion keeps its existing fallback.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_encoder_matrix",
+                title: "Production encoder matrix",
+                status: RequirementStatus::Unobservable,
+                evidence: "Processing still needs testing with the encoders used by playback workers.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_bitrate_quality",
+                title: "Quality at delivery bitrates",
+                status: RequirementStatus::Unobservable,
+                evidence: "Independent quality comparisons at delivery bitrates are still pending.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_physical_playback",
+                title: "Physical playback validation",
+                status: RequirementStatus::Unobservable,
+                evidence: "Startup, seeking, fallback and sustained playback still need testing on supported devices. Your saved preference remains authoritative.".into(),
+            },
+        ],
     }
 }
 

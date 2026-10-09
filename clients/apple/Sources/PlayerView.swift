@@ -1926,7 +1926,9 @@ struct PlayerView: View {
             audio: audio,
             delivered: controller.deliveredRange,
             displayHDR: Caps.displayIsHDR,
-            deliveredDolbyVisionProfile: controller.deliveredDolbyVisionProfile
+            deliveredDolbyVisionProfile: controller.deliveredDolbyVisionProfile,
+            effectiveProcessing: controller.effectiveProcessing,
+            activeGeneration: controller.effectiveProcessingGeneration
         )
         return HStack(spacing: PlayerMetadataBadgeMetrics.rowSpacing) {
             ForEach(badges) { badge in
@@ -1954,7 +1956,9 @@ struct PlayerView: View {
         audio: AudioTrack?,
         delivered: String? = nil,
         displayHDR: Bool = true,
-        deliveredDolbyVisionProfile: Int? = nil
+        deliveredDolbyVisionProfile: Int? = nil,
+        effectiveProcessing: EffectiveProcessingReport? = nil,
+        activeGeneration: String? = nil
     ) -> [PlayerMetadataBadge] {
         var badges: [PlayerMetadataBadge] = []
         if let label = playbackResolutionLabel(width: source?.width, height: source?.height) {
@@ -1970,7 +1974,9 @@ struct PlayerView: View {
             hdrFormat: source?.hdrFormat,
             delivered: delivered,
             displayHDR: displayHDR,
-            deliveredDolbyVisionProfile: deliveredDolbyVisionProfile
+            deliveredDolbyVisionProfile: deliveredDolbyVisionProfile,
+            effectiveProcessing: effectiveProcessing,
+            activeGeneration: activeGeneration
         ) {
             badges.append(range)
         }
@@ -2002,7 +2008,9 @@ struct PlayerView: View {
         hdrFormat: String?,
         delivered: String?,
         displayHDR: Bool,
-        deliveredDolbyVisionProfile: Int? = nil
+        deliveredDolbyVisionProfile: Int? = nil,
+        effectiveProcessing: EffectiveProcessingReport? = nil,
+        activeGeneration: String? = nil
     ) -> PlayerMetadataBadge? {
         guard let source = DynamicRange.source(hdr: hdr, hdrFormat: hdrFormat) else {
             return nil
@@ -2020,6 +2028,14 @@ struct PlayerView: View {
         )
         guard let delivered, !delivered.isEmpty else { return lit }
         let rendered = DynamicRange.rendered(delivered: delivered, displayHDR: displayHDR)
+        if let report = effectiveProcessing,
+           report.matches(generation: activeGeneration, delivered: delivered), rendered == DynamicRange.hdr10 {
+            return PlayerMetadataBadge(kind: .dynamicRange, tone: .hdr,
+                mark: source == DynamicRange.hdr10 ? "HDR10-E" : sourceMark,
+                accessibilityLabel: report.detail,
+                renderedMark: source == DynamicRange.hdr10 ? nil : "HDR10-E",
+                dimmed: source != DynamicRange.hdr10)
+        }
         guard rendered != source else {
             // Same grade — but not necessarily the same profile. A Profile 7
             // disc remux reaching a device that takes 8 is converted on the
@@ -2089,7 +2105,9 @@ struct PlayerView: View {
         source: SourceSummary?,
         delivered: String?,
         displayHDR: Bool,
-        reasons: [String]?
+        reasons: [String]?,
+        effectiveProcessing: EffectiveProcessingReport? = nil,
+        activeGeneration: String? = nil
     ) -> String? {
         let grade = DynamicRange.source(hdr: source?.hdr, hdrFormat: source?.hdrFormat)
             ?? DynamicRange.sdr
@@ -2099,6 +2117,10 @@ struct PlayerView: View {
             return source?.hdrFormat ?? DynamicRange.longLabel(grade)
         }
         let rendered = DynamicRange.rendered(delivered: delivered, displayHDR: displayHDR)
+        if let report = effectiveProcessing,
+           report.matches(generation: activeGeneration, delivered: delivered), rendered == DynamicRange.hdr10 {
+            return "HDR10-E — \(report.detail)"
+        }
         let long = DynamicRange.longLabel(rendered)
         guard rendered != grade else { return "\(long) (rendering)" }
         let displayLoss = delivered != DynamicRange.sdr && !displayHDR
@@ -3275,7 +3297,9 @@ struct PlaybackStatsView: View {
                 source: source,
                 delivered: controller.deliveredRange,
                 displayHDR: Caps.displayIsHDR,
-                reasons: controller.decision?.reasons
+                reasons: controller.decision?.reasons,
+                effectiveProcessing: controller.effectiveProcessing,
+                activeGeneration: controller.effectiveProcessingGeneration
             ) else { return nil }
             return ContractFieldValue(value: range, note: PlayerView.toneMapPeakSummary(status))
         case "decode_audio":

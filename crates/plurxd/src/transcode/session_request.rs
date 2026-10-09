@@ -1145,6 +1145,9 @@ impl SessionRequest {
 }
 
 pub struct StartInfo {
+    /// Profile of an admitted, prepared processed presentation. Independent
+    /// of the physical transcode kind and its PQ base grade; never source tags.
+    pub(crate) processed_dv_profile: Option<u8>,
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,

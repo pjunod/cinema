@@ -389,7 +389,14 @@ pub(crate) async fn start(
             }
         })?;
     let status = remote_start_success_status(&headers, created);
-    Ok((status, Json(response)).into_response())
+    let processed_header = response.processed_dv_header();
+    let mut output = (status, Json(response)).into_response();
+    if let Some(value) =
+        processed_header.and_then(|value| axum::http::HeaderValue::from_str(&value).ok())
+    {
+        output.headers_mut().insert("x-plurx-dv-processing", value);
+    }
+    Ok(output)
 }
 
 pub(crate) async fn activate(
@@ -1203,6 +1210,7 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            effective_processing: None,
             delivered_audio: None,
             quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),

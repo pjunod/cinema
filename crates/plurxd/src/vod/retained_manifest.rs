@@ -46,6 +46,8 @@ enum LogicalProfile {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LogicalProduction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_processing: Option<String>,
     plan: String,
     executable: String,
     build: String,
@@ -96,6 +98,12 @@ impl LogicalOutput {
                 .as_ref()
                 .and_then(|c| c.owner_node_id.clone()),
             production: encoding.map(|e| LogicalProduction {
+                dv_processing: match &e.dv_processing {
+                    plurx_core::transcode::dv_processing::DvSelection::Selected(plan) => {
+                        Some(plan.semantic_digest().as_str().to_owned())
+                    }
+                    plurx_core::transcode::dv_processing::DvSelection::KeepExisting(_) => None,
+                },
                 plan: e.plan.plan_digest().to_owned(),
                 executable: e.executable.digest.clone(),
                 build: e.ffmpeg_build.clone(),

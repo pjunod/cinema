@@ -49,6 +49,8 @@ Apple temporary serving fence: [962-temporary-serving-fence-control.md](apple-bu
 
 Apple display wake: [818-display-wake.md](apple-builds/818-display-wake.md) — playback owns the display idle timer.
 
+Apple build 222: [Verified Dolby Vision processing reports](apple-builds/968-dv-processing-reports.md).
+
 Sharing activation: [Running-cluster activation and SQL transition safety](features/SHARING-LIVE-ACTIVATION.md) — **open**.
 
 ## Find it fast
@@ -327,6 +329,17 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [DV_HDR_PROCESSING_BUILD.md](streaming/DV_HDR_PROCESSING_BUILD.md) | Sol 6.1 implementation handoff: backend feasibility, integration contracts, benchmarks and qualification. | open |
 | [DV_HDR_PROCESSING_REVIEW.md](streaming/DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
 | [DV_HDR_PROCESSING_FEASIBILITY.md](streaming/DV_HDR_PROCESSING_FEASIBILITY.md) | Sol 6.1 M0 reuse findings: existing DV/FEL renderers, P8.1 recipe, metric checks and unproven boundaries. | open |
+| [DV_HDR_M1_CONTRACTS.md](streaming/DV_HDR_M1_CONTRACTS.md) | Approved additive M1 type, frame-coverage, graph and recovery-episode contracts; the initial slice kept the production registry empty. | open |
+| [DV_HDR_PROCESSING_STATUS.md](streaming/DV_HDR_PROCESSING_STATUS.md) | Implementation ledger: backend and serving integration, HDR10-E, resource measurements, reproducible acceptance fixtures, packaging and remaining qualification. | open |
+| [DV fixture recipes](evidence/dv-processing-2026-10-09/dv-fixture-reproduction.tar.gz) · [archive receipt](evidence/dv-processing-2026-10-09/fixture-archive-receipt.json) | Reproduce and verify the synthetic acceptance sources; generated movies and private media are excluded. | built |
+| [DV_HDR_BACKEND_CONTROLS.md](streaming/DV_HDR_BACKEND_CONTROLS.md) | Reproduce reviewed synthetic libplacebo and DoViBaker pixel controls; exact build evidence and limits. | open |
+| [Parsed metadata and authoring controls](streaming/DV_HDR_AUTHORING_CONTROLS.md) | Reproduce parsed-RPU rendering and synthetic reconstructed-base authoring; distinguish completed mechanics from timing, nonlinear metadata and conformance gaps. | open |
+| [DV_HDR_DECODED_LAYER_CONTROLS.md](streaming/DV_HDR_DECODED_LAYER_CONTROLS.md) | Reproduce reviewed encoded BL/EL/RPU association, B-frame timing, stale-metadata refusal and accepted-frame rendering controls. | open |
+| [DV_HDR_TIMELINE_CONTROLS.md](streaming/DV_HDR_TIMELINE_CONTROLS.md) | Reproduce bounded VFR, real seek/preroll and timestamp-epoch controls with stored-duration, lifecycle and failure-status evidence. | open |
+| [DV_HDR_RPU_REUSE_CONTROLS.md](streaming/DV_HDR_RPU_REUSE_CONTROLS.md) | Reviewed explicit mapping reuse, cache/reset refusals, input-bound execution and retained-prerequisite replay. | open |
+| [DV_HDR_COMBINED_CONTROLS.md](streaming/DV_HDR_COMBINED_CONTROLS.md) | Reviewed finite P7/FEL source-to-HDR10 chain, actual output/timing, numerical limits and remaining movie integration. | open |
+| [DV_PROCESSING_TOOLS.md](streaming/DV_PROCESSING_TOOLS.md) | Build and run the bounded streaming FEL reconstruction and P8.1 authoring helpers; remaining serving limits. | open |
+| [DV_HDR_NONIDENTITY_CONTROLS.md](streaming/DV_HDR_NONIDENTITY_CONTROLS.md) | Reproduce reviewed affine FEL reconstruction and P8.1 repeated-reshape controls, separate HDR10-base checks and exact replay provenance. | open |
 | [DV-DISK-CONVERSION-DIAGNOSIS.md](streaming/DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |
 | [QUEUE-REPAIR-VERIFICATION-PROMPT.md](streaming/QUEUE-REPAIR-VERIFICATION-PROMPT.md) | Did the fragment-index queue come back, and stay back? | open |
 | [DECODER_SELECTION_AND_RECOVERY_PLAN.md](streaming/DECODER_SELECTION_AND_RECOVERY_PLAN.md) | An explicit decoder choice and recovery path for each producer. | open |
@@ -408,7 +421,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
-| [Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) | Physical-device failures, root causes and delivery progress. | open |
+| [Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) | Merged playback repairs, validation and remaining physical-device acceptance. | built |
 | [Ready-video recovery build note](apple-builds/888-ready-video-recovery.md) | Apple build claim and viewer-visible black-picture recovery changes for PR #888. | built |
 | [APPLE-BLACK-VIDEO-IMPLEMENTATION.md](clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md) | Avatar and HDR10 black-video investigation, verified false-frame evidence defects, item-bound presentation repair and physical acceptance limits. | open |
 | [Growing-resume preparation build note](apple-builds/914-growing-resume-preparation.md) | Apple build claim and bounded unpublished-session preparation repair for PR #914. | built |
@@ -736,3 +749,5 @@ This index is kept honest by `tests/operations/test_docs_index.py`: every
 Markdown file under `docs/` must appear here, every link here must resolve,
 and no link anywhere in the repo may point at a `docs/` path that does not
 exist.
+
+DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10-09/http-summary.json) and [artifact manifest](evidence/dv-processing-2026-10-09/http-manifest.json) — retained local synthetic results and failed attempts; full promotion evidence belongs to PR #968.

@@ -1,0 +1,33 @@
+{
+  "result": "pass",
+  "scope": "synthetic no-reorder elementary control",
+  "parsed_l1_tags": [
+    {
+      "min_pq": 0,
+      "max_pq": 4095,
+      "avg_pq": 2048
+    },
+    {
+      "min_pq": 0,
+      "max_pq": 4094,
+      "avg_pq": 2047
+    },
+    {
+      "min_pq": 0,
+      "max_pq": 4093,
+      "avg_pq": 2046
+    },
+    {
+      "min_pq": 0,
+      "max_pq": 4092,
+      "avg_pq": 2045
+    }
+  ],
+  "frame_count": 4,
+  "distinct_source_hashes": 4,
+  "distinct_rpu_hashes": 4,
+  "coded_duration": "1/24",
+  "manifest_time_base": "1/24",
+  "actual_container_pts": null,
+  "p81_conformance": null
+}

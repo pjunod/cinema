@@ -8,7 +8,11 @@ Companion to the [proposal](DV_HDR_PROCESSING_PLAN.md),
 [build contract](DV_HDR_PROCESSING_BUILD.md) and
 [project queue P01/P02](../features/PROJECT-BACKLOG.md). This records what the
 existing ecosystem can contribute before Plurx writes another renderer.
-No production library, playback route or ROG installation changed.
+No production library, playback route or ROG installation changed. Later executable mechanics and retained evidence are in the
+[implementation ledger](DV_HDR_PROCESSING_STATUS.md),
+[backend controls](DV_HDR_BACKEND_CONTROLS.md) and
+[parsed/authoring controls](DV_HDR_AUTHORING_CONTROLS.md). The observations
+below describe the earlier source-investigation stage.
 
 ## 1. The idea already has implemented precedents
 

@@ -1,0 +1,54 @@
+{
+  "argv": [
+    "/usr/bin/ffmpeg",
+    "-nostdin",
+    "-hide_banner",
+    "-n",
+    "-copyts",
+    "-i",
+    "/work/reconstructed.nut",
+    "-an",
+    "-vf",
+    "zscale=matrixin=gbr:primariesin=2020:transferin=smpte2084:rangein=full:matrix=2020_ncl:primaries=2020:transfer=smpte2084:range=limited:chromal=center:filter=point,format=yuv420p10le",
+    "-fps_mode",
+    "passthrough",
+    "-enc_time_base",
+    "1/1000",
+    "-r",
+    "24",
+    "-c:v",
+    "libx265",
+    "-profile:v",
+    "main10",
+    "-preset",
+    "ultrafast",
+    "-x265-params",
+    "qp=0:bframes=0:keyint=24:scenecut=0:repeat-headers=1:chromaloc=1:colorprim=9:transfer=16:colormatrix=9:master-display=G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(100000000,50):pools=1:frame-threads=1",
+    "-color_primaries",
+    "bt2020",
+    "-color_trc",
+    "smpte2084",
+    "-colorspace",
+    "bt2020nc",
+    "-color_range",
+    "tv",
+    "/work/hdr10.mkv"
+  ],
+  "program_sha256": "249e6abb898538aeae5165a6cee0748b73f4791afb02e088d19bc5321dfe2a4e",
+  "input_sha256": {
+    "reconstructed.nut": "0a575dd9d3f2b80d03eefcd6ad65abfea1c0e53d7fb12873479306c410535351"
+  },
+  "cwd": "/work",
+  "environment": {
+    "LD_LIBRARY_PATH": null,
+    "VK_ICD_FILENAMES": null,
+    "XDG_RUNTIME_DIR": null,
+    "LC_ALL": "C"
+  },
+  "exit": 0,
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "40ff4d7698c279fb982565cf3e27adb93997f1cc97e016df69077c64884d5a5d",
+  "output_sha256": {
+    "hdr10.mkv": "4c5a4608f08756316ae629a8a14a2981efa363d0cc06c4221e3d773fe6655f29"
+  }
+}

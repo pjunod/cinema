@@ -43,7 +43,7 @@ pub(super) struct Rendition {
     pub(super) retained_offer: StdMutex<Option<[u8; 32]>>,
     pub(super) cancelled_preparation_epoch: AtomicU64,
     pub(super) identity: Mutex<IdentityState>,
-    pub(super) slot: ProducerSlot,
+    pub(super) slot: Arc<ProducerSlot>,
     pub(super) source_owners: SourceRenditionOwners,
     /// Capacity can be shared by parents of this exact immutable rendition,
     /// without keeping a cache-only rendition admitted after the final reap.

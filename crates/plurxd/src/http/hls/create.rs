@@ -1229,6 +1229,27 @@ pub(super) fn session_delivered_dolby_vision_profile(
     plurx_core::playback::delivered_dolby_vision_profile(file, method, preserve, convert)
 }
 
+/// The prepared processing result may author P81 while still physically
+/// re-encoding a PQ base. Only the owner-projected marker overrides the ordinary
+/// route; requests, source tags and saved processing preferences do not.
+fn session_delivered_processing_shape(
+    source: Option<&MediaFile>,
+    kind: &crate::transcode::SessionKind,
+    grade: plurx_core::transcode::OutputGrade,
+    processed_dv_profile: Option<u8>,
+) -> (Option<&'static str>, Option<u8>) {
+    if processed_dv_profile == Some(8)
+        && grade == plurx_core::transcode::OutputGrade::Hdr10
+        && matches!(kind, crate::transcode::SessionKind::Transcode { .. })
+    {
+        return (Some("dolby_vision"), Some(8));
+    }
+    (
+        session_delivered_dynamic_range(source, kind, grade),
+        session_delivered_dolby_vision_profile(source, kind),
+    )
+}
+
 /// What a session kind means to the two badge helpers.
 ///
 /// One reading for both, so the range and the profile can never disagree
@@ -2929,6 +2950,10 @@ async fn create_with_purpose_inner(
                 )
             })?;
             let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
+            response.effective_processing = state
+                .transcode
+                .dv_effective_report(&route.session_id, &route.incarnation_id)
+                .await;
             // Same-session owner takeover advances only the control epoch.
             // Replaying the persisted create must not hand a restarted client
             // the stale epoch embedded when owner 1 first activated.
@@ -3033,6 +3058,10 @@ async fn create_with_purpose_inner(
                     state.media_sessions.seed_owned_lease(&route).await;
                 }
                 let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
+                response.effective_processing = state
+                    .transcode
+                    .dv_effective_report(&route.session_id, &route.incarnation_id)
+                    .await;
                 if let Some(control) = response.control.as_ref() {
                     response.control = control.refreshed(
                         &route.session_id,
@@ -3660,7 +3689,12 @@ async fn create_with_purpose_inner(
     // The grade the session actually built, not the one the body asked for:
     // the server refuses the HDR10 rung for a source or a rung that cannot
     // prove it, and the badge has to follow the encoder.
-    let delivered = session_delivered_dynamic_range(source.as_ref(), &info.kind, info.grade);
+    let (delivered, delivered_profile) = session_delivered_processing_shape(
+        source.as_ref(),
+        &info.kind,
+        info.grade,
+        info.processed_dv_profile,
+    );
     // A session being created is playback beginning — the honest moment for
     // the scrobble that used to fire from `/decision`. Read the normalized
     // route from the result: a bound Auto stall may have changed a copy request
@@ -3726,6 +3760,10 @@ async fn create_with_purpose_inner(
         None
     };
     let response = StartResponse {
+        effective_processing: state
+            .transcode
+            .dv_effective_report(&info.session_id, &incarnation_id)
+            .await,
         delivered_audio: info.audio_delivery.clone(),
         display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
         quality_candidate_id: request
@@ -3770,10 +3808,7 @@ async fn create_with_purpose_inner(
         )
         .and_then(|prior| prior.sustained_kbps),
         delivered_dynamic_range: delivered.map(str::to_owned),
-        delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(
-            source.as_ref(),
-            &info.kind,
-        ),
+        delivered_dolby_vision_profile: delivered_profile,
         control: advertise_control.then(|| {
             crate::playback_control::ControlBootstrap::new(
                 &info.session_id,
@@ -5273,6 +5308,34 @@ fn session_store_error(operation: &'static str, error: plurx_core::error::StoreE
 }
 
 #[cfg(test)]
+mod processed_delivery_projection_tests {
+    use super::session_delivered_processing_shape;
+    use crate::transcode::SessionKind;
+    use plurx_core::transcode::OutputGrade;
+
+    #[test]
+    fn prepared_p81_marker_projects_dv_without_changing_physical_transcode() {
+        let kind = SessionKind::Transcode { height: 1080 };
+        assert_eq!(
+            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, Some(8)),
+            (Some("dolby_vision"), Some(8))
+        );
+        assert_eq!(
+            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, None),
+            (None, None)
+        );
+        assert_eq!(
+            session_delivered_processing_shape(None, &kind, OutputGrade::Sdr, Some(8)),
+            (None, None)
+        );
+        assert_eq!(
+            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, Some(7)),
+            (None, None)
+        );
+    }
+}
+
+#[cfg(test)]
 mod quorum_candidate_tests {
     use super::candidate_refusal_reason;
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
@@ -5455,6 +5518,7 @@ impl PreparedSourcePlayback {
             info.playlist_url.clone()
         };
         Ok(StartResponse {
+            effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,
             quality_catalog_status: self.resolved.quality_catalog.as_ref().map(
@@ -5490,16 +5554,21 @@ impl PreparedSourcePlayback {
             vod: info.vod,
             ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
             prior_kbps: None,
-            delivered_dynamic_range: session_delivered_dynamic_range(
+            delivered_dynamic_range: session_delivered_processing_shape(
                 Some(&self.file),
                 &info.kind,
                 info.grade,
+                info.processed_dv_profile,
             )
+            .0
             .map(str::to_owned),
-            delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(
+            delivered_dolby_vision_profile: session_delivered_processing_shape(
                 Some(&self.file),
                 &info.kind,
-            ),
+                info.grade,
+                info.processed_dv_profile,
+            )
+            .1,
             control: Some(control),
             plan_notes: self.resolved.plan_notes.clone(),
         })
