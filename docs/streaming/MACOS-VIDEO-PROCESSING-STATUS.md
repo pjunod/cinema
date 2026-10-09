@@ -23,7 +23,7 @@ This separate effort began at reviewed combined source
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | Bitmap API, all eight complete-graph raw comparisons and final text API pass; inactive font-rule identity correction committed as `e9fdc02a` | Qualify the repaired release with changing inactive rules and measure performance |
-| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls and full SDK generation pass; Linux check/Clippy passed before the latest font-only Rust change | Shipping package, amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
+| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls and full SDK generation pass; exact `e9fdc02a` Linux check/Clippy pass | Shipping package, amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on the final `2139fa9c` signed bundle, including caption payload/timing checks and clean owned shutdown | Preserve this evidence through final integration; broader DVR and client presentation qualification remain tracked separately |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
@@ -41,8 +41,8 @@ No final review or implementation completion is claimed for F1–F3 yet.
 **Latest checkpoint:** the integration head is `e9fdc02a6c89626d72d7f5fb13d9bca0e14b0fd8`.
 Its font-identity repair passes pinned Rust 1.97.1 all-target compilation
 and the normal commit hook (catalog, formatting, Clippy and 86 embedded
-JavaScript checks). The new release build and Linux compiler loop are in
-progress. No unit suite has run; final review has not started.
+JavaScript checks). The new release build is in progress. Exact-source Linux check and Clippy
+also pass in a 192.074-second phase. No unit suite has run; final review has not started.
 
 The earlier `2139fa9c` release continuation finishes in 1,991.254 seconds,
 with executable and matching arm64 debug symbols captured within 1,992.202
@@ -117,8 +117,13 @@ those three package rows and resolves the recursive/versioned closure of
 197 ELF objects. The SDK remains unchanged. The next configure passes x265,
 then exposes a separate development dependency: ZVBI metadata links `-lpng`,
 but the SDK does not yet include the authentic `libpng-dev` linker alias.
-The builder is auditing development dependencies and enabled link names
-together before adding the missing authenticated role. Runtime base parity
+The combined audit covers 85 metadata files and 68 link names. The repair
+adds the pinned authentic development package to the existing Docker compiler
+base, with no SDK role or output change. Its isolated installation passes
+and the next configure passes those dependency probes. It then identifies a
+missing `clang` executable in the diagnostic container. The shipping Docker
+compiler stage already declares Clang; the builder is restoring its authentic
+package dependency closure after auditing the full declared compiler base. Runtime base parity
 and SDK development closure are separate requirements.
 Full linking, matching parser and final package audit remain required; SDK
 generation alone is not a shipping build. No global installation or network

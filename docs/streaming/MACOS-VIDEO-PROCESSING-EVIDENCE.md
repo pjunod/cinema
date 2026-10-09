@@ -1611,3 +1611,37 @@ verified in order. The corrected MPEG-2 observer is explicitly bound.
 No paths, commands, infrastructure, media or credentials are included.
 This archive qualifies the captured `2139fa9c` bundle, not the later
 active-configuration identity repair or the pending performance campaign.
+
+## 35. Linux SDK generation and current-source compiler evidence
+
+The `829bf9a9` SDK generation passes in 91.919 seconds and produces all 514
+declared outputs. Focused Fribidi and Opus public-header preprocessing also
+passes. SDK digest `0cbe4a367143c6c7daeed342f8398673c80c5dbfdcf0b3aaf2ebc7029b650c84`
+and source-offer digest
+`df0334eb12a30765edd3d4aeba4b0a57d837368a73ca47c044842c8b362b585b`
+bind the generated material. They do not establish a linked FFmpeg package.
+
+Exact source `e9fdc02a6c89626d72d7f5fb13d9bca0e14b0fd8` passes Linux
+Rust 1.97.1 check (1 minute 16 seconds) and Clippy with denied warnings
+(1 minute 47 seconds), for core and daemon, all targets and `hiqlite-store`.
+The one-job phase finishes in 192.074 seconds, reaps its processes and leaves
+no compiler target holder. No unit tests execute. This ARM Linux compiler
+result does not replace the required amd64 daemon or hardware acceptance.
+
+The isolated Bookworm base receives exactly the three runtime packages
+already required by the shipping Jellyfin runtime chain: `libnuma1`,
+`libelf1` and `libpng16-16`. Recursive dependency and version-symbol checks
+cover 197 ELF objects with no unresolved dependency. The SDK is unchanged.
+A subsequent configure failure separately identifies the missing system
+PNG development linker alias. The compiler-image repair adds the genuine
+matching `libpng-dev` package; it does not fabricate a link or regenerate
+the SDK. The development install and subsequent producer qualification are
+recorded separately from this archive's runtime-base result.
+
+[Linux SDK and compiler evidence](evidence/macos-video-20261008/linux-sdk-and-compile-evidence.tar.gz)
+contains one neutral JSON record, 4994 compressed bytes, SHA-256
+`cbe4d34c06b61172df224c44ad148b3368e8c2d8e8ae472ae745324bb9d526fd`. All 18 retained raw
+allowlist entries were independently verified for size and hash; the archive
+was reopened and its member compared byte-for-byte. Failed configure and
+preflight attempts remain separate records. Full producer linking, matching
+parser, package audit and physical normal-API acceptance remain outstanding.

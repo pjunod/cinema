@@ -317,7 +317,7 @@ RUN test "$TARGETARCH" = amd64 \
     && apt-get update && apt-get install -y --no-install-recommends \
         build-essential python3 pkg-config cmake ninja-build nasm patch curl \
         autoconf automake libtool libtool-bin gettext texinfo git bison flex clang \
-        zlib1g-dev libbz2-dev liblzma-dev \
+        zlib1g-dev libbz2-dev liblzma-dev libpng-dev=1.6.39-2+deb12u5 \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/build-linux-dolby-ffmpeg scripts/prepare-linux-dolby-sdk scripts/prepare-linux-dolby-ffmpeg scripts/build-static-ffprobe scripts/linux-video-ffmpeg-sdk-sources.json /opt/plurx-media/scripts/
 COPY scripts/linux-video-ffmpeg-patches /opt/plurx-media/scripts/linux-video-ffmpeg-patches
