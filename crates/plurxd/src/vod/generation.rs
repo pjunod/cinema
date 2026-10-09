@@ -11,6 +11,13 @@ pub(super) async fn spawn_generation(
     if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         return;
     }
+    let private_operation = match rendition.private_storage.as_ref() {
+        Some(storage) => match storage.operation() {
+            Some(operation) => Some(operation),
+            None => return,
+        },
+        None => None,
+    };
     let source_dispatch = match rendition.source_owners.begin_generation() {
         Ok(dispatch) => dispatch,
         Err(cause) => {
@@ -210,7 +217,12 @@ pub(super) async fn spawn_generation(
     let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
     tokio::spawn({
         let rendition = Arc::clone(rendition);
+        let shared = Arc::clone(shared);
         async move {
+            let _private_operation = private_operation;
+            if _private_operation.is_some() {
+                shared.hooks.get().before_private_registration().await;
+            }
             rendition.hooks.before_producer_registration().await;
             let (registration, writers) = rendition
                 .slot
@@ -683,13 +695,10 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
                 let served = identity
                     .served_init_for(muxer)
                     .expect("an identity just established from this muxer init serves it");
-                let preparation = rendition.preparation();
                 if let Err(error) = store_identity_observed(
                     &rendition.identity_path(),
                     &identity,
-                    preparation
-                        .as_ref()
-                        .map(|preparation| &preparation.allowance),
+                    rendition.private_storage.as_ref(),
                 )
                 .await
                 {
@@ -698,7 +707,7 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
                         rendition = %rendition.key,
                         "persisting identity.json: {error}"
                     );
-                    if preparation.is_some() {
+                    if rendition.private_storage.is_some() {
                         rendition.revoke_preparation();
                         drop(state);
                         return Err(Outcome::Failed(Failure::Sink(error)));
@@ -712,9 +721,8 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
             }
         }
     };
-    let preparation = rendition.preparation();
-    let pending = if let Some(preparation) = preparation.as_ref() {
-        match preparation.allowance.begin(served.bytes.len() as u64) {
+    let pending = if let Some(storage) = rendition.private_storage.as_ref() {
+        match storage.begin(served.bytes.len() as u64) {
             Some(pending) => Some(pending),
             None => {
                 rendition.revoke_preparation();
@@ -842,7 +850,7 @@ pub(super) async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Renditio
         {
             let mut manifest = rendition.manifest.lock().await;
             let freed = rendition.dir.purge(&mut manifest).await;
-            sub_saturating(&shared.working_set, freed.bytes);
+            rendition.free_unadmitted(shared, freed.bytes);
             if let Some(error) = freed.error {
                 tracing::warn!(
                     target: "plurxd::vodserve",
@@ -1423,12 +1431,12 @@ impl vodgen::Sink for RenditionSink {
             }
             let before = manifest.state(entry).map(|s| s.bytes()).unwrap_or(0);
             let preparation = self.rendition.preparation();
-            let pending = if let Some(preparation) = preparation.as_ref() {
+            let pending = if let Some(storage) = self.rendition.private_storage.as_ref() {
                 if before != 0 || manifest.is_admitted() {
                     self.rendition.revoke_preparation();
                     return Err(io::ErrorKind::InvalidData.into());
                 }
-                match preparation.allowance.begin(len) {
+                match storage.begin(len) {
                     Some(pending) => Some(pending),
                     None => {
                         self.rendition.revoke_preparation();
@@ -1438,6 +1446,11 @@ impl vodgen::Sink for RenditionSink {
             } else {
                 None
             };
+            if pending.is_some() {
+                self.shared.hooks.get().before_private_materialize().await;
+            } else {
+                self.shared.hooks.get().before_ordinary_materialize().await;
+            }
             self.rendition
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
@@ -1464,14 +1477,14 @@ impl vodgen::Sink for RenditionSink {
             // Publication and provenance linearize under the same manifest
             // lock. A skip can therefore observe neither fact or both, never
             // real prewarm bytes with a missing credit.
-            if !manifest.is_admitted() {
+            if !manifest.is_admitted() && self.rendition.private_storage.is_none() {
                 sub_saturating(&self.shared.working_set, before);
                 self.shared.working_set.fetch_add(len, Relaxed);
             }
             if let Some(pending) = pending {
                 pending.commit(true);
             }
-            if manifest.next_gap(0).is_none() && preparation.is_none() {
+            if manifest.next_gap(0).is_none() && self.rendition.private_storage.is_none() {
                 self.shared.try_admit(&self.rendition, &mut manifest).await;
             }
             if let Some(preparation) = preparation {

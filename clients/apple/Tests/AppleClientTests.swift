@@ -2308,6 +2308,14 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(PlayerController.holdNotice(nil), "Waiting for the server.")
     }
 
+    func testPlaybackBufferHoldsNameTheBufferLimit() {
+        for reason in ["working_set", "no_room"] {
+            XCTAssertEqual(PlayerController.holdNotice(reason),
+                "The server’s playback buffer limit has been reached.")
+        }
+    }
+
+
     func testTimerOnlyStallsRemainUnknownToTheServer() {
         // A stationary clock identifies failed presentation, not its cause.
         // Actual AVPlayer item failures exercise the separate error ladder.
