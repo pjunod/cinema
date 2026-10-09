@@ -1,3 +1,13 @@
+# PR #947 inherited census reconciliation (source-only base 079960dae):
+# vod/tests/chunk_03.rs additions in 142d9f4e07 and b38387a133 implement
+# retirement_releases_background_admission_with_publication_locks_held and
+# completed_output_survives_retirement_and_manifest_contention. Their finite
+# sleep children are kill-on-drop, ChildJob-attached, ProducerSlot-registered
+# with the background permit, and explicitly writer-settled and confirmed-reaped.
+# These fixtures account for one existing key gate, two method/OS spawn,
+# Command and kill-on-drop sites, and five bounded timeout observations.
+# No inherited production owner or pattern/scope/equality exception is added.
+
 version = 1
 source = "crates/plurxd/src/transcode.rs"
 module_roots = [
@@ -1804,7 +1814,11 @@ pattern = "rendition_build_gate"
 # cancelled preparation termination and settled private artifact exposure.
 # Neither creates a new build owner or scheduler.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 29
+# PR #947: exact base source count 30; repair delta +2.
+# The inherited fixture delta is reviewed at the catalog header above.
+# Cleanup and conservative cold revalidation take the existing exact-key gate;
+# no competing build owner.
+expected_occurrences = 32
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -1841,7 +1855,9 @@ expected_occurrences = 40
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
 pattern = "spawn_cancellation_independent"
-expected_occurrences = 5
+# PR #947: exact base source count 5; repair delta +1.
+# A bounded inventory batch retains scan ownership when its caller cancels.
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-bounded-vod-head-regeneration"
@@ -2793,7 +2809,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # and startup worker-local reprobes using shutdown cancellation; joined private
 # cache-directory stat; two joined late-publication fixture drivers; and a
 # joined child-cancellation fixture trigger. No rolling/media owner is added.
-expected_occurrences = 892
+# PR #947: exact base source count 892; repair delta +5.
+# One exact-owner cleanup attempt plus four finite, joined or aborted/joined
+# regression tasks.
+expected_occurrences = 897
 # Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -2981,7 +3000,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Source uses awaited FuturesUnordered, with no independently spawned close task.
 # Review64 R4: +1 owned/joined finite-stack test thread. No production task.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 60
+# PR #947: exact base source count 62; repair delta +1.
+# The inherited fixture delta is reviewed at the catalog header above.
+# The release-triggered runtime task retains the exact cleanup registry; it
+# starts no media producer.
+expected_occurrences = 63
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4237,7 +4260,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # graph/stat deadlines; cooperative publication stop; two one-second cleanup
 # bounds; and two finite fixture sleeps. Subprocess cancellation retains the
 # child kill-and-reap owner; a deadline never supplies completion evidence.
-expected_occurrences = 1590
+# PR #947: exact base source count 1595; repair delta +12.
+# The inherited fixture delta is reviewed at the catalog header above.
+# Three production bounds retain detached inventory/cleanup/reap ownership;
+# nine finite fixture observation bounds/polls.
+expected_occurrences = 1607
 
 
 [[module_structures]]
@@ -4613,7 +4640,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # exact frozen executable used by the pretranscode launch-fence regression.
 # Production observations use bounded_probe_command's existing owned child
 # kill-and-reap settlement; fixture children are also awaited or killed/reaped.
-expected_occurrences = 236
+# PR #947: exact base source count 238; repair delta +2.
+# The inherited fixture delta is reviewed at the catalog header above.
+# Two finite FFmpeg foreground fixtures run synchronously through the existing
+# fixture collector.
+expected_occurrences = 240
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5198,7 +5229,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # read the boot and current readiness values before and after disablement.
 # status() clones SharingStatus under a read lock and receiver recovery under
 # its mutex; these test-only observations launch no task, timer, or process.
-expected_occurrences = 716
+# PR #947: exact base source count 718; repair delta +1.
+# The inherited fixture delta is reviewed at the catalog header above.
+# The same release-triggered runtime task above; it launches no OS child.
+expected_occurrences = 719
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5466,7 +5500,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
 # both racers are joined and their retained permits dropped in the test.
-expected_occurrences = 317
+# PR #947: exact base source count 317; repair delta +3.
+# Two waits join the existing ReapOperation; one fault hook waits the actual
+# registered child.
+expected_occurrences = 320
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5656,7 +5693,10 @@ pattern = "kill_on_drop\\s*\\("
 # finite reordered-VOD decode fixture. Their enclosing owners also await reap.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 99
+# PR #947: exact base source count 101; repair delta +0.
+# The inherited fixture delta is reviewed at the catalog header above.
+# No repair delta; reconcile the exact source-only base inventory.
+expected_occurrences = 101
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

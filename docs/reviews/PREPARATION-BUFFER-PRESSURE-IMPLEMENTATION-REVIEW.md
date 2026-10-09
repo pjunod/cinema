@@ -46,3 +46,22 @@ watching and repairing the remaining broad units after merge. Native host
 font contracts and a stalled executable-fixture run are rerun on the pinned
 Linux/FFmpeg 6 surface; no failed test is hidden or waived. Deployment and
 physical Apple TV acceptance remain unclaimed.
+
+## Ownership census reconciliation
+
+The same reviewer confirmed nine exact census totals against a source-only
+archive of base `079960dae`. Six catalog counts were already stale on that
+base: finite regression owners added by `142d9f4e07` and `b38387a133` in
+`vod/tests/chunk_03.rs`. Their sleep children are kill-on-drop, job-attached
+and registered in `ProducerSlot` with the background permit; their writers
+settle and the tests await confirmed reap. The extra gate and five timers
+are bounded fixture observations, with no inherited production owner.
+
+The repair itself adds two existing-key gate calls, one cancellation-independent
+inventory batch, one exact-owner cleanup task plus four fixture tasks, one
+release-triggered runtime maintenance spawn, three production deadline bounds
+plus nine fixture observations, two collected foreground FFmpeg fixtures, and
+three reap/wait observations. These are the F1–F7 owners already reviewed.
+The census patterns, scopes and exact equality assertions remain unchanged.
+The failed preflight receipts are retained as runs 4523 and 4525; their
+bookkeeping corrections do not waive either the gate or a runtime test.

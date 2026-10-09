@@ -1,6 +1,6 @@
 # Android playback repair — device failures and delivery progress
 
-**Status:** PR #915 merged; TCL follow-up validated in PR #918 · **Updated:** 2026-10-08
+**Status:** PR #915 merged; TCL follow-up validated in PR #918; physical-device acceptance pending · **Updated:** 2026-10-08
 
 Companion to [Android parity](ANDROID-CLIENT-PARITY.md): repairs the native
 TCL and Lenovo playback failures and Razr video geometry and playback menus.
