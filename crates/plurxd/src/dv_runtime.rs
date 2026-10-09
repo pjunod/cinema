@@ -330,16 +330,14 @@ impl PrivateWindow {
         .map_err(|e| e.to_string())?;
         let cache = runtime_cache.to_owned();
         let (bytes, held) = tokio::task::spawn_blocking(move || {
-            use std::io::{Seek, SeekFrom, Write};
-            let mut held = tempfile::tempfile_in(cache).map_err(|e| e.to_string())?;
-            held.write_all(&bytes).map_err(|e| e.to_string())?;
-            held.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+            let held = crate::ffmpeg::stage_completed_probe_file(&bytes, &cache)
+                .map_err(|e| e.to_string())?;
             Ok::<_, String>((bytes, held))
         })
         .await
         .map_err(|e| e.to_string())??;
         let document = crate::ffmpeg::held_source_probe_json(
-            &held,
+            held.as_file(),
             crate::process_control::ChildWork::realtime("DV completed output header probe"),
         )
         .await?;
