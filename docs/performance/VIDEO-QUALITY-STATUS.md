@@ -1,12 +1,97 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** implementation and qualification complete; [PR #766](http://forge.lan:3000/noirr/plurx/pulls/766) records landing and cleanup · **Updated:** 2026-10-03
+**Status:** implementation merged; autonomous follow-up measurements complete
+· **Updated:** 2026-10-08 · **Resume base:** `1088d7529`
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
 unverified, not a pass. Dates use America/New_York unless a receipt states UTC.
 
-## Current execution — consolidated batch
+## Remaining acceptance — resumed on October 8
+
+[PR #766](http://forge.lan:3000/noirr/plurx/pulls/766) landed the implementation
+and its required checks as `342521018`. That did not complete every performance
+and image acceptance goal. Paul resumed the remaining work with parallel
+sessions on October 8. The coordinator uses `codex/video-qualification-followup`
+in a fresh independent clone; the owner's checkout is not used.
+[Draft PR #956](http://forge.lan:3000/noirr/plurx/pulls/956) collects the logical
+commits. Its review, per-check qualification and landing receipts are the
+authoritative merge status; the measured outcomes below do not imply an
+unmeasured device or image path passed.
+
+| Lane / exclusive ownership | Work being completed | Current evidence and next step |
+|---|---|---|
+| Encoding: encoding qualification harnesses and receipts | Real-title C2 sample and whole-clip quality/size/time comparison; B-frame client delivery. | Three genuinely tagged SDR titles retain baseline: candidates lose quality or increase bytes. The real-title durable owner persisted source-matched measurements and produced a Ready baseline package. Actual Plurx HLS passes Chrome and all 16 AVPlayer plus all 16 Media3 phases, with fresh review-corrected probes; older receipts remain limited to admitted timestamps. B-frames show no consistent quality/size win; retain the default. Safari automation did not reach media. |
+| HDR: captured-image diagnostic harnesses and receipts | Explain the retained sharp-edge failure, then measure broader authored color/highlight/shadow cases with the shipping graph. | Decode, planar/P010 conversion and GPU transfer are byte-exact; independent decoders agree. Quantization/reconstruction causes the sharp-edge error. A quantizer limit improves the image but violates a constrained bitrate budget, so it is rejected. Authored chromatic tone-map inspection is complete; retain the tone-map policy. The bitrate-preserving effort control also trades away quality on real windows and is rejected. Calibration is complete; the original sharp-edge criterion remains failed, and broader graph image/client acceptance is not claimed. |
+| Latency: isolated playback measurement harnesses and receipts | Actual-frame episode transitions, startup distributions and delivery resource comparisons. | All 16 initial transition cells passed. Final compiled release passes both natural-ended cells and three ownership boundaries. The close/cancel root cause is fixed through existing playback intent. All 24 release startup cells pass; cold API preparation median is 360 ms versus 491 ms with one versus two source collections. HLS serves 3,600 identical-hash responses with lower daemon CPU in every paired cell; concurrent latency is mixed. These are frozen-source, shared-host measurements, not fleet guarantees. |
+| Coordinator: this ledger, programme, docs index and backlog | Integrate logical commits, final review, scoped fast lane, merge and cleanup. | Pinned Rust 1.97.1 release builds passed for both measured variants; native harnesses compile. Newer main is integrated separately for final candidate compilation and checks. PR #956 records the final adversarial review, retained successful checks, selective retries, landing and local cleanup. No deployment is part of this campaign. |
+
+The [programme](VIDEO-QUALITY-PROGRAM.md#8-integration-evidence-and-limits)
+remains the acceptance contract. Its original autonomous captured-image scope
+explicitly excludes physical display calibration. Wider S-11/Dolby and
+hardware-family programmes retain their own acceptance; synthetic or desktop
+results will not close their physical-device rows. No threshold is weakened,
+no existing failed capture is erased, and no new watchdog or feature gate is
+introduced. Each receipt identifies its exact source, tool, client, control,
+resource bounds and limitations.
+
+The previously authorized batch workflow remains: one review when this batch
+is merge-ready, then required checks with successful results retained and only
+failed checks retried. Qualification measurements are the work being done now;
+unit suites are not repeatedly run during development. Source changes retain
+pinned compile checks and normal hooks. Tracked records use neutral
+infrastructure names; private media and fleet configuration stay out of Git.
+
+## October 8 measured outcomes and limits
+
+The [latency receipt](../evidence/video-quality-2026-10-08/latency/qualification-summary.json)
+and raw captures bind the current release to `9e018160c`, with a runtime-input
+match to `af2156bea` before the two explicit control patches. Newer main adds
+preparation-storage lifecycle changes; these measurements are not relabelled
+as captures of that later code. The combined landing receives its own pinned
+compile and fast-lane checks, recorded in PR #956.
+
+| Mechanism | Matched result | What the result establishes |
+|---|---|---|
+| Source collection sharing | Four cold pairs: API preparation median 359.55 ms current versus 490.61 ms control; exactly one versus two collections. Warm/resume use one collection in both. | Avoids duplicate cold collection. API preparation has no HLS request. The separate one-frame decoder-process completion metric is not a display clock and uses a combined control. |
+| HLS acknowledgement batching | 3,600 responses, identical 473,153-byte objects, zero source collections during serving. Median daemon CPU current/control is 180/430 ms at concurrency 1, 240/460 ms at 8, 330/530 ms at 32. | Lower coordination CPU in all nine paired cells. Serial batch latency improves in all three pairs; concurrent timing is mixed. Sampled RSS is about 92–107 MiB, not an allocator high-water guarantee. |
+| Episode metadata preparation | Compiled-release pair with 80 ms metadata delay: gap 383.3 to 135.7 ms, trigger-to-frame 294.5 to 44.3 ms. All three lifecycle boundaries pass. | The actual browser path benefits under this declared delay. Earlier 16-cell results remain separate. Close can no longer synchronously recreate preparation through the pending-seek cancellation tick. |
+
+The HLS control preserves authorization, proof granularity, timeouts and
+storage ownership. Different independently encoded objects were rejected
+before timing; the final serving-only comparison uses source-copy VOD through
+the same production pump. Debug parser identity fallback, rejected HLS setup,
+and the original failed close boundary remain retained as failed or invalid
+captures, never promoted into passing evidence.
+
+The [native summary](../evidence/video-quality-2026-10-08/native/qualification.json)
+records four cases × four phases on each framework. The review-corrected Android
+matrix passes with a maximum 160 ms video/player-clock difference against the
+unchanged 250 ms bar. Attempt 4 read a stale receipt and is explicitly invalid;
+the launcher now clears only its own probe package and verifies receipt
+absence. The earlier loaded clock failure remains unexplained by a later
+pass. These probes do not qualify physical speaker/display synchronization
+or the shipping application UI.
+
+The [single final adversarial review](../evidence/video-quality-2026-10-08/review.json)
+found two P2 harness defects and no additional production finding. Both native
+probes filtered below-target observations after phase establishment; they now
+apply that admission only before the first frame and count exclusions. Old
+receipts retain their narrower admitted-observation scope. All 32 affected
+native phases pass fresh corrected captures. The browser reproducer now bounds
+startup/CDP operations and owns child cleanup before a driver is returned.
+Its ten focused failure-path checks pass, retaining eight initial passes and
+retrying only two fixture-budget failures. Unrelated successful qualification
+cells were not repeated. Final fast-lane and landing receipts remain in PR #956.
+
+The HDR calibration decision is **retain**: quantizer changes violate bitrate
+constraints and the effort control has quality regressions. The sharp-edge
+image bar still fails (35 versus <32 codes). Chromatic pixel/filter comparisons
+omit production HDR side-data cleanup and do not qualify complete SDR metadata.
+Broader graph/device acceptance stays open in its owning programme; neither a
+successful neutral ramp nor a simulator pass erases those limitations.
+
+## October 3 execution — merged consolidated batch
 
 Paul authorized replacing per-task testing/effort gates with one larger
 merge-ready PR, one final adversarial review, review fixes, and then fast-lane

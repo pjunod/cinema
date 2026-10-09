@@ -1,0 +1,33 @@
+{
+  "source_revision": "1088d7529401297bddced74bfa11c166457468d8",
+  "scope": "Completed bounded HDR calibration; both candidate policy changes rejected. Sharp-edge image acceptance remains failed.",
+  "shipping_image": "sha256:e7f036e7d1c40d407f20f178c68e857b79f1828b62c921236272a24c2c303cec",
+  "shipping_ffmpeg_sha256": "90004301255382e1beb441a294fa8b75ac7fbb54678837f224d3458032e38787",
+  "proofs": {
+    "source_decode": "all-plane byte-identical",
+    "software_scale_and_p010": "all-plane byte-identical",
+    "upload_download": "all-plane byte-identical",
+    "decoder_8_vs_9": "all-plane byte-identical",
+    "loopfilter_ablation": "max39 vs35; removal worsens artifact",
+    "baseline_sharp_slice_initial_qp": 24,
+    "slice_qp_caveat": "CU QP deltas enabled; not a recovered per-pixel quantizer"
+  },
+  "domain": "PQ encoded-code differences and PQ-code PSNR/SSIM, not HDR perceptual grade",
+  "source_media_policy": "private title bytes stay on lab host; generated synthetic contact sheets only are public",
+  "limitations": [
+    "synthetic analytical colors are not independent artistic references",
+    "two-second real windows are not full-title qualification",
+    "two-CPU timings are not fleet realtime headroom",
+    "full S-11/DV/physical client matrix remains separately owned"
+  ],
+  "decision": {
+    "production_change": "none",
+    "qmax18": "Rejected: at 2 Mbps, output is 11,318,880 packet bits, exceeding even a full initial buffer plus maxrate allowance of 10,006,000 bits over 2.002 seconds.",
+    "compression_level1": "Rejected as an automatic default: passes the sharp fixture but gives mixed real-scene and worst-frame results; no consistent nonregression advantage.",
+    "existing_sharp_bar": "Failed: maximum 35. Criteria remain mean below 4 and maximum below 32 ten-bit codes.",
+    "signal_preservation": "existing neutral continuous-ramp graph proof remains separately scoped",
+    "physical_display": "excluded from original autonomous calibration scope; not converted into a pass"
+  },
+  "external_parameter_reference": "https://ffmpeg.org/ffmpeg-codecs.html#VAAPI-encoders",
+  "cleanup": "All 23 exact owned remote roots removed after inspection and receipt collection, with no running mount conflicts. Borrowed original failure capture and production media untouched. Follow-up audit removed all 16 exact anonymous image volumes from these controls after confirming each empty and unreferenced."
+}

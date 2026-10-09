@@ -23,7 +23,7 @@ function cancelNextEpisodePreparation(p){
   p.nextEpisodePreparation=null;
 }
 function nextEpisodePreparationCurrent(p,state){
-  return p.nextEpisodePreparation===state&&state.current()&&autoNextOn()
+  return p.wantsPlayback&&p.nextEpisodePreparation===state&&state.current()&&autoNextOn()
     &&performance.now()-state.began<NEXT_EPISODE_METADATA_MS;
 }
 function takeAutoplayNextPreparation(id){
@@ -59,10 +59,12 @@ async function resolveNextEpisodePage(itemId,preparation){
 }
 function prepareNextEpisodeIfNearEnd(p,video){
   const state=p?.nextEpisodePreparation;
-  if(state&&(!state.current()||!autoNextOn()))cancelNextEpisodePreparation(p);
+  if(state&&(!p.wantsPlayback||!state.current()||!autoNextOn()))cancelNextEpisodePreparation(p);
   // A cold start can fail before it has a file-bound player. Progress/Close
-  // still tick the initial object, which has no episode to prepare.
-  if(!p?.fileId||playbackFileContextForPlayer(p).source_ref.kind!=="local"||!autoNextOn()||p.libraryChannel||p.bookParts||video.paused||video.seeking
+  // still tick the initial object, which has no episode to prepare. Close also
+  // ticks while cancelling a pending seek, before resetting the attached video;
+  // only the owner's playback intent can admit new work during that teardown.
+  if(!p?.wantsPlayback||!p.fileId||playbackFileContextForPlayer(p).source_ref.kind!=="local"||!autoNextOn()||p.libraryChannel||p.bookParts||video.paused||video.seeking
     ||!playbackOwnsAttachedMedia(p))return;
   const remaining=pbTotalSec()-pbPosSec();
   if(!(pbTotalSec()>0&&remaining>0&&remaining<=NEXT_EPISODE_PREPARE_SEC))return;

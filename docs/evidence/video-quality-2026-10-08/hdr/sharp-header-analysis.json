@@ -1,0 +1,17 @@
+{
+  "encoded_sha256": "9807fc7be12652a8b44f5b13ffb732cfba90333e0699382179a27903aa9a2198",
+  "ffmpeg_version": "9.0.1",
+  "raw_trace_sha256": "361b76c758b8a81d5e09d2fb7e7bcfba972927a59eace31776de0849d04f40d7",
+  "selected_header_lines": [
+    "27          init_qp_minus26                                             1 = 0",
+    "30          cu_qp_delta_enabled_flag                                    1 = 1",
+    "41          deblocking_filter_control_present_flag                      0 = 0",
+    "27          init_qp_minus26                                             1 = 0",
+    "30          cu_qp_delta_enabled_flag                                    1 = 1",
+    "41          deblocking_filter_control_present_flag                      0 = 0",
+    "22          slice_sao_luma_flag                                         1 = 1",
+    "23          slice_sao_chroma_flag                                       1 = 1",
+    "24          slice_qp_delta                                          00101 = -2"
+  ],
+  "inference": "PPS initial26 plus slice delta\u22122 gives slice initialQP24; per-CU deltas are enabled, so this does not recover per-pixel QP"
+}

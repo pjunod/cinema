@@ -1,0 +1,16 @@
+{
+  "source_base": "1088d7529401297bddced74bfa11c166457468d8",
+  "asset": "crates/plurxd/src/web/player/autoplay-next.js",
+  "asset_sha256": "c0f8566da4d2d3f4f30b05913f9ff078931f72fba630eb7f23d4f81ad7712611",
+  "root_cause": "closePlayer cancels the old metadata owner, then sets wantsPlayback=false and invokes cancelPendingSeek; its synchronous pbTick runs before resetMediaSource pauses/detaches the video and formerly admitted a new metadata owner using the post-close control generation. The late result therefore looked current and populated a successor page after close.",
+  "fix": "Require the existing wantsPlayback intent both for automatic preparation admission and result ownership; cancel a now-stopped owner on progress ticks.",
+  "before": "boundary-diagnostic/receipt.json",
+  "after": "boundary-fixed-qualified/receipt.json",
+  "result": "confirmed_in_actual_browser_with_exact_changed_asset_overlay",
+  "unit_tests": "authored; deliberately deferred until batch adversarial review",
+  "failed_startup_attempts": [
+    "boundary-fixed",
+    "boundary-fixed-direct"
+  ],
+  "startup_limit": "Harness60s readiness timed out in capability probes under shared load; optional harness180s readiness only. No product deadline changed."
+}

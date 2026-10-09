@@ -1,0 +1,357 @@
+{
+  "schema": 1,
+  "case": "live-action-bf0",
+  "runtime": "Media3 1.10.1 on isolated Android emulator",
+  "os": "16",
+  "result": "fail",
+  "failure": "audio/clock/visible-moving-surface contract failed",
+  "phases": [],
+  "observations": [
+    {
+      "phase": "start",
+      "media_seconds": 0,
+      "player_clock_seconds": 0,
+      "wall_since_phase_seconds": 4.777,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.041666,
+      "player_clock_seconds": 0.077,
+      "wall_since_phase_seconds": 5.907,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.083333,
+      "player_clock_seconds": 0.077,
+      "wall_since_phase_seconds": 5.944,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.125,
+      "player_clock_seconds": 0.077,
+      "wall_since_phase_seconds": 5.944,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.166666,
+      "player_clock_seconds": 0.309,
+      "wall_since_phase_seconds": 6.248,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.375,
+      "player_clock_seconds": 0.309,
+      "wall_since_phase_seconds": 6.248,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.416666,
+      "player_clock_seconds": 0.309,
+      "wall_since_phase_seconds": 6.308,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.458333,
+      "player_clock_seconds": 0.458,
+      "wall_since_phase_seconds": 6.33,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.5,
+      "player_clock_seconds": 0.458,
+      "wall_since_phase_seconds": 6.336,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.541666,
+      "player_clock_seconds": 0.499,
+      "wall_since_phase_seconds": 6.385,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.583333,
+      "player_clock_seconds": 0.576,
+      "wall_since_phase_seconds": 7.352,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.625,
+      "player_clock_seconds": 0.576,
+      "wall_since_phase_seconds": 7.392,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.666666,
+      "player_clock_seconds": 0.642,
+      "wall_since_phase_seconds": 7.669,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.708333,
+      "player_clock_seconds": 0.768,
+      "wall_since_phase_seconds": 7.813,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.791666,
+      "player_clock_seconds": 0.768,
+      "wall_since_phase_seconds": 7.82,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.875,
+      "player_clock_seconds": 0.768,
+      "wall_since_phase_seconds": 7.887,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.916666,
+      "player_clock_seconds": 0.768,
+      "wall_since_phase_seconds": 8.042,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.958333,
+      "player_clock_seconds": 0.768,
+      "wall_since_phase_seconds": 8.042,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1,
+      "player_clock_seconds": 1.139,
+      "wall_since_phase_seconds": 8.108,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.375,
+      "player_clock_seconds": 1.139,
+      "wall_since_phase_seconds": 8.347,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.416666,
+      "player_clock_seconds": 1.139,
+      "wall_since_phase_seconds": 8.383,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.458333,
+      "player_clock_seconds": 1.408,
+      "wall_since_phase_seconds": 8.832,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.5,
+      "player_clock_seconds": 1.498,
+      "wall_since_phase_seconds": 9.098,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.541666,
+      "player_clock_seconds": 1.521,
+      "wall_since_phase_seconds": 9.123,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.583333,
+      "player_clock_seconds": 1.521,
+      "wall_since_phase_seconds": 9.669,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.083333,
+      "player_clock_seconds": 1.521,
+      "wall_since_phase_seconds": 9.69,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.125,
+      "player_clock_seconds": 1.521,
+      "wall_since_phase_seconds": 9.717,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.166666,
+      "player_clock_seconds": 2.167,
+      "wall_since_phase_seconds": 10.674,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.208333,
+      "player_clock_seconds": 2.167,
+      "wall_since_phase_seconds": 10.708,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.25,
+      "player_clock_seconds": 2.206,
+      "wall_since_phase_seconds": 10.744,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.291666,
+      "player_clock_seconds": 2.251,
+      "wall_since_phase_seconds": 10.79,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.333333,
+      "player_clock_seconds": 2.287,
+      "wall_since_phase_seconds": 10.849,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.375,
+      "player_clock_seconds": 2.395,
+      "wall_since_phase_seconds": 10.982,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.416666,
+      "player_clock_seconds": 2.395,
+      "wall_since_phase_seconds": 10.985,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.458333,
+      "player_clock_seconds": 2.395,
+      "wall_since_phase_seconds": 11.368,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.5,
+      "player_clock_seconds": 2.437,
+      "wall_since_phase_seconds": 11.898,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.541666,
+      "player_clock_seconds": 2.501,
+      "wall_since_phase_seconds": 11.936,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 2.583333,
+      "player_clock_seconds": 2.66,
+      "wall_since_phase_seconds": 12.087,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    }
+  ],
+  "scope": "Native codec and actual Surface pixels, timestamp progression, seeks and fresh-player restart. Audio selection and player clock measured; physical output A/V sync is not measured.",
+  "harness_sha256": "37bd365d04f1d0bacb022d7951d6ec59a89d67c2440bdd073d549ae29364aae7",
+  "apk_sha256": "6ce7730195dd47447bc691008a8a012f3de7e3dec05195395bb4efad364216b2",
+  "qualification_note": "Clock criterion failed under shared-host compiler/emulator load; maximum observed video/player delta0.604s and first frame4.777s. No threshold is relaxed. This is not a causal diagnosis of a production A/V defect; final failed-case retry requires a quiet owned-workload window."
+}

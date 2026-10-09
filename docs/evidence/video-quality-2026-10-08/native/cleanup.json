@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "completed_unix": 1791515645.586609,
+  "owned_android_serial": "emulator-5584",
+  "android_serial_absent": true,
+  "owned_avd": "plurx_video_qualification",
+  "owned_avd_directory_removed": true,
+  "owned_avd_ini_removed": true,
+  "apple_owned_device": "DA6C73F0-3AD5-46BC-AE7D-32EF9CBCAFF4",
+  "apple_shutdown_and_deleted_before_android_retry": true,
+  "loopback_http_port": 18976,
+  "http_server_session": 7549,
+  "http_server_exit_code": 0,
+  "remaining": "Task-owned binary/build/source scratch is retained through review and merge; final exact cleanup is recorded in PR956. No foreign devices or caches removed.",
+  "review_capture_cleanup": {
+    "apple": "review-apple-identity.json",
+    "android": "review-android-identity.json",
+    "http_server_session": 45653,
+    "http_server_exit_code": 0,
+    "all_owned_native_devices_removed": true
+  }
+}
