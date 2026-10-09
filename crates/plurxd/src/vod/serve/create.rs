@@ -131,11 +131,20 @@ impl VodServe {
         )
         .await
         .ok_or(PreparationError::Yield("retention_capacity"))?;
+        let mut storage_run =
+            super::preparation_storage::ConstructionOwner::new(Arc::clone(&allowance));
         let (attachment, logical) = self
-            .resolve_rendition(&mut prepared, file, settings, None, Some(allowance.nonce))
+            .resolve_rendition(
+                &mut prepared,
+                file,
+                settings,
+                None,
+                Some(Arc::clone(&allowance)),
+            )
             .await?;
         let rendition = Arc::clone(&attachment.rendition);
         let logical = logical.ok_or("copy preparation logical facts unavailable")?;
+        self.shared.hooks.get().before_preparation_snapshot().await;
         let token = fence
             .snapshot()
             .await
@@ -203,6 +212,7 @@ impl VodServe {
         };
         drop(manifest);
         drop(readers);
+        storage_run.disarm(); // PreparationRun now owns cancellation settlement.
         drop(attachment); // Never hold the attachment gate for full-film work.
         rendition.kick();
         self.wait_prepared_copy(run, still_idle).await
@@ -406,7 +416,7 @@ impl VodServe {
         file: &MediaFile,
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
-        private_preparation: Option<uuid::Uuid>,
+        private_preparation: Option<Arc<super::copy_preparation::PreparationAllowance>>,
     ) -> Result<
         (
             RenditionAttachment,
@@ -425,19 +435,27 @@ impl VodServe {
             .prepare_recipe(prepared, file, settings, viewer)
             .await?;
         let canonical_key = rendition_key(&recipe, &identity);
-        let key = private_preparation.map_or_else(
+        let key = private_preparation.as_ref().map_or_else(
             || canonical_key.clone(),
             |nonce| {
                 let mut hash = Sha256::new();
                 hash.update(b"plurx:private-copy-preparation-incarnation:v1\0");
                 hash.update(canonical_key.as_bytes());
-                hash.update(nonce.as_bytes());
+                hash.update(nonce.nonce.as_bytes());
                 hex::encode(hash.finalize())
             },
         );
         let attachment = self
             .shared
-            .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
+            .attach_rendition_with_storage(
+                &key,
+                &identity,
+                index,
+                recipe,
+                duration_ms,
+                settings,
+                private_preparation,
+            )
             .await?
             .ok_or_else(|| {
                 crate::transcode::vod_refusal_error(
@@ -2484,7 +2502,15 @@ impl VodServe {
         );
         let attachment = self
             .shared
-            .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
+            .attach_rendition_with_storage(
+                &key,
+                &identity,
+                index,
+                recipe,
+                duration_ms,
+                settings,
+                None,
+            )
             .await?
             .ok_or_else(|| {
                 crate::transcode::vod_refusal_error(
