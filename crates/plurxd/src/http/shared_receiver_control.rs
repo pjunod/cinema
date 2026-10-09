@@ -949,6 +949,7 @@ mod tests {
                 hold_reason: None,
                 producer_decision: None,
                 subtitle_readiness: None,
+                subtitle_revision: None,
                 preparation: None,
                 owner_node_hash: pc::node_hash("source-node"),
                 owner_epoch: source_epoch,

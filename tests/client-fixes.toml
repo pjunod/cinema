@@ -1,6 +1,39 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "subtitles.available-count-includes-selection"
+commits = ["884614df1b58c2878c30c758d21adbeb973f60c9"]
+source = "crates/plurxd/src/web/detail/watch-browser.js"
+source_anchor = "<b>${tracks.length}</b> available"
+test = "tests/web/file-context.test.js"
+test_anchor = "folded subtitle availability includes the selected generated track"
+
+# Subtitle batch source/test anchors; retained execution evidence is separate.
+[[fixes]]
+id = "subtitles.acknowledged-native-reselection"
+commits = ["46a15c2800b850b4ac00dbbc7d973b6d922cfad4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/NativeSubtitleRetry.kt"
+source_anchor = "suspendCancellableCoroutine<Unit>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/NativeSubtitleRetryTest.kt"
+test_anchor = "reselectWaitsForPlaybackThreadAcknowledgement"
+
+[[fixes]]
+id = "subtitles.explicit-offline-generation-refusal"
+commits = ["96cc3fce06934f1eb30a04e40f8519bf57662f56"]
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = "async function generateSubtitles(fileId,button)"
+test = "tests/web/settings-sections.test.js"
+test_anchor = "transcription queue refusal is not displayed as successful work"
+
+[[fixes]]
+id = "subtitles.unavailable-notice-preserves-video"
+commits = ["4f6a1d7e2ba2b1a681b554c18ffb798a7ad82b4a"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "guard value == \"unavailable\", toldIntent != intent else { return false }"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testUnavailableSubtitleNotifiesOncePerIntentWithoutConsumingReadyRetry"
+
 # Reviewed Mac completion client changes: source/test anchors, not execution receipts.
 [[fixes]]
 id = "android.hls-hevc-retains-measured-envelope"

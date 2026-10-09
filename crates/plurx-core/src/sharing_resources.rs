@@ -168,7 +168,13 @@ impl SharingHlsResource {
                 if *name == "index.m3u8" {
                     SharingHlsResourceKind::SubtitlePlaylist { index }
                 } else {
-                    segment(name, ".vtt")?;
+                    if let Some(revision) = name.strip_prefix("cached-") {
+                        if !valid_cached_subtitle_revision(revision) {
+                            return Err(SharingResourceUnsupported);
+                        }
+                    } else {
+                        segment(name, ".vtt")?;
+                    }
                     SharingHlsResourceKind::SubtitleSegment { index }
                 }
             }
@@ -216,6 +222,14 @@ impl SharingHlsResource {
             kind,
             native,
         })
+    }
+
+    /// A bounded opaque delivery identity, never a filesystem path.
+    pub fn cached_subtitle_revision(&self) -> Option<&str> {
+        if !matches!(self.kind, SharingHlsResourceKind::SubtitleSegment { .. }) {
+            return None;
+        }
+        self.uri.rsplit('/').next()?.strip_prefix("cached-")
     }
 
     pub fn as_str(&self) -> &str {
@@ -654,6 +668,37 @@ mod tests {
                 | SharingFileResourceKind::ChapterThumbnail { .. } => "asset",
             };
             assert_eq!(row["b"], route, "{suffix:?}");
+        }
+    }
+}
+
+/// Shared by the public session route and the closed sharing resource parser.
+pub fn valid_cached_subtitle_revision(revision: &str) -> bool {
+    !revision.is_empty()
+        && revision.len() <= 192
+        && revision
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.'))
+        && !revision.contains("..")
+}
+
+#[cfg(test)]
+mod cached_caption_tests {
+    use super::*;
+    #[test]
+    fn cached_caption_session_resource_is_bounded_and_cannot_escape_its_namespace() {
+        let revision = "f7-s1-123-456-w0-200.vtt";
+        let resource = SharingHlsResource::parse(&format!("subs/1/cached-{revision}"))
+            .expect("cached caption fixture");
+        assert_eq!(resource.cached_subtitle_revision(), Some(revision));
+        for path in [
+            "subs/1/cached-../secret",
+            "subs/1/cached-a%2fb",
+            "subs/1/cached-a?token=viewer",
+            "subs/1/cached-",
+            "subs/4096/cached-a",
+        ] {
+            assert!(SharingHlsResource::parse(path).is_err(), "{path}");
         }
     }
 }

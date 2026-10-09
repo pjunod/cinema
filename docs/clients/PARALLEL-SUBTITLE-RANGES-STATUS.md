@@ -1,6 +1,8 @@
 # Parallel subtitle ranges — playback work shared across nodes
 
-**Status:** open · **Updated:** 2026-09-25 · **Model:** gpt-6-astra ·
+> Current work and corrected delivery status: [subtitle completion ledger](SUBTITLE-RELIABILITY-COMPLETION.md). This page retains its historical scope and evidence.
+
+**Status:** built; #517 landed as `38f61dfe6`; physical acceptance remains · **Updated:** 2026-09-25 · **Model:** gpt-6-astra ·
 **Session:** none:openai:2026-09-25 · **Branch:** codex/parallel-subtitle-ranges ·
 **PR:** [#517](http://forge.lan:3000/noirr/plurx/pulls/517)
 
@@ -62,7 +64,7 @@ latency measurement or a physical byte bound for every subtitle layout.
 | Parallel current/next window publication and playback integration | implemented; current extraction starts before peer discovery and publishes independently |
 | Named regressions and documentation | complete; 10 range tests and 1 unsigned-handler test passed after review fixes |
 | Single adversarial review | complete; cancellation finding fixed and acceptance limits recorded in §6 |
-| Current candidate fast-lane qualification | pending; PR is ready for the non-draft qualification run |
+| Original candidate qualification | merged in #517 as `38f61dfe6`; current acceptance belongs to the completion ledger |
 | Deployment and physical client measurements | outside this change |
 
 The implementation owns `subtitle_ranges.rs`, subtitle window plumbing in

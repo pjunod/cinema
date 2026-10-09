@@ -4861,6 +4861,37 @@ available. The caption limit is eight tracks per source revision, each at
 most 256 KiB of normalized WebVTT. Downloaded tracks survive cache cleanup
 and ordinary rescans; replacing the media invalidates its old associations.
 
+## Generate subtitles offline
+
+Offline generation is optional. Install `whisper-cli` from whisper.cpp and a
+compatible model on each worker that should execute transcription. Use an
+absolute regular model-file path; the worker does not download models. The
+initial adapter runs on CPU with two threads and supports finite, probed
+media with audio lasting up to four hours.
+
+In **Settings → Developer → Generate subtitles**, select **Configure
+transcription**, enter the command, model path and spoken-language code, then
+save the enable choice. Readiness reports whether the serving node can find
+the executable and model; missing dependencies never disable Save. Use the
+same command/model layout on participating workers. Jobs awaiting a different
+model or pipeline remain visible and stoppable until a compatible worker can
+claim them; changing configuration does not silently rewrite their identity.
+Interval zero permits
+manual requests only; a positive interval also checks bounded pages of files
+missing captions in that language.
+
+On a local title's detail page, choose **Generate subtitles**. Activity shows
+the durable job and provides Stop for queued or running work. After completion,
+refresh the title and select the machine-generated track in its normal
+subtitle picker. Language is a transcription language, not a translation
+target. Machine captions may contain recognition errors.
+
+The job holds its source/model identity through execution, reaps stopped
+children and removes its temporary audio/output files. It publishes WebVTT,
+provenance and successful queue completion together. A replaced source or
+lost lease cannot publish captions for the wrong file. Models and library
+media stay in place; output uses the existing durable acquired-caption store.
+
 ## Sharing Cinema addresses — set up before creating invitations
 
 Settings → Sharing always lists the observed local TLS listener and sharing

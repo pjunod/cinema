@@ -10868,6 +10868,10 @@ extension PlayerController {
             onSubtitleReady: { [weak self] in
                 self?.retryNativeSubtitleAfterReadiness()
             },
+            onSubtitleUnavailable: { [weak self] in
+                guard let self, self.selectedSubtitle != nil else { return }
+                self.showPlaybackNotice("That subtitle could not be prepared. Playback was kept unchanged.")
+            },
             // Deliberately ungated at this call site. Everything that could
             // refuse a staging — one already live, one already settled, a
             // switch in flight, a playback that has proved it cannot prime one

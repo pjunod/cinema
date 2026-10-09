@@ -747,6 +747,7 @@ data class ControlAction(
 @Serializable
 data class ControlDelivery(
     @SerialName("subtitle_readiness") val subtitleReadiness: String? = null,
+    @SerialName("subtitle_revision") val subtitleRevision: String? = null,
     /**
      * Where this server has got to on the viewer's last selection change:
      * `staging`, `offered` or `none`.
@@ -773,37 +774,29 @@ internal object SubtitleReadinessDecision {
     fun meansUnavailable(value: String?): Boolean = value == "unavailable"
 }
 
-/**
- * One notice per run of `unavailable`, not one per exchange.
- *
- * The reporter exchanges every couple of seconds, so a bare equality test
- * would put a banner on screen on a cadence. The viewer needs to be told
- * once, and told again only if the track recovers and fails afresh.
- */
+/** A terminal failure gets one notice per selection/seek intent, independently of ready retries. */
 internal class SubtitleUnavailableNoticeState {
-    private var told = false
+    private var toldIntent: Long? = null
 
     @Synchronized
-    fun record(value: String?): Boolean {
-        val unavailable = SubtitleReadinessDecision.meansUnavailable(value)
-        if (!unavailable) {
-            told = false
-            return false
-        }
-        if (told) return false
-        told = true
+    fun record(value: String?, commitUnavailable: Boolean = true, intent: Long = 0): Boolean {
+        if (!SubtitleReadinessDecision.meansUnavailable(value) || toldIntent == intent) return false
+        if (commitUnavailable) toldIntent = intent
         return true
     }
 }
 
 internal class SubtitleReadinessRetryState {
     private var lastReady: Boolean? = null
+    private var lastIntent: Long? = null
+    private var lastRevision: String? = null
 
     @Synchronized
-    fun record(value: String?, commitReady: Boolean = true): Boolean {
+    fun record(value: String?, commitReady: Boolean = true, intent: Long = 0, revision: String? = null): Boolean {
         val ready = SubtitleReadinessDecision.meansReady(value)
-        val retry = lastReady == false && ready
-        if (!ready || commitReady) lastReady = ready
+        // Extraction can finish before the first control response.
+        val retry = ready && (lastReady != true || lastIntent != intent || lastRevision != revision)
+        if (!ready || commitReady) { lastReady = ready; lastIntent = intent; lastRevision = revision }
         return retry
     }
 }

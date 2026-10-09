@@ -104,6 +104,7 @@ fn response(request: &ControlRequestV1) -> ControlResponseV1 {
             hold_reason: None,
             producer_decision: None,
             subtitle_readiness: None,
+            subtitle_revision: None,
             preparation: Some("none".to_owned()),
             owner_node_hash: pc::node_hash("receiver-node"),
             owner_epoch: request.control_epoch,

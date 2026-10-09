@@ -649,39 +649,59 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
-      <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
+      <div class="setsection" id="enable-subtitle-transcription"><h2>Generate subtitles</h2><p>Optional local transcription for media without suitable captions.</p></div>${subtitleTranscriptionCard()}
       <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}
       <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep tracks during indexing${clustered?" and share verified tracks across the cluster":""}.</p></div>${clustered?subtitlePlaybackRangesCard(readiness):""}${subtitleStoredSourcesCard(settings,readiness)}${clustered?subtitleClusterSourcesCard(settings,readiness):""}${subtitleBackfillCard(settings,readiness)}`;
 }
-// Refusing a subtitle segment whose extraction failed.
-//
-// A not-ready subtitle segment is answered with a valid but empty WebVTT
-// body. While the sidecar is warming that is true. Once the extraction has
-// failed it is a lie, and players keep the bytes in memory whatever
-// `no-store` says — so the viewer is left with a track that is selected,
-// silent, and never going to fill in.
-//
-// The switch is the enable path and the rows below never gate it. They are
-// all `unobservable` on purpose: whether an engine keeps playing video
-// through a subtitle 503 is a measurement on an Apple TV, an Android device
-// and a browser, not something this server can read about itself.
-function subtitleNotReadyCard(s,readiness){
-  const enabled=!!s.subtitle_not_ready_503;
-  const state=enabled
-    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
-    : `<span class="pill">disabled</span>`;
-  return setCard(`${cardHead("Refuse a subtitle segment that failed","Answer 503 with Retry-After when a subtitle track's extraction has failed, instead of an empty subtitle segment the player keeps.",state)}
-      ${togRow("sub503",`Refuse instead of serving an empty subtitle segment <span class="pill warn">experimental</span>`,`Applies immediately to new segment requests. This checkbox is authoritative: an unobserved engine never turns it back off.`,enabled)}
-      <div class="hint"><b>This checkbox is the enable path.</b> The observations below are advisory only. Only a <i>failed</i> extraction is refused; a track that is still warming keeps its empty segment and the client's readiness retry, because "not yet" and "not going to" are different answers.</div>
-      <details class="setdetails" open><summary>What to confirm before enabling</summary><div class="setdetails-body">
-      ${devReq(readiness,"subtitle_not_ready_503","avplayer_survives_subtitle_refusal","AVPlayer keeps the picture","Apple TV and iPad. AVPlayer allows a subtitle segment about two seconds and blocks the muxed video while it waits, so this is the refusal with a picture riding on it. Play a title whose subtitle extraction fails and confirm the video continues.")}
-      ${devReq(readiness,"subtitle_not_ready_503","media3_survives_subtitle_refusal","Media3 keeps the picture","Android. Confirm a refused subtitle rendition surfaces as a text-track problem and not a fatal source error that stops playback.")}
-      ${devReq(readiness,"subtitle_not_ready_503","hlsjs_survives_subtitle_refusal","hls.js keeps the picture","Any browser. Confirm the bundled hls.js treats a 503 with Retry-After on a subtitle rendition as recoverable rather than escalating to a fatal network error.")}
-      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. These are device measurements; this server cannot take them for you, which is why all three read "not observable" rather than showing a tick nobody earned.</p>
-      </div></details>
-      ${devGraduation("the subtitle-reliability physical verification shows AVPlayer, Media3 and hls.js keep the picture through a refused subtitle segment.","the toggle is removed and refusing a failed extraction becomes the default, keeping an operator's explicit choice.")}<div class="err" id="sub503err" role="alert"></div>
-      ${setCardFoot("saveSubtitleNotReady")}`,{id:"sub503card"});
+function subtitleTranscriptionCard(){
+  return setCard(`${cardHead("Generate subtitles offline","Create machine-generated captions locally with whisper.cpp.")}
+      <p>Runs as background work. You can follow progress and stop queued or running transcription in Activity.</p>
+      <button class="sm" onclick="openSubtitleTranscription(this)">Configure transcription</button>
+      <div id="subtitle-transcription-form"></div>
+      ${devGraduation("real transcription, cancellation, source replacement and generated-caption playback are qualified on the supported workers and clients.","the permanent controls move to Settings → Maintenance.")}`);
 }
+function subtitleTranscriptionForm(settings){
+  const readiness=settings.readiness||{};
+  return `<label><input id="st-enabled" type="checkbox"${settings.enabled?" checked":""}> Enable offline subtitle generation</label>
+      <p class="hint">Applies to new requests. Stop existing work in Activity. The checks below are advisory and never change your saved choice.</p>
+      <label for="st-command">whisper.cpp executable on the worker</label><input id="st-command" autocomplete="off" value="${esc(settings.command||"whisper-cli")}">
+      <label for="st-model">Local model file on the worker</label><input id="st-model" autocomplete="off" value="${esc(settings.model_path||"")}">
+      <label for="st-language">Spoken language code</label><input id="st-language" maxlength="12" value="${esc(settings.language||"en")}">
+      <label for="st-interval">Check for missing subtitles every (minutes; 0 for manual requests only)</label><input id="st-interval" type="number" min="0" max="10080" step="1" value="${esc(String(settings.interval_mins||0))}">
+      <p class="hint">Audio and captions stay on your servers. Models must already be installed. Captions are labelled as machine-generated and may contain mistakes.</p>
+      <div role="status"><b>Worker readiness:</b> ${readiness.ready?"Ready":"Not ready"}. ${esc(readiness.reason||"")}</div>
+      <ul><li>Executable: ${readiness.command_available?"available":"not found"}</li><li>Model: ${readiness.model_available?"available":"not found"}</li></ul>
+      <button class="sm" onclick="saveSubtitleTranscription(this)">Save</button><div id="st-status" role="status" aria-live="polite"></div>`;
+}
+async function openSubtitleTranscription(button){
+  const panel=document.getElementById("subtitle-transcription-form");
+  if(!panel)return;
+  if(button)button.disabled=true;
+  try{
+    const settings=await api("/subtitle-transcription");
+    if(panel.isConnected)panel.innerHTML=subtitleTranscriptionForm(settings);
+  }catch(error){if(panel.isConnected)panel.textContent=error.message||"Could not load transcription settings.";}
+  finally{if(button&&button.isConnected)button.disabled=false;}
+}
+async function saveSubtitleTranscription(button){
+  const panel=document.getElementById("subtitle-transcription-form"),status=document.getElementById("st-status");
+  if(!panel||!status)return;
+  const input=id=>/** @type {HTMLInputElement} */ (document.getElementById(id));
+  const interval=Number(input("st-interval").value);
+  if(!Number.isInteger(interval)||interval<0||interval>10080){status.textContent="Choose a whole number of minutes from 0 to 10080.";return;}
+  const body={enabled:input("st-enabled").checked,
+    command:input("st-command").value.trim(),
+    model_path:input("st-model").value.trim(),
+    language:input("st-language").value.trim(),interval_mins:interval};
+  if(button)button.disabled=true;
+  status.textContent="Saving…";
+  try{
+    const saved=await api("/subtitle-transcription",{method:"PUT",body});
+    if(panel.isConnected){panel.innerHTML=subtitleTranscriptionForm(saved);document.getElementById("st-status").textContent="Saved. Worker readiness does not change this choice.";}
+  }catch(error){if(status.isConnected)status.textContent=error.message||"Could not save transcription settings.";}
+  finally{if(button&&button.isConnected)button.disabled=false;}
+}
+
 function pgsOverlayCard(s,readiness){
   const enabled=!!s.pgs_overlay;
   const state=enabled

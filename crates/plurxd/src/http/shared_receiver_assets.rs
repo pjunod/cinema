@@ -211,6 +211,38 @@ fn session_query(query: Option<&str>) -> Result<Option<Uuid>, ApiError> {
     Ok(session)
 }
 
+/// A cached subtitle revision is delivery identity, never viewer authority.
+/// Keep the other asset queries closed and forward only one bounded value.
+fn asset_query(
+    query: Option<&str>,
+    subtitle: bool,
+) -> Result<(Option<Uuid>, Option<String>), ApiError> {
+    let mut revision = None;
+    let mut authority = Vec::new();
+    for pair in query
+        .unwrap_or("")
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
+        match pair.split_once('=') {
+            Some(("revision", value))
+                if subtitle
+                    && revision.is_none()
+                    && !value.is_empty()
+                    && value.len() <= 192
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') =>
+            {
+                revision = Some(value.to_owned());
+            }
+            Some(("revision", _)) => return Err(invalid()),
+            _ => authority.push(pair),
+        }
+    }
+    Ok((session_query(Some(&authority.join("&")))?, revision))
+}
+
 /// The viewer and login a request reaches the file as: the session's own when
 /// it carries an exact binding (an account, if also present, must be that
 /// session's viewer), otherwise the signed-in account's.
@@ -263,7 +295,10 @@ async fn serve(
         | SharingFileResourceKind::ChapterThumbnail { .. } => false,
         _ => return Err(resource_unsupported().await),
     };
-    let session = session_query(parts.uri.query())?;
+    let (session, revision) = asset_query(
+        parts.uri.query(),
+        matches!(resource.kind(), SharingFileResourceKind::Subtitle { .. }),
+    )?;
     let import_id = Uuid::parse_str(import).map_err(|_| invalid())?;
     if import_id.is_nil() || import_id.to_string() != import {
         return Err(invalid());
@@ -294,12 +329,24 @@ async fn serve(
     };
     let (summary, asset) = state
         .sharing
-        .read_file_asset(&state, user, &reference, &target, &resource)
+        .read_file_asset(
+            &state,
+            user,
+            &reference,
+            &target,
+            &resource,
+            revision.as_deref(),
+        )
         .await
         .map_err(source_failure)?;
     let mut response = match asset {
         PeerFileAsset::Preparing => preparing(),
-        PeerFileAsset::Ready { bytes, mime } => {
+        PeerFileAsset::Absent => StatusCode::NO_CONTENT.into_response(),
+        PeerFileAsset::Ready {
+            bytes,
+            mime,
+            complete,
+        } => {
             let bytes = if manifest {
                 project_manifest(&bytes, &reference, &key)?.into()
             } else {
@@ -309,6 +356,12 @@ async fn serve(
             response
                 .headers_mut()
                 .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+            if let Some(complete) = complete {
+                response.headers_mut().insert(
+                    axum::http::HeaderName::from_static("x-plurx-subtitle-complete"),
+                    HeaderValue::from_static(if complete { "true" } else { "false" }),
+                );
+            }
             response
         }
     };
@@ -782,8 +835,8 @@ mod tests {
             .await
             .expect("fixture connection");
         let resource = SharingFileResource::parse(&vtt_suffix()).expect("resource");
-        let Ok(PeerFileAsset::Ready { bytes, mime }) = peer
-            .file_asset(&source.secret, &source.target, &resource)
+        let Ok(PeerFileAsset::Ready { bytes, mime, .. }) = peer
+            .file_asset(&source.secret, &source.target, &resource, None)
             .await
         else {
             panic!("the Source answered its own file")
@@ -793,12 +846,130 @@ mod tests {
         let mut stale = source.target.clone();
         stale.revision = FileRevision::parse(&"0".repeat(64)).expect("revision");
         assert!(matches!(
-            peer.file_asset(&source.secret, &stale, &resource).await,
+            peer.file_asset(&source.secret, &stale, &resource, None)
+                .await,
             Err(PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE))
         ));
         drop(peer);
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn local_cached_subtitle_revision_requires_login_and_delivers_window() {
+        let fixture = receiver_fixture().await;
+        let file = fixture
+            .state
+            .store
+            .get_file(0)
+            .await
+            .expect("file")
+            .expect("file");
+        let path = crate::subtitles::vtt_window_path(&fixture.state.subs_dir, &file, 0, 0, 200);
+        tokio::fs::create_dir_all(&fixture.state.subs_dir)
+            .await
+            .expect("cache");
+        tokio::fs::write(&path, LOCAL_VTT).await.expect("window");
+        let revision = path.file_name().expect("name").to_str().expect("revision");
+        let uri = format!("/api/v1/files/0/subs/0.vtt?revision={revision}");
+        assert_eq!(
+            call(&fixture.state, "GET", &uri, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, body) = call(&fixture.state, "GET", &uri, Some(&fixture.token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::Value::String(LOCAL_VTT.into()));
+        let stale = "/api/v1/files/0/subs/0.vtt?revision=f0-s0-5-999-w0-200.vtt";
+        assert_eq!(
+            call(&fixture.state, "GET", stale, Some(&fixture.token))
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_cached_subtitle_revision_reaches_authorized_source_window() {
+        use super::super::shared_source_assets::tests::{source_fixture, SOURCE_VTT};
+        let source = source_fixture().await;
+        let file = source.file().await;
+        let path = crate::subtitles::vtt_window_path(&source.state.subs_dir, &file, 0, 0, 200);
+        tokio::fs::create_dir_all(&source.state.subs_dir)
+            .await
+            .expect("cache");
+        tokio::fs::write(&path, SOURCE_VTT).await.expect("window");
+        let revision = path.file_name().expect("name").to_str().expect("revision");
+        let app = super::super::sharing::peer_router(source.state.clone());
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    hyper_util::rt::TokioIo::new(server),
+                    hyper_util::service::TowerToHyperService::new(app),
+                )
+                .await;
+        });
+        let mut peer = crate::sharing_client::PeerConnection::over_test_stream(client)
+            .await
+            .expect("peer");
+        let resource = SharingFileResource::parse("subs/0.vtt").expect("resource");
+        let Ok(PeerFileAsset::Ready {
+            bytes, complete, ..
+        }) = peer
+            .file_asset(&source.secret, &source.target, &resource, Some(revision))
+            .await
+        else {
+            panic!("cached Source window");
+        };
+        assert_eq!(bytes, SOURCE_VTT.as_bytes());
+        assert_eq!(complete, Some(false));
+        assert!(!crate::subtitles::vtt_path(&source.state.subs_dir, &file, 0).exists());
+        assert!(matches!(
+            peer.file_asset(
+                &source.secret,
+                &source.target,
+                &resource,
+                Some("other-source.vtt")
+            )
+            .await,
+            Ok(PeerFileAsset::Absent)
+        ));
+        let mut stale = source.target.clone();
+        stale.revision = FileRevision::parse(&"0".repeat(64)).expect("stale");
+        assert!(matches!(
+            peer.file_asset(&source.secret, &stale, &resource, Some(revision))
+                .await,
+            Err(PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE))
+        ));
+        drop(peer);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[test]
+    fn sharing_cached_subtitle_revision_query_preserves_closed_authority() {
+        let session = Uuid::new_v4();
+        let revision = "f0-s0-15-1000-w0-200.vtt";
+        assert_eq!(
+            asset_query(
+                Some(&format!(
+                    "token=viewer&session={session}&revision={revision}"
+                )),
+                true
+            )
+            .expect("query"),
+            (Some(session), Some(revision.into()))
+        );
+        for query in [
+            "revision=../outside",
+            "revision=a&revision=b",
+            "revision=a&unknown=b",
+            "revision=",
+            "revision=%2Fa",
+        ] {
+            assert!(asset_query(Some(query), true).is_err(), "{query}");
+        }
+        assert!(asset_query(Some(&format!("revision={revision}")), false).is_err());
     }
 
     #[tokio::test]

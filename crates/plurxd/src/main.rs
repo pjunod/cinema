@@ -83,6 +83,7 @@ mod storeprobe;
 mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
+mod subtitle_transcription;
 mod subtitles;
 mod telemetry;
 mod titlestore;
@@ -3190,6 +3191,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(http::file_grants::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(subtitle_transcription::run(
         state.clone(),
         background_shutdown.clone(),
     ));

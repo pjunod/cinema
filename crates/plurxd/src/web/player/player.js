@@ -59,6 +59,12 @@
  * @property {any} [preplay]               this playback's pre-play track choice, carried across reopens
  * @property {number} [aoffset]            the viewer's audio offset for this session, ms
  * @property {any} [_subOff]               the subtitle-offset control's state
+ * @property {number} [_subtitleUnavailableIntent] caption failure notice's selection/seek intent
+ * @property {number} [_subtitleUnavailableIndex] caption failure notice's track ordinal
+ * @property {any} [_subtitleSidecarRequest] current cached-caption read with source/session/owner fences
+ * @property {number} [_subtitleSidecarSerial] orders cached-caption completions
+ * @property {number} [subtitleReadinessIntent] latest caption readiness observation's intent
+ * @property {string|null} [subtitleReadinessRevision] latest observed caption publication
  *
  * Markers (intro / credits)
  * @property {any[]} markers

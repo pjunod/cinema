@@ -1683,6 +1683,7 @@ impl SharingManager {
         reference: &plurx_core::sharing_file_locators::FileLocatorReference,
         target: &crate::http::hls::SourcePlaybackTarget,
         resource: &plurx_core::sharing_resources::SharingFileResource,
+        revision: Option<&str>,
     ) -> Result<
         (
             plurx_core::sharing::ImportSummary,
@@ -1695,7 +1696,7 @@ impl SharingManager {
             let (summary, credentials, mut peer) =
                 self.assigned_file_peer(state, user, reference).await?;
             let asset = peer
-                .file_asset(&credentials.credential, target, resource)
+                .file_asset(&credentials.credential, target, resource, revision)
                 .await?;
             self.ensure_current(state, &summary).await?;
             Ok((summary, asset))

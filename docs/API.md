@@ -20,7 +20,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 354 routes across the registered routers.
+plurx has 356 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -1980,13 +1980,26 @@ No user credentials are forwarded and all discovery responses are uncacheable.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
-| GET | `/api/v1/files/{id}/subs/{subtitle}` | bearer | One subtitle stream as WebVTT, for a `<track>` element |
+| GET | `/api/v1/files/{id}/subs/{subtitle}` | bearer | One subtitle stream as WebVTT; optional `revision` reads only the already-ready representation named by playback control |
 | GET | `/api/v1/subtitle-provider` | admin bearer | Configured flags, account username, automatic mode and language codes; never the API key or password |
 | PUT | `/api/v1/subtitle-provider` | admin bearer | Update optional `api_key`, `username`, `password`, `automatic` and `languages`; omitted fields are retained, empty secrets clear them |
+| GET | `/api/v1/subtitle-transcription` | admin bearer | Offline transcription settings and advisory executable/model readiness |
+| PUT | `/api/v1/subtitle-transcription` | admin bearer | Save `enabled`, `interval_mins`, `command`, `model_path` and `language`; missing worker dependencies never override the saved enable choice |
+| POST | `/api/v1/files/{id}/subtitles/transcribe` | admin bearer | Enqueue local transcription through the durable background queue; empty JSON body, standard enqueue outcome and job ID |
 | GET | `/api/v1/files/{id}/subtitles/search` | bearer | Required `language` query (for example `en`); movie/episode candidates with provider file ID, release, language, file match, translation and accessibility flags, plus downloaded IDs |
 | POST | `/api/v1/files/{id}/subtitles/download` | bearer | Accept `{language, provider_file_id}`, revalidate against search results, acquire and return `{subtitle_index, already_downloaded}` |
 | GET | `/api/v1/files/{id}/subs/{index}/overlay.json` | bearer | The `pgs-v1` overlay manifest |
 | GET | `/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}` | bearer | One immutable overlay PNG, addressed by content hash |
+
+The optional `revision` query is the opaque `delivery.subtitle_revision`
+from the current playback-control response. It reads cached bytes only and
+never starts extraction. A missing, stale or unavailable representation
+answers 204 without caption bytes. A successful response carries
+`x-plurx-subtitle-complete: true` for a complete track or `false` for a bounded
+window. Both use absolute source cue times. A window is not permission to
+stop requesting later HLS subtitle ranges; only complete-track takeover can
+retire that rendition. The Shared VTT route preserves the same query and
+completion semantics after its normal viewer/source authorization.
 
 Provider routes use typed errors: `subtitle_provider_disabled`,
 `subtitle_provider_credentials`, `subtitle_provider_quota`,
@@ -1996,6 +2009,15 @@ full track list or competing per-file download returns 409. Automatic mode
 defaults to false; `languages` accepts one to three language codes, default
 `["en"]`. A successful acquisition appends an ordinary `webvtt` subtitle
 ordinal. Caption bodies are not included in file metadata responses.
+
+Offline transcription is optional and disabled by default. A zero-minute
+interval allows manual requests only. Operators install whisper.cpp and a
+local model on the worker; the job downloads neither. The first implementation
+uses two CPU threads and disables GPU execution. Source duration and inference
+are bounded to four hours; audio conversion has a separate 30-minute limit. Generated WebVTT joins the ordinary subtitle picker
+with machine-generated attribution and source/model provenance. Activity
+owns queue visibility and Stop. Enqueue refusals do not imply work was accepted;
+clients must inspect the returned `outcome` before announcing success.
 
 `{subtitle}` accepts **both** spellings: the handler strips a trailing `.vtt`
 if present and parses the remainder as an integer, so `/subs/0` (legacy) and

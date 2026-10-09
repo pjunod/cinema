@@ -247,6 +247,7 @@ async fn serve_subtitle(
         super::super::extract::AuthUser(user),
         State(state),
         Path((file_id, format!("{ordinal}.vtt"))),
+        axum::extract::Query(super::super::stream::SubtitleVttQuery::default()),
     )
     .await?;
     let start_ms = window.start.map_or(0, Ticks::milliseconds);

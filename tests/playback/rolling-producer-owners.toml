@@ -1,3 +1,21 @@
+# Subtitle batch census, base0c4ae0aa5 -> reviewed worker/owner delivery:
+# +2 publication_ready_at_ms fields belong only to cached_owner_delivery's
+# admitted activation fixtures; no new production publication fence is added.
+# +6 namespaced task sites: main's shutdown-bound transcription loop; two
+# awaited no-follow model open/identity spawn_blocking calls; one receiver
+# duplex fixture server that aborts and awaits; and cached_owner_delivery's
+# graceful HTTP server and awaited learner-client drain. Its dedicated
+# stack-sized test thread is joined (+1 method-spawn).
+# +9 timer sites: three shutdown/model/idle worker timers, three bounded
+# Stop fixture observations, one retained-window publication fixture timeout,
+# one remote-owner fixture timeout and the existing request deadline wrapped
+# around cached-caption forwarding. All stay awaited by their current owner.
+# +4 process constructors are the worker decoder/whisper and finite fixture
+# generator/probe; each uses bounded::output_command and its reap ownership.
+# +5 broad launch-shaped method matches are response.status assertions/checks
+# (five in cached_owner_delivery, one in subtitle_playlist, minus one removed
+# chunk_02 assertion). They start no OS child. No pattern/scope relaxation.
+
 # PR #947 inherited census reconciliation (source-only base 079960dae):
 # vod/tests/chunk_03.rs additions in 142d9f4e07 and b38387a133 implement
 # retirement_releases_background_admission_with_publication_locks_held and
@@ -1423,7 +1441,7 @@ pattern = "publication_ready_at_ms"
 # staged link proof can be shown to end at commit. No shipped fence moves.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 137
+expected_occurrences = 139
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1480,7 +1498,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # A05 recovery: 35 -> 38, three new exact ack/typed-recovery fixtures use
 # the existing blocked activation then Confirm. No new shipped sentinel write.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 49
+# +1 subtitle remote-owner fixture starts its activation publication-blocked
+# before Confirm, matching the admitted durable owner; no production writer.
+expected_occurrences = 50
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -2813,7 +2833,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # PR #947 after integrating main 1088d7529: base 902; repair delta +5.
 # One exact-owner cleanup attempt plus four finite, joined or aborted/joined
 # regression tasks retain their original owners.
-expected_occurrences = 908
+# Final subtitle/current-main union: main adds one awaited startup fixture
+# spawn_blocking owner with its own drained runtime; cached_owner_delivery
+# removes its second relay task and reuses StartupObservationHttp's existing
+# owned listener/router. The two task deltas cancel; no new detached owner.
+expected_occurrences = 913
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3020,7 +3044,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # PR #947 after integrating main 1088d7529: base 63; repair delta +1.
 # One release-triggered runtime task retains the exact cleanup registry;
 # it starts no media producer.
-expected_occurrences = 64
+expected_occurrences = 65
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4291,7 +4315,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # PR #947 after integrating main 1088d7529: base 1622; repair delta +12.
 # Three production bounds retain detached inventory/cleanup/reap ownership;
 # nine finite fixture observation bounds/polls add no independent scheduler.
-expected_occurrences = 1636
+# Final subtitle/current-main union: +2 main preparation-storage fixture
+# observations (one finite timeout and one sleep while its retained filesystem
+# owner settles). No production timer or polling authority is introduced.
+expected_occurrences = 1645
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4688,7 +4715,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # PR #947 after integrating main 1088d7529: base 245; repair delta +2.
 # Two finite FFmpeg foreground fixtures run synchronously through the existing
 # fixture collector.
-expected_occurrences = 248
+# Final subtitle/current-main union: +1 main native-DV fixture Command
+# constructs the committed HDR10/P5 control; the synchronous fixture collector
+# owns and reaps it. No production process constructor is added.
+expected_occurrences = 252
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5282,7 +5312,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it remains retained and joined by Drop, not an unowned child launch.
 # PR #947 after integrating main 1088d7529: base 733; repair delta +1.
 # The same release-triggered runtime task above launches no OS child.
-expected_occurrences = 734
+expected_occurrences = 739
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

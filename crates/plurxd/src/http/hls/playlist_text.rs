@@ -348,6 +348,7 @@ fn master_playlist_with_shape(
 #[derive(Debug, Clone, PartialEq)]
 struct SubtitleWindow {
     sequence: u64,
+    discontinuities: u64,
     start_seconds: f64,
     end_seconds: f64,
     duration: f64,
@@ -357,6 +358,7 @@ struct SubtitleWindow {
 struct SubtitleTimeline {
     target_duration: u64,
     media_sequence: u64,
+    discontinuity_sequence: Option<u64>,
     playlist_type: Option<String>,
     endlist: bool,
     segments: Vec<SubtitleWindow>,
@@ -366,6 +368,8 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
     let text = String::from_utf8_lossy(video_playlist);
     let mut target_duration = 1;
     let mut media_sequence = 0;
+    let mut discontinuity_sequence = None;
+    let mut discontinuities = 0;
     let mut playlist_type = None;
     let mut pending_duration = None;
     let mut durations = Vec::new();
@@ -375,6 +379,10 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
             target_duration = value.parse().unwrap_or(1).max(1);
         } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
             media_sequence = value.parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+            discontinuity_sequence = value.parse().ok();
+        } else if line == "#EXT-X-DISCONTINUITY" {
+            discontinuities += 1;
         } else if let Some(value) = line.strip_prefix("#EXT-X-PLAYLIST-TYPE:") {
             playlist_type = Some(value.to_owned());
         } else if let Some(value) = line.strip_prefix("#EXTINF:") {
@@ -387,7 +395,8 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
             endlist = true;
         } else if !line.is_empty() && !line.starts_with('#') {
             if let Some(duration) = pending_duration.take().filter(|value| *value > 0.0) {
-                durations.push(duration);
+                durations.push((duration, discontinuities));
+                discontinuities = 0;
             }
         }
     }
@@ -396,10 +405,11 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
     let segments = durations
         .into_iter()
         .enumerate()
-        .map(|(ordinal, duration)| {
+        .map(|(ordinal, (duration, discontinuities))| {
             let end_seconds = start_seconds + duration;
             let window = SubtitleWindow {
                 sequence: media_sequence + ordinal as u64,
+                discontinuities,
                 start_seconds,
                 end_seconds,
                 duration,
@@ -411,6 +421,7 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
     SubtitleTimeline {
         target_duration,
         media_sequence,
+        discontinuity_sequence,
         playlist_type,
         endlist,
         segments,
@@ -423,10 +434,18 @@ pub(super) fn subtitle_media_playlist(video_playlist: &[u8]) -> String {
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n",
         timeline.target_duration, timeline.media_sequence
     );
+    if let Some(sequence) = timeline.discontinuity_sequence {
+        out.push_str(&format!("#EXT-X-DISCONTINUITY-SEQUENCE:{sequence}\n"));
+    }
     if let Some(kind) = &timeline.playlist_type {
         out.push_str(&format!("#EXT-X-PLAYLIST-TYPE:{kind}\n"));
     }
     for window in &timeline.segments {
+        // Renditions synchronize by discontinuity epoch as well as time. A
+        // takeover or pruned boundary must remain identical to the video.
+        for _ in 0..window.discontinuities {
+            out.push_str("#EXT-X-DISCONTINUITY\n");
+        }
         out.push_str(&format!(
             "#EXTINF:{:.6},\nseg{:05}.vtt\n",
             window.duration, window.sequence

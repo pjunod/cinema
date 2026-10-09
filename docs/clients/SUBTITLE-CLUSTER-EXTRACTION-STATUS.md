@@ -1,5 +1,7 @@
 # Subtitle cluster extraction — implementation status
 
+> Current work and corrected delivery status: [subtitle completion ledger](SUBTITLE-RELIABILITY-COMPLETION.md). This page retains its historical scope and evidence.
+
 **Status:** built — M0–M5 implementation complete; PR #507 records merge qualification; fleet and device evidence pending · **Updated:** 2026-09-25 · **Board:** K-09 · **Branch:** `plan/K-09` · **PR:** [#507](http://forge.lan:3000/noirr/plurx/pulls/507) · **Base:** `44cdfccc7`
 
 The [v2 plan](SUBTITLE-CLUSTER-EXTRACTION-PLAN.md) is the contract. Its

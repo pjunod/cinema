@@ -241,6 +241,7 @@ final class PlaybackControlSession {
         observe: @escaping () -> PlayerControlObservation?,
         linkReceipt: @escaping @MainActor @Sendable () -> String? = { nil },
         onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {},
+        onSubtitleUnavailable: @escaping @MainActor @Sendable () -> Void = {},
         // The prepared-handoff return path. A `prepare` reaches the player
         // already proven whole — the reporter refuses a malformed one as a
         // protocol violation before this is called — so the player never has
@@ -272,6 +273,7 @@ final class PlaybackControlSession {
         answers.begin(generation: generation)
         let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         let subtitleReadiness = SubtitleReadinessRetryState()
+        let subtitleUnavailable = SubtitleUnavailableNoticeState()
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -320,8 +322,23 @@ final class PlaybackControlSession {
                         onExchangeFailure(failure)
                     }
                 }
+                if exchange.capture.hasSameIntent(as: latest.load()), subtitleUnavailable.record(
+                    exchange.response?.delivery?.subtitleReadiness, commitUnavailable: false,
+                    intent: exchange.capture.intentGeneration
+                ) {
+                    scheduleSubtitleReady { [weak self] in
+                        guard self?.activeGeneration == generation,
+                              exchange.capture.hasSameIntent(as: latest.load()),
+                              subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness,
+                                                         intent: exchange.capture.intentGeneration)
+                        else { return }
+                        onSubtitleUnavailable()
+                    }
+                }
                 if exchange.capture.hasSameIntent(as: latest.load()), subtitleReadiness.record(
-                    exchange.response?.delivery?.subtitleReadiness, commitReady: false
+                    exchange.response?.delivery?.subtitleReadiness, commitReady: false,
+                    intent: exchange.capture.intentGeneration,
+                    revision: exchange.response?.delivery?.subtitleRevision
                 ) {
                     scheduleSubtitleReady { [weak self] in
                         // A ready edge can wait for MainActor while a new
@@ -329,7 +346,9 @@ final class PlaybackControlSession {
                         // callback executes, not when it was enqueued.
                         guard self?.activeGeneration == generation,
                               exchange.capture.hasSameIntent(as: latest.load()),
-                              subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
+                              subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness,
+                                                       intent: exchange.capture.intentGeneration,
+                                                       revision: exchange.response?.delivery?.subtitleRevision)
                         else { return }
                         onSubtitleReady()
                     }
