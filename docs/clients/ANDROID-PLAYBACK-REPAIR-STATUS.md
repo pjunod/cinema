@@ -242,3 +242,24 @@ generation and unrendered-output boundaries. Per the user's current workflow,
 unit suites are not repeated during implementation; current-source compilation
 and the post-review fast lane supply final pre-merge evidence. Installation
 and physical stutter acceptance remain separate from source qualification.
+
+### Single implementation review and correction
+
+The final combined native candidate received one adversarial agent review.
+It found one P2: the server sends a header-only `Retry-After: 1`, but both
+native local control transports read delays only from JSON `retry_after_ms`.
+That discarded the real pacing instruction and used the 500 ms reporter
+fallback. The transport adapters now read bounded delta-seconds headers into
+the existing error field, retain body-only compatibility and use the longer
+valid delay when both signals exist. Malformed, overflowing and over-budget
+headers cannot change the existing retry budget or terminal classification.
+
+After the review correction, only new/changed cases ran: three Android
+transport cases and six Apple transport/reporter cases passed. Header-only
+503 response objects, case-insensitive header lookup, body compatibility,
+invalid/over-budget values, exact reporter replay and definitive terminal
+refusals are covered. Earlier passing suites were not replayed. Android
+compilation, the iOS reporter test build and tvOS compilation passed on the
+corrected implementation. The isolated simulator used for those cases was
+removed after the successful run. The review found no other actionable issue
+and confirmed that the repairs use the existing arrival/retry owners.
