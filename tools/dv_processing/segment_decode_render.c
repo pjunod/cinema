@@ -363,10 +363,13 @@ static void render_pairs(void) {
     snprintf(duration, sizeof(duration), "%lld/%d",
              (long long)(bl->duration * source_time_base.num),
              source_time_base.den);
-    hash_bytes((uint8_t *)native[0], (size_t)bl->width * bl->height * 3,
-               bl_hash);
-    hash_bytes((uint8_t *)native[1], (size_t)el->width * el->height * 3,
-               el_hash);
+    bool diagnostic_hashes = debug_frames || dv_frame_hashes();
+    if (diagnostic_hashes) {
+      hash_bytes((uint8_t *)native[0], (size_t)bl->width * bl->height * 3,
+                 bl_hash);
+      hash_bytes((uint8_t *)native[1], (size_t)el->width * el->height * 3,
+                 el_hash);
+    }
     hash_bytes(nalu, raw->size + 2, rpu_hash);
     if (window_mode) {
       struct coded_input *input = NULL;
@@ -380,11 +383,12 @@ static void render_pairs(void) {
     }
 
     printf("{\"kind\":\"accepted_source_pair\",\"frame\":%d,\"pts\":\"%s\","
-           "\"duration\":\"%s\",\"bl_sha256\":\"%s\",\"el_sha256\":\"%s\","
-           "\"rpu_sha256\":\"%s\",\"bl_width\":%d,\"bl_height\":%d,\"el_"
+           "\"duration\":\"%s\"", emitted, pts, duration);
+    if (diagnostic_hashes)
+      printf(",\"bl_sha256\":\"%s\",\"el_sha256\":\"%s\"", bl_hash, el_hash);
+    printf(",\"rpu_sha256\":\"%s\",\"bl_width\":%d,\"bl_height\":%d,\"el_"
            "width\":%d,\"el_height\":%d}\n",
-           emitted, pts, duration, bl_hash, el_hash, rpu_hash, bl->width,
-           bl->height, el->width, el->height);
+           rpu_hash, bl->width, bl->height, el->width, el->height);
     output_pts = bl->pts;
     output_duration = bl->duration;
     gpu_render(native, nalu, raw->size + 2, emitted, pts, duration,

@@ -96,8 +96,10 @@ budget. The daemon still owns deadlines, resource admission and cancellation.
 
 The input access-unit trace is captured before both decoders. Each emitted
 picture must match exactly one coded picture and its fresh RPU. The helper
-exports original timestamps, coded and decoded hashes, and the exact RGB payload
-hash. A later paired PTS at or beyond `END` proves the requested boundary.
+exports original timestamps and coded access-unit/RPU hashes. Full decoded
+BL/EL and RGB hashes are optional diagnostics: set `PLURX_DV_FRAME_HASHES=1`
+(or the existing 64×64 debug mode) to emit them. They do not provide an
+independent post-encode playback check, so production skips their pixel scans. A later paired PTS at or beyond `END` proves the requested boundary.
 Natural EOF requires the final observed picture to reach `END` and agree in both
 directions with the declared video extent within one source tick. Unknown or
 inconsistent extent refuses. These observations establish source membership;
@@ -225,3 +227,9 @@ sets. Retagging these samples as `hvc1` would misdescribe them. Device acceptanc
 and final HLS publication remain integration checks; this helper alone does not
 prove them. The focused replay includes the actual author's output-clock guard
 with endpoint, nonunit input clock and timestamp-spacing boundaries.
+
+The `gpu_runtime` trace records the selected Vulkan device and driver UUIDs,
+API/driver versions, vendor/device IDs and device type from the actual physical
+device. The worker binds this observation separately from helper/library hashes;
+a configured GPU name or an available driver is insufficient. Diagnostic digest
+mode must preserve every output byte and all required source/timing observations.
