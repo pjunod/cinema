@@ -60,6 +60,11 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
         include_str!("hiqlite_fragment_index_cluster.rs"),
     ),
     ("hiqlite_import.rs", include_str!("hiqlite_import.rs")),
+    ("hiqlite_remote.rs", include_str!("hiqlite_remote.rs")),
+    (
+        "hiqlite_invitations.rs",
+        include_str!("hiqlite_invitations.rs"),
+    ),
     (
         "hiqlite_jellyfin_play.rs",
         include_str!("hiqlite_jellyfin_play.rs"),
@@ -128,6 +133,8 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
         include_str!("sqlite/fragment_index_cluster.rs"),
     ),
     ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
+    ("remote.rs", include_str!("sqlite/remote.rs")),
+    ("invitations.rs", include_str!("sqlite/invitations.rs")),
     (
         "jellyfin_identity.rs",
         include_str!("sqlite/jellyfin_identity.rs"),

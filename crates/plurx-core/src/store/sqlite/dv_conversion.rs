@@ -1493,7 +1493,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 61] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 66] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1607,6 +1607,13 @@ mod tests {
             // Both fixtures remove later sharing tables before the Jellyfin downgrade.
             "CREATE TABLE sharing_identity",
             "CREATE TABLE sharing_ingress_custody",
+            // v106-v110: both historical fixtures remove the Cinema adjunct
+            // through the shared helper, including later columns and triggers.
+            "CREATE TABLE remote_schema",
+            "CREATE TABLE invitation_phones",
+            "ADD COLUMN last_revision",
+            "CREATE TRIGGER invitation_phone_rebind",
+            "CREATE TRIGGER invitation_cleanup_guard",
         ];
 
         assert!(

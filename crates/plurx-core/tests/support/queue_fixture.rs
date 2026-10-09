@@ -540,6 +540,7 @@ impl<T: Store + ?Sized> QueueFixture for T {}
 pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connection) {
     // Every caller rewinds below v98, so remove the later v104–v105 sharing
     // tables too. Leaving them behind impersonates an ambiguous private lineage.
+    remove_cinema_schema(connection);
     remove_sharing_schema(connection);
     connection
         .execute_batch(
@@ -617,4 +618,27 @@ pub(crate) fn remove_sharing_schema(connection: &rusqlite::Connection) {
             .execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
             .expect("remove sharing fixture schema");
     }
+}
+
+/// Remove additive Cinema v106-v110 before replaying a historical fixture.
+/// Both v43 guard and v14 import fixtures reach this through the Jellyfin helper.
+#[allow(dead_code)]
+pub(crate) fn remove_cinema_schema(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS invitation_cleanup_guard;
+         DROP TRIGGER IF EXISTS invitation_consent_cleanup;
+         DROP TRIGGER IF EXISTS invitation_phone_rebind;
+         DROP TABLE IF EXISTS invitation_events;
+         DROP TABLE IF EXISTS invitation_cooldowns;
+         DROP TABLE IF EXISTS invitation_consents;
+         DROP TABLE IF EXISTS invitation_broker_revocations;
+         DROP TABLE IF EXISTS invitation_phones;
+         DROP TABLE IF EXISTS invitation_schema;
+         DROP TABLE IF EXISTS remote_grants;
+         DROP TABLE IF EXISTS remote_receivers;
+         DROP TABLE IF EXISTS remote_claim_budget;
+         DROP TABLE IF EXISTS remote_schema;",
+        )
+        .expect("remove v106-v110 Cinema fixture schema");
 }

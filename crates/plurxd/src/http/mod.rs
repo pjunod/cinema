@@ -52,6 +52,7 @@ mod plex;
 pub(crate) mod plex_census;
 pub(crate) mod publication;
 mod reading;
+pub(crate) mod remote;
 mod scan;
 pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
@@ -2214,6 +2215,7 @@ pub fn router(state: AppState) -> Router {
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
         .without_v07_checks()
         .nest("/api/v1", api)
+        .merge(remote::router())
         .merge(jellyfin_json)
         .merge(plex_routes)
         .merge(public_short)
@@ -2394,6 +2396,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
+    if remote::eligible(method, path) {
+        return true;
+    }
     if method == Method::GET
         && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
             || path.starts_with("/assets/")
@@ -5166,7 +5171,13 @@ mod tests {
                 .find(|item| item["id"] == "macos_video_processing")
                 .expect("Mac processing regression fixture or settings lookup");
             assert_eq!(item["enabled"], enabled);
-            assert_eq!(item["requirements"][2]["status"], "unobservable");
+            let qualification = item["requirements"]
+                .as_array()
+                .expect("readiness requirements")
+                .iter()
+                .find(|requirement| requirement["id"] == "delivery_qualification")
+                .expect("delivery qualification requirement");
+            assert_eq!(qualification["status"], "unobservable");
         }
         // Reload durable choice independently of observation state.
         state.transcode.set_macos_video_processing_enabled(false);
@@ -10727,7 +10738,10 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "cinema_remote_control",
+                "cinema_remote_invitations",
                 "macos_video_processing",
+                "macos_hevc_output",
                 "cinema_sharing",
                 // Jellyfin compatibility: one advisory row (pinned-client
                 // qualification) that never gates the switch.
@@ -10833,10 +10847,39 @@ mod tests {
                         | "free_space"
                         | "chapter_thumbs_cache_space"
                         | "output_node_idle"
+                        | "output_storage_ownership"
                         | "retention_same_filesystem"
                 )
             })
             .collect::<Vec<_>>();
+        // Startup inventory may settle between the two readiness requests.
+        // Its status must report the same snapshot as its evidence; this
+        // empty fixture owns no preparation media or pending cleanup.
+        let ownership = items
+            .iter()
+            .find(|item| item["id"] == "output_preparation")
+            .expect("output preparation card")["requirements"]
+            .as_array()
+            .expect("output preparation requirements")
+            .iter()
+            .find(|row| row["id"] == "output_storage_ownership")
+            .expect("private storage ownership row");
+        let evidence = ownership["evidence"].as_str().expect("storage evidence");
+        let inventory_complete = evidence.contains("Startup inventory complete: true.");
+        assert_eq!(
+            ownership["status"],
+            if inventory_complete {
+                "met"
+            } else {
+                "unavailable"
+            },
+            "inventory status and evidence must describe the same snapshot"
+        );
+        assert_eq!(
+            evidence,
+            format!("Private media: 0 bytes. Pending cleanup: 0 owners, 0 bytes, oldest 0 seconds, failure none. Cold/unknown cache: 0 bytes. Startup inventory complete: {inventory_complete}. Completion keeps storage capacity until cleanup settles."),
+            "the empty fixture must report its actual owned storage"
+        );
         // The free-space row reads this host's disk, so it is either.
         for id in ["stored_source_self_test", "stored_source_free_space"] {
             assert!(

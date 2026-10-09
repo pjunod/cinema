@@ -323,6 +323,7 @@ struct EpisodeCard: View {
     let item: Item
     var width: CGFloat = shelfLandscapeWidth
     var isStarting = false
+    var remoteShelf: String? = nil
     let onPlay: () -> Void
 
     var body: some View {
@@ -336,6 +337,7 @@ struct EpisodeCard: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(episodeCardPlayAccessibilityLabel(item))
         .accessibilityValue(tvEpisodeCardAccessibilityValue(item, isStarting: isStarting))
+        .modifier(RemoteEpisodePlayModifier(shelf: remoteShelf, item: item, onPlay: onPlay))
         #else
         VStack(alignment: .leading, spacing: 8) {
             Button {
@@ -542,7 +544,9 @@ private struct MediaShelf<Content: View>: View {
 
 struct MediaRow: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     let title: String
+    var remoteShelf: String? = nil
     let items: [Item]
     var style: MediaRowStyle = .poster
     var collection: LibraryCollection?
@@ -574,10 +578,12 @@ struct MediaRow: View {
                         }
                         .shelfActionButtonStyle()
                         .accessibilityIdentifier("library-open-\(destination.id)")
+                        .remoteControl("collection:" + destination.id, label: destination.title) { remoteNavigation.navigate(to: .collection(destination)) }
                     }
                 }
                 .padding(.horizontal, screenHPad)
 
+                ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     MediaShelf(spacing: shelfSpacing, itemCount: items.count) {
                         ForEach(items) { item in
@@ -589,7 +595,9 @@ struct MediaRow: View {
                                         width: model.posterSize.posterWidth
                                     )
                                 }
+                                .id(item.id)
                                 .posterButtonStyle()
+                                .modifier(RemoteShelfItemModifier(shelf: remoteShelf, item: item))
                             case .landscape:
                                 NavigationLink(value: Route.item(item.id)) {
                                     LandscapeCard(
@@ -599,7 +607,9 @@ struct MediaRow: View {
                                         copyStyle: landscapeCopyStyle
                                     )
                                 }
+                                .id(item.id)
                                 .posterButtonStyle()
+                                .modifier(RemoteShelfItemModifier(shelf: remoteShelf, item: item))
                             case .episode:
                                 EpisodeCard(
                                     item: item,
@@ -608,13 +618,20 @@ struct MediaRow: View {
                                         startingEpisodeID: startingEpisodeID,
                                         itemID: item.id
                                     ),
+                                    remoteShelf: remoteShelf,
                                     onPlay: { onPlayEpisode?(item) }
-                                )
+                                ).id(item.id)
                             }
                         }
                     }
                     .padding(.horizontal, screenHPad)
 
+                }
+                .onChange(of: remoteNavigation.requestedFocus) { _, key in
+                    guard let shelf = remoteShelf, let key, key.hasPrefix(shelf + ":item:"),
+                          let id = Int(key.dropFirst((shelf + ":item:").count)) else { return }
+                    proxy.scrollTo(id, anchor: .center)
+                }
                 }
             }
             .padding(.vertical, 10)
@@ -702,6 +719,7 @@ func episodeCardMeta(_ item: Item) -> String {
 
 struct ComingSoonRow: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     let entries: [ComingSoonEntry]
 
     var body: some View {
@@ -715,6 +733,7 @@ struct ComingSoonRow: View {
                     #endif
                     .foregroundColor(Palette.onBg)
                     .padding(.horizontal, screenHPad)
+                ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     MediaShelf(spacing: comingSoonSpacing, itemCount: entries.count) {
                         ForEach(entries) { entry in
@@ -723,6 +742,8 @@ struct ComingSoonRow: View {
                                     ComingSoonCard(entry: entry, width: model.posterSize.posterWidth)
                                 }
                                 .posterButtonStyle()
+                                .id(entry.id)
+                                .remoteControl("shelf:3:comingsoon:" + entry.id, label: entry.title) { navigation.navigate(to: .item(itemId)) }
                             } else {
                                 ComingSoonCard(entry: entry, width: model.posterSize.posterWidth)
                             }
@@ -730,6 +751,14 @@ struct ComingSoonRow: View {
                     }
                     .padding(.horizontal, screenHPad)
 
+                }
+                .onChange(of: navigation.requestedFocus) { _, key in
+                    let prefix = "shelf:3:comingsoon:"
+                    guard navigation.activeScope == "home", let key, key.hasPrefix(prefix) else { return }
+                    let id = String(key.dropFirst(prefix.count))
+                    guard entries.contains(where: { $0.id == id && $0.itemId != nil }) else { return }
+                    proxy.scrollTo(id, anchor: .center)
+                }
                 }
             }
             .padding(.vertical, 10)
@@ -885,4 +914,26 @@ private func shortDate(_ raw: String) -> String {
     let formatter = DateFormatter()
     formatter.setLocalizedDateFormatFromTemplate("MMM d")
     return formatter.string(from: date)
+}
+
+private struct RemoteShelfItemModifier: ViewModifier {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    let shelf: String?
+    let item: Item
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let shelf {
+            content.remoteControl(shelf + ":item:\(item.id)", label: item.title) { navigation.navigate(to: .item(item.id)) }
+        } else { content }
+    }
+}
+
+private struct RemoteEpisodePlayModifier: ViewModifier {
+    let shelf: String?
+    let item: Item
+    let onPlay: () -> Void
+    @ViewBuilder func body(content: Content) -> some View {
+        if let shelf { content.remoteControl(shelf + ":item:\(item.id)", label: episodeCardPlayAccessibilityLabel(item), activate: onPlay) }
+        else { content }
+    }
 }

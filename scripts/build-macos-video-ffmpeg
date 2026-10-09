@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import xml.etree.ElementTree as ET
 
 
 TAG = "v8.1.3-1"
@@ -101,6 +102,159 @@ def source_provenance(archive, destination):
     return files
 
 
+def local_svn_source_files(path, config):
+    """Read the already-built working-copy inventory without a remote SVN query."""
+    document = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
+        str(config), "status", "--verbose", "--xml", str(path)], text=True, timeout=30)
+    root = path.resolve()
+    files = []
+    for entry in ET.fromstring(document).iter("entry"):
+        state = entry.find("wc-status")
+        if state is None or state.get("item") in {"unversioned", "ignored", "external", "missing", "deleted"}:
+            continue
+        item = Path(entry.attrib["path"]).resolve()
+        if not item.is_relative_to(root):
+            raise ValueError("SVN source inventory escapes its working copy")
+        if item.is_file() and not item.is_symlink():
+            files.append((item, str(item.relative_to(root))))
+    if not files:
+        raise ValueError("SVN source inventory contains no tracked files")
+    return sorted(files)
+
+
+def verify_bwdif_metal_binding(source):
+    """Match separate Metal buffer namespaces in the exact compiled source."""
+    host = (source / "libavfilter/vf_bwdif_videotoolbox.m").read_text()
+    shader = (source / "libavfilter/metal/vf_bwdif_videotoolbox.metal").read_text()
+    host_indices = re.findall(r"setBuffer:s->mtlParamsBuffer\s+offset:0\s+atIndex:(\d+)", host)
+    shader_indices = re.findall(r"constant\s+params\s*&\s*p\s*\[\[buffer\((\d+)\)\]\]", shader)
+    if len(host_indices) != 1 or len(shader_indices) != 1 or host_indices != shader_indices:
+        raise ValueError("native BWDIF Metal parameter buffer binding disagrees with shader")
+    return int(host_indices[0])
+
+
+def retain_compiled_source(prepared, evidence):
+    """Retain exact local patch inputs and every built dependency's source."""
+    verify_bwdif_metal_binding(prepared / "source")
+    manifest = json.loads((prepared / "prepared-source.json").read_text())
+    if manifest.get("source_commit") != COMMIT or manifest.get("source_sha256") != SOURCE_SHA256:
+        raise ValueError("prepared build does not match pinned Jellyfin source")
+    local = sorted(Path(__file__).with_name("macos-video-ffmpeg-patches").glob("*.patch"))
+    expected = {p.name: digest(p) for p in local}
+    if not expected or manifest.get("local_patches") != expected:
+        raise ValueError("prepared build's local patch set does not match this recipe")
+    retained = {}
+    for patch in local:
+        actual = prepared / "local-patches" / patch.name
+        if actual.is_symlink() or digest(actual) != expected[patch.name]:
+            raise ValueError("prepared build patch input changed")
+        destination = evidence / "local-patches" / patch.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(actual, destination)
+        retained[patch.name] = expected[patch.name]
+    # The prepared tree carries all source and dependency recipes; retain the
+    # small private build changes as well, so this is a reproducible source offer.
+    recipes = evidence / "compiled-build-recipes"
+    recipes.mkdir()
+    for relative in ["prepared-source.json", "build.sh", "source/builder/buildmac.sh",
+                     "source/builder/images/macos/00-dep.sh", "source/builder/scripts.d/50-x265.sh"]:
+        source = prepared / relative
+        target = recipes / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    offers = evidence / "dependency-source"
+    offers.mkdir()
+    facts = {}
+    dependencies = prepared / "source/builder/build"
+    for path in sorted(dependencies.iterdir()):
+        if path.is_file() and path.name.endswith((".tar.gz", ".tar.xz", ".zip")):
+            target = offers / path.name
+            shutil.copyfile(path, target)
+            facts[path.name] = {"sha256": digest(target), "kind": "upstream-source-archive"}
+        elif path.is_dir() and (path / ".git").exists():
+            # Public dependency clones only; archive source, never repository
+            # configuration, credential helpers or build products.
+            commit = subprocess.check_output(["/usr/bin/git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+            target = offers / (path.name + "-" + commit + ".tar.gz")
+            subprocess.run(["/usr/bin/git", "-C", str(path), "archive", "--format=tar.gz",
+                            "--output", str(target), commit], check=True, timeout=60)
+            facts[path.name] = {"sha256": digest(target), "commit": commit, "kind": "git-source-archive"}
+            # Submodules are separate source trees and must not disappear from
+            # the source offer merely because git archive omits their contents.
+            for nested in sorted(path.rglob(".git")):
+                if nested == path / ".git":
+                    continue
+                directory = nested.parent
+                nested_commit = subprocess.check_output(["/usr/bin/git", "-C", str(directory), "rev-parse", "HEAD"], text=True).strip()
+                name = str(directory.relative_to(dependencies)).replace("/", "--")
+                target = offers / (name + "-" + nested_commit + ".tar.gz")
+                subprocess.run(["/usr/bin/git", "-C", str(directory), "archive", "--format=tar.gz",
+                                "--output", str(target), nested_commit], check=True, timeout=60)
+                facts[name] = {"sha256": digest(target), "commit": nested_commit, "kind": "git-submodule-source-archive"}
+        elif path.is_dir() and (path / ".svn").exists():
+            target = offers / (path.name + "-svn-source.tar.gz")
+            with tarfile.open(target, "w:gz") as archive:
+                # LAME source has already been configured; retain original SVN
+                # content with exact revision, not generated native objects.
+                for item, name in local_svn_source_files(path, prepared / "svn-config"):
+                    archive.add(item, arcname=name)
+            info = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
+                str(prepared / "svn-config"), "info", "--show-item", "revision", str(path)], text=True).strip()
+            facts[path.name] = {"sha256": digest(target), "revision": info, "kind": "svn-source-archive"}
+    if not facts:
+        raise ValueError("compiled package lacks retained dependency sources")
+    (offers / "manifest.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
+    return {"local_patches": retained, "dependency_sources": facts,
+            "contract": manifest["contract"]}
+
+
+def verify_strict_options(executable, evidence):
+    for name in ["tonemapx", "tonemap_videotoolbox"]:
+        help_text = run([str(executable), "-hide_banner", "-h", f"filter={name}"])
+        if not re.search(r"^\s+require_dovi\s+<", help_text, re.MULTILINE):
+            raise ValueError("compiled package lacks required renderer boundary enforcement")
+    decoder_help = run([str(executable), "-hide_banner", "-h", "decoder=hevc"])
+    full_help = (evidence / "full-help.txt").read_text()
+    if not re.search(r"^\s+-strict_dovi\s+<", decoder_help, re.MULTILINE) or "require_hardware" not in full_help:
+        raise ValueError("compiled package lacks associated Dolby state/hardware decoder enforcement")
+    (evidence / "decoder-hevc.txt").write_text(decoder_help)
+
+
+def attach_source_parser(package, stage, evidence):
+    """Copy only the explicit exact-source parser and inspectable provenance."""
+    manifest_path = package / "provenance/manifest.json"
+    artifact = package / "bin/plurx-source-parser.wasm"
+    if not package.is_absolute() or artifact.is_symlink() or manifest_path.is_symlink():
+        raise ValueError("source parser package must use explicit regular artifacts")
+    manifest = json.loads(manifest_path.read_text())
+    if (manifest.get("source_sha256") != SOURCE_SHA256 or manifest.get("source_commit") != COMMIT
+            or manifest.get("parser_abi") != "plurx-source-wasi-p1-v1-wasmtime-49.0.2"):
+        raise ValueError("source parser package source/ABI does not match pinned Jellyfin")
+    actual = digest(artifact)
+    if (actual != manifest.get("module_sha256") or artifact.stat().st_size != manifest.get("module_bytes")
+            or artifact.read_bytes()[:8] != b"\0asm\1\0\0\0"):
+        raise ValueError("source parser artifact does not match its manifest")
+    retained = {}
+    source = package / "provenance"
+    if source.is_symlink():
+        raise ValueError("source parser provenance must not be a symlink")
+    for item in sorted(source.rglob("*")):
+        if item.is_symlink() or (not item.is_dir() and not item.is_file()):
+            raise ValueError("source parser provenance contains an unsafe member")
+        if item.is_file():
+            relative = item.relative_to(source)
+            if ".git" in relative.parts:
+                raise ValueError("source parser provenance must not carry a Git checkout")
+            target = evidence / "source-parser" / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(item, target)
+            retained[str(relative)] = digest(target)
+    shutil.copyfile(artifact, stage / "plurx-source-parser.wasm")
+    return {"sha256": actual, "bytes": artifact.stat().st_size,
+            "parser_abi": manifest["parser_abi"], "provenance_sha256": retained,
+            "qualification": "package-integrity-only"}
+
+
 def inventory(binary, evidence):
     facts = {}
     for kind, names in REQUIRED.items():
@@ -136,6 +290,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="new private package directory")
     parser.add_argument("--archive", type=Path, help="checksum-verified local official binary archive")
     parser.add_argument("--source-archive", type=Path, help="checksum-verified local pinned source archive")
+    parser.add_argument("--prepared-build", type=Path,
+                        help="completed private source build from prepare-macos-video-ffmpeg")
+    parser.add_argument("--source-parser-package", type=Path,
+                        help="explicit pinned parser package; companion is copied beside ffprobe")
     args = parser.parse_args()
     if platform.system() != "Darwin" or platform.machine() not in ARCHIVES:
         parser.error("native arm64 or x86_64 macOS is required")
@@ -157,18 +315,31 @@ def main():
         evidence.mkdir()
         archive = evidence / name
         source = evidence / "jellyfin-ffmpeg-source.tar.gz"
-        acquire(args.archive, url, expected, archive)
-        acquire(args.source_archive, SOURCE_URL, SOURCE_SHA256, source)
-        with tarfile.open(archive) as package:
-            members = package.getmembers()
-            if {member.name for member in members} != {"ffmpeg", "ffprobe"} or len(members) != 2:
-                raise ValueError("unexpected official package members")
-            for member in members:
-                if not member.isfile():
-                    raise ValueError("official executables must be regular files")
-                executable = stage / member.name
-                executable.write_bytes(package.extractfile(member).read())
-                executable.chmod(0o755)
+        if args.prepared_build:
+            prepared = args.prepared_build
+            if not prepared.is_absolute() or prepared.is_relative_to(repo):
+                raise ValueError("prepared build must be an explicit private task directory")
+            acquire(args.source_archive or prepared / "jellyfin-ffmpeg-source.tar.gz",
+                    SOURCE_URL, SOURCE_SHA256, source)
+            for name in ["ffmpeg", "ffprobe"]:
+                binary = prepared / "source/builder" / name
+                if binary.is_symlink() or not binary.is_file():
+                    raise ValueError("prepared build has no completed regular executables")
+                shutil.copyfile(binary, stage / name)
+                (stage / name).chmod(0o755)
+        else:
+            acquire(args.archive, url, expected, archive)
+            acquire(args.source_archive, SOURCE_URL, SOURCE_SHA256, source)
+            with tarfile.open(archive) as package:
+                members = package.getmembers()
+                if {member.name for member in members} != {"ffmpeg", "ffprobe"} or len(members) != 2:
+                    raise ValueError("unexpected official package members")
+                for member in members:
+                    if not member.isfile():
+                        raise ValueError("official executables must be regular files")
+                    executable = stage / member.name
+                    executable.write_bytes(package.extractfile(member).read())
+                    executable.chmod(0o755)
         files = source_provenance(source, evidence / "source")
         binaries = {}
         for name in ["ffmpeg", "ffprobe"]:
@@ -192,7 +363,7 @@ def main():
                               "linked_libraries": dependencies}
         facts = inventory(stage / "ffmpeg", evidence)
         receipt = {
-            "schema_version": 1, "mode": "official-portable-package", "source_tag": TAG,
+            "schema_version": 1, "mode": "compiled-pinned-jellyfin" if args.prepared_build else "official-portable-package", "source_tag": TAG,
             "source_commit": COMMIT, "source_url": SOURCE_URL, "source_sha256": SOURCE_SHA256,
             "binary_archive_url": url, "binary_archive_sha256": expected,
             "release_metadata_url": f"https://api.github.com/repos/jellyfin/jellyfin-ffmpeg/releases/tags/{TAG}",
@@ -206,6 +377,17 @@ def main():
                             "AC-4 and Dolby sample acceptance remain required", "No global install performed",
                             "Private candidate: redistribution dependency-source/license closure remains required"],
         }
+        if args.prepared_build:
+            receipt["compiled_source"] = retain_compiled_source(args.prepared_build, evidence)
+            receipt.pop("binary_archive_url")
+            receipt.pop("binary_archive_sha256")
+            receipt["checksum_authority"] = "pinned source and local compiled binary digests"
+            verify_strict_options(stage / "ffmpeg", evidence)
+            receipt["patch_digest"] = hashlib.sha256(json.dumps({
+                "jellyfin": receipt["patch_digest"], "local": receipt["compiled_source"]["local_patches"]
+            }, sort_keys=True).encode()).hexdigest()
+        if args.source_parser_package:
+            receipt["source_parser"] = attach_source_parser(args.source_parser_package, stage, evidence)
         (evidence / "manifest.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
         # Publish only after verification. Never overwrite an existing package.
         if output.exists():

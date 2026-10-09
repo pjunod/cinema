@@ -105,6 +105,7 @@ operations! {
     ObserveCandidateLink => "observe_candidate_link",
     ObserveMeasuredLinkPrior => "observe_measured_link_prior",
     ReclaimReceiverIngress => "reclaim_receiver_ingress",
+    RevokeUnpublishedRemoteGrant => "revoke_unpublished_remote_grant",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];
@@ -424,8 +425,8 @@ mod tests {
     fn every_classified_failure_has_a_bounded_metric_row() {
         // 46 on main #793, plus the quality cancellation settlement, the
         // Jellyfin unbound media-link revocation, and the acknowledged Link
-        // negative's measured-Link prior fold (D6).
-        assert_eq!(Operation::ALL.len(), 50, "one fixed label per audited site");
+        // negative's measured-Link prior fold (D6), and orphan grant revocation.
+        assert_eq!(Operation::ALL.len(), 51, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {
@@ -455,6 +456,21 @@ mod tests {
             .expect("metric row")
             .parse()
             .expect("metric value")
+    }
+
+    #[test]
+    fn unpublished_remote_grant_revocation_failure_is_lost_work() {
+        let operation = Operation::RevokeUnpublishedRemoteGrant;
+        let before = metric_value(operation, Discard::LostWork, "error");
+        observe(
+            operation,
+            Discard::LostWork,
+            Err::<(), _>("revocation Store failure"),
+        );
+        assert_eq!(
+            metric_value(operation, Discard::LostWork, "error"),
+            before + 1
+        );
     }
 
     #[tokio::test]

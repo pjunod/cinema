@@ -446,6 +446,11 @@ impl VodServe {
         // discovers the next one. Plan deletion precedes directory deletion,
         // so a crash cannot erase the only durable key needed to collect the
         // node-local database row.
+        self.shared
+            .preparation_storage
+            .reconcile(&self.shared)
+            .await;
+        self.shared.preparation_storage.maintain(&self.shared).await;
         self.shared.reconcile_obsolete_encoded_generations().await;
         self.shared
             .retained_artifacts

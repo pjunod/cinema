@@ -761,7 +761,7 @@ final class LiveTvTests: XCTestCase {
     /// `devGraduation` line — and the Live TV enable is one of them.
     func testEveryDeveloperCardThatStaysSaysWhatItWaitsOn() throws {
         let developer = try Self.appleSource("LiveTvDeveloperView.swift")
-        XCTAssertEqual(LiveTvSettingsPlacement.developer.count, 3)
+        XCTAssertEqual(LiveTvSettingsPlacement.developer.count, 5)
         for title in LiveTvSettingsPlacement.developer {
             XCTAssertTrue(developer.contains("Section(\"\(title)\")"), title)
         }
@@ -773,6 +773,12 @@ final class LiveTvTests: XCTestCase {
                      LiveTvSettingsPlacement.preparedHandoffGraduation] {
             XCTAssertTrue(line.hasPrefix("Leaves Developer when: "))
             XCTAssertTrue(line.contains(" Then: "))
+        }
+        for title in ["Cinema remotes · advisory enablement", "Screen invitations · advisory readiness"] {
+            let card = try XCTUnwrap(developer.components(separatedBy: "Section(\"\(title)\")").last, title)
+                .components(separatedBy: "Section(\"")[0]
+            XCTAssertTrue(card.contains("Awaiting "), title)
+            XCTAssertTrue(card.contains("graduates "), title)
         }
         XCTAssertTrue(LiveTvSettingsPlacement.enableLiveTvGraduation
             .hasSuffix("Then: the switch moves to Settings → Live TV as a permanent on/off."))
@@ -1471,7 +1477,12 @@ final class LiveTvTests: XCTestCase {
         let tvList = source
             .components(separatedBy: "private var tvChannelList: some View {")[1]
             .components(separatedBy: "private var channelFocusIdentity: String {")[0]
-        XCTAssertFalse(tvList.contains("live.busy)"), "the touch List may disable rows; the focused one may not")
+        let disabledArguments = tvList.components(separatedBy: ".disabled(").dropFirst()
+            .map { $0.components(separatedBy: ")")[0] }
+        XCTAssertEqual(disabledArguments, ["!channel.watchable"],
+                       "the focused list only disables unwatchable rows, never a busy tune")
+        XCTAssertTrue(tvList.contains("enabled: channel.watchable && !live.busy"),
+                      "remote admission still refuses a second tune while busy")
         XCTAssertTrue(source.contains("let candidates = visibleChannels.filter(\\.watchable)"),
                       "a restore aimed at a disabled row is dropped")
 

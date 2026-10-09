@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 from validation.history import (
     CORRECTIVE_RE,
@@ -15,6 +16,7 @@ from validation.history import (
     _audit_tips,
     _write_report,
     audit_history,
+    authenticated_history_baseline,
     landing_commit_title,
     load_client_fixes,
     load_coverage,
@@ -885,6 +887,61 @@ class CorrectiveBoundaryCase(RepositoryFixture):
             stdout=subprocess.PIPE,
         ).stdout.strip()
 
+    def candidate_fixture(self):
+        root, catalog, coverage = self.repository()
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/master"], cwd=root, check=True)
+        (root / "src/seed").write_text("seed")
+        boundary = self.commit(root, "feat: seed")
+        ledger = self.ledger(root, boundary)
+        baseline = self.commit(root, "docs: record boundary")
+        (root / "crates/app.rs").write_text("pub fn reader() {}")
+        pending = self.commit(root, "fix(app): integrate pending reader")
+        subprocess.run(["git", "checkout", "-q", "-b", "task"], cwd=root, check=True)
+        (root / "tests/app_test.rs").write_text("#[test]\nfn focused_control() {}\n")
+        self.commit(root, "fix(app): add reader control")
+        subprocess.run(["git", "checkout", "-q", "master"], cwd=root, check=True)
+        self.merge(root, "task", "Merge PR #2: fix(app): add reader control\n\nRegression-Test: tests/app_test.rs::focused_control")
+        return root, catalog, coverage, ledger, baseline, pending
+
+    def test_authenticated_candidate_keeps_preintegration_ancestry_pending(self):
+        root, catalog, coverage, ledger, baseline, pending = self.candidate_fixture()
+        ordinary = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        self.assertTrue(any(pending[:8] in error and "outside any landing" in error for error in ordinary.errors))
+        candidate = audit_history(root, catalog, coverage, merge_ledger_path=ledger, landed_baseline=baseline)
+        self.assertEqual(candidate.errors, ())
+        self.assertIn(pending, candidate.pending)
+
+    def test_candidate_baseline_preserves_real_main_and_task_landing_failures(self):
+        root, catalog, coverage, ledger, baseline, pending = self.candidate_fixture()
+        main_at_direct_fix = pending
+        report = audit_history(root, catalog, coverage, merge_ledger_path=ledger, landed_baseline=main_at_direct_fix)
+        self.assertTrue(any(pending[:8] in error and "outside any landing" in error for error in report.errors))
+        subprocess.run(["git", "commit", "--amend", "-qm", "Merge PR #2: fix(app): add reader control"], cwd=root, check=True)
+        report = audit_history(root, catalog, coverage, merge_ledger_path=ledger, landed_baseline=baseline)
+        self.assertTrue(any("no Regression-Test:" in error for error in report.errors))
+
+    def test_candidate_baseline_refuses_nonancestor_or_symbolic_identity(self):
+        root, catalog, coverage, ledger, baseline, _ = self.candidate_fixture()
+        subprocess.run(["git", "checkout", "-q", "--detach", baseline], cwd=root, check=True)
+        (root / "src/foreign").write_text("foreign main movement")
+        foreign = self.commit(root, "docs: move main independently")
+        subprocess.run(["git", "checkout", "-q", "master"], cwd=root, check=True)
+        for wrong in ("HEAD", foreign):
+            with self.subTest(wrong=wrong), self.assertRaises(HistoryError):
+                audit_history(root, catalog, coverage, merge_ledger_path=ledger, landed_baseline=wrong)
+
+    def test_final_main_landing_introduces_entire_candidate_and_requires_fields(self):
+        root, catalog, coverage, ledger, baseline, pending = self.candidate_fixture()
+        subprocess.run(["git", "branch", "candidate"], cwd=root, check=True)
+        subprocess.run(["git", "checkout", "-q", "--detach", baseline], cwd=root, check=True)
+        self.merge(root, "candidate", "Merge PR #3: fix(app): promote candidate")
+        report = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        self.assertTrue(any(pending[:8] in error and "no Regression-Test:" in error for error in report.errors))
+        subprocess.run(["git", "commit", "--amend", "-qm", "Merge PR #3: fix(app): promote candidate\n\nRegression-Test: tests/app_test.rs::focused_control"], cwd=root, check=True)
+        report = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        self.assertEqual(report.errors, ())
+        self.assertNotIn(pending, report.pending)
+
     def test_a_fix_past_the_boundary_awaits_its_landing_then_needs_its_line(self):
         """The narrow rule has to bite, or the freeze is just an amnesty.
 
@@ -1549,6 +1606,25 @@ class CorrectiveBoundaryCase(RepositoryFixture):
             load_merge_ledger(path)
         self.assertIn("enforce_after", str(raised.exception))
         self.assertIsNone(load_merge_ledger(root / "absent.toml").enforce_after)
+
+
+class AuthenticatedPromotionHistoryCase(unittest.TestCase):
+    def test_only_authenticated_live_binding_can_select_baseline(self):
+        environment = {"PLURX_PROMOTION_PR": "3", "PLURX_PROMOTION_BASE_SHA": "a" * 40}
+        with mock.patch("validation.qualification.resolve_manual_binding", return_value={"base_sha": "b" * 40}) as resolve:
+            self.assertEqual(authenticated_history_baseline(environment, Path("/source")), "b" * 40)
+            resolve.assert_called_once_with(environment, Path("/source"))
+
+    def test_rejected_or_partial_binding_never_falls_back_to_untrusted_baseline(self):
+        from validation.qualification import QualificationError
+        with mock.patch("validation.qualification.resolve_manual_binding", side_effect=QualificationError("mismatch")):
+            with self.assertRaises(HistoryError):
+                authenticated_history_baseline({"PLURX_PROMOTION_BASE_SHA": "a" * 40}, Path("/source"))
+
+    def test_ordinary_audit_does_not_request_repository_credentials(self):
+        with mock.patch("validation.qualification.resolve_manual_binding") as resolve:
+            self.assertIsNone(authenticated_history_baseline({}, Path("/source")))
+            resolve.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1195,6 +1195,7 @@ pub(crate) fn continuous_test_candidate_context(
         id,
         recipe_digest: digest,
         route: plurx_core::playback::candidate::CandidateRoute::Encode,
+        planned_codec: None,
         normalized_geometry: true,
         width: height * 16 / 9,
         height,

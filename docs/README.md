@@ -43,6 +43,8 @@ Apple playback controls: [10 and 30 second seeking](apple-builds/689-playback-se
 
 Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-arrow-icons.md).
 
+Apple playback buffer: [944-playback-buffer-limit.md](apple-builds/944-playback-buffer-limit.md).
+
 Apple display wake: [818-display-wake.md](apple-builds/818-display-wake.md) — playback owns the display idle timer.
 
 Sharing activation: [Running-cluster activation and SQL transition safety](features/SHARING-LIVE-ACTIVATION.md) — **open**.
@@ -56,6 +58,7 @@ Sharing activation: [Running-cluster activation and SQL transition safety](featu
 | What do I type? | [CHEATSHEET.md](CHEATSHEET.md) |
 | How is it built, and why that way? | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | What endpoint do I call, and what authorizes it? | [API.md](API.md) |
+| How do I build and operate the fixed-purpose Cinema notification broker? | [Broker README](../crates/plurx-notification-broker/README.md) — **open**; synthetic software evidence, provider/native acceptance outstanding. |
 | How does a file become a stream? | [PLAYBACK.md](PLAYBACK.md) |
 | Why is this title playing badly? | [PLAYBACK-TESTING.md](PLAYBACK-TESTING.md), then [streaming/](streaming/) |
 | Why is a Dolby Vision title arriving as HDR10? | [streaming/DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) |
@@ -209,12 +212,13 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [Heated Rivalry quorum build status](streaming/HEATED-RIVALRY-S1E5-QUORUM-STATUS.html) | Current implementation phase, review, validation, PR, decisions, and cleanup for the quorum repair. | open |
 | [MEDIA-COMPATIBILITY-CATALOG.md](streaming/MEDIA-COMPATIBILITY-CATALOG.md) | Which 52 media-condition families have incident, reproduction or synthetic evidence, where their fixtures and regressions live, and which samples and player checks are still missing? | open |
 | [STATUS-HISTORY.md](streaming/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
+| [PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md](streaming/PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md) | October 8 Apple TV freeze: completed full-title preparation spills into the playback budget; evidence, ownership repair, tests, adversarial review and implementation/merge ledger. | open |
 | [HONEST-MASTER-PLAYLIST.md](streaming/HONEST-MASTER-PLAYLIST.md) | Implementation plan from the 2026-09-20 architecture review: M1/M2 landed; bounded M3/M4, retained VOD M5 and automatic/manual-copy/encoded preparation implemented; rolling/PUT consumers and one bounded public Create/fetched-wire host control recorded; current independent review/integration, unseen-tail first-publication and fleet/device acceptance remain open. | open |
 | [MACOS-VIDEO-PROCESSING-DESIGN.md](streaming/MACOS-VIDEO-PROCESSING-DESIGN.md) | Proposed native Mac acceleration: shared-memory cost model, VideoToolbox/Metal processing, Jellyfin dependency preservation, P5 hardware-decode experiment, contracts and measured acceptance. | open |
 | [MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md](streaming/MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md) | Opus review and build handoff: baseline/package proof, processing milestones, code ownership, regression matrix, rollout and independent Dolby/Live TV/HEVC extensions. | open |
-| [MACOS-VIDEO-PROCESSING-STATUS.md](streaming/MACOS-VIDEO-PROCESSING-STATUS.md) | Active managed implementation: parallel Sol ownership, package/graph evidence, user-directed validation sequence, decisions and remaining acceptance. | open |
+| [MACOS-VIDEO-PROCESSING-STATUS.md](streaming/MACOS-VIDEO-PROCESSING-STATUS.md) | Active managed implementation: parallel Sol ownership, package/graph evidence, user-directed validation sequence, decisions and remaining acceptance. | built |
 | [MACOS-VIDEO-PROCESSING-EVIDENCE.md](streaming/MACOS-VIDEO-PROCESSING-EVIDENCE.md) | Initial SDR/HDR10 CPU feasibility measurements, failed-comparison root causes, exact Jellyfin package/graphs, reproducible raw receipts and limits. | open |
-| [MACOS-VIDEO-PROCESSING-REVIEW.md](streaming/MACOS-VIDEO-PROCESSING-REVIEW.md) | Independent adversarial review and author dispositions: strict P5 metadata enforcement, worker-local cluster resolution and clean-install smoke-fixture provisioning. | done |
+| [MACOS-VIDEO-PROCESSING-REVIEW.md](streaming/MACOS-VIDEO-PROCESSING-REVIEW.md) | Original proposal review and active continuation implementation review: independent coverage, concrete findings, owner repairs and re-review disposition. | open |
 | [CODEC-AND-GPU-QUALIFICATION.md](streaming/CODEC-AND-GPU-QUALIFICATION.md) | Codec/GPU qualification: typed output contract, actual corpus acquisition, gradient VUI/scoring work, offline rolling-output census and private real-owner/headless-browser acquisition candidate, scoped family inventory, and separate graph/device acceptance. Organic-use week is supplementary, not M1/M2 eligibility. | open |
 | [S11-INTERNAL-ROLLING-CELLS-2026-10-02.md](streaming/S11-INTERNAL-ROLLING-CELLS-2026-10-02.md) | Sanitized exact-source/digest ledger for16 distinct internal rolling cells on four synthetic inputs: actual geometry, real presentation, packet/grid/key/equality and cleanup facts, preserved failed attempts and original public/film/NAL/device/fidelity qualification limits. | done |
 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md](streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | Implementation plan from the 2026-09-20 architecture review: why DV Profile 5 was refused and the media-origin probe went dead after the Windows refactor; the fix to `output_job_owned` with a portable child test, the full caller audit, and a bounded, killable library scan probe. | built |
@@ -505,8 +509,12 @@ player obeys, subtitles and overlays, layouts and themes.
 | [TV-REMOTE-AND-COMPANION-PLAN.md](clients/TV-REMOTE-AND-COMPANION-PLAN.md) | TV remote and HDMI-CEC input, automatic phone/tablet remote discovery, pairing, cross-platform control, and the Linux/Pi, Mac, and Windows implementation sequence. | open |
 | [TV-REMOTE-AND-COMPANION-REVIEW.md](clients/TV-REMOTE-AND-COMPANION-REVIEW.md) | Independent adversarial review of the TV remote plan: controller authorization, command expiry, desktop CEC availability, and the tvOS feasibility gate. | open |
 | [TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md](clients/TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md) | Build-ready Sol 6.1 packets, file ownership, native/desktop/background delivery, parent review, and batched-merge handoff. | open |
+| [TV-REMOTE-NATIVE-INVITATIONS-BUILD.md](clients/TV-REMOTE-NATIVE-INVITATIONS-BUILD.md) | Native notification enrollment, cold-launch taps, existing reminder/service ownership, Android resident networking and focused acceptance. | open |
+| [TV-REMOTE-API.md](clients/TV-REMOTE-API.md) | Implemented v1 HTTP DTOs, header proofs, owner routing, pairing/control lifecycle, storage migration and limits for receiver and companion clients. | open |
+| [TV-REMOTE-INVITATIONS-API.md](clients/TV-REMOTE-INVITATIONS-API.md) | Exact opt-in phone consent, background poll/tap, broker ticket and durable invitation lifecycle contract; first storage slice implemented, transport qualification pending. | open |
 | [TV-REMOTE-PROTOCOL.md](clients/TV-REMOTE-PROTOCOL.md) | Exact remote authority, node ownership, command/state wire types, receiver freshness, pairing and endpoint contracts. | open |
 | [TV-REMOTE-AND-COMPANION-STATUS.md](clients/TV-REMOTE-AND-COMPANION-STATUS.md) | Packet progress, parent review, compilation and physical acceptance evidence, without treating docs as shipped functionality. | open |
+| [TV-REMOTE-OPERATIONS.md](clients/TV-REMOTE-OPERATIONS.md) | Set up a TV receiver and paired phone, recover control, and record physical acceptance without treating in-progress packets as shipped support. | open |
 | [JELLYFIN-SHARED-SERVICES.md](clients/JELLYFIN-SHARED-SERVICES.md) | J1 shared login/token authority, token-only revocation and complete native watch operations; remaining compatibility lifecycle work. | open |
 | [JELLYFIN-PLAY-BINDINGS.md](clients/JELLYFIN-PLAY-BINDINGS.md) | J1 bounded negotiation metadata, live source incarnations, native route references, terminal retention and remaining adapter fences. | open |
 | [JELLYFIN-COMPATIBILITY-BUILD.md](clients/JELLYFIN-COMPATIBILITY-BUILD.md) | Infuse/Android TV build contract after three reviews: protocol spike, player identity, VOD fallbacks, watch fencing and acceptance. | open |
@@ -669,6 +677,8 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md](reviews/PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md) | Actual storage-owner implementation review: seven findings corrected and final focused evidence approved. | done |
+| [PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md](reviews/PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md) | Adversarial review of the October 8 playback-buffer repair: capacity handoff, early cancellation, restart and cleanup-failure ownership; findings and dispositions. | open |
 | [S11-GRAIN720-NAL-EVIDENCE-20261002.md](reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md) | One retained synthetic Grain720 header census: 35 first IDRs, two extras, reviewable historical parser/control/result/process/cleanup snapshots and private audit-byte retention; sanitized-not-raw and original S11 qualification limits. | done |
 | [S11-RETAINED-NAL-CONTINUATION-20261002.md](reviews/S11-RETAINED-NAL-CONTINUATION-20261002.md) | Sixteen-context retained-header ledger: thirteen Linux passes plus three retained Grain successes, preserved Grain720 extras, raw-private hash/metric/cleanup identities and historical route/local/pressure failures; reviewer local access, not portable raw evidence or original S11 qualification. | done |
 | [ARCHITECTURE-REVIEW-2026-09-20.md](reviews/ARCHITECTURE-REVIEW-2026-09-20.md) | The end-to-end architecture review of 2026-09-20, revision 3 (adversarial assessment applied, Astra's independent review merged) — ranked findings for performance, stability, video quality and design, ten verified do-first items, and the sequencing. | open |

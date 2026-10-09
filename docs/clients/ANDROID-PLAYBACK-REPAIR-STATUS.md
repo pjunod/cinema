@@ -1,6 +1,6 @@
 # Android playback repair — device failures and delivery progress
 
-**Status:** PR #915 merged; TCL follow-up validated in PR #918 · **Updated:** 2026-10-08
+**Status:** open — PR #915 and PR #918 merged; server rollout and physical TCL playback acceptance pending · **Updated:** 2026-10-08
 
 Companion to [Android parity](ANDROID-CLIENT-PARITY.md): repairs the native
 TCL and Lenovo playback failures and Razr video geometry and playback menus.
@@ -131,3 +131,20 @@ The branch was rebased onto the concurrent Apple-only main update and the
 pinned all-target server compiler check passed again; behavior tests were not
 repeated for that unrelated change. PR #918 is the live merge/deployment
 receipt. A server rollout and an actual TCL playback remain outstanding.
+
+
+## Dolby Vision badge parity — 2026-10-08
+
+**Status:** ready for PR review; Android build 156.
+
+Android source badges now spell out Dolby Vision, show known profile numbers
+and retain the actual delivered profile when conversion changes it. Both
+conversion and downgrade arrows render. Conversion stays undimmed, and the
+player badge row wraps on narrow views. Unknown profile or delivery facts do
+not invent a conversion.
+
+The badge model's 18 focused tests passed during development. Their assertions
+were updated alongside the visible labels. No additional unit run is required
+for this badge-only PR; current-source compilation and the PR fast lane supply
+the remaining pre-merge evidence. Playback arrival and temporary-fence control
+repairs are separate work and are not included in this change.

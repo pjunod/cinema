@@ -111,8 +111,8 @@ class KnownRedContractTest(unittest.TestCase):
         # #811 adds three operator-run ffmpeg 8 fixture checks (captured
         # generations, a captured output and a captured copy pipe), each
         # needing the capture its ignore reason names: 21 -> 24.
-        # Main #859 adds three explicit Linux namespace controls; #861 adds
-        # the real-FFmpeg CPU calibration smoke. Bind their exact identities
+        # Main #859 adds three explicit Linux namespace controls; Cinema B04
+        # adds a loopback-only synthetic acceptance server. Bind their identities
         # and environment reasons rather than silently admitting unknown ignores.
         additional_fixture_reasons = {
             "crates/plurxd/src/decode_facts.rs::decode_facts::tests::" + name:
@@ -124,6 +124,10 @@ class KnownRedContractTest(unittest.TestCase):
             )
         }
         additional_fixture_reasons[
+            "crates/plurxd/src/http/remote/live_fixture.rs::http::remote::live_fixture::"
+            "remote_live_server_fixture"
+        ] = "explicit loopback-only synthetic acceptance server; stops by file, Ctrl-C or one hour"
+        additional_fixture_reasons[
             "crates/plurx-core/src/transcode/encoder.rs::transcode::encoder::tests::"
             "benchmark_real_cpu_emits_a_complete_positive_measurement"
         ] = "requires a real FFmpeg with libx264"
@@ -134,8 +138,8 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 4)
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 28)
+        self.assertEqual(len(additional_fixtures), 5)
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 29)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

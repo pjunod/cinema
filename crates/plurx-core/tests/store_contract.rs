@@ -20,6 +20,8 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/invitations.rs"]
+mod invitations;
 #[path = "store_contract/jellyfin_catalog.rs"]
 mod jellyfin_catalog;
 #[path = "store_contract/jellyfin_identity.rs"]
@@ -28,6 +30,8 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/remote.rs"]
+mod remote;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;
@@ -130,7 +134,7 @@ use plurx_core::store::{
     ApiKeyStore, CoordinationStore, DvConversionStore, FencedPublicationStore, HiqliteAuthStore,
     MediaSessionStore, OfflinePackageStore, PlaybackTelemetryStore, ReadingStore, SettingsStore,
     TimelineAnnotationStore, TraktStore, TranscodeCacheStore, UserStore, WatchStore,
-    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    AUTH_SCHEMA_BASELINE_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{CatalogueReader, MetricsStore};
@@ -12539,7 +12543,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
     let checks: [(&str, i64); 6] = [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
@@ -12588,6 +12592,130 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
     }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_bootstrap_refuses_a_producer_payload_column_without_its_constraint() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect malformed-column fixture");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("malformed-producer-payload-telemetry.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("initial valid bootstrap"),
+    );
+    for result in client.txn([
+        ("ALTER TABLE background_transcode_artifacts RENAME COLUMN producer_payload TO previous_producer_payload", hiqlite::params!()),
+        ("ALTER TABLE background_transcode_artifacts ADD COLUMN producer_payload TEXT", hiqlite::params!()),
+    ]).await.expect("install deliberately unconstrained column") {
+        result.expect("malformed-column fixture transaction");
+    }
+    let error = HiqliteAuthStore::bootstrap(client, CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .err()
+        .expect("unconstrained producer intent must be refused");
+    assert!(matches!(error, StoreError::Migration(_)));
+    assert!(error
+        .to_string()
+        .contains("producer payload column has incompatible shape"));
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_bootstrap_refuses_canonical_constraint_text_in_a_sql_comment() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect malformed-column fixture");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("malformed-producer-payload-telemetry.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("initial valid bootstrap"),
+    );
+    for result in client.txn([
+        ("ALTER TABLE background_transcode_artifacts RENAME COLUMN producer_payload TO previous_producer_payload", hiqlite::params!()),
+        ("ALTER TABLE background_transcode_artifacts ADD COLUMN producer_payload TEXT /* producer_payload TEXT CHECK (producer_payload IS NULL OR (json_valid(producer_payload) AND length(CAST(producer_payload AS BLOB)) <= 16384)) */", hiqlite::params!()),
+    ]).await.expect("install deliberately unconstrained column") {
+        result.expect("malformed-column fixture transaction");
+    }
+    let error = HiqliteAuthStore::bootstrap(client, CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .err()
+        .expect("unconstrained producer intent must be refused");
+    assert!(matches!(error, StoreError::Migration(_)));
+    assert!(error
+        .to_string()
+        .contains("producer payload column has incompatible shape"));
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_bootstrap_refuses_an_incompatible_existing_sharing_index() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect malformed-sharing fixture");
+    let telemetry = cluster._root.path().join("malformed-sharing-telemetry.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("initial valid bootstrap"),
+    );
+    for result in client
+        .txn([
+            ("DROP INDEX sharing_exports_state", hiqlite::params!()),
+            (
+                "CREATE INDEX sharing_exports_state ON sharing_exports(updated_at_ms)",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("replace index with incompatible shape")
+    {
+        result.expect("malformed-sharing fixture transaction");
+    }
+    let error = HiqliteAuthStore::bootstrap(client, CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .err()
+        .expect("incompatible sharing object must be refused");
+    assert!(matches!(error, StoreError::Migration(_)));
+    assert!(error
+        .to_string()
+        .contains("incompatible sharing bootstrap object sharing_exports_state"));
 }
 
 /// The replicated schema exactly as `HiqliteAuthStore::bootstrap` left it at
@@ -13094,7 +13222,7 @@ async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
             .expect("read migrated marker");
         assert_eq!(
             reached.iter().map(|row| row.value).collect::<Vec<_>>(),
-            vec![AUTH_SCHEMA_VERSION]
+            vec![AUTH_SCHEMA_BASELINE_VERSION]
         );
         assert_migrated_fragment_prune_budget(&client).await;
         store_schema_snapshot(&client).await

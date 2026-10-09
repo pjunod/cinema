@@ -551,6 +551,13 @@ async function resumeQualityBoundary(p){
   await seekTo(pbPosSec(),false,null,false,null,true,candidate);
   return true;
 }
+// Desired state shares the viewer transport owner, including pending opens.
+function setPlayerPlaying(playing){
+  const v=document.getElementById("video");
+  if(!v||typeof playing!=="boolean") return false;
+  if(playerWantsPlayback(v)!==playing) togglePlay();
+  return true;
+}
 function togglePlay(origin="viewer_control"){
   const v=document.getElementById("video"); if(!v) return;
   if(PLAYER&&PLAYER.libraryChannel&&v.paused

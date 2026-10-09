@@ -17,7 +17,8 @@ pub enum Encoder {
 }
 
 /// The delivered codec, independent of the source codec or dynamic range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VideoCodec {
     H264,
     Hevc,
@@ -41,6 +42,10 @@ impl VideoCodec {
             (Self::H264, 8, OutputGrade::Sdr, family) => Some(family.video_codec()),
             // Preserve the Main10 measurements and the subsequently published
             // VAAPI HDR graph; the output tuple remains explicit.
+            (Self::Hevc, 8, OutputGrade::Sdr, Encoder::VideoToolbox) => Some("hevc_videotoolbox"),
+            (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::VideoToolbox) => {
+                Some("hevc_videotoolbox")
+            }
             (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Software) => Some("libx265"),
             (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Qsv) => Some("hevc_qsv"),
             (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Vaapi) => Some("hevc_vaapi"),
@@ -68,8 +73,19 @@ impl OutputCodecContract {
         pipeline: super::Pipeline,
         rate_control: EffectiveRateControl,
     ) -> Option<Self> {
+        Self::resolve_with_codec(encoder, pipeline, rate_control, None)
+    }
+
+    /// Explicit codec requests are frozen by negotiation before this resolver;
+    /// absent requests retain the incumbent grade-based selection.
+    pub fn resolve_with_codec(
+        encoder: Encoder,
+        pipeline: super::Pipeline,
+        rate_control: EffectiveRateControl,
+        requested_codec: Option<VideoCodec>,
+    ) -> Option<Self> {
         let grade = pipeline.output_grade();
-        let (codec, bit_depth) = match grade {
+        let (default_codec, bit_depth) = match grade {
             OutputGrade::Sdr => (VideoCodec::H264, 8),
             OutputGrade::Hdr10 => (VideoCodec::Hevc, 10),
         };
@@ -80,6 +96,7 @@ impl OutputCodecContract {
             OutputGrade::Hdr10 => EffectiveRateControl::Vbr,
             OutputGrade::Sdr => rate_control,
         };
+        let codec = requested_codec.unwrap_or(default_codec);
         let contract = Self {
             codec,
             bit_depth,
@@ -95,6 +112,14 @@ impl OutputCodecContract {
         self.pipeline.output_grade() == self.grade
             && self.pipeline.pairs_with(self.encoder)
             && (self.grade != OutputGrade::Hdr10 || self.rate_control == EffectiveRateControl::Vbr)
+            && (self.codec != VideoCodec::Hevc
+                || self.grade != OutputGrade::Sdr
+                || (self.encoder == Encoder::VideoToolbox
+                    && matches!(
+                        self.pipeline,
+                        super::Pipeline::VtScaleSdr | super::Pipeline::Cpu
+                    )
+                    && self.rate_control == EffectiveRateControl::Vbr))
             && self.encoder_name().is_some()
     }
 
@@ -258,6 +283,7 @@ mod output_codec_contract_tests {
                         Encoder::Software => Some("libx265"),
                         Encoder::Qsv => Some("hevc_qsv"),
                         Encoder::Vaapi => Some("hevc_vaapi"),
+                        Encoder::VideoToolbox => Some("hevc_videotoolbox"),
                         _ => None,
                     },
                 };
@@ -295,7 +321,10 @@ mod output_codec_contract_tests {
                     encoder: family,
                     pipeline: Pipeline::Cpu,
                 };
-                assert!(!contract.qualified());
+                assert_eq!(
+                    contract.qualified(),
+                    family == Encoder::VideoToolbox && depth == 8
+                );
             }
         }
         let mut contract = OutputCodecContract::resolve(
@@ -759,6 +788,44 @@ impl Encoder {
         )
     }
 
+    /// Emit the resolved output tuple. HEVC SDR never inherits the H.264
+    /// quality preset or profile; the exact native route uses bounded VBR.
+    pub fn encode_args_for_codec(
+        self,
+        codec: VideoCodec,
+        grade: OutputGrade,
+        bitrate_kbps: u32,
+        rate_control: EffectiveRateControl,
+        force_idr: bool,
+        software_threads: Option<u32>,
+    ) -> Vec<String> {
+        let mut args = self.encode_args_for(
+            grade,
+            bitrate_kbps,
+            rate_control,
+            force_idr,
+            software_threads,
+        );
+        if codec == VideoCodec::Hevc && grade == OutputGrade::Sdr {
+            assert_eq!(
+                self,
+                Encoder::VideoToolbox,
+                "only the observed native SDR encoder is admitted"
+            );
+            assert_eq!(rate_control, EffectiveRateControl::Vbr);
+            args[1] = "hevc_videotoolbox".to_owned();
+            args.extend([
+                "-profile:v".to_owned(),
+                "main".to_owned(),
+                "-allow_sw".to_owned(),
+                "0".to_owned(),
+                "-tag:v".to_owned(),
+                "hvc1".to_owned(),
+            ]);
+        }
+        args
+    }
+
     /// [`Encoder::encode_args`] for a chosen [`OutputGrade`].
     ///
     /// [`OutputGrade::Sdr`] delegates to the pre-M5 body byte-for-byte; the
@@ -906,6 +973,16 @@ impl Encoder {
             .unwrap_or("libx265");
         let mut args: Vec<String> = ["-c:v", codec].into_iter().map(str::to_owned).collect();
         match self {
+            Encoder::VideoToolbox => {
+                args.extend([
+                    "-profile:v".to_owned(),
+                    "main10".to_owned(),
+                    "-allow_sw".to_owned(),
+                    "0".to_owned(),
+                    "-tag:v".to_owned(),
+                    "hvc1".to_owned(),
+                ]);
+            }
             Encoder::Qsv => {
                 args.extend([
                     "-preset".to_owned(),
@@ -1944,13 +2021,11 @@ mod tests {
             Encoder::Qsv.video_codec_for(OutputGrade::Hdr10),
             Some("hevc_qsv")
         );
-        for encoder in [Encoder::Nvenc, Encoder::VideoToolbox] {
-            assert_eq!(
-                encoder.video_codec_for(OutputGrade::Hdr10),
-                None,
-                "{encoder:?} has an unmeasured HEVC Main10 encoder at best"
-            );
-        }
+        assert_eq!(
+            Encoder::VideoToolbox.video_codec_for(OutputGrade::Hdr10),
+            Some("hevc_videotoolbox")
+        );
+        assert_eq!(Encoder::Nvenc.video_codec_for(OutputGrade::Hdr10), None);
     }
 
     /// Every colour term of a grade comes from the grade, so the PQ/8-bit

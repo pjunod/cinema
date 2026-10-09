@@ -1,3 +1,13 @@
+# PR #947 inherited census reconciliation (source-only base 079960dae):
+# vod/tests/chunk_03.rs additions in 142d9f4e07 and b38387a133 implement
+# retirement_releases_background_admission_with_publication_locks_held and
+# completed_output_survives_retirement_and_manifest_contention. Their finite
+# sleep children are kill-on-drop, ChildJob-attached, ProducerSlot-registered
+# with the background permit, and explicitly writer-settled and confirmed-reaped.
+# These fixtures account for one existing key gate, two method/OS spawn,
+# Command and kill-on-drop sites, and five bounded timeout observations.
+# No inherited production owner or pattern/scope/equality exception is added.
+
 version = 1
 source = "crates/plurxd/src/transcode.rs"
 module_roots = [
@@ -333,6 +343,8 @@ replacement = "response EOF enters the actor with a move-only RollingMediaCommit
 
 [[symbols]]
 id = "all-detached-tokio-tasks"
+# PR913: +2 joined test tasks in source_fixture_monitor_join_propagates_task_failure;
+# the injected panic and monitor.join task both propagate to the owning fixture.
 pattern = "tokio::spawn\\("
 also_in = ["crates/plurxd/src/transcode"]
 # 79 -> 80 with M3b2's end-to-end reporting test: one `tokio::spawn` runs a
@@ -400,7 +412,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # output workers and the Source actor/preparation fixtures. The whole-module
 # structural task count equals effort + main - merge base; these three extra
 # scoped text references do not introduce an additional detached owner.
-expected_occurrences = 111
+expected_occurrences = 113
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -1796,6 +1808,8 @@ expected_occurrences = 2
 
 [[module_symbols]]
 id = "m4-keyed-vod-build-owner"
+# Main PR915: +1 existing recipe-key gate acquisition in the retirement regression;
+# it holds the publication lock while confirming actual writer/child settlement.
 pattern = "rendition_build_gate"
 # S10 #680: +2 in vod/retained.rs::repair_exact and link_complete. Both
 # acquire the EXISTING recipe-key build gate before validating/linking exact
@@ -1808,7 +1822,10 @@ pattern = "rendition_build_gate"
 # retirement_releases_background_admission_with_publication_locks_held.
 # The fixture holds the existing recipe-key gate while retiring its actual
 # child/writer generation. It adds no build owner or production scheduler.
-expected_occurrences = 30
+# PR #947 after integrating main 1088d7529: base 30; repair delta +2.
+# Cleanup and conservative cold revalidation take the existing exact-key gate;
+# neither creates a competing build owner.
+expected_occurrences = 32
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -1845,7 +1862,9 @@ expected_occurrences = 40
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
 pattern = "spawn_cancellation_independent"
-expected_occurrences = 5
+# PR #947 after integrating main 1088d7529: base 5; repair delta +1.
+# One bounded inventory batch retains scan ownership when its caller cancels.
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-bounded-vod-head-regeneration"
@@ -1930,6 +1949,7 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# PR913: +2 joined source_actor monitor-failure fixture tasks, no detached owner.
 # Shared H2 drain: the accepted driver moves to JoinSet.spawn; two finite
 # regression drivers are explicitly stopped and joined (+1 net).
 # Durable queue: background_jobs.rs adds one ActiveJob-owned heartbeat (joined
@@ -2785,6 +2805,25 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # heartbeat loop and aborts/joins it before Store shutdown; Drop aborts on panic.
 # Fixture startup owns the existing production passive/quorum metrics sampler;
 # it is aborted and joined before its Store, with Drop cancellation on panic.
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote owner adds one bounded physical-approval actor and three joined
+# race fixtures. Existing decode_facts tests add one joined probe actor.
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+# #904: the Mac parser blocking worker retains source/admission guards until
+# joined; one joined Live source-classification fixture observes its owned child.
+# DV adapter: +11 dv_segment.rs matches: five cancellation-aware async owners
+# retain or await helper/encoder reap and six producer_spawn calls use the
+# existing registered child owner (including the finite probe fixture).
+# DV serving integration: +3 bounded spawn_blocking bridges in dv_runtime.rs
+# (manifest loading, private-window validation, retained prepared-window extraction),
+# and +1 generation.rs task observing the same retained generation cancellation.
+# These hold existing custody; they do not elect or acquire a new producer owner.
+# PR #947 after integrating main 1088d7529: base 902; repair delta +5.
+# One exact-owner cleanup attempt plus four finite, joined or aborted/joined
+# regression tasks retain their original owners.
+# Final DV/main integration: measured union of the reviewed DV sites and
+# PR #947 ownership additions above; neither history is discarded.
+expected_occurrences = 922
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -2797,7 +2836,6 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # and startup worker-local reprobes using shutdown cancellation; joined private
 # cache-directory stat; two joined late-publication fixture drivers; and a
 # joined child-cancellation fixture trigger. No rolling/media owner is added.
-expected_occurrences = 892
 # Promotion union: final count is measured after architectural conflict resolution.
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -2835,6 +2873,8 @@ expected_occurrences = 892
 
 [[module_structures]]
 id = "method-spawn"
+# Main PR915: +2 finite VOD test children; ChildJob registration owns both
+# through retirement, writer settlement and confirmed reap with real admission.
 # Shared H2 drain: the HTTP server JoinSet owns every accepted driver through
 # daemon drain; each driver drops its socket before publishing actual closure.
 # Durable queue removes the state.rs fragment JoinSet launcher. The common
@@ -2993,7 +3033,16 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # settles the writer, then awaits confirmed child/writer reap before checking
 # permit release. kill_on_drop is an unwind backstop; no production task or
 # rolling producer is added.
-expected_occurrences = 62
+# #904: EpochClock owns its Builder-spawned epoch thread; Drop stops, unparks
+# and joins it before releasing the parser engine. This creates no OS child.
+# DV adapter: +1 finite /bin/sleep predecessor fixture child, registered in
+# the existing ProducerSlot and retired/reaped before releasing its writers.
+# PR #947 after integrating main 1088d7529: base 63; repair delta +1.
+# One release-triggered runtime task retains the exact cleanup registry;
+# it starts no media producer.
+# Final DV/main integration: measured union of the reviewed DV sites and
+# PR #947 ownership additions above; neither history is discarded.
+expected_occurrences = 65
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3010,11 +3059,25 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # 10 -> 11, shared cluster forwarding completion (2026-10-06).
 # The Source non-owner fixture adds its server constructor named spawn; the
 # fixture retains the server task and cancels/joins it on teardown.
-expected_occurrences = 13
+# DV adapter: +2 names are its spawn function declaration and probe call;
+# both use the same retained cancellation/reap owner, not separate launchers.
+expected_occurrences = 15
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Backup passive catch-up: 1618 -> 1622, exactly +4 in backup.rs.
+# The existing publication sleep becomes sleep_until (no count delta).
+# One new timeout_at bounds local metrics, the single trigger and publication
+# with the same original deadline under the held backup:cluster lease; one
+# new sleep_until observes apply/log convergence under that deadline. Both
+# futures stay awaited by that lease owner, with no new task or producer.
+# Two test-only sleeps consume the catch-up/trigger budget on a paused clock
+# and prove the trigger cannot acquire a fresh deadline. Existing scheduler
+# sleeps, snapshot/image guards and resource authority are unchanged.
+# PR913: +2 finite monitor-join/retirement fixture bounds; timeout is a failure.
+# Main PR915: +5 finite publication/reap/completion regression bounds; each
+# requires actual settlement, with no deadline promoted to a closure receipt.
 # Resume repair: two graceful-drain test deadlines and a bounded polling
 # wait for the retained forwarding cleanup owner add four test-only timers.
 # Shared ingress custody adds one bounded actual-driver closure wait and two
@@ -4239,6 +4302,25 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +6 B known-registration coordination: one original-deadline owned mutex
 # wait in admission; five finite test waits exercise gate/monitor custody.
 # No deadline is extended and no timer or missing row supplies close proof.
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote adds one peer timeout, one bounded long-poll sleep, three
+# regression deadlines and two live-fixture shutdown timers. Existing
+# decode_facts regressions add five bounded deadline/poll timers.
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+# #904: one parser stop deadline, three Live executable identity bounds and
+# one P5 unlink bound. Deadlines never replace worker or child settlement.
+# DV adapter: +14 bounded helper-stage and finite fixture waits in
+# dv_segment.rs; +1 empty-slot predecessor regression bound in prodrun.rs.
+# Expiry cancels owned work and still awaits child/writer settlement.
+# DV serving integration: +2 dv_runtime.rs bounded retirement polling/deadline
+# timers and +1 generation.rs cancellation polling timer. The existing generation
+# and caller preparation budget retain authority; no retry election is added.
+# PR #947 after integrating main 1088d7529: base 1622; repair delta +12.
+# Three production bounds retain detached inventory/cleanup/reap ownership;
+# nine finite fixture observation bounds/polls add no independent scheduler.
+# Final DV/main integration: measured union of the reviewed DV sites and
+# PR #947 ownership additions above; neither history is discarded.
+expected_occurrences = 1652
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4256,7 +4338,6 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # proof capture, confirmed reap and deferred completion metadata (three sites).
 # Each asserts actual generation-owned settlement; timeout supplies no reap,
 # publication or admission-release evidence and starts no recovery owner.
-expected_occurrences = 1595
 
 
 [[module_structures]]
@@ -4284,6 +4365,8 @@ expected_occurrences = 5
 
 [[module_structures]]
 id = "process-command-construction"
+# Main PR915: +2 VOD fixture children (sleep and true), owned by the real
+# registered ChildJob and settled writers before their admission is released.
 # Durable queue adds two test-only shell children, in background_jobs.rs and
 # ffmpeg.rs. Both run through the production cancellable collector; tests await
 # the collector and verify ESRCH before releasing their retained admission.
@@ -4636,11 +4719,24 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # vod/tests/chunk_03.rs retirement/completion fixtures named under method-spawn.
 # Existing ProducerSlot owns both children and their permits through confirmed
 # child/writer reap. Neither is an encoder or a new production launch path.
-expected_occurrences = 238
+# #904: one corpus pre-probe and five P5 probe/decode/encode commands use
+# bounded child ownership; one Live classification fixture owns and reaps its
+# shell. The existing Live producer command site is only refactored in place.
+# DV adapter: +1 finite sleep predecessor fixture constructor; the existing
+# ProducerSlot retains and retires its child and writer barrier.
+# DV serving integration: +1 vodgen.rs test-only FFmpeg command for the actual
+# nonzero video/AAC emitted-timestamp regression; no production launcher added.
+# PR #947 after integrating main 1088d7529: base 245; repair delta +2.
+# Two finite FFmpeg foreground fixtures run synchronously through the existing
+# fixture collector.
+# Final DV/main integration: measured union of the reviewed DV sites and
+# PR #947 ownership additions above; neither history is discarded.
+expected_occurrences = 249
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# Main PR915: +2 spawn calls for the same registered/reaped VOD fixture children.
 # Shared H2 drain: JoinSet.spawn starts the accepted HTTP task described above,
 # not an operating-system process.
 # Durable queue removes state.rs JoinSet.spawn for the fragment worker. This
@@ -5225,7 +5321,22 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # method-spawn and process-command-construction. Existing ProducerSlot owns
 # retirement and confirmed child/writer reap; these are two fixtures, not two
 # additional children or production process owners.
-expected_occurrences = 718
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote adds five HTTP response/status builder calls (remote.rs:3,
+# live_fixture.rs:1, tests.rs:1); these conservative matches launch no process.
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+# #904: the broad .spawn() matcher also counts the EpochClock thread above;
+# it remains retained and joined by Drop, not an unowned child launch.
+# DV adapter: +1 spawn of that same finite sleep predecessor fixture,
+# registered and reaped by the existing ProducerSlot.
+# DV serving integration: +2 HTTP response.status() comparisons in hls/control.rs
+# bounded owner-report projection. These are structural false positives, not
+# process launches; producer ownership remains unchanged.
+# PR #947 after integrating main 1088d7529: base 733; repair delta +1.
+# The same release-triggered runtime task above launches no OS child.
+# Final DV/main integration: measured union of the reviewed DV sites and
+# PR #947 ownership additions above; neither history is discarded.
+expected_occurrences = 737
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5489,11 +5600,23 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
 # One bounded fixture wait follows actual Raft watch changes until the
 # real Source peer publishes bounded-read readiness; no polling owner.
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote adds two test-only pause-barrier wait() calls; no child reap.
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+# #904: one Live classification fixture waits for its owned shell child,
+# verifies settlement and classifies the actual decoder-refusal exit.
+# DV adapter: +1 try_wait observation for the exact registered generation
+# in prodrun.rs; admission remains held through actual child/writer settlement.
+# PR #947 after integrating main 1088d7529: base 320; repair delta +3.
+# Two waits join the existing ReapOperation; one fault hook waits the actual
+# registered child.
+# Final DV/main integration: measured union of the reviewed DV sites and
+# PR #947 ownership additions above; neither history is discarded.
+expected_occurrences = 324
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
 # both racers are joined and their retained permits dropped in the test.
-expected_occurrences = 317
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5559,13 +5682,19 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # ReapOperation are notifier waits matched by name. Test-only `libc::kill
 # (pid, 0)` probes in vod/tests/source_lifetime.rs assert the production
 # slot reaped (ESRCH) or kept its fixture child; they send no signal.
+# Cinema composition: audited exact sites, preserving production ownership.
+# Cinema remote adds the test-only pause-barrier async fn wait declaration;
+# the conservative free/UFCS matcher finds it, not an OS wait or signal.
 # #870 adds one test-only libc::kill(pid, 0) liveness observation after its
 # owned cancelled probe has settled; it verifies ESRCH and sends no signal.
-expected_occurrences = 65
+# Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
+expected_occurrences = 66
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "kill-on-drop-construction"
+# Main PR915: +2 cancellation-safe VOD fixture children, additionally confirmed
+# reaped through the registration; kill-on-drop alone is not settlement proof.
 pattern = "kill_on_drop\\s*\\("
 # +2: the two HDR10 boot probes, which take it for the same reason every
 # other probe does -- a capability check that outlives its await is a stray
@@ -5687,6 +5816,8 @@ pattern = "kill_on_drop\\s*\\("
 # under method-spawn. The normal fixture path requests exact-generation
 # retirement and awaits confirmed child/writer reap before permit release;
 # kill_on_drop is only a panic/unwind backstop, never settlement evidence.
+# PR #947 after integrating main 1088d7529: base 101; repair delta +0.
+# No repair delta; preserve current main's already reconciled fixture owners.
 expected_occurrences = 101
 # Promotion union: final count is measured after architectural conflict resolution.
 

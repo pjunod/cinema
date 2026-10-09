@@ -529,6 +529,44 @@ impl ProducerSlot {
         }
         state.child.as_mut().ok_or_else(no_child)?.try_wait()
     }
+    /// Storage deletion needs a settled child and every registered writer.
+    /// An empty slot is accepted only when no registration or reap is pending.
+    pub(crate) async fn retire_storage(&self) -> io::Result<()> {
+        loop {
+            let mut state = self.inner.lock().await;
+            if let Some(operation) = state.reaping.clone() {
+                drop(state);
+                operation.wait().await;
+                continue;
+            }
+            if let Some(child) = state.child.take() {
+                let next = after(
+                    state.belief,
+                    Step::Terminate {
+                        why: Termination::Idle,
+                    },
+                );
+                let operation = owned_reap(
+                    child,
+                    state.child_job.take(),
+                    state.resources.take(),
+                    state.registration.clone(),
+                    Arc::clone(&state.hooks),
+                    Arc::downgrade(&self.inner),
+                    next,
+                );
+                state.reaping = Some(Arc::clone(&operation));
+                drop(state);
+                operation.wait().await;
+                continue;
+            }
+            return if state.registration.is_none() {
+                Ok(())
+            } else {
+                Err(no_child())
+            };
+        }
+    }
 
     /// Start exact-generation retirement without waiting for its own writers.
     /// Returns whether this call acquired the actual process for retirement.

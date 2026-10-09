@@ -18,6 +18,8 @@ struct DeviceCaps: Codable, Equatable {
     let containers: [String]
     let transports: [String]
     var progressiveHevcSampleEntries: [String]? = nil
+    // Independent HLS/fMP4 transport claim; unknown is omitted.
+    var hlsHevcSampleEntries: [String]? = nil
     /// Overlay protocols this client can draw. `PGSOverlay.swift` implements
     /// `pgs-v1`, so it is claimed unconditionally — the renderer is compiled
     /// in, not a runtime capability.
@@ -144,7 +146,8 @@ enum Caps {
                 av1: av1,
                 displayHDR: displayHDR,
                 dolbyVision: dolbyVision,
-                audioRoute: audioRoute
+                audioRoute: audioRoute,
+                hlsHevcSampleEntries: hlsHevcSampleEntries()
             ),
             legacyQuery: legacyQuery
         )
@@ -157,7 +160,8 @@ enum Caps {
         av1: Bool,
         displayHDR: Bool,
         dolbyVision: Bool,
-        audioRoute: AudioRouteFacts? = nil
+        audioRoute: AudioRouteFacts? = nil,
+        hlsHevcSampleEntries: [String]? = nil
     ) -> DeviceCaps {
         let supportsDolbyVision = hevc && displayHDR && dolbyVision
         let present = displayHDR ? ["sdr", "pq", "hlg"] : ["sdr"]
@@ -204,12 +208,27 @@ enum Caps {
             // server-normalized copy whose progressive output uses another
             // label.
             progressiveHevcSampleEntries: hevc ? ["hvc1"] : nil,
+            hlsHevcSampleEntries: hlsHevcSampleEntries,
             // AVPlayer accepts P5/P8, but a raw progressive MP4 can advance
             // with audio and report DV while rendering black. Preserved DV
             // therefore always rides the normalized copy-video HLS envelope.
             dvTransport: "hls",
             display: DisplayCaps(hdr: displayHDR, dolbyVision: supportsDolbyVision)
         )
+    }
+
+    // AVPlayer's HLS backend asks AVFoundation about the actual container and
+    // codec combination independently of the VideoToolbox registry. A missing
+    // answer leaves the new delivery off; it does not erase the saved choice.
+    static func hlsHevcSampleEntries() -> [String] {
+        let codecs = ["hvc1.1.6.L93.B0", "hvc1.1.6.L120.B0", "hvc1.1.6.L153.B0",
+                      "hvc1.2.4.L120.B0", "hvc1.2.4.L153.B0"]
+        let supported = codecs.allSatisfy { codec in
+            AVURLAsset.isPlayableExtendedMIMEType(
+                "application/vnd.apple.mpegurl; codecs=\"\(codec),mp4a.40.2\""
+            )
+        }
+        return supported ? ["hvc1"] : []
     }
 
     static func query() -> [URLQueryItem] {
