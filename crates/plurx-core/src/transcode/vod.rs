@@ -1314,6 +1314,27 @@ pub fn vod_completed_reconstructed_pipe_args(
     if let Some(index) = args.iter().position(|arg| arg == "-movflags") {
         args[index + 1].push_str("+frag_discont");
     }
+    if plan.options().input_has_audio {
+        let index = args
+            .iter()
+            .position(|arg| arg == "-af")
+            .ok_or("reconstructed AAC has no sample-clock filter")?;
+        // frag_discont also preserves AAC's negative encoder-priming DTS.
+        // Give the incumbent publisher its zero-based AAC packet clock,
+        // without changing the PCM samples or their source association.
+        args[index + 1].push_str(",asettb=expr=1/48000,asetpts=PTS+1024");
+        let end = args
+            .iter()
+            .rposition(|arg| arg == "-t")
+            .ok_or("reconstructed AAC has no output bound")?;
+        let duration = args[end + 1]
+            .parse::<f64>()
+            .map_err(|_| "invalid reconstructed output bound")?;
+        args[end + 1] = format!(
+            "{:.9}",
+            duration + VOD_AAC_FRAME_SAMPLES as f64 / f64::from(VOD_AUDIO_RATE)
+        );
+    }
     let pixel_format = if output.encoder() == super::Encoder::Nvenc {
         "p010le"
     } else {

@@ -253,10 +253,13 @@ pub(super) async fn spawn_generation(
                 publication_complete = true;
                 // Traversing immutable cached media is valid playback, but
                 // those bytes are not this encoder window's evidence.
-                if all_fresh {
-                    if let Some(receipt) = receipt {
-                        runtime.published_window(receipt, &encoded_payloads);
-                    }
+                if let (
+                    true,
+                    Some(receipt),
+                    plurx_core::transcode::dv_processing::DvSelection::Selected(plan),
+                ) = (all_fresh, receipt, &encoding.dv_processing)
+                {
+                    runtime.published_window(receipt, &encoded_payloads, &plan.semantic_digest());
                 }
             }
         }
@@ -798,6 +801,28 @@ async fn run_generation(
             .encoding
             .as_ref()
             .map(|encoding| encoding.grid.denominator),
+        encoded_video_origin: {
+            #[cfg(target_os = "linux")]
+            {
+                rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .filter(|encoding| encoding.dv_runtime.is_some())
+                    .map(|encoding| {
+                        plurx_core::transcode::vod_reconstructed_video_origin(
+                            encoding.grid,
+                            rendition.plan.entry(at).expect("spawn entry").start_ticks
+                                / u64::from(encoding.grid.denominator),
+                        )
+                        .expect("independently validated reconstructed video origin")
+                    })
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                None
+            }
+        },
         encoded_audio_anchor: rendition.recipe.encoding.as_ref().map(|_| {
             let start = rendition.plan.entry(at).expect("spawn entry").start_ticks as f64
                 / f64::from(rendition.timescale);

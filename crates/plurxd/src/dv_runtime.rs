@@ -473,11 +473,20 @@ impl RuntimeRecipe {
         &self,
         receipt: plurx_core::transcode::dv_processing::DvProcessingReceipt,
         encoded_payloads: &[DvDigest],
+        plan_digest: &DvDigest,
     ) {
         if !episode_failed(&self.failure_episode) {
             let shape =
                 digest(&serde_json::to_vec(encoded_payloads).expect("encoded sample digest list"))
                     .expect("encoded sample shape");
+            tracing::debug!(target: "plurxd::vodserve",
+                destination = ?self.destination, processing_mode = ?self.mode,
+                frames = receipt.served_frames().len(), el_frames = receipt.counts().el_accepted,
+                nlq_frames = receipt.counts().operations_applied.get(
+                    &plurx_core::transcode::dv_processing::DvOperation::LinearNlqResidual
+                ).copied().unwrap_or(0),
+                plan_digest = %plan_digest.as_str(), object_shape = %shape.as_str(),
+                "DV processed window published");
             self.published_receipt
                 .lock()
                 .expect("DV published receipt")
