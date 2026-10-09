@@ -93,7 +93,8 @@ class PiRuntimeTests(unittest.TestCase):
 
     def test_uninstall_keeps_changed_and_unowned_files(self):
         with tempfile.TemporaryDirectory() as temporary:
-            prefix = Path(temporary) / "owned"
+            # The production prepare() entry point canonicalizes the prefix.
+            prefix = Path(temporary).resolve() / "owned"
             prefix.mkdir()
             (prefix / "unchanged").write_text("owned")
             (prefix / "changed").write_text("original")
@@ -125,7 +126,8 @@ class PiRuntimeTests(unittest.TestCase):
 
     def test_upgrade_does_not_adopt_operator_additions_or_changed_files(self):
         with tempfile.TemporaryDirectory() as temporary:
-            prefix = Path(temporary) / "owned"
+            # Keep the host's /var alias outside the ownership-symlink probe.
+            prefix = Path(temporary).resolve() / "owned"
             downloads = prefix / "downloads"
             downloads.mkdir(parents=True)
             original = downloads / "original"

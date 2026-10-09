@@ -481,15 +481,15 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](clients/PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) | Adversarial review of the RCA at `5c605768`: §5.3's web regression refuted, the index pass proven to be one full demux (so Fix C rides on it for free), answers to all seven questions, six rulings. | done |
 | [SUBTITLE-CLUSTER-EXTRACTION-PLAN.md](clients/SUBTITLE-CLUSTER-EXTRACTION-PLAN.md) | v2 implementation contract and M0–M5 execution log for clustered text and PGS extraction, queueing, hydration and backfill; fleet evidence pending. | built |
 | [SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md](clients/SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md) | Seven findings and dispositions that shaped the v2 contract. | done |
-| [PARALLEL-SUBTITLE-RANGES-STATUS.md](clients/PARALLEL-SUBTITLE-RANGES-STATUS.md) | Distributed playback text windows: bounded-seek evidence, implementation and verification status. | open |
+| [PARALLEL-SUBTITLE-RANGES-STATUS.md](clients/PARALLEL-SUBTITLE-RANGES-STATUS.md) | Distributed playback text windows: bounded-seek evidence, implementation and verification status. | built |
 | [SUBTITLE-CLUSTER-EXTRACTION-STATUS.md](clients/SUBTITLE-CLUSTER-EXTRACTION-STATUS.md) | Current K-09 milestone, review and merge qualification status; fleet evidence pending. | built |
-| [SUBTITLE-RELIABILITY-COMPLETION.md](clients/SUBTITLE-RELIABILITY-COMPLETION.md) | Current cross-client subtitle defects, measured engine recovery, and reconciled remaining subtitle work. | open |
+| [SUBTITLE-RELIABILITY-COMPLETION.md](clients/SUBTITLE-RELIABILITY-COMPLETION.md) | Current cross-client subtitle defects, measured engine recovery, and reconciled remaining subtitle work. | built |
 | [SUBTITLE-MAC-COMPOSITION-EVIDENCE.md](clients/SUBTITLE-MAC-COMPOSITION-EVIDENCE.md) | Bounded native-processing then CPU subtitle corpus, active-cue seek, EOF and cancellation observations, package/source identity and explicit reproducer. | done |
 | [Mac subtitle composition receipt](clients/SUBTITLE-MAC-COMPOSITION-EVIDENCE.json) | Sanitized package/input/driver hashes and analytic measurements for the bounded E2 graph acceptance. | done |
 | [SUBTITLE-RELIABILITY-ASSESSMENT.md](clients/SUBTITLE-RELIABILITY-ASSESSMENT.md) | Why subtitles still fail on every client after the rework landed — three symptoms root-caused at `c9e4edf4`, with confidence labels. | done |
-| [SUBTITLE-RELIABILITY-HANDOFF.md](clients/SUBTITLE-RELIABILITY-HANDOFF.md) | The build order for the repairs: six milestones, exact contracts, non-goals, acceptance. | open |
+| [SUBTITLE-RELIABILITY-HANDOFF.md](clients/SUBTITLE-RELIABILITY-HANDOFF.md) | The build order for the repairs: six milestones, exact contracts, non-goals, acceptance. | built |
 | [SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md](clients/SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | Eight cases for the session that has the devices — the hardware evidence none of this has yet. | open |
-| [PGS_OVERLAY_PLAN.md](clients/PGS_OVERLAY_PLAN.md) | Dolby Vision-safe PGS subtitle overlay. | open |
+| [PGS_OVERLAY_PLAN.md](clients/PGS_OVERLAY_PLAN.md) | Dolby Vision-safe PGS subtitle overlay. | built |
 | [PGS-OVERLAY-M0-FEASIBILITY.md](clients/PGS-OVERLAY-M0-FEASIBILITY.md) | The feasibility evidence for M0. | open |
 | [PGS-OVERLAY-REVIEW-ASSESSMENT.md](clients/PGS-OVERLAY-REVIEW-ASSESSMENT.md) | Accepted findings, and the re-review requested. | done |
 | [APPLE-PGS-OVERLAY-ACCEPTANCE.md](clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md) | One iPad Pro run, one decidable acceptance record. | open |
@@ -622,7 +622,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md](features/LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md) | Remove permanent tuner ownership with distributed admission, session recovery, recording claims and safe storage publication; merged as #537. | built |
 | [LIVE-TV-CLUSTER-RESOURCE-REVIEW.md](features/LIVE-TV-CLUSTER-RESOURCE-REVIEW.md) | Design review findings and accepted corrections for distributed tuner access. | done |
 | [LIVE-TV-CLUSTER-RESOURCE-STATUS.md](features/LIVE-TV-CLUSTER-RESOURCE-STATUS.md) | Current implementation progress, decisions, commits, review and fast-lane evidence. | live |
-| [SUBTITLE-DOWNLOADS-IMPLEMENTATION.md](features/SUBTITLE-DOWNLOADS-IMPLEMENTATION.md) | Online subtitle search, durable captions, playback integration and optional automatic acquisition. | open |
+| [SUBTITLE-DOWNLOADS-IMPLEMENTATION.md](features/SUBTITLE-DOWNLOADS-IMPLEMENTATION.md) | Online subtitle search, durable captions, playback integration and optional automatic acquisition. | built |
 | [STATUS-HISTORY.md](features/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md](features/DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | Implementation plan from the 2026-09-20 architecture review: why a series rule missed an airing ten days out and why one slow recording disk stalls the shared tuner; the scheduler's full-guide view and per-sink owned writers behind bounded queues. | open |
 | [LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md](features/LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md) | Implementation plan from the 2026-09-20 architecture review: one graced settings observation per node instead of a consistent read per session per second, one shared `PeerTransport`, warm start without the serial prefix wait, and a retry owner for failed cleanup. | open |
