@@ -53,6 +53,11 @@ fn completed_packet_authoring_keeps_base_and_dynamic_association() {
         .expect("strip RPUs while preserving base packets");
         base.extend_from_slice(&fragment.bytes);
     }
+    assert!(
+        reader.saw_trailer(),
+        "the retained input actually completed"
+    );
+    base.extend_from_slice(&completed_window_trailer(&init));
     let base_payloads = dv_validate_encoded_window(
         &base,
         (64, 64),
@@ -65,6 +70,41 @@ fn completed_packet_authoring_keeps_base_and_dynamic_association() {
     .expect("HDR10 control");
     let authored = dv_author_profile81_window(&base, (64, 64), 24000, 48048, 1001, &rpus, 1)
         .expect("packet-aware author");
+    let mut completed = fmp4::FragmentReader::new();
+    completed.push(&authored);
+    while completed
+        .next_unit()
+        .expect("complete authored stream")
+        .is_some()
+    {}
+    assert!(completed.saw_trailer());
+    let trailer_bytes = completed_window_trailer(&init).len();
+    assert!(
+        dv_author_profile81_window(
+            &base[..base.len() - trailer_bytes],
+            (64, 64),
+            24000,
+            48048,
+            1001,
+            &rpus,
+            1
+        )
+        .is_err(),
+        "absent completion cannot be authored"
+    );
+    assert!(
+        dv_author_profile81_window(
+            &base[..base.len() - 1],
+            (64, 64),
+            24000,
+            48048,
+            1001,
+            &rpus,
+            1
+        )
+        .is_err(),
+        "truncated completion cannot be authored"
+    );
     assert_eq!(base_payloads.len(), 3);
     assert_eq!(
         dv_validate_encoded_window(

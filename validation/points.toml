@@ -879,6 +879,7 @@ paths = [
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-core/tests/fixtures/dv-runtime/**",
   "crates/plurxd/src/dv_runtime.rs",
+  "crates/plurxd/src/dv_report_lifetime.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
   "scripts/fuzz-campaign",

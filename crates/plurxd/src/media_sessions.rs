@@ -1500,6 +1500,9 @@ fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartResponse {
+    /// Owner answer carried separately from the strict legacy JSON body.
+    #[serde(skip)]
+    pub processed_dv_profile: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1650,6 +1653,13 @@ fn decode_remote_start_response(
     };
     serde_json::from_slice::<RemoteStartResponse>(&response.body)
         .ok()
+        .map(|mut info| {
+            info.processed_dv_profile = response
+                .dv_processing_header
+                .as_deref()
+                .and_then(|header| info.processed_dv_profile_from_header(header));
+            info
+        })
         .filter(RemoteStartResponse::is_valid)
         .filter(|info| {
             ownership == RemoteSessionStartOwnership::LegacyAmbiguous
@@ -1662,6 +1672,7 @@ fn decode_remote_start_response(
 impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
+            processed_dv_profile: info.processed_dv_profile,
             retained_output: info.retained_output,
             audio_delivery: info.audio_delivery,
             session_id: info.session_id,
@@ -1681,8 +1692,46 @@ impl From<StartInfo> for RemoteStartResponse {
 }
 
 impl RemoteStartResponse {
+    /// Optional bounded sidecar keeps older strict START body readers valid.
+    pub(crate) fn processed_dv_header(&self) -> Option<String> {
+        self.processed_dv_profile
+            .filter(|_| self.is_valid())
+            .map(|profile| {
+                serde_json::json!({
+                    "session_id": self.session_id,
+                    "processed_dv_profile": profile,
+                })
+                .to_string()
+            })
+    }
+
+    fn processed_dv_profile_from_header(&self, header: &str) -> Option<u8> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            session_id: String,
+            processed_dv_profile: u8,
+        }
+        if header.len() > 4096 {
+            return None;
+        }
+        let wire: Wire = serde_json::from_str(header).ok()?;
+        (wire.session_id == self.session_id
+            && wire.processed_dv_profile == 8
+            && self.vod
+            && self.grade == OutputGrade::Hdr10
+            && matches!(self.kind, SessionKind::Transcode { .. }))
+        .then_some(wire.processed_dv_profile)
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self.processed_dv_profile.is_none_or(|profile| {
+                profile == 8
+                    && self.vod
+                    && self.grade == OutputGrade::Hdr10
+                    && matches!(self.kind, SessionKind::Transcode { .. })
+            })
             && self
                 .retained_output
                 .as_ref()
@@ -7121,6 +7170,7 @@ mod tests {
     fn valid_start_response() -> RemoteStartResponse {
         let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
         RemoteStartResponse {
+            processed_dv_profile: None,
             retained_output: None,
             audio_delivery: None,
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -9502,6 +9552,41 @@ mod tests {
             .expect("request object")
             .insert("future_unfenced_field".to_owned(), serde_json::json!(true));
         assert!(serde_json::from_value::<RemoteStartRequest>(json).is_err());
+    }
+
+    #[test]
+    fn processed_p81_owner_marker_is_optional_and_bound_to_pq_transcode() {
+        let ordinary = valid_start_response();
+        let json = serde_json::to_value(&ordinary).expect("ordinary response");
+        assert!(json.get("processed_dv_profile").is_none());
+        let decoded: RemoteStartResponse =
+            serde_json::from_value(json).expect("old owner response");
+        assert!(decoded.processed_dv_profile.is_none());
+        let mut processed = ordinary;
+        processed.grade = OutputGrade::Hdr10;
+        processed.processed_dv_profile = Some(8);
+        assert!(processed.is_valid());
+        let header = processed
+            .processed_dv_header()
+            .expect("processed owner sidecar");
+        assert_eq!(processed.processed_dv_profile_from_header(&header), Some(8));
+        let body = serde_json::to_value(&processed).expect("processed body");
+        assert!(
+            body.get("processed_dv_profile").is_none(),
+            "legacy strict body remains unchanged"
+        );
+        let wrong_session = header.replace(
+            &processed.session_id,
+            "00000000-0000-4000-8000-0000000000b2",
+        );
+        assert!(processed
+            .processed_dv_profile_from_header(&wrong_session)
+            .is_none());
+        processed.processed_dv_profile = Some(7);
+        assert!(!processed.is_valid());
+        processed.processed_dv_profile = Some(8);
+        processed.grade = OutputGrade::Sdr;
+        assert!(!processed.is_valid());
     }
 
     #[test]

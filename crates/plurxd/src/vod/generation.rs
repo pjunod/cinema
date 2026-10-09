@@ -98,8 +98,9 @@ pub(super) async fn spawn_generation(
             .as_ref()
             .map(|runtime| (encoding, runtime))
     }) {
-        // A completed prior interval grants no evidence for this new producer.
-        runtime.clear_published_window();
+        let mut report_revision = runtime.report_revision.load(Acquire);
+        // Keep the last verified interval while this attachment prefetches.
+        // Explicit seek/replacement/failure revoke its publication allowance.
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
                 runtime.refuse_episode();
@@ -121,6 +122,9 @@ pub(super) async fn spawn_generation(
             }
         };
         let verified = if let Some(prepared) = prepared {
+            // Prepared before attachment/control: a later seek must not award
+            // this original interval new report authority.
+            report_revision = 0;
             drop(permit);
             rendition
                 .source_owners
@@ -240,6 +244,21 @@ pub(super) async fn spawn_generation(
         let trailer_complete = completed.is_some();
         let mut publication_complete = false;
         if let Some((sink, all_fresh)) = completed {
+            // Snapshot attachments before the publication lock: control takes
+            // session ownership before its media/manifest fences.
+            let physical_owners: Vec<_> = shared
+                .sessions
+                .lock()
+                .await
+                .values()
+                .filter(|session| {
+                    session.tombstone.is_none()
+                        && session
+                            .live_rendition()
+                            .is_some_and(|current| Arc::ptr_eq(current, rendition))
+                })
+                .map(|session| Arc::clone(&session.incarnation))
+                .collect();
             let completion_accepted = sink.completed_output_accepted().await;
             // The driver changes the epoch under this same publication lock.
             // A trailer alone cannot award evidence to a replaced generation.
@@ -266,7 +285,13 @@ pub(super) async fn spawn_generation(
                     plurx_core::transcode::dv_processing::DvSelection::Selected(plan),
                 ) = (all_fresh, receipt, &encoding.dv_processing)
                 {
-                    runtime.published_window(receipt, &encoded_payloads, &plan.semantic_digest());
+                    runtime.published_window(
+                        receipt,
+                        &encoded_payloads,
+                        &plan.semantic_digest(),
+                        &physical_owners,
+                        report_revision,
+                    );
                 }
             }
         }

@@ -1034,6 +1034,7 @@ impl TranscodeManager {
         )
         .await;
         Some(StartInfo {
+            processed_dv_profile: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

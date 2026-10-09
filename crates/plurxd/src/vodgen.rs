@@ -1007,6 +1007,96 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn completed_profile81_authoring_reaches_the_real_publisher() {
+        use plurx_core::transcode::dv_processing::dv_author_profile81_window;
+        let encoded = include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/authored.mp4");
+        let rpus = vec![
+            include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/frame-000.nal").to_vec(),
+            include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/frame-001.nal").to_vec(),
+            include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/frame-002.nal").to_vec(),
+        ];
+        let mut reader = FragmentReader::new();
+        reader.push(encoded);
+        let Some(Unit::Init(mut base_init)) = reader.next_unit().expect("fixture init") else {
+            panic!("missing init")
+        };
+        plurx_core::fmp4::remove_dolby_vision_record(&mut base_init).expect("base config");
+        let video = base_init.video().expect("video").id;
+        let mut base = base_init.bytes.clone();
+        while let Some(unit) = reader.next_unit().expect("fixture fragment") {
+            if let Unit::Fragment(mut fragment) = unit {
+                plurx_core::fmp4::rewrite_video_samples(
+                    &mut fragment,
+                    &base_init.tracks,
+                    video,
+                    |sample| {
+                        let mut output = Vec::new();
+                        let mut at = 0;
+                        while at < sample.len() {
+                            let length = u32::from_be_bytes(
+                                sample[at..at + 4].try_into().expect("NAL length"),
+                            ) as usize;
+                            let end = at + 4 + length;
+                            if (sample[at + 4] >> 1) & 63 != 62 {
+                                output.extend_from_slice(&sample[at..end]);
+                            }
+                            at = end;
+                        }
+                        Ok(output)
+                    },
+                )
+                .expect("strip control RPU");
+                base.extend_from_slice(&fragment.bytes);
+            }
+        }
+        assert!(
+            reader.saw_trailer(),
+            "the retained encoder actually completed"
+        );
+        // Preserve its authentic completion input. The author rebuilds the
+        // random-access trailer after changing sample sizes.
+        let mut offset = 0;
+        while offset < encoded.len() {
+            let length =
+                u32::from_be_bytes(encoded[offset..offset + 4].try_into().expect("box length"))
+                    as usize;
+            if &encoded[offset + 4..offset + 8] == b"mfra" {
+                base.extend_from_slice(&encoded[offset..offset + length]);
+            }
+            offset += length;
+        }
+        let feed = dv_author_profile81_window(&base, (64, 64), 24000, 48048, 1001, &rpus, 1)
+            .expect("completed author");
+        let init = muxer_init(&feed);
+        let grid = plurx_core::transcode::VodFrameGrid::new(24000, 1001).expect("grid");
+        let generation = Generation {
+            plan: grid.plan(125, 0),
+            index: None,
+            encoded_frame_ticks: Some(1001),
+            encoded_audio_anchor: None,
+            encoded_video_origin: Some(48048),
+            identity: InitIdentity::establish(&init, Default::default())
+                .expect("authored identity"),
+            start_entry: 0,
+            policy: CutPolicy::new(2, 2, 48_000_000, 15, 24000),
+            convert_dolby_vision: false,
+            retain_hevc_parameter_sets: false,
+        };
+        let sink = MemSink::default();
+        let outcome = run(&feed[..], generation, &sink, "completed-p81").await;
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Ran {
+                    produced_through: Some(0)
+                }
+            ),
+            "P81 publisher outcome: {outcome:?}"
+        );
+        assert_eq!(sink.taken().len(), 1);
+    }
+
     /// A sink that remembers what it was handed and can start refusing.
     #[derive(Default)]
     struct MemSink {

@@ -4,6 +4,10 @@
 #[path = "dv_runtime.rs"]
 pub(crate) mod dv_runtime;
 
+#[cfg(any(target_os = "linux", test))]
+#[path = "dv_report_lifetime.rs"]
+pub(crate) mod dv_report_lifetime;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1067,6 +1071,24 @@ impl Encoding {
         }
     }
 
+    /// The encoder of the admitted, prepared processing graph, rather than
+    /// the software source-decode plan used to build its input contract.
+    pub(crate) fn delivered_encoder_label(&self) -> &'static str {
+        #[cfg(target_os = "linux")]
+        if let Some(runtime) = &self.dv_runtime {
+            if matches!(&self.dv_processing,
+                plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
+                    if plurx_core::transcode::dv_processing::DvProductionRegistry.permits(plan))
+            {
+                return match runtime.encoder {
+                    plurx_core::transcode::Encoder::Software => "software (x265)",
+                    encoder => encoder.label(),
+                };
+            }
+        }
+        self.plan.encoder().label()
+    }
+
     pub(crate) fn preserves_processed_dv(&self) -> bool {
         matches!(&self.dv_processing,
             plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
@@ -1074,6 +1096,9 @@ impl Encoding {
                     && plan.destination() == plurx_core::transcode::dv_processing::DvDestination::Profile81)
     }
     pub(crate) fn processed_dv_supplemental(&self) -> Option<String> {
+        if !self.preserves_processed_dv() {
+            return None;
+        }
         let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) = &self.dv_processing
         else {
             return None;
