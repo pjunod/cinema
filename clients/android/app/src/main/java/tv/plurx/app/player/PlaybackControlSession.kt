@@ -508,12 +508,23 @@ class PlaybackControlSession(
                 // viewer nothing leaves them watching a track that is selected
                 // and will never fill in.
                 if (exchange.capture.hasSameIntent(latest.get()) &&
-                    subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness)
+                    subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness,
+                        commitUnavailable = false, intent = exchange.capture.intentGeneration)
                 ) {
-                    onSubtitleUnavailable()
+                    dispatchSubtitleReady {
+                        synchronized(verdictLock) {
+                            if (generation == verdictGeneration &&
+                                exchange.intentGeneration == verdictIntentGeneration &&
+                                exchange.capture.hasSameIntent(latest.get()) &&
+                                subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness,
+                                    intent = exchange.capture.intentGeneration)) onSubtitleUnavailable()
+                        }
+                    }
                 }
                 if (exchange.capture.hasSameIntent(latest.get()) && subtitleReadiness.record(
                         exchange.response?.delivery?.subtitleReadiness, commitReady = false,
+                        intent = exchange.capture.intentGeneration,
+                        revision = exchange.response?.delivery?.subtitleRevision,
                     )) {
                     dispatchSubtitleReady {
                         // The callback can be queued while begin/end replaces
@@ -523,7 +534,9 @@ class PlaybackControlSession(
                             if (generation == verdictGeneration &&
                                 exchange.capture.owner == PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration) &&
                                 exchange.intentGeneration == verdictIntentGeneration &&
-                                subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
+                                subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness,
+                                    intent = exchange.capture.intentGeneration,
+                                    revision = exchange.response?.delivery?.subtitleRevision)
                             ) {
                                 onSubtitleReady()
                             }

@@ -1460,6 +1460,20 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(decoded.effectiveSelection?.qualityAuto, true)
     }
 
+    func testUnavailableSubtitleNotifiesOncePerIntentWithoutConsumingReadyRetry() {
+        let notice = SubtitleUnavailableNoticeState()
+        let readiness = SubtitleReadinessRetryState()
+        XCTAssertFalse(notice.record(nil, intent: 1))
+        XCTAssertFalse(notice.record("unknown", intent: 1))
+        XCTAssertTrue(notice.record("unavailable", commitUnavailable: false, intent: 1))
+        XCTAssertTrue(notice.record("unavailable", intent: 1))
+        XCTAssertFalse(notice.record("unavailable", intent: 1))
+        XCTAssertFalse(notice.record("warming", intent: 1))
+        XCTAssertTrue(readiness.record("ready", intent: 1))
+        XCTAssertFalse(notice.record("unavailable", intent: 1))
+        XCTAssertTrue(notice.record("unavailable", intent: 2))
+    }
+
     func testSubtitleReadinessDecisionAndTransitionAreClosedAndSingleShot() {
         for (value, expected) in [
             ("ready", true),
@@ -1471,6 +1485,17 @@ final class PlaybackControlReporterTests: XCTestCase {
             XCTAssertEqual(SubtitleReadinessDecision.meansReady(value), expected, value)
         }
         XCTAssertFalse(SubtitleReadinessDecision.meansReady(nil))
+
+        let initial = SubtitleReadinessRetryState()
+        XCTAssertTrue(initial.record("ready", commitReady: false, intent: 1))
+        XCTAssertTrue(initial.record("ready", intent: 1), "first ready needs no observed warming")
+        XCTAssertFalse(initial.record("ready", intent: 1))
+        XCTAssertTrue(initial.record("ready", intent: 2), "new intent owns a new retry")
+        XCTAssertFalse(initial.record("ready", intent: 2))
+
+        XCTAssertTrue(initial.record("ready", intent: 2, revision: "window-200"))
+        XCTAssertFalse(initial.record("ready", intent: 2, revision: "window-200"))
+        XCTAssertTrue(initial.record("ready", intent: 2, revision: "whole"))
 
         let transition = SubtitleReadinessRetryState()
         XCTAssertFalse(transition.record(nil))

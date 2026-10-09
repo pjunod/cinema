@@ -351,7 +351,11 @@ impl BoundedDiagnosticChild {
                     .open(path)
                     .await?;
                 let mut total = 0_u64;
-                let mut buffer = [0_u8; 64 * 1024];
+                // This buffer lives across awaits. Inline storage propagates
+                // through extractor/timeout/select future states; their debug
+                // poll frames exceeded the worker stack during window warming.
+                // Keep the same bounded chunk owned by the IO future on heap.
+                let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
                 let exceeded = loop {
                     let read = tokio::select! {
                         biased;

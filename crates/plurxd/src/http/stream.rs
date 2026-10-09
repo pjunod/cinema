@@ -2853,6 +2853,7 @@ pub async fn subtitles_vtt(
     _user: AuthUser,
     State(state): State<AppState>,
     AxPath((id, subtitle)): AxPath<(i64, String)>,
+    Query(query): Query<SubtitleVttQuery>,
 ) -> Result<Response, ApiError> {
     let index = subtitle
         .strip_suffix(".vtt")
@@ -2860,16 +2861,23 @@ pub async fn subtitles_vtt(
         .parse::<i64>()
         .map_err(|_| ApiError::NotFound("subtitle track"))?;
     let file = load_file(&state, id).await?;
-    subtitle_vtt_for_file(&state, &file, index).await
+    subtitle_vtt_for_file_revision(&state, &file, index, query.revision.as_deref()).await
+}
+
+/// An optional readiness revision asks for already-published bytes only.
+#[derive(Default, Deserialize)]
+pub struct SubtitleVttQuery {
+    pub revision: Option<String>,
 }
 
 /// One text track of an already-resolved file as WebVTT. Local callers resolve
 /// the file by ID after login; the shared Source resolves it only after its
 /// grant/item/file/revision witness.
-pub(crate) async fn subtitle_vtt_for_file(
+pub(crate) async fn subtitle_vtt_for_file_revision(
     state: &AppState,
     file: &MediaFile,
     index: i64,
+    revision: Option<&str>,
 ) -> Result<Response, ApiError> {
     let id = file.id;
     let stream = file
@@ -2882,6 +2890,30 @@ pub(crate) async fn subtitle_vtt_for_file(
              it can only be burned in during transcode"
                 .into(),
         ));
+    }
+
+    if let Some(revision) = revision {
+        if revision.len() > 192 {
+            return Err(ApiError::BadRequest("invalid subtitle revision".into()));
+        }
+        let cached = crate::subtitles::read_cached_revision(&state.subs_dir, file, index, revision)
+            .await
+            .map_err(|_| ApiError::Internal("subtitle cache read failed".into()))?;
+        return Ok(match cached {
+            Some((bytes, complete)) => {
+                let mut response = vtt_response(bytes);
+                response.headers_mut().insert(
+                    HeaderName::from_static("x-plurx-subtitle-complete"),
+                    HeaderValue::from_static(if complete { "true" } else { "false" }),
+                );
+                response
+            }
+            None => (
+                StatusCode::NO_CONTENT,
+                [(header::CACHE_CONTROL, "no-store")],
+            )
+                .into_response(),
+        });
     }
 
     let bytes = crate::subtitles::ensure_vtt_bytes_with_store(

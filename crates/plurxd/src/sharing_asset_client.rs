@@ -7,7 +7,7 @@ use super::*;
 use crate::http::{
     hls::SourcePlaybackTarget,
     shared_receiver_assets::{MAX_IMAGE_BYTES, MAX_MANIFEST_BYTES, MAX_VTT_BYTES},
-    shared_source_assets::{encode_reference, REFERENCE_HEADER},
+    shared_source_assets::{encode_reference, REFERENCE_HEADER, SUBTITLE_REVISION_HEADER},
 };
 use plurx_core::sharing_resources::{SharingFileResource, SharingFileResourceKind as Kind};
 
@@ -18,9 +18,12 @@ pub(crate) enum PeerFileAsset {
     Ready {
         bytes: axum::body::Bytes,
         mime: &'static str,
+        complete: Option<bool>,
     },
     /// The Source answered 202: the overlay generation is still being made.
     Preparing,
+    /// A cached revision is no longer available; no extraction was started.
+    Absent,
 }
 
 /// The closed representation per asset kind: exact media type, B's byte cap
@@ -60,6 +63,7 @@ impl PeerConnection {
         credential: &Secret,
         target: &SourcePlaybackTarget,
         resource: &SharingFileResource,
+        revision: Option<&str>,
     ) -> Result<PeerFileAsset, PeerError> {
         let Representation {
             mime,
@@ -72,7 +76,7 @@ impl PeerConnection {
                 HeaderValue::from_str(&format!("CinemaShare {}", credential.expose()))
                     .map_err(|_| PeerError::InvalidResponse)?;
             authorization.set_sensitive(true);
-            let request = Request::builder()
+            let mut request = Request::builder()
                 .method(Method::GET)
                 .uri(format!(
                     "/sharing/v1/items/{}/files/{}/{}",
@@ -83,7 +87,14 @@ impl PeerConnection {
                 .header(header::HOST, &self.host)
                 .header(header::AUTHORIZATION, authorization)
                 .header(header::ACCEPT_ENCODING, "identity")
-                .header(REFERENCE_HEADER, reference)
+                .header(REFERENCE_HEADER, reference);
+            if let Some(revision) = revision {
+                if !matches!(resource.kind(), Kind::Subtitle { .. }) || revision.len() > 192 {
+                    return Err(PeerError::InvalidResponse);
+                }
+                request = request.header(SUBTITLE_REVISION_HEADER, revision);
+            }
+            let request = request
                 .body(Body::empty())
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -107,6 +118,7 @@ impl PeerConnection {
                     {
                         Ok(PeerFileAsset::Preparing)
                     }
+                    StatusCode::NO_CONTENT if revision.is_some() => Ok(PeerFileAsset::Absent),
                     StatusCode::UNAUTHORIZED => Err(PeerError::Authentication),
                     _ => Err(PeerError::Rejected(status)),
                 };
@@ -118,6 +130,15 @@ impl PeerConnection {
                     (Some(value), None) => value.to_str().map_err(|_| PeerError::InvalidResponse),
                     _ => Err(PeerError::InvalidResponse),
                 }
+            };
+            let complete = if revision.is_some() {
+                match single(header::HeaderName::from_static("x-plurx-subtitle-complete"))? {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => return Err(PeerError::InvalidResponse),
+                }
+            } else {
+                None
             };
             let length_text = single(header::CONTENT_LENGTH)?;
             let length = length_text
@@ -153,6 +174,7 @@ impl PeerConnection {
             Ok(PeerFileAsset::Ready {
                 bytes: axum::body::Bytes::from(bytes),
                 mime,
+                complete,
             })
         })
         .await
@@ -226,7 +248,7 @@ mod tests {
             .expect("fixture connection");
         let credential = plurx_core::sharing::new_secret().expect("credential");
         let resource = SharingFileResource::parse(resource).expect("resource");
-        let result = peer.file_asset(&credential, &target, &resource).await;
+        let result = peer.file_asset(&credential, &target, &resource, None).await;
         drop(peer);
         server.abort();
         let _ = server.await;
@@ -449,7 +471,7 @@ mod tests {
         for (name, resource, reply, expected) in cases {
             let (result, seen) = exchange(reply, &resource).await;
             match (result, expected) {
-                (Ok(PeerFileAsset::Ready { mime, bytes }), Some(expected)) => {
+                (Ok(PeerFileAsset::Ready { mime, bytes, .. }), Some(expected)) => {
                     assert_eq!(mime, expected, "{name}");
                     assert!(!bytes.is_empty(), "{name}");
                 }

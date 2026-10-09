@@ -1,6 +1,8 @@
 # Subtitle reliability — build handoff
 
-**Status:** ready to build · **Executes:** the repairs in
+> Current work and corrected delivery status: [subtitle completion ledger](SUBTITLE-RELIABILITY-COMPLETION.md). This page retains its historical scope and evidence.
+
+**Status:** historical implementation built; residual repair and acceptance in the completion ledger · **Executes:** the repairs in
 [SUBTITLE-RELIABILITY-ASSESSMENT.md](SUBTITLE-RELIABILITY-ASSESSMENT.md) §3
 · **Baseline:** `origin/main` @ `c9e4edf4` (v0.3.0-2633) · **Written:**
 2026-09-16

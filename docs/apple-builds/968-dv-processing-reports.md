@@ -1,6 +1,6 @@
 # Show verified Dolby Vision processing during playback
 
-Build: 221
+Build: 222
 Issue: #968
 
 The delivered-format label shows **HDR10-E** when the server reports supported

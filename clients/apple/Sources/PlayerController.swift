@@ -10899,6 +10899,10 @@ extension PlayerController {
             onSubtitleReady: { [weak self] in
                 self?.retryNativeSubtitleAfterReadiness()
             },
+            onSubtitleUnavailable: { [weak self] in
+                guard let self, self.selectedSubtitle != nil else { return }
+                self.showPlaybackNotice("That subtitle could not be prepared. Playback was kept unchanged.")
+            },
             onProcessingGeneration: { [weak self] generation, report in
                 guard let self else { return }
                 self.effectiveProcessing = report.flatMap {

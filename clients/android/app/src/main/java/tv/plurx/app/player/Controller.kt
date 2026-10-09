@@ -3263,9 +3263,10 @@ class Controller internal constructor(
                     effectiveProcessing = report?.takeIf { it.matches(generation, deliveredRange) }
                     effectiveProcessingGeneration = generation
                 },
-            onSubtitleUnavailable = {
-                raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
-            },
+                onSubtitleUnavailable = {
+                    if (selectedSubtitle != null) raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
+                },
+
                 onPrepare = ::onPrepareAction,
                 onAcknowledged = ::acknowledgementDelivered,
                 onEffectiveSelection = { effective ->
@@ -3361,13 +3362,19 @@ class Controller internal constructor(
                 return@launch
             }
             textSelectionArmed = false
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                .build()
-            kotlinx.coroutines.yield()
-            textSelectionArmed = true
-            applyTextSelection()
+            retryNativeTextRendition(
+                player,
+                isCurrent = {
+                    playbackControlBootstrapFence.isCurrent(claim, sessionId) &&
+                        playbackIntent.generation() == intentGeneration &&
+                        selectedSubtitle == index &&
+                        subtitleDelivery == SubtitleDelivery.NativeSession
+                },
+                restore = {
+                    textSelectionArmed = true
+                    applyTextSelection()
+                },
+            )
         }
     }
 

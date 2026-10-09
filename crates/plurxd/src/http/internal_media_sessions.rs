@@ -1492,6 +1492,7 @@ mod tests {
                 producer_decision: None,
                 hold_reason: None,
                 subtitle_readiness: None,
+                subtitle_revision: None,
                 preparation: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,

@@ -108,7 +108,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 158
+        versionCode = 159
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -251,4 +251,6 @@ dependencies {
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.test.manifest)
+    // Isolated physical Compose tests need the same host activity as debug.
+    add("capabilityProbeImplementation", libs.androidx.ui.test.manifest)
 }

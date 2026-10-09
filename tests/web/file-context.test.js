@@ -145,7 +145,8 @@ test("file route census allows only explicit local administration and reader exc
     "pages/reader.js":["`/files/${routeFileId}/publication`"],
     "pages/analysis.js":["`/files/${row.file_id}/analysis`"],
     "detail/track-facts.js":["`/files/${fileId}/analysis`","`/files/${id}/preparation`"],
-    "detail/preplay-selection.js":["`/files/${fileId}/subtitles/search?language=${encodeURIComponent(language)}`","`/files/${fileId}/subtitles/download`","`/api/v1/files/${exactWireId(file)}/content`","`/files/${id}/dv-conversion`"],
+    // Caption generation is a Local-only administrative job, never a shared Source action.
+    "detail/preplay-selection.js":["`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`","`/files/${fileId}/subtitles/search?language=${encodeURIComponent(language)}`","`/files/${fileId}/subtitles/download`","`/api/v1/files/${exactWireId(file)}/content`","`/files/${id}/dv-conversion`"],
     // Continuous enrollment is Local-only; the real Start guard is exercised below.
     "player/continuous-quality.js":["`/files/${fileId}/hls/continuous-candidates`","`/files/${fileId}/hls/continuous-sessions`"],
   };
@@ -432,4 +433,25 @@ test("episode preparation ignores the unbound player after an early startup fail
   vm.runInContext(source+shippedFunction("player/autoplay-next.js","prepareNextEpisodeIfNearEnd")+
     '\nthis.tick=prepareNextEpisodeIfNearEnd;',ctx);
   assert.doesNotThrow(()=>ctx.tick({fileId:null,started:false},{paused:true}));
+});
+
+test("folded subtitle availability includes the selected generated track",()=>{
+  const ctx=vm.createContext({
+    watchFolds:()=>({subs:false}),esc:value=>String(value),langName:value=>value,
+    watchFoldButton:()=>'<button class="watch-fold"></button>',
+  });
+  vm.runInContext(shippedFunction("detail/watch-browser.js","watchTrackRow")+
+    '\nthis.row=watchTrackRow;',ctx);
+  const generated={index:0,language:"English",title:"Machine transcription (whisper.cpp)"};
+  const label=(track,on)=>`<span class="trk${on?" on":""}">${track.title}</span>`;
+  const off=on=>`<span class="trk${on?" on":""}">Off</span>`;
+  for(const selected of [0,-1]){
+    const html=ctx.row("subs",[generated],selected,label,off);
+    assert.match(html,/<b>1<\/b> available/);
+    assert.doesNotMatch(html,/<b>0<\/b> available/);
+  }
+  const another={index:1,language:"French",title:"French"};
+  const html=ctx.row("subs",[generated,another],0,label,off);
+  assert.match(html,/trk on[^]*?Machine transcription/);
+  assert.match(html,/<b>2<\/b> available · French/);
 });

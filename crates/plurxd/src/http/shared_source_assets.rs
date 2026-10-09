@@ -30,6 +30,7 @@ use std::sync::{Arc, LazyLock};
 /// The complete expected Source file identity travels in this one bounded
 /// request header; the path names only the file-relative resource.
 pub(crate) const REFERENCE_HEADER: &str = "cinemashare-reference";
+pub(crate) const SUBTITLE_REVISION_HEADER: &str = "cinemashare-subtitle-revision";
 pub(crate) const MAX_REFERENCE_BYTES: usize = 1024;
 /// Peer asset reads in flight on this Source. A refusal is a 429 the receiver
 /// reports as capacity; nothing queues behind it.
@@ -95,7 +96,21 @@ async fn subtitle(
     headers: HeaderMap,
     Path((item, file, subtitle)): Path<(String, String, String)>,
 ) -> Result<Response, ApiError> {
-    serve(&state, &headers, &item, &file, &format!("subs/{subtitle}")).await
+    let mut values = headers.get_all(SUBTITLE_REVISION_HEADER).iter();
+    let revision = match (values.next(), values.next()) {
+        (None, None) => None,
+        (Some(value), None) if value.len() <= 192 => Some(value.to_str().map_err(|_| invalid())?),
+        _ => return Err(invalid()),
+    };
+    serve_with_revision(
+        &state,
+        &headers,
+        &item,
+        &file,
+        &format!("subs/{subtitle}"),
+        revision,
+    )
+    .await
 }
 async fn overlay_manifest(
     State(state): State<AppState>,
@@ -150,6 +165,17 @@ pub(super) async fn serve(
     file: &str,
     suffix: &str,
 ) -> Result<Response, ApiError> {
+    serve_with_revision(state, headers, item, file, suffix, None).await
+}
+
+async fn serve_with_revision(
+    state: &AppState,
+    headers: &HeaderMap,
+    item: &str,
+    file: &str,
+    suffix: &str,
+    revision: Option<&str>,
+) -> Result<Response, ApiError> {
     let resource = SharingFileResource::parse(suffix).map_err(|_| invalid())?;
     let target = reference(headers)?;
     if SourceId::parse(item).map_err(|_| invalid())? != target.item_id
@@ -177,7 +203,7 @@ pub(super) async fn serve(
         .ok_or_else(unavailable)?;
     let mut response = match resource.kind() {
         SharingFileResourceKind::Subtitle { index } => {
-            stream::subtitle_vtt_for_file(state, &media, index.into()).await?
+            stream::subtitle_vtt_for_file_revision(state, &media, index.into(), revision).await?
         }
         SharingFileResourceKind::SubtitleManifest { index } => {
             pgs_overlay::manifest_for_file(state, &media, index.into()).await?

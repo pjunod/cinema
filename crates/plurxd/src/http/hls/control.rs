@@ -257,7 +257,7 @@ async fn subtitle_track_cache(
     selection: &crate::playback_control::SubtitleSelection,
     request: &crate::playback_control::ControlRequestV1,
     window_seconds: i64,
-) -> Option<crate::playback_control::SubtitleTrackCache> {
+) -> Option<(crate::playback_control::SubtitleTrackCache, Option<String>)> {
     use crate::playback_control::{SubtitleMode, SubtitleTrackCache};
 
     if !matches!(selection.mode, SubtitleMode::Native) {
@@ -272,34 +272,33 @@ async fn subtitle_track_cache(
         .ok()
         .and_then(|i| file.subtitle_streams.get(i))
     else {
-        return Some(SubtitleTrackCache::Unavailable);
+        return Some((SubtitleTrackCache::Unavailable, None));
     };
     if !plurx_core::tracks::is_native_text_subtitle(&track.codec) {
-        return Some(SubtitleTrackCache::Unavailable);
+        return Some((SubtitleTrackCache::Unavailable, None));
     }
     // Control positions are already absolute film time. The segment path gets
     // the same value by adding its item-local segment start to
     // `media_origin_seconds`; snapping both through the shared grid is what
     // prevents readiness from reporting on a window the segment will not use.
     let demand_seconds = request.seek_target_ms.unwrap_or(request.position_ms).max(0) / 1_000;
-    Some(
-        match crate::subtitles::sidecar_state_for_demand_with_store(
-            &state.subs_dir,
-            &file,
-            index,
-            demand_seconds,
-            window_seconds,
-            &state.subtitle_source_access(),
-        )
-        .await
-        {
-            crate::subtitles::SidecarState::Ready => SubtitleTrackCache::Ready,
-            crate::subtitles::SidecarState::Failed => SubtitleTrackCache::Unavailable,
-            crate::subtitles::SidecarState::Warming | crate::subtitles::SidecarState::Absent => {
-                SubtitleTrackCache::Warming
-            }
-        },
+    let (state, revision) = crate::subtitles::readiness_revision_with_store(
+        &state.subs_dir,
+        &file,
+        index,
+        demand_seconds,
+        window_seconds,
+        &state.subtitle_source_access(),
     )
+    .await;
+    let cache = match state {
+        crate::subtitles::SidecarState::Ready => SubtitleTrackCache::Ready,
+        crate::subtitles::SidecarState::Failed => SubtitleTrackCache::Unavailable,
+        crate::subtitles::SidecarState::Warming | crate::subtitles::SidecarState::Absent => {
+            SubtitleTrackCache::Warming
+        }
+    };
+    Some((cache, revision))
 }
 
 fn local_control_response(
@@ -2921,15 +2920,16 @@ async fn control_local_with_observation(
         }
     } else {
         let subtitle_window_seconds = state.subtitle_window_seconds().await;
-        let subtitle_cache = subtitle_track_cache(
+        let (subtitle_cache, subtitle_revision) = subtitle_track_cache(
             state,
             &recipe,
             &request.selection.subtitle,
             &request,
             subtitle_window_seconds,
         )
-        .await;
-        local_control_response(
+        .await
+        .map_or((None, None), |(cache, revision)| (Some(cache), revision));
+        let mut response = local_control_response(
             route,
             &start,
             &recipe,
@@ -2940,7 +2940,9 @@ async fn control_local_with_observation(
                 &request.selection.subtitle,
                 subtitle_cache,
             ),
-        )
+        );
+        response.delivery.subtitle_revision = subtitle_revision;
+        response
     };
     // The ask becomes durable before this exchange is reported accepted.
     //

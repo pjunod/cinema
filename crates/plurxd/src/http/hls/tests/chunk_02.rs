@@ -1922,69 +1922,32 @@ mod seek_coalescing {
         crate::subtitles::release_session_window(timeout_session).await;
     }
 
-    /// An empty segment says "there are no cues here". While a sidecar is
-    /// warming that is true; once its extraction has failed it is a lie, and
-    /// the player keeps the bytes whatever `no-store` says.
-    ///
-    /// Off by default, because whether each engine keeps its picture through
-    /// a subtitle refusal is a device measurement nobody has taken — so the
-    /// shipped answer is still the empty segment, and the switch is what an
-    /// operator who *has* taken it turns on.
+    /// A terminal caption failure must not become a media transport failure.
+    /// A retired experimental setting cannot make AVPlayer lose the picture.
     #[tokio::test]
-    async fn a_failed_subtitle_extraction_is_refused_only_when_the_operator_asked() {
+    async fn a_failed_subtitle_extraction_keeps_video_transport_nonblocking() {
         let dir = crate::test_tempdir().expect("session directory");
         let memo_session = &uuid::Uuid::new_v4().to_string();
         let (fixture, file) = cold_windowed_fixture(dir.path(), memo_session).await;
         let source = Arc::new(WindowFixtureSubtitleSource::counting());
-
         crate::subtitles::remember_whole_track_failure_for_test(
-            &fixture.state.subs_dir,
-            &file,
-            0,
-            "the source could not be read",
+            &fixture.state.subs_dir, &file, 0, "the source could not be read",
             Duration::from_secs(90),
-        )
-        .await;
-
-        let default_off = subtitle_segment(&fixture.state, memo_session, 1, source.as_ref()).await;
-        assert_eq!(
-            default_off.status(),
-            StatusCode::OK,
-            "the shipped default keeps the empty segment"
-        );
-        assert_eq!(
-            default_off
-                .into_body()
-                .collect()
-                .await
-                .expect("empty body")
-                .to_bytes()
-                .as_ref(),
-            b"WEBVTT\n\n"
-        );
-
-        fixture
-            .store
-            .put_setting(plurx_core::store::keys::SUBTITLE_NOT_READY_503, "1")
-            .await
-            .expect("the operator turns the refusal on");
-
-        let refused = subtitle_segment(&fixture.state, memo_session, 2, source.as_ref()).await;
-        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let retry_after = refused
-            .headers()
-            .get(header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .expect("a refusal says when a retry could achieve anything");
-        assert!(
-            (80..=90).contains(&retry_after),
-            "Retry-After is the memo's own remaining time, not a constant: got {retry_after}"
-        );
+        ).await;
+        fixture.store.put_setting("playback.subtitle_not_ready_503", "1")
+            .await.expect("retained historical choice");
+        let response = subtitle_segment(&fixture.state, memo_session, 1, source.as_ref()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        assert_eq!(response.into_body().collect().await.expect("empty body")
+            .to_bytes().as_ref(), b"WEBVTT\n\n");
+        assert_eq!(crate::subtitles::sidecar_state(&fixture.state.subs_dir, &file, 0).await,
+            crate::subtitles::SidecarState::Failed,
+            "transport success must not erase the failure observed by control");
         crate::subtitles::release_session_window(memo_session).await;
-        crate::subtitles::forget_whole_track_failure_for_test(&fixture.state.subs_dir, &file, 0)
-            .await;
+        crate::subtitles::forget_whole_track_failure_for_test(&fixture.state.subs_dir, &file, 0).await;
     }
+
 }
 
 #[tokio::test]
