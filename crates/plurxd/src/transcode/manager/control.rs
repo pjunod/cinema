@@ -6,6 +6,12 @@ use super::*;
 pub(crate) use crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
 
 impl TranscodeManager {
+    pub(crate) async fn preparation_storage_diagnostics(
+        &self,
+    ) -> crate::vodserve::preparation_storage::StorageDiagnostics {
+        self.vod.preparation_storage_diagnostics().await
+    }
+
     /// Exact passive-grant presence on this node's VOD registry.
     pub(crate) async fn passive_presence(
         &self,
