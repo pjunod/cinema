@@ -265,3 +265,69 @@ def test_fftw_float_pkgconfig_is_generated_by_its_upstream_make_target():
     assert generator["commands"][1] == {"cwd": "source", "argv": ["make", "-j{jobs}", "fftw3f.pc"]}
     assert generator["outputs"]["lib/pkgconfig/fftw3f.pc"] == {"root": "source", "path": "fftw3f.pc"}
     assert "--enable-threads" in generator["commands"][0]["argv"]
+
+
+def test_normalized_source_tree_preserves_bytes_executability_and_link_targets():
+    module = helper()
+    def archive(prefix, execute=True, link="main.py"):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as output:
+            path = (prefix + "/" if prefix else "")
+            row = tarfile.TarInfo(path + "main.py")
+            row.mode = 0o755 if execute else 0o644
+            contents = b"source"
+            row.size = len(contents)
+            output.addfile(row, io.BytesIO(contents))
+            row = tarfile.TarInfo(path + "link")
+            row.type = tarfile.SYMTYPE
+            row.linkname = link
+            row.mode = 0o777
+            output.addfile(row)
+        return buffer.getvalue()
+    original = module.normalized_source_tree(archive(""), ".")
+    assert original == module.normalized_source_tree(archive("provider-prefix"), "provider-prefix")
+    assert original != module.normalized_source_tree(archive("", execute=False), ".")
+    assert original != module.normalized_source_tree(archive("", link="other.py"), ".")
+
+
+def test_submodule_composition_rejects_parent_gitlink_mismatch_and_existing_bytes():
+    module = helper()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        archive = root / "module.tar"
+        with tarfile.open(archive, "w") as output:
+            for name, contents in {"dlg/LICENSE": b"Original license", "dlg/src/dlg/dlg.c": b"original source"}.items():
+                row = tarfile.TarInfo(name)
+                row.size = len(contents)
+                output.addfile(row, io.BytesIO(contents))
+        tree = {"tree": [{"path": "subprojects/dlg", "mode": "160000", "type": "commit", "sha": "b" * 40}], "truncated": False}
+        proof = root / "tree.json"
+        proof.write_text(json.dumps(tree))
+        child = {"path": "subprojects/dlg", "repository_url": "https://github.com/nyorain/dlg.git", "url": "https://codeload.github.com/nyorain/dlg/tar.gz/" + "b" * 40, "commit": "b" * 40, "archive": archive.name, "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "source_root": "dlg", "license_members": ["dlg/LICENSE"]}
+        row = {"commit": "a" * 40, "generator": {"source_root": "."}, "submodules": [child], "submodule_tree_evidence": {"archive": proof.name, "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(), "parent_commit": "a" * 40, "url": "https://api.github.com/repos/freetype/freetype/git/trees/" + "a" * 40 + "?recursive=1"}}
+        parent = {".gitmodules": b'[submodule "dlg"]\n path = subprojects/dlg\n url = https://github.com/nyorain/dlg.git\n'}
+        offer = root / "offer"
+        records = module.stage_submodules(row, parent, offer, root)
+        project = root / "project"
+        project.mkdir()
+        module.compose_submodules(offer, project, root / "work", records)
+        assert (project / "subprojects/dlg/src/dlg/dlg.c").read_bytes() == b"original source"
+        assert not (project / ".git").exists()
+        with unittest.TestCase().assertRaisesRegex(ValueError, "existing parent bytes"):
+            module.compose_submodules(offer, project, root / "second-work", records)
+        child["commit"] = "c" * 40
+        with unittest.TestCase().assertRaisesRegex(ValueError, "parent gitlink"):
+            module.stage_submodules(row, parent, root / "mismatch", root)
+
+
+def test_cold_source_urls_are_downloadable_archives_and_required_submodules_are_pinned():
+    root = Path(__file__).resolve().parents[2]
+    lock = json.loads((root / "scripts/linux-video-ffmpeg-sdk-sources.json").read_text())
+    for row in lock["sources"].values():
+        assert not row["url"].endswith(".git")
+        if row.get("historical_archive_equivalence"):
+            assert row["source_tree_sha256"] == row["historical_archive_equivalence"]["normalized_tree_sha256"]
+    assert {module["path"] for module in lock["sources"]["freetype"]["submodules"]} == {"subprojects/dlg"}
+    placebo = lock["sources"]["libplacebo"]
+    assert {module["path"] for module in placebo["submodules"]} == {"3rdparty/glad", "3rdparty/jinja", "3rdparty/markupsafe", "3rdparty/fast_float", "3rdparty/Vulkan-Headers"}
+    assert all("nuklear" not in module["path"] for module in placebo["submodules"])

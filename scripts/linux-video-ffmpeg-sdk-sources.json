@@ -1220,6 +1220,90 @@
           "after_sha256": "54b1dcf00bdd800a95b3c7a9e02f65e4291a400cce647419f6202f72a1453700",
           "recipe_line": "sed -i 's/env: python_env,//g' libplacebo/src/vulkan/meson.build"
         }
+      ],
+      "submodule_tree_evidence": {
+        "archive": "libplacebo-pinned-git-tree.json",
+        "sha256": "7d96c20c729484c16b788cfd9185a37a1c16464a8dd46f6647d09135eca25b26",
+        "url": "https://api.github.com/repos/haasn/libplacebo/git/trees/cee9b076f2c63104ccfd497fa79c39a867293ec4?recursive=1",
+        "parent_commit": "cee9b076f2c63104ccfd497fa79c39a867293ec4"
+      },
+      "submodules": [
+        {
+          "path": "3rdparty/glad",
+          "url": "https://codeload.github.com/Dav1dde/glad/tar.gz/73db193f853e2ee079bf3ca8a64aa2eaf6459043",
+          "repository_url": "https://github.com/Dav1dde/glad.git",
+          "commit": "73db193f853e2ee079bf3ca8a64aa2eaf6459043",
+          "archive": "glad-73db193f853e2ee079bf3ca8a64aa2eaf6459043.tar.gz",
+          "archive_sha256": "33dbeae44d8315ece57e14eba4b1b4a02ac5406d1c4f49cd20048c91522a6b9a",
+          "archive_bytes": 645779,
+          "source_root": "glad-73db193f853e2ee079bf3ca8a64aa2eaf6459043",
+          "license_members": [
+            "glad-73db193f853e2ee079bf3ca8a64aa2eaf6459043/LICENSE"
+          ]
+        },
+        {
+          "path": "3rdparty/jinja",
+          "url": "https://codeload.github.com/pallets/jinja/tar.gz/15206881c006c79667fe5154fe80c01c65410679",
+          "repository_url": "https://github.com/pallets/jinja.git",
+          "commit": "15206881c006c79667fe5154fe80c01c65410679",
+          "archive": "jinja-15206881c006c79667fe5154fe80c01c65410679.tar.gz",
+          "archive_sha256": "b88a20dcc2e34072fcf4159325bc6c34cd4b29a81a8b83d15d2f28ba561da296",
+          "archive_bytes": 276954,
+          "source_root": "jinja-15206881c006c79667fe5154fe80c01c65410679",
+          "license_members": [
+            "jinja-15206881c006c79667fe5154fe80c01c65410679/LICENSE.txt",
+            "jinja-15206881c006c79667fe5154fe80c01c65410679/docs/license.rst"
+          ]
+        },
+        {
+          "path": "3rdparty/markupsafe",
+          "url": "https://codeload.github.com/pallets/markupsafe/tar.gz/297fc8e356e6836a62087949245d09a28e9f1b13",
+          "repository_url": "https://github.com/pallets/markupsafe.git",
+          "commit": "297fc8e356e6836a62087949245d09a28e9f1b13",
+          "archive": "markupsafe-297fc8e356e6836a62087949245d09a28e9f1b13.tar.gz",
+          "archive_sha256": "da7c010c9c81a66ac73036558c1fcb6212b50482f43211cd1254035b94f82414",
+          "archive_bytes": 83817,
+          "source_root": "markupsafe-297fc8e356e6836a62087949245d09a28e9f1b13",
+          "license_members": [
+            "markupsafe-297fc8e356e6836a62087949245d09a28e9f1b13/LICENSE.txt",
+            "markupsafe-297fc8e356e6836a62087949245d09a28e9f1b13/docs/license.rst"
+          ]
+        },
+        {
+          "path": "3rdparty/fast_float",
+          "url": "https://codeload.github.com/fastfloat/fast_float/tar.gz/97b54ca9e75f5303507699d27c6b4f4efe4641a1",
+          "repository_url": "https://github.com/fastfloat/fast_float.git",
+          "commit": "97b54ca9e75f5303507699d27c6b4f4efe4641a1",
+          "archive": "fast_float-97b54ca9e75f5303507699d27c6b4f4efe4641a1.tar.gz",
+          "archive_sha256": "2b132274539286e41f37857cac22aa8441d21bd86d55de825a3342b149f66801",
+          "archive_bytes": 120200,
+          "source_root": "fast_float-97b54ca9e75f5303507699d27c6b4f4efe4641a1",
+          "license_members": [
+            "fast_float-97b54ca9e75f5303507699d27c6b4f4efe4641a1/LICENSE-APACHE",
+            "fast_float-97b54ca9e75f5303507699d27c6b4f4efe4641a1/LICENSE-BOOST",
+            "fast_float-97b54ca9e75f5303507699d27c6b4f4efe4641a1/LICENSE-MIT"
+          ]
+        },
+        {
+          "path": "3rdparty/Vulkan-Headers",
+          "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/450bd2232225d6c7728a4108055ac2e37cef6475",
+          "repository_url": "https://github.com/KhronosGroup/Vulkan-Headers.git",
+          "commit": "450bd2232225d6c7728a4108055ac2e37cef6475",
+          "archive": "Vulkan-Headers-450bd2232225d6c7728a4108055ac2e37cef6475.tar.gz",
+          "archive_sha256": "26df9841c30806a994e2fdf42f7c87bcb1ced9db9a06033469123939fb3fa075",
+          "archive_bytes": 2940820,
+          "source_root": "Vulkan-Headers-450bd2232225d6c7728a4108055ac2e37cef6475",
+          "license_members": [
+            "Vulkan-Headers-450bd2232225d6c7728a4108055ac2e37cef6475/LICENSE.md",
+            "Vulkan-Headers-450bd2232225d6c7728a4108055ac2e37cef6475/LICENSES/Apache-2.0.txt",
+            "Vulkan-Headers-450bd2232225d6c7728a4108055ac2e37cef6475/LICENSES/MIT.txt"
+          ]
+        }
+      ],
+      "python_source_paths": [
+        "3rdparty/jinja/src",
+        "3rdparty/markupsafe/src",
+        "3rdparty/glad"
       ]
     },
     "libvpl": {
@@ -2394,13 +2478,13 @@
     },
     "ass": {
       "kind": "git",
-      "url": "https://github.com/libass/libass.git",
+      "url": "https://codeload.github.com/libass/libass/legacy.tar.gz/4a05d8127f525943ebf45fdc6497c9e665947f0d",
       "ref": "0.17.5",
       "commit": "4a05d8127f525943ebf45fdc6497c9e665947f0d",
-      "archive": "ass-4a05d8127f525943ebf45fdc6497c9e665947f0d.tar.gz",
-      "archive_sha256": "6b521f8be88dc13034b56f42a0b5a6dbb5854999318eaf1b9a60db3ccde60779",
+      "archive": "ass-canonical-4a05d8127f525943ebf45fdc6497c9e665947f0d.tar.gz",
+      "archive_sha256": "17a6ccf21dd5d58e0655b94853fca28f7e10e496d54c8c06ba094fa1b674f300",
       "license_members": [
-        "COPYING"
+        "libass-libass-4a05d81/COPYING"
       ],
       "configure_flags": [
         "--enable-libass"
@@ -2411,16 +2495,16 @@
       },
       "files": {
         "include/ass/ass.h": {
-          "member": "libass/ass.h",
+          "member": "libass-libass-4a05d81/libass/ass.h",
           "sha256": "04582aa925d4ed2d1206f21915d382584e8b49c50a6b88419d4112f4f88d24da"
         },
         "include/ass/ass_types.h": {
-          "member": "libass/ass_types.h",
+          "member": "libass-libass-4a05d81/libass/ass_types.h",
           "sha256": "b3ac4ad4d655f4d90e5e8d05cc2868ce17e5ff89ef1fe76cabcc8f3093e6134b"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "libass-libass-4a05d81",
         "commands": [
           {
             "cwd": "source",
@@ -2462,7 +2546,15 @@
           "libunibreak"
         ]
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "repository_url": "https://github.com/libass/libass.git",
+      "source_tree_sha256": "3ff7a4fdccf9fad7267fc8907d10ce5e32679c6b5af0f3412932e6e80aa3aae1",
+      "historical_archive_equivalence": {
+        "archive_sha256": "6b521f8be88dc13034b56f42a0b5a6dbb5854999318eaf1b9a60db3ccde60779",
+        "normalized_tree_sha256": "3ff7a4fdccf9fad7267fc8907d10ce5e32679c6b5af0f3412932e6e80aa3aae1",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 136
+      }
     },
     "fc": {
       "kind": "git",
@@ -2528,13 +2620,13 @@
     },
     "fribidi": {
       "kind": "git",
-      "url": "https://github.com/fribidi/fribidi.git",
+      "url": "https://codeload.github.com/fribidi/fribidi/legacy.tar.gz/5c85a174650ab8ef106ce85f13bcf2950d3fc65f",
       "ref": "v1.0.16",
       "commit": "5c85a174650ab8ef106ce85f13bcf2950d3fc65f",
-      "archive": "fribidi-5c85a174650ab8ef106ce85f13bcf2950d3fc65f.tar.gz",
-      "archive_sha256": "9d5aa93f0b69eefe31437b7b20e9604accc5db7193ec0a66f931200c895ce711",
+      "archive": "fribidi-canonical-5c85a174650ab8ef106ce85f13bcf2950d3fc65f.tar.gz",
+      "archive_sha256": "f1a7c47bc3f45e064287015904aef12a6bfe46cadc31153a2de4f709089a15de",
       "license_members": [
-        "COPYING"
+        "fribidi-fribidi-5c85a17/COPYING"
       ],
       "configure_flags": [
         "--enable-libfribidi"
@@ -2545,112 +2637,112 @@
       },
       "files": {
         "include/fribidi/fribidi-arabic.h": {
-          "member": "lib/fribidi-arabic.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-arabic.h",
           "sha256": "f4c5231a027536077ff577aa375e95f93ccd3275fd31a1951244ec449d4fd7cb"
         },
         "include/fribidi/fribidi-begindecls.h": {
-          "member": "lib/fribidi-begindecls.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-begindecls.h",
           "sha256": "7a8cd3e05e46dee19f658d67e485fca4acd06b96b4773bbf4607530564f3117f"
         },
         "include/fribidi/fribidi-bidi-types-list.h": {
-          "member": "lib/fribidi-bidi-types-list.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-bidi-types-list.h",
           "sha256": "f8bbfd157de60bd62b2f565488c22630dda9315e50af7002856de557c0a1daa3"
         },
         "include/fribidi/fribidi-bidi-types.h": {
-          "member": "lib/fribidi-bidi-types.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-bidi-types.h",
           "sha256": "693930457d718570f795fb0a02d3aa85188dc702e62f9707dc44a28ab5d2b260"
         },
         "include/fribidi/fribidi-bidi.h": {
-          "member": "lib/fribidi-bidi.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-bidi.h",
           "sha256": "819ec96d0a479a8516260b1a3b3993a244214ad6c0586d304249a691e1b5b274"
         },
         "include/fribidi/fribidi-brackets.h": {
-          "member": "lib/fribidi-brackets.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-brackets.h",
           "sha256": "f5a32f2ac8c0cdc445f82b9d81f6a5b4ae103ca65e03838eb09453b5185988d1"
         },
         "include/fribidi/fribidi-char-sets-cap-rtl.h": {
-          "member": "lib/fribidi-char-sets-cap-rtl.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-char-sets-cap-rtl.h",
           "sha256": "bd25adf8f55c63fb49518e2215301135f787d78d9c19e9dc9a395df7eb0ad231"
         },
         "include/fribidi/fribidi-char-sets-cp1255.h": {
-          "member": "lib/fribidi-char-sets-cp1255.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-char-sets-cp1255.h",
           "sha256": "a9a15bba6fe9de247a9ee92e4d8cf45f7e28fb99e3b2981dec1e803be79c44a1"
         },
         "include/fribidi/fribidi-char-sets-cp1256.h": {
-          "member": "lib/fribidi-char-sets-cp1256.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-char-sets-cp1256.h",
           "sha256": "04cfd262ef6a20ad048eb9fdea340928afa1f9c69703746998a8b03c7f56847f"
         },
         "include/fribidi/fribidi-char-sets-iso8859-6.h": {
-          "member": "lib/fribidi-char-sets-iso8859-6.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-char-sets-iso8859-6.h",
           "sha256": "88d7140e53ff20c41722ef25c83d0d66aa4e7894b6f39f26b5eb6fd462e4332b"
         },
         "include/fribidi/fribidi-char-sets-iso8859-8.h": {
-          "member": "lib/fribidi-char-sets-iso8859-8.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-char-sets-iso8859-8.h",
           "sha256": "c4295d8ae4e098b306cf68d2c2004e322a211c2c6f1edf3387314c25f3a5627d"
         },
         "include/fribidi/fribidi-char-sets-list.h": {
-          "member": "lib/fribidi-char-sets-list.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-char-sets-list.h",
           "sha256": "93aec7f29320d82933f5a4f18bf5bed4a4be8bb9a16cc0b7ad6452f4647840ef"
         },
         "include/fribidi/fribidi-char-sets-utf8.h": {
-          "member": "lib/fribidi-char-sets-utf8.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-char-sets-utf8.h",
           "sha256": "59f201f0e77ecbf04c75ab0e52172c81ac8812bc274932ccb0346d94d6de5f3c"
         },
         "include/fribidi/fribidi-char-sets.h": {
-          "member": "lib/fribidi-char-sets.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-char-sets.h",
           "sha256": "bb3b0fea74d9e4d456a1241cc63a557365260180b8382bb622891df3c164647c"
         },
         "include/fribidi/fribidi-common.h": {
-          "member": "lib/fribidi-common.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-common.h",
           "sha256": "7e0f4a124344941c40a3c3244ff30d0e9df8968b6287fc1f3a7a6495c7093e7b"
         },
         "include/fribidi/fribidi-deprecated.h": {
-          "member": "lib/fribidi-deprecated.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-deprecated.h",
           "sha256": "8839fbc0faaa654dc2f166862962d74ec2c29932373eed1e35809b35eaa352f3"
         },
         "include/fribidi/fribidi-enddecls.h": {
-          "member": "lib/fribidi-enddecls.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-enddecls.h",
           "sha256": "5d140c2e49a3d4d0b5d9519df860e56ebeabbbf991fec37bde9ce7d868d12236"
         },
         "include/fribidi/fribidi-flags.h": {
-          "member": "lib/fribidi-flags.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-flags.h",
           "sha256": "819bf2e462e20a3f79a9f959be173550aa609f12eeecbf62e87109b8034dfb20"
         },
         "include/fribidi/fribidi-joining-types-list.h": {
-          "member": "lib/fribidi-joining-types-list.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-joining-types-list.h",
           "sha256": "00b499c280d1331d802c5c778b66d4c2f80fb894c94dbdcb162c05fe8cfe4f8e"
         },
         "include/fribidi/fribidi-joining-types.h": {
-          "member": "lib/fribidi-joining-types.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-joining-types.h",
           "sha256": "f4703cad6845a1e4c11702999716b1667ad6e268ecfa64f91585d739e2ffd913"
         },
         "include/fribidi/fribidi-joining.h": {
-          "member": "lib/fribidi-joining.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-joining.h",
           "sha256": "c9bbe87f5c5ce2ce99cd8568a0a79fc715c216de9f677973e711a798085099a1"
         },
         "include/fribidi/fribidi-mirroring.h": {
-          "member": "lib/fribidi-mirroring.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-mirroring.h",
           "sha256": "cc531e106e7b42748a997459464c8a08cc38cef4273d41afdbf2aa1bc36393f3"
         },
         "include/fribidi/fribidi-shape.h": {
-          "member": "lib/fribidi-shape.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-shape.h",
           "sha256": "4c57bf3ed59c8f425990ca5df1a696a98f87075db00e0f1b6c99b8de0c2588d7"
         },
         "include/fribidi/fribidi-types.h": {
-          "member": "lib/fribidi-types.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-types.h",
           "sha256": "c959bf5f15c0fc405205136cc0ed9c03aa63a9fc285696444dc594b0d6f4845f"
         },
         "include/fribidi/fribidi-unicode.h": {
-          "member": "lib/fribidi-unicode.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi-unicode.h",
           "sha256": "21ee4bf3f7a6dd19e5b35566cdf10a2cdf22b52d01aa3fe467d2da8f11cec2fe"
         },
         "include/fribidi/fribidi.h": {
-          "member": "lib/fribidi.h",
+          "member": "fribidi-fribidi-5c85a17/lib/fribidi.h",
           "sha256": "a3c26eda78b6563361253a094f2a7f5b725ed2bd7c6a8dfaa65883cf174ee18b"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "fribidi-fribidi-5c85a17",
         "commands": [
           {
             "cwd": "build",
@@ -2786,19 +2878,27 @@
         },
         "depends_on": []
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "repository_url": "https://github.com/fribidi/fribidi.git",
+      "source_tree_sha256": "6c62ee0c2f50db5dfc14ae88e416491e20f19ceefdf681e6823e180bb6ff969b",
+      "historical_archive_equivalence": {
+        "archive_sha256": "9d5aa93f0b69eefe31437b7b20e9604accc5db7193ec0a66f931200c895ce711",
+        "normalized_tree_sha256": "6c62ee0c2f50db5dfc14ae88e416491e20f19ceefdf681e6823e180bb6ff969b",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 135
+      }
     },
     "freetype": {
       "kind": "git",
-      "url": "https://github.com/freetype/freetype.git",
+      "url": "https://codeload.github.com/freetype/freetype/legacy.tar.gz/1803559c4ee407d0bcbf2a67dbe96690cee869d2",
       "ref": "VER-2-14-3",
       "commit": "1803559c4ee407d0bcbf2a67dbe96690cee869d2",
-      "archive": "freetype-1803559c4ee407d0bcbf2a67dbe96690cee869d2.tar.gz",
-      "archive_sha256": "d9bc9ca3703c3196a11ed487a7964fd3e0902ba47da52d42d62426038c1dc255",
+      "archive": "freetype-canonical-1803559c4ee407d0bcbf2a67dbe96690cee869d2.tar.gz",
+      "archive_sha256": "67405052a1e0dd13f615eab698fc838c54e1ab484c0092ff95c5a9b9f5300a86",
       "license_members": [
-        "LICENSE.TXT",
-        "docs/FTL.TXT",
-        "docs/GPLv2.TXT"
+        "freetype-freetype-1803559/LICENSE.TXT",
+        "freetype-freetype-1803559/docs/FTL.TXT",
+        "freetype-freetype-1803559/docs/GPLv2.TXT"
       ],
       "configure_flags": [
         "--enable-libfreetype"
@@ -2809,404 +2909,404 @@
       },
       "files": {
         "include/freetype2/freetype/config/ftheader.h": {
-          "member": "include/freetype/config/ftheader.h",
+          "member": "freetype-freetype-1803559/include/freetype/config/ftheader.h",
           "sha256": "0b099b85a787ef6a20774dad096bb74e6cbb89e244f198baad8b135709123d0b"
         },
         "include/freetype2/freetype/config/ftmodule.h": {
-          "member": "include/freetype/config/ftmodule.h",
+          "member": "freetype-freetype-1803559/include/freetype/config/ftmodule.h",
           "sha256": "f695657e4a8b02427296414d144d9dafc5b073538718d5e0c4290ba9d318c579"
         },
         "include/freetype2/freetype/config/ftoption.h": {
-          "member": "include/freetype/config/ftoption.h",
+          "member": "freetype-freetype-1803559/include/freetype/config/ftoption.h",
           "sha256": "82319cf01360be4a2d5c4cf9dd2d803ad4fa66a371990a83967449f6f23078c4"
         },
         "include/freetype2/freetype/config/ftstdlib.h": {
-          "member": "include/freetype/config/ftstdlib.h",
+          "member": "freetype-freetype-1803559/include/freetype/config/ftstdlib.h",
           "sha256": "de81744697b6f9f7fe3a49ca320f2a7ea8f2ae905bb96ff161b5b2d1eed25fe2"
         },
         "include/freetype2/freetype/config/integer-types.h": {
-          "member": "include/freetype/config/integer-types.h",
+          "member": "freetype-freetype-1803559/include/freetype/config/integer-types.h",
           "sha256": "0aeaf74f638d1584ccae37f580076a7ac24ef89049749839c3c90dcdda148d5b"
         },
         "include/freetype2/freetype/config/mac-support.h": {
-          "member": "include/freetype/config/mac-support.h",
+          "member": "freetype-freetype-1803559/include/freetype/config/mac-support.h",
           "sha256": "be37d3886a1a1ab1bcf894259d6a50d90b5fc71e3284b12e818c57710a9c945d"
         },
         "include/freetype2/freetype/config/public-macros.h": {
-          "member": "include/freetype/config/public-macros.h",
+          "member": "freetype-freetype-1803559/include/freetype/config/public-macros.h",
           "sha256": "7557630cb407f98fbc003300c507ae444b0f7449cab99d80c13f5c343710d06e"
         },
         "include/freetype2/freetype/freetype.h": {
-          "member": "include/freetype/freetype.h",
+          "member": "freetype-freetype-1803559/include/freetype/freetype.h",
           "sha256": "fd45e7ee01c8f0f2419186d3fc9dd58e25cd866ef0c49f0b347c2d141665a364"
         },
         "include/freetype2/freetype/ftadvanc.h": {
-          "member": "include/freetype/ftadvanc.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftadvanc.h",
           "sha256": "6f0c22af9c16eb0459736db8c60e27269db6b774addd196a845e417c851d3813"
         },
         "include/freetype2/freetype/ftbbox.h": {
-          "member": "include/freetype/ftbbox.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftbbox.h",
           "sha256": "4389ec87328ba568415fe4919b9399ff38fa766956b0940e494fbccd1427a6da"
         },
         "include/freetype2/freetype/ftbdf.h": {
-          "member": "include/freetype/ftbdf.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftbdf.h",
           "sha256": "d394c0d427d75efbb04ee06d55e2793bfab969d6ca94dba9f743707b109adbcd"
         },
         "include/freetype2/freetype/ftbitmap.h": {
-          "member": "include/freetype/ftbitmap.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftbitmap.h",
           "sha256": "92b63e93b151d96fd985cfaba4ec60e47204bbc922f3bee82412ae2fc426fb03"
         },
         "include/freetype2/freetype/ftbzip2.h": {
-          "member": "include/freetype/ftbzip2.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftbzip2.h",
           "sha256": "be324bc70ad4b355d7a2ae78a540019db17146a140cdcc59676079afc174ca38"
         },
         "include/freetype2/freetype/ftcache.h": {
-          "member": "include/freetype/ftcache.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftcache.h",
           "sha256": "ba20c0391cc39373474ce3d57adb65559e3954d413d98c2100d77d40bf82bf07"
         },
         "include/freetype2/freetype/ftchapters.h": {
-          "member": "include/freetype/ftchapters.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftchapters.h",
           "sha256": "c7d1c2ca13903fb6d0b3b37850344d805280856fb87c7597087ce2352573f752"
         },
         "include/freetype2/freetype/ftcid.h": {
-          "member": "include/freetype/ftcid.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftcid.h",
           "sha256": "e71180811abd5f87bb9c5eb058904b32c037ed29f8666e8a9b3561936b5b6ecc"
         },
         "include/freetype2/freetype/ftcolor.h": {
-          "member": "include/freetype/ftcolor.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftcolor.h",
           "sha256": "217af290dc25ceba7b77ed62bf7710e17d6396d6a20438072ab3a0685f4b2137"
         },
         "include/freetype2/freetype/ftdriver.h": {
-          "member": "include/freetype/ftdriver.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftdriver.h",
           "sha256": "459e4688340c8fc66545768e360b7fa126a4939c8de33d729181ca23572cf695"
         },
         "include/freetype2/freetype/fterrdef.h": {
-          "member": "include/freetype/fterrdef.h",
+          "member": "freetype-freetype-1803559/include/freetype/fterrdef.h",
           "sha256": "376e05cbda2fe270031ef19722c6f9d76b9c4c444ff9e0e9c97cf9e3a016111f"
         },
         "include/freetype2/freetype/fterrors.h": {
-          "member": "include/freetype/fterrors.h",
+          "member": "freetype-freetype-1803559/include/freetype/fterrors.h",
           "sha256": "a7547172143ce6309f89492b47ab0e6e69c7fb7f7caa8c81635811fd42673050"
         },
         "include/freetype2/freetype/ftfntfmt.h": {
-          "member": "include/freetype/ftfntfmt.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftfntfmt.h",
           "sha256": "54f23d9c103f0c485e837ea1a9db5f0736372b7d781d1adafb8cff6aa950d4d1"
         },
         "include/freetype2/freetype/ftgasp.h": {
-          "member": "include/freetype/ftgasp.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftgasp.h",
           "sha256": "a1453a8faeba8845c7b35bcdbbfc43afcc51bfaea89470f813e344a5c9fb06af"
         },
         "include/freetype2/freetype/ftglyph.h": {
-          "member": "include/freetype/ftglyph.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftglyph.h",
           "sha256": "79a94788388fee750f7cb1deac0c2dfe23d6a6232f29eb9bc056ca4d5a74f137"
         },
         "include/freetype2/freetype/ftgxval.h": {
-          "member": "include/freetype/ftgxval.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftgxval.h",
           "sha256": "06bb3bd9450ac2534f738849df72de6e618313a61d4b4866bc0bdf44ecefdbcf"
         },
         "include/freetype2/freetype/ftgzip.h": {
-          "member": "include/freetype/ftgzip.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftgzip.h",
           "sha256": "75f54dfef82233d9a9a1f9d4b4560a258b052784aff9859137cc232f468805df"
         },
         "include/freetype2/freetype/ftimage.h": {
-          "member": "include/freetype/ftimage.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftimage.h",
           "sha256": "30fb302298e418986d12107f856aca8f6e290cf88fe51b6186171ca21a65d824"
         },
         "include/freetype2/freetype/ftincrem.h": {
-          "member": "include/freetype/ftincrem.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftincrem.h",
           "sha256": "073a9dd3b7585989ee68540b3688a1e11bbd3498dd8210809b0869529861df05"
         },
         "include/freetype2/freetype/ftlcdfil.h": {
-          "member": "include/freetype/ftlcdfil.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftlcdfil.h",
           "sha256": "462073b97096be0c7e485d802fee6e6046f1aa36050c14f7771c31b99bab30fa"
         },
         "include/freetype2/freetype/ftlist.h": {
-          "member": "include/freetype/ftlist.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftlist.h",
           "sha256": "fea6f521193148308630725ae5de0ec736c135910704239967c541c8ab3e0cd1"
         },
         "include/freetype2/freetype/ftlogging.h": {
-          "member": "include/freetype/ftlogging.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftlogging.h",
           "sha256": "3c353c71c09de36f847cdc209f6e7d92dd92304b1d11c1d8d7300d439a24ef88"
         },
         "include/freetype2/freetype/ftlzw.h": {
-          "member": "include/freetype/ftlzw.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftlzw.h",
           "sha256": "fd8b72704427c0d8d4c6f2efdd30fdbfc55a7d1246a3c627dcb82661b324aae3"
         },
         "include/freetype2/freetype/ftmac.h": {
-          "member": "include/freetype/ftmac.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftmac.h",
           "sha256": "4203c770c57d3f09ea16e1dd6535da3a1bda62673cb9bedaacab90ac4b736bad"
         },
         "include/freetype2/freetype/ftmm.h": {
-          "member": "include/freetype/ftmm.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftmm.h",
           "sha256": "5d134d486b89d9a3dbaa54e581168be3868d04951c1ec3260542d852a14dddb1"
         },
         "include/freetype2/freetype/ftmodapi.h": {
-          "member": "include/freetype/ftmodapi.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftmodapi.h",
           "sha256": "1e526ff1f741cce96bf8d5e935bd9f1ba8db4afdd5c76f387ac54964b25d3fde"
         },
         "include/freetype2/freetype/ftmoderr.h": {
-          "member": "include/freetype/ftmoderr.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftmoderr.h",
           "sha256": "b9f667a0487217b12de1390cbf08622aae39966d1ef7c0578cfdd44d7328ddb9"
         },
         "include/freetype2/freetype/ftotval.h": {
-          "member": "include/freetype/ftotval.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftotval.h",
           "sha256": "da5bfb9e509556bfc16ce899a161ea26555cc3ff019cdcc67e6b3af3723f6361"
         },
         "include/freetype2/freetype/ftoutln.h": {
-          "member": "include/freetype/ftoutln.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftoutln.h",
           "sha256": "db0585ea338debdb9b721adc5f6d138ec7f88df30ff44cf6fb3cac79a70982f8"
         },
         "include/freetype2/freetype/ftparams.h": {
-          "member": "include/freetype/ftparams.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftparams.h",
           "sha256": "4db8f53c9b62aa5adfd2f89877a96c522198e9a780402be7aafba9fdace5f485"
         },
         "include/freetype2/freetype/ftpfr.h": {
-          "member": "include/freetype/ftpfr.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftpfr.h",
           "sha256": "dd40f7a041f345c8ae12664f52d2def53ec5dd2a49e65aba2b95bdef5b63a1d0"
         },
         "include/freetype2/freetype/ftrender.h": {
-          "member": "include/freetype/ftrender.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftrender.h",
           "sha256": "9579d3d9ff09e98ee09a49c8588d97a910c8fe698fe465a3f33965921fea77ec"
         },
         "include/freetype2/freetype/ftsizes.h": {
-          "member": "include/freetype/ftsizes.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftsizes.h",
           "sha256": "2afecd7a4dabbf89e9f76d373829b4e8e70a5c593ecccb7646e190c47a2b398e"
         },
         "include/freetype2/freetype/ftsnames.h": {
-          "member": "include/freetype/ftsnames.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftsnames.h",
           "sha256": "621faad855dfd4cc5e9a90b5a4554b706767653c5c2d41acd1b03d2e118b52dd"
         },
         "include/freetype2/freetype/ftstroke.h": {
-          "member": "include/freetype/ftstroke.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftstroke.h",
           "sha256": "ba4ed8f81ac66e9e6a2cdf772b69da02a0085fc5576cd233e4da661c6fb1967c"
         },
         "include/freetype2/freetype/ftsynth.h": {
-          "member": "include/freetype/ftsynth.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftsynth.h",
           "sha256": "f75aa75f8cb754c37db6ac16e1c9648997e06d280d8b28490d502838e6c649ca"
         },
         "include/freetype2/freetype/ftsystem.h": {
-          "member": "include/freetype/ftsystem.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftsystem.h",
           "sha256": "9a41ef1877a9f5f7e5debbf0d701bd393e53e2ae36fb6c34faebf26b8cbc43f2"
         },
         "include/freetype2/freetype/fttrigon.h": {
-          "member": "include/freetype/fttrigon.h",
+          "member": "freetype-freetype-1803559/include/freetype/fttrigon.h",
           "sha256": "924526c9b662973f64eb5b4f5034ae897684cb08b9cca7262aba097e49471ade"
         },
         "include/freetype2/freetype/fttypes.h": {
-          "member": "include/freetype/fttypes.h",
+          "member": "freetype-freetype-1803559/include/freetype/fttypes.h",
           "sha256": "dcaa79e39c7495d8f622555bd64b2ea87d6ddcfb8c9bbe9f8c33befcdda4eb9b"
         },
         "include/freetype2/freetype/ftwinfnt.h": {
-          "member": "include/freetype/ftwinfnt.h",
+          "member": "freetype-freetype-1803559/include/freetype/ftwinfnt.h",
           "sha256": "a2d77ef372f2c874d61179687b71a2d034e1d51430266c46ec0854593d02b779"
         },
         "include/freetype2/freetype/internal/autohint.h": {
-          "member": "include/freetype/internal/autohint.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/autohint.h",
           "sha256": "c7cbbc5a3ef63736dd7b8a297bc95067fe978a10bb969a984a8692f805bbc783"
         },
         "include/freetype2/freetype/internal/cffotypes.h": {
-          "member": "include/freetype/internal/cffotypes.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/cffotypes.h",
           "sha256": "f5ef8ae6a20dbf92f84e28201e038054f353513ab23c6092d2901378615d8cb8"
         },
         "include/freetype2/freetype/internal/cfftypes.h": {
-          "member": "include/freetype/internal/cfftypes.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/cfftypes.h",
           "sha256": "c563db1545cf8c323b5e414a606c727f7c8d040c168d24abaacdcf05dd2ac0c4"
         },
         "include/freetype2/freetype/internal/compiler-macros.h": {
-          "member": "include/freetype/internal/compiler-macros.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/compiler-macros.h",
           "sha256": "7f34bf9a86ee998fe285edfcf8e509070b10cec0ca1b08e53f4e01811ba63cef"
         },
         "include/freetype2/freetype/internal/ftcalc.h": {
-          "member": "include/freetype/internal/ftcalc.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftcalc.h",
           "sha256": "496ec9f724ca74a604c5363bd3f133a51d1b47053fbf5a710a018d6a1928e173"
         },
         "include/freetype2/freetype/internal/ftdebug.h": {
-          "member": "include/freetype/internal/ftdebug.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftdebug.h",
           "sha256": "b7d2d9f85ebf5a97c453ea6fa4dcf4325b9d3d6a3274d7ae62ede99eb207005f"
         },
         "include/freetype2/freetype/internal/ftdrv.h": {
-          "member": "include/freetype/internal/ftdrv.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftdrv.h",
           "sha256": "39efd6b6062cbde9c6d5e149e113de54eaacc84ddfe72d41b609d1aa1da3d4ab"
         },
         "include/freetype2/freetype/internal/ftgloadr.h": {
-          "member": "include/freetype/internal/ftgloadr.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftgloadr.h",
           "sha256": "326623def7d16cd7886459edc1843934cd134783df43741805d39448b8d37b20"
         },
         "include/freetype2/freetype/internal/fthash.h": {
-          "member": "include/freetype/internal/fthash.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/fthash.h",
           "sha256": "023d88d49d29ecf3833db7717a3f7ae223c17ec2012bdb5bf33bb67abaf616c4"
         },
         "include/freetype2/freetype/internal/ftmemory.h": {
-          "member": "include/freetype/internal/ftmemory.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftmemory.h",
           "sha256": "90ba879c7384948c4323767d368b5660be4c33104a7699e7c1ce0e983ec5b7ac"
         },
         "include/freetype2/freetype/internal/ftmmtypes.h": {
-          "member": "include/freetype/internal/ftmmtypes.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftmmtypes.h",
           "sha256": "b131a8d4c3bed0438bbb47a5dab5020e43a152157de667552e751f4e98a35754"
         },
         "include/freetype2/freetype/internal/ftobjs.h": {
-          "member": "include/freetype/internal/ftobjs.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftobjs.h",
           "sha256": "236d0e8a235ef1958917a7350f14320380a4b95aaf8d1299928419aaff15a74c"
         },
         "include/freetype2/freetype/internal/ftpsprop.h": {
-          "member": "include/freetype/internal/ftpsprop.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftpsprop.h",
           "sha256": "1213d6141efeaa743e1c566634cd6788f4c12cb48164fd089fb793e721c41a71"
         },
         "include/freetype2/freetype/internal/ftrfork.h": {
-          "member": "include/freetype/internal/ftrfork.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftrfork.h",
           "sha256": "fc6edbdfeb71bcfcfea4e5bde0bdd3014fa56a4db8b01c1f178d931810ace640"
         },
         "include/freetype2/freetype/internal/ftserv.h": {
-          "member": "include/freetype/internal/ftserv.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftserv.h",
           "sha256": "0d53a4e5a4df8bb3b70578f8792b75850880af5a4a39351ffa93e3f0b8cf0d5a"
         },
         "include/freetype2/freetype/internal/ftstream.h": {
-          "member": "include/freetype/internal/ftstream.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftstream.h",
           "sha256": "5e35712114b18e457c3b71852c1224b2356da5a28adb0cb29a9f8a34e60a7d3c"
         },
         "include/freetype2/freetype/internal/fttrace.h": {
-          "member": "include/freetype/internal/fttrace.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/fttrace.h",
           "sha256": "bfbdb4e3a0f6220fd99d06a75fb70c3c28f9a017e61763d967e83e056d2eafb3"
         },
         "include/freetype2/freetype/internal/ftvalid.h": {
-          "member": "include/freetype/internal/ftvalid.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/ftvalid.h",
           "sha256": "69705440b3c104ea033de8e1fda0226ec523f09f4962561cfdc180605f6324f1"
         },
         "include/freetype2/freetype/internal/psaux.h": {
-          "member": "include/freetype/internal/psaux.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/psaux.h",
           "sha256": "5396fe79bd2c279afcdd594d3fff88ea5962bb6779109539529a305d17dc0d3c"
         },
         "include/freetype2/freetype/internal/pshints.h": {
-          "member": "include/freetype/internal/pshints.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/pshints.h",
           "sha256": "a1edc1691574dcd73c7ecbbe4f40b62fc2e1f94ee57df02a1396aac8bb51a5f5"
         },
         "include/freetype2/freetype/internal/services/svbdf.h": {
-          "member": "include/freetype/internal/services/svbdf.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svbdf.h",
           "sha256": "528d9a5af7583623303c01323fe50657d62ee972f46b938e76794abe4488c6f6"
         },
         "include/freetype2/freetype/internal/services/svcfftl.h": {
-          "member": "include/freetype/internal/services/svcfftl.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svcfftl.h",
           "sha256": "3aecb7a51cec4a84d3f0c29dd70f563cb476e5e0e1e232f074e42f9a3f341bb8"
         },
         "include/freetype2/freetype/internal/services/svcid.h": {
-          "member": "include/freetype/internal/services/svcid.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svcid.h",
           "sha256": "03874b78ef7b68eed4cdcb82998e0bb132d37a3e814850ab0db14932a8fef375"
         },
         "include/freetype2/freetype/internal/services/svfntfmt.h": {
-          "member": "include/freetype/internal/services/svfntfmt.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svfntfmt.h",
           "sha256": "c84d16faae42ab92c4f53e18129622a64346bbc075a13a4472657e65b5ecdcfd"
         },
         "include/freetype2/freetype/internal/services/svgldict.h": {
-          "member": "include/freetype/internal/services/svgldict.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svgldict.h",
           "sha256": "2677a537aa796ba2ec1b527ae961a13aba894317e7e326f5e574c529d5ebd9ac"
         },
         "include/freetype2/freetype/internal/services/svgxval.h": {
-          "member": "include/freetype/internal/services/svgxval.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svgxval.h",
           "sha256": "b5218e794653fdc866f22e1c2e6995ef471d544d72079ece353bfac3eb16a39a"
         },
         "include/freetype2/freetype/internal/services/svkern.h": {
-          "member": "include/freetype/internal/services/svkern.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svkern.h",
           "sha256": "2aabbe2772f776141e9438bb02937ffc9752fac52061d00a4cadbee65741d589"
         },
         "include/freetype2/freetype/internal/services/svmetric.h": {
-          "member": "include/freetype/internal/services/svmetric.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svmetric.h",
           "sha256": "5acdbc81e44aa670bffdc6b9dd68549ffe1db1bba819d249a2c2c23650a9ab56"
         },
         "include/freetype2/freetype/internal/services/svmm.h": {
-          "member": "include/freetype/internal/services/svmm.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svmm.h",
           "sha256": "277b2fa598f61b5b28b419fdd6b178c38b1ac853aff75f6ca7b448964beaaf15"
         },
         "include/freetype2/freetype/internal/services/svotval.h": {
-          "member": "include/freetype/internal/services/svotval.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svotval.h",
           "sha256": "408d183d96cc62a9c166a7f392b3bb102d818fb82680c5498330bcd69fd46312"
         },
         "include/freetype2/freetype/internal/services/svpfr.h": {
-          "member": "include/freetype/internal/services/svpfr.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svpfr.h",
           "sha256": "7fe80b52bfc3e537ea0b1bc4e5e8c508608026fea02f8e0ca082965320f0cb9c"
         },
         "include/freetype2/freetype/internal/services/svpostnm.h": {
-          "member": "include/freetype/internal/services/svpostnm.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svpostnm.h",
           "sha256": "ae626264be5339bdb7a56bba21ec8b9ef5954c6d77f47e4deda472ba30479908"
         },
         "include/freetype2/freetype/internal/services/svprop.h": {
-          "member": "include/freetype/internal/services/svprop.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svprop.h",
           "sha256": "62d5a32b261d8e1c2fc72328a0b13fa642f5db824b9398d54c0f7f61897ceffc"
         },
         "include/freetype2/freetype/internal/services/svpscmap.h": {
-          "member": "include/freetype/internal/services/svpscmap.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svpscmap.h",
           "sha256": "a151bf86f9c1348cf5727b7fe4ca86287cd354753edc236e5a99b118d511d14f"
         },
         "include/freetype2/freetype/internal/services/svpsinfo.h": {
-          "member": "include/freetype/internal/services/svpsinfo.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svpsinfo.h",
           "sha256": "4f66de51efed7884e7f911f485e601cc370c7c9c2d7503a59511862ccc118b7d"
         },
         "include/freetype2/freetype/internal/services/svsfnt.h": {
-          "member": "include/freetype/internal/services/svsfnt.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svsfnt.h",
           "sha256": "19c44d5979d323009b496bfe5acc59210b4c985e0dc73d1239bda1b2284f7794"
         },
         "include/freetype2/freetype/internal/services/svttcmap.h": {
-          "member": "include/freetype/internal/services/svttcmap.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svttcmap.h",
           "sha256": "03f84fd4b573f6bb8399e669f1fa019271cd8362494709ca01d90464eb0dc859"
         },
         "include/freetype2/freetype/internal/services/svtteng.h": {
-          "member": "include/freetype/internal/services/svtteng.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svtteng.h",
           "sha256": "760880d0ec32640bdce34fbd4dae0096a240bf61a04027f53a992cc24fa10cd5"
         },
         "include/freetype2/freetype/internal/services/svttglyf.h": {
-          "member": "include/freetype/internal/services/svttglyf.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svttglyf.h",
           "sha256": "4e984a4c0f82e071205e7d8463f9edfac1a90c26081a2884aa6721c1155d0615"
         },
         "include/freetype2/freetype/internal/services/svwinfnt.h": {
-          "member": "include/freetype/internal/services/svwinfnt.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/services/svwinfnt.h",
           "sha256": "d48058b0fe7eebe2b63050a040016077665d8b7ffe2a61a783b1806b366b0549"
         },
         "include/freetype2/freetype/internal/sfnt.h": {
-          "member": "include/freetype/internal/sfnt.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/sfnt.h",
           "sha256": "df4a2d4943af91457c66ffbd9f4f13a8e0e2adb4c5d98980b24a604d50312fc8"
         },
         "include/freetype2/freetype/internal/svginterface.h": {
-          "member": "include/freetype/internal/svginterface.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/svginterface.h",
           "sha256": "23c235b3912995227a2c30e2903489aaf84c7ec337a9781244f31b90952eb4db"
         },
         "include/freetype2/freetype/internal/t1types.h": {
-          "member": "include/freetype/internal/t1types.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/t1types.h",
           "sha256": "15c1a26b6538acc65fa7214d2514e827454c439851d802c277d40eabbbe9bd91"
         },
         "include/freetype2/freetype/internal/tttypes.h": {
-          "member": "include/freetype/internal/tttypes.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/tttypes.h",
           "sha256": "d6e41389fbfd3981570b60ea1f0f5bffa25874d94d9f2753529ee9931df893e3"
         },
         "include/freetype2/freetype/internal/wofftypes.h": {
-          "member": "include/freetype/internal/wofftypes.h",
+          "member": "freetype-freetype-1803559/include/freetype/internal/wofftypes.h",
           "sha256": "eb43a2ad0a51d36f9f894bc7079d5a816ca0ac13eacaa7dccf620599db6e56ac"
         },
         "include/freetype2/freetype/otsvg.h": {
-          "member": "include/freetype/otsvg.h",
+          "member": "freetype-freetype-1803559/include/freetype/otsvg.h",
           "sha256": "3f7b2484cf4980c5dfb568e8f57b687d3add3b7cc499054f46164ca6d2690e53"
         },
         "include/freetype2/freetype/t1tables.h": {
-          "member": "include/freetype/t1tables.h",
+          "member": "freetype-freetype-1803559/include/freetype/t1tables.h",
           "sha256": "3bf63affe3fd88daa017ee7fcd894e37e961be9abdcd168b39a328ad3e6db3ba"
         },
         "include/freetype2/freetype/ttnameid.h": {
-          "member": "include/freetype/ttnameid.h",
+          "member": "freetype-freetype-1803559/include/freetype/ttnameid.h",
           "sha256": "c7f9f5b9d7f90bb77f0b5e5fb643039f47ded753130b9c4521d6070fe7dcd7ce"
         },
         "include/freetype2/freetype/tttables.h": {
-          "member": "include/freetype/tttables.h",
+          "member": "freetype-freetype-1803559/include/freetype/tttables.h",
           "sha256": "7fd1ce25de661e802dbff67ad5e9927bcdef1730527a5d453120586f13698280"
         },
         "include/freetype2/freetype/tttags.h": {
-          "member": "include/freetype/tttags.h",
+          "member": "freetype-freetype-1803559/include/freetype/tttags.h",
           "sha256": "a248823e132bf2af20ecb2fadc6d92241841b0fd27c07c6afffaf8ffb67e1617"
         },
         "include/freetype2/ft2build.h": {
-          "member": "include/ft2build.h",
+          "member": "freetype-freetype-1803559/include/ft2build.h",
           "sha256": "1e8028d455a85db4dd19b2019a721d56409f802c2223e78ab5199c22f8b33397"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "freetype-freetype-1803559",
         "commands": [
           {
             "cwd": "source",
@@ -3632,17 +3732,46 @@
         },
         "depends_on": []
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "submodule_tree_evidence": {
+        "archive": "freetype-pinned-git-tree.json",
+        "sha256": "ef714c331a73ee63d9b110c911381fe8b057d12350b1c36b319bb2aeae31d8a1",
+        "url": "https://api.github.com/repos/freetype/freetype/git/trees/1803559c4ee407d0bcbf2a67dbe96690cee869d2?recursive=1",
+        "parent_commit": "1803559c4ee407d0bcbf2a67dbe96690cee869d2"
+      },
+      "submodules": [
+        {
+          "path": "subprojects/dlg",
+          "url": "https://codeload.github.com/nyorain/dlg/tar.gz/395ccad2c1e0daae535c4d20bb0a3f2424648e17",
+          "repository_url": "https://github.com/nyorain/dlg.git",
+          "commit": "395ccad2c1e0daae535c4d20bb0a3f2424648e17",
+          "archive": "dlg-395ccad2c1e0daae535c4d20bb0a3f2424648e17.tar.gz",
+          "archive_sha256": "263a4a3777d9839e34cd41db988310659e0c00eab37beb7aedd30511a460133b",
+          "archive_bytes": 837072,
+          "source_root": "dlg-395ccad2c1e0daae535c4d20bb0a3f2424648e17",
+          "license_members": [
+            "dlg-395ccad2c1e0daae535c4d20bb0a3f2424648e17/LICENSE"
+          ]
+        }
+      ],
+      "repository_url": "https://github.com/freetype/freetype.git",
+      "source_tree_sha256": "3b75274ecadeb94616c79dafe367f48ecd25d4be25fbfb83268bafe1f91dd613",
+      "historical_archive_equivalence": {
+        "archive_sha256": "d9bc9ca3703c3196a11ed487a7964fd3e0902ba47da52d42d62426038c1dc255",
+        "normalized_tree_sha256": "3b75274ecadeb94616c79dafe367f48ecd25d4be25fbfb83268bafe1f91dd613",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 757
+      }
     },
     "harfbuzz": {
       "kind": "git",
-      "url": "https://github.com/harfbuzz/harfbuzz.git",
+      "url": "https://codeload.github.com/harfbuzz/harfbuzz/legacy.tar.gz/56feae4035bdd48f62ba2b8d8c16232d4d89b3a4",
       "ref": "14.2.1",
       "commit": "56feae4035bdd48f62ba2b8d8c16232d4d89b3a4",
-      "archive": "harfbuzz-56feae4035bdd48f62ba2b8d8c16232d4d89b3a4.tar.gz",
-      "archive_sha256": "a93a479ed9db66b5d1c8f64d026d70fcae943d79442e90d757b1e1c57da74813",
+      "archive": "harfbuzz-canonical-full-56feae4035bdd48f62ba2b8d8c16232d4d89b3a4.tar.gz",
+      "archive_sha256": "b52f5077b743bfc580728f7adb70ab5407e67e5c90fa9e094c2504eb164777d9",
       "license_members": [
-        "COPYING"
+        "harfbuzz-harfbuzz-56feae4/COPYING"
       ],
       "configure_flags": [
         "--enable-libharfbuzz"
@@ -3653,200 +3782,200 @@
       },
       "files": {
         "include/harfbuzz/hb-aat-layout.h": {
-          "member": "src/hb-aat-layout.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-aat-layout.h",
           "sha256": "19260855effa365dabbea60543813bdb88c67835aa347b7970e416906f3ff392"
         },
         "include/harfbuzz/hb-aat.h": {
-          "member": "src/hb-aat.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-aat.h",
           "sha256": "bce10093cad39cfbd5355d763368b22a04ae2bec9289ef0642e5f752bd6e79ff"
         },
         "include/harfbuzz/hb-blob.h": {
-          "member": "src/hb-blob.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-blob.h",
           "sha256": "710fe0a1be3b3a344154939be9bf6cc30674f6abd4ae0fcc0d3144b9d6b9a6bd"
         },
         "include/harfbuzz/hb-buffer.h": {
-          "member": "src/hb-buffer.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-buffer.h",
           "sha256": "c9d608ef2ab9fdcbe3b285418a3662fb075a579fb7fd3010e75cfb1ae8263566"
         },
         "include/harfbuzz/hb-cairo.h": {
-          "member": "src/hb-cairo.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-cairo.h",
           "sha256": "ca71ef1a2f5210ed65294fb9f96b90973a2baa60e2ef8c2702404e13fd3b186d"
         },
         "include/harfbuzz/hb-common.h": {
-          "member": "src/hb-common.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-common.h",
           "sha256": "a8d4765469856d6a34ea2fad587665cdae6aba8922a985eb4d715efce3027f74"
         },
         "include/harfbuzz/hb-coretext.h": {
-          "member": "src/hb-coretext.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-coretext.h",
           "sha256": "27f22c0c9fee8e164fc6672494b03bca5340f3be9682bad338936d3507cfd5f0"
         },
         "include/harfbuzz/hb-deprecated.h": {
-          "member": "src/hb-deprecated.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-deprecated.h",
           "sha256": "d0b32b536185fc9ee042e5371b581c330fb871d546a7c8a775f7d6d635b7dfb5"
         },
         "include/harfbuzz/hb-directwrite.h": {
-          "member": "src/hb-directwrite.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-directwrite.h",
           "sha256": "aed6703986f540a5fabe03f25d731d7efeeca788c1c28f0e4b8e4e18a803111c"
         },
         "include/harfbuzz/hb-draw.h": {
-          "member": "src/hb-draw.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-draw.h",
           "sha256": "48d67d60afef4f71edbe7d24b61e13cce0bc834e0123156f2ec56f591851b274"
         },
         "include/harfbuzz/hb-face.h": {
-          "member": "src/hb-face.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-face.h",
           "sha256": "1e6b179f97b055c48aaadfe31adc20a090cf463336e7d11b83b834667e88f9dc"
         },
         "include/harfbuzz/hb-font.h": {
-          "member": "src/hb-font.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-font.h",
           "sha256": "a7b0cb846e3cad88578a2435483bf64f6b164d4a63a53e4d79e6228bc0053e73"
         },
         "include/harfbuzz/hb-fontations.h": {
-          "member": "src/hb-fontations.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-fontations.h",
           "sha256": "23f3660cb26167d58da354e8a8561f0fedbb8663aed13065f8dccc46d2b30a9c"
         },
         "include/harfbuzz/hb-ft.h": {
-          "member": "src/hb-ft.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ft.h",
           "sha256": "e5a128de581bad91eec64eb057a26dbb4539b60cafa6017d5ca2578cfe0de3e8"
         },
         "include/harfbuzz/hb-gdi.h": {
-          "member": "src/hb-gdi.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-gdi.h",
           "sha256": "746f8a752275816dccc24952203b8763305489c4d4f4f1a3ce9180a7eb0945d5"
         },
         "include/harfbuzz/hb-glib.h": {
-          "member": "src/hb-glib.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-glib.h",
           "sha256": "05402cbae1f44fc2587ea8f59afa235107f9e568e5a4aa93c12ed2727de74aac"
         },
         "include/harfbuzz/hb-gobject-structs.h": {
-          "member": "src/hb-gobject-structs.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-gobject-structs.h",
           "sha256": "43eb2a7d5a6ac89b9b1d30df278c9ceae429f4f309a54e3bdc0a4bd86b5fac6b"
         },
         "include/harfbuzz/hb-gobject.h": {
-          "member": "src/hb-gobject.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-gobject.h",
           "sha256": "98639ef9185189a968e606db6429a024c363809df2b654297f6aecb59236dbc4"
         },
         "include/harfbuzz/hb-gpu.h": {
-          "member": "src/hb-gpu.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-gpu.h",
           "sha256": "39554d8253c91678618054c568f68d49a8b5561725b6bd53bb644cab1531c490"
         },
         "include/harfbuzz/hb-graphite2.h": {
-          "member": "src/hb-graphite2.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-graphite2.h",
           "sha256": "98180c71960325ae9a9c886859547f56899504072da6935ae977cb5e7b2586da"
         },
         "include/harfbuzz/hb-icu.h": {
-          "member": "src/hb-icu.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-icu.h",
           "sha256": "f2eaa478e7ecc533be912d75288e6fa8c2157191edbc03b2bd68c302bbcd0f6e"
         },
         "include/harfbuzz/hb-map.h": {
-          "member": "src/hb-map.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-map.h",
           "sha256": "b073aa19718e43e3535caeddc0015a4e45a89032a76059cc5ab8f3f0d220bece"
         },
         "include/harfbuzz/hb-ot-color.h": {
-          "member": "src/hb-ot-color.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-color.h",
           "sha256": "187e95990bb37e5e124ba7fc2fa8b42975717502531759a0f298916df17d5158"
         },
         "include/harfbuzz/hb-ot-deprecated.h": {
-          "member": "src/hb-ot-deprecated.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-deprecated.h",
           "sha256": "c3a9878ac0633d5e6d7e16821114ad4555458a6924100581f0d16fef5728b1c4"
         },
         "include/harfbuzz/hb-ot-font.h": {
-          "member": "src/hb-ot-font.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-font.h",
           "sha256": "e62d178aa73ef9c80b08d3c076db3e99bb8cb4e8219e978e793ef7ffe965f8f1"
         },
         "include/harfbuzz/hb-ot-layout.h": {
-          "member": "src/hb-ot-layout.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-layout.h",
           "sha256": "c7b0024750a50cef84cc81d49188e5ceab441ed0c24809fcb63ddcc449691f1c"
         },
         "include/harfbuzz/hb-ot-math.h": {
-          "member": "src/hb-ot-math.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-math.h",
           "sha256": "4e737e5ed9dcb3db18a64534a1ff2faf638ef720dc30db0ee821324099432f90"
         },
         "include/harfbuzz/hb-ot-meta.h": {
-          "member": "src/hb-ot-meta.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-meta.h",
           "sha256": "1d38c9bcbc0d417f8b7e0e818c2f5f9b83d2abddc39f2f116cc0ae84157a572d"
         },
         "include/harfbuzz/hb-ot-metrics.h": {
-          "member": "src/hb-ot-metrics.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-metrics.h",
           "sha256": "c65239f100590cf1b1f647bba6ccd1a548a4e89cb80978601ca3050e9884e724"
         },
         "include/harfbuzz/hb-ot-name.h": {
-          "member": "src/hb-ot-name.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-name.h",
           "sha256": "5be924687f71a0f98149b1987f3de3fd766ed9e84c4e144250e97048a36cb1ac"
         },
         "include/harfbuzz/hb-ot-shape.h": {
-          "member": "src/hb-ot-shape.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-shape.h",
           "sha256": "fd484f67e5c0d99cd428a2debadface7e80f7163b9c1be150cf1860fabe050c6"
         },
         "include/harfbuzz/hb-ot-var.h": {
-          "member": "src/hb-ot-var.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot-var.h",
           "sha256": "9c438bc34f43afcc95c3f5f390b929903156af93e19473fc29daa650d98cf20e"
         },
         "include/harfbuzz/hb-ot.h": {
-          "member": "src/hb-ot.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-ot.h",
           "sha256": "c5c821c47756741bae7a0121f440391a28d5e188824469f2281dd08b8c655a16"
         },
         "include/harfbuzz/hb-paint.h": {
-          "member": "src/hb-paint.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-paint.h",
           "sha256": "f61e5892bd1e6315ea4f2a722118b735fc4654bc35ec66c1e8bef856ec0a5e98"
         },
         "include/harfbuzz/hb-raster.h": {
-          "member": "src/hb-raster.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-raster.h",
           "sha256": "0e5af11e15e0deead79312f823a88863945564b7e454cf145c6f3cf0099a448c"
         },
         "include/harfbuzz/hb-script-list.h": {
-          "member": "src/hb-script-list.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-script-list.h",
           "sha256": "18274018858eded78f2a491225e124b3105399a4d22ce14839ba5820df7a4684"
         },
         "include/harfbuzz/hb-set.h": {
-          "member": "src/hb-set.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-set.h",
           "sha256": "0ee36c1a0926e51bb2a050687930db464b8e719f5823cd93a0c96226b8ccb783"
         },
         "include/harfbuzz/hb-shape-plan.h": {
-          "member": "src/hb-shape-plan.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-shape-plan.h",
           "sha256": "03555c82558fa347e96549ec99698fae790c2cfb9ee795c5ea48ff4134e06224"
         },
         "include/harfbuzz/hb-shape.h": {
-          "member": "src/hb-shape.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-shape.h",
           "sha256": "3adfcf510853bc118a120b7633c0e4d15134e4ac4bdf7911cb85511887e7e328"
         },
         "include/harfbuzz/hb-style.h": {
-          "member": "src/hb-style.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-style.h",
           "sha256": "6e88aec3ae6db176b37e4d6089923f78859134a26fd12b33b40b772e91673b5a"
         },
         "include/harfbuzz/hb-subset-serialize.h": {
-          "member": "src/hb-subset-serialize.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-subset-serialize.h",
           "sha256": "cd0a15ab76193618e82077b53735338d4c5581d7c1718c3af2fafeac1161b13a"
         },
         "include/harfbuzz/hb-subset.h": {
-          "member": "src/hb-subset.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-subset.h",
           "sha256": "3c99f1c69df58267c99930a9c34c56d9309001db9490bda2e5fe0ebd62334840"
         },
         "include/harfbuzz/hb-unicode.h": {
-          "member": "src/hb-unicode.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-unicode.h",
           "sha256": "6131f0eb9e411fa392101f58793f4e4347ec3bc6fe45226736b186004cea8038"
         },
         "include/harfbuzz/hb-uniscribe.h": {
-          "member": "src/hb-uniscribe.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-uniscribe.h",
           "sha256": "fad494ab421c382ef5d0264472e2f1b6527e0af165444103b71cc7447e9dc5e2"
         },
         "include/harfbuzz/hb-vector.h": {
-          "member": "src/hb-vector.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-vector.h",
           "sha256": "c9f480bfba4b09c20dc60e54807d73291fbefd9ce7f675dee39e04790b1f15c7"
         },
         "include/harfbuzz/hb-version.h": {
-          "member": "src/hb-version.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-version.h",
           "sha256": "49aded44168f08b38be23a7eba1d91258c5c4fd14b6d424f0ba0db56f771cfd7"
         },
         "include/harfbuzz/hb-wasm-api.h": {
-          "member": "src/hb-wasm-api.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb-wasm-api.h",
           "sha256": "14268942e13774cc9f7ebd7ddbc3a4bbb8433b1b8891202cfce6c89e0b738942"
         },
         "include/harfbuzz/hb.h": {
-          "member": "src/hb.h",
+          "member": "harfbuzz-harfbuzz-56feae4/src/hb.h",
           "sha256": "31a1b53db3ee4395916e6d4f105b2c64772b8037bbb97d0e6d1e4a905eb6c6c9"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "harfbuzz-harfbuzz-56feae4",
         "commands": [
           {
             "cwd": "build",
@@ -4076,17 +4205,25 @@
           "freetype"
         ]
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "repository_url": "https://github.com/harfbuzz/harfbuzz.git",
+      "source_tree_sha256": "63c4c541db05f3f664cc116ef9acd72caf70cfe4217843784205945d6d32b4d5",
+      "historical_archive_equivalence": {
+        "archive_sha256": "a93a479ed9db66b5d1c8f64d026d70fcae943d79442e90d757b1e1c57da74813",
+        "normalized_tree_sha256": "63c4c541db05f3f664cc116ef9acd72caf70cfe4217843784205945d6d32b4d5",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 3720
+      }
     },
     "zimg": {
       "kind": "git",
-      "url": "https://github.com/sekrit-twc/zimg.git",
+      "url": "https://codeload.github.com/sekrit-twc/zimg/legacy.tar.gz/5e8c32222569edf3a712f83d7cff80ad4dd9ab6e",
       "ref": "release-3.0.6",
       "commit": "5e8c32222569edf3a712f83d7cff80ad4dd9ab6e",
-      "archive": "zimg-5e8c32222569edf3a712f83d7cff80ad4dd9ab6e.tar.gz",
-      "archive_sha256": "941df77785c83cfa4e9f31a100c17462f1fecec881ea00b000e8a19dc712ee42",
+      "archive": "zimg-canonical-5e8c32222569edf3a712f83d7cff80ad4dd9ab6e.tar.gz",
+      "archive_sha256": "dba5ac3d168da049edcd592505cdffb1217702b0476a44a30636f9036cad6398",
       "license_members": [
-        "COPYING"
+        "sekrit-twc-zimg-5e8c322/COPYING"
       ],
       "configure_flags": [
         "--enable-libzimg"
@@ -4097,12 +4234,12 @@
       },
       "files": {
         "include/zimg.h": {
-          "member": "src/zimg/api/zimg.h",
+          "member": "sekrit-twc-zimg-5e8c322/src/zimg/api/zimg.h",
           "sha256": "59ab0d0fe15da10a709692826ec798da352b71aa6929fdb84a478328bcb08a5b"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "sekrit-twc-zimg-5e8c322",
         "commands": [
           {
             "cwd": "source",
@@ -4130,17 +4267,25 @@
         },
         "depends_on": []
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "repository_url": "https://github.com/sekrit-twc/zimg.git",
+      "source_tree_sha256": "c2cd3502fe2cd73a8de516a9e8130f13f79dfc766acaceada5d3d35d50e63a6c",
+      "historical_archive_equivalence": {
+        "archive_sha256": "941df77785c83cfa4e9f31a100c17462f1fecec881ea00b000e8a19dc712ee42",
+        "normalized_tree_sha256": "c2cd3502fe2cd73a8de516a9e8130f13f79dfc766acaceada5d3d35d50e63a6c",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 244
+      }
     },
     "dav1d": {
       "kind": "git",
-      "url": "https://code.videolan.org/videolan/dav1d.git",
+      "url": "https://codeload.github.com/videolan/dav1d/legacy.tar.gz/54706fc6bc0cdecab7e9593974a4039cc038fca7",
       "ref": "1.5.4",
       "commit": "54706fc6bc0cdecab7e9593974a4039cc038fca7",
-      "archive": "dav1d-54706fc6bc0cdecab7e9593974a4039cc038fca7.tar.gz",
-      "archive_sha256": "2fd4c572d2c7f4943d501114e6d7424e97b3ee5d6588a39754a2247a94bf33f2",
+      "archive": "dav1d-canonical-54706fc6bc0cdecab7e9593974a4039cc038fca7.tar.gz",
+      "archive_sha256": "88d59558d030c83b8d428ff282fc83ed237d75087eb8ab36900ea6ab3367f9f2",
       "license_members": [
-        "COPYING"
+        "videolan-dav1d-54706fc/COPYING"
       ],
       "configure_flags": [
         "--enable-libdav1d"
@@ -4151,32 +4296,32 @@
       },
       "files": {
         "include/dav1d/common.h": {
-          "member": "include/dav1d/common.h",
+          "member": "videolan-dav1d-54706fc/include/dav1d/common.h",
           "sha256": "ad1524155895b430df57b1b418564995999af8c1712fadd3b9708c3672413937"
         },
         "include/dav1d/data.h": {
-          "member": "include/dav1d/data.h",
+          "member": "videolan-dav1d-54706fc/include/dav1d/data.h",
           "sha256": "283e79ba35c3f90083d68f729a82a3d3625945c0776de5e87b4c081f0296a529"
         },
         "include/dav1d/dav1d.h": {
-          "member": "include/dav1d/dav1d.h",
+          "member": "videolan-dav1d-54706fc/include/dav1d/dav1d.h",
           "sha256": "dbc211a0f5480d8c38877dc18380fbd7cd6bb8375ac49a599e0c6e5f5e3ae15e"
         },
         "include/dav1d/headers.h": {
-          "member": "include/dav1d/headers.h",
+          "member": "videolan-dav1d-54706fc/include/dav1d/headers.h",
           "sha256": "3349f02ca7ebc5a09d9a623f83b820769903f86313638a9277b930cdd8071fe8"
         },
         "include/dav1d/picture.h": {
-          "member": "include/dav1d/picture.h",
+          "member": "videolan-dav1d-54706fc/include/dav1d/picture.h",
           "sha256": "66680595e5c6686395073ce55a5dc123369daa7d2f2a0c6df9a13ce8cfb57e17"
         },
         "include/dav1d/version.h": {
-          "member": "include/dav1d/version.h",
+          "member": "videolan-dav1d-54706fc/include/dav1d/version.h",
           "sha256": "ee63fe5d8bba3a84ed9e57360ea593dbd81c7e9b731e2e02ca2724f813b89fdd"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "videolan-dav1d-54706fc",
         "commands": [
           {
             "cwd": "build",
@@ -4229,18 +4374,26 @@
         },
         "depends_on": []
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "repository_url": "https://code.videolan.org/videolan/dav1d.git",
+      "source_tree_sha256": "848145a58ba2eb6ba2c73ea2a173206ae4fc39c8582b7bed7a3625d3a665a0ee",
+      "historical_archive_equivalence": {
+        "archive_sha256": "2fd4c572d2c7f4943d501114e6d7424e97b3ee5d6588a39754a2247a94bf33f2",
+        "normalized_tree_sha256": "848145a58ba2eb6ba2c73ea2a173206ae4fc39c8582b7bed7a3625d3a665a0ee",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 359
+      }
     },
     "svtav1": {
       "kind": "git",
-      "url": "https://gitlab.com/AOMediaCodec/SVT-AV1.git",
+      "url": "https://codeload.github.com/AOMediaCodec/SVT-AV1/legacy.tar.gz/9292ec8e32bce26f781f277ec8739b53426c4300",
       "ref": "v4.2.0",
       "commit": "9292ec8e32bce26f781f277ec8739b53426c4300",
-      "archive": "svtav1-9292ec8e32bce26f781f277ec8739b53426c4300.tar.gz",
-      "archive_sha256": "5ea887efb65619f8d4113b882e96590b28e96af5295ae577d2cc6f7e13970736",
+      "archive": "svtav1-canonical-9292ec8e32bce26f781f277ec8739b53426c4300.tar.gz",
+      "archive_sha256": "a5882c485b3089c303d9a7d74b8e3e9993ce614c9335f26a75c9796c75734045",
       "license_members": [
-        "LICENSE-BSD2.md",
-        "LICENSE.md"
+        "AOMediaCodec-SVT-AV1-9292ec8/LICENSE-BSD2.md",
+        "AOMediaCodec-SVT-AV1-9292ec8/LICENSE.md"
       ],
       "configure_flags": [
         "--enable-libsvtav1"
@@ -4251,36 +4404,36 @@
       },
       "files": {
         "include/svt-av1/EbConfigMacros.h": {
-          "member": "Source/API/EbConfigMacros.h",
+          "member": "AOMediaCodec-SVT-AV1-9292ec8/Source/API/EbConfigMacros.h",
           "sha256": "0ef50a80a611bbfa7587eeb6f6a25b4124685a5862e0c0ef67ce4def4bac96f2"
         },
         "include/svt-av1/EbDebugMacros.h": {
-          "member": "Source/API/EbDebugMacros.h",
+          "member": "AOMediaCodec-SVT-AV1-9292ec8/Source/API/EbDebugMacros.h",
           "sha256": "485b73f400058ee9311825f520ad12ffdea54af47846e204e11046f39018581d"
         },
         "include/svt-av1/EbSvtAv1.h": {
-          "member": "Source/API/EbSvtAv1.h",
+          "member": "AOMediaCodec-SVT-AV1-9292ec8/Source/API/EbSvtAv1.h",
           "sha256": "cf84b3d5121798bf7af4396e9d01dd6ed214e42bdc6f52dc6f895e225a83adcc"
         },
         "include/svt-av1/EbSvtAv1Enc.h": {
-          "member": "Source/API/EbSvtAv1Enc.h",
+          "member": "AOMediaCodec-SVT-AV1-9292ec8/Source/API/EbSvtAv1Enc.h",
           "sha256": "97e15377e1ac4634bdd0f36f1bf3ae3bd9644ff4e950f3f3eecaa38b463ffb90"
         },
         "include/svt-av1/EbSvtAv1ErrorCodes.h": {
-          "member": "Source/API/EbSvtAv1ErrorCodes.h",
+          "member": "AOMediaCodec-SVT-AV1-9292ec8/Source/API/EbSvtAv1ErrorCodes.h",
           "sha256": "701bdbd9db57fc467c21ee0256e7629be55d7e66a8e548cbe57da230c90a32b2"
         },
         "include/svt-av1/EbSvtAv1Formats.h": {
-          "member": "Source/API/EbSvtAv1Formats.h",
+          "member": "AOMediaCodec-SVT-AV1-9292ec8/Source/API/EbSvtAv1Formats.h",
           "sha256": "207104ab03e926c7fc547290c3a6ac45c0c292b6017dac9bd9b688d41619f2f6"
         },
         "include/svt-av1/EbSvtAv1Metadata.h": {
-          "member": "Source/API/EbSvtAv1Metadata.h",
+          "member": "AOMediaCodec-SVT-AV1-9292ec8/Source/API/EbSvtAv1Metadata.h",
           "sha256": "6a9422d5e962059f13f9edaea28850972f19e3c59b65da9b8ab3cbd7272670ca"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "AOMediaCodec-SVT-AV1-9292ec8",
         "commands": [
           {
             "cwd": "build",
@@ -4331,17 +4484,25 @@
         },
         "depends_on": []
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "repository_url": "https://gitlab.com/AOMediaCodec/SVT-AV1.git",
+      "source_tree_sha256": "dabaa0778016c3b8e4630d090f586a6dcdcc464ce26b19e02933315069c12b5a",
+      "historical_archive_equivalence": {
+        "archive_sha256": "5ea887efb65619f8d4113b882e96590b28e96af5295ae577d2cc6f7e13970736",
+        "normalized_tree_sha256": "dabaa0778016c3b8e4630d090f586a6dcdcc464ce26b19e02933315069c12b5a",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 1292
+      }
     },
     "chromaprint": {
       "kind": "git",
-      "url": "https://github.com/acoustid/chromaprint.git",
+      "url": "https://codeload.github.com/acoustid/chromaprint/legacy.tar.gz/6b13ce3a81ae931e7477c4856a86bece99157cd8",
       "ref": "v1.6.0",
       "commit": "6b13ce3a81ae931e7477c4856a86bece99157cd8",
-      "archive": "chromaprint-6b13ce3a81ae931e7477c4856a86bece99157cd8.tar.gz",
-      "archive_sha256": "d6a0874c9f194a2670c3f67b4838756b83a51ba1c7b35078d63c2a5d5b32cba5",
+      "archive": "chromaprint-canonical-6b13ce3a81ae931e7477c4856a86bece99157cd8.tar.gz",
+      "archive_sha256": "6a21595c12b2a87eb9ef52f9def03ed70f3800beec998aa2902f1b6353ef493d",
       "license_members": [
-        "LICENSE.md"
+        "acoustid-chromaprint-6b13ce3/LICENSE.md"
       ],
       "configure_flags": [
         "--enable-chromaprint"
@@ -4352,12 +4513,12 @@
       },
       "files": {
         "include/chromaprint.h": {
-          "member": "src/chromaprint.h",
+          "member": "acoustid-chromaprint-6b13ce3/src/chromaprint.h",
           "sha256": "74aa243526dbb73e9e8bec115d1d5d7942e6e3c2f20e997226af02e68d7b56d1"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "acoustid-chromaprint-6b13ce3",
         "commands": [
           {
             "cwd": "build",
@@ -4387,10 +4548,10 @@
           "fftw3"
         ]
       },
-      "archive_origin": "accepted exact upstream Git source offer",
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
       "source_append": [
         {
-          "member": "libchromaprint.pc.cmake",
+          "member": "acoustid-chromaprint-6b13ce3/libchromaprint.pc.cmake",
           "text": "Libs.private: -lfftw3f -lstdc++\nCflags.private: -DCHROMAPRINT_NODLL\n",
           "before_sha256": "4e672cd12e9b68205413463d983089c1a2cde81bc83f1b39ea22b3617f18af14",
           "after_sha256": "f55c0f258ccbff523d3a96132236d0a03f222c007a0204cc8f62c671f74d41c3",
@@ -4399,27 +4560,35 @@
             "echo \"Cflags.private: -DCHROMAPRINT_NODLL\" >> libchromaprint.pc.cmake"
           ]
         }
-      ]
+      ],
+      "repository_url": "https://github.com/acoustid/chromaprint.git",
+      "source_tree_sha256": "67f15e01015c48057674b77cf5bb7b4f009bbbc4c70457f7ace4d37ff43c35e6",
+      "historical_archive_equivalence": {
+        "archive_sha256": "d6a0874c9f194a2670c3f67b4838756b83a51ba1c7b35078d63c2a5d5b32cba5",
+        "normalized_tree_sha256": "67f15e01015c48057674b77cf5bb7b4f009bbbc4c70457f7ace4d37ff43c35e6",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 430
+      }
     },
     "libunibreak": {
       "kind": "git",
-      "url": "https://github.com/adah1972/libunibreak.git",
+      "url": "https://codeload.github.com/adah1972/libunibreak/legacy.tar.gz/3ce4bfa3129ff3738046a44a6db533d2ce25af2b",
       "ref": "libunibreak_7_0",
       "commit": "3ce4bfa3129ff3738046a44a6db533d2ce25af2b",
-      "archive": "libunibreak-3ce4bfa3129ff3738046a44a6db533d2ce25af2b.tar.gz",
-      "archive_sha256": "147ec07d1237e6a3877b717d557d06f4074aa934502034520b2e6f4ebc4915ca",
+      "archive": "libunibreak-canonical-3ce4bfa3129ff3738046a44a6db533d2ce25af2b.tar.gz",
+      "archive_sha256": "8ea7412e749afc1644c3e6b8d62c313212810fed295902c30cec7caeb4ac1452",
       "license_members": [
-        "src/eastasianwidthdef.h",
-        "src/emojidef.h",
-        "src/graphemebreak.h",
-        "src/graphemebreakdef.h",
-        "src/indicconjunctbreakdef.h",
-        "src/linebreak.h",
-        "src/linebreakdef.h",
-        "src/unibreakbase.h",
-        "src/unibreakdef.h",
-        "src/wordbreak.h",
-        "src/wordbreakdef.h"
+        "adah1972-libunibreak-3ce4bfa/src/eastasianwidthdef.h",
+        "adah1972-libunibreak-3ce4bfa/src/emojidef.h",
+        "adah1972-libunibreak-3ce4bfa/src/graphemebreak.h",
+        "adah1972-libunibreak-3ce4bfa/src/graphemebreakdef.h",
+        "adah1972-libunibreak-3ce4bfa/src/indicconjunctbreakdef.h",
+        "adah1972-libunibreak-3ce4bfa/src/linebreak.h",
+        "adah1972-libunibreak-3ce4bfa/src/linebreakdef.h",
+        "adah1972-libunibreak-3ce4bfa/src/unibreakbase.h",
+        "adah1972-libunibreak-3ce4bfa/src/unibreakdef.h",
+        "adah1972-libunibreak-3ce4bfa/src/wordbreak.h",
+        "adah1972-libunibreak-3ce4bfa/src/wordbreakdef.h"
       ],
       "configure_flags": [],
       "recipe_binding": {
@@ -4428,28 +4597,28 @@
       },
       "files": {
         "include/linebreak.h": {
-          "member": "src/linebreak.h",
+          "member": "adah1972-libunibreak-3ce4bfa/src/linebreak.h",
           "sha256": "f4b78d8482778014dfb9e84eba8ee17299f45232715c1b04fe3876841820794a"
         },
         "include/wordbreak.h": {
-          "member": "src/wordbreak.h",
+          "member": "adah1972-libunibreak-3ce4bfa/src/wordbreak.h",
           "sha256": "1578f31ea316cbf224b0d0709871e1c4621828411816a83d7dfc2483b4595c40"
         },
         "include/graphemebreak.h": {
-          "member": "src/graphemebreak.h",
+          "member": "adah1972-libunibreak-3ce4bfa/src/graphemebreak.h",
           "sha256": "13ba816b68992d4091b3fef4ec16ad897ea6a73650a0ddd2ab259b0d83adb2a8"
         },
         "include/unibreakbase.h": {
-          "member": "src/unibreakbase.h",
+          "member": "adah1972-libunibreak-3ce4bfa/src/unibreakbase.h",
           "sha256": "0fd4a6eb7264f984a7e30d72b37733f876e4badca894480fe77afff5f8c8dc2c"
         },
         "include/unibreakdef.h": {
-          "member": "src/unibreakdef.h",
+          "member": "adah1972-libunibreak-3ce4bfa/src/unibreakdef.h",
           "sha256": "f07d44ee793da606825a0d871c6041b48b6d55c530adaf05d50e56925dcc964c"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "adah1972-libunibreak-3ce4bfa",
         "commands": [
           {
             "cwd": "source",
@@ -4496,7 +4665,15 @@
         },
         "depends_on": []
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "repository_url": "https://github.com/adah1972/libunibreak.git",
+      "source_tree_sha256": "49537a1b0a4ccd74ae4558d931cba8a7fe8239109b0804519a47407081a60a1c",
+      "historical_archive_equivalence": {
+        "archive_sha256": "147ec07d1237e6a3877b717d557d06f4074aa934502034520b2e6f4ebc4915ca",
+        "normalized_tree_sha256": "49537a1b0a4ccd74ae4558d931cba8a7fe8239109b0804519a47407081a60a1c",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 65
+      }
     },
     "libxml2": {
       "kind": "git",
@@ -5119,13 +5296,13 @@
     },
     "ogg": {
       "kind": "git",
-      "url": "https://github.com/xiph/ogg.git",
+      "url": "https://codeload.github.com/xiph/ogg/legacy.tar.gz/06a5e0262cdc28aa4ae6797627a783b5010440f0",
       "ref": "v1.3.6",
       "commit": "06a5e0262cdc28aa4ae6797627a783b5010440f0",
-      "archive": "ogg-06a5e0262cdc28aa4ae6797627a783b5010440f0.tar.gz",
-      "archive_sha256": "c822b870bd046ac4a7180476e1da88960c37c983db7566cbd3069e1d89376918",
+      "archive": "ogg-canonical-06a5e0262cdc28aa4ae6797627a783b5010440f0.tar.gz",
+      "archive_sha256": "da047f72466d2d24233463499b1d7b94fcd745373ee0b46f8eb7c42e4d059453",
       "license_members": [
-        "COPYING"
+        "xiph-ogg-06a5e02/COPYING"
       ],
       "configure_flags": [],
       "recipe_binding": {
@@ -5134,16 +5311,16 @@
       },
       "files": {
         "include/ogg/ogg.h": {
-          "member": "include/ogg/ogg.h",
+          "member": "xiph-ogg-06a5e02/include/ogg/ogg.h",
           "sha256": "aad86109c1fdb377738675a63e0b19859e06ada25ae5c59c290ca7263d1dc4ca"
         },
         "include/ogg/os_types.h": {
-          "member": "include/ogg/os_types.h",
+          "member": "xiph-ogg-06a5e02/include/ogg/os_types.h",
           "sha256": "3bbab6a5d31e3c25c6080252b042afb87028e3ffff100e3e0285648b250b70f4"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "xiph-ogg-06a5e02",
         "commands": [
           {
             "cwd": "source",
@@ -5182,18 +5359,26 @@
         },
         "depends_on": []
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
+      "repository_url": "https://github.com/xiph/ogg.git",
+      "source_tree_sha256": "59aa6f3468813d45138c9735b84d70de64a8ae1e827903563aaa3dedf5180a03",
+      "historical_archive_equivalence": {
+        "archive_sha256": "c822b870bd046ac4a7180476e1da88960c37c983db7566cbd3069e1d89376918",
+        "normalized_tree_sha256": "59aa6f3468813d45138c9735b84d70de64a8ae1e827903563aaa3dedf5180a03",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 125
+      }
     },
     "theora": {
       "kind": "git",
-      "url": "https://github.com/xiph/theora.git",
+      "url": "https://codeload.github.com/xiph/theora/legacy.tar.gz/014bc312d05241ff2d06fd52ee7cbbec3768bfd6",
       "ref": "v1.2.0",
       "commit": "014bc312d05241ff2d06fd52ee7cbbec3768bfd6",
-      "archive": "theora-014bc312d05241ff2d06fd52ee7cbbec3768bfd6.tar.gz",
-      "archive_sha256": "836b0db7173605de5b05f4619c5b5c8015b4fe3f8633ce249bb231e367955a89",
+      "archive": "theora-canonical-014bc312d05241ff2d06fd52ee7cbbec3768bfd6.tar.gz",
+      "archive_sha256": "e5a46ba704bb18d9f0421f83ea9d4840f23814dbcc09e5b2c48acf9c53381441",
       "license_members": [
-        "COPYING",
-        "LICENSE"
+        "xiph-theora-014bc31/COPYING",
+        "xiph-theora-014bc31/LICENSE"
       ],
       "configure_flags": [
         "--enable-libtheora"
@@ -5204,24 +5389,24 @@
       },
       "files": {
         "include/theora/codec.h": {
-          "member": "include/theora/codec.h",
+          "member": "xiph-theora-014bc31/include/theora/codec.h",
           "sha256": "9d55acfd9a46ccbd0f2c3e95c5fcc68595442e0b6317ef95c6d3488396841155"
         },
         "include/theora/theora.h": {
-          "member": "include/theora/theora.h",
+          "member": "xiph-theora-014bc31/include/theora/theora.h",
           "sha256": "6ab9415acebc2021934ac8513ce57af278961068bf1873090baf3092d10e475e"
         },
         "include/theora/theoradec.h": {
-          "member": "include/theora/theoradec.h",
+          "member": "xiph-theora-014bc31/include/theora/theoradec.h",
           "sha256": "f7d8da45d904978d7200a868d4b7a941bd8a8d6c535709265c82dc6bf4faba10"
         },
         "include/theora/theoraenc.h": {
-          "member": "include/theora/theoraenc.h",
+          "member": "xiph-theora-014bc31/include/theora/theoraenc.h",
           "sha256": "925d17994dab723b99262ef06c5adfc9c3d39a81ba83b0faa76ed1f3fbdf3e41"
         }
       },
       "generator": {
-        "source_root": ".",
+        "source_root": "xiph-theora-014bc31",
         "commands": [
           {
             "cwd": "source",
@@ -5280,7 +5465,7 @@
           "ogg"
         ]
       },
-      "archive_origin": "accepted exact upstream Git source offer",
+      "archive_origin": "observed public provider archive at identical pinned commit; complete normalizedtree equivalence verified",
       "patches": [
         {
           "url": "https://github.com/xiph/theora/commit/3ae2669a3d53fd0a564657d1253debdf77e2a241.patch",
@@ -5289,7 +5474,15 @@
           "sha256": "f110c93bfefe3e896843d3428b441395c342f40558fb52eb9cadc1fa75d7e56d",
           "recipe_reference": "https://github.com/xiph/theora/commit/3ae2669.patch"
         }
-      ]
+      ],
+      "repository_url": "https://github.com/xiph/theora.git",
+      "source_tree_sha256": "f3531a274ed17044cdb3aae33f97ccda58a32f76eddea88e2574631677cdc2ef",
+      "historical_archive_equivalence": {
+        "archive_sha256": "836b0db7173605de5b05f4619c5b5c8015b4fe3f8633ce249bb231e367955a89",
+        "normalized_tree_sha256": "f3531a274ed17044cdb3aae33f97ccda58a32f76eddea88e2574631677cdc2ef",
+        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
+        "files": 274
+      }
     }
   },
   "remaining_source_roles": [

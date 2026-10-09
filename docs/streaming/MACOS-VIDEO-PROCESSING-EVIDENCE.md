@@ -1316,8 +1316,45 @@ peak RSS. The new role lock is
 the new static manifest is
 `68e6a4b63a4e33328e48f4127a298ca5a023800681b2041eca1417ac70be6f2b`.
 It retains 25 upstream dependency sources, 49 distribution roles, one pinned
-Meson provider and all 57 Jellyfin configure tokens. The corrected generator
-has not yet run; generation, linking and runtime qualification remain open.
+Meson provider and all 57 Jellyfin configure tokens.
+
+The corrected retry uses committed source
+`c4beb5b5f1b26fdbb865ffc4ef47e26053fece97`. Its source-only archive is
+`9cc24a0df4511a706caf19335aa4154add356453b08d7ce17233ccc0a655e221`.
+All 6,596 input-file hashes verify before execution. The same isolated
+Bookworm container runs offline with the same two-CPU/2-GiB bound. FFTW's
+actual upstream metadata target succeeds, completing the AMF, dav1d,
+FDK-AAC, FFNVCODEC and FFTW generation roles. The attempt then fails after
+21.91 seconds while configuring FreeType 2.14.3, without an OOM or deadline.
+The owned container stops and its network configuration is restored; both
+failed attempts remain retained.
+
+FreeType's genuine `check_out_submodule` rule invokes `git submodule update`
+for `subprojects/dlg`. The archive-only source lacks that pinned submodule,
+so configure cannot complete. This is a source-closure omission, not a
+compiler-resource failure. The repair must include the authentic parent
+revision's gitlink source, license and source offer. Fake Git metadata,
+disabling the feature or weakening output checks would conceal the omission.
+The source repair now supplies six required submodules: FreeType's `dlg`
+and libplacebo's GLAD, Jinja, MarkupSafe, fast_float and Vulkan-Headers.
+Each is bound to the actual parent gitlink and `.gitmodules` declaration,
+its downloaded archive and authentic license. Composition refuses to replace
+existing parent source bytes. Optional demo/test submodules are not consumed.
+The same source audit finds eleven dependency roles whose accepted local
+Git-archive hashes are paired with repository URLs in the cold-fetch path.
+Those URLs cannot supply the declared archive bytes. The repair must bind
+actual downloadable public archives of the same pinned commits, with observed
+hashes and normalized source-tree equivalence; cached files cannot establish
+that a fresh release build works. Prior accepted archive evidence remains
+historical. All eleven replacement archives now have observed hashes and
+exact normalized-tree equivalence, including contents, executability and
+symlink targets. The equivalence receipt is
+`5c3c0ff7e89df2af4d13b42563af43b095b9a15afd48a9a764c1b4470158b8c3`;
+the required-submodule authority receipt is
+`d7c9b6b9d4aac59b44f3939b290f3ab4231797f1cac8435e396737d694d0aa2f`.
+The helper, lock and acquisition path are updated; fresh static staging and
+actual generation have not run on this repair. Linking and runtime
+qualification also remain open.
 
 The shipping source also closes a separate integration gap: published and CI
 smoke images bypassed the local `make docker` seam. Both now have a shared

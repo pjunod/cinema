@@ -8,6 +8,7 @@ No generated headers or pkg-config substitutions are fabricated. A later bounded
 CPU generation/configure stage must hash its actual outputs before link readiness.
 """
 import argparse
+import configparser
 import hashlib
 import io
 import json
@@ -356,6 +357,92 @@ def stage_distribution_packages(lock, sdk, provenance, archive_directory):
             "materialized_archive_aliases": alias_witness}, supplied
 
 
+def normalized_source_tree(data, source_root):
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+        for member in archive:
+            if member.isdir():
+                continue
+            name = PurePosixPath(member_path(member.name.removeprefix("./")))
+            if source_root != ".":
+                name = name.relative_to(source_root)
+            if str(name) in files:
+                raise ValueError("duplicate normalized source-tree member")
+            if member.isfile():
+                value = {"kind": "regular", "sha256": digest(archive.extractfile(member).read()), "exec": bool(member.mode & 0o111)}
+            elif member.issym():
+                value = {"kind": "symlink", "target": member.linkname, "exec": bool(member.mode & 0o111)}
+            else:
+                raise ValueError("unsupported normalized source-tree object")
+            files[str(name)] = value
+    return digest(json.dumps(files, sort_keys=True, separators=(",", ":")).encode())
+
+
+def stage_submodules(row, regular, offer, archives):
+    if not row.get("submodules"):
+        return {}
+    evidence = row["submodule_tree_evidence"]
+    parent_url = urlsplit(evidence["url"])
+    if (evidence["parent_commit"] != row["commit"] or parent_url.scheme != "https" or parent_url.hostname != "api.github.com"
+            or parent_url.username or parent_url.password or parent_url.query != "recursive=1"
+            or not parent_url.path.endswith("/git/trees/" + row["commit"])):
+        raise ValueError("submodule evidence must identify immutable public parent")
+    tree_bytes = checked_bytes(Path(archives) / member_path(evidence["archive"]), evidence["sha256"])
+    tree = json.loads(tree_bytes)
+    if tree.get("truncated"):
+        raise ValueError("incomplete parent gitlink evidence")
+    source_root = row["generator"]["source_root"]
+    descriptor = ".gitmodules" if source_root == "." else source_root + "/.gitmodules"
+    declaration = configparser.ConfigParser()
+    declaration.read_string(regular[descriptor].decode())
+    urls = {declaration[section]["path"]: declaration[section]["url"].removesuffix(".git") for section in declaration.sections()}
+    records = {}
+    for module in row["submodules"]:
+        name = member_path(module["path"])
+        if name in records or urls.get(name) != module["repository_url"].removesuffix(".git"):
+            raise ValueError("submodule path/repository differs from parent descriptor")
+        links = [entry for entry in tree["tree"] if entry["path"] == name and entry["mode"] == "160000" and entry["type"] == "commit"]
+        if len(links) != 1 or links[0]["sha"] != module["commit"]:
+            raise ValueError("submodule revision differs from pinned parent gitlink")
+        url = urlsplit(module["url"])
+        if url.scheme != "https" or url.hostname != "codeload.github.com" or url.username or url.password or not url.path.endswith("/" + module["commit"]):
+            raise ValueError("submodule archive must identify exact public revision")
+        data = checked_bytes(Path(archives) / member_path(module["archive"]), module["archive_sha256"])
+        files, links = tar_members(data)
+        destination = offer / "submodules" / name
+        destination.mkdir(parents=True)
+        (destination / "original-source.tar").write_bytes(data)
+        (destination / "parent-git-tree.json").write_bytes(tree_bytes)
+        licenses = {}
+        for license_name in module["license_members"]:
+            contents, _ = resolved(member_path(license_name), files, links)
+            target = destination / "licenses" / member_path(license_name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            licenses[license_name] = digest(contents)
+        if not licenses:
+            raise ValueError("authentic submodule license required")
+        records[name] = {**module, "licenses": licenses, "parent_descriptor_sha256": digest(regular[descriptor]), "parent_tree_sha256": digest(tree_bytes)}
+    return records
+
+
+def compose_submodules(offer, source, work, modules):
+    for name, module in modules.items():
+        unpacked = work / "submodule-archives" / member_path(name)
+        unpacked.mkdir(parents=True)
+        extract_role(checked_bytes(offer / "submodules" / name / "original-source.tar", module["archive_sha256"]), unpacked)
+        original = unpacked / member_path(module["source_root"])
+        if not original.is_dir() or original.is_symlink():
+            raise ValueError("authentic submodule root missing")
+        target = source / member_path(name)
+        if target.exists():
+            if not target.is_dir() or any(target.iterdir()):
+                raise ValueError("submodule composition cannot replace existing parent bytes")
+            target.rmdir()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(original, target)
+
+
 def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_directory=None, supplied_flags=()):
     if lock.get("schema_version") != 1 or not isinstance(lock.get("sources"), dict):
         raise ValueError("missing immutable consumed-source lock")
@@ -374,6 +461,8 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_dire
             archive = Path(archive_directory or ".") / member_path(row["archive"])
         data = checked_bytes(archive, row["archive_sha256"])
         regular, links = tar_members(data)
+        if row.get("source_tree_sha256") and normalized_source_tree(data, row["generator"]["source_root"]) != row["source_tree_sha256"]:
+            raise ValueError("canonical archive differs from verified immutable source tree")
         role_offer = provenance / "consumed-sources" / role
         role_offer.mkdir(parents=True)
         (role_offer / "original-source.tar").write_bytes(data)
@@ -405,6 +494,7 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_dire
             target.write_bytes(contents)
             files[destination] = {"source_member": origin, "source_sha256": digest(contents),
                                   "state": "generation/configuration witness pending"}
+        submodules = stage_submodules(row, regular, role_offer, archive_directory or ".")
         patches = []
         for index, patch in enumerate(row.get("patches", [])):
             if patch["recipe_reference"].encode() not in fragment:
@@ -429,9 +519,9 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_dire
                               "generated_outputs": {}, "link_ready": False}
         supplied.update(row.get("configure_flags", []))
         records[role] = {"url": row["url"], "ref": row["ref"], "commit": row.get("commit"),
-                         "archive_sha256": digest(data), "licenses": licenses,
+                         "archive_sha256": digest(data), "source_tree_sha256": row.get("source_tree_sha256"), "historical_archive_equivalence": row.get("historical_archive_equivalence"), "licenses": licenses,
                          "files": files, "recipe_binding": binding, "generation": records_generation,
-                         "generator": row.get("generator"), "patches": patches,
+                         "generator": row.get("generator"), "submodules": submodules, "python_source_paths": row.get("python_source_paths", []), "patches": patches,
                          "source_append": row.get("source_append", []), "source_replace": row.get("source_replace", []), "output_append": row.get("output_append", {})}
     needed = {flag for flag in flags if flag.startswith("--enable-lib")}
     needed.update(flag for flag in flags if flag in {"--enable-gmp", "--enable-gnutls",
@@ -752,9 +842,22 @@ def verified_staging(root):
         checked_bytes(root / "sdk/sysroot" / name, row["sha256"])
     for role, row in facts["consumed_sources"].items():
         checked_bytes(root / "provenance/consumed-sources" / role / "original-source.tar", row["archive_sha256"])
+        if row.get("source_tree_sha256") != lock["sources"][role].get("source_tree_sha256"):
+            raise ValueError("canonical source-tree identity differs from source lock")
         if lock["sources"][role].get("generator") != row.get("generator"):
             raise ValueError("generator differs from immutable consumed-source lock")
         validate_generator(row["generator"])
+        expected_modules = {module["path"]: module for module in lock["sources"][role].get("submodules", [])}
+        if set(expected_modules) != set(row.get("submodules", {})) or row.get("python_source_paths", []) != lock["sources"][role].get("python_source_paths", []):
+            raise ValueError("submodule composition differs from immutable source lock")
+        for name, module in row.get("submodules", {}).items():
+            if any(module.get(key) != value for key, value in expected_modules[name].items()):
+                raise ValueError("submodule identity changed from source lock")
+            base = root / "provenance/consumed-sources" / role / "submodules" / name
+            checked_bytes(base / "original-source.tar", module["archive_sha256"])
+            checked_bytes(base / "parent-git-tree.json", module["parent_tree_sha256"])
+            for license_name, sha in module["licenses"].items():
+                checked_bytes(base / "licenses" / license_name, sha)
         for index, patch in enumerate(row.get("patches", [])):
             checked_bytes(root / "provenance/consumed-sources" / role / ("patch-" + str(index) + ".patch"), patch["sha256"])
         for name, sha in row["licenses"].items():
@@ -875,6 +978,13 @@ def generate(root, jobs, seconds):
                 source = (unpacked / row["generator"]["source_root"]).resolve(strict=True)
                 if not source.is_relative_to(unpacked):
                     raise ValueError("generator source root escapes its authentic archive")
+                compose_submodules(root / "provenance/consumed-sources" / role, source, work, row.get("submodules", {}))
+                role_environment = dict(environment)
+                if row.get("python_source_paths"):
+                    paths = [(source / member_path(name)).resolve(strict=True) for name in row["python_source_paths"]]
+                    if any(not path.is_relative_to(source) for path in paths):
+                        raise ValueError("private Python source path escaped project")
+                    role_environment.update(PYTHONPATH=os.pathsep.join(map(str, paths)), PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
                 substitutions = {"source": str(source), "build": str(build), "sdk": str(root / "sdk"), "jobs": str(jobs)}
                 commands = []
                 for index, patch in enumerate(row.get("patches", [])):
@@ -919,7 +1029,7 @@ def generate(root, jobs, seconds):
                     program = program.resolve(strict=True)
                     argv[0] = str(program)
                     tool_hash = digest(program.read_bytes())
-                    result = bounded_generator(argv, cwd, environment, work / (str(index) + ".log"), deadline)
+                    result = bounded_generator(argv, cwd, role_environment, work / (str(index) + ".log"), deadline)
                     if digest(program.read_bytes()) != tool_hash:
                         raise ValueError("generator tool changed during execution")
                     result["tool_sha256"] = tool_hash

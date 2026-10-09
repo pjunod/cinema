@@ -253,8 +253,16 @@ first actual Bookworm generator attempt stopped after 21.60 seconds because
 the FFTW recipe omitted its upstream metadata target. The source repair invokes
 `make fftw3f.pc` after float configure; it does not manufacture the file or
 weaken missing-output checks. Fresh static staging passes in 6.59 seconds.
-Actual generation must be retried before producer configure/link, parser and
-shipping qualification. [Evidence §33](MACOS-VIDEO-PROCESSING-EVIDENCE.md#33-linux-sdk-generation-and-release-integration--2026-10-08)
+The corrected committed-source retry verifies all 6,596 input files and
+passes FFTW's actual upstream metadata target. It then stops after 21.91
+seconds because FreeType's archive lacks its required pinned `dlg` submodule.
+The source repair supplies six required submodules from exact parent gitlinks
+and replaces eleven unusable repository download URLs with verified canonical
+archives of the same pinned commits. Their normalized source trees match the
+retained originals, including executable bits and symlink targets. Fresh
+static staging and actual generation of the repaired inputs remain pending.
+The container is stopped and its lease released. Actual generation must complete before producer configure/link,
+parser and shipping qualification. [Evidence §33](MACOS-VIDEO-PROCESSING-EVIDENCE.md#33-linux-sdk-generation-and-release-integration--2026-10-08)
 records the failure, authentic rule and current input identity.
 
 Shipping source `6cdd3755f780bfef215ebd09e190ada2504d3ef1` now connects

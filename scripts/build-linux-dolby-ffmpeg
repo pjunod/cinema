@@ -441,6 +441,11 @@ def package_pipeline(root, jobs, seconds):
         downloads[name] = claim
     for role in [*lock["sources"].values(), *lock.get("build_tools", {}).values()]:
         add(role["archive"], role["url"], role["archive_sha256"])
+        if role.get("submodule_tree_evidence"):
+            evidence = role["submodule_tree_evidence"]
+            add(evidence["archive"], evidence["url"], evidence["sha256"])
+        for module in role.get("submodules", []):
+            add(module["archive"], module["url"], module["archive_sha256"])
         for patch in role.get("patches", []):
             if "url" in patch:
                 add(patch["archive"], patch["url"], patch["sha256"])
