@@ -1,6 +1,6 @@
 # Dolby Vision processing — implementation evidence and remaining work
 
-**Status:** open — M0 implementation in progress; product routes unqualified ·
+**Status:** open — serving integration and Linux packaging under qualification ·
 **Updated:** 2026-10-08 · **Integration:** `effort/dv-hdr-processing`
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
@@ -23,10 +23,11 @@ waiver; they are not Windows success evidence. PR #928 retained all 14 named
 regression trailers. These are integration checks, not product qualification.
 
 Sol 6.1 sessions provide renderer, CPU/authoring and offline measurement work,
-with independent adversarial review. Production routing, settings and badges
-remain unqualified and unchanged. The [M1 contract](DV_HDR_M1_CONTRACTS.md)
-owns only additive core types, validation and pure/test-only selection; actual
-code review approved the bounded Rust diff. On current effort base `03fa9d2`,
+with independent adversarial review. Settings and generation-bound client
+presentation are implemented; normal serving integration and the installed Linux
+helper bundle are completing qualification. The [M1 contract](DV_HDR_M1_CONTRACTS.md)
+initially introduced only additive core types, validation and pure/test-only
+selection; code review approved that bounded Rust diff. On its effort base `03fa9d2`,
 25 focused tests, six compatibility regressions, core all-target checking and
 warnings-denied Clippy passed with Rust 1.97.1. PR #933 merged at `0925e26db6336e9f17442635eee8e361de90745f`.
 Its existing exact-head run 4524 completed successfully before the cancellation request.
@@ -42,12 +43,12 @@ DV-off validation. Current playback keeps its compatible fallback.
 | Milestone | State | Evidence still required |
 |---|---|---|
 | M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association, bounded VFR/seek/epochs and affine P8.1 authoring retained with replay recipes | Broader timing and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
-| M1 typed contracts | Merged in #933: 25 focused and six compatibility tests passed; production registry empty | Runtime integration and qualification in M2/M3 |
+| M1 typed contracts | Merged in #933: 25 focused and six compatibility tests passed; registry intentionally empty in that first slice | Final serving qualification in M2/M3 |
 | M2 processing and lifecycle | Partial: bounded P7/FEL and base-only helpers; owned adapter merged in #946 | Normal playback integration, retained admission and served output evidence |
-| M3 routing and cache identity | In progress on `codex/dv-runtime-route`; first-window and generation paths wired, not yet accepted | Effective operation receipts, later-window fallback, base selection, audio and hardware encoding |
-| M4 settings and HDR10-E badge | Settings merged in #937: two default-off preferences persist independently with advisory Developer cards; receipt-backed web/Apple/Android presentation built and reviewed | Effective-generation reporting, runtime integration and route qualification |
+| M3 routing and cache identity | Merged in #964: first-window and generation paths, ownership, publication receipts and ordinary-reopen exclusion pass focused checks; native HTTP acceptance pending | Effective operation receipts, later-window fallback, base selection, audio and hardware encoding |
+| M4 settings and HDR10-E badge | Settings #937, report presentation #941 and accepted-control adoption/clearing #955 are merged. #960 describes supported processing and fallback without making readiness a gate | Actual served-generation report and fallback acceptance |
 | M5 quality and performance | Matched 24-picture software-decode/NVENC comparison recorded in §16; sustained throughput unresolved | Held-out corpus, matched bitrate, physical playback and full graph performance; current 4K helper is slower than realtime |
-| M6 release qualification | Not started | Exact-tree gates and separate acceptance for each proposed route |
+| M6 release qualification | Portable Linux helper packaging merged in #963; ARM64/AMD64 loader and manifest checks passed. Full-suite qualification has not started | Final native serving checks, frozen-tree qualification and main promotion |
 
 ## 3. Run the bounded offline comparison
 
@@ -134,9 +135,11 @@ compile against their separately pinned Rust 1.97.1 source recipes.
 Focused implementation regressions apply to the new offline tools. The earlier
 request to omit unit tests covered the documentation-only PR.
 
-Do not use this ledger as a production qualification receipt. Until the
-remaining gates pass, HDR10-E is a specified product label, not an emitted
-playback badge, and no measured universal quality gain is claimed.
+Do not use this ledger as a production qualification receipt. HDR10-E
+presentation is implemented, but a source label or saved preference
+cannot enable it: only an accepted current-generation processing report can.
+Native serving acceptance and final promotion remain outstanding. No measured
+universal quality gain is claimed.
 
 The first comparator slice passes 23 focused regressions:
 
@@ -351,10 +354,10 @@ The additive `effective_processing` sidecar carries the active playback control
 generation, `hdr10_enhanced`, separate FEL contribution and applied operations.
 Its only core constructor derives the M1 generation digest from the canonical
 UUID using the fixed `plurx.dv.playback-generation.v1` domain plus a zero byte
-and the UUID's 16 bytes. It then checks the unchanged production registry,
-plan, generation and current object shape. There is no caller-supplied
-independent digest/UUID pairing. The registry remains empty and every current
-production response constructor supplies no report.
+and the UUID's 16 bytes. It then checks the production registry, plan,
+generation and current object shape. There is no caller-supplied independent digest/UUID pairing. In this
+initial reporting slice, the registry was empty and response constructors
+supplied no report; actual publication-backed issuance belongs to M3.
 
 The sidecar is omitted when absent and ignored when deserializing a durable
 response, preventing stored JSON from restoring processing authority. Web,
@@ -381,8 +384,8 @@ or CI dispatch was run. The finite combined proof merged in PR #940 at
 
 Settings landed in effort PR #937 and effective-report/client presentation in
 PR #941 (merge `2730facccf2a35e768f0efb499b4924417e37cd6`). Presentation remains
-conditional on an actual generation report; current production routes do not
-mint one.
+conditional on an actual generation report. This helper slice did not mint
+one; normal serving integration owns that final publication boundary.
 
 The [helper build and execution guide](DV_PROCESSING_TOOLS.md) records the
 reviewed persistent renderer, direct NUT pipe, exact-clock overflow protection
@@ -397,9 +400,10 @@ authoring keeps coded base bytes unchanged and uses exact PTS association and
 explicit Matroska durations; final MP4/HLS packaging is not yet qualified.
 
 M3 worker selection, actual routing/cache receipts and concurrent graph custody
-remain open. M5 comparative resource measurements have not run. Correctness
-controls and configured resource caps are not a benchmark. No broad CI or full
-suite was dispatched for these helpers.
+remained open in that slice. M5 comparative resource measurements were
+subsequently completed in §16. Correctness controls and configured resource caps
+alone are not a benchmark. No broad CI or full suite was dispatched for these
+helpers.
 
 ## 14. Original movie windows and current integration limits
 
@@ -529,3 +533,55 @@ the CPU saving did not resolve the wall-time bottleneck, and no real-time
 claim follows. It used pinned `nv-codec-headers` commit
 `57f8cc0bb68e5f16f3787ea92cea59000f7bf97f` and a separate FFmpeg installation;
 no host package or production service was changed.
+
+
+## 17. Final serving integration and packaging
+
+The normal-serving implementation merged in PR #964 after adversarial review
+and exact-source compile and focused regression checks. It admits the first bounded window before selecting
+the processed route, retains process/resource ownership, and uses the existing
+publication path. A receipt must describe freshly published media in the
+accepted generation; replayed retained media cannot establish a new producer's
+processing claim. Later failure excludes that processing attempt for an ordinary
+reopen of the same playback, without requiring predecessor fields from clients.
+
+The HDR and FEL preferences remain independent and default off. HDR processing
+does not require permission to convert to Profile 8.1. FEL reconstruction for
+Profile 8.1 additionally requires that existing conversion permission. Native
+Dolby Vision precedence and compatible fallback remain in place. The default
+window budget remains eight seconds. The §16 4K source measurements
+are slower than realtime; neither startup success on a tiny fixture nor a
+passing build proves that ordinary 4K windows will meet this budget.
+
+Linux packaging builds private pinned FFmpeg decode libraries, libplacebo and
+libdovi separately from the existing production encoder. The bundle is intended
+for `/usr/lib/plurx/dv-processing`, with source, ABI and artifact identities.
+PR #963 merged this packaging after independent review and successful ARM64
+and AMD64 helper-only builds. Minimal Debian runtime checks verified the
+manifest, ABI 374/63/63/61, Vulkan provider definitions and all three executable
+loader/usage checks. AMD64 compilation used emulation; it is not native
+performance evidence. Host Vulkan discovery is preserved; no machine-specific
+ICD file is installed. Two focused manifest integrity regressions passed.
+Neither the production image nor the full suites were built for this task.
+
+PR #958 fixes the exclusive source-window boundary: a later unsupported RPU
+cannot invalidate an already complete prior window, but the later window must
+refuse it. Actual FEL and base-only controls decoded all 48 requested frames;
+separate later-window controls refused the unsupported metadata. The existing
+NTSC B-frame control also passed. PR #960's settings wording passed all 55
+settings-file checks and independent review. Neither task ran the full suites.
+
+Reviewed runtime source `5a872cded` passed workspace all-target Clippy with
+denied warnings and the normal Linux daemon compile on Rust 1.97.1. The actual
+FFmpeg-to-publisher regression retained all 48 video frames from two to four
+seconds, aligned AAC within one encoder frame and audio through the endpoint.
+Focused final regressions also passed for retained replay, incarnation-bound
+public reporting, compatible peer control and failed-episode exclusion. These
+checks do not replace normal HTTP serving acceptance.
+
+Final acceptance must use the normal daemon's HTTP create, control, HLS and
+media endpoints, including audio, a nonzero seek, multiple supported windows,
+a later unsupported window and ordinary reopen. Synthetic 256×144 fixtures
+meet the existing minimum transcode height and prove routing and timing only. The real 4K case must retain the eight-second
+budget and demonstrate compatible fallback if it is exceeded. These checks
+are pending; no successful final serving result is claimed here.
