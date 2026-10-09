@@ -71,5 +71,6 @@
     "Initial live-action bf0 probe attributed one outgoing14.583s decoder callback to the new backward-seek epoch with playerclock3s. Retained failure identifies a harness boundary; only this case is retried after target-epoch establishment.",
     "The first Android epoch correction used target+100ms, which rejected valid later first frames under startup load. Only the failed case is retried using the existing250ms video/player-clock correspondence criterion to establish an epoch; later within-epoch reversal and clock checks stay unchanged.",
     "Quiet attempt4 was invalid: install -r retained the previous same-case receipt, which was accepted before new playback. Clear only the isolated probe package data, verify files/qualification.json is absent, then launch and poll. Every observation equals attempt3; it is not a repeated playback failure."
-  ]
+  ],
+  "review_correction": "Target-floor admission is now limited to phase establishment and counted separately. After the first frame, below-target timestamps reach reversal/clock validation. All affected native cases are captured again with corrected source; pre-review receipts remain only admitted-observation evidence."
 }

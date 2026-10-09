@@ -350,3 +350,11 @@ explicit. A later first frame is admissible; startup frame drops do not have
 to land within 100 ms of the requested target.
 The correction does not change production playback or discard reversals
 inside an established phase.
+
+The final adversarial review exposed an unconditional target-floor filter in
+both native probes. It now applies only before phase establishment, with
+admission exclusions recorded separately. Every later same-epoch timestamp
+reaches reversal and clock checks. The original captures remain evidence for
+admitted observations only; all eight affected cases were captured again with
+the corrected probes. The [native summary](../evidence/video-quality-2026-10-08/native/qualification.json)
+separates those fresh passes from historical results and preserves all failures.

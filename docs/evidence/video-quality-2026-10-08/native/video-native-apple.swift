@@ -31,6 +31,8 @@ final class ProbeView: UIViewController {
     var firstTime: Double?
     var lastTime: Double?
     var phaseFrames = 0
+    var initialFloorExclusions = 0
+    var totalInitialFloorExclusions = 0
     var readyToCollect = false
     var done = false
     var url: URL!
@@ -77,6 +79,7 @@ final class ProbeView: UIViewController {
         firstTime = nil
         lastTime = nil
         phaseFrames = 0
+        initialFloorExclusions = 0
         if phase == 0 || targets[phase].0 == "restart" { attach() }
         let seek = CMTime(seconds: targets[phase].1, preferredTimescale: 600)
         player.seek(to: seek, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] ok in
@@ -126,7 +129,11 @@ final class ProbeView: UIViewController {
         guard media.isFinite else { finish("nonfinite frame timestamp"); return }
         // A ready layer alone may retain an old picture across a seek. The
         // decoded output's item time must belong to the requested new epoch.
-        guard media >= targets[phase].1 - 0.1 else { return }
+        if firstTime == nil && media < targets[phase].1 - 0.1 {
+            initialFloorExclusions += 1
+            totalInitialFloorExclusions += 1
+            return
+        }
         if let last = lastTime, media < last - 0.001 {
             finish("presentation timestamp reversed within a phase")
             return
@@ -158,6 +165,7 @@ final class ProbeView: UIViewController {
             }
             phases.append([
                 "phase": targets[phase].0, "frames_observed": phaseFrames,
+                "initial_floor_exclusions": initialFloorExclusions,
                 "first_frame_seconds": rows.first?["wall_since_phase_seconds"] ?? 0,
                 "maximum_video_to_player_clock_seconds": maximum,
                 "distinct_pixel_fingerprints": distinct, "result": "pass"
@@ -178,6 +186,7 @@ final class ProbeView: UIViewController {
             "case": ProcessInfo.processInfo.environment["QUAL_CASE"] ?? "unnamed",
             "result": failure == nil ? "pass" : "fail",
             "failure": failure ?? NSNull(), "phases": phases, "observations": observations,
+            "initial_floor_exclusions": totalInitialFloorExclusions,
             "scope": "Actual native decode, visible simulator layer readiness, timestamp progression, forward/backward seek and fresh-item restart of Plurx HLS. Video-to-player clock and audio-track presence are measured; physical audio sync and physical display are not measured."
         ]
         do {

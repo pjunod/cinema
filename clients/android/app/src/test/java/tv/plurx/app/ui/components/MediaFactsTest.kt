@@ -32,7 +32,7 @@ class MediaFactsTest {
 
         val facts = playerMediaFacts(file, audio)
 
-        assertEquals(listOf("1080P", "DV", "ATMOS 7.1"), facts.map { it.label })
+        assertEquals(listOf("1080P", "Dolby Vision P8", "ATMOS 7.1"), facts.map { it.label })
         assertEquals(
             listOf(MediaFactKind.Resolution, MediaFactKind.DynamicRange, MediaFactKind.Audio),
             facts.map { it.kind },
@@ -63,8 +63,7 @@ class MediaFactsTest {
 
     // ---- MEDIA-BADGES-PLAN §2.3: the three states, case by case -------------
     //
-    // The same table the web player's badge is driven by, adapted to Android's
-    // chip labels ("DV"/"HDR" rather than "DV P7"/"HDR10").
+    // Source and delivered profiles remain visible, including active conversions.
 
     @Test
     fun aStrippedDolbyVisionRemuxSaysWhatItIsPlayingInstead() {
@@ -77,8 +76,8 @@ class MediaFactsTest {
         )
 
         assertEquals(FactState.Downgraded, fact.state)
-        assertEquals("DV → HDR10", fact.chipText)
-        assertEquals("Dolby Vision, playing as HDR10", fact.accessibilityLabel)
+        assertEquals("Dolby Vision P7 → HDR10", fact.chipText)
+        assertEquals("Dolby Vision Profile 7, playing as HDR10", fact.accessibilityLabel)
     }
 
     @Test
@@ -92,7 +91,7 @@ class MediaFactsTest {
         )
 
         assertEquals(FactState.Active, fact.state)
-        assertEquals("DV", fact.chipText)
+        assertEquals("Dolby Vision P8", fact.chipText)
     }
 
     @Test
@@ -109,7 +108,7 @@ class MediaFactsTest {
         )
 
         assertEquals(FactState.Downgraded, fact.state)
-        assertEquals("DV → HDR10", fact.chipText)
+        assertEquals("Dolby Vision P8 → HDR10", fact.chipText)
     }
 
     @Test
@@ -121,7 +120,7 @@ class MediaFactsTest {
         )
 
         assertEquals(FactState.Downgraded, fact.state)
-        assertEquals("HDR → SDR", fact.chipText)
+        assertEquals("HDR10 → SDR", fact.chipText)
     }
 
     @Test
@@ -133,7 +132,7 @@ class MediaFactsTest {
         )
 
         assertEquals(FactState.Downgraded, fact.state)
-        assertEquals("HDR → SDR", fact.chipText)
+        assertEquals("HDR10 → SDR", fact.chipText)
     }
 
     @Test
@@ -154,7 +153,7 @@ class MediaFactsTest {
             .single { it.kind == MediaFactKind.DynamicRange }
 
         assertEquals(FactState.Source, fact.state)
-        assertEquals("DV", fact.chipText)
+        assertEquals("Dolby Vision P7", fact.chipText)
         assertNull(fact.activeLabel)
     }
 
@@ -217,9 +216,9 @@ class MediaFactsTest {
         // byte and what reaches the device IS Dolby Vision, so dimming it
         // would say the opposite of what happened.
         assertEquals(FactState.Active, fact.state)
-        assertEquals("DV", fact.chipText)
-        assertEquals("Dolby Vision Profile 8", fact.activeLabel)
-        assertEquals("Dolby Vision, playing as Dolby Vision Profile 8", fact.accessibilityLabel)
+        assertEquals("Dolby Vision P7 → Dolby Vision P8", fact.chipText)
+        assertEquals("Dolby Vision P8", fact.activeLabel)
+        assertEquals("Dolby Vision Profile 7, playing as Dolby Vision Profile 8", fact.accessibilityLabel)
     }
 
     @Test
@@ -270,6 +269,7 @@ class MediaFactsTest {
         ).single { it.kind == MediaFactKind.DynamicRange }
 
         assertEquals(FactState.Active, fact.state)
+        assertEquals("Dolby Vision", fact.chipText)
         assertNull(fact.activeLabel)
     }
 

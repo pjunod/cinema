@@ -36,6 +36,7 @@ public final class ProbeActivity extends Activity {
     int phase = -1, observed = 0, successfulCopies = 0;
     volatile int epoch = 0;
     int priorEpochCallbacks = 0;
+    int initialFloorExclusions = 0, totalInitialFloorExclusions = 0;
     long started, phaseStarted, firstPts = -1, lastPts = -1;
     double maximumClockDelta = 0;
     boolean done = false, copyPending = false, audioSelected = false;
@@ -97,6 +98,7 @@ public final class ProbeActivity extends Activity {
         phaseStarted = SystemClock.elapsedRealtime();
         firstPts = lastPts = -1;
         observed = successfulCopies = priorEpochCallbacks = 0;
+        initialFloorExclusions = 0;
         fingerprints.clear(); maximumClockDelta = 0;
         if (phase == 0 || names[phase].equals("restart")) attach();
         player.seekTo(targets[phase]);
@@ -104,7 +106,12 @@ public final class ProbeActivity extends Activity {
     }
 
     void observe(int ownEpoch, long ptsUs, int width, int height) {
-        if (done || ownEpoch != epoch || ptsUs < targets[phase] * 1000 - 100000) return;
+        if (done || ownEpoch != epoch) return;
+        if (firstPts < 0 && ptsUs < targets[phase] * 1000 - 100000) {
+            initialFloorExclusions++;
+            totalInitialFloorExclusions++;
+            return;
+        }
         // The decoder may finish an outgoing frame after seekTo has already
         // changed the application clock. Establish the new epoch with a frame
         // corresponding to the current player clock before checking monotonicity.
@@ -147,6 +154,7 @@ public final class ProbeActivity extends Activity {
                     }
                     try {
                         phases.put(new JSONObject().put("phase", names[phase]).put("result", "pass")
+                            .put("initial_floor_exclusions", initialFloorExclusions)
                             .put("prior_epoch_callbacks", priorEpochCallbacks).put("frames_observed", observed).put("successful_surface_copies", successfulCopies)
                             .put("distinct_pixel_fingerprints", fingerprints.size())
                             .put("maximum_video_to_player_clock_seconds", maximumClockDelta));
@@ -167,6 +175,7 @@ public final class ProbeActivity extends Activity {
                 .put("runtime", "Media3 1.10.1 on isolated Android emulator")
                 .put("os", android.os.Build.VERSION.RELEASE).put("result", failure == null ? "pass" : "fail")
                 .put("failure", failure == null ? JSONObject.NULL : failure).put("phases", phases).put("observations", frames)
+                .put("initial_floor_exclusions", totalInitialFloorExclusions)
                 .put("scope", "Native codec and actual Surface pixels, timestamp progression, seeks and fresh-player restart. Audio selection and player clock measured; physical output A/V sync is not measured.");
             try (FileOutputStream out = new FileOutputStream(new File(getFilesDir(), "qualification.json"))) {
                 out.write(report.toString(2).getBytes(StandardCharsets.UTF_8));

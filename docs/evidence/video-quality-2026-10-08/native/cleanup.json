@@ -11,5 +11,12 @@
   "loopback_http_port": 18976,
   "http_server_session": 7549,
   "http_server_exit_code": 0,
-  "remaining": "Task-owned binary/build/source scratch is retained through review and merge; final exact cleanup is recorded in PR956. No foreign devices or caches removed."
+  "remaining": "Task-owned binary/build/source scratch is retained through review and merge; final exact cleanup is recorded in PR956. No foreign devices or caches removed.",
+  "review_capture_cleanup": {
+    "apple": "review-apple-identity.json",
+    "android": "review-android-identity.json",
+    "http_server_session": 45653,
+    "http_server_exit_code": 0,
+    "all_owned_native_devices_removed": true
+  }
 }

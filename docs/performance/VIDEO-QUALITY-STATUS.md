@@ -21,7 +21,7 @@ unmeasured device or image path passed.
 
 | Lane / exclusive ownership | Work being completed | Current evidence and next step |
 |---|---|---|
-| Encoding: encoding qualification harnesses and receipts | Real-title C2 sample and whole-clip quality/size/time comparison; B-frame client delivery. | Three genuinely tagged SDR titles retain baseline: candidates lose quality or increase bytes. The real-title durable owner persisted source-matched measurements and produced a Ready baseline package. Actual Plurx HLS passes Chrome and all 16 AVPlayer plus all 16 Media3 phases, retaining three initial Android passes and selectively retrying only the failed case. B-frames show no consistent quality/size win; retain the default. Safari automation did not reach media. |
+| Encoding: encoding qualification harnesses and receipts | Real-title C2 sample and whole-clip quality/size/time comparison; B-frame client delivery. | Three genuinely tagged SDR titles retain baseline: candidates lose quality or increase bytes. The real-title durable owner persisted source-matched measurements and produced a Ready baseline package. Actual Plurx HLS passes Chrome and all 16 AVPlayer plus all 16 Media3 phases, with fresh review-corrected probes; older receipts remain limited to admitted timestamps. B-frames show no consistent quality/size win; retain the default. Safari automation did not reach media. |
 | HDR: captured-image diagnostic harnesses and receipts | Explain the retained sharp-edge failure, then measure broader authored color/highlight/shadow cases with the shipping graph. | Decode, planar/P010 conversion and GPU transfer are byte-exact; independent decoders agree. Quantization/reconstruction causes the sharp-edge error. A quantizer limit improves the image but violates a constrained bitrate budget, so it is rejected. Authored chromatic tone-map inspection is complete; retain the tone-map policy. The bitrate-preserving effort control also trades away quality on real windows and is rejected. Calibration is complete; the original sharp-edge criterion remains failed, and broader graph image/client acceptance is not claimed. |
 | Latency: isolated playback measurement harnesses and receipts | Actual-frame episode transitions, startup distributions and delivery resource comparisons. | All 16 initial transition cells passed. Final compiled release passes both natural-ended cells and three ownership boundaries. The close/cancel root cause is fixed through existing playback intent. All 24 release startup cells pass; cold API preparation median is 360 ms versus 491 ms with one versus two source collections. HLS serves 3,600 identical-hash responses with lower daemon CPU in every paired cell; concurrent latency is mixed. These are frozen-source, shared-host measurements, not fleet guarantees. |
 | Coordinator: this ledger, programme, docs index and backlog | Integrate logical commits, final review, scoped fast lane, merge and cleanup. | Pinned Rust 1.97.1 release builds passed for both measured variants; native harnesses compile. Newer main is integrated separately for final candidate compilation and checks. PR #956 records the final adversarial review, retained successful checks, selective retries, landing and local cleanup. No deployment is part of this campaign. |
@@ -65,13 +65,24 @@ and the original failed close boundary remain retained as failed or invalid
 captures, never promoted into passing evidence.
 
 The [native summary](../evidence/video-quality-2026-10-08/native/qualification.json)
-records four cases × four phases on each framework. The fresh final Android
-case passes with a maximum 154 ms video/player-clock difference against the
+records four cases × four phases on each framework. The review-corrected Android
+matrix passes with a maximum 160 ms video/player-clock difference against the
 unchanged 250 ms bar. Attempt 4 read a stale receipt and is explicitly invalid;
 the launcher now clears only its own probe package and verifies receipt
-absence. The earlier loaded clock failure remains unexplained by that later
+absence. The earlier loaded clock failure remains unexplained by a later
 pass. These probes do not qualify physical speaker/display synchronization
 or the shipping application UI.
+
+The [single final adversarial review](../evidence/video-quality-2026-10-08/review.json)
+found two P2 harness defects and no additional production finding. Both native
+probes filtered below-target observations after phase establishment; they now
+apply that admission only before the first frame and count exclusions. Old
+receipts retain their narrower admitted-observation scope. All 32 affected
+native phases pass fresh corrected captures. The browser reproducer now bounds
+startup/CDP operations and owns child cleanup before a driver is returned.
+Its ten focused failure-path checks pass, retaining eight initial passes and
+retrying only two fixture-budget failures. Unrelated successful qualification
+cells were not repeated. Final fast-lane and landing receipts remain in PR #956.
 
 The HDR calibration decision is **retain**: quantizer changes violate bitrate
 constraints and the effort control has quality regressions. The sharp-edge

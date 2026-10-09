@@ -24,7 +24,8 @@
     "safari": "POST /session times out before any page or media is loaded. This is an automation environment failure, not a decoder verdict.",
     "vmaf": "All 3,359 frames per recipe were scored against the matched CFR/scale source reference. B-frames show no consistent quality/byte benefit.",
     "c2_durable_owner": "One actual current-image offline owner on idle lab3 persisted three measured windows for a tagged real SDR excerpt and produced the ready package. Identity equality was checked source-locally. All candidates fail quality gates; the accepted VBR snapshot remained immutable.",
-    "c2_structure": "content-structure.json records exact producer-only analysis callers and metadata-only foreground lookup. Ambiguous official CC originals retain baseline encoding."
+    "c2_structure": "content-structure.json records exact producer-only analysis callers and metadata-only foreground lookup. Ambiguous official CC originals retain baseline encoding.",
+    "browser_failure_paths": "browser-focused-checks.json records ten passing fake-process/CDP/page checks after startup/cleanup repair: eight initial passes retained and only two fixture-budget failures rerun. Historical browser observations are unchanged."
   },
   "decisions": {
     "c2": "Retain ordinary VBR on these three sources; do not change the default.",
@@ -52,7 +53,7 @@
     "content-structure.json": "54f4c5b5ddab4c190e609fb77616dacd4b0726e412059c64afcd3a6113594d91",
     "inspect-served.py": "828c75feb39685d3670986e12479a268ad56ca1a6028be0783eff1c75b107ae8",
     "media-inspection.json": "7b51b08264c23e628036b1634f86410216ce7b15ab69361ee1402acf3b830e81",
-    "probe-clients.mjs": "b4a049076c09c11d2a8f188ac99c00e29036c5d0b67528a6f83910260cb3165c",
+    "probe-clients.mjs": "4ab8913159cbac564b875fd1f77c6998ee7dd7809fc9e6ccf0294f55e89f050a",
     "public-corpus.json": "5f1ceb7d9839b88c5d9630dbacc5ffd2d94a98a8bec2001cb1261e2b2914b7fd",
     "qualify-content-encoding.py": "2ddf83b7a1220f3e9aa1df4b9413e8f457b0df89dd23ebbb5ff085240b9f0df6",
     "qualify-content-owner.py": "09c1e7312ecd998f94df514eaa02191640b913f80ef95613e277896b9f55d0e1",
@@ -60,7 +61,9 @@
     "safari-capture.json": "84b2081619476bcfb9ba48a27727112a54cd0df65716d51e88fcf210d72e9783",
     "score-vod.py": "7948502968b9acca19ca70763c4d530a77f78529a99237af55914b69e7f9aea9",
     "vod-quality.json": "7e47373488e23bf749bc88df18c3819f5f965f7fdedf678891a932d05d67761d",
-    "wire-presentation-grid.json": "d49e99643c1588ab17212162cc38d0e3b6c8f1caa35ee4dafa66c29acec8d998"
+    "wire-presentation-grid.json": "d49e99643c1588ab17212162cc38d0e3b6c8f1caa35ee4dafa66c29acec8d998",
+    "probe-clients-failure.test.mjs": "6b31966a2c2f1f60199755dbe4e4f8499f9888eb59c5e69a9f3477e5c46df93e",
+    "browser-focused-checks.json": "c8b935e9416e3776eb3e72c3344df3b6a6c10f3678d5da407d2cf659a28c9efc"
   },
   "cleanup": {
     "remote_private_media_and_container": {
