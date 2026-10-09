@@ -806,3 +806,96 @@ M5/K-05 completion or later-main deployment is claimed. The original owners,
 decisions and historical execution rows below remain unchanged. The
 coordinator owns review and batch integration; this evidence record does not
 authorize a new unit/discovery, compiler, deployment or runtime action.
+
+### Published-image index-choice readback — 2026-10-09 (partial M5 evidence)
+
+gpt-6.1-sol (`agent:/root/ci_reconcile_sol61`) records the coordinator's
+actual one-shot read on media1 at 05:51:53.782301 UTC (1.297668 s total
+acquisition, not a query benchmark). This supplies the two index-choice
+assertions requested by the 2026-09-25 M5 fleet-evidence row: Python SQLite
+3.46.1 on one completed published snapshot copied into private owned scratch.
+The live state-machine database/WAL was not opened; no database bytes,
+application rows or catalogue binding integer are published here. The
+external-ID bindings were `movie / <redacted existing integer> / NULL`;
+the canonical top-level count uses library1 without claiming it contains rows.
+Besides the fixed schema-length bootstrap, application-query work was only
+the one integer parameter selection and the two EQPs; the underlying lookup
+and COUNT were not executed.
+
+| Statement | Actual plan detail |
+|---|---|
+| `sql_source::item_by_external_id`, exact 28-column projection | `SEARCH items USING COVERING INDEX idx_items_tmdb (tmdb_id=?)` and `SEARCH items USING COVERING INDEX idx_items_imdb (imdb_id=?)` |
+| Canonical top-level library count | `SEARCH items USING INDEX idx_items_top_level_title (library_id=?)` |
+
+The external-ID plan also retains `SEARCH items USING INTEGER PRIMARY KEY
+(rowid=?)`, the compound/list subquery and `USE TEMP B-TREE FOR ORDER BY`.
+These are observed compiled plans, not timings, returned-item evidence or an
+assertion that the NULL IMDb arm executed. Complete plan rows are retained in
+the private raw receipt; no sort-removal or latency improvement is inferred.
+
+This was not a first-attempt success. Three earlier negative cases remain
+separately retained and their once-handles consumed:
+
+- 05:06:38.432522 UTC: a fixed epoch/mount tuple mismatch was refused before
+  scratch creation, copy or SQL; the actual receipt did not identify the
+  mismatching field or cause. A separately reviewed successor captured a
+  strictly validated current tuple and required it unchanged afterward.
+- 05:15:15.673018 UTC: copy/hash passed, then schema loading under
+  LENGTH32768/SQL_LENGTH4096 returned `string or blob too big` for
+  `background_job_publish_fragment_command`, before parameter selection/EQP;
+  cleanup subsequently passed in finally. Final source/pointer/epoch brackets
+  were not reached, so this was not a complete copy-protocol admission.
+  This did not establish database corruption or missing indexes.
+- 05:32:55.924749 UTC: the unchanged bootstrap reader refused a same-UUID
+  pending-image/sidecar pathname before scratch/copy/SQL. The receipt did not
+  identify which suffix or prove active writing; no sidecar was deleted.
+
+The schema correction used verified 1MiB LENGTH/SQL_LENGTH limits only for
+same-connection schema initialization and one fixed scalar byte-length query.
+The successful image returned 8,988 bytes for the named schema SQL, above the
+old 4,096-byte statement limit; this does not prove that the earlier image's
+definition was byte-identical. Before parameter selection/EQPs, the reader
+restored and verified 32768/4096 and the original items/COUNT authorizer.
+Schema/statistics reads and length/COUNT were narrowly permitted during
+bootstrap; no DDL text, statistics rows or samples were exported. Callback
+counts do not prove that every eligible statistic was applied. One shared
+1s SQL deadline, read-only/immutable access and all epoch/FD/path/hash/cleanup
+guards remained in force; no production limit, schema or behavior changed.
+
+The successful case followed a distinct, normally observed SystemUI
+snapshot-build completion projection at 05:34:05.127 UTC, after the pending
+refusal. That event was only a trigger, not current UUID/epoch or producer
+admission. The unchanged reader independently admitted and bracketed the new
+current tuple, pointer and image. Original/source-post/copy hashes agreed;
+the exact scratch file and directory were removed after hash/identity checks.
+The actual receipt records remote complete/cleanup true, no cleanup errors,
+reaped owned Docker CLI children and reaped SSH/group absence. No polling
+campaign, forced snapshot, restart, mutation, new unit or CI run occurred.
+
+Actual raw SHA256
+`48e26c7ffd6a23a4022821ea19a2a95f5339f23be385f3a6e3fd41cd1bcc01d5`
+records the embedded remote source hash
+`8bba7c2eaed42d480f4f5fbe8045b78f3c810dec5c65f54f59a1bfbd32e2ff7e`
+only. The separately retained caller
+`dc8db41ce0dcbb78534aa385e657813b7b2b47424cb7fb8289cf7e405713cb5c`
+was independently hashed and associated by the actual pinned execution
+context; its hash is not cryptographically embedded in this raw receipt.
+Offline drafting independently rehashed the retained raw/caller and checked
+the two plan assertions and cleanup fields without another acquisition.
+The retained SQL source SHA256
+`615a183ce5363b6c09779c33ccab7c3e8379565aa88cb01f8f318c17da32a9a7`
+is byte-identical in the coordinator-supplied current-main97be91e/tree1cc5d0
+snapshot. The observed SQL uses that shared template and the retained selected
+28-column projection; the current handler/projection inventory was not
+re-extracted. This establishes shared-template applicability, not a full
+shipping-SQL census, installed-producer or build equivalence. M5 explicitly
+requests Python SQLite on the copy; this observation adds no new requirement
+to replay it with a shipping engine.
+
+Only this media1 index-choice slice is newly observed. The earlier three-voter
+structural readback and all historical measurements/decisions stay unchanged.
+Other-voter plan readback, original index-build cost and coordinated rollout,
+restart-to-ready comparison and before/after Home/Title route latency remain
+open. The snapshot producer and effective current configured data_dir are not
+bound by these mount/plan observations. No whole M5/K-05 qualification or
+later-main deployment is claimed.
