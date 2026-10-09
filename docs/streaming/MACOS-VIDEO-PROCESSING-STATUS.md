@@ -18,12 +18,15 @@ VideoToolbox failure into active implementation. These are now required
 work, not conditional follow-ups. The accepted PR #904 source is an ancestor
 of Batch03's main landing `1088d7529401297bddced74bfa11c166457468d8`.
 This separate effort began at reviewed combined source
-`b8461f30f5ae6f69c32ec671a81f3d1aedb4f219` and is integrating that landing.
+`b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`. Integration commit
+`c10f16f009a723c4fb579ead278bec8d233d283f` also incorporates main
+`e7a973887cff09af9307d39508045c1be9a20e70` without conflicts. Its exact
+merged tree passes pinned all-target compilation and the normal tracked hook.
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | Bitmap API, all eight complete-graph raw comparisons and final text API pass; inactive font-rule identity repair passes on the signed `e9fdc02a` release | Measure performance and preserve final qualification through integration |
-| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; full Bookworm FFmpeg and matching static parser builds pass; exact `e9fdc02a` Linux check/Clippy pass | Shipping package, amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
+| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; full Bookworm FFmpeg, matching static parser, package assembly, complete ELF audit and exact merged-source Linux checks pass | amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on the final `2139fa9c` signed bundle, including caption payload/timing checks and clean owned shutdown | Preserve this evidence through final integration; broader DVR and client presentation qualification remain tracked separately |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
@@ -45,8 +48,14 @@ The `e9fdc02a` font-identity repair passes pinned Rust 1.97.1 all-target compila
 and the normal commit hook (catalog, formatting, Clippy and 86 embedded
 JavaScript checks). The repaired release build and focused ordinary-API
 qualification both pass. Exact-source Linux check and Clippy also pass in
-a 192.074-second phase. Subsequent changes affect build packaging and
-documentation. No unit suite has run; final review has not started.
+a 192.074-second phase. Subsequent changes repair build packaging and integrate current main. The
+merged tree passes all-target compilation in 320.513 seconds. The first
+bounded phase expires during the commit hook; a warm hook-only continuation
+passes in 67.421 seconds without replaying the successful check. Its new
+Mac release and focused subtitle/caption API checks are underway. Exact-source
+Linux check and Clippy pass in a 413.866-second phase. See
+[evidence §39](MACOS-VIDEO-PROCESSING-EVIDENCE.md#39-exact-merged-source-compilation).
+No unit suite has run; final review has not started.
 
 The earlier `2139fa9c` release continuation finishes in 1,991.254 seconds,
 with executable and matching arm64 debug symbols captured within 1,992.202
@@ -69,11 +78,11 @@ rows under a new identity domain. It retains font, tool and active-file
 checks. Its focused release qualification passes in 86.630 seconds:
 inactive rules change from zero to 44, a fresh Source profile retains the
 startup digest, and native GPU text delivery passes all 25 cue and lifecycle
-assertions. Performance remains separate: three admissions declined competing
-processes before starting any timing child. The latest refusal found an
-active Clippy compiler with normal system memory pressure and about 21 GB
-reclaimable memory. Benchmark contention, rather than memory exhaustion,
-prevents an uncontaminated timing claim.
+assertions. Performance remains separate: four admissions declined competing
+processes before starting any timing child. The fourth found active Rust
+and Swift compilers, warning-level pressure and 16.34 GB reclaimable memory.
+These refusals establish contention; they do not establish memory
+exhaustion or supply an uncontaminated timing result.
 
 The earlier `2cd6000b3` Mac release completed in 1,590.286 seconds with its
 owned process group fully reaped. Matching executable and debug symbols are
@@ -158,18 +167,37 @@ bytes and records all original link members/targets as hash-bound metadata.
 It neither invents libraries nor copies host tools through those aliases.
 Assembly retains the original compilation recipe and all three verified
 build logs, while identifying its corrected packaging recipe separately.
-The failed package remains preserved. Corrected assembly, ELF audit and
-hardware/API qualification remain pending. No global installation or network
-fallback substitutes for dependencies.
+The failed package remains preserved. Corrected assembly passes, then
+the complete ELF audit finds a missing system provider in the diagnostic
+container. A consolidated parity audit identifies 23 absent runtime-base
+packages: 17 authenticated inputs already retained by the SDK and six new
+public packages with their source offers. The isolated installation passes
+in a seven-second phase with exactly those 23 additions, no changes to
+previously installed packages, and an unchanged SDK. Its first attempt
+failed before installation because the private driver omitted system
+administration directories from PATH; the corrected standard PATH resolves
+that cause. The complete existing ELF audit then passes in 7.797 seconds
+on a byte-verified package copy, covering 121 runtime objects. Its capsule
+is `c2a07f88dcdbcfab086256711108a8860bacb8e619814b210a64bed9c7bc8695`.
+The original assembled package remains unchanged. The producer and parser
+builds are retained. Hardware/API qualification remains pending. No global
+installation or network fallback substitutes for dependencies.
 
 Final Linux hardware acceptance also requires an actual amd64 daemon;
 ARM Linux type/lint checks alone cannot supply that executable. A warm
 build-cache candidate and bounded build are prepared. Automatic approval
-review rejected transferring the 54.2 MB committed-source archive to the
-build node; explicit user approval for that payload and destination is
-pending. Nothing from that archive has transferred or started. The
-independent package and hardware preparation continue on their existing
-inputs. Performance measurements, shipping Linux runtime qualification,
+review rejected transferring the committed-source archive to the build
+node. The refreshed merged-source packet is about 55.1 MB. Review also
+rejected the separate 0.2 MB Dockerfile/media-helper context needed to build
+the authentic shipping runtime image. The user then explicitly approved
+both transfers to the build node. Both exact transfers pass hash checks.
+The shipping runtime-image build is active; its actual build container has
+two CPUs, 2 GiB memory and no swap. The daemon build wrapper initially
+refuses an unused systemd slice because systemd synthesizes its loaded state;
+the wrapper is being corrected to check actual ownership and restrict
+cleanup to resources it created. No compiler ran in that refused attempt.
+The completed package audit is retained; physical admission preparation and
+Mac release qualification continue. Performance measurements, shipping Linux runtime qualification,
 final adversarial review and merge handoff remain outstanding.
 The designated merge coordinator owns unit execution and main landing.
 

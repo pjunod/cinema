@@ -1701,8 +1701,8 @@ events and zero OOM or OOM-kill events at that sample. This is resource
 evidence for the build, not a throughput measurement or final telemetry
 for every process. The original compiled parser is preserved while the
 normal packaging path acquires source records for its actual static system
-dependencies. Final package audit and physical hardware/API qualification
-remain open.
+dependencies. At this checkpoint the package audit and physical hardware/API
+qualification remained open; §38 records the later package audit.
 
 [Producer and sealed-parser build evidence](evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz)
 contains one neutral JSON record, 2800 compressed bytes, SHA-256
@@ -1712,3 +1712,67 @@ the actual configure, compile, install and parser logs against their build
 receipts. The archived member was reopened and compared byte-for-byte.
 No binaries, source archives, private paths or full logs are included, and
 no build or unit test was replayed to curate this evidence.
+
+## 38. Audited Linux package with preserved build authority
+
+The corrected assembly at `d9c9926025c56e264ef925fcb15dec2bef3b1348`
+retains the producer/parser binaries compiled in §37. It copies regular
+provenance files without following scratch-tree or host-tool aliases, records
+those aliases as metadata, and binds the original compilation recipe
+separately from the packaging recipe. It does not rewrite build witnesses.
+
+The first complete ELF audit exposes missing system packages in the isolated
+diagnostic container. A consolidated dependency inventory identifies 23
+absent packages: 17 original authenticated inputs already retained by the
+SDK and six additional public packages with matching source offers. The
+installation changes exactly those 23 rows and preserves every prior package
+version and the SDK. Installation itself takes 4.441 seconds. A first attempt
+fails before installation because the private driver omitted system
+administration directories from PATH; the standard PATH fixes that cause.
+
+The unchanged audit owner then passes in 7.797 seconds on a byte-verified
+copy of the assembled package. Only the copy's failed audit directory is
+moved aside; the original package remains unchanged. There are 121 runtime
+objects and 167 recursive closure entries. The final capsule SHA-256 is
+`c2a07f88dcdbcfab086256711108a8860bacb8e619814b210a64bed9c7bc8695`.
+It explicitly retains `runtime_qualification: false`: a complete ELF audit
+does not establish driver behavior, P5 output correctness or ordinary daemon
+API delivery. Those require the authentic shipping runtime and physical
+Intel/AMD checks still in progress.
+
+[Linux package audit evidence](evidence/macos-video-20261008/linux-package-audit-evidence.tar.gz)
+contains one neutral JSON record, 2109 compressed bytes, SHA-256
+`3c216b4f440e3787e8d97ee5d3f7336074f2f0ef4a5454908d78ea20d098e73a`.
+Eight raw receipts, logs and the actual capsule were independently verified
+against their recorded sizes and hashes. The neutral record includes exact
+producer/parser and recipe identities, package additions, closure counts,
+original-package preservation and raw-record hashes. Its archived member
+was reopened and compared byte-for-byte. No compiler or unit execution was
+repeated to curate this evidence.
+
+## 39. Exact merged-source compilation
+
+Integration `c10f16f009a723c4fb579ead278bec8d233d283f` incorporates main
+`e7a973887cff09af9307d39508045c1be9a20e70` without conflicts. The exact
+merged tree is `3d7efe3ae8d3ff9919685b30c3e2813a0ff1d006`. Pinned Rust
+1.97.1 all-target checking of core and daemon with `hiqlite-store` passes on
+Mac in 320.513 seconds. The first bounded phase expires during the normal
+commit hook. A hook-only continuation passes in 67.421 seconds, preserving
+the successful check and running the normal catalog, formatting, Clippy and
+embedded JavaScript checks. Its owned process group and target holders are
+absent afterward.
+
+The same committed source is archived into the existing local Linux arm64
+compiler lane. All-target check and Clippy with denied warnings both pass,
+using one job and the pinned compiler. The host phase takes 413.866 seconds;
+its child receipts show zero exits and settled processes. This provides
+Linux source/type/lint evidence, not an amd64 daemon or physical hardware
+result. No unit suite is executed. The changed daemon/storage integration
+still receives fresh release and focused normal-API qualification.
+
+[Merged-source compiler evidence](evidence/macos-video-20261008/merged-c10-compile-evidence.tar.gz)
+contains one neutral JSON record, 1762 compressed bytes, SHA-256
+`3051d8064d975b3a0aafcc2ec300d16fa2c34199b8a70c5b51b8f75f6e78b5d7`.
+It records the successful phases, retained first-phase timeout, exact source
+identities, compiler commands and hashes of 14 underlying receipts/logs.
+The archived member was reopened and compared byte-for-byte.
