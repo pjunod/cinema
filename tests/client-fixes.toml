@@ -5970,3 +5970,28 @@ source = "clients/apple/Sources/PlaybackControlSession.swift"
 source_anchor = 'retryAfterHeader: response.value(forHTTPHeaderField: "Retry-After")'
 test = "clients/apple/Tests/PlaybackControlTransportTests.swift"
 test_anchor = "testHeaderOnlyServingFenceCarriesTheServersDelay"
+
+# DV effort corrective client anchors: source/test witnesses, not execution receipts.
+[[fixes]]
+id = "android.physical-key-public-window-callback"
+commits = ["696b37ff3e4cf664fab6fb98a71706f02ac297ab"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = "return nativeWindowCallback.dispatchKeyEvent(event)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "dedicatedPhysicalPlayPauseStopRetireCreditsAndPreservePhysicalScrub"
+
+[[fixes]]
+id = "web.accepted-control-processing-report"
+commits = ["0ebcd0cd318f307a3e81ab8bb2635cb6443bfb3d"]
+source = "crates/plurxd/src/web/player/directed-change.js"
+source_anchor = "p.effectiveProcessing=processing;"
+test = "tests/web/dv-processing-badge.test.js"
+test_anchor = "accepted current controls adopt late processing and omission clears the same generation"
+
+[[fixes]]
+id = "android.generation-bound-hdr10-enhancement"
+commits = ["e3970c07d6bceb36caf9d82bbc86a74223ff079d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "effectiveProcessing?.matches(activeGeneration, delivered) == true"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "hdr10EnhancedRequiresCurrentReportAndKeepsFelDetailSeparate"
