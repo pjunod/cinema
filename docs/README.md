@@ -45,6 +45,8 @@ Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-
 
 Apple playback buffer: [944-playback-buffer-limit.md](apple-builds/944-playback-buffer-limit.md).
 
+Apple temporary serving fence: [962-temporary-serving-fence-control.md](apple-builds/962-temporary-serving-fence-control.md).
+
 Apple display wake: [818-display-wake.md](apple-builds/818-display-wake.md) — playback owns the display idle timer.
 
 Sharing activation: [Running-cluster activation and SQL transition safety](features/SHARING-LIVE-ACTIVATION.md) — **open**.

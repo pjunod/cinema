@@ -368,7 +368,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         await reporter.start()
         assertAsyncResult(await harness.awaitExchanges(2))
         await reporter.stop()
-        XCTAssertEqual(harness.requests[0], harness.requests[1])
+        XCTAssertEqual(harness.requests.first, harness.requests.dropFirst().first)
         XCTAssertEqual(harness.exchanges[0].capture, captured)
         XCTAssertEqual(harness.exchanges[1].capture, captured)
         XCTAssertNotEqual(captured.intentGeneration, harness.takeCapture()?.intentGeneration)
@@ -1093,27 +1093,57 @@ final class PlaybackControlReporterTests: XCTestCase {
     }
 
     func testARetryHonoursTheServersRetryAfter() async throws {
+        for code in ["control_unavailable", "serving_fenced"] {
+            let harness = Harness()
+            harness.enqueue([
+                .failure(ControlTransportError(
+                    status: 503, code: code, retryAfterMs: 4_000
+                )),
+                .success(ControlResponse(
+                    proto: PlaybackControl.protocolName,
+                    generation: bootstrap().generation,
+                    controlEpoch: 7,
+                    acceptedSequence: 1,
+                    action: ControlAction(type: "none")
+                )),
+            ])
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            await reporter.start()
+            assertAsyncResult(await harness.awaitExchanges(2))
+            let stopped = await reporter.stopped
+            XCTAssertFalse(stopped, "temporary refusal \(code) must keep the reporter alive")
+            await reporter.stop()
+            XCTAssertEqual(harness.requests.first, harness.requests.dropFirst().first, "replay must retain the exact capture")
+            XCTAssertTrue(
+                harness.pacingSleeps.contains(4_000),
+                "the server asked for 4s and got 4s, not the 500ms default: \(harness.pacingSleeps)"
+            )
+        }
+    }
+
+    func testATemporaryServingFenceCanEndWithADefinitiveTerminal() async throws {
         let harness = Harness()
         harness.enqueue([
-            .failure(ControlTransportError(
-                status: 503, code: "control_unavailable", retryAfterMs: 4_000
-            )),
-            .success(ControlResponse(
-                proto: PlaybackControl.protocolName,
-                generation: bootstrap().generation,
-                controlEpoch: 7,
-                acceptedSequence: 1,
-                action: ControlAction(type: "none")
-            )),
+            .failure(ControlTransportError(status: 503, code: "serving_fenced")),
+            .failure(ControlTransportError(status: 410, code: "session_ended")),
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
         assertAsyncResult(await harness.awaitExchanges(2))
-        await reporter.stop()
-        XCTAssertTrue(
-            harness.pacingSleeps.contains(4_000),
-            "the server asked for 4s and got 4s, not the 500ms default: \(harness.pacingSleeps)"
-        )
+        let stopped = await reporter.stopped
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(harness.requests.first, harness.requests.dropFirst().first)
+    }
+
+    func testAnUnknown503StopsControlReporting() async throws {
+        let harness = Harness()
+        harness.enqueue([.failure(ControlTransportError(status: 503, code: "unknown_refusal"))])
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        assertAsyncResult(await harness.awaitExchanges(1))
+        let stopped = await reporter.stopped
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(harness.requests.count, 1)
     }
 
     func testARetryWithoutARetryAfterUsesTheControlBackoff() async throws {
