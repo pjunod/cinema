@@ -116,3 +116,13 @@ for package in zlib1g-dev libbz2-dev liblzma-dev libc6-dev; do
         cp "/usr/share/doc/$package/copyright" "$documentation/$package.copyright"
     fi
 done
+
+# The audited amd64 shipping caller supplies an owned input directory. Existing
+# ARM and other baseline callers keep their original parser contract. This step
+# supplements the recorded compiler/library provenance; it never rebuilds or
+# changes the executable.
+if [ -n "${3:-}" ]; then
+    case "$3" in /*) ;; *) echo 'static provider inputs must be absolute' >&2; exit 1 ;; esac
+    python3 "$(dirname "$recipe")/sealed-parser-dependency-offers.py" \
+        --parser "$binary" --provenance "$documentation" --inputs "$3"
+fi

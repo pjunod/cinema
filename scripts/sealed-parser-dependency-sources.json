@@ -1,0 +1,336 @@
+{
+  "schema_version": 1,
+  "platform": {
+    "distribution": "debian",
+    "version": "12",
+    "architecture": "amd64"
+  },
+  "scope": "Actual sealed-parser static providers only; compiler-only dependency sources are excluded. Existing ARM path remains unchanged.",
+  "metadata_authority": {
+    "main_inrelease_sha256": "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa",
+    "main_verification_receipt_sha256": "2792decaf2dba234656403bbff3343988be21f2daec621027ba38a34e71fd0d5",
+    "security_inrelease_sha256": "7aca99af5945f174d3a00ff806d94a8e680c8d21ad081e55811099148e3399b1",
+    "security_verification_receipt_sha256": "4c483f59d5300d6f248f7ba24004c83977ad32ae63a33cd28941cf53ffd715c2",
+    "verification_scope": "Cryptographic release/index chain using official HTTPS public key; full apt revocation/expiry policy was not evaluated."
+  },
+  "providers": {
+    "libc6-dev": {
+      "package": {
+        "archive": "libc6-dev_2.36-9+deb12u14_amd64.deb",
+        "version": "2.36-9+deb12u14",
+        "sha256": "0218fc2befcd784c1b0c6292c0a137ce89fad054efaa579ad083bee0f2c01aae",
+        "bytes": 1903668,
+        "url": "https://deb.debian.org/debian/pool/main/g/glibc/libc6-dev_2.36-9+deb12u14_amd64.deb",
+        "authenticated_index": "debian-metadata"
+      },
+      "source_offer": {
+        "package": "glibc",
+        "version": "2.36-9+deb12u14",
+        "files": {
+          "glibc_2.36-9+deb12u14.dsc": {
+            "sha256": "cfe1f0b8dc1fa211ce5a45b3725cc38b29f88667f1140ebdca6de35cf9c6f1fd",
+            "bytes": 9765,
+            "url": "https://deb.debian.org/debian/pool/main/g/glibc/glibc_2.36-9+deb12u14.dsc"
+          },
+          "glibc_2.36.orig.tar.xz": {
+            "sha256": "a543c02070d46ccaf866957efd13f10c924daa74c86a90a0254db09a92a708ee",
+            "bytes": 19363988,
+            "url": "https://deb.debian.org/debian/pool/main/g/glibc/glibc_2.36.orig.tar.xz"
+          },
+          "glibc_2.36-9+deb12u14.debian.tar.xz": {
+            "sha256": "cf4ac9cd98185452cae3ef34e2e4ee12753e3d93fd0c62c61396d4a47eec902f",
+            "bytes": 918488,
+            "url": "https://deb.debian.org/debian/pool/main/g/glibc/glibc_2.36-9+deb12u14.debian.tar.xz"
+          }
+        }
+      },
+      "link_names": [
+        "m",
+        "pthread"
+      ],
+      "implicit_roles": [
+        "C runtime",
+        "startup objects"
+      ],
+      "installed_members": {
+        "usr/lib/x86_64-linux-gnu/crt1.o": {
+          "sha256": "4b46dce59ad3ab304d3f98fd370048b20c1569d6d0a9176623a6bbb0dc6d3513",
+          "bytes": 1768
+        },
+        "usr/lib/x86_64-linux-gnu/crti.o": {
+          "sha256": "78acef26a7007f5320c98633376f2903e33895e694fbc2b91d189b38addbca8a",
+          "bytes": 1072
+        },
+        "usr/lib/x86_64-linux-gnu/crtn.o": {
+          "sha256": "121f2a5f12b13471dd8c7dabe3ff334df08540c270564d1a2b3c47ecbd8d3101",
+          "bytes": 648
+        },
+        "usr/lib/x86_64-linux-gnu/libBrokenLocale.a": {
+          "sha256": "c16c27e728378fc005c208da16bf49e17636f0ec6f45d7b81bfcd212a71090aa",
+          "bytes": 1790
+        },
+        "usr/lib/x86_64-linux-gnu/libanl.a": {
+          "sha256": "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5",
+          "bytes": 8
+        },
+        "usr/lib/x86_64-linux-gnu/libc.a": {
+          "sha256": "8e5252c4b87e3d588e2d15e624502277c5d3bfb382fec7a5199ae752080b372c",
+          "bytes": 5452590
+        },
+        "usr/lib/x86_64-linux-gnu/libc_nonshared.a": {
+          "sha256": "22a836e3aff767b559a703d42bde40fdb0e550297dbd99dd565f6a68b3ae8dda",
+          "bytes": 5098
+        },
+        "usr/lib/x86_64-linux-gnu/libdl.a": {
+          "sha256": "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5",
+          "bytes": 8
+        },
+        "usr/lib/x86_64-linux-gnu/libg.a": {
+          "sha256": "e4d0162ed6a095611051d6bf79a18d4042d905cd9dcfe10cc6fc390de09eb8d1",
+          "bytes": 1098
+        },
+        "usr/lib/x86_64-linux-gnu/libm-2.36.a": {
+          "sha256": "c6382c1c6d14aa90d002f3ca1911f1b7477bf0b5b685c30de278076bbab95100",
+          "bytes": 2307876
+        },
+        "usr/lib/x86_64-linux-gnu/libm.a": {
+          "sha256": "8613ec93733a7aaaae0f9ce1ba0a66e46b76ffdc48b2bb6a286005f1090b89d2",
+          "bytes": 132
+        },
+        "usr/lib/x86_64-linux-gnu/libmcheck.a": {
+          "sha256": "c735a6c71d4e69b0a069ff3430c8c5e0ffccc3b201854d792644506feaaec5f1",
+          "bytes": 1360
+        },
+        "usr/lib/x86_64-linux-gnu/libmvec.a": {
+          "sha256": "8ae76fe83cc08f346773d1bc334f8fe4fa80f934236ae63c87468e3e17733fde",
+          "bytes": 1750500
+        },
+        "usr/lib/x86_64-linux-gnu/libpthread.a": {
+          "sha256": "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5",
+          "bytes": 8
+        },
+        "usr/lib/x86_64-linux-gnu/libpthread_nonshared.a": {
+          "sha256": "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5",
+          "bytes": 8
+        },
+        "usr/lib/x86_64-linux-gnu/libresolv.a": {
+          "sha256": "e3f4c210e427fd69e9f981c395bcf1c70d90a42fb1b7fed73a1cde5db55f8d4c",
+          "bytes": 81916
+        },
+        "usr/lib/x86_64-linux-gnu/librt.a": {
+          "sha256": "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5",
+          "bytes": 8
+        },
+        "usr/lib/x86_64-linux-gnu/libutil.a": {
+          "sha256": "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5",
+          "bytes": 8
+        }
+      }
+    },
+    "libgcc-12-dev": {
+      "package": {
+        "archive": "libgcc-12-dev_12.2.0-14+deb12u1_amd64.deb",
+        "version": "12.2.0-14+deb12u1",
+        "sha256": "d720259380a84f2ffc6fe516eff5cbe9c8a005138e8d6a5748747ba4b3404a82",
+        "bytes": 2437204,
+        "url": "https://deb.debian.org/debian/pool/main/g/gcc-12/libgcc-12-dev_12.2.0-14+deb12u1_amd64.deb",
+        "authenticated_index": "debian-metadata"
+      },
+      "source_offer": {
+        "package": "gcc-12",
+        "version": "12.2.0-14+deb12u1",
+        "files": {
+          "gcc-12_12.2.0-14+deb12u1.dsc": {
+            "sha256": "3aed0b189189c744dc9f4b74798a51d3e512ea85e492568db788a927c88e20ba",
+            "bytes": 27330,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/g/gcc-12/gcc-12_12.2.0-14+deb12u1.dsc"
+          },
+          "gcc-12_12.2.0.orig.tar.gz": {
+            "sha256": "b8298be16aeeb96a889c6afed0a8e2241b47452e89cc81fe65ea849d5c740fcb",
+            "bytes": 87090343,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/g/gcc-12/gcc-12_12.2.0.orig.tar.gz"
+          },
+          "gcc-12_12.2.0-14+deb12u1.debian.tar.xz": {
+            "sha256": "59f7f7763a0c355e3f27ff9e7ac80d06382b29939361a87e7b139226bfe7402e",
+            "bytes": 1675204,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/g/gcc-12/gcc-12_12.2.0-14+deb12u1.debian.tar.xz"
+          }
+        }
+      },
+      "link_names": [
+        "atomic"
+      ],
+      "implicit_roles": [
+        "GCC runtime",
+        "startup objects"
+      ],
+      "installed_members": {
+        "usr/lib/gcc/x86_64-linux-gnu/12/crtbegin.o": {
+          "sha256": "fa84e03f722b21cb6ff9ea71de28601a569316b4901393daebadae498e698518",
+          "bytes": 2440
+        },
+        "usr/lib/gcc/x86_64-linux-gnu/12/crtbeginT.o": {
+          "sha256": "28d42fe29af04c8bbe4bd8f8debf427c80303c162aebca748da4bb34d7f1c4c7",
+          "bytes": 2960
+        },
+        "usr/lib/gcc/x86_64-linux-gnu/12/crtend.o": {
+          "sha256": "96d81f92f663e0cf892cf0c83c4cf8ddfbbc1b32996d39c20843583cf91a26cc",
+          "bytes": 1160
+        },
+        "usr/lib/gcc/x86_64-linux-gnu/12/libatomic.a": {
+          "sha256": "e2ff202d8f365ecc104b78d56bbcc39954c1bd489af564a5d60bef003655b548",
+          "bytes": 138032
+        },
+        "usr/lib/gcc/x86_64-linux-gnu/12/libgcc.a": {
+          "sha256": "525f1bab26ddfe18ab442e3e51723b57417265f2804a65ddf3cc87b34eea856b",
+          "bytes": 3080764
+        },
+        "usr/lib/gcc/x86_64-linux-gnu/12/libgcc_eh.a": {
+          "sha256": "35ab41a9450ce844f0240f61a73a11aa2ba4f83d54d90f4199d777fb052bd391",
+          "bytes": 54236
+        }
+      }
+    },
+    "zlib1g-dev": {
+      "package": {
+        "archive": "zlib1g-dev_1.2.13.dfsg-1_amd64.deb",
+        "version": "1:1.2.13.dfsg-1",
+        "sha256": "f9ce531f60cbd5df37996af9370e0171be96902a17ec2bdbd8d62038c354094f",
+        "bytes": 916272,
+        "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib1g-dev_1.2.13.dfsg-1_amd64.deb",
+        "authenticated_index": "debian-metadata"
+      },
+      "source_offer": {
+        "package": "zlib",
+        "version": "1:1.2.13.dfsg-1",
+        "files": {
+          "zlib_1.2.13.dfsg-1.dsc": {
+            "sha256": "3fa1e6b2fc525062aa88207dda52fed8e045373c809d362fe8a2bfbf7cf515a8",
+            "bytes": 2399,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/z/zlib/zlib_1.2.13.dfsg-1.dsc"
+          },
+          "zlib_1.2.13.dfsg.orig.tar.bz2": {
+            "sha256": "71feb7947e3c00ef125f83b79a4e529bde31171e5babe48b391f06758d1ab0a1",
+            "bytes": 1239825,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/z/zlib/zlib_1.2.13.dfsg.orig.tar.bz2"
+          },
+          "zlib_1.2.13.dfsg-1.debian.tar.xz": {
+            "sha256": "f66cf3d4f2d7defcd4d1fd1fb0a11ee39f1e01b42ec7d059c9dc5c1695133c44",
+            "bytes": 15700,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/z/zlib/zlib_1.2.13.dfsg-1.debian.tar.xz"
+          }
+        }
+      },
+      "link_names": [
+        "z"
+      ],
+      "implicit_roles": [],
+      "installed_members": {
+        "usr/lib/x86_64-linux-gnu/libz.a": {
+          "sha256": "b5a4f0439559010349877f4100e6f704185840d0cc02cd3adaf49e4d4bf51b29",
+          "bytes": 148862
+        }
+      }
+    },
+    "libbz2-dev": {
+      "package": {
+        "archive": "libbz2-dev_1.0.8-5+b1_amd64.deb",
+        "version": "1.0.8-5+b1",
+        "sha256": "df7204e188f7514ceae9c6f57c6c8b25ce8a642746fe284c6e89122ef26b7e57",
+        "bytes": 30868,
+        "url": "https://deb.debian.org/debian/pool/main/b/bzip2/libbz2-dev_1.0.8-5+b1_amd64.deb",
+        "authenticated_index": "debian-metadata"
+      },
+      "source_offer": {
+        "package": "bzip2",
+        "version": "1.0.8-5",
+        "files": {
+          "bzip2_1.0.8-5.dsc": {
+            "sha256": "ed9c40f4de3f9e064535e15eac1c61a0f606763db98f4579dbc04067b94a8944",
+            "bytes": 2206,
+            "url": "https://deb.debian.org/debian/pool/main/b/bzip2/bzip2_1.0.8-5.dsc"
+          },
+          "bzip2_1.0.8.orig.tar.gz": {
+            "sha256": "ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269",
+            "bytes": 810029,
+            "url": "https://deb.debian.org/debian/pool/main/b/bzip2/bzip2_1.0.8.orig.tar.gz"
+          },
+          "bzip2_1.0.8-5.debian.tar.bz2": {
+            "sha256": "d68c6eba11d70e14319e24ef1451880a03023b2b75364646adb117086db36039",
+            "bytes": 26787,
+            "url": "https://deb.debian.org/debian/pool/main/b/bzip2/bzip2_1.0.8-5.debian.tar.bz2"
+          }
+        }
+      },
+      "link_names": [
+        "bz2"
+      ],
+      "implicit_roles": [],
+      "installed_members": {
+        "usr/lib/x86_64-linux-gnu/libbz2.a": {
+          "sha256": "58fe6133ef194830bf9895ecd2090a70a2a5987f42c4e3981e4cb5a0354e7de8",
+          "bytes": 79770
+        }
+      }
+    },
+    "liblzma-dev": {
+      "package": {
+        "archive": "liblzma-dev_5.4.1-1+deb12u2_amd64.deb",
+        "version": "5.4.1-1+deb12u2",
+        "sha256": "8fba549e7a6819bb5758fc9b7d601a82963e6cdc222043d06a989312604bbc55",
+        "bytes": 260400,
+        "url": "https://deb.debian.org/debian-security/pool/updates/main/x/xz-utils/liblzma-dev_5.4.1-1+deb12u2_amd64.deb",
+        "authenticated_index": "debian-security-metadata"
+      },
+      "source_offer": {
+        "package": "xz-utils",
+        "version": "5.4.1-1+deb12u2",
+        "files": {
+          "xz-utils_5.4.1-1+deb12u2.dsc": {
+            "sha256": "bffc9917562b5787661379621bb1f7510bf7271b03d8ce4181cebc84b90d3c35",
+            "bytes": 2442,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/x/xz-utils/xz-utils_5.4.1-1+deb12u2.dsc"
+          },
+          "xz-utils_5.4.1.orig.tar.xz": {
+            "sha256": "5d9827aa1875b21c288f78864bb26d2650b436ea8d2cad364e4921eb6266a5a5",
+            "bytes": 1485272,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/x/xz-utils/xz-utils_5.4.1.orig.tar.xz"
+          },
+          "xz-utils_5.4.1-1+deb12u2.debian.tar.xz": {
+            "sha256": "7e0b1d1448520ea4f88ec05136a88f07564cc4a1abd6dfcf53c1f822a3e4f64f",
+            "bytes": 95356,
+            "url": "https://deb.debian.org/debian-security/pool/updates/main/x/xz-utils/xz-utils_5.4.1-1+deb12u2.debian.tar.xz"
+          }
+        }
+      },
+      "link_names": [
+        "lzma"
+      ],
+      "implicit_roles": [],
+      "installed_members": {
+        "usr/lib/x86_64-linux-gnu/liblzma.a": {
+          "sha256": "38f0d96e142728df0c93aff50f910dc07dd466c8b735b31c578e02eb76c574c5",
+          "bytes": 340978
+        }
+      }
+    }
+  },
+  "copyright_packages": {
+    "gcc-12-base": {
+      "archive": "gcc-12-base_12.2.0-14+deb12u1_amd64.deb",
+      "version": "12.2.0-14+deb12u1",
+      "sha256": "1896a2aacf4ad681ff5eacc24a5b0ca4d5d9c9b9c9e4b6de5197bc1e116ea619",
+      "bytes": 37596,
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-12/gcc-12-base_12.2.0-14+deb12u1_amd64.deb",
+      "authenticated_index": "debian-metadata"
+    },
+    "libbz2-1.0": {
+      "archive": "libbz2-1.0_1.0.8-5+b1_amd64.deb",
+      "version": "1.0.8-5+b1",
+      "sha256": "54149da3f44b22d523b26b692033b84503d822cc5122fed606ea69cc83ca5aeb",
+      "bytes": 47348,
+      "url": "https://deb.debian.org/debian/pool/main/b/bzip2/libbz2-1.0_1.0.8-5+b1_amd64.deb",
+      "authenticated_index": "debian-metadata"
+    }
+  }
+}

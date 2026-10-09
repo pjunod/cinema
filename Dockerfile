@@ -59,6 +59,7 @@ ARG JELLYFIN_FFMPEG_VERSION=8.1.3-1-bookworm
 # ffprobe cannot be its trusted input. Build a separate static local-file
 # probe; keep the ordinary Jellyfin probe and hardware encoder intact.
 COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
+COPY scripts/sealed-parser-dependency-offers.py scripts/sealed-parser-dependency-sources.json scripts/prepare-linux-dolby-sdk /usr/local/libexec/
 COPY scripts/prepare-linux-dolby-ffmpeg /usr/local/libexec/prepare-linux-dolby-ffmpeg
 COPY scripts/linux-video-ffmpeg-patches/0001-require-current-dolby-state.patch /usr/local/libexec/linux-video-ffmpeg-patches/0001-require-current-dolby-state.patch
 COPY scripts/build-static-vmaf-scorer /usr/local/libexec/build-static-vmaf-scorer
@@ -119,15 +120,18 @@ RUN sed -i \
     && apt-get install -y --no-install-recommends \
         build-essential pkg-config nasm curl ca-certificates xz-utils meson ninja-build xxd python3 patch \
         zlib1g-dev libbz2-dev liblzma-dev \
+    && static_provider_inputs="" \
+    && if [ "$TARGETARCH" = amd64 ]; then static_provider_inputs=/tmp/sealed-parser-provider-inputs; fi \
     && sh /usr/local/libexec/build-static-ffprobe \
-        /usr/local/lib/plurx/ffprobe /usr/share/doc/plurx/ffprobe \
+        /usr/local/lib/plurx/ffprobe /usr/share/doc/plurx/ffprobe $static_provider_inputs \
     && sh /usr/local/libexec/build-static-vmaf-scorer \
         /usr/local/lib/plurx/vmaf-ffmpeg /usr/share/doc/plurx/vmaf-scorer \
     && apt-get purge -y build-essential pkg-config nasm xz-utils meson ninja-build xxd python3 patch \
         zlib1g-dev libbz2-dev liblzma-dev \
     && apt-get autoremove -y \
     && rm /usr/local/libexec/build-static-ffprobe /usr/local/libexec/build-static-vmaf-scorer /usr/local/libexec/prepare-linux-dolby-ffmpeg \
-    && rm -rf /usr/local/libexec/linux-video-ffmpeg-patches \
+    && rm /usr/local/libexec/sealed-parser-dependency-offers.py /usr/local/libexec/sealed-parser-dependency-sources.json /usr/local/libexec/prepare-linux-dolby-sdk \
+    && rm -rf /usr/local/libexec/linux-video-ffmpeg-patches /tmp/sealed-parser-provider-inputs \
     && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates mesa-va-drivers curl \
         "mkvtoolnix=${MKVTOOLNIX_VERSION}" \

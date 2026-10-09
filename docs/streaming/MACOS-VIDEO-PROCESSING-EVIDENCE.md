@@ -1643,8 +1643,9 @@ contains one neutral JSON record, 4994 compressed bytes, SHA-256
 `cbe4d34c06b61172df224c44ad148b3368e8c2d8e8ae472ae745324bb9d526fd`. All 18 retained raw
 allowlist entries were independently verified for size and hash; the archive
 was reopened and its member compared byte-for-byte. Failed configure and
-preflight attempts remain separate records. Full producer linking, matching
-parser, package audit and physical normal-API acceptance remain outstanding.
+preflight attempts remain separate records. Producer and parser compilation
+are qualified separately in §37; package audit and physical normal-API
+acceptance remain outstanding.
 
 ## 36. Active font identity survives an inactive-rule change
 
@@ -1677,3 +1678,37 @@ inputs were independently verified for size and hash, and the archived
 member was reopened and compared byte-for-byte. Earlier `2139fa9c` raw graph
 and caption proofs retain their original source identities and are not
 replayed or relabelled. No unit tests execute during this qualification.
+
+## 37. Full Bookworm producer and matching static parser build
+
+The production recipe at `354bd87e5f4356ae677bc16c67672985dd58f261`
+configures, compiles and installs the full Jellyfin producer. All 57 official
+configuration tokens remain, including `--enable-lto=auto`; all three steps
+exit zero. This uses the 514-output authenticated SDK from §35 and the
+original Jellyfin `v8.1.3-1` source, its 100 quilt patches and the generic
+strict-Dolby patch. It does not substitute the earlier diagnostic binary.
+
+The matching sealed parser builds in 170.238 seconds. Its SHA-256 is
+`e4defc74375b5170d574b65256969340ad8e1268b695350dc8998b2a981ce191`.
+The retained ELF headers have no interpreter or dynamic segment; resolved
+configuration enables AC-4 decoding and demuxing. Producer and parser source,
+local patch and canonical quilt identities agree. This establishes their
+build relationship, not an actual decoder/driver or normal-API result.
+
+A recorded compile-time cgroup sample has a two-CPU limit, 2 GiB memory
+limit and no swap. Its memory peak reaches that limit, with 1099 limit
+events and zero OOM or OOM-kill events at that sample. This is resource
+evidence for the build, not a throughput measurement or final telemetry
+for every process. The original compiled parser is preserved while the
+normal packaging path acquires source records for its actual static system
+dependencies. Final package audit and physical hardware/API qualification
+remain open.
+
+[Producer and sealed-parser build evidence](evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz)
+contains one neutral JSON record, 2800 compressed bytes, SHA-256
+`da9405c96130f240f74447b829a49e5bc58653f0b2671e4c3aee7729ec192155`.
+All 16 retained private records were verified by size and hash, including
+the actual configure, compile, install and parser logs against their build
+receipts. The archived member was reopened and compared byte-for-byte.
+No binaries, source archives, private paths or full logs are included, and
+no build or unit test was replayed to curate this evidence.

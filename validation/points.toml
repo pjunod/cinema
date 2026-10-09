@@ -1233,6 +1233,8 @@ paths = [
   "scripts/p02-release-cost.py",
   "scripts/p02-release-cost.Dockerfile",
   "scripts/build-static-ffprobe",
+  "scripts/sealed-parser-dependency-offers.py",
+  "scripts/sealed-parser-dependency-sources.json",
   "scripts/build-macos-video-ffmpeg",
   "scripts/build-macos-source-parser",
   "scripts/package-macos",

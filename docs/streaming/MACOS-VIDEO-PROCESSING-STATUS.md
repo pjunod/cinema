@@ -140,10 +140,17 @@ The full producer compiles successfully in a 475-second phase on `354bd87e`,
 with all features retained and no OOM under the fixed container limits.
 Installation also passes. The matching sealed parser passes in 170.238
 seconds: it is static, enables AC-4, and uses the same source and patch set.
+The retained build records and all four actual log hashes are independently
+verified in [evidence §37](MACOS-VIDEO-PROCESSING-EVIDENCE.md#37-full-bookworm-producer-and-matching-static-parser-build).
 Final package auditing is checking the actual redistributed static system
-libraries and their source records. Compilation alone is not shipping
-acceptance. No global installation or network fallback substitutes for
-dependencies.
+libraries and their source records. The amd64 parser packaging path now
+automatically verifies the installed static archives against authenticated
+Debian members and retains their matching source offers. A supplement mode
+can attach those records to the existing compiled parser without changing
+its binary or original build recipe. Its 22 public inputs are size/hash
+verified; actual supplement and package audit remain pending. Compilation
+alone is not shipping acceptance. No global installation or network fallback
+substitutes for dependencies.
 
 Final Linux hardware acceptance also requires an actual amd64 daemon;
 ARM Linux type/lint checks alone cannot supply that executable. A warm
