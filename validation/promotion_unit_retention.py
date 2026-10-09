@@ -137,6 +137,8 @@ def log_outcomes(log, format_name):
     else:
         raise r.ReceiptError('Unsupported actual unit log format')
     for name, outcome in rows:
+        if format_name in {'rust', 'rust-serial'}:
+            name = name.removesuffix(' - should panic')
         r.require(name not in outcomes, 'Duplicate contradictory unit log outcome')
         outcomes[name] = outcome
     r.require(outcomes, 'No actual unit outcomes in retained log')

@@ -147,6 +147,13 @@ class RetainedUnitCase(unittest.TestCase):
         self.assertEqual(retention.log_outcomes('test file.rs - item (line 12) ... ok\n', 'rust'),
                          {'file.rs - item (line 12)': 'pass'})
 
+    def test_rust_should_panic_annotation_keeps_the_discovered_identity(self):
+        self.assertEqual(retention.log_outcomes('test module::case - should panic ... ok\n', 'rust'),
+                         {'module::case': 'pass'})
+        with self.assertRaises(receipts.ReceiptError):
+            retention.log_outcomes('test module::case - should panic ... ok\n'
+                                   'test module::case ... ok\n', 'rust')
+
     def test_live_identity_and_writer_attestation_are_required(self):
         proof = fixture()
         raw = json.dumps(proof).encode()
