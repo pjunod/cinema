@@ -22,21 +22,24 @@
     "bframes": "Four actual immutable VOD outputs: two CC film excerpts times bf0/bf2. All raw video presentation slots are contiguous and unique from zero; bf2 uses signed version-1 CTO. Strict full decode passes and AAC packets have no timestamp gaps.",
     "chrome": "Four outputs times cold mid-entry at 18 seconds, forward seek to 40 seconds, and backward seek to 8 seconds. All pass moving decoded-pixel hashes and monotonic RVFC presentation.",
     "safari": "POST /session times out before any page or media is loaded. This is an automation environment failure, not a decoder verdict.",
-    "vmaf": "All 3,359 frames per recipe were scored against the matched CFR/scale source reference. B-frames show no consistent quality/byte benefit."
+    "vmaf": "All 3,359 frames per recipe were scored against the matched CFR/scale source reference. B-frames show no consistent quality/byte benefit.",
+    "c2_durable_owner": "One actual current-image offline owner on idle lab3 persisted three measured windows for a tagged real SDR excerpt and produced the ready package. Identity equality was checked source-locally. All candidates fail quality gates; the accepted VBR snapshot remained immutable.",
+    "c2_structure": "content-structure.json records exact producer-only analysis callers and metadata-only foreground lookup. Ambiguous official CC originals retain baseline encoding."
   },
   "decisions": {
     "c2": "Retain ordinary VBR on these three sources; do not change the default.",
     "bframes": "Retain the bf0 default and meaningful operator opt-in; do not claim compression graduation."
   },
   "limits": [
-    "The C2 driver exercises the production recipe projection and scoring policy, not the durable job/cache owner.",
+    "The three-title campaign measures exact production recipes; a separate one-title durable offline-owner cell covers real lifecycle integration. This does not qualify every whole-film title.",
     "Private 60-second excerpts and 12-second holdouts do not guarantee whole-film quality.",
     "Official CC sources omit color tags. Source-relative VOD comparison does not qualify C2 metadata or original mastering.",
     "Chrome is an isolated headless HLS/MSE runtime, not a physical television.",
     "Safari WebDriver is unavailable. Apple AVPlayer and Android Media3 have separately owned receipts.",
     "No shipping-UI prepared handoff or audible HDMI acceptance is claimed by this receipt.",
     "The first raw bf2 CTO is zero; FFprobe 9 adds one video tick to demuxed PTS. Retained raw-grid evidence distinguishes that interpretation from the authored timeline.",
-    "OS cache is uncontrolled and single capture timings are not throughput benchmarks."
+    "OS cache is uncontrolled and single capture timings are not throughput benchmarks.",
+    "The private owner receipt exports only allowlisted metrics and boolean source-identity equality; the raw fingerprints/database/logs remained source-local and were deleted after verification. The anonymous receipt cannot locate or independently reproduce the private title."
   ],
   "artifacts": {
     "capture-vod.cjs": "e8e09e2eec6d36023f9486818bcacadab140c70a28ee34951adadd44c9bfaf76",
@@ -44,11 +47,15 @@
     "chrome-capture.json": "a296e066a1542f3dd2d9a9af6d98bd43174924f6bb92287952ec9b2e135228bc",
     "content-attempt1.json": "2d9758fdbd267e0a0c0524666cbacbcf96b0ddb16872d33fa933ceb886372370",
     "content-measured.json": "39ffb87a600c025f75ac7802b0585680e4e613d0869bd0d1c37b71ae0e01274f",
+    "content-owner-attempts.json": "a4ff524c89471fcf0b712043886814d34df3107536ffbd792f9b8bd6b03702a5",
+    "content-owner-measured.json": "af8db9a7e2236b287ff1f7df20a4c73f3a480bb2c73ee95733dd50bf98c7060c",
+    "content-structure.json": "54f4c5b5ddab4c190e609fb77616dacd4b0726e412059c64afcd3a6113594d91",
     "inspect-served.py": "828c75feb39685d3670986e12479a268ad56ca1a6028be0783eff1c75b107ae8",
     "media-inspection.json": "7b51b08264c23e628036b1634f86410216ce7b15ab69361ee1402acf3b830e81",
     "probe-clients.mjs": "b4a049076c09c11d2a8f188ac99c00e29036c5d0b67528a6f83910260cb3165c",
     "public-corpus.json": "5f1ceb7d9839b88c5d9630dbacc5ffd2d94a98a8bec2001cb1261e2b2914b7fd",
-    "qualify-content-encoding.py": "aa6fb7e3ca574bf71669a8424f47cee2ae5b0a7476228ed97b34e56eeddc5aea",
+    "qualify-content-encoding.py": "2ddf83b7a1220f3e9aa1df4b9413e8f457b0df89dd23ebbb5ff085240b9f0df6",
+    "qualify-content-owner.py": "09c1e7312ecd998f94df514eaa02191640b913f80ef95613e277896b9f55d0e1",
     "safari-capture-diagnostic.json": "36b8d7385bcc1afc34dc08dabe199c2533396fea34de3358bd105292dfe853ed",
     "safari-capture.json": "84b2081619476bcfb9ba48a27727112a54cd0df65716d51e88fcf210d72e9783",
     "score-vod.py": "7948502968b9acca19ca70763c4d530a77f78529a99237af55914b69e7f9aea9",
@@ -58,15 +65,18 @@
   "cleanup": {
     "remote_private_media_and_container": {
       "container_removed": true,
-      "private_media_removed": true
+      "private_media_removed": true,
+      "anonymous_image_volumes_removed": 2
     },
     "isolated_daemon_data_removed": true,
     "chrome_profiles_removed": true,
     "native_shared_public_assets": "retained temporarily for parent-owned native probes, then delete",
-    "remote_driver_and_private_manifest_removed": true
+    "remote_driver_and_private_manifest_removed": true,
+    "durable_owner": "Owned daemon/container/internal network/private pixels/database/driver/manifest/full receipt removed after anonymous extraction."
   },
   "reproduction": {
     "browser_and_vod": "Run from an independent repository clone. Copy capture-vod.cjs, probe-clients.mjs, inspect-served.py and score-vod.py into target/qualification/. Set PLURX_QUALIFICATION_SERVER to the pinned daemon, PLURX_HWACCEL=software and explicit PLURX_FFMPEG/PLURX_FFPROBE. The public-corpus URLs and hashes identify the inputs; copy-stream 60-second excerpts with input -ss 120 into public-clips/{animation,live-action}.mkv. capture-vod.cjs owns and removes the isolated daemon. The inspection/scoring scripts read its served/ outputs. Browser profiles and servers are temporary.",
-    "private_content": "Run qualify-content-encoding.py on the source node with a private manifest containing exactly three preselected source paths, anonymous identities, current source revision and three encoder-calibration-args exports for CRF 18/23/28 at 4000 kbps and two threads. The script creates one isolated current-image container with read-only source mounts, exports no media, emits numerical JSON, and removes its temporary media/container. The control manifest must remain private and be deleted afterward."
+    "private_content": "Run qualify-content-encoding.py on the source node with a private manifest containing exactly three preselected source paths, anonymous identities, current source revision and three encoder-calibration-args exports for CRF 18/23/28 at 4000 kbps and two threads. The script creates one isolated current-image container with read-only source mounts, exports no media, emits numerical JSON, and removes its temporary media/container. The control manifest must remain private and be deleted afterward.",
+    "durable_owner": "Run qualify-content-owner.py on an idle authorized source node using a private JSON manifest with source_path, source_revision and neutral host. It uses the installed image, a fresh internal-only network and empty data, two-CPU limit, zero-viewer checks and a ten-minute total budget. Its full receipt remains source-local; export only the explicit numeric/boolean fields represented by content-owner-measured.json, never fingerprints, raw logs or databases. Keep the control manifest private and remove it afterward. Reproducer cleanup includes image-declared anonymous volumes; the recorded experiment used equivalent source-local processing with the four empty volume leftovers removed explicitly afterward."
   }
 }

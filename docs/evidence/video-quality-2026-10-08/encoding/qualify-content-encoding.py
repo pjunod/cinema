@@ -142,7 +142,7 @@ def run(manifest, output):
         report["error"] = type(e).__name__ + ": " + str(e)
     finally:
         if container:
-            p = subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=15)
+            p = subprocess.run(["docker", "rm", "-fv", container], capture_output=True, timeout=15)
             report["cleanup"]["container_removed"] = p.returncode == 0
         shutil.rmtree(root)
         report["cleanup"]["private_media_removed"] = not root.exists()
