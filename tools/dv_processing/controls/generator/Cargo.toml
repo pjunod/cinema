@@ -1,0 +1,7 @@
+[package]
+name = "segment-guard-controls"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+dolby_vision = { path = "/dovi/dolby_vision", features = ["serde"] }
+serde_json = "1"

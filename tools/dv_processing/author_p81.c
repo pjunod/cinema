@@ -48,6 +48,60 @@ struct row {
   const DoviData *nal;
   char source_hash[65], adapted_hash[65];
 };
+// The reconstructed master has not applied display trims or cropped pixels.
+// Retain those source instructions exactly for the eventual DV display mapper.
+static bool retained_metadata_equal(const DoviVdrDmData *a,
+                                    const DoviVdrDmData *b) {
+  if (!a || !b || a->dm_data.level2.len != b->dm_data.level2.len ||
+      a->dm_data.level8.len != b->dm_data.level8.len ||
+      !!a->dm_data.level3 != !!b->dm_data.level3 ||
+      !!a->dm_data.level4 != !!b->dm_data.level4 ||
+      !!a->dm_data.level5 != !!b->dm_data.level5)
+    return false;
+  for (size_t i = 0; i < a->dm_data.level2.len; i++) {
+    const DoviExtMetadataBlockLevel2 *x = a->dm_data.level2.list[i];
+    const DoviExtMetadataBlockLevel2 *y = b->dm_data.level2.list[i];
+    if (!x || !y || x->target_max_pq != y->target_max_pq ||
+        x->trim_slope != y->trim_slope || x->trim_offset != y->trim_offset ||
+        x->trim_power != y->trim_power ||
+        x->trim_chroma_weight != y->trim_chroma_weight ||
+        x->trim_saturation_gain != y->trim_saturation_gain ||
+        x->ms_weight != y->ms_weight)
+      return false;
+  }
+  if (a->dm_data.level3 &&
+      (a->dm_data.level3->min_pq_offset != b->dm_data.level3->min_pq_offset ||
+       a->dm_data.level3->max_pq_offset != b->dm_data.level3->max_pq_offset ||
+       a->dm_data.level3->avg_pq_offset != b->dm_data.level3->avg_pq_offset))
+    return false;
+  for (size_t i = 0; i < a->dm_data.level8.len; i++) {
+    const DoviExtMetadataBlockLevel8 *x = a->dm_data.level8.list[i];
+    const DoviExtMetadataBlockLevel8 *y = b->dm_data.level8.list[i];
+    if (!x || !y || x->length != 10 || y->length != 10 ||
+        x->target_display_index != y->target_display_index ||
+        x->trim_slope != y->trim_slope || x->trim_offset != y->trim_offset ||
+        x->trim_power != y->trim_power ||
+        x->trim_chroma_weight != y->trim_chroma_weight ||
+        x->trim_saturation_gain != y->trim_saturation_gain ||
+        x->ms_weight != y->ms_weight)
+      return false;
+  }
+  if (a->dm_data.level4 &&
+      (a->dm_data.level4->anchor_pq != b->dm_data.level4->anchor_pq ||
+       a->dm_data.level4->anchor_power != b->dm_data.level4->anchor_power))
+    return false;
+  if (a->dm_data.level5) {
+    const DoviExtMetadataBlockLevel5 *x = a->dm_data.level5;
+    const DoviExtMetadataBlockLevel5 *y = b->dm_data.level5;
+    if (x->active_area_left_offset != y->active_area_left_offset ||
+        x->active_area_right_offset != y->active_area_right_offset ||
+        x->active_area_top_offset != y->active_area_top_offset ||
+        x->active_area_bottom_offset != y->active_area_bottom_offset)
+      return false;
+  }
+  return true;
+}
+
 static const DoviData *adapt(const char *dir, int index, char hash[65]) {
   char path[4096];
   int n = snprintf(path, sizeof(path), "%s/frame-%03d.nal", dir, index);
@@ -66,14 +120,17 @@ static const DoviData *adapt(const char *dir, int index, char hash[65]) {
            h->vdr_dm_metadata_present_flag && !h->disable_residual_flag,
        "fresh FEL metadata");
   const DoviVdrDmData *dm = dovi_rpu_get_vdr_dm_data(r);
-  need(dm && dm->dm_data.level2.len == 0 && dm->dm_data.level8.len == 0 &&
-           !dm->dm_data.level3 && !dm->dm_data.level4 &&
+  need(dm && dm->dm_data.level2.len <= 16 && dm->dm_data.level8.len <= 16 &&
            dm->dm_data.level10.len == 0 && !dm->dm_data.level255,
        "unsupported creative or complex adaptation metadata");
-  dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free_header(h);
   need(dovi_convert_rpu_with_mode(r, 2) == 0 && dovi_rpu_remove_mapping(r) == 0,
        "P8.1 adaptation and remove already-applied mapping");
+  const DoviVdrDmData *adapted_dm = dovi_rpu_get_vdr_dm_data(r);
+  need(retained_metadata_equal(dm, adapted_dm),
+       "source display trims and active area preserved");
+  dovi_rpu_free_vdr_dm_data(adapted_dm);
+  dovi_rpu_free_vdr_dm_data(dm);
   h = dovi_rpu_get_header(r);
   need(h && h->guessed_profile == 8 && h->disable_residual_flag,
        "adapted P8 residual independence");
@@ -104,9 +161,16 @@ static void validate_packet(const AVPacket *p) {
   }
   need(first_slices == 1, "one complete picture per encoded packet");
 }
+// movenc requires every mapped decode interval to be strictly smaller than
+// INT_MAX. Validate the whole endpoint in the actual post-header output clock.
+static bool fmp4_grid_bounds(int64_t first, int64_t step, int count) {
+  return first >= 0 && step > 0 && step < INT_MAX && count > 0 &&
+         count <= MAX_FRAMES && first <= INT64_MAX - (int64_t)count * step;
+}
 int main(int argc, char **argv) {
-  need(argc == 5,
-       "usage: author_p81 ENCODED.mkv TIMING.tsv RPU_DIR OUTPUT.mkv");
+  need(argc == 5 || (argc == 6 && !strcmp(argv[5], "fmp4")),
+       "usage: author_p81 ENCODED TIMING.tsv RPU_DIR OUTPUT [fmp4]");
+  bool fmp4 = argc == 6;
   FILE *timing = fopen(argv[2], "r");
   need(timing != NULL, "renderer timeline");
   struct row rows[MAX_FRAMES] = {0};
@@ -171,7 +235,27 @@ int main(int argc, char **argv) {
       level = candidate + 1;
   }
   need(level > 0, "bounded Dolby Vision coded picture rate");
-  need(avformat_alloc_output_context2(&out, NULL, "matroska", argv[4]) >= 0 &&
+  if (fmp4) {
+    int64_t first_pts = av_rescale_q(rows[0].pts,
+                                  (AVRational){1, rows[0].pd}, src->time_base);
+    int64_t step = av_rescale_q(rows[0].duration,
+                              (AVRational){1, rows[0].dd}, src->time_base);
+    need(step > 0 && step <= INT64_MAX / count && first_pts >= 0 &&
+             av_compare_ts(first_pts, src->time_base, rows[0].pts,
+                           (AVRational){1, rows[0].pd}) == 0 &&
+             av_compare_ts(step, src->time_base, rows[0].duration,
+                           (AVRational){1, rows[0].dd}) == 0 &&
+             first_pts <= INT64_MAX - (int64_t)count * step,
+         "fMP4 exact bounded frame grid");
+    for (int i = 0; i < count; i++)
+      need(av_compare_ts(rows[i].duration, (AVRational){1, rows[i].dd},
+                         step, src->time_base) == 0 &&
+               av_compare_ts(rows[i].pts, (AVRational){1, rows[i].pd},
+                             first_pts + i * step, src->time_base) == 0,
+           "fMP4 uniform contiguous frame grid");
+  }
+  need(avformat_alloc_output_context2(&out, NULL,
+                                      fmp4 ? "mp4" : "matroska", argv[4]) >= 0 &&
            out,
        "output muxer");
   AVStream *dst = avformat_new_stream(out, NULL);
@@ -179,7 +263,22 @@ int main(int argc, char **argv) {
        "copy HDR10 codec parameters");
   dst->avg_frame_rate = (AVRational){rows[0].dd, (int)rows[0].duration};
   dst->time_base = src->time_base;
-  dst->codecpar->codec_tag = 0;
+  // hev1 permits the retained in-band parameter sets; never relabel them hvc1.
+  dst->codecpar->codec_tag = fmp4 ? MKTAG('h', 'e', 'v', '1') : 0;
+  AVDictionary *mux_options = NULL;
+  if (fmp4) {
+    // frag_discont makes FFmpeg keep the original nonzero decode origin in
+    // tfdt. No automatic keyframe cuts: the complete window is one fragment.
+    out->avoid_negative_ts = AVFMT_AVOID_NEG_TS_DISABLED;
+    out->strict_std_compliance = FF_COMPLIANCE_UNOFFICIAL;
+    need(av_dict_set(&mux_options, "movflags",
+                     "empty_moov+frag_custom+default_base_moof+frag_discont",
+                     0) >= 0 &&
+             av_dict_set(&mux_options, "use_editlist", "0", 0) >= 0 &&
+             av_dict_set_int(&mux_options, "video_track_timescale",
+                             src->time_base.den, 0) >= 0,
+         "fMP4 mux policy");
+  }
   need(!av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data,
                                 AV_PKT_DATA_DOVI_CONF),
        "no existing DV config");
@@ -195,8 +294,24 @@ int main(int argc, char **argv) {
   cfg->rpu_present_flag = cfg->bl_present_flag = 1;
   cfg->dv_bl_signal_compatibility_id = 1;
   need(avio_open(&out->pb, argv[4], AVIO_FLAG_WRITE) >= 0 &&
-           avformat_write_header(out, NULL) >= 0,
+           avformat_write_header(out, &mux_options) >= 0,
        "output header");
+  need(!mux_options, "all mux options consumed");
+  av_dict_free(&mux_options);
+  if (fmp4) {
+    int64_t first = av_rescale_q(rows[0].pts,
+                               (AVRational){1, rows[0].pd}, dst->time_base);
+    int64_t step = av_rescale_q(rows[0].duration,
+                              (AVRational){1, rows[0].dd}, dst->time_base);
+    need(fmp4_grid_bounds(first, step, count),
+         "fMP4 bounded output-clock frame grid");
+    for (int i = 0; i < count; i++)
+      need(av_compare_ts(first + (int64_t)i * step, dst->time_base,
+                         rows[i].pts, (AVRational){1, rows[i].pd}) == 0 &&
+               av_compare_ts(step, dst->time_base, rows[i].duration,
+                             (AVRational){1, rows[i].dd}) == 0,
+           "fMP4 exact output-clock frame grid");
+  }
   AVPacket *p = av_packet_alloc();
   need(p != NULL, "packet allocation");
   int rc, packets = 0;
@@ -212,6 +327,10 @@ int main(int argc, char **argv) {
         match = i;
     need(match >= 0 && !rows[match].seen,
          "unique exact presentation association");
+    if (fmp4)
+      need(p->pts == p->dts && match == packets &&
+               (packets != 0 || (p->flags & AV_PKT_FLAG_KEY)),
+           "fMP4 no-reorder keyframe-led encoded grid");
     struct row *r = &rows[match];
     r->seen = 1;
     // The encoder's MP4 stts describes decode intervals; its demuxer may
