@@ -115,3 +115,103 @@ class SourceSkew4513Case(unittest.TestCase):
                                        size_in_bytes=1)]
             with patch.object(recovery, 'descriptor', return_value=evidence.proof):
                 with self.assertRaises(ReceiptError): main.restore(evidence, evidence.scope, 9999, Applicability())
+
+
+class PrepareChainEvidence(Evidence):
+    def __init__(self):
+        super().__init__(4540)
+        self.run = 6000
+        self.actual['id'] = self.run
+        for job in self.jobs:
+            job['run_id'] = self.run
+        self.prior = copy.deepcopy(self.actual)
+        self.log = self.log.replace(b'Prior event/source/PR/base/readiness binding mismatch',
+            b'Missing final journal for prior attempt 5999; preserve possibly passed IDs')
+        self.sources = {path: ('synthetic:' + path).encode() for path in recovery.PREPARE_PRODUCERS}
+        self.accepted = {path: [hashlib.sha256(raw).hexdigest()] for path, raw in self.sources.items()}
+        self.ancestor = True
+        self.current_run = '9000'
+
+    def context(self):
+        import contextlib
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.object(recovery, 'PREPARE_PRODUCERS', self.accepted))
+        stack.enter_context(patch.object(recovery, 'prepare_ancestor', return_value=self.ancestor))
+        stack.enter_context(patch.dict('os.environ', GITHUB_RUN_ID=self.current_run, GITHUB_SHA='d' * 40))
+        return stack
+
+    def recover(self):
+        with self.context():
+            return recovery.recover(self, self.scope, self.prior, self.jobs)
+
+
+class PrepareRefusalChainCase(unittest.TestCase):
+    def test_reviewed_prepare_dependency_chain_imports_zero_and_keeps_event(self):
+        evidence = PrepareChainEvidence()
+        original = copy.deepcopy(evidence.prior)
+        self.assertTrue(evidence.recover())
+        self.assertEqual(evidence.prior, original)
+        self.assertEqual(evidence.artifacts, [])
+        evidence.log = evidence.log.replace(
+            b'Missing final journal for prior attempt 5999; preserve possibly passed IDs',
+            b'Main receipt must match an open same-repository PR head')
+        self.assertTrue(evidence.recover())
+        evidence.log = evidence.log.replace(b'Main receipt must match an open same-repository PR head',
+                                            b'Unknown unrelated refusal')
+        self.assertFalse(evidence.recover())
+
+    def test_prepare_chain_source_identity_execution_and_artifact_contradictions_refuse(self):
+        modes = ('source', 'event', 'event_source', 'commit', 'repo', 'branch',
+                 'attempt', 'missing_job', 'job_status', 'job_run', 'duplicate_job',
+                 'truncated', 'unit', 'uploaded', 'ordering', 'artifact', 'marker',
+                 'ancestor', 'current_run', 'self_dependency')
+        for mode in modes:
+            with self.subTest(mode=mode):
+                evidence = PrepareChainEvidence()
+                if mode == 'source': evidence.sources[next(iter(evidence.sources))] += b'changed'
+                if mode == 'event': evidence.actual['event_payload'] += ' '
+                if mode == 'event_source':
+                    event = json.loads(evidence.actual['event_payload'])
+                    event['pull_request']['head']['sha'] = '0' * 40
+                    evidence.actual['event_payload'] = json.dumps(event)
+                    evidence.prior = copy.deepcopy(evidence.actual)
+                if mode == 'commit': evidence.actual['commit_sha'] = '0' * 40
+                if mode == 'repo': evidence.actual['repository'] = {'id': 2}
+                if mode == 'branch': evidence.scope['branch'] = 'foreign'
+                if mode == 'attempt': evidence.jobs[0]['attempt'] = 2
+                if mode == 'missing_job': evidence.jobs.pop()
+                if mode == 'job_status': evidence.jobs[3]['status'] = 'success'
+                if mode == 'job_run': evidence.jobs[0]['run_id'] += 1
+                if mode == 'duplicate_job': evidence.jobs.append(copy.deepcopy(evidence.jobs[0]))
+                if mode == 'truncated': evidence.log = evidence.log.rstrip(b'\n')
+                if mode == 'unit': evidence.log = evidence.log.replace(b"Job 'fast", b"MAIN-UNIT-success\nJob 'fast")
+                if mode == 'uploaded': evidence.log = evidence.log.replace(b"Job 'fast", b"has been successfully uploaded!\nJob 'fast")
+                if mode == 'ordering':
+                    evidence.log = evidence.log.replace(b'Main Python receipt refused:', b'late refusal:')
+                if mode == 'artifact': evidence.artifacts = [{'run_id': evidence.run}]
+                if mode == 'marker': evidence.markers = [{'run_id': evidence.run}]
+                if mode == 'ancestor': evidence.ancestor = False
+                if mode == 'current_run': evidence.current_run = str(evidence.run)
+                if mode == 'self_dependency': evidence.log = evidence.log.replace(b'attempt 5999;', b'attempt 6000;')
+                if mode == 'ordering':
+                    self.assertFalse(evidence.recover())
+                else:
+                    with self.assertRaises(ReceiptError): evidence.recover()
+
+    def test_prepare_chain_restore_imports_no_successes_and_future_helper_stays_bound(self):
+        from pathlib import Path
+        class Applicability:
+            def __call__(self, *_): raise AssertionError('No successes may be imported')
+            def finish(self, passes): self.passes = passes
+        evidence = PrepareChainEvidence()
+        applicability = Applicability()
+        with evidence.context():
+            self.assertEqual(main.restore(evidence, evidence.scope, 9000, applicability), {})
+        self.assertEqual(applicability.passes, {})
+        path = 'validation/main_preflight_adoption.py'
+        evidence.sources[path] = b'from validation.main_source_skew4513 import recover'
+        evidence.accepted[path] = [hashlib.sha256(evidence.sources[path]).hexdigest()]
+        evidence.sources['validation/main_source_skew4513.py'] = Path(recovery.__file__).read_bytes()
+        self.assertTrue(evidence.recover())
+        evidence.sources['validation/main_source_skew4513.py'] += b'unknown producer'
+        with self.assertRaises(ReceiptError): evidence.recover()

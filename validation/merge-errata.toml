@@ -320,3 +320,15 @@ reason = "Fast lane for PR #915 found this existing corrective commit in main an
 [[errata]]
 commit = "b6ebc3f6e7ccacf7d04efd24f0f312f81d797315"
 reason = "Fast lane for PR #915 found this existing corrective commit in main ancestry outside an audited PR landing. Its immutable message carries four Regression-Test anchors in tests/operations/test_vaapi_failure_capture.py, including test_fixed_signal_selection_preserves_ramp_and_original_sharp_reference and test_failed_luma_keeps_full_identity_coordinates_and_reference_regions. Record the missing landing attribution without changing the audit boundary or claiming a new test run; #915 carries its own checked regression trailers into its landing."
+
+[[landings]]
+commit = "1088d7529401297bddced74bfa11c166457468d8"
+tree = "7e6a70793b9e86f4f734d612f4401d68ea97fd4d"
+parents = ["079960daebd5a1e23dff2b0e8f8506c1238bc1b0", "1c76a9f605cf4b3b83ec5da2c28743dc1a02bdfc"]
+title = "fix(batch): promote Cinema remotes and macOS video completion"
+pull = "917"
+reason = "Batch03 PR917 was merged by explicit user direction after 10114 applicable unit passes. The API landing subject omitted the PR number, so the audit did not recognize it. All 663 Regression-Test fields match the saved PR description and immutable landing message. This row binds the actual ordered parents and tree; it does not claim the failed promotion gate passed, rewrite history, alter the audit boundary or excuse future missing regression fields."
+
+[[errata]]
+commit = "1088d7529401297bddced74bfa11c166457468d8"
+reason = "Batch03 PR917 landing1088d752 preserves all663 original regression fields. Three immutable Python references incorrectly include unittest class qualifiers: tests/operations/test_macos_p5_terminal_nals.py::P5TerminalNalCase::test_terminal_positives_preserve_every_original_sample_and_timing_table, tests/validation/test_python_zero_failure_recovery.py::ZeroFailureRecoveryCase::test_exact_zero_unit_history_and_prepare_refusal_import_no_passes, tests/validation/test_python_zero_failure_recovery.py::ZeroFailureRecoveryCase::test_corrupt_or_contradictory_evidence_refuses. Their canonical references are tests/operations/test_macos_p5_terminal_nals.py::test_terminal_positives_preserve_every_original_sample_and_timing_table, tests/validation/test_python_zero_failure_recovery.py::test_exact_zero_unit_history_and_prepare_refusal_import_no_passes, tests/validation/test_python_zero_failure_recovery.py::test_corrupt_or_contradictory_evidence_refuses. The exact classes and methods exist in the immutable landing tree; the completed audit resolved the other660 references. This permanent row records those three malformed historical trailers, retains the verified merge identity and leaves the boundary and all future regression checks unchanged. It does not claim the failed promotion gate passed."
