@@ -364,7 +364,7 @@ async fn held_plan_fallback_reasons() {
             DecodePlanFallbackReason::Invariant,
         ),
     ];
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let cases = cases
         .into_iter()
         .chain(std::iter::once((

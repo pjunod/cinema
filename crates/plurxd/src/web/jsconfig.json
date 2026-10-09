@@ -88,6 +88,15 @@
     "pages/shared-artwork.js",
     "pages/shared-libraries.js",
     "pages/sharing-management.js",
+    "core/remote-navigation.js",
+    "core/remote-router.js",
+    "core/remote-guard.js",
+    "core/remote-client.js",
+    "core/remote-receiver.js",
+    "core/remote-controller.js",
+    "pages/remote-pairing.js",
+    "pages/settings-remote.js",
+    "pages/remote.js",
     "router.js"
   ]
 }

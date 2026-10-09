@@ -1,0 +1,116 @@
+"use strict";
+let CINEMA_REMOTE_PAGE_GENERATION=0,CINEMA_REMOTE_DEVICES=[],CINEMA_REMOTE_SELECTED=null,CINEMA_REMOTE_DISCOVERY=null;
+const CINEMA_REMOTE_DISMISSED=new Set();
+function cinemaRemoteViewerMessage(message){
+  const messages={applied:"Done",duplicate_or_old:"Already handled",expired:"Screen state expired — try again",stale_target:"Reconnect to this screen",stale_control:"Another phone has control",stale_context:"TV changed screens — try again",stale_focus:"TV selection changed — try again",restricted_surface:"Use the TV directly on this screen",unauthorized:"Pair this phone again",unsupported:"This control is unavailable here",busy:"Screen is busy — try again",unavailable:"Reconnect to this screen",invalid:"This control could not be sent",off:"Off",background:"Return to this foreground screen",available:"Ready",registration_required:"Register this screen first",owned_by_another_tab:"Another tab is receiving controls",web_locks_unavailable:"This browser needs a secure context with Web Locks",connecting:"Connecting…",receiver_retired:"Return to the foreground screen"};
+  return Object.hasOwn(messages,message)?messages[message]:cinemaRemoteText(message,256);
+}
+function cinemaRemoteValidateDevices(reply){
+  if(!Array.isArray(reply?.receivers)||reply.receivers.length>20||!Array.isArray(reply.unavailable_nodes)||reply.unavailable_nodes.length>64)throw new Error("Screen list unavailable");
+  const seen=new Set();
+  for(const value of reply.receivers){
+    if(!CinemaRemoteWire.exact(value,["receiver_id","name","platform","target","available","busy","paired"])||!CinemaRemoteWire.id(value.receiver_id)||seen.has(value.receiver_id)||CinemaRemoteWire.bytes(value.name)>80||typeof value.platform!=="string"||!["web","desktop","apple_tv","android_tv"].includes(value.platform)||![value.available,value.busy,value.paired].every(v=>typeof v==="boolean")||value.target!==null&&!CinemaRemoteWire.targetValid(value.target)||value.available&&!value.target)throw new Error("Screen list unavailable");seen.add(value.receiver_id);
+  }return reply.receivers;
+}
+function cinemaRemoteUiChanged(){
+  const receiver=document.getElementById("cinema-receiver-status");if(receiver)receiver.textContent=cinemaRemoteViewerMessage(CINEMA_WEB_RECEIVER?.state||"off");
+  if(CINEMA_PAIR_DIALOG&&(!CINEMA_WEB_RECEIVER?.target||!CINEMA_WEB_RECEIVER.challenge||performance.now()>=CINEMA_WEB_RECEIVER.challenge.deadline)){const status=document.getElementById("cinema-pair-status");if(status)status.textContent="Code expired or this screen disconnected. Close and show a new code.";document.getElementById("cinema-pair-pending")?.replaceChildren();}
+  const pairStatus=document.getElementById("cinema-phone-pair-status");if(pairStatus&&CINEMA_PAIR_FLOW)pairStatus.textContent=cinemaRemoteViewerMessage(CINEMA_PAIR_FLOW.message);
+  const mount=document.getElementById("cinema-remote-controls"),controller=CINEMA_WEB_CONTROLLER;
+  if(!mount||!controller||location.hash!=="#/remote")return;
+  const status=document.getElementById("cinema-remote-status");if(status)status.textContent=controller.state&&(controller.state.route==="restricted"||controller.state.capabilities.length===0)?"Use the TV directly on this screen":cinemaRemoteViewerMessage(controller.message);
+  const summary=document.getElementById("cinema-remote-summary");if(summary)summary.textContent=controller.state?.playback?.title||controller.state?.focused_label||"";
+  const caps=controller.state?.capabilities||[],active=controller.ownsControl()&&controller.alive();
+  for(const button of /** @type {NodeListOf<HTMLButtonElement>} */(mount.querySelectorAll("[data-remote-cap]")))button.disabled=!active||!caps.includes(button.dataset.remoteCap)||!!controller.sendPending;
+  for(const input of /** @type {NodeListOf<HTMLInputElement>} */(mount.querySelectorAll("input[data-remote-cap]")))input.disabled=!active||!caps.includes(input.dataset.remoteCap);
+  const lease=document.getElementById("cinema-phone-lease");if(lease)lease.hidden=active;
+  for(const section of /** @type {NodeListOf<HTMLElement>} */(mount.querySelectorAll("[data-remote-section]")))section.hidden=!caps.includes(section.dataset.remoteSection);
+  for(const button of /** @type {NodeListOf<HTMLButtonElement>} */(mount.querySelectorAll("p [data-remote-cap]")))button.hidden=!caps.includes(button.dataset.remoteCap);
+  const tracks=document.getElementById("cinema-phone-tracks"),values=controller.state?.playback?.tracks||[];
+  const signature=JSON.stringify([caps.includes("choose_track"),values]);if(tracks&&tracks.dataset.signature!==signature){tracks.dataset.signature=signature;tracks.innerHTML=caps.includes("choose_track")?values.map((value,index)=>`<button class="ghost" data-remote-cap="choose_track" onclick="cinemaRemotePhoneChooseTrack(${index},event)">${esc(value.label)}</button>`).join(""):"";for(const button of tracks.querySelectorAll("button"))button.disabled=!active;}
+}
+async function viewRemote(generation){
+  cinemaRemoteCancelPairFlow();cinemaRemoteControllerRetire();CINEMA_REMOTE_SELECTED=null;CINEMA_REMOTE_DEVICES=[];const operation=++CINEMA_REMOTE_PAGE_GENERATION;
+  layoutChrome("remote",'<div class="adminwrap cinema-remote-page" id="cinema-phone-page"><h1>Phone remote</h1><div id="cinema-screen-picker"><p>Choose a foreground Cinema screen on this server.</p><button class="ghost" onclick="cinemaRemoteRefreshScreens(event)">Refresh screens</button><div id="cinema-screen-list" role="status">Loading screens…</div></div><div id="cinema-phone-pair"></div><div id="cinema-remote-controls"></div></div>');
+  setPagePhase(location.hash,generation,"shell");
+  if(!cinemaRemoteLocalEnabled("companion")){document.getElementById("cinema-screen-list").innerHTML='<p>Enable the phone remote in <a href="#/settings/developer">Developer → Preferences for this device</a>.</p>';setPagePhase(location.hash,generation,"settled");return;}
+  const client=new CinemaRemoteClient();CINEMA_REMOTE_DISCOVERY?.retire();CINEMA_REMOTE_DISCOVERY=client;
+  try{
+    const reply=await client.request("receivers",{method:"GET"});if(operation!==CINEMA_REMOTE_PAGE_GENERATION||location.hash!=="#/remote"||!client.current())return;
+    CINEMA_REMOTE_DEVICES=cinemaRemoteValidateDevices(reply);
+    document.getElementById("cinema-screen-list").innerHTML=CINEMA_REMOTE_DEVICES.map((value,index)=>`<p><button class="ghost" onclick="cinemaRemoteSelectScreen(${index},event)" ${value.available?"":"disabled"}>${esc(value.name)}</button> · ${value.available?(value.busy?"another phone is connected":"available"):"offline"}</p>`).join("")||'<p>No registered screens. Register and enable receiving in Developer on the TV.</p>';
+    if(reply.unavailable_nodes.length)document.getElementById("cinema-screen-list").insertAdjacentHTML("beforeend",'<p>Some server nodes could not be reached. Refresh to check their screens.</p>');
+  }catch(error){if(operation===CINEMA_REMOTE_PAGE_GENERATION&&location.hash==="#/remote")document.getElementById("cinema-screen-list").textContent=cinemaRemoteViewerMessage(error.code||error.message);}
+  finally{client.retire();if(CINEMA_REMOTE_DISCOVERY===client)CINEMA_REMOTE_DISCOVERY=null;setPagePhase(location.hash,generation,"content");setPagePhase(location.hash,generation,"settled");}
+}
+function cinemaRemoteRefreshScreens(event){if(event?.isTrusted&&location.hash==="#/remote")return viewRemote(++PAGE_RENDER_GENERATION);}
+async function cinemaRemoteSelectScreen(index,event){
+  if(!event?.isTrusted||!Number.isInteger(index))return;const device=CINEMA_REMOTE_DEVICES[index];if(!device?.available)return;
+  cinemaRemoteCancelPairFlow();cinemaRemoteControllerRetire();CINEMA_REMOTE_SELECTED=device;
+  const grant=cinemaRemoteLoad(cinemaRemoteIdentity()).grants.find(value=>value.receiver_id===device.receiver_id&&CinemaRemoteWire.id(value.grant_id)&&cinemaRemoteSecret(value.grant_secret));
+  if(grant){await cinemaRemoteConnectSelected(device,grant);return;}
+  CINEMA_PAIR_FLOW=new CinemaRemotePairFlow(device);
+  document.getElementById("cinema-remote-controls").replaceChildren();
+  document.getElementById("cinema-phone-pair").innerHTML=`<h2>Pair with ${esc(device.name)}</h2><p>On this TV, open Developer and choose Show pairing code. After entering the code, approve this phone on the TV.</p><label>Eight-digit code <input id="cinema-phone-code" inputmode="numeric" autocomplete="off" maxlength="8"></label><button class="primary" onclick="cinemaRemoteClaimCode(event)">Pair</button><details><summary>Scan or paste a pairing QR link</summary><button class="ghost" onclick="cinemaRemoteScanPair(event)">Scan with camera</button><input id="cinema-phone-link" type="text" autocomplete="off" placeholder="Paste pairing link"><button class="ghost" onclick="cinemaRemoteClaimLink(event)">Use pairing link</button></details><p id="cinema-phone-pair-status" role="status"></p><button class="ghost" onclick="cinemaRemoteClosePhone(event)">Close</button>`;
+  cinemaRemoteUiChanged();
+}
+async function cinemaRemoteConnectSelected(device,grant){
+  if(location.hash!=="#/remote"||CINEMA_REMOTE_SELECTED?.receiver_id!==device.receiver_id||CinemaRemoteWire.targetKey(CINEMA_REMOTE_SELECTED.target)!==CinemaRemoteWire.targetKey(device.target))return;
+  document.getElementById("cinema-phone-pair").replaceChildren();const picker=document.getElementById("cinema-screen-picker");if(picker)picker.hidden=true;document.getElementById("cinema-phone-page")?.classList.add("connected");CINEMA_WEB_CONTROLLER=CINEMA_WEB_CONTROLLER||new CinemaWebController();
+  document.getElementById("cinema-remote-controls").innerHTML=`<div class="cinema-phone-heading"><h2>${esc(device.name)}</h2><button class="ghost" onclick="cinemaRemoteRefreshScreens(event)">Change screen</button></div><p id="cinema-remote-status" role="status"></p><p id="cinema-remote-summary"></p><div id="cinema-phone-lease"><button class="primary" onclick="cinemaRemoteAcquire(false,event)">Use as remote</button> <button class="ghost" onclick="cinemaRemoteAcquire(true,event)">Take over</button></div><div class="cinema-dpad">${["up","left","right","down"].map(direction=>`<button class="ghost" data-remote-cap="navigate" data-remote-direction="${direction}">${direction[0].toUpperCase()+direction.slice(1)}</button>`).join("")}<button class="primary" data-remote-cap="select" onclick="cinemaRemotePhoneAction({type:'select'},event)">Select</button></div><button class="ghost" data-remote-cap="back" onclick="cinemaRemotePhoneAction({type:'back'},event)">Back</button><button class="ghost" data-remote-cap="home" onclick="cinemaRemotePhoneAction({type:'home'},event)">Home</button><p><button class="ghost" data-remote-cap="set_playing" onclick="cinemaRemotePhoneAction({type:'set_playing',playing:true},event)">Play</button><button class="ghost" data-remote-cap="set_playing" onclick="cinemaRemotePhoneAction({type:'set_playing',playing:false},event)">Pause</button><button class="ghost" data-remote-cap="stop" onclick="cinemaRemotePhoneAction({type:'stop'},event)">Stop</button><button class="ghost" data-remote-cap="play_item" onclick="cinemaRemotePhonePlayItem(event)">Play this item</button></p><details class="cinema-phone-more"><summary>More controls</summary><div data-remote-section="text_replace"><label>Search text <input id="cinema-phone-text" data-remote-cap="text_replace" maxlength="512" autocomplete="off"></label><button class="ghost" data-remote-cap="text_replace" onclick="cinemaRemotePhoneText(event)">Replace TV search text</button></div><div data-remote-section="seek_absolute"><p><button class="ghost" data-remote-cap="seek_relative" onclick="cinemaRemotePhoneAction({type:'seek_relative',seconds:-10},event)">Back 10 seconds</button><button class="ghost" data-remote-cap="seek_relative" onclick="cinemaRemotePhoneAction({type:'seek_relative',seconds:10},event)">Forward 10 seconds</button><label>Position in seconds <input id="cinema-phone-position" data-remote-cap="seek_absolute" type="number" min="0" step="1"></label><button class="ghost" data-remote-cap="seek_absolute" onclick="cinemaRemotePhoneSeek(event)">Seek</button></p></div><div data-remote-section="open_tracks"><p>${["audio","subtitles","quality"].map(kind=>`<button class="ghost" data-remote-cap="open_tracks" onclick="cinemaRemotePhoneAction({type:'open_tracks',kind:'${kind}'},event)">${kind}</button>`).join("")}</p><div id="cinema-phone-tracks"></div></div><button class="ghost" onclick="cinemaRemoteClosePhone(event)">Disconnect</button><button class="ghost" onclick="cinemaRemoteForgetPhone(event)">Forget this screen on this phone</button></details>`;
+  for(const button of /** @type {NodeListOf<HTMLButtonElement>} */(document.querySelectorAll("[data-remote-direction]")))cinemaRemoteWireDirection(button);
+  const controller=CINEMA_WEB_CONTROLLER,pageGeneration=CINEMA_REMOTE_PAGE_GENERATION,targetKey=CinemaRemoteWire.targetKey(device.target);
+  const connection=controller.connect(device,grant),controllerGeneration=controller.generation;
+  try{await connection;}catch(error){if(CINEMA_WEB_CONTROLLER===controller&&controller.generation===controllerGeneration&&CINEMA_REMOTE_PAGE_GENERATION===pageGeneration&&location.hash==="#/remote"&&CinemaRemoteWire.targetKey(CINEMA_REMOTE_SELECTED?.target)===targetKey){controller.message=cinemaRemoteViewerMessage(error.code||error.message);cinemaRemoteUiChanged();}}
+}
+function cinemaRemoteWireDirection(button){
+  let physicalActivation=false,releaseTimer=null;
+  const begin=()=>{clearTimeout(releaseTimer);physicalActivation=true;CINEMA_WEB_CONTROLLER?.hold(button.dataset.remoteDirection);};
+  const release=()=>{CINEMA_WEB_CONTROLLER?.stopHold();clearTimeout(releaseTimer);releaseTimer=setTimeout(()=>{physicalActivation=false;},0);};
+  button.addEventListener("pointerdown",event=>{if(!event.isTrusted||event.button!==0)return;event.preventDefault();button.setPointerCapture(event.pointerId);begin();});
+  for(const type of ["pointerup","pointercancel","lostpointercapture","blur"])button.addEventListener(type,release);
+  // companion-direction-key-adapter:begin
+  button.addEventListener("keydown",event=>{if(!event.isTrusted||!["Enter"," "].includes(event.key))return;event.preventDefault();if(!event.repeat)begin();});
+  button.addEventListener("keyup",event=>{if(!event.isTrusted||!["Enter"," "].includes(event.key))return;event.preventDefault();release();});
+  // companion-direction-key-adapter:end
+  button.addEventListener("click",event=>{
+    if(!event.isTrusted)return;
+    // A native pointer/key activation already started this gesture. Its click
+    // completes that activation; standalone assistive clicks dispatch once.
+    if(physicalActivation){physicalActivation=false;clearTimeout(releaseTimer);return;}
+    cinemaRemotePhoneAction({type:"navigate",direction:button.dataset.remoteDirection},event);
+  });
+}
+function cinemaRemoteClosePhone(event){if(event&&!event.isTrusted)return;cinemaRemoteCancelPairFlow();cinemaRemoteControllerRetire();CINEMA_REMOTE_SELECTED=null;const picker=document.getElementById("cinema-screen-picker");if(picker)picker.hidden=false;document.getElementById("cinema-phone-page")?.classList.remove("connected");document.getElementById("cinema-phone-pair")?.replaceChildren();document.getElementById("cinema-remote-controls")?.replaceChildren();}
+function cinemaRemoteForgetPhone(event){if(!event?.isTrusted||!CINEMA_REMOTE_SELECTED)return;const identity=cinemaRemoteIdentity(),stored=cinemaRemoteLoad(identity);stored.grants=stored.grants.filter(value=>value.receiver_id!==CINEMA_REMOTE_SELECTED.receiver_id);cinemaRemoteSave(identity,stored);cinemaRemoteClosePhone(event);toast("Forgot this screen on this phone. The TV can revoke the account grant in Developer.");}
+async function cinemaRemoteAcquire(takeover,event){
+  if(!event?.isTrusted||!CINEMA_WEB_CONTROLLER)return;const controller=CINEMA_WEB_CONTROLLER,generation=controller.generation,pageGeneration=CINEMA_REMOTE_PAGE_GENERATION,targetKey=CinemaRemoteWire.targetKey(controller.device?.target);
+  try{await controller.acquire(takeover);}catch(error){if(CINEMA_WEB_CONTROLLER===controller&&controller.generation===generation&&CINEMA_REMOTE_PAGE_GENERATION===pageGeneration&&location.hash==="#/remote"&&CinemaRemoteWire.targetKey(CINEMA_REMOTE_SELECTED?.target)===targetKey){controller.message=cinemaRemoteViewerMessage(error.code||error.message);cinemaRemoteUiChanged();}}
+}
+function cinemaRemotePhoneAction(action,event){if(!event?.isTrusted)return;CINEMA_WEB_CONTROLLER?.send(action).catch(error=>{toast(cinemaRemoteViewerMessage(error.message));});}
+function cinemaRemotePhoneText(event){const state=CINEMA_WEB_CONTROLLER?.state;if(!state?.text_nonce)return;cinemaRemotePhoneAction({type:"text_replace",text:(/** @type {HTMLInputElement} */(document.getElementById("cinema-phone-text"))).value,text_nonce:state.text_nonce},event);}
+function cinemaRemotePhoneSeek(event){const value=Number((/** @type {HTMLInputElement} */(document.getElementById("cinema-phone-position"))).value)*1000;if(CinemaRemoteWire.unsigned(value))cinemaRemotePhoneAction({type:"seek_absolute",position_ms:value},event);}
+function cinemaRemotePhonePlayItem(event){const state=CINEMA_WEB_CONTROLLER?.state;if(state?.playback?.media?.type==="item")cinemaRemotePhoneAction({type:"play_item",item_id:state.playback.media.item_id},event);else toast("Use Select on the TV's Play button.");}
+function cinemaRemotePhoneChooseTrack(index,event){const track=CINEMA_WEB_CONTROLLER?.state?.playback?.tracks[index];if(track)cinemaRemotePhoneAction({type:"choose_track",kind:track.kind,option_id:track.option_id},event);}
+function cinemaRemoteClaimCode(event){if(!event?.isTrusted)return;CINEMA_PAIR_FLOW?.claim((/** @type {HTMLInputElement} */(document.getElementById("cinema-phone-code"))).value).catch(error=>toast(cinemaRemoteViewerMessage(error.message)));}
+function cinemaRemoteClaimLink(event){
+  if(!event?.isTrusted||!CINEMA_PAIR_FLOW)return;
+  try{const input=/** @type {HTMLInputElement} */(document.getElementById("cinema-phone-link")),link=cinemaRemoteParsePairLink(input.value);input.value="";if(CinemaRemoteWire.targetKey(link.target)!==CinemaRemoteWire.targetKey(CINEMA_PAIR_FLOW.device.target))throw new Error("Choose the screen shown by this QR code first");CINEMA_PAIR_FLOW.claim(link.code,link.challenge_id).catch(error=>toast(error.message));}catch(error){toast(error.message);}
+}
+async function cinemaRemoteScanPair(event){
+  if(!event?.isTrusted)return;if(typeof globalThis.BarcodeDetector!=="function"||!navigator.mediaDevices?.getUserMedia){toast("Camera QR scanning is unavailable. Paste the link or enter the eight-digit code.");return;}
+  const flow=CINEMA_PAIR_FLOW;let stream=null,video=null;
+  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"},audio:false});if(!flow?.alive())return;video=document.createElement("video");video.muted=true;video.playsInline=true;video.srcObject=stream;document.getElementById("cinema-phone-pair").append(video);await video.play();const detector=new globalThis.BarcodeDetector({formats:["qr_code"]}),deadline=performance.now()+15000;while(flow.alive()&&performance.now()<deadline){const found=await detector.detect(video);if(!flow.alive())return;if(found.length){const link=cinemaRemoteParsePairLink(found[0].rawValue);if(CinemaRemoteWire.targetKey(link.target)!==CinemaRemoteWire.targetKey(flow.device.target))throw new Error("Choose the screen shown by this QR code first");await flow.claim(link.code,link.challenge_id);return;}await new Promise(resolve=>setTimeout(resolve,100));}toast("No QR code found. Enter the eight-digit code.");}catch(error){toast(cinemaRemoteViewerMessage(error.message));}finally{stream?.getTracks().forEach(track=>track.stop());video?.remove();}
+}
+function cinemaRemoteClearSuggestion(){document.getElementById("cinema-remote-suggestion")?.remove();}
+async function cinemaRemoteSuggest(){
+  const identity=cinemaRemoteIdentity(),prefs=cinemaRemotePreferences(identity);if(!identity||!prefs.companion||!prefs.suggestions||document.visibilityState!=="visible"||!document.hasFocus()||location.hash==="#/remote"||isSettingsRoute(location.hash)){cinemaRemoteClearSuggestion();return;}
+  const stored=cinemaRemoteLoad(identity),paired=new Set(stored.grants.filter(value=>cinemaRemoteSecret(value.grant_secret)).map(value=>value.receiver_id));if(!paired.size)return;const client=new CinemaRemoteClient(identity);
+  try{const reply=await client.request("receivers",{method:"GET"});if(!client.current()||!document.hasFocus()||document.visibilityState!=="visible"||location.hash==="#/remote"||isSettingsRoute(location.hash)||!cinemaRemoteLocalEnabled("companion")||!cinemaRemotePreferences(identity).suggestions)return;const devices=cinemaRemoteValidateDevices(reply).filter(value=>value.available&&paired.has(value.receiver_id)&&!CINEMA_REMOTE_DISMISSED.has(value.receiver_id)&&stored.suggestions?.[value.receiver_id]!==false);if(!devices.length){cinemaRemoteClearSuggestion();return;}cinemaRemoteClearSuggestion();const card=document.createElement("aside");card.id="cinema-remote-suggestion";card.className="setcard";card.setAttribute("aria-label","Phone remote suggestion");card.innerHTML=`<p>${devices.length===1?"Control "+esc(devices[0].name):"Choose a paired screen"}</p><a class="ghost" href="#/remote">${devices.length===1?"Open remote":"Choose a screen"}</a><button class="ghost" id="cinema-suggestion-dismiss">Dismiss</button><button class="ghost" id="cinema-suggestion-hide">Do not suggest these screens</button>`;document.body.append(card);card.querySelector("#cinema-suggestion-dismiss").addEventListener("click",()=>{devices.forEach(value=>CINEMA_REMOTE_DISMISSED.add(value.receiver_id));cinemaRemoteClearSuggestion();});card.querySelector("#cinema-suggestion-hide").addEventListener("click",()=>{if(!client.current())return;const value=cinemaRemoteLoad(identity);value.suggestions=value.suggestions||{};devices.forEach(device=>{value.suggestions[device.receiver_id]=false;});cinemaRemoteSave(identity,value);cinemaRemoteClearSuggestion();});}catch(_){}finally{client.retire();}
+}
+function cinemaRemoteRouteChanged(){cinemaRemoteCancelPairFlow();cinemaRemoteControllerRetire();cinemaRemoteClosePairDialog();CINEMA_REMOTE_PAGE_GENERATION++;CINEMA_REMOTE_DISCOVERY?.retire();cinemaRemoteClearSuggestion();}
+window.addEventListener("focus",()=>{cinemaRemoteReceiverSync();cinemaRemoteSuggest();});
+window.addEventListener("blur",()=>{CINEMA_WEB_CONTROLLER?.stopHold();cinemaRemoteReceiverSync();cinemaRemoteClearSuggestion();});
+document.addEventListener("visibilitychange",()=>{cinemaRemoteReceiverSync();if(document.visibilityState!=="visible"){cinemaRemoteCancelPairFlow();cinemaRemoteControllerRetire();cinemaRemoteClearSuggestion();}});
+setInterval(()=>{if(cinemaRemoteIdentity()){cinemaRemoteReceiverSync();if(CINEMA_WEB_CONTROLLER?.client&&!CINEMA_WEB_CONTROLLER.client.current())cinemaRemoteControllerRetire();}},1000);
+setInterval(cinemaRemoteSuggest,30000);

@@ -16,7 +16,10 @@ use axum::http::{header, Response, StatusCode};
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use plurx_core::store::{keys, Store};
-use plurx_core::transcode::{EffectiveRateControl, Encoder};
+use plurx_core::transcode::{
+    EffectiveRateControl, Encoder, MacosProcessingAvailability, MacosProcessingContext,
+    MacosProcessingGraph, MacosProcessingIdentity,
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -1316,6 +1319,8 @@ struct LiveTvSession {
     worker: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     process: tokio::sync::Mutex<Option<LiveTvProcess>>,
     decoder_unavailable: Arc<AtomicBool>,
+    /// Retained until the owned child and stderr reader have settled.
+    source_format_changed: Arc<AtomicBool>,
     encoder_diagnostic: Arc<StdMutex<Option<&'static str>>>,
     source_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
     source_format_expires_at: Arc<AtomicI64>,
@@ -4225,6 +4230,7 @@ impl LiveTvManager {
             worker: StdMutex::new(None),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format_changed: Arc::new(AtomicBool::new(false)),
             encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format,
             source_format_expires_at,
@@ -6539,10 +6545,27 @@ async fn run_live_session(
         .encoder_diagnostic
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let result = classify_live_source_error(
+    // A fast graph reconfiguration failure can exit before the next observer
+    // tick. Cleanup has joined the existing bounded stderr reader, so its
+    // confirmed source-change fact now takes part in terminal classification.
+    let source_changed = session.source_format_changed.load(Ordering::Acquire);
+    if source_changed {
+        if let Some(transport) = session.transport() {
+            transport.mark_source_stale();
+        }
+        if let Some(owner) = manager.upgrade() {
+            owner.forget_source_facts(&SourceFormatKey {
+                generation: config.generation,
+                device_id: session.device_id.clone(),
+                channel_id: session.channel.id.clone(),
+            });
+        }
+    }
+    let result = classify_live_terminal_error(
         result,
         session.decoder_unavailable.load(Ordering::Acquire),
         diagnostic,
+        source_changed,
     );
     {
         let error = result.as_ref().err().cloned().unwrap_or_else(|| {
@@ -6610,6 +6633,26 @@ fn classify_live_source_error(
             }
             (result, _) => result,
         }
+    }
+}
+
+fn classify_live_terminal_error(
+    result: Result<(), LiveTvError>,
+    decoder_unavailable: bool,
+    encoder_diagnostic: Option<&'static str>,
+    source_changed: bool,
+) -> Result<(), LiveTvError> {
+    let result = classify_live_source_error(result, decoder_unavailable, encoder_diagnostic);
+    if source_changed
+        && !decoder_unavailable
+        && encoder_diagnostic.is_none()
+        && matches!(result, Err(LiveTvError::StreamFailed(_)))
+    {
+        Err(LiveTvError::SourceFormatChanged(
+            "the broadcast changed format; start the channel again so a fresh delivery route can be selected".into(),
+        ))
+    } else {
+        result
     }
 }
 
@@ -6840,7 +6883,7 @@ async fn run_live_session_inner(
             delivery.clone(),
             admission.as_ref().map(|value| value.encoder.label()),
         ));
-        let transcode_plan = LiveTvTranscodePlan::new(
+        let mut transcode_plan = LiveTvTranscodePlan::new(
             &owner.system,
             delivery,
             admission.as_ref().map(|value| value.encoder),
@@ -6848,10 +6891,25 @@ async fn run_live_session_inner(
                 .as_ref()
                 .and_then(crate::transcode::LiveAdmission::software_threads),
         )?;
+        let macos_context = owner
+            .transcode
+            .macos_video_report()
+            .context(owner.transcode.macos_video_processing_enabled());
+        tokio::select! {
+            _ = session.cancel.cancelled() => return Err(LiveTvError::StreamFailed("live-TV start cancelled".into())),
+            () = transcode_plan.bind_macos_upload(&owner.system, macos_context.as_ref()) => {}
+        }
+        tokio::select! {
+            _ = session.cancel.cancelled() => return Err(LiveTvError::StreamFailed("live-TV start cancelled".into())),
+            result = transcode_plan.verify_macos_upload() => result?
+        }
         let (mut child, child_job) =
             spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
         let stdin = child.stdin.take();
-        let source_format_changed = Arc::new(AtomicBool::new(false));
+        session
+            .source_format_changed
+            .store(false, Ordering::Release);
+        let source_format_changed = Arc::clone(&session.source_format_changed);
         let input_format = Arc::new(StdMutex::new(None));
         let stderr = child.stderr.take().map(|stderr| {
             tokio::spawn(capture_live_stderr(
@@ -6945,53 +7003,58 @@ async fn run_live_session_inner(
                     match transport.opening_facts() {
                         None => {}
                         Some(Err(error)) => break Err(error),
-                        Some(Ok(probed)) => match warm_plan_agrees(
-                            &system,
-                            &transcode_plan,
-                            &source,
-                            &probed,
-                            session.request.playback.as_ref(),
-                            &policy,
-                            &support,
-                            &session.directory,
-                        ) {
-                            Some(delivery) => {
-                                verifying = false;
-                                *session
-                                    .source_format
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                    Some(session_source_format(&probed, &delivery));
-                                let owner = manager.upgrade();
-                                session.set_delivery(match &owner {
-                                    Some(owner) => advertise_proven_captions(
-                                        &owner
-                                            .caption_proofs
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
-                                        &probed,
-                                        delivery,
-                                        transcode_plan
-                                            .encoder
-                                            .as_ref()
-                                            .map(|encoder| encoder.label()),
-                                    ),
-                                    None => delivery,
-                                });
-                                if let Some(owner) = owner {
-                                    owner.record_source_facts(
-                                        facts_key.clone(),
-                                        &session.channel.guide_number,
-                                        probed.clone(),
-                                    );
-                                    owner
-                                        .metrics
-                                        .observe_start_plan(StartPlanSource::WarmAgreed);
-                                }
-                                source = probed;
+                        Some(Ok(probed)) => {
+                            if let Err(error) = transcode_plan.verify_macos_upload().await {
+                                break Err(error);
                             }
-                            None => break Ok(Some(probed)),
-                        },
+                            match warm_plan_agrees(
+                                &system,
+                                &transcode_plan,
+                                &source,
+                                &probed,
+                                session.request.playback.as_ref(),
+                                &policy,
+                                &support,
+                                &session.directory,
+                            ) {
+                                Some(delivery) => {
+                                    verifying = false;
+                                    *session
+                                        .source_format
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                        Some(session_source_format(&probed, &delivery));
+                                    let owner = manager.upgrade();
+                                    session.set_delivery(match &owner {
+                                        Some(owner) => advertise_proven_captions(
+                                            &owner
+                                                .caption_proofs
+                                                .lock()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                            &probed,
+                                            delivery,
+                                            transcode_plan
+                                                .encoder
+                                                .as_ref()
+                                                .map(|encoder| encoder.label()),
+                                        ),
+                                        None => delivery,
+                                    });
+                                    if let Some(owner) = owner {
+                                        owner.record_source_facts(
+                                            facts_key.clone(),
+                                            &session.channel.guide_number,
+                                            probed.clone(),
+                                        );
+                                        owner
+                                            .metrics
+                                            .observe_start_plan(StartPlanSource::WarmAgreed);
+                                    }
+                                    source = probed;
+                                }
+                                None => break Ok(Some(probed)),
+                            }
+                        }
                     }
                 }
                 if !input_checked && !verifying {
@@ -7016,12 +7079,8 @@ async fn run_live_session_inner(
                     }
                 }
                 if source_format_changed.load(Ordering::Acquire) {
-                    // The transport's facts no longer describe the mux: the next
-                    // viewer re-probes before it plans (§2.4 D5).
-                    transport.mark_source_stale();
-                    if let Some(owner) = manager.upgrade() {
-                        owner.forget_source_facts(&facts_key);
-                    }
+                    // The terminal owner invalidates the source facts after
+                    // settling stderr, including when child exit wins this tick.
                     break Err(LiveTvError::SourceFormatChanged(
                     "the broadcast changed format; start the channel again so a fresh delivery route can be selected".into(),
                 ));
@@ -7583,6 +7642,9 @@ fn parse_probe_facts(bytes: &[u8]) -> Result<LiveSourceFacts, LiveTvError> {
         .filter(|value| (8..=16).contains(value))
         .or_else(|| {
             pixel_format.as_deref().and_then(|format| {
+                if matches!(format, "yuv420p" | "nv12") {
+                    return Some(8);
+                }
                 [16u8, 14, 12, 10, 9, 8]
                     .into_iter()
                     .find(|depth| format.contains(&depth.to_string()))
@@ -7622,6 +7684,8 @@ fn parse_probe_facts(bytes: &[u8]) -> Result<LiveSourceFacts, LiveTvError> {
         color_primaries: json_string(video, "color_primaries"),
         color_transfer,
         color_space: json_string(video, "color_space"),
+        color_range: json_string(video, "color_range"),
+        rotation: live_probe_rotation(video),
         hdr,
         audio_codec: first_audio.codec.clone(),
         audio_sample_rate: first_audio.sample_rate,
@@ -7629,6 +7693,33 @@ fn parse_probe_facts(bytes: &[u8]) -> Result<LiveSourceFacts, LiveTvError> {
         audio_layout: first_audio.layout.clone(),
         audio_tracks,
     })
+}
+
+/// A complete stream probe can establish the absence of a rotation transform.
+/// A present but unreadable transform stays unknown and cannot admit a native graph.
+fn live_probe_rotation(video: &serde_json::Value) -> Option<i16> {
+    let side_data = video
+        .get("side_data_list")
+        .and_then(serde_json::Value::as_array);
+    if let Some(matrix) = side_data.and_then(|entries| {
+        entries.iter().find(|entry| {
+            entry
+                .get("side_data_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("Display Matrix")
+        })
+    }) {
+        return matrix
+            .get("rotation")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|rotation| i16::try_from(rotation).ok());
+    }
+    if let Some(rotation) = video.get("tags").and_then(|tags| tags.get("rotate")) {
+        return rotation
+            .as_str()
+            .and_then(|value| value.parse::<i16>().ok());
+    }
+    Some(0)
 }
 
 /// Who waits on a source probe, as one value: the child's priority class and
@@ -7767,6 +7858,14 @@ struct LiveTvTranscodePlan {
     software_threads: Option<u32>,
     video_map: &'static str,
     force_idr: bool,
+    macos_upload: Option<LiveMacosUpload>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveMacosUpload {
+    graph: MacosProcessingGraph,
+    identity: MacosProcessingIdentity,
+    executable: crate::ffmpeg::EncodedExecutable,
 }
 
 impl LiveTvTranscodePlan {
@@ -7795,9 +7894,118 @@ impl LiveTvTranscodePlan {
             encoder,
             software_threads,
             video_map: "0:v:0",
+            macos_upload: None,
             force_idr: encoder.is_some_and(|encoder| system.encoders.forced_idr.wanted_by(encoder)),
         })
     }
+    async fn bind_macos_upload(
+        &mut self,
+        system: &SystemInfo,
+        context: Option<&MacosProcessingContext>,
+    ) {
+        let Some(context) = context.filter(|context| context.enabled()) else {
+            return;
+        };
+        let Some(graph) = live_macos_upload_graph(self) else {
+            return;
+        };
+        if context.graph(graph) != MacosProcessingAvailability::Available {
+            return;
+        }
+        let Ok(Ok(executable)) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            crate::ffmpeg::EncodedExecutable::capture_program(&system.ffmpeg),
+        )
+        .await
+        else {
+            return;
+        };
+        if executable.digest != context.identity().ffmpeg_sha256()
+            || !tokio::time::timeout(CONNECT_TIMEOUT, executable.is_current())
+                .await
+                .unwrap_or(false)
+        {
+            return;
+        }
+        self.macos_upload = Some(LiveMacosUpload {
+            graph,
+            identity: context.identity().clone(),
+            executable,
+        });
+    }
+
+    async fn verify_macos_upload(&self) -> Result<(), LiveTvError> {
+        if let Some(binding) = &self.macos_upload {
+            if binding.executable.digest != binding.identity.ffmpeg_sha256()
+                || !tokio::time::timeout(CONNECT_TIMEOUT, binding.executable.is_current())
+                    .await
+                    .unwrap_or(false)
+            {
+                return Err(LiveTvError::CodecUnsupported(
+                    "the selected live-TV processing executable changed before launch".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Upload graphs describe software decode and native processing, not hardware decode.
+/// Older or incomplete probes keep the incumbent route.
+fn live_macos_upload_graph(plan: &LiveTvTranscodePlan) -> Option<MacosProcessingGraph> {
+    let source = &plan.delivery.source;
+    if plan.encoder != Some(Encoder::VideoToolbox)
+        || plan.delivery.video_action != LiveTrackAction::Encode
+        || source.rotation != Some(0)
+        || source.sample_aspect_ratio.as_deref() != Some("1:1")
+        || source.color_range.as_deref() != Some("tv")
+        || source.color_primaries.as_deref() != Some("bt709")
+        || source.color_transfer.as_deref() != Some("bt709")
+        || source.color_space.as_deref() != Some("bt709")
+        || source.hdr.as_deref() != Some("sdr")
+    {
+        return None;
+    }
+    let (width, height) = (source.width?, source.height?);
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return None;
+    }
+    let rate = source.frame_rate?;
+    if rate.num == 0 || rate.den == 0 {
+        return None;
+    }
+    let codec = source.video_codec.as_deref()?;
+    let depth = source.bit_depth?;
+    let layout = source.pixel_format.as_deref()?;
+    let eight_bit = depth == 8 && matches!(layout, "yuv420p" | "nv12");
+    let ten_bit = depth == 10 && matches!(layout, "yuv420p10le" | "p010le");
+    let graph = match (
+        source.field_order.as_deref()?,
+        plan.delivery.deinterlace_output,
+    ) {
+        ("progressive", None)
+            if (eight_bit && matches!(codec, "h264" | "mpeg2video" | "hevc"))
+                || (ten_bit && codec == "hevc") =>
+        {
+            MacosProcessingGraph::LiveSdrUploadScale
+        }
+        ("tt" | "bb", Some(LiveDeinterlaceOutput::Frame))
+            if eight_bit && matches!(codec, "h264" | "mpeg2video") =>
+        {
+            MacosProcessingGraph::LiveSdrUploadBwdifFrame
+        }
+        ("tt" | "bb", Some(LiveDeinterlaceOutput::Field))
+            if eight_bit && matches!(codec, "h264" | "mpeg2video") =>
+        {
+            MacosProcessingGraph::LiveSdrUploadBwdifField
+        }
+        _ => return None,
+    };
+    graph.live_upload_filter(
+        u32::from(plan.delivery.output.width),
+        u32::from(plan.delivery.output.height),
+    )?;
+    Some(graph)
 }
 
 fn spawn_live_ffmpeg(
@@ -7839,7 +8047,11 @@ fn live_ffmpeg_command_for_input(
         LivePackaging::Fmp4 => "m4s",
     };
     let segments = directory.join(format!("segment-%06d.{extension}"));
-    let mut command = tokio::process::Command::new(&system.ffmpeg);
+    let program = plan.macos_upload.as_ref().map_or_else(
+        || Path::new(&system.ffmpeg),
+        |binding| binding.executable.path.as_path(),
+    );
+    let mut command = tokio::process::Command::new(program);
     command
         // Tuner bytes are untrusted media input. Do not hand their decoder the
         // daemon's database, API, object-store, or deployment credentials just
@@ -7847,7 +8059,14 @@ fn live_ffmpeg_command_for_input(
         .env_clear()
         .env("LC_ALL", "C")
         .args(["-hide_banner", "-loglevel", "info", "-nostdin", "-y"]);
-    if let Some(encoder) = plan.encoder {
+    if let Some(binding) = &plan.macos_upload {
+        command.args(
+            binding
+                .graph
+                .live_upload_init_args()
+                .expect("a frozen live upload graph"),
+        );
+    } else if let Some(encoder) = plan.encoder {
         command.args(encoder.init_args());
     }
     command
@@ -7899,15 +8118,25 @@ fn live_ffmpeg_command_for_input(
         }
         LiveTrackAction::Encode => {
             let encoder = plan.encoder.expect("an encoded route has an encoder");
-            let filter = live_video_filter(
-                encoder,
-                plan.delivery
-                    .source
-                    .height
-                    .unwrap_or(plan.delivery.output.height),
-                plan.delivery.output.height,
-                plan.delivery.deinterlace_output,
-            );
+            let filter = if let Some(binding) = &plan.macos_upload {
+                binding
+                    .graph
+                    .live_upload_filter(
+                        u32::from(plan.delivery.output.width),
+                        u32::from(plan.delivery.output.height),
+                    )
+                    .expect("the frozen live graph has a valid raster")
+            } else {
+                live_video_filter(
+                    encoder,
+                    plan.delivery
+                        .source
+                        .height
+                        .unwrap_or(plan.delivery.output.height),
+                    plan.delivery.output.height,
+                    plan.delivery.deinterlace_output,
+                )
+            };
             command.args(["-vf", &filter]);
             command.args([
                 "-force_key_frames",
@@ -8112,6 +8341,13 @@ fn live_encoder_diagnostic(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+fn live_source_parameters_changed(text: &str) -> bool {
+    text.contains("new video stream")
+        || text.contains("new audio stream")
+        || text.contains("parameter change")
+        || text.contains("reconfiguring filter graph because video parameters changed to ")
+}
+
 async fn capture_live_stderr(
     mut stderr: impl tokio::io::AsyncRead + Unpin,
     decoder_unavailable: Arc<AtomicBool>,
@@ -8193,11 +8429,7 @@ async fn capture_live_stderr(
             window.drain(..window.len() - 2048);
         }
         let text = String::from_utf8_lossy(&window).to_ascii_lowercase();
-        if descriptor_done
-            && (text.contains("new video stream")
-                || text.contains("new audio stream")
-                || text.contains("parameter change"))
-        {
+        if descriptor_done && live_source_parameters_changed(&text) {
             source_format_changed.store(true, Ordering::Release);
         }
         if text.contains("decoding requested, but no decoder found for:")
@@ -8434,13 +8666,19 @@ fn warm_plan_agrees(
     if same_plan != running.delivery {
         return None;
     }
-    let probed_plan = LiveTvTranscodePlan::new(
+    let mut probed_plan = LiveTvTranscodePlan::new(
         system,
         delivery.clone(),
         running.encoder,
         running.software_threads,
     )
     .ok()?;
+    if let Some(binding) = &running.macos_upload {
+        if live_macos_upload_graph(&probed_plan) != Some(binding.graph) || cached != probed {
+            return None;
+        }
+        probed_plan.macos_upload = Some(binding.clone());
+    }
     let argv = |plan: &LiveTvTranscodePlan| {
         live_ffmpeg_command(system, plan, directory).map(|command| {
             command
@@ -10173,6 +10411,7 @@ mod tests {
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format_changed: Arc::new(AtomicBool::new(false)),
             encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format: Arc::new(StdMutex::new(None)),
             source_format_expires_at: Arc::new(AtomicI64::new(0)),
@@ -10266,6 +10505,7 @@ mod tests {
             worker: StdMutex::new(None),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format_changed: Arc::new(AtomicBool::new(false)),
             encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format: Arc::new(StdMutex::new(None)),
             source_format_expires_at: Arc::new(AtomicI64::new(0)),
@@ -12258,6 +12498,165 @@ exec /bin/cat > {sink}"#,
         );
     }
 
+    #[test]
+    fn native_live_upload_requires_exact_sdr_source_facts() {
+        let system = SystemInfo {
+            ffmpeg: "/task/ffmpeg".into(),
+            ..SystemInfo::default()
+        };
+        let mut delivery = test_encode_delivery(720);
+        delivery.source = LiveSourceFacts {
+            video_codec: Some("h264".into()),
+            width: Some(1920),
+            height: Some(1080),
+            bit_depth: Some(8),
+            pixel_format: Some("yuv420p".into()),
+            field_order: Some("progressive".into()),
+            frame_rate: Some(crate::live_tv_delivery::LiveRational {
+                num: 30000,
+                den: 1001,
+            }),
+            sample_aspect_ratio: Some("1:1".into()),
+            rotation: Some(0),
+            color_range: Some("tv".into()),
+            color_primaries: Some("bt709".into()),
+            color_transfer: Some("bt709".into()),
+            color_space: Some("bt709".into()),
+            hdr: Some("sdr".into()),
+            ..LiveSourceFacts::default()
+        };
+        delivery.deinterlace_output = None;
+        let plan = LiveTvTranscodePlan::new(&system, delivery, Some(Encoder::VideoToolbox), None)
+            .expect("valid isolated live upload fixture");
+        assert_eq!(
+            live_macos_upload_graph(&plan),
+            Some(MacosProcessingGraph::LiveSdrUploadScale)
+        );
+        for change in 0..7 {
+            let mut rejected = plan.clone();
+            match change {
+                0 => rejected.delivery.source.rotation = None,
+                1 => rejected.delivery.source.color_range = None,
+                2 => rejected.delivery.source.sample_aspect_ratio = Some("4:3".into()),
+                3 => rejected.delivery.source.color_transfer = Some("smpte2084".into()),
+                4 => rejected.delivery.source.width = Some(1919),
+                5 => rejected.delivery.source.field_order = Some("unknown".into()),
+                _ => rejected.encoder = Some(Encoder::Software),
+            }
+            assert_eq!(live_macos_upload_graph(&rejected), None, "case {change}");
+        }
+        let mut interlaced = plan.clone();
+        interlaced.delivery.source.field_order = Some("bb".into());
+        interlaced.delivery.deinterlace_output = Some(LiveDeinterlaceOutput::Field);
+        assert_eq!(
+            live_macos_upload_graph(&interlaced),
+            Some(MacosProcessingGraph::LiveSdrUploadBwdifField)
+        );
+        interlaced.delivery.source.video_codec = Some("hevc".into());
+        assert_eq!(live_macos_upload_graph(&interlaced), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_live_upload_executable_is_rejected_before_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_tempdir().expect("valid isolated live upload fixture");
+        let executable_path = root.path().join("ffmpeg");
+        std::fs::write(&executable_path, "#!/bin/sh\nexit 0\n")
+            .expect("valid isolated live upload fixture");
+        std::fs::set_permissions(&executable_path, std::fs::Permissions::from_mode(0o700))
+            .expect("valid isolated live upload fixture");
+        let executable = crate::ffmpeg::EncodedExecutable::capture_program(
+            executable_path
+                .to_str()
+                .expect("valid isolated live upload fixture"),
+        )
+        .await
+        .expect("valid isolated live upload fixture");
+        let identity = MacosProcessingIdentity::new(
+            executable.digest.clone(),
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "test-build".into(),
+            "arm64".into(),
+            "test-hardware".into(),
+        )
+        .expect("valid isolated live upload fixture");
+        let system = SystemInfo {
+            ffmpeg: "/unrelated/configured/ffmpeg".into(),
+            ..SystemInfo::default()
+        };
+        let mut plan = LiveTvTranscodePlan::new(
+            &system,
+            test_encode_delivery(720),
+            Some(Encoder::VideoToolbox),
+            None,
+        )
+        .expect("valid isolated live upload fixture");
+        plan.macos_upload = Some(LiveMacosUpload {
+            graph: MacosProcessingGraph::LiveSdrUploadScale,
+            identity,
+            executable,
+        });
+        plan.verify_macos_upload()
+            .await
+            .expect("valid isolated live upload fixture");
+        let command = live_ffmpeg_command(&system, &plan, root.path())
+            .expect("valid isolated live upload fixture");
+        assert_eq!(
+            command.as_std().get_program(),
+            std::fs::canonicalize(&executable_path)
+                .expect("valid isolated live upload fixture")
+                .as_os_str()
+        );
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["-hwaccel", "none"]));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("hwupload") && arg.contains("scale_vt")));
+        std::fs::write(&executable_path, "#!/bin/sh\nexit 17\n")
+            .expect("valid isolated live upload fixture");
+        assert!(plan.verify_macos_upload().await.is_err());
+    }
+
+    #[test]
+    fn native_source_reconfiguration_uses_existing_format_change_owner() {
+        assert!(live_source_parameters_changed("reconfiguring filter graph because video parameters changed to nv12(tv, bt709), 1920x1080"));
+        assert!(live_source_parameters_changed("new audio stream"));
+        assert!(!live_source_parameters_changed(
+            "decoding requested, but no decoder found for: ac4"
+        ));
+        assert!(!live_source_parameters_changed(
+            "could not reconfigure filter graph"
+        ));
+    }
+
+    #[test]
+    fn source_rotation_probe_does_not_turn_malformed_metadata_into_upright_video() {
+        assert_eq!(live_probe_rotation(&serde_json::json!({})), Some(0));
+        assert_eq!(
+            live_probe_rotation(
+                &serde_json::json!({"side_data_list": [{"side_data_type": "Display Matrix", "rotation": 90}]})
+            ),
+            Some(90)
+        );
+        assert_eq!(
+            live_probe_rotation(
+                &serde_json::json!({"side_data_list": [{"side_data_type": "Display Matrix"}]})
+            ),
+            None
+        );
+        assert_eq!(
+            live_probe_rotation(&serde_json::json!({"tags": {"rotate": "invalid"}})),
+            None
+        );
+    }
+
     /// Plan L-02 §5.3: warm facts are exactly this generation, device and
     /// channel, and only until their expiry.
     #[tokio::test(start_paused = true)]
@@ -13030,6 +13429,115 @@ exec /bin/cat >/dev/null"#;
             ),
             Err(LiveTvError::CodecUnsupported(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fast_source_change_exit_is_classified_after_the_owned_stderr_reader_settles() {
+        let root = crate::test_tempdir().expect("source-change root");
+        let session = test_session(root.path().join("session"), 1);
+        tokio::fs::create_dir_all(&session.directory)
+            .await
+            .expect("scratch");
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "exit 178"]);
+        let (mut child, job) = crate::process_control::spawn_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::realtime("Live source-change test child"),
+        )
+        .expect("child");
+        assert!(!child.wait().await.expect("already exited").success());
+        let (release, waiting) = tokio::sync::oneshot::channel();
+        let captured = Arc::clone(&session);
+        let stderr = tokio::spawn(async move {
+            waiting.await.expect("release pending stderr");
+            let initial =
+                std::io::Cursor::new(b"Input #0, mpegts, from pipe:0:\nStream mapping:\n".to_vec());
+            let changed = std::io::Cursor::new(b"Reconfiguring filter graph because video parameters changed to yuv420p(tv, bt709), 416x234\n".to_vec());
+            capture_live_stderr(
+                tokio::io::AsyncReadExt::chain(initial, changed),
+                Arc::clone(&captured.decoder_unavailable),
+                Arc::clone(&captured.encoder_diagnostic),
+                Arc::clone(&captured.source_format),
+                Arc::clone(&captured.source_format_expires_at),
+                Arc::clone(&captured.source_format_changed),
+                Arc::new(StdMutex::new(None)),
+            )
+            .await;
+        });
+        *session.process.lock().await = Some(LiveTvProcess {
+            child,
+            _job: job,
+            _admission: None,
+            stderr: Some(stderr),
+        });
+        assert!(!session.source_format_changed.load(Ordering::Acquire));
+        let cleanup = cleanup_session(&session, false);
+        tokio::pin!(cleanup);
+        tokio::select! {
+            biased;
+            result = &mut cleanup => panic!("cleanup returned before stderr settled: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        release.send(()).expect("reader is owned by cleanup");
+        cleanup.await.expect("existing bounded cleanup");
+        assert!(session.process.lock().await.is_none());
+        assert!(matches!(
+            classify_live_terminal_error(
+                Err(LiveTvError::StreamFailed("child exited with178".into())),
+                false,
+                None,
+                session.source_format_changed.load(Ordering::Acquire),
+            ),
+            Err(LiveTvError::SourceFormatChanged(_))
+        ));
+    }
+
+    #[test]
+    fn confirmed_source_change_preserves_classified_decoder_encoder_and_owner_errors() {
+        assert!(matches!(
+            classify_live_terminal_error(
+                Err(LiveTvError::StreamFailed("exit".into())),
+                true,
+                None,
+                true,
+            ),
+            Err(LiveTvError::CodecUnsupported(_))
+        ));
+        let encoded = classify_live_terminal_error(
+            Err(LiveTvError::StreamFailed("exit".into())),
+            false,
+            Some("known encoder cause"),
+            true,
+        )
+        .expect_err("encoder cause");
+        assert_eq!(encoded.code(), "stream_failed");
+        assert!(encoded.to_string().contains("known encoder cause"));
+        for error in [
+            LiveTvError::OwnerUnavailable("fenced".into()),
+            LiveTvError::CapabilityExpired("stopped".into()),
+            LiveTvError::StartupTimeout("deadline".into()),
+        ] {
+            let expected = error.code();
+            assert_eq!(
+                classify_live_terminal_error(Err(error), false, None, true)
+                    .expect_err("retain owner reason")
+                    .code(),
+                expected
+            );
+        }
+        assert!(classify_live_terminal_error(Ok(()), false, None, true).is_ok());
+        assert_eq!(
+            classify_live_terminal_error(
+                Err(LiveTvError::StreamFailed("ordinary EOF".into())),
+                false,
+                None,
+                false,
+            )
+            .expect_err("unchanged EOF")
+            .code(),
+            "stream_failed"
+        );
     }
 
     #[tokio::test]

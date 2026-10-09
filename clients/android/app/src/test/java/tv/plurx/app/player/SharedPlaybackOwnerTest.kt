@@ -31,6 +31,81 @@ class SharedPlaybackOwnerTest {
         override fun releaseSuccessor() = error("no successor")
     }
 
+    @Test fun admittedSharedStartKeepsActualPlayFocusThroughOwnerBusyAndRecordsBeforeTransfer(): Unit = runBlocking {
+        val f = SharedFixture("211"); f.login()
+        val owner = SharedPlaybackOwner(this, { SharedDecisionClient.forTest(f.transport()) }, Renderer(f.log))
+        val navigation = tv.plurx.app.remote.RemoteNavigationCoordinator()
+        navigation.enter("preplay", "details") { true }
+        navigation.viewport = androidx.compose.ui.geometry.Rect(0f, 0f, 100f, 100f)
+        navigation.setOrder("preplay", listOf("back", "play"))
+        navigation.register("preplay", "play", tv.plurx.app.remote.RemoteNavigationCoordinator.Entry("actual-play", "Play", androidx.compose.ui.geometry.Rect(0f, 0f, 50f, 50f), {}) { tv.plurx.app.remote.RemoteOutcome.Unsupported })
+        navigation.nativeFocus("preplay", "play", "actual-play", true)
+        val snapshot = navigation.context
+        val guard = tv.plurx.app.remote.RemoteReceiverGuard()
+        val grant = java.util.UUID.randomUUID().toString()
+        val target = tv.plurx.app.remote.RemoteTarget(java.util.UUID.randomUUID().toString(), java.util.UUID.randomUUID().toString(), java.util.UUID.randomUUID().toString())
+        val control = java.util.UUID.randomUUID().toString()
+        val context = tv.plurx.app.remote.RemoteReceiverGuard.Context(grant, target, control, snapshot.revision, snapshot.focusRevision, null)
+        guard.setContext(context)
+        val credit = guard.mint(tv.plurx.app.remote.RemoteCreditKind.Interaction, 100)!!
+        val command = tv.plurx.app.remote.RemoteCommand(target, grant, control, 1, credit.nonce, snapshot.revision, snapshot.focusRevision, tv.plurx.app.remote.RemoteAction("select"))
+        val binding = tv.plurx.app.remote.RemoteDeferredBinding("preplay", "controller", "full-reference")
+        val permit = (guard.reserve(command, binding, 200) as tv.plurx.app.remote.RemoteReservation.Admitted).permit
+        f.startReply = { index, _ ->
+            assertTrue(owner.starting.value)
+            assertEquals(snapshot, navigation.context)
+            assertEquals("play", navigation.focusedControl)
+            assertNull(navigation.requestedFocus)
+            f.hlsReply(index)
+        }
+        assertEquals(tv.plurx.app.remote.RemoteOutcome.Applied, owner.startRemote(f.plan(f.context())) { navigation.context == snapshot && guard.permits(permit, binding, 300) })
+        assertEquals(snapshot, navigation.context)
+        assertEquals("play", navigation.focusedControl)
+        assertFalse(owner.starting.value)
+        assertEquals("applied", guard.complete(permit, binding, 400, tv.plurx.app.remote.RemoteOutcome.Applied)?.outcome)
+        navigation.enter("player", "playback") { true }
+        guard.setContext(context.copy(contextRevision = navigation.context.revision, focusRevision = navigation.context.focusRevision))
+        assertEquals("applied", guard.retainedResult(command, 500)?.outcome)
+        owner.stop()
+    }
+    @Test fun expiredRemoteStartCleansLateOfferWithoutRendererAndFreshRetryUsesNewRequest(): Unit = runBlocking {
+        val f = SharedFixture("209"); f.login()
+        val renderer = Renderer(f.log)
+        val owner = SharedPlaybackOwner(this, { SharedDecisionClient.forTest(f.transport()) }, renderer)
+        var admitted = true
+        f.startReply = { index, _ -> admitted = false; f.hlsReply(index) }
+        val first = f.plan(f.context())
+        assertTrue(runCatching { owner.startRemote(first) { admitted } }.isFailure)
+        assertNull(owner.currentSession)
+        assertFalse(f.log.any { it.startsWith("attach") })
+        assertTrue(f.log.contains("delete ${f.session(1)}"))
+        assertTrue(owner.remoteStartAvailable)
+        admitted = true
+        f.startReply = { index, _ -> f.hlsReply(index) }
+        val prepared = f.plan(f.context())
+        val retry = tv.plurx.app.data.sharedPlaybackPlan(prepared.subject, SharedDecisionClient.Result(prepared.decision, prepared.caps), prepared.selection, prepared.request.playback_id, java.util.UUID.randomUUID().toString(), false)
+        assertNotEquals(first.request.request_id, retry.request.request_id)
+        assertEquals(tv.plurx.app.remote.RemoteOutcome.Applied, owner.startRemote(retry) { admitted })
+        owner.stop()
+    }
+
+    @Test fun remotePauseChecksAfterControlAndLocalStopPausesBeforeCleanupRuns(): Unit = runBlocking {
+        val f = SharedFixture("210"); f.login()
+        val renderer = Renderer(f.log)
+        val owner = SharedPlaybackOwner(this, { SharedDecisionClient.forTest(f.transport()) }, renderer)
+        owner.start(f.plan(f.context()))
+        var admitted = true
+        f.control = { _, body -> admitted = false; 200 to f.accepted(body) }
+        assertEquals(tv.plurx.app.remote.RemoteOutcome.Unavailable, owner.setPlayingRemote(false) { admitted })
+        assertTrue(renderer.active)
+        val cleanup = owner.beginStop()
+        assertFalse(renderer.active)
+        assertFalse(cleanup.isCompleted)
+        assertSame(cleanup, owner.beginStop())
+        cleanup.join()
+        assertTrue(f.log.contains("delete ${f.session(1)}"))
+    }
+
     @Test fun rendererSetupFailureEndsTheStartedSessionForHlsAndDirect(): Unit = runBlocking {
         for (direct in listOf(false, true)) {
             val f = SharedFixture(if (direct) "206" else "205"); f.login()

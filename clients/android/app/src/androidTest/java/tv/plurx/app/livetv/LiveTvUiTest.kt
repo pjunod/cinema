@@ -2,12 +2,16 @@ package tv.plurx.app.livetv
 
 import android.content.res.Configuration
 import androidx.compose.ui.test.ComposeTimeoutException
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
@@ -99,7 +103,8 @@ class LiveTvUiTest {
                             // answers the honest degraded shape — a configured
                             // source with nothing cached — and the assertions
                             // below prove the screen is fully usable anyway.
-                            path == "/api/v1/live-tv/guide" -> """{"source":"hdhomerun","freshness":"unavailable",
+                            (path == "/api/v1/live-tv/guide" ||
+                                path.matches(Regex("/api/v1/live-tv/guide\\?from=[0-9]+&hours=6"))) -> """{"source":"hdhomerun","freshness":"unavailable",
                                 "age_seconds":0,"window":{"start":0,"end":0},
                                 "matched_channels":0,"lineup_channels":2,"channels":[]}"""
                             // The DVR is a third independent read. Like the
@@ -194,7 +199,7 @@ class LiveTvUiTest {
         // does not owe a touch screen. This has to precede search input, which
         // correctly moves focus into the field.
         if (television) {
-            val firstChannel = compose.onNodeWithText("7.1 · Fixture News")
+            val firstChannel = compose.onNode(hasText("7.1 · Fixture News") and hasClickAction())
             compose.waitUntil(timeoutMillis = 2_000) {
                 firstChannel.fetchSemanticsNode().config
                     .getOrElse(SemanticsProperties.Focused) { false }
@@ -205,19 +210,29 @@ class LiveTvUiTest {
         // the old lineup-only rows. Select the protected result explicitly so
         // this contract does not depend on both fixture channels fitting in one
         // emulator viewport.
+        fun openSearch() {
+            if (television) compose.onNode(hasText("⌕", substring = true) and hasClickAction()).performClick()
+            else compose.onNodeWithContentDescription("Search channels").performClick()
+        }
+        openSearch()
         val search = compose.onNodeWithTag("live-tv-channel-search")
         search.performTextInput("Protected")
-        val protectedLabel = if (television) "Protected · unavailable" else "DRM unsupported"
+        compose.onNodeWithText("Done").performClick()
+        val protectedLabel = if (television) "Protected · not playable" else "DRM unsupported"
         awaitText(protectedLabel)
         compose.onNodeWithText(protectedLabel).assertIsNotEnabled()
         // The field's label says what search now matches. It used to read
         // "Find a channel"; since the guide landed it also matches the
         // programme on now, and the label says so.
+        openSearch()
         search.performTextClearance()
         search.performTextInput("Fixture")
-        compose.onNodeWithText("7.1 · Fixture News").assertIsDisplayed()
-        val watchLabel = if (television) "No programme information · Watch live" else "Watch live"
-        compose.onNodeWithText(watchLabel).assertIsDisplayed()
+        compose.onNodeWithText("Done").performClick()
+        compose.onNode(hasText("7.1 · Fixture News") and hasClickAction()).assertIsDisplayed()
+        if (television) {
+            compose.onNode(hasText("7.1 · Fixture News") and hasClickAction())
+                .assertIsDisplayed().assertIsEnabled().assertHasClickAction()
+        } else compose.onNodeWithText("Watch live").assertIsDisplayed()
         assertTrue(requests.none { it.startsWith("POST ") })
         assertEquals(emptyList<String>(), fixtureErrors.toList())
         assertEquals(emptyList<String>(), unexpectedPaths.toList())

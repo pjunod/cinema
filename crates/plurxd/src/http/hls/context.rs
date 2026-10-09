@@ -175,7 +175,7 @@ pub(super) async fn exact_hls_context(
 pub(super) async fn exact_hls_context_at(
     state: &AppState,
     session: &str,
-    mut context: crate::transcode::HlsContext,
+    context: crate::transcode::HlsContext,
     inspect_avc_init: bool,
     deadline: Instant,
 ) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
@@ -306,8 +306,16 @@ pub(super) async fn exact_hls_context_at(
             }
         }
     }
+    bind_hls_init_context(context, &init, sample_entry)
+}
+
+fn bind_hls_init_context(
+    mut context: crate::transcode::HlsContext,
+    init: &[u8],
+    sample_entry: &str,
+) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
     let mut reader = plurx_core::fmp4::FragmentReader::new();
-    reader.push(&init);
+    reader.push(init);
     let parsed = match reader.next_unit() {
         Ok(Some(plurx_core::fmp4::Unit::Init(init))) => init,
         Ok(Some(_)) | Ok(None) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
@@ -370,14 +378,16 @@ pub(super) async fn exact_hls_context_at(
             ) => return Err(HlsInitInspectionError::unsupported()),
         }
     } else if matches!(sample_entry, "dvh1" | "dvhe") {
-        dolby_vision_codec_from_init(&init, sample_entry)
+        dolby_vision_codec_from_init(init, sample_entry)
     } else {
-        hevc_codec_from_init(&init, sample_entry)
+        hevc_codec_from_init(init, sample_entry)
     };
     let video = derived.ok_or_else(HlsInitInspectionError::unsupported)?;
-    if sample_entry == "avc1" {
-        if let Some(facts) = &mut context.codec_facts {
+    if let Some(facts) = &mut context.codec_facts {
+        if sample_entry == "avc1" {
             facts.bind_output_avc_init(video.clone());
+        } else if matches!(sample_entry, "hvc1" | "hev1") {
+            facts.bind_output_hevc_init(video.clone());
         }
     }
     context.codecs = match context.codecs.split_once(',') {
@@ -608,4 +618,236 @@ pub(super) fn normalize_high_tier_hevc_init(file: &MediaFile, init: &mut [u8]) -
     }
     payload[1] &= !0x20;
     true
+}
+
+#[cfg(test)]
+mod finite_hevc_init_tests {
+    use super::*;
+    use plurx_core::transcode::*;
+
+    fn source() -> plurx_core::domain::MediaFile {
+        plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
+            id: 5,
+            item_id: 1,
+            path: std::path::PathBuf::from("/media/profile5.mkv"),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(1_000),
+            container: Some("matroska".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: Some("Main".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            bitrate: Some(20_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
+    }
+
+    fn plan_context() -> crate::transcode::HlsContext {
+        let file = source();
+        let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+            "codec_name":"hevc","profile":"Main","width":3840,"height":2160,
+            "pix_fmt":"yuv420p","color_transfer":"bt709","color_primaries":"bt709",
+            "color_space":"bt709","color_range":"tv","field_order":"progressive",
+            "sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1"}]});
+        let facts = DecodeFacts::from_ffprobe_json(
+            &probe,
+            DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source identity"),
+        )
+        .expect("facts");
+        let caps = DecodeCapabilities::new(
+            DecodeCapabilitySnapshotIdentity::new(
+                "f".repeat(64),
+                "test-node".into(),
+                Some("e".repeat(64)),
+            )
+            .expect("snapshot"),
+            vec![],
+            vec![SoftwareDecoder {
+                codec: "hevc".into(),
+                implementation: Some("hevc".into()),
+            }],
+        )
+        .expect("caps");
+        let identity = MacosProcessingIdentity::new(
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+            "test".into(),
+            "arm64".into(),
+            "Apple test".into(),
+        )
+        .expect("processing identity");
+        let context = MacosProcessingContext::new(
+            false,
+            identity,
+            MacosProcessingAvailability::Unavailable,
+            MacosProcessingAvailability::Unavailable,
+        )
+        .with_graph(
+            MacosProcessingGraph::HevcSdrHost,
+            MacosProcessingAvailability::Available,
+        )
+        .with_hevc_output_enabled(true);
+        let options = TranscodeOptions {
+            target_height: 1080,
+            output_codec: Some(VideoCodec::Hevc),
+            effective_rate_control: EffectiveRateControl::Vbr,
+            ..Default::default()
+        };
+        let mut media = TranscodeMediaOptions::from_options(&file, &options);
+        media.input_has_audio = true;
+        let plan = resolve_transcode(
+            &TranscodeRequest::new(Encoder::VideoToolbox, media),
+            &facts,
+            &caps,
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+                .with_macos_processing(context),
+            &AttemptRestrictions::none(),
+        )
+        .expect("finite HEVC plan");
+        assert_eq!(plan.output_contract().output_codec(), "hevc");
+        let codec_facts =
+            crate::transcode::FrozenHlsCodecFacts::encoded(&plan).with_sdr_master_codecs(true);
+        assert_eq!(
+            codec_facts.sdr_master_codecs(),
+            None,
+            "the family is not a qualified profile claim"
+        );
+        crate::transcode::HlsContext {
+            bandwidth: None,
+            file_id: file.id,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: crate::transcode::transcoded_hls_codecs_for_plan(&plan),
+            codec_facts: Some(codec_facts),
+            supplemental_codecs: None,
+            frame_rate: Some(24.0),
+        }
+    }
+
+    // Exact ftyp+moov from the signed 46f31 finite producer's served hvc1 init.
+    // SHA256 c46d6fea4130a3b189a3f009449945bf8eb9d31d5615011650bd27db5ca42db2; the media payload and session capability are excluded.
+    fn produced_init() -> Vec<u8> {
+        hex::decode(concat!("0000001c6674797069736f350000020069736f3569736f366d703431000005406d6f6f760000006c6d76686400000000",
+"0000000000000000000003e8000000000001000001000000000000000000000000010000000000000000000000000000",
+"000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000002",
+"000002637472616b0000005c746b68640000000300000000000000000000000100000000000000000000000000000000",
+"000000000000000000010000000000000000000000000000000100000000000000000000000000004000000007800000",
+"04380000000001ff6d646961000000206d646864000000000000000000000000000000180000000055c400000000002d",
+"68646c72000000000000000076696465000000000000000000000000566964656f48616e646c657200000001aa6d696e",
+"6600000014766d68640000000100000000000000000000002464696e660000001c647265660000000000000001000000",
+"0c75726c20000000010000016a7374626c0000011e7374736400000000000000010000010e6876633100000000000000",
+"01000000000000000000000000000000000780043800480000004800000000000000011f4c61766336322e32382e3130",
+"3320686576635f766964656f746f6f6c626f780018ffff0000007768766343010160000000b0000000000078f000fcfd",
+"f8f800000f03a00001001840010c01ffff016000000300b00000030000030078170240a10001002a4201010160000003",
+"00b00000030000030078a003c0801107cb8817b916452ffcb9fc4feb016a02020201a2000100074401c072f053240000",
+"000a6669656c010000000013636f6c726e636c7800010001000100000000107061737000000001000000010000001462",
+"74727400000000007a1200007a1200000000107374747300000000000000000000001073747363000000000000000000",
+"0000147374737a000000000000000000000000000000107374636f0000000000000000000001bf7472616b0000005c74",
+"6b6864000000030000000000000000000000020000000000000000000000000000000000000001010000000001000000",
+"0000000000000000000000000100000000000000000000000000004000000000000000000000000000015b6d64696100",
+"0000206d6468640000000000000000000000000000bb800000000055c400000000002d68646c72000000000000000073",
+"6f756e000000000000000000000000536f756e6448616e646c657200000001066d696e6600000010736d686400000000",
+"000000000000002464696e660000001c6472656600000000000000010000000c75726c2000000001000000ca7374626c",
+"0000007e7374736400000000000000010000006e6d703461000000000000000100000000000000000002001000000000",
+"bb8000000000003665736473000000000380808025000200048080801740150000000002710000027100058080800511",
+"9056e5000680808001020000001462747274000000000002710000027100000000107374747300000000000000000000",
+"0010737473630000000000000000000000147374737a000000000000000000000000000000107374636f000000000000",
+"0000000000486d7665780000002074726578000000000000000100000001000000000000000000000000000000207472",
+"657800000000000000020000000100000000000000000000000000000062756474610000005a6d657461000000000000",
+"002168646c7200000000000000006d6469726170706c0000000000000000000000002d696c737400000025a9746f6f00",
+"00001d6461746100000001000000004c61766636322e31322e313033")).expect("retained producer init")
+    }
+
+    #[test]
+    fn finite_hevc_plan_inspects_served_init_and_freezes_actual_codec() {
+        let context = plan_context();
+        assert_eq!(context.codecs, "hvc1,mp4a.40.2");
+        let init = produced_init();
+        let expected = hevc_codec_from_init(&init, "hvc1").expect("actual HEVC profile");
+        assert!(expected.starts_with("hvc1.1."));
+        let bound =
+            bind_hls_init_context(context, &init, "hvc1").expect("structurally complete init");
+        assert_eq!(bound.codecs, format!("{expected},mp4a.40.2"));
+        let frozen = bound.codec_facts.expect("frozen output facts");
+        assert_eq!(frozen.sdr_master_codecs(), Some(bound.codecs));
+        let serialized = serde_json::to_value(frozen).expect("origin");
+        assert!(serialized.to_string().contains("OutputInit"));
+    }
+
+    #[test]
+    fn finite_hevc_plan_refuses_incomplete_parameter_sets() {
+        let init = produced_init();
+        let hvcc = init
+            .windows(4)
+            .position(|bytes| bytes == b"hvcC")
+            .expect("record");
+        let mut at = hvcc + 4 + 23;
+        for expected_type in 32u8..=34 {
+            assert_eq!(init[at] & 0x3f, expected_type);
+            let mut partial = init.clone();
+            partial[at] &= 0x7f;
+            assert!(bind_hls_init_context(plan_context(), &partial, "hvc1").is_err());
+            let mut reader = plurx_core::fmp4::FragmentReader::new();
+            reader.push(&partial);
+            let Some(plurx_core::fmp4::Unit::Init(parsed)) =
+                reader.next_unit().expect("valid boxes")
+            else {
+                panic!("retained init must parse");
+            };
+            assert!(!plurx_core::fmp4::hevc_parameter_sets_complete(&parsed).expect("valid hvcC"));
+            assert!(plurx_core::fmp4::validate_hevc_sample_entries(&parsed).is_err());
+            let entry = partial
+                .windows(4)
+                .position(|bytes| bytes == b"hvc1")
+                .expect("entry");
+            let mut dolby_out_of_band = partial.clone();
+            dolby_out_of_band[entry..entry + 4].copy_from_slice(b"dvh1");
+            let mut reader = plurx_core::fmp4::FragmentReader::new();
+            reader.push(&dolby_out_of_band);
+            let Some(plurx_core::fmp4::Unit::Init(parsed)) =
+                reader.next_unit().expect("out-of-band boxes")
+            else {
+                panic!("out-of-band init must parse");
+            };
+            assert!(plurx_core::fmp4::validate_hevc_sample_entries(&parsed).is_err());
+            // The same partial arrays are legal for an in-band sample entry.
+            for kind in [b"hev1", b"dvhe"] {
+                let mut in_band = partial.clone();
+                in_band[entry..entry + 4].copy_from_slice(kind);
+                let mut reader = plurx_core::fmp4::FragmentReader::new();
+                reader.push(&in_band);
+                let Some(plurx_core::fmp4::Unit::Init(parsed)) =
+                    reader.next_unit().expect("in-band boxes")
+                else {
+                    panic!("in-band init must parse");
+                };
+                plurx_core::fmp4::validate_hevc_sample_entries(&parsed)
+                    .expect("in-band arrays may be partial");
+            }
+            let count = u16::from_be_bytes([init[at + 1], init[at + 2]]) as usize;
+            at += 3;
+            for _ in 0..count {
+                let length = u16::from_be_bytes([init[at], init[at + 1]]) as usize;
+                at += 2 + length;
+            }
+        }
+    }
 }

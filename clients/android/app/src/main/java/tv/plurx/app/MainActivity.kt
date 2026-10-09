@@ -64,6 +64,17 @@ import tv.plurx.app.livetv.DvrCaptureActivityScreen
 import tv.plurx.app.librarychannels.LibraryChannelPlayer
 import tv.plurx.app.librarychannels.LibraryChannelsScreen
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import android.view.KeyEvent
+import tv.plurx.app.remote.*
 
 class MainActivity : ComponentActivity() {
     /**
@@ -73,31 +84,51 @@ class MainActivity : ComponentActivity() {
      * fact arrives.
      */
     private val reminderChannel = MutableStateFlow<String?>(null)
+    private val invitationId = MutableStateFlow<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val rootView = java.lang.ref.WeakReference(window.decorView)
+        RemoteRuntime.get(applicationContext).mainWindowEligible = { rootView.get()?.hasWindowFocus() == true }
         // Keep a real-hardware capability snapshot in logcat even before sign
         // in. Decoder/display regressions otherwise surface only as a later
         // server transcode, after the evidence that caused it is gone.
         lifecycleScope.launch { Caps.query(this@MainActivity) }
         reminderChannel.value = intent?.getStringExtra(EXTRA_LIVE_TV_CHANNEL)
+        invitationId.value = invitationFrom(intent)
         setContent {
             val vm: AppViewModel = viewModel()
             val preferences by vm.preferences.collectAsStateWithLifecycle()
             PlurxTheme(preferences.theme, preferences.appearance) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    AppRoot(vm, reminderChannel) { reminderChannel.value = null }
+                    AppRoot(vm, reminderChannel, { reminderChannel.value = null }, invitationId, { invitationId.value = null })
                 }
             }
         }
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); RemoteRuntime.get(applicationContext).windowChanged() }
+    override fun onResume() { super.onResume(); RemoteRuntime.scene(true, false) }
+    override fun onPause() { RemoteRuntime.scene(false, false); super.onPause() }
+    override fun onStop() { if (!isChangingConfigurations) RemoteRuntime.scene(false, true); super.onStop() }
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) RemoteRuntime.get(applicationContext).physicalInput()
+        return super.dispatchTouchEvent(event)
+    }
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        tv.plurx.app.remote.RemotePhysicalInput.observe(event) { RemoteRuntime.get(applicationContext).physicalInput() }
+        return super.dispatchKeyEvent(event)
+    }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         reminderChannel.value = intent.getStringExtra(EXTRA_LIVE_TV_CHANNEL)
+        invitationId.value = invitationFrom(intent)
     }
 
+    private fun invitationFrom(intent: Intent?): String? = intent?.getStringExtra(tv.plurx.app.invitations.InvitationNotifications.EXTRA_ID)?.takeIf {
+        it.length == 43 && runCatching { tv.plurx.app.invitations.InvitationWire.invitation(it) }.isSuccess
+    }
     companion object {
         const val EXTRA_LIVE_TV_CHANNEL = "live_tv_channel"
     }
@@ -108,6 +139,8 @@ private fun AppRoot(
     vm: AppViewModel,
     reminderChannel: StateFlow<String?>,
     onReminderChannelUsed: () -> Unit,
+    invitationId: StateFlow<String?>,
+    onInvitationUsed: () -> Unit,
 ) {
     val context = LocalContext.current
     val liveTv = LiveTvPlayer.get(context)
@@ -143,7 +176,7 @@ private fun AppRoot(
         Phase.Loading -> LoadingBox()
         Phase.NeedServer -> ConnectScreen(vm, busy, authError)
         Phase.NeedLogin -> LoginScreen(vm, busy, authError)
-        Phase.Ready -> MainNav(vm, reminderChannel, onReminderChannelUsed)
+        Phase.Ready -> MainNav(vm, reminderChannel, onReminderChannelUsed, invitationId, onInvitationUsed)
     }
 }
 
@@ -152,8 +185,32 @@ private fun MainNav(
     vm: AppViewModel,
     reminderChannel: StateFlow<String?>,
     onReminderChannelUsed: () -> Unit,
+    invitationId: StateFlow<String?>,
+    onInvitationUsed: () -> Unit,
 ) {
     val nav = rememberNavController()
+    val context = LocalContext.current
+    val remote = remember(context) { RemoteRuntime.get(context) }
+    val invitations = remember(context) { tv.plurx.app.invitations.InvitationRuntime.get(context) }
+    LaunchedEffect(vm.origin, vm.currentUserId, vm.serverInstanceId, invitations.authorizationGeneration) { invitations.configure(vm, remote) }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { invitations.resume() }
+    val remoteNavigation = remember { RemoteNavigationCoordinator() }
+    val currentEntry by nav.currentBackStackEntryAsState()
+    val entryScope = currentEntry?.id ?: "restricted"
+    val route = currentEntry?.destination?.route.orEmpty()
+    val category = tv.plurx.app.remote.RemoteRoutes.category(route)
+    DisposableEffect(entryScope, category) {
+        val entry = currentEntry
+        remoteNavigation.enter(entryScope, category) { entry != null && nav.popBackStackFrom(entry) }
+        onDispose { remoteNavigation.releaseScope(entryScope) }
+    }
+    DisposableEffect(remoteNavigation) {
+        remoteNavigation.onHome = { nav.navigate("home") { popUpTo("home") { inclusive = true }; launchSingleTop = true } }
+        onDispose { remote.suspendNavigation(); remoteNavigation.resetIdentity() }
+    }
+    LaunchedEffect(vm.origin, vm.currentUserId, vm.serverInstanceId, remote.enabled, remote.sceneEligible) {
+        remote.configure(vm, remoteNavigation, tv.plurx.app.player.isTelevision(context))
+    }
     val dvrScope = rememberCoroutineScope()
     val token = Session.token.orEmpty()
     val dvr = androidx.compose.runtime.remember(vm.origin, token, dvrScope) {
@@ -177,8 +234,11 @@ private fun MainNav(
         nav.navigate("live-tv?channel=${Uri.encode(channel)}") { launchSingleTop = true }
         onReminderChannelUsed()
     }
+    Box(Modifier.fillMaxSize().onGloballyPositioned { remoteNavigation.viewport = it.boundsInWindow() }) {
+    CompositionLocalProvider(LocalRemoteClient provides remote, LocalRemoteNavigation provides remoteNavigation, LocalRemoteScope provides entryScope) {
     NavHost(navController = nav, startDestination = "home") {
-        composable("home") {
+        composable("home") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             HomeScreen(
                 vm = vm,
                 onOpenItem = { id -> nav.navigate("detail/$id") },
@@ -193,6 +253,7 @@ private fun MainNav(
                 onOpenLibraryChannels = { nav.navigate("library-channels") },
                 onOpenSharedLibraries = { nav.navigate("shared-libraries") },
             )
+            }
         }
         composable(
             "library/{ids}/{name}",
@@ -201,6 +262,7 @@ private fun MainNav(
                 navArgument("name") { type = NavType.StringType },
             ),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             LibraryScreen(
                 vm = vm,
                 libraryIds = entry.arguments!!.getString("ids").orEmpty().split(',').mapNotNull(String::toLongOrNull),
@@ -208,18 +270,22 @@ private fun MainNav(
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable("search") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             SearchScreen(
                 vm = vm,
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             "detail/{id}",
             arguments = listOf(navArgument("id") { type = NavType.LongType }),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             DetailScreen(
                 vm = vm,
                 itemId = entry.arguments!!.getLong("id"),
@@ -235,6 +301,7 @@ private fun MainNav(
                 },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             "reader/{itemId}/{fileId}",
@@ -243,11 +310,13 @@ private fun MainNav(
                 navArgument("fileId") { type = NavType.LongType },
             ),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             ReaderScreen(
                 itemId = entry.arguments!!.getLong("itemId"),
                 fileId = entry.arguments!!.getLong("fileId"),
                 onExit = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             "pdf-reader/{fileId}/{expectedSize}",
@@ -256,36 +325,47 @@ private fun MainNav(
                 navArgument("expectedSize") { type = NavType.LongType },
             ),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             PdfReaderScreen(
                 fileId = entry.arguments!!.getLong("fileId"),
                 expectedSize = entry.arguments!!.getLong("expectedSize"),
                 onExit = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             "photo/{id}",
             arguments = listOf(navArgument("id") { type = NavType.LongType }),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             PhotoScreen(
                 itemId = entry.arguments!!.getLong("id"),
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable("shared-libraries") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             SharedLibrariesScreen(onBack = { nav.popBackStackFrom(entry) })
+            }
         }
         composable("sharing-settings") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             SharedSharingSettingsScreen(onBack = { nav.popBackStackFrom(entry) },
                 onLibraries = { nav.navigate("shared-libraries") }, onDeveloper = { nav.navigate("developer") })
+            }
         }
         composable("settings") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             SettingsScreen(
                 vm = vm,
                 onBack = { nav.popBackStackFrom(entry) },
                 onOpenDeveloper = { nav.navigate("developer") },
                 onOpenLiveTvSettings = { nav.navigate("live-tv-settings") },
                 onOpenSharing = { nav.navigate("sharing-settings") },
+                onOpenRemotes = { nav.navigate("remote-devices") },
             )
+            }
         }
         composable(
             "live-tv?channel={channel}",
@@ -297,6 +377,7 @@ private fun MainNav(
                 },
             ),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             LiveTvScreen(
                 origin = vm.origin,
                 dvrController = dvr,
@@ -306,8 +387,10 @@ private fun MainNav(
                 onOpenRecordingActivity = { nav.navigate("recording-activity") },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable("recordings") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             DvrRecordingsScreen(
                 controller = dvr,
                 onOpenItem = { id -> nav.navigate("detail/$id") },
@@ -315,24 +398,29 @@ private fun MainNav(
                 onOpenActivity = { nav.navigate("recording-activity") },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             "recording/{id}",
             arguments = listOf(navArgument("id") { type = NavType.StringType }),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             DvrRecordingDetailScreen(
                 controller = dvr,
                 recordingId = entry.arguments?.getString("id").orEmpty(),
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable("recording-activity") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             DvrCaptureActivityScreen(
                 controller = dvr,
                 onOpenRecording = { id -> nav.navigate("recording/${Uri.encode(id)}") },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             "library-channels?seedId={seedId}&seedKind={seedKind}&seedTitle={seedTitle}",
@@ -342,6 +430,7 @@ private fun MainNav(
                 navArgument("seedTitle") { type = NavType.StringType; nullable = true },
             ),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             LibraryChannelsScreen(
                 vm = vm,
                 seedItemId = entry.arguments?.getLong("seedId")?.takeIf { it > 0 },
@@ -352,38 +441,50 @@ private fun MainNav(
                 },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
+        composable("remote-devices") { entry -> RemoteDeviceSettings(remote) { nav.popBackStackFrom(entry) } }
         composable("developer") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             LiveTvDeveloperScreen(origin = vm.origin, onBack = { nav.popBackStackFrom(entry) })
+            }
         }
         composable("live-tv-settings") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             LiveTvSettingsScreen(origin = vm.origin, onBack = { nav.popBackStackFrom(entry) })
+            }
         }
         composable("downloads") { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             DownloadsScreen(
                 vm = vm,
                 onPlay = { id -> nav.navigate("offline/$id") },
                 onRead = { id -> nav.navigate("offline-book/$id") },
                 onBack = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             "offline-book/{id}",
             arguments = listOf(navArgument("id") { type = NavType.StringType }),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             OfflineBookReaderScreen(
                 bookId = entry.arguments!!.getString("id").orEmpty(),
                 onExit = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             "offline/{id}",
             arguments = listOf(navArgument("id") { type = NavType.StringType }),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             OfflinePlayerScreen(
                 downloadId = entry.arguments!!.getString("id").orEmpty(),
                 onExit = { nav.popBackStackFrom(entry) },
             )
+            }
         }
         composable(
             // `audio` and `subtitle` are the viewer's pre-play choice and are
@@ -412,6 +513,7 @@ private fun MainNav(
                 },
             ),
         ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             val a = entry.arguments!!
             PlayerScreen(
                 vm = vm,
@@ -435,6 +537,17 @@ private fun MainNav(
                 },
                 onExit = { nav.popBackStackFrom(entry) },
             )
+            }
         }
+    }
+    val requestedInvitation by invitationId.collectAsStateWithLifecycle()
+    requestedInvitation?.let { invitation ->
+        AlertDialog(onDismissRequest = onInvitationUsed, title = { Text("Open invited screen?") },
+            text = { Text("Use the saved Cinema profile that received this invitation. Opening the remote does not take control or start playback. " + invitations.status) },
+            confirmButton = { TextButton(onClick = { if (invitations.canOpenTap(invitation)) { invitations.tap(invitation); onInvitationUsed() } }) { Text("Open remote") } },
+            dismissButton = { TextButton(onClick = onInvitationUsed) { Text("Dismiss") } })
+    }
+    RemoteRootOverlay(remote, television = tv.plurx.app.player.isTelevision(context))
+    }
     }
 }

@@ -203,8 +203,9 @@ pub const GROWTH_COMPACTION_LOGS: u64 = 10_000;
 /// few entries past the snapshot index by the time the controller observes
 /// the new snapshot, which otherwise leaves a runner-speed-dependent SQLite
 /// WAL tail in the directory-size comparison. Filling both sides to the same
-/// post-snapshot index makes the physical comparison phase-identical without
-/// changing the byte budget or excluding a durable file.
+/// post-snapshot index removes this index-tail drift. It does not guarantee
+/// identical serialized-byte rollover phase; normal WAL reclamation must
+/// still reduce retained file lengths without excluding a durable file.
 const GROWTH_SETTLED_LOG_TAIL: u64 = 512;
 /// Maximum net compacted directory growth per incoming heartbeat.
 pub const GROWTH_BYTES_PER_BEAT_BUDGET: u64 = 512;
@@ -6728,9 +6729,10 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         &[],
     )
     .await?;
-    // hiqlite's retained WAL segment alternates allocation across adjacent
-    // compactions. Compare equally settled, two-cycle states so that rollover
-    // is not reported as durable progress growth (or as a negative delta).
+    // Retain the two normal compaction cycles on both sides. Equal applied
+    // tails alone do not normalize serialized-byte segment placement; the
+    // production WAL must reclaim obsolete sealed prefixes, and all retained
+    // file lengths remain included in the unchanged byte budget.
     let settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
@@ -9722,10 +9724,16 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         );
         let listeners = voter_listen_addrs(&launch)?;
         let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
-        let client = hiqlite::start_node(node_config(&launch)?)
-            .await
-            .context("start hiqlite voter")?;
+        let admission =
+            Arc::new(plurx_core::cluster::membership::StartupMembershipAdmission::default());
+        let client =
+            hiqlite::start_node_with_membership_admission(node_config(&launch)?, admission.clone())
+                .await
+                .context("start hiqlite voter")?;
         client.wait_until_healthy_db().await;
+        // The original membership phase starts after vendor catch-up and is
+        // retained by this same local client. Never replace it on a request.
+        admission.install_startup_deadline(TokioInstant::now() + startup_timeout)?;
         prove_listeners_bound(&listeners).await?;
         Ok::<_, anyhow::Error>(client)
     })
@@ -9928,10 +9936,14 @@ async fn handle_request(
                 replication.metrics_handle(),
                 0,
             );
-            let opened_membership =
-                membership_manager(client, replication, opened.clone(), launch).await?;
-            tokio::spawn(opened_membership.clone().offline_source_probe_loop());
-            *membership = Some(opened_membership);
+            // One local client retains one installed removal owner and probe.
+            // Reopening its store cannot rebind that owner or replenish admission.
+            if membership.is_none() {
+                let opened_membership =
+                    membership_manager(client, replication, opened.clone(), launch).await?;
+                tokio::spawn(opened_membership.clone().offline_source_probe_loop());
+                *membership = Some(opened_membership);
+            }
             *catalogue = Some(opened_catalogue);
             *catalogue_store = Some(opened_catalogue_store);
             *store = Some(opened);
@@ -9966,10 +9978,14 @@ async fn handle_request(
                 replication.metrics_handle(),
                 0,
             );
-            let opened_membership =
-                membership_manager(client, replication, opened.clone(), launch).await?;
-            tokio::spawn(opened_membership.clone().offline_source_probe_loop());
-            *membership = Some(opened_membership);
+            // One local client retains one installed removal owner and probe.
+            // Reopening its store cannot rebind that owner or replenish admission.
+            if membership.is_none() {
+                let opened_membership =
+                    membership_manager(client, replication, opened.clone(), launch).await?;
+                tokio::spawn(opened_membership.clone().offline_source_probe_loop());
+                *membership = Some(opened_membership);
+            }
             *catalogue = Some(opened_catalogue);
             *catalogue_store = Some(opened_catalogue_store);
             *store = Some(opened);

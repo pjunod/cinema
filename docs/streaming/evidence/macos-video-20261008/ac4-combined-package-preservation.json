@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "kind": "AC4_combined_P5_BWDIF_package_preservation",
+  "argv": [
+    "/experiment/dolby-live-bwdif-correct-package/ffmpeg",
+    "-hide_banner",
+    "-nostdin",
+    "-y",
+    "-i",
+    "/experiment/qualification-media/ac4-broadcast.ts",
+    "-map",
+    "0:a:0",
+    "-t",
+    "5",
+    "-vn",
+    "-ac",
+    "2",
+    "-ar",
+    "48000",
+    "-c:a",
+    "pcm_s16le",
+    "/experiment/qualification-media/ac4-combined-package.wav"
+  ],
+  "exit_code": 0,
+  "package_hashes": {
+    "ffmpeg": "80416af20a3fa4055b0460cda5deb5a2b59da6abf0e760d98f282e70a09b6708",
+    "ffprobe": "9ab06120caac00b0f4e94bb273347bf6469881490444c57b5cd21af3e0cab335",
+    "plurx-source-parser.wasm": "36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c",
+    "provenance/manifest.json": "11958293aa9f8c3dedefce57c54f71c07fa7ce35efafc13c6854812b5062f650"
+  },
+  "source_sha256": "1198188445e56eee0787f2da1864189afb1674d777249091b6dbf2c736c48384",
+  "current": {
+    "frames": 239999,
+    "sample_rate": 48000,
+    "channels": 2,
+    "sample_width": 2
+  },
+  "current_pcm_sha256": "28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7",
+  "reference_pcm_sha256": "28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7",
+  "pcm_bytes_identical": true,
+  "reference_argv": [
+    "/experiment/native-candidate/final-package/ffmpeg",
+    "-hide_banner",
+    "-nostdin",
+    "-y",
+    "-i",
+    "/experiment/qualification-media/ac4-broadcast.ts",
+    "-map",
+    "0:a:0",
+    "-t",
+    "5",
+    "-vn",
+    "-ac",
+    "2",
+    "-ar",
+    "48000",
+    "-c:a",
+    "pcm_s16le",
+    "/experiment/qualification-media/ac4-exact-reference.wav"
+  ],
+  "reference_ffmpeg_sha256": "f043b55df439a90743faf539ce88b723c84eb8baa0ae3323a894c87b459b85ef",
+  "reference_exit_code": 0,
+  "reference_reused": "Retained exact matching original-package decode; unaffected reference was not rerun.",
+  "source_url": "https://samples.ffmpeg.org/A-codecs/ac-4/KDAF.ts",
+  "limits": [
+    "Five-second standalone AC4 decode/downmix, no daemon/client/A-V timing acceptance",
+    "Concurrent compilation; no performance claim"
+  ]
+}

@@ -55,6 +55,10 @@ class LibraryRowsNavigationTest {
             compose.onNodeWithContentDescription("View all Z · 21").performClick()
             compose.onNode(hasText("Zulu 401") and hasAnyAncestor(isDialog())).performClick()
             compose.runOnIdle { assertEquals(401L, opened) }
+            // Opening an item closes its owned expanded window. Reopen the
+            // group to exercise the explicit return-to-rows action too.
+            compose.onNodeWithText("Zulu 401").assertIsDisplayed()
+            compose.onNodeWithContentDescription("View all Z · 21").performClick()
             compose.onNodeWithText("All rows").performClick()
             compose.onNodeWithText("Zulu 401").assertIsDisplayed()
             compose.onNodeWithText("Rows").performClick()

@@ -14,7 +14,9 @@ interfaces to implement, not claims about endpoints that already exist.
 V1 pairs only installations authenticated as the **same user on the same
 server instance**. Existing `User` records have no profile/library ACL model;
 do not invent a permissions intersection which the server cannot enforce.
-Use human bearer authentication in headers. Machine API keys, URL tokens,
+Use human bearer authentication in the `Authorization: Bearer` header only.
+Reject the general extractor's alternate query and `X-Api-Key` paths.
+Machine API keys, URL tokens,
 mDNS, a device name, an installation UUID, and shared Wi-Fi confer no control.
 
 A receiver installation has a random UUID and a random 256-bit secret. A
@@ -55,6 +57,10 @@ TV CEC -> native host -> extension -> bound Cinema tab (local only)
 ```
 
 Use `(owner_node_id, session_id, receiver_epoch)` as the complete target.
+A separate client-generated `foreground_id` UUID lasts for one actual
+foreground lifetime, including transport reconnects and owner changes. It is
+not authority; B09 uses it for durable invitation deduplication. Generate a
+new value only after a real background-to-foreground transition.
 Session and epoch are random UUIDs. Each foreground receiver holds exactly
 one active tuple. Cancel the old channel and invalidate its credits before
 activating a replacement. Duplicate tabs are separate receivers; never
@@ -66,8 +72,9 @@ Resolve owner IDs through `MembershipManager::operations_peers()` and use
 `PeerAuthMode::ExactRequestAndMemberResponse`. Never accept an HTTP base URL
 from a phone. Sign exact requests and replies using the existing internal
 peer helpers. Authenticated peer transport proves the peer, not the user:
-the owner rechecks the current user, receiver, and grant in authoritative
-storage before delivery. Revocation prevents subsequent admitted delivery;
+the owner rechecks the current bearer/session validity, user, receiver, and
+grant in authoritative storage before delivery. Preserve the request token
+digest for this check; a cached user ID cannot survive token revocation. Revocation prevents subsequent admitted delivery;
 it cannot undo an action already applied to a screen.
 
 `may_run_cluster_jobs()` permits multiple committed voters. It is NOT a
@@ -87,8 +94,15 @@ thirty seconds; changing servers or auth cancels retries immediately.
 
 ## 3. Wire envelope — explicit revisions and receiver-issued credits
 
-All bodies are UTF-8 JSON, max 16 KiB except discovery/state responses at
-64 KiB. Unknown protocol versions/actions and extra action fields are
+All bodies are UTF-8 JSON, max 16 KiB except presence requests and
+remote responses at 64 KiB. A presence's normalized `ReceiverState` must
+serialize to at most 48 KiB, leaving response space for the target, lease and
+all 64 retained acknowledgement outcomes. Oversized state is rejected with
+413/`invalid`; the previous accepted state is preserved. Publishers bound
+optional presentation metadata before sending while retaining valid option
+identities. Poll delivery packs an ordered prefix within its response budget
+and keeps overflow queued; a smaller later command cannot overtake it.
+Unknown protocol versions/actions and extra action fields are
 rejected; no permissive fallback into keyboard events. Integers are unsigned
 and limited to `Number.MAX_SAFE_INTEGER` for identical JavaScript semantics.
 Sequence and initialized context/focus/state revisions are positive; zero is
@@ -113,7 +127,8 @@ use UUID strings, except secrets which use unpadded base64url.
 }
 ```
 
-Bearer, `X-Cinema-Receiver-Secret`, and `X-Cinema-Grant-Secret` are headers,
+Bearer, `X-Cinema-Receiver-Secret`, `X-Cinema-Grant-Secret`, and claimant
+`X-Cinema-Pairing-Secret` proofs are headers,
 not fields copied to state or logs. CSRF defenses and origin checks follow
 the native API policy; state-changing GETs are forbidden. Responses are
 `Cache-Control: no-store`; diagnostics contain only redacted IDs and reasons.
@@ -127,14 +142,15 @@ Each advertised credit is `{ "nonce": UUID, "kind": "interaction" }` or
 `playback` applies to set_playing/seek_relative/seek_absolute/stop/choose_track/
 play_item. A credit cannot authorize another class. State exposes the class,
 never the receiver's monotonic timestamp. Mint every 250 ms while an active
-controller is connected. Keep a ring of at
+controller is connected and publish the refreshed state at that cadence.
+The five-second heartbeat applies only while idle. Keep a ring of at
 most sixteen credits; replacing a context, control epoch, or foreground
 session clears it. No wall-clock timestamp crosses the wire for expiry.
 An actor also expires queued work after 500 ms of actor-local time. That is
 an additional bound, not a replacement for the final receiver check.
 
 Before applying a command, on the UI owner: validate protocol, active target,
-active control epoch, credit identity and local deadline, sequence,
+active grant and control epoch, credit identity and local deadline, sequence,
 context/focus, allowed semantic action and parameters. Then atomically consume sequence on the UI owner before invoking its effect.
 Rejected commands do not consume sequence. This admission is synchronous;
 never yield between semantic authorization and consumption/application. A command arriving after a stall does not get a fresh TTL.
@@ -155,7 +171,10 @@ scrubs and credits before its own action, then publishes fresh state.
 One controller holds a fifteen-second idle control lease. Acquire through
 an explicit Use as remote tap. A second controller sees who is controlling
 and must explicitly Take over; takeover creates a new random control epoch
-and clears queues, credits, dedup and pending gestures. Physical input always
+and clears queues, credits, dedup and pending gestures. Renewal requires the
+same grant and current control epoch; a phone refreshes at most every five
+seconds while its remote UI is active. Renewal never implicitly takes over.
+Physical input always
 works and does not need this network lease. Revocation or lease loss clears
 unapplied commands. Sequence begins at 1 per control epoch; duplicate/lower
 sequences never apply again. Bounded results are keyed by `(control_epoch, sequence)` and retain the
@@ -174,7 +193,7 @@ with a new sequence number.
 | `set_playing` | `playing`: bool | Desired state through existing playback owner; not toggle |
 | `seek_relative` | `seconds`: -30/-10/10/30 | Existing policy, clamp to authorized seek range |
 | `seek_absolute` | `position_ms`: safe nonnegative integer | Current item/range only, one committed scrub |
-| `stop` | none | Detach local playback immediately; network cleanup may finish later |
+| `stop` | none | Pause immediately through the playback owner; preserve fullscreen/PiP teardown ordering without waiting for server cleanup |
 | `open_tracks` | `kind`: audio/subtitles/quality | App-owned scoped menu |
 | `choose_track` | `kind`, `option_id`: max 128 UTF-8 bytes | ID must be in current authorized menu options |
 | `text_replace` | `text_nonce`, `text`: max 512 UTF-8 bytes | Search only in v1; reject password/login/settings fields |
@@ -186,13 +205,23 @@ volume remains the TV remote's job. An unsupported action returns
 as documented in [PLAYER-INPUT-CONTRACT.md](PLAYER-INPUT-CONTRACT.md).
 
 State includes target, safe receiver name (80 UTF-8 bytes), platform,
-capabilities, available/busy status, control epoch, state revision,
+capabilities, available/busy status, active grant ID, control epoch, state revision,
 context/focus revisions, safe focused label, current credits, optional search
 nonce, and optional authorized playback summary. Never include filesystem
 paths, playable stream URLs, bearer tokens, pairing code, passwords, or an
 administrator screen's labels. Apply state monotonically per target/epoch;
 ignore older replies and erase state on identity change. Cap a state at 64
-KiB and labels at 256 UTF-8 bytes. Do not publish a full DOM or library dump.
+KiB and labels at 256 UTF-8 bytes. Presence may omit optional `focused_label`,
+`text_nonce` and `playback`, or send null; server state replies normalize them
+to null. Do not publish a full DOM or library dump.
+
+Playback summary carries `media`, title, desired playing state, position and
+duration in milliseconds, and bounded track choices. `media` is exactly one
+of `{ "type": "item", "item_id": <positive safe integer> }` or
+`{ "type": "live_channel", "channel_id": <nonempty string> }`. Channel IDs
+are at most 128 UTF-8 bytes; mixed, extra or unknown fields are invalid.
+Zero duration means unknown for Live TV. Advertised capabilities determine
+whether seeking is available; this does not add a play-channel command.
 
 Acknowledgements name sequence and one of `applied`, `duplicate_or_old`,
 `expired`, `stale_target`, `stale_control`, `stale_context`, `stale_focus`,
@@ -218,7 +247,8 @@ Internal dispatch is an explicit tagged request enum, not an arbitrary proxy.
 | Method/path | Request/result | Additional proof |
 |---|---|---|
 | POST `/receivers` | name/platform -> receiver_id + secret | Fresh human login; capped 20 active installations per user |
-| POST `/sessions` | receiver_id -> target | Receiver secret |
+| DELETE `/receivers/{id}` | Revoke own installation and its grants, cancel its sessions; idempotent | Human auth; not a remote semantic action |
+| POST `/sessions` | receiver_id + foreground_id -> target | Receiver secret |
 | POST `/presence` | target + bounded state -> accepted | Receiver secret |
 | POST `/poll` | target + last delivery ID -> commands or empty | Receiver secret; max 20 s |
 | POST `/ack` | target + command outcomes -> accepted | Receiver secret |
@@ -229,16 +259,49 @@ Internal dispatch is an explicit tagged request enum, not an arbitrary proxy.
 | POST `/pairing/result` | pending_id + poll secret -> pending/grant | Original claimant proof; grant secret returned once |
 | GET `/grants` | Own grants, names, created time | Human auth |
 | DELETE `/grants/{id}` | Revoke own grant; idempotent | Human auth; cannot be remotely activated on receiver |
-| POST `/control` | target + acquire/takeover/release -> control epoch | Grant secret |
+| POST `/control` | target + grant + acquire/renew/takeover/release + expected control epoch -> control | Grant secret |
 | POST `/state` | target + after revision -> state/unchanged | Grant secret; max 20 s |
 | POST `/commands` | Envelope from §3 -> 202 queued or rejection | Grant secret |
+
+Owner replies carry a monotonically increasing `response_revision`, distinct
+from receiver UI revisions. It advances on credit publication, control or
+pairing changes, revocation and expiry. Receiver polls are serial. Clients
+ignore older replies and use a local request generation to discard replies
+across account/server changes. Explicit null control wakes waiting polls
+when a lease expires. Controller state carries bounded acknowledgements;
+HTTP 202 never substitutes for the receiver's outcome.
+
+Same-grant acquire preserves the current control epoch and sequence history.
+A controller must retain its sequence allocator across closing and reopening
+the remote. If its process lost that allocator, the next explicit request to
+control must establish a fresh epoch before sending. Automatic recovery of
+an observed own-grant epoch uses conditional takeover: a nonnull
+`control_epoch` must equal the current lease epoch or the server rejects
+`stale_control`. The control request must include `control_epoch`, even when
+its value is null. Null takeover is reserved for the user's explicit Take over
+action. This prevents an intervening phone's lease from being silently
+stolen back. Renew/reconnect cannot
+reset sequence numbers in an existing epoch. Retiring a controller request
+generation also clears its in-flight sending state; a late response cannot
+block a new controller forever.
 
 Use an eight-digit random pairing code, keyed hash in owner memory, 120-second
 expiry, max five failed claims per challenge, and per-user throttling of ten
 claims/minute across challenges. Never permit an unbounded code lookup scan.
+Manual pairing takes the selected TV target and eight-digit code only:
+`challenge_id` may be omitted or null, selecting that target's one current
+challenge. A QR supplies the exact challenge ID; it must match. Never ask a
+viewer to transcribe a UUID.
 Pairing screen QR contains server instance ID, target and challenge ID; put
 any code in a URL fragment, remove it after parsing, and never auto-approve.
-No long-lived secret in a QR. Every claim creates a fresh random poll secret,
+The URI is `cinema-remote://pair`, with query fields `server_instance_id`,
+`owner_node_id`, `session_id`, `receiver_epoch`, `challenge_id` and fragment
+`code=<eight digits>`. It identifies the already selected server; it never
+chooses a new authenticated API origin. The pairing-start response includes
+`qr_modules`: a square array of ASCII 0/1 rows, width 21–177, without a quiet
+zone, or null if encoding is unavailable. Render with a four-module quiet
+zone and retain the manual code fallback. No long-lived secret appears in a
+QR. Every claim creates a fresh random poll secret,
 held by the claimant; an account peer cannot collect another claimant's
 returned grant. Consume approved results once and erase after sixty seconds.
 If delivery is lost, pair again rather than disclose an old secret.

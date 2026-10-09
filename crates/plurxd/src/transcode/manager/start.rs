@@ -731,6 +731,7 @@ impl TranscodeManager {
         let plan =
             self.resolve_movie_plan_from_probe(&file, &opts, encoder, probe_json.as_deref())?;
         opts.pipeline = plan.options().pipeline;
+        opts.strict_dolby = plan.options().strict_dolby.clone();
         // Freeze the master shape from the same settings read as the plan.
         let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
             plurx_core::store::stored_switch(
@@ -808,6 +809,7 @@ impl TranscodeManager {
             };
             if let Some((retained_plan, Ok(execution))) = retained_plan.map(|plan| {
                 retained_opts.pipeline = plan.options().pipeline;
+                retained_opts.strict_dolby = plan.options().strict_dolby.clone();
                 let execution = TranscodeExecution::from_options(
                     &file,
                     &retained_opts,
@@ -915,6 +917,7 @@ impl TranscodeManager {
                     probe_json.as_deref(),
                 ) {
                     cached_options.pipeline = cached_plan.options().pipeline;
+                    cached_options.strict_dolby = cached_plan.options().strict_dolby.clone();
                     if let Some(info) = self
                         .serve_cached(
                             &file,
@@ -1064,6 +1067,7 @@ impl TranscodeManager {
         // Retries, descriptors and attribution carry the graph resolution
         // selected, including its verdict-aware software downgrade.
         opts.pipeline = plan.options().pipeline;
+        opts.strict_dolby = plan.options().strict_dolby.clone();
         let macos_executable = capture_macos_plan_executable(&plan, &producer_ffmpeg_bin()).await?;
         // Every object FFmpeg's muxer writes for this session passes a
         // scratch grant before it reaches the disk, so the session starts on

@@ -1,0 +1,929 @@
+{
+  "version": "cinema.remote.v1",
+  "valid": [
+    {
+      "name": "navigate",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "navigate",
+          "direction": "down"
+        }
+      },
+      "credit_kind": "interaction"
+    },
+    {
+      "name": "select",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "credit_kind": "interaction"
+    },
+    {
+      "name": "back",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "back"
+        }
+      },
+      "credit_kind": "interaction"
+    },
+    {
+      "name": "home",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "home"
+        }
+      },
+      "credit_kind": "interaction"
+    },
+    {
+      "name": "set_playing",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "set_playing",
+          "playing": true
+        }
+      },
+      "credit_kind": "playback"
+    },
+    {
+      "name": "seek_relative",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "seek_relative",
+          "seconds": -10
+        }
+      },
+      "credit_kind": "playback"
+    },
+    {
+      "name": "seek_absolute",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "seek_absolute",
+          "position_ms": 0
+        }
+      },
+      "credit_kind": "playback"
+    },
+    {
+      "name": "stop",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "stop"
+        }
+      },
+      "credit_kind": "playback"
+    },
+    {
+      "name": "open_tracks",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "open_tracks",
+          "kind": "audio"
+        }
+      },
+      "credit_kind": "interaction"
+    },
+    {
+      "name": "choose_track",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "choose_track",
+          "kind": "subtitles",
+          "option_id": "en"
+        }
+      },
+      "credit_kind": "playback"
+    },
+    {
+      "name": "text_replace",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "text_replace",
+          "text_nonce": "00000000-0000-4000-8000-000000000006",
+          "text": "你好"
+        }
+      },
+      "credit_kind": "interaction"
+    },
+    {
+      "name": "play_item",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "play_item",
+          "item_id": 1
+        }
+      },
+      "credit_kind": "playback"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown_version",
+      "command": {
+        "version": "v2",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      }
+    },
+    {
+      "name": "zero_sequence",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 0,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      }
+    },
+    {
+      "name": "unsafe_sequence",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 9007199254740992,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      }
+    },
+    {
+      "name": "zero_context",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 0,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      }
+    },
+    {
+      "name": "extra_action_field",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select",
+          "playing": true
+        }
+      }
+    },
+    {
+      "name": "unknown_action",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "execute",
+          "script": "x"
+        }
+      }
+    },
+    {
+      "name": "invalid_seek",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "seek_relative",
+          "seconds": 1
+        }
+      }
+    },
+    {
+      "name": "negative_position",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "seek_absolute",
+          "position_ms": -1
+        }
+      }
+    },
+    {
+      "name": "unsafe_position",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "seek_absolute",
+          "position_ms": 9007199254740992
+        }
+      }
+    },
+    {
+      "name": "zero_item",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "play_item",
+          "item_id": 0
+        }
+      }
+    },
+    {
+      "name": "long_option",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "choose_track",
+          "kind": "audio",
+          "option_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      }
+    },
+    {
+      "name": "long_utf8_text",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "text_replace",
+          "text_nonce": "00000000-0000-4000-8000-000000000006",
+          "text": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+        }
+      }
+    },
+    {
+      "name": "extra_envelope",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        },
+        "unexpected": true
+      }
+    },
+    {
+      "name": "invalid_uuid",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "not-a-uuid",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      }
+    },
+    {
+      "name": "missing_action",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7
+      }
+    },
+    {
+      "name": "extra_target_field",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002",
+          "url": "https://evil.invalid"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      }
+    },
+    {
+      "name": "fractional_sequence",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1.5,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      }
+    },
+    {
+      "name": "invalid_direction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "navigate",
+          "direction": "north"
+        }
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "deadline_equality",
+      "issued_ms": 100,
+      "now_ms": 1100,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "expired",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "name": "transport_stall",
+      "issued_ms": 100,
+      "now_ms": 5100,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "expired",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "name": "before_deadline",
+      "issued_ms": 100,
+      "now_ms": 1099,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "applied",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "name": "focus_changed",
+      "issued_ms": 100,
+      "now_ms": 101,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 8,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "stale_focus",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "name": "context_changed",
+      "issued_ms": 100,
+      "now_ms": 101,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 5,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "stale_context",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "name": "wrong_grant",
+      "issued_ms": 100,
+      "now_ms": 101,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000008",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "unauthorized",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "name": "wrong_target",
+      "issued_ms": 100,
+      "now_ms": 101,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000008"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "stale_target",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "name": "wrong_control",
+      "issued_ms": 100,
+      "now_ms": 101,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000008",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "stale_control",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "name": "wrong_credit_class",
+      "issued_ms": 100,
+      "now_ms": 101,
+      "credit_kind": "playback",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "expected": "invalid",
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1
+    },
+    {
+      "issued_ms": 100,
+      "now_ms": 101,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1,
+      "name": "duplicate_select",
+      "expected": "duplicate_or_old",
+      "preapply": true
+    },
+    {
+      "issued_ms": 100,
+      "now_ms": 101,
+      "credit_kind": "interaction",
+      "command": {
+        "version": "cinema.remote.v1",
+        "target": {
+          "owner_node_id": "node-a",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "receiver_epoch": "00000000-0000-4000-8000-000000000002"
+        },
+        "grant_id": "00000000-0000-4000-8000-000000000003",
+        "control_epoch": "00000000-0000-4000-8000-000000000004",
+        "sequence": 1,
+        "credit": "00000000-0000-4000-8000-000000000005",
+        "context_revision": 4,
+        "focus_revision": 7,
+        "action": {
+          "type": "select"
+        }
+      },
+      "sender_wall_ms": 100000000000,
+      "server_wall_ms": 1,
+      "name": "takeover",
+      "expected": "stale_control",
+      "new_control_epoch": "00000000-0000-4000-8000-000000000099"
+    }
+  ]
+}

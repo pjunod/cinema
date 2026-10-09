@@ -445,6 +445,60 @@ Do not enable fixture launch mode in production, weaken normalized geometry
 verification, or substitute scanner-time facts to make this route appear
 supported. Track actual working delivery modes separately on the status page.
 
+### 7.1 Native held-source parser — continuation decision, 2026-10-08
+
+**Status:** implemented and independently reviewed; final daemon qualification
+pending.
+The existing Linux boundary combines immutable parser execution, a held source
+handle and process/descendant restrictions. Launching ordinary FFprobe on macOS
+would not preserve that boundary. The native implementation instead compiles
+the same pinned Jellyfin FFprobe to WebAssembly and embeds a restricted host
+adapter in the existing fact collector. This changes the parser's isolation
+mechanism while retaining its media semantics and ownership.
+
+The module receives descriptor 3 reads/seeks and bounded stdout/stderr. It
+receives no directory, network, process, fork or executable-loading capability.
+The host captures immutable module bytes, validates their structure/imports,
+and binds the module/runtime/ABI identity to the existing parser snapshot and
+single-flight cache. Output is still parsed by the existing fact collector.
+Cancellation and deadline completion must settle in-flight source reads before
+releasing the original source lease. Memory, output and execution stay bounded;
+no new watchdog or secondary observation cache is introduced.
+
+A measured interpreter prototype exceeded a 20-second exploratory cap on the
+existing ten-second 1080p `idet` workload. Compiled Pulley bytecode exceeded
+the same cap. The candidate therefore uses Wasmtime native compilation; the
+production ten-second execution deadline remains unchanged. Cold compilation,
+4K cost and simultaneous-source behavior still need acceptance evidence.
+
+Wasmtime's native compiler needs executable memory. Its pinned macOS backend
+does not use `MAP_JIT`; the normal `allow-jit` entitlement alone is insufficient.
+The candidate package uses Apple's documented
+[unsigned executable-memory entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-unsigned-executable-memory).
+This weakens that particular hardened-runtime protection and expands the
+trusted runtime dependency; the final security review must explicitly cover
+both costs. A live-process signing preflight must reject an incompatible
+hardened signature before compilation, because the operating system can kill
+the process instead of returning a recoverable compiler error.
+
+Packaging must provide one discoverable parser companion beside the selected
+FFprobe, with matching provenance and immutable identity. A new native package
+assembler copies and signs task-owned artifacts only, preserves explicit
+operator executable overrides, and distinguishes an ad-hoc local candidate
+from a Developer ID release. It does not install a service, modify a deployed
+binary or claim notarization. Final acceptance covers the copied hardened
+package, missing/wrong companion, metadata/AC-4 parity, source mutation,
+read cancellation, malformed-module limits and the existing decode deadline.
+
+The first copied release package at `d1683a682` makes the size trade-off
+concrete: the signed daemon is 162,704,784 bytes under the repository's thin
+LTO/line-tables release profile, and the parser is 15,311,140 bytes. The whole
+local bundle is approximately 648 MiB, including approximately 369 MiB of
+retained native/parser source and license provenance. These are early package
+measurements, not a baseline-relative size increase or final release size.
+Representative parser compilation/execution and actual daemon acceptance are
+recorded separately in the [evidence](MACOS-VIDEO-PROCESSING-EVIDENCE.md).
+
 ## 8. M5 — integrate HDR10 processing without widening Dolby routing
 
 **Deliverable:** enabled native/Metal HDR10-to-SDR processing in the same
@@ -517,6 +571,30 @@ the recipe and add an appropriate distributable P5 smoke fixture. If these
 contracts cannot be provided, retain incumbent P5 behavior without changing
 the saved processing preference.
 
+**Reuse scope correction from implementation evidence:** Dolby's
+[public profile table](https://ott.dolby.com/OnDelKits/Dolby_Vision_Online_Delivery_Kit/v1/Documentation/Specs/Visio_Profiles/help_files/topics/c_dovi_profiles_public.html)
+lists no metadata compression for Profile 5. Fresh per-frame P5 metadata and
+changing-DM frame association are the conforming synthetic-positive targets.
+A generated mapping-reuse case exercises the pinned parser's robustness; it
+must not be called standardized P5 reuse. Missing DM color may cause upstream
+default substitution, so a completed output is insufficient proof. The strict
+contract must establish supported color semantics and reject synthesized
+incompatible defaults before rendering. Seek/flush must clear stale state.
+This clarification does not admit other Dolby profiles.
+
+**Implemented strict policy:** `StrictDolbyPolicy` retains the selected
+package identity through media options, the immutable plan and the existing
+producer/recovery projections. Four independently observed contracts cover
+software/VT decoding and CPU/Metal rendering. Software recovery keeps the
+strict decoder/renderer requirements and the captured package; it cannot
+quietly bind a new binary or use generic HDR interpretation. P5 reshape and
+color interpretation operate at source raster before resize. Where layout
+conversion requires clearing the unsupported IPT-C2 matrix tag, that adapter
+changes metadata only; required effective RPU metadata remains the color
+interpreter. The existing bounded child owner now exposes nonzero outcomes
+and bounded partial output for strict-loss controls while retaining its
+ordinary success-only wrapper, cancellation, deadline and reap behavior.
+
 ### 9.2 E2: subtitle compositing
 
 First test hardware scale/tone-map followed by CPU burn at output resolution.
@@ -547,6 +625,14 @@ input EOF on a paced source, sustained playback and the existing
 `live_tv_videotoolbox_atsc1_publishes_decodable_segments` hardware regression.
 Do not claim file-caption repair from that live-only test.
 
+**Supported interlace boundary established during implementation:** ordinary
+native BWDIF is qualified with genuine woven 8-bit H.264 SDR TFF/BFF controls.
+Four genuine 10-bit H.264 PQ/HLG TFF/BFF tuples fail VT decoding on the tested
+Mac/package before producing a frame. The formerly declared HDR BWDIF arms
+were unreachable behind the 8-bit input requirement and are removed. HDR
+interlaced input keeps the incumbent path; this is a specific tested limit,
+not a universal claim about every device or an unfinished hidden gate.
+
 ### 9.4 E4: HEVC/Main10 output
 
 Add the explicit `macos_hevc_output_enabled` preference and Developer card.
@@ -554,6 +640,27 @@ Qualify HEVC SDR and HDR10 Main10 separately. Extend codec selection,
 encoder options, pipeline pairing, presentation facts, manifests, container
 handling, cluster offers and cache identity together. Keep H.264 compatibility
 fallback negotiated through existing delivery policy.
+
+The effective encoder remains owned by existing hardware-acceleration policy.
+These native paths require VideoToolbox; the processing and HEVC preferences
+do not override an explicit software encoder or Auto selecting software.
+The early actual-daemon experiment observed Auto choosing software despite
+working VT capability. Controlled qualification uses the existing explicit
+VideoToolbox preference (`PLURX_HWACCEL=videotoolbox` seeds the normal stored
+choice). Developer advice must show this prerequisite. The existing Auto
+encoder benchmark does not establish complete decode/filter/encode cost; this
+effort does not silently replace that policy with a Mac-specific workaround.
+
+**Client contract chosen during implementation:** add optional
+`DeviceCaps.hls_hevc_sample_entries: Option<Vec<String>>`. A present list has
+at most two distinct lowercase entries, `hvc1` and/or `hev1`; absent or empty
+preserves the legacy H.264 selection for new SDR HEVC offers. Each entry is a
+claim about the actual HLS fragmented-MP4 path. Original-progressive MP4 or
+generic HEVC support does not supply it. The initial encoder emits `hvc1`, so
+that entry is required in addition to existing profile, transfer, container,
+transport, geometry, frame-rate and bitrate compatibility. This is an additive
+client capability, not a required remote processing-graph field. The saved
+HEVC preference remains independent and is always accepted.
 
 Start HDR preservation with ordinary HDR10; do not admit Dolby passthrough
 by widening an HDR10 input check. Preserve color and static HDR metadata
@@ -611,15 +718,15 @@ in for Mac hardware or client qualification.
 
 ## 11. Validation commands and evidence format
 
-For this documentation-only proposal:
+The work is now implementation. Per the user-directed workflow in §1,
+builders compile and lint without running unit suites. The designated merge
+coordinator owns final regression and fast-lane execution after independent
+review and repairs. Documentation-only updates use `git diff --check`; they
+do not independently trigger unit execution.
 
-```bash
-python3 -m unittest discover -s tests/operations -p 'test_docs_index.py'
-git diff --check
-```
-
-For implementation, use the verified pinned compiler. These are starting
-commands, not permission to skip affected checks selected by the workflow:
+Use the verified pinned compiler for build feedback. The test commands below
+are coordinator starting points, not evidence of execution or permission to
+skip checks selected by the workflow:
 
 ```bash
 rustc --version
@@ -632,8 +739,9 @@ cargo test --locked -p plurxd macos_processing
 node --test tests/web/settings-sections.test.js
 ```
 
-The `macos_processing` filters refer to tests to be added; require a nonzero
-executed count and list their fully qualified names in the PR. Broaden to
+The `macos_processing` filters are illustrative. Use the concrete regression
+anchors from the final commit/PR packet, require a nonzero executed count and
+record their fully qualified names and results. Broaden to
 existing pipeline, recipe, VOD, recovery and settings regressions appropriate
 to the changes. Use `make unit-core` or `--features hiqlite-store` whenever
 storage behavior is covered. Run real-FFmpeg/hardware ignored tests explicitly
@@ -676,6 +784,74 @@ use hashes and sanitized fixture identifiers. Store large traces as artifacts,
 link the small retained receipt, and index any new prose in `docs/README.md`
 in the same commit.
 
+### 11.1 Implemented native tooling and package layout
+
+These are build/assembly entry points, not qualification commands. Use a new
+private build directory outside the checkout. The source archive is the
+checksum-pinned Jellyfin archive identified by
+[`build-macos-video-ffmpeg`](../../scripts/build-macos-video-ffmpeg); an ambient
+Homebrew FFmpeg is never an input. Native source compilation needs Apple's
+Metal compiler and the build tools listed by the generated `build.sh`. The
+preparer disables upstream global tool installation and keeps dependency
+outputs under its private prefix. Missing build tools are explicit failures.
+
+| Tool | Responsibility and output |
+|---|---|
+| [`prepare-macos-video-ffmpeg`](../../scripts/prepare-macos-video-ffmpeg) | Verify the pinned source archive, apply the complete official quilt and committed local patches, and generate the private source build entry point. |
+| [`build-macos-source-parser`](../../scripts/build-macos-source-parser) | Build the bounded WASI FFprobe companion from the pinned Jellyfin source and SDK, retaining module/runtime source and license provenance. |
+| [`build-macos-video-ffmpeg`](../../scripts/build-macos-video-ffmpeg) | Assemble either the pinned official baseline or a prepared native build, inventory required declarations/dependencies, attach the parser and retain corresponding source/provenance. Strict P5 and the BWDIF repair require the patched build. |
+| [`package-macos`](../../scripts/package-macos) | Copy a built daemon and validated native package into a new directory, validate optional matched dSYM symbols, sign the copied daemon and record immutable artifact hashes. It never overwrites or installs a live package. |
+| [`bench-macos-video`](../../scripts/bench-macos-video) | Record explicitly selected executable inventory and bounded offline comparisons. Its receipts do not authorize runtime graphs. |
+
+For example, after choosing private paths and supplying the pinned archive:
+
+```bash
+mac_build_root=/absolute/private/macos-build
+mac_source_archive=/absolute/downloads/pinned-jellyfin-source.tar.gz
+python3 scripts/prepare-macos-video-ffmpeg \
+  --source-archive "$mac_source_archive" \
+  --output "$mac_build_root/prepared" --jobs 2
+(cd "$mac_build_root/prepared/source" && ../build.sh)
+python3 scripts/build-macos-source-parser \
+  --source-archive "$mac_source_archive" \
+  --output "$mac_build_root/parser" --jobs 2
+python3 scripts/build-macos-video-ffmpeg \
+  --prepared-build "$mac_build_root/prepared" \
+  --source-archive "$mac_source_archive" \
+  --source-parser-package "$mac_build_root/parser" \
+  --output "$mac_build_root/native-package"
+cargo build --locked --release -p plurxd
+python3 scripts/package-macos \
+  --daemon target/release/plurxd \
+  --debug-symbols target/release/plurxd.dSYM \
+  --ffmpeg-package "$mac_build_root/native-package" \
+  --output "$mac_build_root/daemon-package"
+```
+
+Substitute the actual target directory if `CARGO_TARGET_DIR` is set. Supply
+`--debug-symbols` only for the matching built dSYM; omission is explicitly
+recorded as no symbol bundle. The default signature is ad hoc. An explicit
+`--sign` Developer ID identity must be available locally; neither signing
+mode establishes notarization or distribution-install acceptance.
+
+The copied layout has `bin/plurxd`, `bin/ffmpeg`, `bin/ffprobe` and
+`bin/plurx-source-parser.wasm`, with native/parser and daemon provenance.
+Normal explicit executable overrides still win over sibling discovery.
+Retain the entire versioned package when using it: native binary hashes,
+parser identity, patches and source receipts are one implementation. Upgrade
+by preparing a new directory and retaining the previous package while its
+workers remain active, or drain those workers before removal. Never replace
+selected executables in place and assume an existing immutable plan can
+rebind to them. The runtime checks compatibility through its existing owners.
+
+In Settings → Developer, processing and HEVC output are independent saved
+choices. Readiness explains package, graph and effective-encoder prerequisites
+without rejecting either choice. Processing changes new plans; an existing
+plan retains its captured implementation. These controls stay in Developer
+until the claimed workload/client qualification is complete. The status page
+records exactly which source builds, host experiments and external acceptance
+rows are complete; the commands above do not substitute for that evidence.
+
 ## 12. Opus review handoff
 
 Review the design and this execution plan together. Use source inspection to
@@ -713,3 +889,11 @@ on 2026-10-07. All three execution-contract findings have author corrections
 in these documents; see the [review record](MACOS-VIDEO-PROCESSING-REVIEW.md).
 No second independent approval is claimed. The user may still hand the
 revised documents and this record to Opus.
+
+The shared media-tool resolver in `plurx_core::process` governs normal library
+scanning, local/book metadata extraction and daemon processing. Nonempty
+`PLURX_FFMPEG`/`PLURX_FFPROBE` overrides remain first; packaged macOS/Windows
+processes then use executable siblings before PATH. This prevents catalog and
+held-parser facts from being produced by different default toolchains. Source
+attestation remains strict; normal reanalysis is required for stale catalog
+facts created by an older or explicitly different parser.

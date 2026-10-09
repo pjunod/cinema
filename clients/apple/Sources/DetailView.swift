@@ -668,6 +668,7 @@ struct DetailView: View {
     #endif
 
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #if os(iOS)
     @Environment(\.dismiss) private var dismiss
@@ -677,7 +678,8 @@ struct DetailView: View {
     let itemId: Int
     @State private var detail: ItemDetail?
     @State private var play: PlayContext?
-    @State private var startingEpisodeID: Int?
+    @State private var episodePlayAttempt = EpisodePlayAttempt()
+    private var startingEpisodeID: Int? { episodePlayAttempt.itemID }
     @State private var seriesPlayback: PlayContext?
     @State private var resolvingSeries = false
     @State private var loadError: String?
@@ -689,6 +691,9 @@ struct DetailView: View {
     @State private var pendingTrackSelection = PrePlaySelection.none
     @State private var pendingTrackSelectionFileId: Int?
     @State private var selectedMediaFileID: Int?
+    @State private var remoteChoiceTitle: String?
+    @State private var remoteChoices: [RemoteChoice] = []
+    @State private var remoteChoiceSource: RemoteOwnedChoiceSource?
     #if os(iOS)
     @State private var downloadBusy = false
     @State private var reader: ReaderContext?
@@ -743,6 +748,25 @@ struct DetailView: View {
             #endif
         }
         .background(Palette.bg.ignoresSafeArea())
+
+        .onAppear { updateRemoteDetailOrder() }
+        .onChange(of: remoteDetailKeys) { _, _ in updateRemoteDetailOrder() }
+        .onChange(of: remoteDetailSourceSignature) { _, _ in
+            guard remoteChoiceTitle != nil else { return }
+            if remoteNavigation.activeScope == "item:\(itemId):preplay" { remoteNavigation.closeModal() }
+            else { remoteChoiceTitle = nil; remoteChoices = []; remoteChoiceSource = nil }
+        }
+        .onChange(of: selectedMediaFileID) { _, _ in remoteNavigation.contextChanged() }
+        .onChange(of: pendingTrackSelection) { _, _ in remoteNavigation.contextChanged() }
+        .overlay {
+            if let remoteChoiceTitle {
+                RemoteChoicePanel(scope: "item:\(itemId):preplay", title: remoteChoiceTitle, choices: remoteChoices, admission: { [source = remoteChoiceSource] in
+                    guard let source, remoteNavigation.activeScope == "item:\(itemId):preplay",
+                          source.accepts(token: remoteChoiceSource?.token, epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature) else { return .staleContext }
+                    return nil
+                })
+            }
+        }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
@@ -758,6 +782,15 @@ struct DetailView: View {
                     resolvingSeries = false
                 } else {
                     seriesPlayback = nil
+                }
+                if remoteNavigation.consumePlaybackRequest(itemId) {
+                    if let seriesPlayback { play = seriesPlayback }
+                    else if loaded.item.isPlayable, !loaded.item.isBook,
+                            let file = Self.playbackFile(in: loaded, positionMs: loaded.item.watch?.positionMs ?? 0), file.available != false {
+                        let position = loaded.item.watch?.positionMs ?? 0
+                        play = primaryPlayContext(item: loaded.item, file: file, durationMs: file.durationMs ?? loaded.item.runtimeMs ?? 0,
+                                                  resumeMs: position, canResume: position > 3_000)
+                    }
                 }
                 #if os(tvOS)
                 // First arrival only. `.task(id:)` re-runs whenever this view
@@ -807,14 +840,17 @@ struct DetailView: View {
                 .environmentObject(model)
         }
         #if os(iOS)
+        .remoteRestricted(reader != nil || offlineReader != nil)
         .fullScreenCover(item: $reader, onDismiss: {
             Task { detail = try? await model.itemDetail(itemId) }
         }) { context in
             if context.format == "pdf" {
                 PDFReaderView(context: context)
+                    .remoteRestricted()
                     .environmentObject(model)
             } else {
                 ReaderView(context: context)
+                    .remoteRestricted()
                     .environmentObject(model)
             }
         }
@@ -825,6 +861,7 @@ struct DetailView: View {
             }
         }) { book in
             OfflineBookReaderView(book: book)
+                .remoteRestricted()
         }
         #endif
     }
@@ -896,11 +933,87 @@ struct DetailView: View {
         )
     }
 
+    private var remoteDetailSourceSignature: Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(detail?.files ?? [])) ?? Data()
+    }
+    private var remoteDetailKeys: [String] {
+        guard let detail else { return [] }
+        var keys: [String] = []
+        let series = detail.item.kind == "show" || detail.item.kind == "season"
+        if series ? seriesPlayback != nil : (detail.item.isPlayable && !detail.item.isBook && detail.files?.first != nil) { keys.append("detail:play") }
+        let position = detail.item.watch?.positionMs ?? 0
+        let file = (detail.files ?? []).first(where: { $0.id == selectedMediaFileID }) ?? Self.playbackFile(in: detail, positionMs: position)
+        if let file, detail.item.isPlayable, !detail.item.isBook {
+            if position > 3000 { keys.append("detail:start-over") }
+            #if os(tvOS)
+            if TrackFacts.audioRows(file).count > 1 { keys.append("detail:audio") }
+            if !TrackFacts.subtitleRows(file).isEmpty { keys.append("detail:subtitles") }
+            if (detail.files ?? []).count > 1 { keys.append("detail:version") }
+            #endif
+        }
+        keys += (detail.children ?? []).map { "detail:children:item:\($0.id)" }
+        return keys
+    }
+    private func updateRemoteDetailOrder() {
+        remoteNavigation.setOrder(scope: "item:\(itemId)", keys: remoteDetailKeys, columns: 1)
+    }
+    private func showPreplayChoices(title: String, opener: String, choices: [RemoteChoice]) {
+        guard remoteNavigation.activeScope == "item:\(itemId)", !remoteNavigation.hasOwnedModal else { return }
+        let source = RemoteOwnedChoiceSource(token: UUID(), epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature)
+        remoteChoiceSource = source
+        remoteChoices = choices.map { choice in
+            RemoteChoice(id: choice.id, label: choice.label, selected: choice.selected) {
+                guard remoteNavigation.activeScope == "item:\(itemId):preplay",
+                      source.accepts(token: remoteChoiceSource?.token, epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature) else { return }
+                choice.choose()
+            }
+        }
+        remoteChoiceTitle = title
+        remoteNavigation.openModal(scope: "item:\(itemId):preplay", opener: opener) {
+            remoteChoiceTitle = nil; remoteChoices = []; remoteChoiceSource = nil
+        }
+    }
+    private func openPreplayTracks(_ file: MediaFile, subtitles: Bool) {
+        let binding = trackSelectionBinding(for: file)
+        let selected = subtitles ? trackSelection(for: file).subtitleIndex : trackSelection(for: file).audioIndex
+        let rows = subtitles ? TrackFacts.subtitleRows(file) : TrackFacts.audioRows(file)
+        var choices = [RemoteChoice(id: "default", label: "Use server default", selected: selected == nil) {
+            if subtitles { binding.wrappedValue.subtitleIndex = nil } else { binding.wrappedValue.audioIndex = nil }
+        }]
+        if subtitles {
+            choices.append(RemoteChoice(id: "off", label: "Off", selected: selected == PrePlaySelection.subtitleOff) { binding.wrappedValue.subtitleIndex = PrePlaySelection.subtitleOff })
+        }
+        choices += rows.map { row in RemoteChoice(id: String(row.index), label: row.summary, selected: selected == row.index) {
+            if subtitles { binding.wrappedValue.subtitleIndex = row.index } else { binding.wrappedValue.audioIndex = row.index }
+        } }
+        showPreplayChoices(title: subtitles ? "Subtitles" : "Audio", opener: subtitles ? "detail:subtitles" : "detail:audio", choices: choices)
+    }
+    private func openPreplayVersions(_ detail: ItemDetail) {
+        showPreplayChoices(title: "Version", opener: "detail:version", choices: (detail.files ?? []).map { file in
+            RemoteChoice(id: String(file.id), label: file.filename ?? "Version \(file.id)", selected: selectedMediaFileID == file.id) { selectedMediaFileID = file.id }
+        })
+    }
+
     /// Both halves of the pre-play control: the two menus and the burn-in
     /// disclosure that a bitmap choice owes the viewer before playback starts.
     @ViewBuilder
     private func trackChoiceControls(_ file: MediaFile) -> some View {
+        #if os(tvOS)
+        if TrackFacts.audioRows(file).count > 1 {
+            Button("Audio · " + TrackFacts.audioSummary(file, chosen: trackSelection(for: file).audioIndex)) { openPreplayTracks(file, subtitles: false) }
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .remoteControl("detail:audio", label: "Choose audio") { openPreplayTracks(file, subtitles: false) }
+        }
+        if !TrackFacts.subtitleRows(file).isEmpty {
+            Button("Subtitles · " + TrackFacts.subtitleSummary(file, chosen: trackSelection(for: file).subtitleIndex)) { openPreplayTracks(file, subtitles: true) }
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .remoteControl("detail:subtitles", label: "Choose subtitles") { openPreplayTracks(file, subtitles: true) }
+        }
+        #else
         TrackChoiceControls(file: file, selection: trackSelectionBinding(for: file))
+        #endif
     }
 
     @ViewBuilder
@@ -1060,7 +1173,7 @@ struct DetailView: View {
         let nearlyDone = (durationMs ?? 0) > 0
             && Double(resumeMs) > Double(durationMs!) * 0.95
         let canResume = resumeMs > 3000 && !nearlyDone
-        let file = Self.playbackFile(in: detail, positionMs: canResume ? resumeMs : 0)
+        let file = (detail.files ?? []).first(where: { $0.id == selectedMediaFileID }) ?? Self.playbackFile(in: detail, positionMs: canResume ? resumeMs : 0)
 
         return VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
@@ -1163,6 +1276,7 @@ struct DetailView: View {
             if let children = detail.children, !children.isEmpty {
                 MediaRow(
                     title: childrenHeading(item.kind),
+                    remoteShelf: "detail:children",
                     items: children,
                     style: Self.seriesChildStyle(for: item.kind),
                     startingEpisodeID: startingEpisodeID,
@@ -1234,7 +1348,7 @@ struct DetailView: View {
         let durationMs = item.isAudiobook ? (item.runtimeMs ?? resumeFile?.durationMs) : (resumeFile?.durationMs ?? item.runtimeMs)
         let nearlyDone = (durationMs ?? 0) > 0 && Double(resumeMs) > Double(durationMs!) * 0.95
         let canResume = resumeMs > 3000 && !nearlyDone
-        let file = Self.playbackFile(in: detail, positionMs: canResume ? resumeMs : 0)
+        let file = (detail.files ?? []).first(where: { $0.id == selectedMediaFileID }) ?? Self.playbackFile(in: detail, positionMs: canResume ? resumeMs : 0)
 
         return VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottom) {
@@ -1344,6 +1458,7 @@ struct DetailView: View {
             if let children = detail.children, !children.isEmpty {
                 MediaRow(
                     title: childrenHeading(item.kind),
+                    remoteShelf: "detail:children",
                     items: children,
                     style: Self.seriesChildStyle(for: item.kind),
                     startingEpisodeID: startingEpisodeID,
@@ -1365,7 +1480,7 @@ struct DetailView: View {
         let durationMs = item.isAudiobook ? (item.runtimeMs ?? resumeFile?.durationMs) : (resumeFile?.durationMs ?? item.runtimeMs)
         let nearlyDone = (durationMs ?? 0) > 0 && Double(resumeMs) > Double(durationMs!) * 0.95
         let canResume = resumeMs > 3000 && !nearlyDone
-        let file = Self.playbackFile(in: detail, positionMs: canResume ? resumeMs : 0)
+        let file = (detail.files ?? []).first(where: { $0.id == selectedMediaFileID }) ?? Self.playbackFile(in: detail, positionMs: canResume ? resumeMs : 0)
 
         return VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
@@ -1429,6 +1544,11 @@ struct DetailView: View {
                     if let file, item.isPlayable, !item.isBook {
                         HStack(spacing: 16) {
                             trackChoiceControls(file)
+                            if (detail.files ?? []).count > 1 {
+                                Button("Version") { openPreplayVersions(detail) }
+                                    .buttonStyle(TVReadableButtonStyle(prominent: false))
+                                    .remoteControl("detail:version", label: "Choose version") { openPreplayVersions(detail) }
+                            }
                         }
                     }
 
@@ -1463,6 +1583,7 @@ struct DetailView: View {
             if let children = detail.children, !children.isEmpty {
                 MediaRow(
                     title: childrenHeading(item.kind),
+                    remoteShelf: "detail:children",
                     items: children,
                     style: Self.seriesChildStyle(for: item.kind),
                     startingEpisodeID: startingEpisodeID,
@@ -1669,6 +1790,7 @@ struct DetailView: View {
             if !children.isEmpty {
                 MediaRow(
                     title: childrenHeading(item.kind),
+                    remoteShelf: "detail:children",
                     items: children,
                     style: Self.seriesChildStyle(for: item.kind),
                     startingEpisodeID: startingEpisodeID,
@@ -1747,6 +1869,7 @@ struct DetailView: View {
                     ? "▶  Resume · \(formatTime(target.startMs))"
                     : "▶  Play episode"
             ) { play = target }
+            .remoteControl("detail:play", label: "Play episode") { play = target }
             #if os(tvOS)
             .focused($tvFocusedAction, equals: .primaryAction)
             #endif
@@ -2590,6 +2713,7 @@ struct DetailView: View {
             action: action
         )
         button.focused($tvFocusedAction, equals: .primaryAction)
+            .remoteControl("detail:play", label: canResume ? "Resume" : "Play", activate: action)
         #else
         Button(action: action) {
             HStack(spacing: 8) {
@@ -2607,19 +2731,23 @@ struct DetailView: View {
         }
         .buttonStyle(IOSDetailPrimaryActionButtonStyle())
         .accessibilityLabel(canResume ? "Resume from \(formatTime(resumeMs))" : "Play")
+        .remoteControl("detail:play", label: canResume ? "Resume" : "Play", activate: action)
         #endif
     }
 
     /// Resolve a season-card play through the same context builder and player
     /// cover as the episode detail page's primary Play / Resume action.
     private func playEpisodeFromSeason(_ summary: Item) {
-        guard startingEpisodeID == nil else { return }
-        startingEpisodeID = summary.id
+        guard let attempt = episodePlayAttempt.begin(itemID: summary.id) else { return }
         actionError = nil
+        let route = remoteNavigation.activeScope
+        let context = remoteNavigation.context
+        func current() -> Bool { remoteNavigation.activeScope == route && remoteNavigation.context.epoch == context.epoch && remoteNavigation.context.contextRevision == context.contextRevision }
         Task {
-            defer { startingEpisodeID = nil }
+            defer { episodePlayAttempt.finish(attempt) }
             do {
                 let loaded = try await model.itemDetail(summary.id)
+                guard current(), !Task.isCancelled else { return }
                 let item = loaded.item
                 let resumeMs = item.watch?.positionMs ?? summary.watch?.positionMs ?? 0
                 guard let file = Self.playbackFile(in: loaded, positionMs: resumeMs) else {
@@ -2639,6 +2767,7 @@ struct DetailView: View {
                     canResume: canResume
                 )
             } catch {
+                guard current(), !Task.isCancelled else { return }
                 actionError = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
             }
@@ -2675,7 +2804,7 @@ struct DetailView: View {
     }
 
     private func startOverButton(item: Item, file: MediaFile, durationMs: Int) -> some View {
-        Button {
+        let action = {
             play = Self.startOverContext(
                 item: item,
                 file: file,
@@ -2685,7 +2814,9 @@ struct DetailView: View {
                 pendingSelection: pendingTrackSelection,
                 pendingSelectionFileId: pendingTrackSelectionFileId
             )
-        } label: {
+
+        }
+        return Button(action: action) {
             #if os(tvOS)
             Text("Start over")
                 .font(.system(.body, design: .monospaced))
@@ -2695,6 +2826,7 @@ struct DetailView: View {
                 .lineLimit(1)
             #endif
         }
+        .remoteControl("detail:start-over", label: "Start over", activate: action)
         #if os(tvOS)
         .buttonStyle(TVReadableButtonStyle(prominent: false))
         #else
@@ -2729,5 +2861,21 @@ struct DetailView: View {
         case "season": return "Episodes"
         default: return "Contents"
         }
+    }
+}
+
+/// Loading ownership ends independently from permission to publish playback.
+/// An old completion cannot clear a newer episode's loading marker.
+struct EpisodePlayAttempt {
+    private(set) var itemID: Int?
+    private var token: UUID?
+    mutating func begin(itemID: Int) -> UUID? {
+        guard token == nil else { return nil }
+        let id = UUID(); token = id; self.itemID = itemID
+        return id
+    }
+    mutating func finish(_ id: UUID) {
+        guard token == id else { return }
+        token = nil; itemID = nil
     }
 }

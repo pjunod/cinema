@@ -2073,6 +2073,7 @@ pub struct SettingsDto {
     /// advisory qualification/readiness fields below.
     pub automatic_decoder_recovery: bool,
     pub macos_video_processing_enabled: bool,
+    pub macos_hevc_output_enabled: bool,
     pub macos_video_processing: serde_json::Value,
     /// Whether an operator has asked this node for the health-qualified
     /// artifact identity. What the node actually does with the request is
@@ -2242,6 +2243,8 @@ pub struct SettingsDto {
     /// (see migration v13), and an upgrade that started that on its own is
     /// the failure v9 documents.
     pub genre_backfill: bool,
+    pub cinema_remote_control: bool,
+    pub cinema_remote_invitations: bool,
     /// "Sign-ins expire" (Settings → Users). On by default: a device that
     /// goes unused for `auth_token_idle_days` is signed out; one in regular
     /// use never is. Off keeps login tokens valid until revoked.
@@ -2566,6 +2569,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::MACOS_VIDEO_PROCESSING_ENABLED).as_deref(),
             false,
         ),
+        macos_hevc_output_enabled: plurx_core::store::stored_switch(
+            setting(keys::MACOS_HEVC_OUTPUT_ENABLED).as_deref(),
+            false,
+        ),
         macos_video_processing: state.transcode.macos_video_diagnostics(),
         decoder_health_qualified_artifacts: decoder_health_requested,
         hevc_unverified_copy: plurx_core::store::stored_switch(
@@ -2681,6 +2688,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or(14)
             .clamp(1, 365),
         genre_backfill,
+        cinema_remote_control: setting(super::remote::FEATURE_KEY).as_deref() == Some("1"),
+        cinema_remote_invitations: setting("cinema.remote_invitations").as_deref() == Some("1"),
         auth_token_expiry: plurx_core::store::stored_switch(
             setting(keys::AUTH_TOKEN_EXPIRY_ENABLED).as_deref(),
             true,
@@ -2880,6 +2889,7 @@ pub struct UpdateSettings {
     pub prepared_quality_handoff: Option<bool>,
     pub automatic_decoder_recovery: Option<bool>,
     pub macos_video_processing_enabled: Option<bool>,
+    pub macos_hevc_output_enabled: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub hevc_unverified_copy: Option<bool>,
     pub playback_sdr_master_codecs: Option<bool>,
@@ -2980,6 +2990,8 @@ pub struct UpdateSettings {
     pub dv_disk_convert_parallel: Option<i64>,
     /// Arm or disarm the one-off genre backfill.
     pub genre_backfill: Option<bool>,
+    pub cinema_remote_control: Option<bool>,
+    pub cinema_remote_invitations: Option<bool>,
     /// "Sign-ins expire". Switching it on (from off) restarts the idle clock
     /// at that moment, so enabling it never signs a device out on the spot.
     pub auth_token_expiry: Option<bool>,
@@ -3053,6 +3065,7 @@ impl UpdateSettings {
             || self.prepared_quality_handoff.is_some()
             || self.automatic_decoder_recovery.is_some()
             || self.macos_video_processing_enabled.is_some()
+            || self.macos_hevc_output_enabled.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.hevc_unverified_copy.is_some()
             || self.playback_sdr_master_codecs.is_some()
@@ -3117,6 +3130,8 @@ impl UpdateSettings {
             || self.dv_disk_keep_original.is_some()
             || self.dv_disk_convert_parallel.is_some()
             || self.genre_backfill.is_some()
+            || self.cinema_remote_control.is_some()
+            || self.cinema_remote_invitations.is_some()
             || self.auth_token_expiry.is_some()
             || self.auth_token_idle_days.is_some()
             // The DVR settings are their own transaction boundary for the same
@@ -4046,6 +4061,10 @@ pub async fn update_settings(
             .apply_macos_video_processing_setting(on)
             .await?;
     }
+    if let Some(on) = req.macos_hevc_output_enabled {
+        // The independent operator choice is accepted with every readiness state.
+        state.transcode.apply_macos_hevc_output_setting(on).await?;
+    }
     if let Some(on) = req.hevc_unverified_copy {
         // The saved preference is authoritative. No readiness condition is
         // consulted here, including on a node without trace_headers.
@@ -4370,6 +4389,22 @@ pub async fn update_settings(
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
+    }
+    if let Some(on) = req.cinema_remote_invitations {
+        // Readiness never rejects or rewrites the administrator's choice.
+        state
+            .store
+            .put_setting("cinema.remote_invitations", if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.cinema_remote_control {
+        state
+            .store
+            .put_setting(super::remote::FEATURE_KEY, if on { "1" } else { "0" })
+            .await?;
+        if !on {
+            state.remote.disable();
+        }
     }
     if let Some(on) = req.genre_backfill {
         // Arming rewinds the cursor. A pass that finished left it at 0 and
@@ -6116,6 +6151,94 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[tokio::test]
+    async fn invitation_setting_saves_without_provider_or_remote_readiness() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::Request,
+        };
+        use tower::ServiceExt;
+        let (app, state) = super::super::tests::test_app_with_state();
+        let admin = state
+            .store
+            .create_user("invitation-settings-admin", "hash", true)
+            .await
+            .expect("admin");
+        let token = plurx_core::auth::generate_token().expect("synthetic token");
+        state
+            .store
+            .create_token(&plurx_core::auth::hash_token(&token), admin.id, None)
+            .await
+            .expect("login");
+        for enabled in [true, false, true] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/settings")
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"cinema_remote_invitations":enabled}).to_string(),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let value: serde_json::Value = serde_json::from_slice(
+                &to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .expect("body"),
+            )
+            .expect("settings");
+            assert_eq!(value["cinema_remote_invitations"], enabled);
+            assert_eq!(value["cinema_remote_control"], false);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting("cinema.remote_invitations")
+                    .await
+                    .expect("stored choice")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/developer/readiness")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("readiness");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("body"),
+        )
+        .expect("readiness JSON");
+        let item = value["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .find(|i| i["id"] == "cinema_remote_invitations")
+            .expect("invitation advisory");
+        assert_eq!(item["enabled"], true);
+        assert_eq!(item["setting"], "cinema_remote_invitations");
+        let ids = item["requirements"]
+            .as_array()
+            .expect("requirements")
+            .iter()
+            .map(|r| r["id"].as_str().expect("ID"))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["broker", "consent", "delivery"]);
+    }
 
     #[test]
     fn display_mode_setting_is_an_independent_advisory_switch() {

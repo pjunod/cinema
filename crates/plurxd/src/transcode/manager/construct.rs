@@ -73,6 +73,7 @@ impl TranscodeManager {
             ),
             automatic_decoder_recovery: AtomicBool::new(false),
             macos_video_processing_enabled: Arc::new(AtomicBool::new(false)),
+            macos_hevc_output_enabled: AtomicBool::new(false),
             macos_video_preference_update: Mutex::new(()),
             macos_video_probe,
             hooks: crate::seam_hooks::HookSlot::new(&NoopTranscodeManagerHooks),
@@ -709,6 +710,53 @@ impl TranscodeManager {
                     == plurx_core::transcode::MacosProcessingAvailability::Available
                 {
                     tone_map_pipelines.push(pipeline.name().to_owned());
+                }
+            }
+        }
+        if self.macos_hevc_output_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if self
+                .macos_video_report()
+                .context(false)
+                .is_some_and(|context| {
+                    context.graph(MacosProcessingGraph::HevcHdr10Host)
+                        == MacosProcessingAvailability::Available
+                })
+                && !tone_map_pipelines
+                    .iter()
+                    .any(|name| name == Pipeline::Hdr10Passthrough.name())
+            {
+                tone_map_pipelines.push(Pipeline::Hdr10Passthrough.name().to_owned());
+            }
+        }
+        if self.macos_video_processing_enabled() && self.macos_hevc_output_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if self
+                .macos_video_report()
+                .context(true)
+                .is_some_and(|context| {
+                    context.graph(MacosProcessingGraph::HevcHdr10)
+                        == MacosProcessingAvailability::Available
+                })
+            {
+                tone_map_pipelines.push(Pipeline::VtScaleHdr10.name().to_owned());
+            }
+        }
+        if self.macos_video_processing_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if let Some(context) = self.macos_video_report().context(true) {
+                for (graph, pipeline) in [
+                    (
+                        MacosProcessingGraph::P5SoftwareCpu,
+                        Pipeline::DoviStrictTonemapx,
+                    ),
+                    (MacosProcessingGraph::P5VtTonemapx, Pipeline::VtDoviTonemapx),
+                    (MacosProcessingGraph::P5VtMetal, Pipeline::VtDoviMetal),
+                    (MacosProcessingGraph::P5SoftwareMetal, Pipeline::DoviMetal),
+                ] {
+                    if context.graph(graph) == MacosProcessingAvailability::Available {
+                        tone_map_pipelines.push(pipeline.name().to_owned());
+                    }
                 }
             }
         }

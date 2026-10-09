@@ -725,6 +725,9 @@ struct DvrRecordingsPanel: View {
             switch route {
             case .item(let id): DetailView(itemId: id)
             case .collection(let collection): LibraryView(collection: collection)
+            case .sharedLibraries: SharedLibrariesView()
+            case .sharedLibrary(let library, let parent, let title): SharedLibraryItemsView(library: library, parent: parent, title: title)
+            case .sharedItem(let reference, let library): SharedLibraryDetailView(reference: reference, library: library)
             }
         }
         #endif

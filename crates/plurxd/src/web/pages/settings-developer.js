@@ -100,14 +100,20 @@ function devGraduation(waitingOn,then){
 }
 function macosVideoProcessingCard(settings,readiness){
   const enabled=!!settings.macos_video_processing_enabled;
-  return setCard(`${cardHead("Mac video processing","Use available Mac processing for progressive SDR resizing and HDR10 conversion in new sessions.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
+  return setCard(`${cardHead("Mac video processing","Use independently available Mac scaling, HDR/HLG conversion, subtitle burns, deinterlacing, strict Dolby Vision and Live TV processing in new sessions.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
     ${togRow("pmacosvideo","Use Mac video processing","Applied to new sessions. Unsupported sources retain their existing processing.",enabled)}
     <div class="hint">The saved choice is always accepted. Runtime compatibility and qualification below are advisory. Dependency checks require a working /usr/bin/otool (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both FFmpeg tools, and no DYLD override.</div>
+    ${devReq(readiness,"macos_video_processing","effective_encoder","Effective VideoToolbox encoder","Uses the existing Hardware acceleration selection. Auto can choose Software from its encode benchmark; these switches preserve that choice. Select VideoToolbox there when wanted.")}
     ${devReq(readiness,"macos_video_processing","sdr_scale","Progressive SDR scaling","This worker checks a small embedded 8-bit and 10-bit source corpus.")}
-    ${devReq(readiness,"macos_video_processing","hdr10_metal","HDR10 to SDR processing","HDR is resized at 10-bit precision before mapping to SDR. Dolby Vision, HLG, burns and interlaced sources retain their existing routes.")}
-    ${devReq(readiness,"macos_video_processing","delivery_qualification","Visual and streaming qualification","Runtime smoke checks do not approve visual quality, startup, concurrency, a sustained soak or physical clients. Normalized continuous VOD also awaits supported bound source and decoder planning on Mac.")}
+    ${devReq(readiness,"macos_video_processing","hdr10_metal","HDR10 to SDR processing","HDR10 is resized at 10-bit precision before mapping to SDR; each source grade has its own compatibility observation.")}
+    ${devReq(readiness,"macos_video_processing","hlg_metal","HLG to SDR processing","HLG has a separate analytical reference-white and rendering check.")}
+    ${devReq(readiness,"macos_video_processing","subtitle_burns","SDR, HDR10 and HLG subtitle burns","Text and bitmap cues use their independently checked composition graphs.")}
+    ${devReq(readiness,"macos_video_processing","deinterlace","SDR frame and field deinterlacing","TFF/BFF moving-field controls verify native SDR deinterlacing and frame or field cadence. HDR interlaced sources keep the existing processing path.")}
+    ${devReq(readiness,"macos_video_processing","dolby_vision","Strict Dolby Vision profile 5","Software/VideoToolbox decode and CPU/Metal renderers have separate metadata and fail-closed observations.")}
+    ${devReq(readiness,"macos_video_processing","live_upload","Live TV software decode and native processing","Known SDR sources use explicit upload, optional native deinterlacing and scaling; Live TV keeps H264 output.")}
+    ${devReq(readiness,"macos_video_processing","delivery_qualification","Visual and streaming qualification","Runtime smoke checks do not approve visual quality, startup, concurrency, a sustained soak or physical clients. Normalized VOD still requires supported source facts and decoder/encoder ceilings for each source.")}
     <div class="row"><button class="ghost sm" onclick="reprobeMacosVideoProcessing(this)">Check compatibility again</button></div>
-    ${devGraduation("real daemon rolling HLS and encoded VOD pass seek/resume, cancellation and recovery, cache and cluster revalidation; visual checks on a named display and target Mac/client startup, concurrency and soak evidence are recorded.","the permanent switch moves to Playback → Advanced server delivery, preserving the saved choice.")}
+    ${devGraduation("SDR, HDR10, HLG, subtitle burns, moving-field deinterlacing, strict Dolby Vision and Live TV pass their applicable visual and daemon delivery checks; rolling HLS and encoded VOD pass seek/resume, cancellation and recovery, cache and cluster revalidation; visual checks on a named display and target Mac/client startup, concurrency and soak evidence are recorded.","the permanent switch moves to Playback → Advanced server delivery, preserving the saved choice.")}
     <div class="err" id="macos-video-error" role="alert"></div>${setCardFoot("saveMacosVideoProcessing")}`,{id:"macos-video-card"});
 }
 
@@ -118,6 +124,29 @@ async function saveMacosVideoProcessing(btn){
     const saved=cacheSettings(await api("/settings",{method:"PUT",body:{macos_video_processing_enabled:!!/** @type {HTMLInputElement} */ (document.getElementById("pmacosvideo")).checked}}));
     const card=btn?.closest(".setcard");if(card)card.outerHTML=macosVideoProcessingCard(saved,DEVELOPER_READINESS);
     toast("Mac video processing saved; applies to new sessions");
+  }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
+}
+
+function macosHevcOutputCard(settings,readiness){
+  const enabled=!!settings.macos_hevc_output_enabled;
+  return setCard(`${cardHead("Mac HEVC output","Allow new sessions to negotiate independently supported SDR HEVC or HDR10 Main10 output.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
+    ${togRow("pmacoshevc","Use Mac HEVC output","Applies to new sessions when the client and output presentation support the promised format.",enabled)}
+    <div class="hint">The saved choice is always accepted. The processing switch and the HEVC output switch are separate preferences.</div>
+    ${devReq(readiness,"macos_hevc_output","hevc_effective_encoder","Effective VideoToolbox encoder","Uses the existing Hardware acceleration selection. Auto can choose Software from its encode benchmark; these switches preserve that choice. Select VideoToolbox there when wanted.")}
+    ${devReq(readiness,"macos_hevc_output","hevc_sdr","Negotiated SDR HEVC","This worker checks the complete SDR HEVC encoding graph independently.")}
+    ${devReq(readiness,"macos_hevc_output","hevc_hdr10","Negotiated HDR10 Main10 HEVC","HDR10 output preserves 10-bit pixels, BT.2020/PQ signaling and effective static HDR metadata. This does not authorize Dolby passthrough.")}
+    ${devReq(readiness,"macos_hevc_output","hevc_delivery_qualification","Client and HDR presentation qualification","Produced segments, negotiation, seek/resume, fallback and HDR presentation require independent client and display evidence.")}
+    ${devGraduation("SDR HEVC and HDR10 Main10 produced segments, client negotiation, seek/resume and grade-preserving fallback pass; HDR signaling and static metadata are checked on a named HDR display and supported target clients.","the permanent HEVC output switch moves to Playback → Advanced server delivery, preserving the saved choice.")}
+    <div class="err" id="macos-hevc-error" role="alert"></div>${setCardFoot("saveMacosHevcOutput")}`,{id:"macos-hevc-card"});
+}
+
+async function saveMacosHevcOutput(btn){
+  const err=document.getElementById("macos-hevc-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{macos_hevc_output_enabled:!!document.getElementById("pmacoshevc").checked}}));
+    const card=btn?.closest(".setcard");if(card)card.outerHTML=macosHevcOutputCard(saved,DEVELOPER_READINESS);
+    toast("Mac HEVC output saved; applies to new sessions");
   }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
 }
 
@@ -555,6 +584,41 @@ async function saveRollingRetention(btn){
     const card=document.getElementById("vod-rolling-retention-card");if(card)card.outerHTML=rollingRetentionCard(saved,DEVELOPER_READINESS);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
+function cinemaRemoteCard(settings,readiness){
+  return setCard(`${cardHead("Cinema remote control","Pair a phone or tablet with one active Cinema screen.",'<span class="pill">Qualification pending</span>')}
+    ${togRow("cinema-remote-control","Enable companion remotes","Only explicitly approved same-account devices can control a screen. Turning this off ends network remote sessions.",!!settings.cinema_remote_control)}
+    ${devReq(readiness,"cinema_remote_control","clients","Receiver and companion qualification","Server support does not prove client or physical remote acceptance. Saving your choice always succeeds.")}
+    ${devGraduation("receiver, companion and physical remote acceptance are recorded for the composed candidate.","this switch moves to Settings → Playback as a permanent network remote preference.")}
+    <div class="err" id="cinema-remote-error" role="alert"></div>${setCardFoot("saveCinemaRemote")}`);
+}
+async function saveCinemaRemote(button){
+  const err=document.getElementById("cinema-remote-error");if(err)err.textContent="";
+  if(button)button.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{cinema_remote_control:/** @type {HTMLInputElement} */(document.getElementById("cinema-remote-control")).checked}}));
+    toast("Companion remote preference saved");if(button)setCardSaved(button);
+  }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
+}
+
+
+function cinemaRemoteInvitationsCard(settings,readiness){
+  return setCard(`${cardHead("Cinema background invitations","Let opted-in phones receive an invitation when their Cinema screen becomes available.",'<span class="pill">Qualification pending</span>')}
+    ${togRow("cinema-remote-invitations","Enable background invitations","Requires companion remotes and explicit consent on each paired phone. This choice does not change either preference.",!!settings.cinema_remote_invitations)}
+    ${devReq(readiness,"cinema_remote_invitations","broker","Notification delivery provider","Configure the broker and provider separately. Missing configuration never prevents saving this choice.")}
+    ${devReq(readiness,"cinema_remote_invitations","consent","Paired phone consent","Each same-account phone must explicitly opt in to invitations for its approved screen.")}
+    ${devReq(readiness,"cinema_remote_invitations","delivery","Physical notification and tap acceptance","Native background delivery and opening the correct screen require platform and device qualification.")}
+    ${devGraduation("provider delivery and native background notification/tap acceptance are recorded.","this permanent preference moves to Settings → Playback.")}
+    <div class="err" id="cinema-invitations-error" role="alert"></div>${setCardFoot("saveCinemaRemoteInvitations")}`);
+}
+async function saveCinemaRemoteInvitations(button){
+  const err=document.getElementById("cinema-invitations-error");if(err)err.textContent="";
+  if(button)button.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{cinema_remote_invitations:/** @type {HTMLInputElement} */(document.getElementById("cinema-remote-invitations")).checked}}));
+    toast("Background invitation preference saved");if(button)setCardSaved(button);
+  }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
+}
+
 function developerPanel(settings,readiness){
   const clustered=settingsClusterEnabled();
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
@@ -571,10 +635,11 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Use the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
       ${clustered?`<div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}`:""}
-      <div class="setsection"><h2>Shared libraries</h2><p>Private sharing between separate Cinemas.</p></div>${cinemaSharingCard(settings,readiness)}
+      <div class="setsection"><h2>Shared libraries</h2><p>Private sharing between separate Cinemas.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
+      <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
@@ -713,7 +778,7 @@ async function saveHevcCopy(btn){
   const err=document.getElementById("hevc-copy-error"); if(err)err.textContent="";
   if(btn)btn.disabled=true;
   try{
-    const saved=await api("/settings",{method:"PUT",body:{hevc_unverified_copy:!!document.getElementById("hevc-unverified").checked}});
+    const saved=await api("/settings",{method:"PUT",body:{hevc_unverified_copy:!!(/** @type {HTMLInputElement} */ (document.getElementById("hevc-unverified"))).checked}});
     cacheSettings(saved);
     const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
     toast("HEVC copy preference saved");

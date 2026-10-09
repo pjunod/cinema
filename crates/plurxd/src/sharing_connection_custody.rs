@@ -608,6 +608,8 @@ pub(crate) async fn close_http(
 ) -> axum::response::Response {
     use axum::{http::StatusCode, response::IntoResponse};
     let Some(auth) = crate::http::peer_transport::exact_auth_from_headers(&headers) else {
+        #[cfg(test)]
+        eprintln!("Source close diagnostic stage=headers");
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state
@@ -616,15 +618,21 @@ pub(crate) async fn close_http(
         .await
         .unwrap_or(false)
     {
+        #[cfg(test)]
+        eprintln!("Source close diagnostic stage=authentication");
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Ok(request) = serde_json::from_slice::<DriverCloseRequest>(&body) else {
+        #[cfg(test)]
+        eprintln!("Source close diagnostic stage=request_decode");
         return StatusCode::BAD_REQUEST.into_response();
     };
     if !matches!(request.principal_kind.as_str(), "source" | "receiver")
         || request.incarnation_id.is_nil()
         || !owner_identity_valid(&request.owner_identity)
     {
+        #[cfg(test)]
+        eprintln!("Source close diagnostic stage=request_identity");
         return StatusCode::BAD_REQUEST.into_response();
     }
     // Source dispatch generation1 may owe ingress before any media route exists.
@@ -648,6 +656,8 @@ pub(crate) async fn close_http(
                 && route.owner_epoch == request.expected_owner_epoch)
     };
     if !authorized_owner {
+        #[cfg(test)]
+        eprintln!("Source close diagnostic stage=current_owner");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let registration = plurx_core::sharing_ingress_custody::IngressRegistration {
@@ -669,6 +679,8 @@ pub(crate) async fn close_http(
         .await
         .unwrap_or(false)
     {
+        #[cfg(test)]
+        eprintln!("Source close diagnostic stage=registered_driver");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     // Current authenticated cleanup fence may differ from initial admission;
@@ -679,6 +691,8 @@ pub(crate) async fn close_http(
         .authorize_current_cleanup_owner(&auth.node_id, &request)
         .is_err()
     {
+        #[cfg(test)]
+        eprintln!("Source close diagnostic stage=cleanup_owner");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     match state
@@ -689,6 +703,8 @@ pub(crate) async fn close_http(
     {
         Ok(receipt) => {
             let Ok(body) = serde_json::to_vec(&receipt) else {
+                #[cfg(test)]
+                eprintln!("Source close diagnostic stage=receipt_encode");
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
             let payload = crate::http::peer_transport::signed_response_payload(200, &body);
@@ -698,6 +714,8 @@ pub(crate) async fn close_http(
                 CLOSE_PATH,
                 &payload,
             ) else {
+                #[cfg(test)]
+                eprintln!("Source close diagnostic stage=response_sign");
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
             axum::http::Response::builder()
@@ -710,7 +728,11 @@ pub(crate) async fn close_http(
                 .body(axum::body::Body::from(body))
                 .expect("validated close response headers")
         }
-        Err(()) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(()) => {
+            #[cfg(test)]
+            eprintln!("Source close diagnostic stage=actual_driver_close");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
     }
 }
 

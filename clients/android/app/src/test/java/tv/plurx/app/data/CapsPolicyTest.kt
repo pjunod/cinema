@@ -11,6 +11,54 @@ import org.junit.Test
 class CapsPolicyTest {
 
     @Test
+    fun hlsHevcClaimIsIndependentAndCannotFallBackToUnrestrictedLegacy() {
+        val unknown = capsDocument(videoCodecCaps(listOf(VideoDecoderLimit("hevc", 1080))),
+            listOf("aac"), emptySet(), emptyList(), ClientInfo("android", "fixture", "fixture"))
+        assertNull(unknown.hls_hevc_sample_entries)
+        assertTrue(shouldFallBackToLegacyDecision(404, unknown))
+        val refused = unknown.copy(hls_hevc_sample_entries = emptyList())
+        val accepted = unknown.copy(hls_hevc_sample_entries = listOf("hvc1"))
+        assertFalse(shouldFallBackToLegacyDecision(404, refused))
+        assertFalse(shouldFallBackToLegacyDecision(404, accepted))
+        assertTrue(Json.encodeToString(refused).contains("\"hls_hevc_sample_entries\":[]"))
+    }
+
+    @Test
+    fun hlsHevcKeepsMeasuredEnvelopeWhenDisplayAwareAutoIsOff() {
+        fun document(entries: List<VideoDecoderLimit>, claim: List<String>) = capsDocument(
+            videoCodecCaps(entries), listOf("aac"), emptySet(), emptyList(),
+            ClientInfo("android", "fixture", "fixture"),
+            hlsHevcSampleEntries = claim, displayAwareAuto = false,
+        )
+        val measured = VideoDecoderLimit("hevc", 2160, profiles = listOf("main10"),
+            maxWidth = 3840, maxFrameRate = DecoderFrameRate(60, 1))
+        val h264 = measured.copy(codec = "h264", profiles = listOf("high"))
+        val positive = document(listOf(measured, h264), listOf("hvc1"))
+        val hevc = positive.video.single { it.codec == "hevc" }
+        assertEquals(listOf("main10"), hevc.profiles)
+        assertEquals(3840, hevc.max_width)
+        assertEquals(2160, hevc.max_height)
+        assertEquals(DecoderFrameRate(60, 1), hevc.max_frame_rate)
+        assertEquals(listOf("hvc1"), positive.hls_hevc_sample_entries)
+        val wire = Json.encodeToString(positive)
+        assertTrue(wire.contains("\"profiles\":[\"main10\"]"))
+        assertTrue(wire.contains("\"max_width\":3840"))
+        assertTrue(positive.video.single { it.codec == "h264" }.profiles.isEmpty())
+        assertNull(positive.video.single { it.codec == "h264" }.max_width)
+        val unknown = document(listOf(VideoDecoderLimit("hevc", 1080)), emptyList())
+        assertTrue(unknown.video.single().profiles.isEmpty())
+        assertNull(unknown.video.single().max_width)
+        assertNull(unknown.video.single().max_frame_rate)
+        assertEquals(emptyList<String>(), unknown.hls_hevc_sample_entries)
+        val unsupported = document(listOf(VideoDecoderLimit("hevc", 1080)), listOf("hvc1"))
+        assertTrue(unsupported.video.single().profiles.isEmpty())
+        assertNull(unsupported.video.single().max_width)
+        assertNull(unsupported.video.single().max_frame_rate)
+        val unclaimed = document(listOf(measured), emptyList())
+        assertTrue(unclaimed.video.single().profiles.isEmpty())
+    }
+
+    @Test
     fun mediatekRegistryCompactsThroughActualWirePolicyWithoutDroppingProfiles() {
         // Review registry: six AVC, four HEVC, four AV1, five VP9 and one MPEG2
         // mapped profiles, each exposed by regular, low-latency and software components.
