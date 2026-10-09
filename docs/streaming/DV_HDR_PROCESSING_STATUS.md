@@ -435,3 +435,14 @@ remain in progress. Base-only P5/P8 processing needs its own profile-aware path;
 it cannot inherit a FEL receipt. Matched quality/resource measurements, device
 acceptance and final effort qualification remain open. No Windows validation,
 per-task full suite or merge-coordinator handoff is part of this effort.
+
+The production trace now omits decoded BL/EL and RGB pixel digests; explicit
+`PLURX_DV_FRAME_HASHES=1` retains them for quality diagnostics. These hashes have
+no independently known post-lossy-encode value, so they do not establish serving
+authority. Coded access-unit/RPU binding, timestamps and process/source custody
+remain mandatory. Ten focused controls preserve identical NUT pixels between
+modes and retained authored metadata. A real 24-picture ROG window took 9.14
+seconds with diagnostic scans disabled, still including startup and five preroll
+pairs and excluding encoding. This remains too slow for realtime 4K playback;
+it is not a steady-state or matched base-versus-FEL benchmark. Actual Vulkan
+device and driver UUIDs, versions and IDs now accompany the runtime trace.

@@ -14,13 +14,13 @@ def test_window_metadata_graph():
     (R / 'runtime').chmod(448)
     results = []
 
-    def renderer(name, source, start='42/1000', end='167/1000', want=0, reason=None):
+    def renderer(name, source, start='42/1000', end='167/1000', want=0, reason=None, diagnostics=True):
         d = R / name / 'output'
         if d.exists():
             shutil.rmtree(d)
         d.mkdir()
         with open(source, 'rb') as src, (d / 'out.nut').open('xb') as out:
-            p = subprocess.run([str(R / 'bin/segment_decode_render'), f'/proc/self/fd/{src.fileno()}', '.', '0', '64', '64', '64', '64', '64', '0', 'bt2020-pq-master-clip', f'/proc/self/fd/{out.fileno()}', start, end, '512'], cwd=d, env=env, pass_fds=(src.fileno(), out.fileno()), capture_output=True)
+            p = subprocess.run([str(R / 'bin/segment_decode_render'), f'/proc/self/fd/{src.fileno()}', '.', '0', '64', '64', '64', '64', '64', '0', 'bt2020-pq-master-clip', f'/proc/self/fd/{out.fileno()}', start, end, '512'], cwd=d, env=env | {'PLURX_DV_FRAME_HASHES': '1' if diagnostics else '0'}, pass_fds=(src.fileno(), out.fileno()), capture_output=True)
         (d / 'stdout').write_bytes(p.stdout)
         (d / 'stderr').write_bytes(p.stderr)
         events = [json.loads(l) for l in p.stdout.decode().splitlines()]
@@ -37,13 +37,22 @@ def test_window_metadata_graph():
         if not want:
             rendered = [e for e in events if e['kind'] == 'rendered_frame']
             assert [e['pts'] for e in rendered] == ['42/1000', '83/1000', '125/1000']
-            assert len({e['rgb_sha256'] for e in rendered}) == 3
+            if diagnostics:
+                assert len({e['rgb_sha256'] for e in rendered}) == 3
+            else:
+                assert all('rgb_sha256' not in e for e in rendered)
+                assert all('bl_sha256' not in e and 'el_sha256' not in e for e in events if e['kind'] == 'accepted_source_pair')
+            runtime = next(e for e in events if e['kind'] == 'gpu_runtime')
+            assert len(runtime['device_uuid']) == len(runtime['driver_uuid']) == 32
+            assert runtime['vendor_id'] > 0 and runtime['api_version'] > 0
             if name == 'valid':
                 parsed = [e for e in events if e['kind'] == 'parsed_rpu']
                 assert len(parsed) == 3 and all((e['creative_l2_count'] == 2 and e['creative_l8_count'] == 1 and (e['creative_trims_applied'] is False) for e in parsed))
         results.append({'case': name, 'exit': p.returncode, 'reason': reason, 'gpu_contexts': sum((e['kind'] == 'gpu_context_created' for e in events))})
         return d
     valid = renderer('valid', R / 'valid/source.mkv')
+    (R / 'production').mkdir(exist_ok=True)
+    production = renderer('production', R / 'valid/source.mkv', diagnostics=False)
     plain = renderer('plain', R / 'plain/source.mkv')
     for name, reason in [('invalid-area', 'invalid active area metadata'), ('nonzero-eotf', 'unsupported EOTF parameters'), ('binding-max', 'unsupported bounded vdr_in_max residual clipping'), ('long-l8', 'unsupported extended L8 trim format')]:
         renderer(name, R / name / 'source.mkv', want=1, reason=reason)
@@ -62,7 +71,7 @@ def test_window_metadata_graph():
         return subprocess.check_output(['ffmpeg', '-nostdin', '-v', 'error', '-threads', '1', '-i', str(path), '-f', 'rawvideo', '-pix_fmt', pix, 'pipe:1'])
     a = decode(valid / 'out.nut', 'rgb48le')
     b = decode(plain / 'out.nut', 'rgb48le')
-    assert a == b
+    assert a == b == decode(production / 'out.nut', 'rgb48le')
     results.append({'case': 'retained-trims-unapplied-master', 'rgb_sha256': hashlib.sha256(a).hexdigest(), 'rgb_bytes': len(a), 'same_plain_master': True})
     encoded = valid / 'encoded.mp4'
     cmd = ['ffmpeg', '-nostdin', '-v', 'error', '-n', '-threads', '1', '-copyts', '-i', str(valid / 'out.nut'), '-filter_threads', '1', '-vf', 'zscale=matrixin=gbr:transferin=smpte2084:primariesin=2020:rangein=full:matrix=2020_ncl:transfer=smpte2084:primaries=2020:range=limited:chromal=center:filter=point,format=yuv420p10le', '-c:v', 'libx265', '-threads', '1', '-profile:v', 'main10', '-x265-params', 'pools=none:frame-threads=1:qp=0:bframes=2:repeat-headers=1:chromaloc=1:colorprim=9:transfer=16:colormatrix=9:range=limited', '-fps_mode', 'passthrough', '-enc_time_base', '1/1000', '-r', '24', '-an', str(encoded)]

@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "nlq_clipping.h"
+#include "dv_trace.h"
 
 #include <libdovi/rpu_parser.h>
 #include <libplacebo/filters.h>
@@ -291,7 +292,8 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
   require(log != NULL, "logging context");
   pl_vulkan vk =
       pl_vulkan_create(log, pl_vulkan_params(.allow_software = true));
-  require(vk != NULL, "software Vulkan device");
+  require(vk != NULL, "Vulkan device");
+  require(dv_gpu_runtime(vk), "actual Vulkan runtime identity");
   pl_gpu gpu = vk->gpu;
   pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
                               PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE |
@@ -450,22 +452,24 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
     }
   }
   write_rgb(packed, (size_t)WIDTH * HEIGHT * 6, rgb_output);
-  struct AVSHA *sha = av_sha_alloc();
-  uint8_t digest[32];
-  char rgb_hash[65];
-  require(sha && av_sha_init(sha, 256) == 0, "rendered RGB SHA256");
-  av_sha_update(sha, packed, (size_t)WIDTH * HEIGHT * 6);
-  av_sha_final(sha, digest);
-  av_free(sha);
-  for (int i = 0; i < 32; i++)
-    snprintf(rgb_hash + 2 * i, 3, "%02x", digest[i]);
-
+  char rgb_field[84] = "";
+  if (debug || dv_frame_hashes()) {
+    struct AVSHA *sha = av_sha_alloc();
+    uint8_t digest[32];
+    char rgb_hash[65];
+    require(sha && av_sha_init(sha, 256) == 0, "rendered RGB SHA256");
+    av_sha_update(sha, packed, (size_t)WIDTH * HEIGHT * 6);
+    av_sha_final(sha, digest);
+    av_free(sha);
+    for (int i = 0; i < 32; i++)
+      snprintf(rgb_hash + 2 * i, 3, "%02x", digest[i]);
+    snprintf(rgb_field, sizeof(rgb_field), ",\"rgb_sha256\":\"%s\"", rgb_hash);
+  }
   free(packed);
   printf("{\"kind\":\"rendered_frame\",\"frame\":%d,\"width\":%d,\"height\":%d,"
          "\"pts\":\"%s\",\"duration\":\"%s\",\"el_bound\":true,\"nlq_active\":"
-         "true,\"rgb_sha256\":\"%s\",\"render_errors\":%u,\"production_"
-         "qualified\":false}\n",
-         frame_index, WIDTH, HEIGHT, pts, duration, rgb_hash, errors.errors);
+         "true%s,\"render_errors\":%u,\"production_qualified\":false}\n",
+         frame_index, WIDTH, HEIGHT, pts, duration, rgb_field, errors.errors);
   for (int layer = 0; layer < 2; layer++)
     for (int c = 0; c < 3; c++)
       pl_tex_destroy(gpu, &textures[layer][c]);
