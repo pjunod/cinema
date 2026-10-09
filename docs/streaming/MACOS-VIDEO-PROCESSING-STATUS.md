@@ -22,8 +22,8 @@ This separate effort began at reviewed combined source
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Bitmap API and all eight complete-graph raw comparisons pass; final text API exposes a remaining native-route failure | Trace captured font authority, repair the cause, prove text release API delivery and measure performance |
-| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls, current Linux check/Clippy and full SDK generation pass | Shipping package, amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
+| F1 GPU subtitle compositing | Native builder | Bitmap API, all eight complete-graph raw comparisons and final text API pass; inactive font-rule identity correction committed as `e9fdc02a` | Qualify the repaired release with changing inactive rules and measure performance |
+| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls and full SDK generation pass; Linux check/Clippy passed before the latest font-only Rust change | Shipping package, amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on the final `2139fa9c` signed bundle, including caption payload/timing checks and clean owned shutdown | Preserve this evidence through final integration; broader DVR and client presentation qualification remain tracked separately |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
@@ -38,27 +38,35 @@ owner; independent lanes run concurrently with the isolated SDK build.
 Unit execution and main landing remain with the designated merge coordinator.
 No final review or implementation completion is claimed for F1–F3 yet.
 
-**Latest checkpoint:** the actual main landing and private `gperf` bootstrap
-repair are committed together as `2139fa9c4c0aff8a0503d72f53b8eaaa9d54630f`.
-Its normal hook passes: catalog, Rust formatting, workspace Clippy and 86
-embedded JavaScript checks. Linux check and Clippy also pass on this source.
-No unit suite was run. The native release build passes; the SDK work
-advances on the helper-only successor `b8bfc491`, whose Rust and Mac package
-inputs are verified unchanged. The final `2139fa9c` release continuation
-finishes in 1,991.254 seconds and captures its executable and matching arm64
-debug symbols within 1,992.202 seconds. Its owned process group is absent
-and the compiler target is released. The earlier 1,800-second timeout is
-retained as a separate failed attempt. Final bundle assembly and API checks
-now use this captured executable. The text case reports compositor
-availability but selects CPU processing with `runtime_probe_failed`.
-The source-evidence engine already captures fonts. A measurement-wrapper UID
-assertion restored the build prefix before its child finished, exposing 44
-inactive Fontconfig rules. The identity hashes the full listing even though
-only the 23 loaded rules are consumed, so unused configuration changes the
-digest and correctly triggers the existing mismatch refusal. The wrapper
-now settles its child before restoration. An application repair will bind
-the identity to ordered loaded configuration while preserving active-rule,
-font and tool checks. No final text delivery pass is claimed yet.
+**Latest checkpoint:** the integration head is `e9fdc02a6c89626d72d7f5fb13d9bca0e14b0fd8`.
+Its font-identity repair passes pinned Rust 1.97.1 all-target compilation
+and the normal commit hook (catalog, formatting, Clippy and 86 embedded
+JavaScript checks). The new release build and Linux compiler loop are in
+progress. No unit suite has run; final review has not started.
+
+The earlier `2139fa9c` release continuation finishes in 1,991.254 seconds,
+with executable and matching arm64 debug symbols captured within 1,992.202
+seconds. Its owned process group is absent. That signed bundle passes all
+eight complete subtitle graph comparisons, normal text API delivery, and
+all three caption file-VOD cases. The evidence archive records the exact
+bundle and original failures; it does not qualify the later Rust repair.
+
+The first text API attempt selected CPU processing with
+`runtime_probe_failed`. A measurement-wrapper assertion had restored the
+build prefix before its child finished, exposing 44 inactive Fontconfig
+rules. All 23 loaded rules and 394 consumed font/rule object versions were
+unchanged. Hashing the full listing nevertheless changed the font identity.
+The corrected wrapper settles its child before restoration; ordinary text
+API delivery then passes in 70.911 seconds with matching startup and Source
+font digests, native graph selection, and cue/control/parser/shutdown checks.
+
+The committed application repair hashes only ordered active configuration
+rows under a new identity domain. It retains font, tool and active-file
+checks. Its focused release qualification will deliberately change inactive
+rule availability between startup and Source capture and require native
+text delivery with identical consumed-font identity. Performance remains
+separate: a first admission declined a competing daemon, so no timing child
+ran and no performance claim is made.
 
 The earlier `2cd6000b3` Mac release completed in 1,590.286 seconds with its
 owned process group fully reaped. Matching executable and debug symbols are
@@ -97,8 +105,21 @@ pass against the actual generated SDK. Full producer configuration passes
 those dependency stages, then reveals that uppercase `PKG_CONFIG` does not
 select FFmpeg's lower-case configure tool variable. The repair supplies
 verified GCC/G++ and the intended pkg-config command through configure's
-actual command-line options. It reuses the successful generated SDK; no
-metadata or feature change is needed.
+actual command-line options in `e815c4b8`. The next configure attempt passes
+those tool and metadata stages, then fails because the temporary container
+lacks `libnuma.so.1`. Auditing all 14 system-library providers finds exactly
+three missing base packages: `libnuma1`, `libelf1` and `libpng16-16`. The
+shipping Docker stage inherits these through the pinned Jellyfin runtime
+package; they belong to the container base, not new SDK roles. Their exact
+binary packages and source offers are verified against the pinned Debian
+snapshot. The isolated installation passes in 3.023 seconds, changes only
+those three package rows and resolves the recursive/versioned closure of
+197 ELF objects. The SDK remains unchanged. The next configure passes x265,
+then exposes a separate development dependency: ZVBI metadata links `-lpng`,
+but the SDK does not yet include the authentic `libpng-dev` linker alias.
+The builder is auditing development dependencies and enabled link names
+together before adding the missing authenticated role. Runtime base parity
+and SDK development closure are separate requirements.
 Full linking, matching parser and final package audit remain required; SDK
 generation alone is not a shipping build. No global installation or network
 fallback substitutes for dependencies.
@@ -109,8 +130,8 @@ build-cache candidate and bounded build are prepared. Automatic approval
 review rejected transferring the 54.2 MB committed-source archive to the
 build node; explicit user approval for that payload and destination is
 pending. Nothing from that archive has transferred or started. The
-independent SDK diagnosis continues on its existing inputs. Native
-text/caption API checks, performance measurements, shipping Linux runtime
+independent SDK diagnosis continues on its existing inputs. The repaired native
+font-identity API check, performance measurements, shipping Linux runtime
 qualification, final adversarial review and merge handoff remain outstanding.
 The designated merge coordinator owns unit execution and main landing.
 

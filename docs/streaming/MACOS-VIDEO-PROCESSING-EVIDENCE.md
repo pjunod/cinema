@@ -1579,6 +1579,16 @@ The corrective design retains active rule order, paths and content/version
 authority while excluding unconsumed inactive entries from that identity.
 The mismatch refusal itself remains required; no digest comparison is bypassed.
 
+The single bounded passive diagnostic with corrected wrapper cleanup passes
+normal text API delivery on the existing signed `2139fa9c` bundle in 70.911
+seconds. First-probe and Source captures both retain the same font digest,
+`3cf7da2420b034171bf51a37204cd2ccb7d488fc615a7e02d2578f87c0263524`.
+The actual plan selects the native graph and passes the independent cue,
+control, parser and shutdown assertions. Its owned processes are absent and
+the prefix is restored after settlement. This proves the existing capture
+path works with unchanged inputs. It does not qualify the proposed identity
+correction, and the original failed attempt remains negative evidence.
+
 The same final signed `2139fa9c` bundle separately passes all three F3
 file-VOD cases: public HEVC/AC-4 in 53.243 seconds, original caption-bearing
 MPEG-2 in 46.554 seconds, and the caption-free control in 43.421 seconds.
@@ -1588,3 +1598,16 @@ software-reference observer; the MPEG-2 case uses only the previously
 approved first-frame padding correction. The caption-free case retains its
 zero-caption expectation. These successful caption cases do not establish
 native text routing, performance, DVR delivery or client presentation.
+
+[Final release correctness and font-identity evidence](evidence/macos-video-20261008/final-2139-correctness-evidence.tar.gz)
+contains one neutral JSON record, 4,570 compressed bytes, SHA-256
+`4dcc3fc0708d3fa156f2d0e8a3227604d32ae4015626ec667f5f11634170701d`.
+All 15 raw allowlist entries were independently checked for size and hash;
+the archive was reopened and compared byte-for-byte. It preserves the
+eight graph results, 25 independent text cue checks, controls, three caption
+cases, exact artifact identities and separate failed attempts. MPEG-2's 50
+A53-bearing frames include padding; its 48 due 608 payloads are separately
+verified in order. The corrected MPEG-2 observer is explicitly bound.
+No paths, commands, infrastructure, media or credentials are included.
+This archive qualifies the captured `2139fa9c` bundle, not the later
+active-configuration identity repair or the pending performance campaign.
