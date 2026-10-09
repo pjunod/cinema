@@ -139,6 +139,10 @@ impl PreparedCopyOutput {
     }
 
     #[cfg(test)]
+    pub(super) fn private_wire_bytes(&self) -> u64 {
+        self.artifact.observation.rates.wire_bytes
+    }
+    #[cfg(test)]
     pub(super) fn private_facts(&self) -> crate::transcode::RetainedOutputFacts {
         self.artifact.facts()
     }
@@ -493,14 +497,10 @@ pub(super) async fn fence_cancelled_epoch(
     }
     rendition.gen_epoch.fetch_add(1, Relaxed);
     drop(readers);
-    let _ = perform_driver_step(
-        shared,
-        rendition,
-        Step::Terminate {
-            why: Termination::Idle,
-        },
-    )
-    .await;
+    if let Some(storage) = rendition.private_storage.as_ref() {
+        storage.release();
+    }
+    rendition.kick();
     true
 }
 
@@ -513,12 +513,15 @@ pub(super) struct Footprint {
 }
 
 /// The full footprint includes init/playlist/identity and in-flight bytes.
-/// Only media already charged to Shared::working_set enters horizon_media.
+/// Materialized media belongs to the immutable private domain in horizon_media.
 pub(super) struct PreparationAllowance {
-    shared: Weak<Shared>,
+    pub(super) shared: Weak<Shared>,
     pub(super) nonce: uuid::Uuid,
     pub(super) cap: u64,
     footprint: StdMutex<Footprint>,
+    namespace: StdMutex<Option<super::preparation_storage::Namespace>>,
+    pins: StdMutex<Vec<Arc<super::retained::RetainedVodArtifact>>>,
+    assemblies: AtomicU64,
 }
 
 impl PreparationAllowance {
@@ -528,6 +531,9 @@ impl PreparationAllowance {
             nonce,
             cap,
             footprint: StdMutex::default(),
+            namespace: StdMutex::default(),
+            pins: StdMutex::default(),
+            assemblies: AtomicU64::new(0),
         }
     }
 
@@ -545,22 +551,147 @@ impl PreparationAllowance {
         })
     }
 
-    pub(super) fn release(&self) {
-        let media = {
-            let mut state = self.footprint.lock().expect("preparation footprint");
-            if state.released {
-                return;
-            }
-            state.released = true;
-            std::mem::take(&mut state.horizon_media)
-        };
-        if let Some(shared) = self.shared.upgrade() {
-            // The physical media still exists: remove only the exclusion,
-            // never its actual working-set charge. Cleanup owns that charge.
-            sub_saturating(&shared.preparation_media, media);
-            shared.retained_artifacts.release_preparation(self.nonce);
-            shared.kick_all();
+    pub(super) fn release(self: &Arc<Self>) {
+        let mut state = self.footprint.lock().expect("preparation footprint");
+        if state.released {
+            return;
         }
+        state.released = true;
+        drop(state);
+        if self.key().is_none() && self.finish() {
+            return;
+        }
+        if let Some(shared) = self.shared.upgrade() {
+            shared.preparation_storage.register(Arc::clone(self));
+            let shared = Arc::clone(&shared);
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    shared.preparation_storage.maintain(&shared).await;
+                });
+            } // The persisted marker remains authoritative across shutdown.
+        }
+    }
+
+    pub(super) fn bind(&self, key: &str) -> Result<(), String> {
+        if self.footprint.lock().expect("footprint").released {
+            return Err("private storage already retiring".into());
+        }
+        let mut namespace = self.namespace.lock().expect("private namespace");
+        if namespace
+            .as_ref()
+            .is_some_and(|namespace| namespace.key != key)
+        {
+            return Err("private storage key changed".into());
+        }
+        namespace.get_or_insert_with(|| super::preparation_storage::Namespace {
+            key: key.into(),
+            rendition: Weak::new(),
+            directory_identity: None,
+        });
+        Ok(())
+    }
+    pub(super) fn directory_created(&self, identity: (u64, u64)) {
+        if let Some(namespace) = self.namespace.lock().expect("private namespace").as_mut() {
+            namespace.directory_identity = Some(identity);
+        }
+    }
+    pub(super) fn owns_directory(&self, identity: (u64, u64)) -> bool {
+        self.namespace
+            .lock()
+            .expect("private namespace")
+            .as_ref()
+            .is_some_and(|namespace| {
+                identity != (0, 0) && namespace.directory_identity == Some(identity)
+            })
+    }
+    pub(super) fn installed(&self, rendition: &Arc<Rendition>) {
+        if let Some(namespace) = self.namespace.lock().expect("private namespace").as_mut() {
+            namespace.rendition = Arc::downgrade(rendition);
+        }
+    }
+    pub(super) fn key(&self) -> Option<String> {
+        self.namespace
+            .lock()
+            .expect("private namespace")
+            .as_ref()
+            .map(|namespace| namespace.key.clone())
+    }
+    pub(super) fn rendition(&self) -> Option<Arc<Rendition>> {
+        self.namespace
+            .lock()
+            .expect("private namespace")
+            .as_ref()
+            .and_then(|namespace| namespace.rendition.upgrade())
+    }
+    pub(super) fn pin(&self, artifact: Arc<super::retained::RetainedVodArtifact>) {
+        self.pins.lock().expect("private pins").push(artifact);
+    }
+    pub(super) fn inflight(&self) -> u64 {
+        self.footprint
+            .lock()
+            .expect("footprint")
+            .inflight
+            .saturating_add(self.assemblies.load(Acquire))
+    }
+    pub(super) fn operation(self: &Arc<Self>) -> Option<PrivateOperation> {
+        self.assembly_begin()
+            .then(|| PrivateOperation(Arc::clone(self)))
+    }
+    pub(super) fn assembly_begin(&self) -> bool {
+        let state = self.footprint.lock().expect("footprint");
+        if state.released {
+            return false;
+        }
+        self.assemblies.fetch_add(1, AcqRel);
+        true
+    }
+    pub(super) fn assembly_end(&self) {
+        self.assemblies.fetch_sub(1, AcqRel);
+    }
+    pub(super) fn owned_bytes(&self) -> u64 {
+        let state = self.footprint.lock().expect("footprint");
+        state
+            .committed
+            .checked_add(state.inflight)
+            .expect("bounded footprint")
+    }
+    pub(super) fn restore_footprint(&self, bytes: u64) {
+        self.footprint.lock().expect("footprint").committed = bytes;
+    }
+    pub(super) fn free_media(&self, bytes: u64) {
+        let mut state = self.footprint.lock().expect("footprint");
+        state.horizon_media = state
+            .horizon_media
+            .checked_sub(bytes)
+            .expect("exact private media ownership");
+        state.committed = state
+            .committed
+            .checked_sub(bytes)
+            .expect("exact private footprint");
+        if let Some(shared) = self.shared.upgrade() {
+            shared
+                .preparation_media
+                .fetch_update(AcqRel, Acquire, |total| total.checked_sub(bytes))
+                .expect("exact node private ownership");
+        }
+    }
+    pub(super) fn finish(&self) -> bool {
+        let mut state = self.footprint.lock().expect("footprint");
+        if state.inflight != 0 || self.assemblies.load(Acquire) != 0 {
+            return false;
+        }
+        let media = std::mem::take(&mut state.horizon_media);
+        state.committed = 0;
+        drop(state);
+        if let Some(shared) = self.shared.upgrade() {
+            shared
+                .preparation_media
+                .fetch_update(AcqRel, Acquire, |total| total.checked_sub(media))
+                .expect("exact node private ownership");
+            shared.retained_artifacts.release_preparation(self.nonce);
+        }
+        self.pins.lock().expect("private pins").clear();
+        true
     }
 
     pub(super) fn footprint(&self) -> Option<u64> {
@@ -571,7 +702,18 @@ impl PreparationAllowance {
 
 impl Drop for PreparationAllowance {
     fn drop(&mut self) {
-        self.release();
+        // A bound owner is retained by its construction/job/cleanup guard.
+        // Only an untouched reservation may have no such owner.
+        if self
+            .namespace
+            .get_mut()
+            .expect("private namespace")
+            .is_none()
+        {
+            if let Some(shared) = self.shared.upgrade() {
+                shared.retained_artifacts.release_preparation(self.nonce);
+            }
+        }
     }
 }
 
@@ -582,8 +724,8 @@ pub(super) struct PendingFootprint {
 }
 
 impl PendingFootprint {
-    /// Caller holds the manifest publication lock and has already charged the
-    /// successful media publication to Shared::working_set, if media=true.
+    /// Caller holds publication ownership. A reserved write commits into its
+    /// original private domain even when job cancellation has closed new writes.
     pub(super) fn commit(mut self, media: bool) -> bool {
         let mut state = self
             .allowance
@@ -595,9 +737,9 @@ impl PendingFootprint {
             .checked_sub(self.bytes)
             .expect("owned pending charge");
         self.finished = true;
-        if state.released {
-            return false;
-        }
+        // Release closes future reservations, but an already-owned write
+        // must commit into this same private domain before cleanup can finish.
+        let live = !state.released;
         state.committed = state
             .committed
             .checked_add(self.bytes)
@@ -611,7 +753,7 @@ impl PendingFootprint {
                 shared.preparation_media.fetch_add(self.bytes, Relaxed);
             }
         }
-        true
+        live
     }
 }
 
@@ -628,5 +770,13 @@ impl Drop for PendingFootprint {
                 .checked_sub(self.bytes)
                 .expect("owned pending charge");
         }
+    }
+}
+
+/// Covers the child-spawn/registration gap before ProducerSlot owns the child.
+pub(super) struct PrivateOperation(Arc<PreparationAllowance>);
+impl Drop for PrivateOperation {
+    fn drop(&mut self) {
+        self.0.assembly_end();
     }
 }

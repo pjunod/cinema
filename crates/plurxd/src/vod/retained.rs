@@ -590,6 +590,7 @@ pub(super) struct AssemblyReservation {
     charge: u64,
     staging: Option<Arc<RetainedVodArtifact>>,
     published: bool,
+    preparation_owner: Option<Arc<super::copy_preparation::PreparationAllowance>>,
 }
 
 impl Drop for AssemblyReservation {
@@ -601,13 +602,26 @@ impl Drop for AssemblyReservation {
             .lock()
             .expect("retained registry lock");
         state.assembling = false;
+        if let Some(storage) = self.preparation_owner.as_ref() {
+            storage.assembly_end();
+        }
         if self.published {
             return;
         }
         if let Some(artifact) = self.staging.take() {
             state.retired.push_back(artifact);
         } else {
-            state.bytes = state.bytes.saturating_sub(self.charge);
+            // No directory exists: restore scratch coverage in the same lock
+            // that removes the temporary retained charge.
+            if let Some(storage) = self.preparation_owner.as_ref() {
+                if let Some(capacity) = state.preparations.get_mut(&storage.nonce) {
+                    *capacity = storage.cap;
+                }
+            }
+            state.bytes = state
+                .bytes
+                .checked_sub(self.charge)
+                .expect("owned assembly charge");
         }
     }
 }
@@ -620,6 +634,8 @@ struct RetainedState {
     rolling_retired: VecDeque<Arc<RollingArtifact>>,
     bytes: u64,
     preparations: HashMap<uuid::Uuid, u64>,
+    cold_capacity: u64,
+    cold_ready: bool,
     assembling: bool,
     namespace_owner: Option<std::fs::File>,
     namespace: Option<PathBuf>,
@@ -684,6 +700,29 @@ impl RetainedArtifactRegistry {
     }
 
     #[cfg(test)]
+    pub(super) fn test_expire_artifact(&self, facts: &crate::transcode::RetainedOutputFacts) {
+        let mut state = self.state.lock().expect("retained registry lock");
+        for entry in state
+            .entries
+            .values_mut()
+            .filter(|entry| entry.artifact.facts() == *facts)
+        {
+            entry.idle_since = Some(Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1));
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_capacity_snapshot(&self) -> (u64, u64, u64, usize) {
+        let state = self.state.lock().expect("retained registry lock");
+        (
+            state.bytes,
+            state.preparations.values().copied().sum(),
+            state.cold_capacity,
+            state.artifact_count(),
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn test_preparation_count(&self) -> usize {
         self.state
             .lock()
@@ -702,6 +741,8 @@ impl RetainedArtifactRegistry {
             return None;
         }
         shared.retained_artifacts.collect_orphans().await;
+        shared.preparation_storage.reconcile(shared).await;
+        shared.preparation_storage.maintain(shared).await;
         let mut state = shared
             .retained_artifacts
             .state
@@ -712,9 +753,15 @@ impl RetainedArtifactRegistry {
             .values()
             .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))?;
         if !state.startup_done
+            || !state.cold_ready
             || !state.orphans.is_empty()
             || state.artifact_count() >= MAX_ARTIFACTS
-            || state.bytes.checked_add(reserved)?.checked_add(cap)? > budget
+            || state
+                .bytes
+                .checked_add(state.cold_capacity)?
+                .checked_add(reserved)?
+                .checked_add(cap)?
+                > budget
         {
             return None;
         }
@@ -733,7 +780,41 @@ impl RetainedArtifactRegistry {
             .preparations
             .values()
             .fold(0_u64, |sum, bytes| sum.saturating_add(*bytes));
-        budget.saturating_sub(state.bytes.saturating_add(reserved))
+        budget.saturating_sub(
+            state
+                .bytes
+                .saturating_add(state.cold_capacity)
+                .saturating_add(reserved),
+        )
+    }
+
+    pub(super) fn set_cold_capacity(&self, bytes: u64, ready: bool) {
+        let mut state = self.state.lock().expect("retained registry lock");
+        state.cold_capacity = bytes;
+        state.cold_ready = ready;
+    }
+    pub(super) fn cold_capacity(&self) -> u64 {
+        self.state
+            .lock()
+            .expect("retained registry lock")
+            .cold_capacity
+    }
+    pub(super) fn cold_ready(&self) -> bool {
+        self.state
+            .lock()
+            .expect("retained registry lock")
+            .cold_ready
+    }
+    pub(super) fn restore_preparation(&self, nonce: uuid::Uuid, cap: u64) -> Result<bool, ()> {
+        let mut state = self.state.lock().expect("retained registry lock");
+        if state.preparations.contains_key(&nonce) {
+            return Err(());
+        }
+        if state.artifact_count() >= MAX_ARTIFACTS {
+            return Ok(false);
+        }
+        state.preparations.insert(nonce, cap);
+        Ok(true)
     }
 
     pub(super) fn release_preparation(&self, nonce: uuid::Uuid) {
@@ -760,6 +841,9 @@ impl RetainedArtifactRegistry {
     /// next maintenance tick offers it again. Only a reservation that cannot
     /// ever fit this rendition's own completed output fails its preparation.
     pub(super) fn offer(shared: &Arc<Shared>, rendition: &Arc<Rendition>) -> bool {
+        if rendition.private_storage.is_some() && rendition.preparation().is_none() {
+            return false;
+        }
         let preparation = rendition.preparation();
         let measurement = rendition
             .output_measurement
@@ -814,7 +898,7 @@ impl RetainedArtifactRegistry {
         true
     }
 
-    async fn own_namespace(&self, base: &Path) -> bool {
+    pub(super) async fn own_namespace(&self, base: &Path) -> bool {
         let namespace = base.join(".retained");
         {
             let state = self.state.lock().expect("retained registry lock");
@@ -1452,20 +1536,29 @@ impl RetainedArtifactRegistry {
             .checked_sub(own_cap)
             .ok_or(AssemblyRefusal::Refused)?;
         if state.entries.contains_key(&rates.identity)
-            || state.artifact_count() - usize::from(own_cap > 0) >= MAX_ARTIFACTS
+            || state.artifact_count() - usize::from(prepare_nonce.is_some()) >= MAX_ARTIFACTS
+            || (prepare_nonce.is_some() && rates.wire_bytes > own_cap)
             || state
                 .bytes
-                .checked_add(reserved)
-                .and_then(|bytes| bytes.checked_add(rates.wire_bytes))
+                .checked_add(state.cold_capacity)
+                .and_then(|bytes| bytes.checked_add(reserved))
+                .and_then(|bytes| bytes.checked_add(own_cap.max(rates.wire_bytes)))
                 .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
+        {
+            return Err(AssemblyRefusal::Refused);
+        }
+        let preparation_owner = preparation
+            .as_ref()
+            .map(|preparation| Arc::clone(&preparation.allowance));
+        if preparation_owner
+            .as_ref()
+            .is_some_and(|storage| !storage.assembly_begin())
         {
             return Err(AssemblyRefusal::Refused);
         }
         state.bytes += rates.wire_bytes;
         if let Some(nonce) = prepare_nonce {
-            if own_cap > 0 {
-                state.preparations.insert(nonce, 0);
-            }
+            state.preparations.insert(nonce, own_cap - rates.wire_bytes);
         }
         state.assembling = true;
         Ok(AssemblyReservation {
@@ -1473,6 +1566,7 @@ impl RetainedArtifactRegistry {
             charge: rates.wire_bytes,
             staging: None,
             published: false,
+            preparation_owner,
         })
     }
 
@@ -1525,15 +1619,31 @@ impl RetainedArtifactRegistry {
             else {
                 return false;
             };
+            let transfer = reservation
+                .preparation_owner
+                .as_ref()
+                .and_then(|storage| state.preparations.get(&storage.nonce).copied())
+                .unwrap_or(0)
+                .min(extra_charge);
             if !state.startup_done
                 || !state.orphans.is_empty()
                 || state
                     .bytes
-                    .checked_add(reserved)
-                    .and_then(|bytes| bytes.checked_add(extra_charge))
+                    .checked_add(state.cold_capacity)
+                    .and_then(|bytes| bytes.checked_add(reserved))
+                    .and_then(|bytes| bytes.checked_add(extra_charge - transfer))
                     .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
             {
                 return false;
+            }
+            if let Some(storage) = reservation.preparation_owner.as_ref() {
+                let remaining = state
+                    .preparations
+                    .get_mut(&storage.nonce)
+                    .expect("assembly owns scratch capacity");
+                *remaining = remaining
+                    .checked_sub(transfer)
+                    .expect("exact capacity handoff");
             }
             state.bytes += extra_charge;
             reservation.charge = charge;
@@ -1560,6 +1670,9 @@ impl RetainedArtifactRegistry {
             validated: AtomicBool::new(true),
             sealed_identity: std::sync::OnceLock::new(),
         });
+        if let Some(storage) = reservation.preparation_owner.as_ref() {
+            storage.pin(Arc::clone(&artifact));
+        }
         reservation.staging = Some(Arc::clone(&artifact));
         let result = self.link_complete(shared, rendition, &artifact).await;
         if let Err(error) = &result {
@@ -1638,7 +1751,7 @@ impl RetainedArtifactRegistry {
                 engine: preparation.engine.digest.clone(),
                 source_metadata,
             });
-            state.preparations.remove(&preparation.allowance.nonce);
+            // Scratch capacity and the artifact pin survive SQL exposure. Cleanup owns them.
             state.entries.insert(
                 artifact.observation.rates.identity,
                 RetainedEntry {
@@ -1708,6 +1821,14 @@ impl RetainedArtifactRegistry {
             artifact.directory.join(INIT_NAME),
         )
         .await?;
+        if rendition.private_storage.is_some()
+            && shared
+                .hooks
+                .get()
+                .private_cleanup_failure("link_after_init")
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
         for (index, member) in artifact.observation.members.iter().enumerate() {
             if versions.get(index).copied().flatten() != Some(member.publication) {
                 return Err(io::ErrorKind::InvalidData.into());

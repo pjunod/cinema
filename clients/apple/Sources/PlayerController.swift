@@ -7311,7 +7311,7 @@ final class PlayerController: ObservableObject {
         case "time", "bytes": return "The server is pacing this stream."
         case "global": return "The server is busy."
         case "ahead": return "The stream is already far enough ahead."
-        case "working_set", "no_room": return "The server is short of space."
+        case "working_set", "no_room": return "The server’s playback buffer limit has been reached."
         default: return "Waiting for the server."
         }
     }

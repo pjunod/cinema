@@ -34,6 +34,8 @@ pub(super) struct Rendition {
     pub(super) materialize_budget: Duration,
     pub(super) manifest: Mutex<Manifest>,
     pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
+    /// Immutable storage domain. Job release cannot turn private bytes ordinary.
+    pub(super) private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
     pub(super) copy_preparation: StdMutex<Option<Arc<super::copy_preparation::CopyPreparation>>>,
     pub(super) preparation_epoch: AtomicU64,
     /// Identity of the complete output already handed to retained assembly

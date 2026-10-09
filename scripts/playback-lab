@@ -1911,7 +1911,7 @@ async function startServer(options, fixtureDirectory) {
     if (exited) throw exited.error || new Error(`plurxd exited ${exited.code ?? exited.signal}`);
     const response = await fetch(`${baseUrl}/healthz`, { signal: AbortSignal.timeout(1000) });
     return response.ok;
-  }, 60_000, "plurxd health");
+  }, options.startup_timeout_ms || 60_000, "plurxd health");
   const setup = await api(baseUrl, "/setup", {
     method: "POST",
     body: { username: "playback-lab", password: "playback-lab" },
