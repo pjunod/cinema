@@ -3576,7 +3576,8 @@ assert.equal(context.ACT_TIMER, null);
                 preflight = workflow_job_blocks(
                     f".github/workflows/{workflow}.yml"
                 )["preflight"]
-                self.assertIn("timeout-minutes: 10", preflight)
+                budget = 15 if workflow == "main-fast-lane" else 10
+                self.assertIn(f"timeout-minutes: {budget}", preflight)
                 for command in (
                     "make history-check",
                     "make validation-lint",

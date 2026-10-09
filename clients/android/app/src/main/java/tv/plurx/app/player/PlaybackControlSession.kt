@@ -11,6 +11,7 @@ import kotlinx.serialization.json.longOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.Session
@@ -24,7 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
  * Separate from [PlaybackControlReporter] because the reporter's rules are
  * about ordering and this one's are about what a server's refusal means. The
  * reporter classifies a failure by `status`, `code` and `retry_after_ms`;
- * producing those faithfully from an HTTP response is this file's whole job,
+ * producing those and Retry-After faithfully from an HTTP response is this file's whole job,
  * and getting it wrong would make a retryable refusal look terminal.
  */
 class PlaybackControlTransport(
@@ -56,8 +57,8 @@ class PlaybackControlTransport(
                 throw ControlTransportException(status = null, code = null)
             }
             response.use {
+                if (!it.isSuccessful) throw failure(it, json)
                 val text = it.body?.string().orEmpty()
-                if (!it.isSuccessful) throw failure(it.code, text, json)
                 try {
                     json.decodeFromString(ControlResponse.serializer(), text)
                 } catch (_: Exception) {
@@ -76,21 +77,45 @@ class PlaybackControlTransport(
          * optional on the wire, and a body that is missing or unparseable still
          * yields the status, which is enough to decide retryable from terminal.
          */
-        fun failure(status: Int, body: String, json: Json = Net.json): ControlTransportException {
+        fun failure(response: Response, json: Json = Net.json): ControlTransportException =
+            failure(response.code, response.body?.string().orEmpty(), json, response.header("Retry-After"))
+
+        fun failure(
+            status: Int,
+            body: String,
+            json: Json = Net.json,
+            retryAfterHeader: String? = null,
+        ): ControlTransportException {
+            val headerDelay = retryAfterHeaderMs(retryAfterHeader)
             var code: String? = null
             var generation: String? = null
             var epoch: Long? = null
-            var retryAfter: Long? = null
+            var retryAfter: Long? = headerDelay
             try {
                 val fields = json.parseToJsonElement(body).jsonObject
                 code = fields["code"]?.jsonPrimitive?.contentOrNullSafe()
                 generation = fields["generation"]?.jsonPrimitive?.contentOrNullSafe()
                 epoch = fields["control_epoch"]?.jsonPrimitive?.longOrNull
-                retryAfter = fields["retry_after_ms"]?.jsonPrimitive?.longOrNull
+                val bodyDelay = fields["retry_after_ms"]?.jsonPrimitive?.longOrNull
+                // Honor both server signals without shortening either valid
+                // delay. Keep legacy body-only errors unchanged.
+                retryAfter = if (headerDelay != null) {
+                    maxOf(headerDelay, bodyDelay?.takeIf { it in 0..PlaybackControl.MAX_EXCHANGE_MS } ?: 0)
+                } else bodyDelay
             } catch (_: Exception) {
                 // Status only. That is still enough to classify.
             }
             return ControlTransportException(status, code, generation, epoch, retryAfter)
+        }
+
+        // Local control routes advertise delta-seconds. Reject malformed,
+        // overflowing and over-budget values; the reporter owns the bounds.
+        private fun retryAfterHeaderMs(header: String?): Long? {
+            val value = header?.trim() ?: return null
+            if (value.isEmpty() || value.any { it !in '0'..'9' }) return null
+            val seconds = value.toLongOrNull() ?: return null
+            if (seconds > PlaybackControl.MAX_EXCHANGE_MS / 1_000L) return null
+            return seconds * 1_000L
         }
 
         /** `null` for a JSON null or a non-string, rather than the text "null". */

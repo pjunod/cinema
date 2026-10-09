@@ -5832,13 +5832,13 @@ test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanel
 test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
 
 # PR920 baseline correction: the Android status now names the real Gradle
-# build 152. The source anchor follows the current build 156 after integration;
+# build 152. The source anchor follows the current build 158 after integration;
 # this maps the documentation correction, not a new playback claim.
 [[fixes]]
 id = "android.build-152-baseline-claim"
 commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
 source = "clients/android/README.md"
-source_anchor = "> Status: **v0.3.0**, build `156`"
+source_anchor = "> Status: **v0.3.0**, build `158`"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
@@ -5884,3 +5884,48 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFact
 source_anchor = "get() = if (state != FactState.Source && activeLabel != null)"
 test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
 test_anchor = "aConvertedProfileSevenTitleShowsBothHalvesLit"
+
+
+[[fixes]]
+id = "android.hls-copy-target-arrival"
+commits = ["2ef81d673527ffcda2bf619f494ba6cbfe580149"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "internal fun copyPrerollHasRenderedProgress("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "hlsCopyPrerollSettlesBeforeTheDestinationDeadline"
+
+[[fixes]]
+id = "android.temporary-serving-fence-control-retry"
+commits = []
+supplements = "android.hls-copy-target-arrival"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = 'code in setOf("control_unavailable", "serving_fenced")'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "temporaryServingFenceReplaysThenResumesFreshControl"
+
+
+[[fixes]]
+id = "apple.temporary-serving-fence-control-retry"
+commits = ["bf956ba589c37c96a8985b5e8a4ea6a058faa3cb"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = 'code == "control_unavailable" || code == "serving_fenced"'
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testARetryHonoursTheServersRetryAfter"
+
+
+[[fixes]]
+id = "android.serving-fence-retry-after-header"
+commits = ["92d9f4e4ff2e99203f7b414f7e8296ae91b49978"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+source_anchor = 'failure(response.code, response.body?.string().orEmpty(), json, response.header("Retry-After"))'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlTransportTest.kt"
+test_anchor = "headerOnlyServingFenceCarriesTheServersDelay"
+
+[[fixes]]
+id = "apple.serving-fence-retry-after-header"
+commits = []
+supplements = "android.serving-fence-retry-after-header"
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = 'retryAfterHeader: response.value(forHTTPHeaderField: "Retry-After")'
+test = "clients/apple/Tests/PlaybackControlTransportTests.swift"
+test_anchor = "testHeaderOnlyServingFenceCarriesTheServersDelay"

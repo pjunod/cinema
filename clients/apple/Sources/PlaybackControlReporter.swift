@@ -1193,7 +1193,7 @@ actor PlaybackControlReporter {
         }
         let retryableControl = (status == 425 && code == "owner_transition")
             || (status == 429 && code == "control_rate_limited")
-            || (status == 503 && code == "control_unavailable")
+            || (status == 503 && (code == "control_unavailable" || code == "serving_fenced"))
         let retryableTransport = status == 408 || status == nil
         guard retryableControl || retryableTransport else {
             stop()

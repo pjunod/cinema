@@ -11,6 +11,97 @@ from validation.python_unit_receipts import ReceiptError
 
 
 class MainPreflightAdoptionCase(unittest.TestCase):
+    def test_timeout_before_mandatory_upload_imports_no_node_outcomes(self):
+        import contextlib
+        import io
+        import json
+        from validation import main_unit_receipts as main
+        scope, commit, rid = {'repository': 1, 'pr': 7}, 'a' * 40, 10
+        repo = {'id': 1, 'full_name': 'owner/repository'}
+        event = {'repository': repo, 'number': 7, 'action': 'reopened', 'pull_request': {
+            'number': 7, 'state': 'open', 'draft': False,
+            'head': {'repo': repo, 'ref': 'topic', 'sha': commit},
+            'base': {'repo': repo, 'ref': 'main'}}}
+        prior = {'id': rid, 'repository': repo, 'workflow_id': main.WORKFLOW,
+                 'commit_sha': commit, 'event': 'pull_request', 'event_payload': json.dumps(event)}
+        job = {'id': 20, 'run_id': rid, 'repo_id': 1, 'attempt': 1,
+               'task_id': 30, 'name': main.JOB, 'status': 'failure'}
+        workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/main-fast-lane.yml').read_bytes()
+        python_scope = dict(scope, branch='topic', base='main', workflow=main.WORKFLOW)
+        python_start = {'version': main.receipts.VERSION, 'scope': python_scope, 'run': rid,
+                        'commit': commit, 'complete': False, 'passes': {}, 'fixture_errors': []}
+        env = {'platform': 'linux', 'machine': 'x86_64', 'python': [3, 12], 'node': 'v22.23.2'}
+        node_start = {'version': 1, 'scope': scope, 'run': rid, 'commit': commit, 'job': 20,
+                      'attempt': 1, 'environment': env, 'producer_blob': 'b' * 40,
+                      'manifest_blob': 'b' * 40, 'outcomes': {}, 'skips': {}, 'phase_errors': []}
+        py_key, node_key = main.key(python_scope), 'main-preflight-v1-r1-pr7'
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            print(commit, commit, 'triggered by event: pull_request', sep='\n')
+            main.emit_snapshot(python_start, 'start')
+            for name in (py_key, node_key):
+                artifact_id = 1 if name == py_key else 2
+                print(f'Artifact {name}-start-{rid} has been successfully uploaded! Final size is 352 bytes. Artifact ID is {artifact_id}')
+            # Python fixture tests can print synthetic outcome examples.
+            print('Main preflight outcome {\"id\": \"validation:synthetic\", \"record\": {\"run\": 12}}')
+            main.emit_snapshot(dict(python_start, complete=True), 'final')
+            print('this step has been cancelled: context deadline exceeded')
+        raw = output.getvalue().encode()
+        class API:
+            log = raw
+            final = []
+            marker_missing = False
+            def pages(self, path, query):
+                name = query['name']
+                if not name.endswith('-start-10'): return self.final
+                return [] if self.marker_missing else [{'id': 1 if name.startswith('main-python') else 2,
+                    'name': name, 'run_id': rid, 'expired': False}]
+            def bytes(self, path, query=None):
+                if path.endswith('/logs'): return self.log
+                return python_start if path.endswith('/1/zip') else node_start
+        api = API()
+        with mock.patch.object(main, 'source', return_value=workflow), \
+             mock.patch.object(adoption, 'artifact_json', side_effect=lambda value: value), \
+             mock.patch.object(adoption, 'git', return_value='b' * 40), \
+             mock.patch.object(adoption, 'environment', return_value=env), \
+             mock.patch.object(adoption, 'atomic_json') as writer:
+            self.assertTrue(adoption.recover_missing_final_before_node(api, scope, prior, [job], workflow))
+            self.assertEqual(node_start['outcomes'], {})
+            writer.assert_not_called()
+            # Missing records alone cannot prove zero execution.
+            for changed in (raw.replace(b'MAIN-UNIT-END final', b'truncated'),
+                            raw.replace(b'Artifact ID is 1', b'Artifact ID is 99'),
+                            raw + f'Artifact {py_key} has been successfully uploaded!\n'.encode(),
+                            raw + b'Main preflight outcome {}\n',
+                            raw.replace(b'context deadline exceeded', b'unknown failure')):
+                api.log = changed
+                with self.subTest(log=changed[-100:]), self.assertRaises(ReceiptError):
+                    adoption.recover_missing_final_before_node(api, scope, prior, [job], workflow)
+            api.log = raw
+            for changed in (workflow.replace(b'if-no-files-found: error', b'if-no-files-found: ignore'),
+                            workflow.replace(b'      - name: Check the shared player input contract',
+                                b'        continue-on-error: true\n      - name: Check the shared player input contract'),
+                            workflow.replace(b'        run: python3 -m validation.main_preflight_adoption node',
+                                b'        if: always()\n        run: python3 -m validation.main_preflight_adoption node'),
+                            workflow.replace(b'      - name: Check the shared player input contract',
+                                b'        continue-on-error : true\n      - name: Check the shared player input contract'),
+                            workflow.replace(b'      - name: Check the shared player input contract',
+                                b'        \"continue-on-error\": true\n      - name: Check the shared player input contract')):
+                with mock.patch.object(main, 'source', return_value=changed), self.assertRaises(ReceiptError):
+                    adoption.recover_missing_final_before_node(api, scope, prior, [job], changed)
+            api.final = [{'run_id': rid}]
+            with self.assertRaises(ReceiptError):
+                adoption.recover_missing_final_before_node(api, scope, prior, [job], workflow)
+            api.final, api.marker_missing = [], True
+            with self.assertRaises(ReceiptError):
+                adoption.recover_missing_final_before_node(api, scope, prior, [job], workflow)
+            api.marker_missing = False
+            for changed in (dict(job, attempt=2), dict(job, repo_id=2)):
+                with self.assertRaises(ReceiptError):
+                    adoption.recover_missing_final_before_node(api, scope, prior, [changed], workflow)
+            self.assertFalse(adoption.recover_missing_final_before_node(api, scope, prior, [dict(job, status='running')], workflow))
+            self.assertFalse(adoption.recover_missing_final_before_node(api, scope, prior, [dict(job, name='scope', status='skipped')], workflow))
+
     def test_exact_prepare_retry_bridge_imports_no_outcomes(self):
         from validation import main_unit_receipts as main
         scope, prior, jobs = {'repository': 1, 'pr': 888}, {'id': 4431}, []

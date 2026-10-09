@@ -410,6 +410,41 @@ class MainUnitReceiptsCase(unittest.TestCase):
             with self.subTest(lines=invalid), self.assertRaises(ReceiptError):
                 main.read_snapshots(invalid)
 
+    def test_completed_framed_log_preserves_passes_after_job_timeout(self):
+        import contextlib
+        import io
+        scope = {'repository': 1, 'pr': 7, 'branch': 'topic', 'base': 'main', 'workflow': main.WORKFLOW}
+        commit, rid = 'a' * 40, 10
+        cached = {'validation:test_fixture.Case.test_cached': {'run': 9, 'commit': 'b' * 40}}
+        fresh = {'operations:test_fixture.Case.test_ok': {'run': rid, 'commit': commit}}
+        start = {'version': main.receipts.VERSION, 'scope': scope, 'run': rid, 'commit': commit,
+                 'complete': False, 'fixture_errors': [], 'passes': cached}
+        final = dict(start, complete=True, passes={**cached, **fresh})
+        def log(last=final):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                print(commit, commit, 'triggered by event: pull_request', sep='\n')
+                main.emit_snapshot(start, 'start')
+                main.emit_snapshot(last, 'final')
+                print('context deadline exceeded')
+            return output.getvalue().encode()
+        api = unittest.mock.Mock()
+        api.bytes.return_value = log()
+        prior = {'id': rid, 'commit_sha': commit}
+        for status in ('success', 'failure', 'cancelled'):
+            with self.subTest(status=status):
+                recovered = main.recover_log(api, scope, prior, {'id': 20, 'status': status}, [])
+                self.assertEqual(recovered['passes'], {**cached, **fresh})
+        for last in (dict(final, complete=False), dict(final, passes=fresh),
+                     dict(final, fixture_errors=['discovery failed'])):
+            api.bytes.return_value = log(last)
+            with self.subTest(last=last), self.assertRaises(ReceiptError):
+                main.recover_log(api, scope, prior, {'id': 20, 'status': 'failure'}, [])
+        api.bytes.return_value = log()
+        for status in ('running', 'waiting', 'skipped'):
+            with self.subTest(status=status), self.assertRaises(ReceiptError):
+                main.recover_log(api, scope, prior, {'id': 20, 'status': status}, [])
+
     def test_verbose_recovery_requires_exact_pending_ids_counts_and_real_ok(self):
         inherited = {'validation:test_validation.Case.test_cached': {'run': 2, 'commit': 'a' * 40}}
         inventories = {'validation': set(inherited), 'operations': {

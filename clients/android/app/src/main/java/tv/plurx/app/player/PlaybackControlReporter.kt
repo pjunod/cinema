@@ -1390,7 +1390,10 @@ class PlaybackControlReporter private constructor(
         }
         val retryableControl = (status == 425 && code == "owner_transition") ||
             (status == 429 && code == "control_rate_limited") ||
-            (status == 503 && code == "control_unavailable")
+            // The serving fence is temporary and carries Retry-After. Keep
+            // reporting when authority returns instead of freezing the last
+            // playhead/runway for the rest of an otherwise live session.
+            (status == 503 && code in setOf("control_unavailable", "serving_fenced"))
         val retryableTransport = status == 408 || status == null
         if (!retryableControl && !retryableTransport) {
             // Nothing left to try on this session's control channel: a 404
