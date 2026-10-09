@@ -638,8 +638,13 @@ function startPlaybackControl(v,p,bootstrap){
         if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
-        if(p.effectiveProcessing&&(error||!response||response.generation!==p.effectiveProcessing.generation))
-          clearEffectiveProcessing(p);
+        if(captured.intentGeneration===(p.controlIntentGeneration||0)){
+          const processing=effectiveHdrProcessing(response?.effective_processing,
+            reporter.bootstrap.generation,p.deliveredRange);
+          const processingChanged=JSON.stringify(p.effectiveProcessing)!==JSON.stringify(processing);
+          p.effectiveProcessing=processing;
+          if(processingChanged&&p===PLAYER&&typeof renderPlayerInfo==="function") renderPlayerInfo();
+        }
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);
         // An acknowledgement the server accepted is spent; one whose exchange

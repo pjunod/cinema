@@ -3248,8 +3248,8 @@ class Controller internal constructor(
                 observe = ::playbackControlObservation,
                 linkReceipt = { if (playbackControlBootstrapFence.isCurrent(claim, sessionId)) currentLinkReceipt() else null },
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
-                onProcessingGeneration = { generation ->
-                    if (effectiveProcessingGeneration != generation) effectiveProcessing = null
+                onProcessingGeneration = { generation, report ->
+                    effectiveProcessing = report?.takeIf { it.matches(generation, deliveredRange) }
                     effectiveProcessingGeneration = generation
                 },
             onSubtitleUnavailable = {
