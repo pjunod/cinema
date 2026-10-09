@@ -267,8 +267,28 @@ def build_receipt(
             "qualification results are missing required jobs: "
             + ", ".join(sorted(missing))
         )
+    retained = None
+    if environment.get('PLURX_RETAINED_UNITS'):
+        try:
+            retained = json.loads(environment['PLURX_RETAINED_UNITS'])
+            assert binding is not None
+            assert retained['version'] == 1
+            assert retained['candidate_sha'] == tested_sha
+            assert retained['base_sha'] == binding['base_sha']
+            assert retained['pull_request'] == binding['pull_request']
+            assert re.fullmatch(r'[0-9a-f]{64}', retained['sha256'])
+            assert retained['attestation_comments']
+            assert set(retained['lanes']) <= {'rust', 'apple', 'android_jvm',
+                                              'android_device', 'windows_compile'}
+            assert all(row['mode'] == ('explicit-human-waiver' if lane == 'windows_compile'
+                                      else 'retained-unit-evidence')
+                       for lane, row in retained['lanes'].items())
+        except (KeyError, ValueError, TypeError, AssertionError) as exc:
+            raise QualificationError('retained unit verification binding invalid') from exc
     incomplete = {
-        name: result for name, result in results.items() if result != "success"
+        name: result for name, result in results.items()
+        if result != "success" and not (result == "skipped" and retained
+                                       and name in retained['lanes'])
     }
     if incomplete:
         detail = ", ".join(
@@ -307,6 +327,7 @@ def build_receipt(
         "run_id": environment["GITHUB_RUN_ID"],
         "run_attempt": environment["GITHUB_RUN_ATTEMPT"],
         "jobs": dict(sorted(results.items())),
+        "retained_unit_evidence": retained,
         "binding_mode": "authenticated-manual-promotion" if binding else "pull-request-event",
     }
 
@@ -349,6 +370,21 @@ def main(argv: list[str] | None = None) -> int:
             live_binding = resolve_manual_binding(environment, args.repository)
             if json.loads(environment.get("PLURX_PROMOTION_BINDING", "null")) != live_binding:
                 raise QualificationError("promotion metadata moved after qualification start")
+        if environment.get('PLURX_RETAINED_UNITS'):
+            from validation import promotion_unit_retention as retention
+            from validation.python_unit_receipts import ReceiptError
+            prior_proof = json.loads(environment['PLURX_RETAINED_UNITS'])
+            try:
+                api = retention.runner_api(environment)
+                raw = retention.attachment_bytes(api, live_binding['pull_request'],
+                    prior_proof['attachment_id'], prior_proof['attachment_uuid'], prior_proof['sha256'])
+                refreshed = retention.verify(api, raw, prior_proof['sha256'], live_binding,
+                    git_object(args.repository, 'HEAD^{commit}'), prior_proof['attachment_id'],
+                    prior_proof['attachment_uuid'])
+            except ReceiptError as exc:
+                raise QualificationError('retained unit proof refused at final gate: ' + str(exc)) from exc
+            if refreshed != prior_proof:
+                raise QualificationError('retained unit attestation changed after scope')
         raw_results = json.loads(os.environ["PLURX_QUALIFICATION_RESULTS"])
         if not isinstance(raw_results, dict) or not all(
             isinstance(key, str) and isinstance(value, str)

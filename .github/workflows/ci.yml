@@ -8,6 +8,18 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
+      retained_units_sha256:
+        description: "Authenticated digest-addressed retained unit proof; no suite replay"
+        required: false
+        default: ""
+      retained_units_attachment_id:
+        description: "Private promotion PR evidence attachment ID"
+        required: false
+        default: ""
+      retained_units_attachment_uuid:
+        description: "Private promotion PR evidence attachment UUID"
+        required: false
+        default: ""
       promotion_pr:
         description: "Optional open same-repo effort/integration promotion PR to main"
         required: false
@@ -70,6 +82,12 @@ jobs:
       promotion_binding: ${{ steps.promotion.outputs.promotion_binding }}
       promotion_pr: ${{ steps.promotion.outputs.promotion_pr }}
       promotion_base_sha: ${{ steps.promotion.outputs.promotion_base_sha }}
+      retained_units: ${{ steps.retention.outputs.retained_units }}
+      retain_rust: ${{ steps.retention.outputs.retain_rust }}
+      retain_apple: ${{ steps.retention.outputs.retain_apple }}
+      retain_android_jvm: ${{ steps.retention.outputs.retain_android_jvm }}
+      retain_android_device: ${{ steps.retention.outputs.retain_android_device }}
+      retain_windows_compile: ${{ steps.retention.outputs.retain_windows_compile }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -86,6 +104,20 @@ jobs:
           PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
           PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
         run: python3 -m validation.qualification --bind-manual >> "$GITHUB_OUTPUT"
+      - name: Verify retained unit outcomes against this exact promotion
+        id: retention
+        if: inputs.retained_units_sha256 != '' || inputs.retained_units_attachment_id != '' || inputs.retained_units_attachment_uuid != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RETAINED_DIGEST: ${{ inputs.retained_units_sha256 }}
+          RETAINED_ATTACHMENT_ID: ${{ inputs.retained_units_attachment_id }}
+          RETAINED_ATTACHMENT_UUID: ${{ inputs.retained_units_attachment_uuid }}
+          PROMOTION_BINDING: ${{ steps.promotion.outputs.promotion_binding }}
+        run: >-
+          python3 -m validation.promotion_unit_retention
+          --digest "$RETAINED_DIGEST" --binding "$PROMOTION_BINDING"
+          --attachment-id "$RETAINED_ATTACHMENT_ID" --attachment-uuid "$RETAINED_ATTACHMENT_UUID"
+          >> "$GITHUB_OUTPUT"
       - name: Select affected CI surfaces
         id: scope
         env:
@@ -261,7 +293,7 @@ jobs:
   windows_compile:
     name: Windows compile
     needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
+    if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_windows_compile != 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container: ubuntu:26.04
     timeout-minutes: 30
@@ -318,7 +350,7 @@ jobs:
     # Kotlin and Swift diffs compile nothing under crates/, so the cargo lane
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
-    if: needs.scope.outputs.rust == 'true'
+    if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
@@ -1316,7 +1348,7 @@ jobs:
   android_jvm:
     name: Android JVM tests and lint
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true'
+    if: needs.scope.outputs.android_jvm == 'true' && needs.scope.outputs.retain_android_jvm != 'true'
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     steps:
@@ -1358,7 +1390,7 @@ jobs:
   apple:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
-    if: needs.scope.outputs.apple == 'true'
+    if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
     concurrency:
       group: plurx-apple-silicon-heavy
@@ -1449,7 +1481,7 @@ jobs:
   android_device:
     name: Android instrumented UI tests
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_device == 'true'
+    if: needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true'
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 35
     steps:
@@ -1914,6 +1946,7 @@ jobs:
           PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
           PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
           PLURX_PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
           PLURX_QUALIFICATION_RESULTS: >-
             {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","windows_compile":"${{ needs.windows_compile.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
         run: >-

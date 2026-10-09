@@ -628,6 +628,10 @@ def prepare(output_key="receipt_key"):
                     or recover_preunit4431(api, scope, prior, jobs)):
                 authenticated_runs.add(prior["id"])
                 continue
+            from validation.main_source_skew4513 import recover as recover_source_skew
+            if recover_source_skew(api, scope, prior, jobs):
+                authenticated_runs.add(prior['id'])
+                continue
             from validation.main_prepare_refusal_recovery import recover
             if recover(api, scope, prior, jobs):
                 authenticated_runs.add(prior['id'])
