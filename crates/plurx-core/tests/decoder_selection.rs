@@ -509,7 +509,7 @@ fn macos_processing_continuous_vod_retains_the_existing_avc_envelope() {
                 ("-c:v", "h264_videotoolbox"),
                 ("-allow_sw", "0"),
                 ("-profile:v", "high"),
-                ("-level:v", "5.0"),
+                ("-level:v", "50"),
                 ("-b:v", "8000k"),
                 ("-color_range", "tv"),
             ] {
@@ -4636,9 +4636,24 @@ fn macos_p5_stream() -> Value {
     stream
 }
 
+// Match the production probe/catalog handoff: the selective decode probe
+// carries the range class, while the catalogue supplies typed DOVI fields.
+fn macos_p5_facts(stream: Value) -> DecodeFacts {
+    let document = json!({"streams": [stream]});
+    let probe = plurx_core::scan::probe::parse_probe_json(&document);
+    let catalog = DecodeCatalogMetadata::new(
+        probe.hdr.as_deref(),
+        probe.hdr_format.as_deref(),
+        probe.dolby_vision,
+    )
+    .expect("typed DOVI catalogue fixture");
+    DecodeFacts::from_ffprobe_json_with_catalog(&document, identity('a'), &catalog)
+        .expect("catalogue-bound P5 fixture")
+}
+
 #[test]
 fn macos_strict_p5_requires_independent_decoder_renderer_graphs() {
-    let input = facts(macos_p5_stream());
+    let input = macos_p5_facts(macos_p5_stream());
     let caps = unqualified_software_capabilities("hevc");
     let request = TranscodeRequest::new(Encoder::VideoToolbox, options(Pipeline::DoviTonemapx));
     let ordinary = macos_context(true, MacosProcessingAvailability::Available);
@@ -4746,7 +4761,7 @@ fn macos_strict_p5_requires_independent_decoder_renderer_graphs() {
 
 #[test]
 fn macos_strict_p5_recovery_retains_package_and_current_au_contract() {
-    let input = facts(macos_p5_stream());
+    let input = macos_p5_facts(macos_p5_stream());
     let caps = unqualified_software_capabilities("hevc");
     let context = macos_context(true, MacosProcessingAvailability::Available)
         .with_graph(
@@ -4850,7 +4865,7 @@ fn macos_strict_p5_recovery_retains_package_and_current_au_contract() {
         assert_eq!(
             resolve_transcode(
                 &request,
-                &facts(stream),
+                &macos_p5_facts(stream),
                 &caps,
                 &policy,
                 &AttemptRestrictions::requiring(DecodeBackend::Software)
@@ -4932,7 +4947,7 @@ fn macos_hdr_interlaced_retains_incumbent_when_vt_cannot_decode_high10_fields() 
 
 #[test]
 fn authorized_strict_p5_survives_rpu_only_renderer_guard_without_admitting_generic_cpu() {
-    let input = facts(macos_p5_stream());
+    let input = macos_p5_facts(macos_p5_stream());
     assert_eq!(
         input.dynamic_range_class(),
         Some(plurx_core::transcode::DynamicRangeClass::DolbyVision)
@@ -4978,7 +4993,7 @@ fn authorized_strict_p5_survives_rpu_only_renderer_guard_without_admitting_gener
             resolve_with_options(
                 Encoder::VideoToolbox,
                 options(Pipeline::VtDoviMetal),
-                &facts(stream),
+                &macos_p5_facts(stream),
                 &caps,
                 macos_policy(context)
             )
