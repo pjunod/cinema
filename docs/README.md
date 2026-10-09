@@ -49,6 +49,8 @@ Apple temporary serving fence: [962-temporary-serving-fence-control.md](apple-bu
 
 Apple display wake: [818-display-wake.md](apple-builds/818-display-wake.md) — playback owns the display idle timer.
 
+Apple build 221: [Verified Dolby Vision processing reports](apple-builds/968-dv-processing-reports.md).
+
 Sharing activation: [Running-cluster activation and SQL transition safety](features/SHARING-LIVE-ACTIVATION.md) — **open**.
 
 ## Find it fast
@@ -328,7 +330,8 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [DV_HDR_PROCESSING_REVIEW.md](streaming/DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
 | [DV_HDR_PROCESSING_FEASIBILITY.md](streaming/DV_HDR_PROCESSING_FEASIBILITY.md) | Sol 6.1 M0 reuse findings: existing DV/FEL renderers, P8.1 recipe, metric checks and unproven boundaries. | open |
 | [DV_HDR_M1_CONTRACTS.md](streaming/DV_HDR_M1_CONTRACTS.md) | Approved additive M1 type, frame-coverage, graph and recovery-episode contracts; the initial slice kept the production registry empty. | open |
-| [DV_HDR_PROCESSING_STATUS.md](streaming/DV_HDR_PROCESSING_STATUS.md) | Implementation ledger: backend and serving integration, HDR10-E, matched resource measurements, packaging and remaining qualification. | open |
+| [DV_HDR_PROCESSING_STATUS.md](streaming/DV_HDR_PROCESSING_STATUS.md) | Implementation ledger: backend and serving integration, HDR10-E, resource measurements, reproducible acceptance fixtures, packaging and remaining qualification. | open |
+| [DV fixture recipes](evidence/dv-processing-2026-10-09/dv-fixture-reproduction.tar.gz) · [archive receipt](evidence/dv-processing-2026-10-09/fixture-archive-receipt.json) | Reproduce and verify the synthetic acceptance sources; generated movies and private media are excluded. | built |
 | [DV_HDR_BACKEND_CONTROLS.md](streaming/DV_HDR_BACKEND_CONTROLS.md) | Reproduce reviewed synthetic libplacebo and DoViBaker pixel controls; exact build evidence and limits. | open |
 | [Parsed metadata and authoring controls](streaming/DV_HDR_AUTHORING_CONTROLS.md) | Reproduce parsed-RPU rendering and synthetic reconstructed-base authoring; distinguish completed mechanics from timing, nonlinear metadata and conformance gaps. | open |
 | [DV_HDR_DECODED_LAYER_CONTROLS.md](streaming/DV_HDR_DECODED_LAYER_CONTROLS.md) | Reproduce reviewed encoded BL/EL/RPU association, B-frame timing, stale-metadata refusal and accepted-frame rendering controls. | open |
@@ -742,3 +745,5 @@ This index is kept honest by `tests/operations/test_docs_index.py`: every
 Markdown file under `docs/` must appear here, every link here must resolve,
 and no link anywhere in the repo may point at a `docs/` path that does not
 exist.
+
+DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10-09/http-summary.json) and [artifact manifest](evidence/dv-processing-2026-10-09/http-manifest.json) — retained local synthetic results and failed attempts; full promotion evidence belongs to PR #968.
