@@ -3,6 +3,7 @@ import json
 import os
 from fractions import Fraction
 from pathlib import Path
+import struct
 import subprocess
 import sys
 
@@ -33,6 +34,13 @@ def test_video_track_duration_eof_with_audio(helper, source, work):
     assert key >= 0
     missing = raw[:key] + b"XURATION" + raw[key + 8:]
     cases += [("missing", missing, False, "source EOF extent unavailable or inconsistent")]
+    short_container = bytearray(raw)
+    duration_at = raw.index(b"D\x89\x88") + 3
+    original_ms = struct.unpack_from(">d", raw, duration_at)[0]
+    assert original_ms >= float(end) * 1000 - 1
+    struct.pack_into(">d", short_container, duration_at, float(end) * 500)
+    cases.append(("short-container", bytes(short_container), False,
+        "source EOF extent unavailable or inconsistent"))
     for name, replacement, reason in [
         ("malformed", "x" + tag[1:], "invalid declared video DURATION extent"),
         ("invalid-minute", "00:99:00.000000000", "invalid declared video DURATION extent"),

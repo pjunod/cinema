@@ -752,6 +752,12 @@ int main(int argc, char **argv) {
                av_compare_ts(last_emitted_end - 1, source_time_base,
                              endpoint_ns, (AVRational){1, 1000000000}) <= 0,
            "source EOF disagrees with declared video DURATION extent");
+      // A known container maximum may contradict the selected video, but
+      // can never supply its missing declaration (other tracks may outlast it).
+      need(input->duration == AV_NOPTS_VALUE || input->duration <= 0 ||
+               av_compare_ts(last_emitted_end - 1, source_time_base,
+                             input->duration, (AVRational){1, AV_TIME_BASE}) <= 0,
+           "source EOF extent unavailable or inconsistent");
     } else {
       need(input->nb_streams == 1 && input->duration != AV_NOPTS_VALUE &&
                input->duration > 0 &&
