@@ -316,3 +316,45 @@ known source cadence at or below 30 fps as well as its existing geometry bound;
 The facts-aware planner checks the same contract before naming an artifact.
 The isolated output qualification also compares actual hvcC profile, tier, level
 and constraint bytes with the advertised codec declaration.
+
+
+### October 8 native delivery qualification
+
+The follow-up feeds the same four captured **actual Plurx immutable VOD**
+outputs to Chrome, AVPlayer and Media3: two openly licensed film excerpts,
+each with the existing no-reorder recipe and the optional two-B-frame recipe.
+The [native receipts](../evidence/video-quality-2026-10-08/native/) bind every
+served object, source revision, harness and runtime. Captured media stay in
+owned scratch; numerical receipts and source harnesses are retained.
+
+The [AVPlayer probe](../evidence/video-quality-2026-10-08/native/video-native-apple.swift)
+compiles for an owned tvOS simulator and observes a ready visible player layer
+plus advancing decoded pixel buffers. The [Media3 probe](../evidence/video-quality-2026-10-08/native/video-native-android/app/src/main/java/org/plurx/qualification/video/ProbeActivity.java)
+uses the application's Media3 version in a separate package and observes
+render-time metadata plus actual moving Surface pixels through PixelCopy.
+Neither installs over the shipping app. Both check start, forward/backward
+seek and a fresh player/item restart, with bounded deadlines and per-phase
+presentation monotonicity. Audio-track selection and video-to-player-clock
+deltas are measured. This is native decode/presentation-clock acceptance;
+physical speaker/display synchronization and the shipping client UI are not
+measured. No physical-device row in another programme is closed by these runs.
+
+[Reproduction instructions](../evidence/video-quality-2026-10-08/native/reproduction.json)
+include build commands, bundle identity, loopback serving, case inputs, receipt
+polling and cleanup. Create owned devices, use an explicit scratch path, and
+remove only those devices and processes afterward. A decoder callback still
+in flight across a seek belongs to the outgoing epoch until a first frame
+meets the existing 250 ms video/player-clock correspondence criterion. The
+retained failed Android control and corrected probe make that harness boundary
+explicit. A later first frame is admissible; startup frame drops do not have
+to land within 100 ms of the requested target.
+The correction does not change production playback or discard reversals
+inside an established phase.
+
+The final adversarial review exposed an unconditional target-floor filter in
+both native probes. It now applies only before phase establishment, with
+admission exclusions recorded separately. Every later same-epoch timestamp
+reaches reversal and clock checks. The original captures remain evidence for
+admitted observations only; all eight affected cases were captured again with
+the corrected probes. The [native summary](../evidence/video-quality-2026-10-08/native/qualification.json)
+separates those fresh passes from historical results and preserves all failures.

@@ -1,0 +1,12 @@
+{
+  "source": "1088d7529401297bddced74bfa11c166457468d8",
+  "binary_sha256": "38b21c2532a705ef8f992ef824f57fbcab49d2e6c0a0329857992fa851a0e4ce",
+  "bytes": 598806344,
+  "patch_sha256": "5219cdb57b11307fc507b8eb2359c7f8ea7350241f7218bbb2f918e5cb8eab96",
+  "changed_file": "crates/plurxd/src/decode_facts.rs",
+  "changed_file_sha256": "f2d52d21f1ea6e4120f6513d5941b618f4f4e5ace949e60accf30f314c4bd27b",
+  "build": "cargo +1.97.1 build --locked --offline -p plurxd -p plurx-core --bin plurxd --example encoder-calibration-args",
+  "incremental": false,
+  "jobs": 2,
+  "purpose": "measurement-only independent verification and decoder owners; warm decoder cache preserved"
+}

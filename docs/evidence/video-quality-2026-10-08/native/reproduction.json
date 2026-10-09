@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "scope": "Source harnesses for isolated native-framework acceptance; never install over or reconfigure the shipping client. All URLs must address an owned loopback server with authorized qualification assets.",
+  "apple": {
+    "source": "docs/evidence/video-quality-2026-10-08/native/video-native-apple.swift",
+    "compile": [
+      "xcrun",
+      "--sdk",
+      "appletvsimulator",
+      "swiftc",
+      "-parse-as-library",
+      "-swift-version",
+      "5",
+      "-target",
+      "arm64-apple-tvos26.0-simulator",
+      "-sdk",
+      "$TVOS_SIMULATOR_SDK",
+      "-module-cache-path",
+      "$SCRATCH/module-cache",
+      "docs/evidence/video-quality-2026-10-08/native/video-native-apple.swift",
+      "-o",
+      "$SCRATCH/VideoProbe.app/VideoProbe",
+      "-framework",
+      "UIKit",
+      "-framework",
+      "AVFoundation",
+      "-framework",
+      "CoreVideo",
+      "-framework",
+      "QuartzCore"
+    ],
+    "bundle_id": "org.plurx.qualification.video",
+    "plist": {
+      "CFBundleExecutable": "VideoProbe",
+      "CFBundlePackageType": "APPL",
+      "CFBundleVersion": "1",
+      "CFBundleShortVersionString": "1",
+      "MinimumOSVersion": "26.0",
+      "UIDeviceFamily": [
+        3
+      ],
+      "NSAppTransportSecurity": {
+        "NSAllowsArbitraryLoads": true
+      }
+    },
+    "run": "Create a new simulator in an owned --set directory, boot, install the ad-hoc signed app; launch with SIMCTL_CHILD_QUAL_URL and SIMCTL_CHILD_QUAL_CASE. Read Documents/qualification.json from get_app_container data. Terminate between cases, remove the prior receipt, and accept only matching case identity. Shutdown/delete only that owned device in finally."
+  },
+  "android": {
+    "source": "docs/evidence/video-quality-2026-10-08/native/video-native-android",
+    "compile": [
+      "clients/android/gradlew",
+      "-p",
+      "docs/evidence/video-quality-2026-10-08/native/video-native-android",
+      "--no-daemon",
+      "--max-workers=2",
+      ":app:assembleDebug"
+    ],
+    "run": "Create an owned Android TV API36 AVD with explicit temporary path. Boot with -no-window -no-snapshot -gpu swiftshader -cores 2 -memory 2048. Install app-debug.apk after every temporary-disk boot. Use adb reverse for the owned loopback server. Force-stop and clear data only for org.plurx.qualification.video, then verify files/qualification.json is absent before every launch (install -r preserves old app data). Launch org.plurx.qualification.video/.ProbeActivity with --es url and --es case. Poll run-as files/qualification.json until valid JSON with matching case, bounded to105s: exec-out status alone does not prove file existence. Force-stop between cases and delete only the previous receipt. Kill and delete only the owned AVD in finally."
+  },
+  "cases": [
+    "animation-bf0",
+    "animation-bf2",
+    "live-action-bf0",
+    "live-action-bf2"
+  ],
+  "deadline_seconds_per_case": 105,
+  "setup_failures_retained": [
+    "Initial Android offline dependency resolution lacked transitive annotations; using the application plugin combination plus public dependency fetch compiled successfully.",
+    "Initial Android launcher treated exec-out status0 as proof of a file; its error text was not validJSON. No media verdict was obtained.",
+    "Owned AVD temporary disk did not persist APK across reboot; subsequent launches install explicitly.",
+    "Initial live-action bf0 probe attributed one outgoing14.583s decoder callback to the new backward-seek epoch with playerclock3s. Retained failure identifies a harness boundary; only this case is retried after target-epoch establishment.",
+    "The first Android epoch correction used target+100ms, which rejected valid later first frames under startup load. Only the failed case is retried using the existing250ms video/player-clock correspondence criterion to establish an epoch; later within-epoch reversal and clock checks stay unchanged.",
+    "Quiet attempt4 was invalid: install -r retained the previous same-case receipt, which was accepted before new playback. Clear only the isolated probe package data, verify files/qualification.json is absent, then launch and poll. Every observation equals attempt3; it is not a repeated playback failure."
+  ],
+  "review_correction": "Target-floor admission is now limited to phase establishment and counted separately. After the first frame, below-target timestamps reach reversal/clock validation. All affected native cases are captured again with corrected source; pre-review receipts remain only admitted-observation evidence."
+}

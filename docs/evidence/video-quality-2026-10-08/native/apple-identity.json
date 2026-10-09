@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "source_commit": "1088d7529401297bddced74bfa11c166457468d8",
+  "runtime": "tvOS 26.5 simulator 23L470 / AVPlayer",
+  "compile_sdk": "AppleTVSimulator27.0",
+  "deployment_target": "arm64-apple-tvos26.0-simulator",
+  "harness_sha256": "89dedf0fe9aa425b3313252b06a2cb8ed62be771cb142449dd34af32aa4e39e6",
+  "binary_sha256": "c9c8936d000f0fb65c190e13f4fa21802b70b7bfe6152aa108ca4ca12ea3ae7c",
+  "scope": "Four actual Plurx-produced immutable VOD outputs from two openly licensed films, x264 bf0/bf2. Native player decode and visible-ready layer, decoded pixel progression, seeks and fresh-item restart. Physical output A/V sync and the shipping UI were not measured.",
+  "result": "pass",
+  "cases": 4,
+  "phases_per_case": 4
+}
