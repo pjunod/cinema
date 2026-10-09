@@ -543,7 +543,8 @@ def recover_log(api, scope, prior, job, older):
     start = recover_preunit_upload4324(api, scope, prior, job)
     if start is not None:
         return start
-    require(job['status'] == 'success', 'Missing artifact needs completed successful preflight')
+    require(job['status'] in ('success', 'failure', 'cancelled'),
+            'Log receipt needs an authenticated terminal preflight')
     lines = log_lines(api.bytes(f"/actions/jobs/{receipts.positive(job['id'])}/logs"))
     require(sum(commit in line for line in lines) >= 2
             and any('triggered by event: pull_request' in line for line in lines),
@@ -557,6 +558,10 @@ def recover_log(api, scope, prior, job, older):
         require(start['complete'] is False and all(final['passes'].get(test) == value
                 for test, value in start['passes'].items()), 'Log journal inheritance mismatch')
         return final
+    # A completed framed journal has the same positive records as its artifact,
+    # even when a later step or the job deadline fails. Unframed legacy output
+    # still needs whole-job success; a partial log never becomes a receipt.
+    require(job['status'] == 'success', 'Missing artifact needs completed successful preflight')
     for path, digest in LEGACY_RUNNER_HASHES.items():
         raw = source(commit, path)
         require(hashlib.sha256(raw).hexdigest() == digest

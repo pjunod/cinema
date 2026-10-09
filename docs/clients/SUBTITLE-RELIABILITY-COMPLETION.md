@@ -1,7 +1,7 @@
 # Subtitle reliability — completion ledger
 
 **Status:** WebVTT/offline implementation integrated; UI snapshots complete; A/53 file-caption repair linked to its active video-processing effort; the sole adversarial review is complete, all three corrections are integrated, and final validation is running.
-**Updated:** 2026-10-09 · **Initial base:** `1088d7529` · **Current main integrated:** `0c4ae0aa5` · **Integration:** `codex/subtitle-timeline-and-window` · **Batched PR:** [#961](http://forge.lan:3000/noirr/plurx/pulls/961)
+**Updated:** 2026-10-09 · **Initial base:** `1088d7529` · **Current main integrated:** `e7a973887` · **Integration:** `codex/subtitle-timeline-and-window` · **Batched PR:** [#961](http://forge.lan:3000/noirr/plurx/pulls/961)
 
 Cinema subtitles fail across clients: selection may produce nothing, cues can
 arrive late, and a selected track can stop displaying. WebVTT is already

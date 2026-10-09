@@ -45,6 +45,8 @@ Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-
 
 Apple playback buffer: [944-playback-buffer-limit.md](apple-builds/944-playback-buffer-limit.md).
 
+Apple temporary serving fence: [962-temporary-serving-fence-control.md](apple-builds/962-temporary-serving-fence-control.md).
+
 Apple display wake: [818-display-wake.md](apple-builds/818-display-wake.md) — playback owns the display idle timer.
 
 Sharing activation: [Running-cluster activation and SQL transition safety](features/SHARING-LIVE-ACTIVATION.md) — **open**.
@@ -212,7 +214,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [Heated Rivalry quorum build status](streaming/HEATED-RIVALRY-S1E5-QUORUM-STATUS.html) | Current implementation phase, review, validation, PR, decisions, and cleanup for the quorum repair. | open |
 | [MEDIA-COMPATIBILITY-CATALOG.md](streaming/MEDIA-COMPATIBILITY-CATALOG.md) | Which 52 media-condition families have incident, reproduction or synthetic evidence, where their fixtures and regressions live, and which samples and player checks are still missing? | open |
 | [STATUS-HISTORY.md](streaming/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
-| [PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md](streaming/PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md) | October 8 Apple TV freeze: completed full-title preparation spills into the playback budget; evidence, ownership repair, tests, adversarial review and implementation/merge ledger. | open |
+| [PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md](streaming/PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md) | October 8 Apple TV freeze: completed full-title preparation spills into the playback budget; evidence, merged ownership repair, adversarial review and focused postmerge unit closure; deployment/device acceptance remains open. | open |
 | [HONEST-MASTER-PLAYLIST.md](streaming/HONEST-MASTER-PLAYLIST.md) | Implementation plan from the 2026-09-20 architecture review: M1/M2 landed; bounded M3/M4, retained VOD M5 and automatic/manual-copy/encoded preparation implemented; rolling/PUT consumers and one bounded public Create/fetched-wire host control recorded; current independent review/integration, unseen-tail first-publication and fleet/device acceptance remain open. | open |
 | [MACOS-VIDEO-PROCESSING-DESIGN.md](streaming/MACOS-VIDEO-PROCESSING-DESIGN.md) | Proposed native Mac acceleration: shared-memory cost model, VideoToolbox/Metal processing, Jellyfin dependency preservation, P5 hardware-decode experiment, contracts and measured acceptance. | open |
 | [MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md](streaming/MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md) | Opus review and build handoff: baseline/package proof, processing milestones, code ownership, regression matrix, rollout and independent Dolby/Live TV/HEVC extensions. | open |

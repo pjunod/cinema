@@ -80,10 +80,10 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Full-history and operations contracts reached the five-minute limit on
-    # a busy shared runner (PR #526 run 3087) while their checks were passing.
-    # Allow the checks to finish; this does not skip or reduce any contract.
-    timeout-minutes: 10
+    # Provisioning, receipt restoration, and the passing contract suites
+    # exhausted ten minutes before final publications in PR #962. Leave room
+    # for those publications and the remaining Node phase; no checks are added.
+    timeout-minutes: 15
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

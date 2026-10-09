@@ -85,6 +85,43 @@ async fn source_retired_predecessor_cannot_invalidate_surviving_owner_generation
 fn source_fixture_state() -> Arc<crate::state::AppState> {
     Arc::new(crate::http::source_actor_test_state())
 }
+
+fn source_fixture_addresses() -> (std::net::SocketAddr, std::net::SocketAddr) {
+    static USED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeSet<std::net::SocketAddr>>,
+    > = std::sync::OnceLock::new();
+
+    // The voter binds after asynchronous store initialization. Keep every
+    // probed address claimed by this fixture family even after its listener
+    // is dropped, so another fixture cannot reuse a pending boot's address.
+    let mut used = USED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+        .lock()
+        .expect("Source fixture address registry");
+    let mut reserve = || loop {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Source fixture listener");
+        let address = listener.local_addr().expect("Source fixture address");
+        if used.insert(address) {
+            break (listener, address);
+        }
+    };
+    let (raft, raft_address) = reserve();
+    let (api, api_address) = reserve();
+    drop((raft, api));
+    (raft_address, api_address)
+}
+
+#[test]
+fn source_fixture_boots_do_not_reuse_probe_addresses() {
+    let mut addresses = std::collections::BTreeSet::new();
+    for _ in 0..64 {
+        let (raft, api) = source_fixture_addresses();
+        assert!(addresses.insert(raft));
+        assert!(addresses.insert(api));
+    }
+    assert_eq!(addresses.len(), 128);
+}
+
 fn source_fixture_store(
     config: &plurx_core::config::Config,
 ) -> std::pin::Pin<
@@ -122,12 +159,8 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     eprintln!("Source fixture: actual standalone selection");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
-    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("Raft port");
-    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("API port");
-    config.cluster.raft_bind = raft.local_addr().expect("Raft address");
-    config.cluster.api_bind = api.local_addr().expect("API address");
+    (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
     config.cluster.advertise_host = "localhost".into();
-    drop((raft, api));
     let mut selected = source_fixture_store(&config)
         .await
         .expect("actual standalone voter");

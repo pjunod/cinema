@@ -7764,6 +7764,29 @@ mod startup_tests {
         config: &Config,
         root: &std::path::Path,
     ) -> Arc<dyn plurx_core::store::Store> {
+        let config = config.clone();
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            // Each simulated process owns its runtime. Settle its detached
+            // tasks and blocking writers before a later boot reopens the file.
+            // The SQLite handle owns its connections independently; subsequent
+            // inspection runs on the caller's current runtime.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("boot runtime");
+            let store = runtime.block_on(boot_serve_and_drain_in_runtime(&config, &root));
+            drop(runtime);
+            store
+        })
+        .await
+        .expect("boot runtime worker")
+    }
+
+    async fn boot_serve_and_drain_in_runtime(
+        config: &Config,
+        root: &std::path::Path,
+    ) -> Arc<dyn plurx_core::store::Store> {
         let handle = plurx_core::cluster::open_store(config)
             .await
             .expect("store");
