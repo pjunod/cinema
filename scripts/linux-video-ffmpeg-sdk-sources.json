@@ -3322,6 +3322,14 @@
               "--enable-shared",
               "--disable-static"
             ]
+          },
+          {
+            "cwd": "source",
+            "argv": [
+              "make",
+              "-j{jobs}",
+              "builds/unix/freetype2.pc"
+            ]
           }
         ],
         "outputs": {

@@ -36,6 +36,25 @@ Accepted earlier packages and evidence remain read-only. The pinned Rust
 Unit execution and main landing remain with the designated merge coordinator.
 No final review or implementation completion is claimed for F1–F3 yet.
 
+**Latest checkpoint:** `50784a2b6` commits the complete pinned Linux SDK
+source closure. Its normal commit hook passes in 73 seconds, including
+workspace Clippy, formatting, catalog and JavaScript checks. Fresh static
+SDK staging passes in 7.25 seconds with a peak resident set of 763 MiB;
+this verifies source preparation, not generated headers or a linked package.
+Exact-source Linux all-target check passes for core and daemon with
+`hiqlite-store` on Rust 1.97.1 in 7 minutes 19 seconds. Clippy runs without
+diagnostics until the shared phase deadline; it remains incomplete, and
+the passing check is retained. All owned Linux processes are reaped. The updated Mac daemon release
+stopped on an actual memory-pressure warning after 202.5 seconds; its owned
+processes are absent and the partial cache is retained. The Bookworm retry
+passes FreeType configure, then refuses its missing pkg-config output after
+23.60 seconds. A repair invokes FreeType's genuine metadata make target;
+the other generator recipes were checked for the same omission. Actual
+post-repair generation remains pending. Unit execution, final
+adversarial review and merge handoff remain outstanding. The native build
+uses one job, actual memory-pressure monitoring and its own cache; unrelated
+compiler processes alone no longer prevent it from starting.
+
 **Integrated source:** `84ad32b51` prepares pinned Linux sources and generic
 strict Dolby patches; `622c1ee42` repairs caption SEI parsing; `a9e0f2c98`
 binds strict processing to typed Mac/Linux provenance. The latter preserves

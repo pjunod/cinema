@@ -1352,9 +1352,29 @@ symlink targets. The equivalence receipt is
 `5c3c0ff7e89df2af4d13b42563af43b095b9a15afd48a9a764c1b4470158b8c3`;
 the required-submodule authority receipt is
 `d7c9b6b9d4aac59b44f3939b290f3ab4231797f1cac8435e396737d694d0aa2f`.
-The helper, lock and acquisition path are updated; fresh static staging and
-actual generation have not run on this repair. Linking and runtime
-qualification also remain open.
+The repair is committed as `50784a2b6a803b27403f545117bdd053fbec76d0`.
+Its normal hook passes in 73.04 seconds. Fresh static staging passes in
+7.25 seconds with peak RSS 800,325,632 bytes and manifest
+`ca95708df14a920a004a41f68d7c55e8c7bc378ed4820787f84c450b116d5188`.
+The exact source-only retry verifies all 6,620 input-file hashes before
+generation. FreeType autogen and configure now pass, proving the required
+submodule repair reaches the actual generator. The collector then refuses
+the absent `builds/unix/freetype2.pc` after 23.60 seconds. There is no OOM or
+deadline; the isolated container stops and its network configuration is
+restored. The repair appends `make -j{jobs} builds/unix/freetype2.pc` after
+the unchanged configure step. The pinned `unix-def.in` defines that genuine
+target; the actual configured makefile resolves `OBJ_BUILD` to `builds/unix`.
+The producer audit finds no further concrete omission of an upstream make
+target in the remaining generator recipes. Actual post-repair generation
+remains pending; no generated metadata is substituted by hand. Linking and runtime
+qualification remain open.
+
+| Evidence for the source-closure retry | SHA-256 |
+|---|---|
+| Static staging receipt | `1db36bd6e28fa902e16a99c4a36076a744a770010464c76cf55886771ae4ea2e` |
+| Source-only helper/lock archive | `f0c20a8880a8957bd2c222eb82c27da1b2eb2eede1308f1a9c5680e0d1522be0` |
+| Actual generator terminal receipt | `d11a6a76e80532415d63ec0c297f3ae8fab3eb9c379cd9cab7c4b07237352798` |
+| FreeType upstream producer evidence | `9e0935266890627002b1150471205e22f79c4b7378c61cb43a39b69badfdad4c` |
 
 The shipping source also closes a separate integration gap: published and CI
 smoke images bypassed the local `make docker` seam. Both now have a shared
