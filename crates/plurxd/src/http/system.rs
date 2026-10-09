@@ -719,6 +719,17 @@ pub struct ClientTransportRecord {
     pub client_timestamp_ms: Option<i64>,
 }
 
+fn deserialize_optional_client_file_id<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct FileId(
+        #[serde(deserialize_with = "super::reading::deserialize_i64_number_or_text")] i64,
+    );
+    Option::<FileId>::deserialize(deserializer).map(|id| id.map(|id| id.0))
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
@@ -736,7 +747,9 @@ pub struct ClientLog {
     pub code: Option<i64>,
     /// Title being played, for cross-referencing with the library.
     pub title: Option<String>,
-    /// File id being played.
+    /// File id being played. Native clients use numbers; web route IDs use
+    /// exact decimal strings to preserve the full signed 64-bit range.
+    #[serde(default, deserialize_with = "deserialize_optional_client_file_id")]
     pub file_id: Option<i64>,
     /// Source video codec the decision picked, e.g. "hevc" — the usual Safari culprit.
     pub vcodec: Option<String>,
@@ -6103,6 +6116,40 @@ pub(crate) async fn metrics(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_log_file_id_accepts_exact_decimal_text_and_legacy_numbers() {
+        for (value, expected) in [
+            (serde_json::json!(4), Some(4)),
+            (serde_json::json!("4"), Some(4)),
+            (
+                serde_json::json!("9007199254740993"),
+                Some(9_007_199_254_740_993),
+            ),
+            (serde_json::json!(i64::MAX.to_string()), Some(i64::MAX)),
+            (serde_json::Value::Null, None),
+        ] {
+            let report: super::ClientLog =
+                serde_json::from_value(serde_json::json!({"event":"ttff","file_id":value}))
+                    .expect("compatible file ID");
+            assert_eq!(report.file_id, expected);
+        }
+        let absent: super::ClientLog =
+            serde_json::from_value(serde_json::json!({"event":"ttff"})).expect("absent file ID");
+        assert_eq!(absent.file_id, None);
+        for invalid in [
+            serde_json::json!(4.5),
+            serde_json::json!("4.5"),
+            serde_json::json!("9223372036854775808"),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            assert!(serde_json::from_value::<super::ClientLog>(
+                serde_json::json!({"file_id":invalid})
+            )
+            .is_err());
+        }
+    }
+
     use std::time::{Duration, Instant};
 
     use super::*;
