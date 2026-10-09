@@ -651,6 +651,13 @@ def restore(api, scope, current_run, applicability, bridge=None):
         bootstrap_passes = {test: {'run': value['run'], 'commit': value['commit']}
                             for test, value in bridge[0].items() if not test.startswith('node:')}
     for prior in sorted(runs, key=lambda item: receipts.positive(item['id']), reverse=True):
+        if (prior['id'] in (4513, 4540) and prior['id'] != current_run
+                and scope['repository'] == 1 and scope['pr'] == 917):
+            from validation.main_source_skew4513 import recover as recover_source_skew
+            source_jobs = api.pages(f"/actions/runs/{prior['id']}/jobs")
+            require(prior['id'] not in indexed and recover_source_skew(api, scope, prior, source_jobs),
+                    'Source-skew chain has unexpected final journal or unavailable proof')
+            continue
         authenticate_run(scope, prior)
         rid = receipts.positive(prior['id'])
         if rid == current_run:
@@ -679,6 +686,9 @@ def restore(api, scope, current_run, applicability, bridge=None):
             require(unexecuted_preflight(api, scope, prior, job), 'Unassigned preflight is ambiguous')
             continue
         if rid not in indexed:
+            from validation.main_prepare_refusal_recovery import recover
+            if recover(api, scope, prior, jobs):
+                continue
             if receipt_workflow:
                 if unexecuted_preflight(api, scope, prior, job):
                     continue

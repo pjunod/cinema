@@ -1131,12 +1131,13 @@ mod tests {
         assert!(p.pairs_with(Encoder::Qsv));
         assert!(p.pairs_with(Encoder::Vaapi));
         assert!(!Pipeline::DoviPassthrough.pairs_with(Encoder::Vaapi));
-        for encoder in [Encoder::Nvenc, Encoder::VideoToolbox] {
-            assert!(
-                !p.pairs_with(encoder),
-                "{encoder:?} has no measured HEVC Main10 route"
-            );
-        }
+        // Reviewed VideoToolbox Main10 is independently proved by the route
+        // planner; plain HDR10 has no Dolby metadata dependency.
+        assert!(p.pairs_with(Encoder::VideoToolbox));
+        assert!(
+            !p.pairs_with(Encoder::Nvenc),
+            "Nvenc has no measured HEVC Main10 route"
+        );
 
         for source in [Some("hdr10"), Some("hdr10plus")] {
             assert!(p.handles(source), "{source:?}");

@@ -549,7 +549,79 @@ sys.exit(main())
 '''
 
 
+def bootstrap_tool_components(regular, links, control, row):
+    actual = control_fields(control)
+    if (actual.get("Package") != "gperf" or actual.get("Version") != row["version"]
+            or actual.get("Architecture") != "amd64" or row["architecture"] != "amd64"):
+        raise ValueError("bootstrap package role/version/architecture mismatch")
+    member = row["executable_member"]
+    if member != "usr/bin/gperf" or member in links or member not in regular:
+        raise ValueError("bootstrap executable must be an authentic regular package member")
+    binary = regular[member]
+    if (digest(binary) != row["executable_sha256"] or len(binary) < 64
+            or binary[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", binary, 18)[0] != 62):
+        raise ValueError("bootstrap executable bytes or amd64 ELF ABI mismatch")
+    copyright_member = row["copyright_member"]
+    if copyright_member != "usr/share/doc/gperf/copyright" or copyright_member not in regular or copyright_member in links:
+        raise ValueError("authentic bootstrap package copyright required")
+    return {"gperf": binary, "copyright": regular[copyright_member], "control": control}
+
+
 def stage_build_tools(lock, provenance, archive_directory):
+    roles = lock.get("build_tools", {})
+    if set(roles) - {"meson", "gperf"}:
+        raise ValueError("unsupported consumed private bootstrap tool")
+    result = stage_meson_build_tool({"build_tools": {"meson": roles["meson"]}}, provenance, archive_directory) if "meson" in roles else {}
+    if "gperf" in roles:
+        row = roles["gperf"]
+        distribution = lock.get("distribution_packages", {}).get(row["distribution_role"], {})
+        if row["distribution_role"] != "gperf" or any(row[key] != distribution.get(key) for key in ["archive", "archive_sha256", "url", "version"]):
+            raise ValueError("private bootstrap must bind the authenticated distribution source offer")
+        package = checked_bytes(role_archive(archive_directory, row), row["archive_sha256"])
+        (regular, links), (control, control_links) = package_members(package, allow_unresolved=True)
+        if control_links or "control" not in control:
+            raise ValueError("bootstrap control metadata must be regular")
+        contents = bootstrap_tool_components(regular, links, control["control"], row)
+        base = provenance / "build-tools/gperf"
+        base.mkdir(parents=True)
+        contents["original-package.deb"] = package
+        for name, data in contents.items():
+            (base / name).write_bytes(data)
+            (base / name).chmod(0o555 if name == "gperf" else 0o444)
+        result["gperf"] = {**row, "files": {name: digest(data) for name, data in contents.items()},
+            "launcher": "provenance/build-tools/gperf/gperf", "license_member": "copyright",
+            "license_sha256": digest(contents["copyright"]), "source_offer": "provenance/distribution-sources/gperf"}
+    return result
+
+
+def verify_build_tools(root, tools):
+    if set(tools) - {"meson", "gperf"}:
+        raise ValueError("unsupported private bootstrap inventory")
+    if "meson" in tools:
+        verify_meson_build_tool(root, {"meson": tools["meson"]})
+    if "gperf" in tools:
+        row = tools["gperf"]
+        if (row["source_offer"] != "provenance/distribution-sources/gperf"
+                or row["launcher"] != "provenance/build-tools/gperf/gperf"):
+            raise ValueError("bootstrap authority must remain in the staged source offer")
+        base = root / "provenance/build-tools/gperf"
+        if any(path.is_symlink() for path in [base, *base.rglob("*")]):
+            raise ValueError("private bootstrap tree contains a filesystem link")
+        package = checked_bytes(base / "original-package.deb", row["archive_sha256"])
+        checked_bytes(root / row["source_offer"] / "original-package.deb", row["archive_sha256"])
+        (regular, links), (control, control_links) = package_members(package, allow_unresolved=True)
+        if control_links or "control" not in control:
+            raise ValueError("bootstrap control metadata changed")
+        expected = bootstrap_tool_components(regular, links, control["control"], row)
+        if (base / "gperf").stat().st_mode & 0o777 != 0o555:
+            raise ValueError("private bootstrap executable permissions changed")
+        expected["original-package.deb"] = package
+        actual = {str(path.relative_to(base)): digest(path.read_bytes()) for path in base.rglob("*") if path.is_file()}
+        if actual != row["files"] or actual != {name: digest(data) for name, data in expected.items()}:
+            raise ValueError("private bootstrap bytes differ from their authenticated package")
+
+
+def stage_meson_build_tool(lock, provenance, archive_directory):
     roles = lock.get("build_tools", {})
     if not roles:
         return {}
@@ -584,7 +656,7 @@ def stage_build_tools(lock, provenance, archive_directory):
         "import_policy": "isolated interpreter; stdlib plus pinned module tree only; no site/bytecode"}}
 
 
-def verify_build_tools(root, tools):
+def verify_meson_build_tool(root, tools):
     for name, tool in tools.items():
         if name != "meson" or tool["archive_sha256"] != MESON_SOURCE_SHA:
             raise ValueError("unsupported private build-tool source")
@@ -830,6 +902,9 @@ def verified_staging(root):
         raise ValueError("consumed role inventory changed after staging")
     if set(lock.get("build_tools", {})) != set(facts.get("build_tools", {})):
         raise ValueError("private build-tool role inventory changed")
+    for name, claims in lock.get("build_tools", {}).items():
+        if any(facts["build_tools"][name].get(key) != value for key, value in claims.items()):
+            raise ValueError("bootstrap tool/source claims changed from immutable lock")
     verify_build_tools(root, facts.get("build_tools", {}))
     distribution = facts.get("distribution_inputs", {})
     for role, row in distribution.get("roles", {}).items():
@@ -945,10 +1020,12 @@ def generate(root, jobs, seconds):
                    "PKG_CONFIG": "/usr/bin/pkg-config --define-prefix",
                    "CFLAGS": " ".join("-I" + str(root / p) for p in ["sdk/include", "sdk/sysroot/usr/include", "sdk/sysroot/usr/include/x86_64-linux-gnu"]),
                    "LDFLAGS": " ".join("-L" + str(root / p) for p in ["sdk/lib", "sdk/sysroot/usr/lib/x86_64-linux-gnu"]), "CC": "/usr/bin/gcc", "CXX": "/usr/bin/g++"}
+    if "gperf" in facts.get("build_tools", {}):
+        environment["PATH"] = str(root / "provenance/build-tools/gperf") + os.pathsep + environment["PATH"]
     outputs, completed, records = {}, set(), {}
     tool_versions = {}
     try:
-        for tool in ["gcc", "g++", "cmake", "meson", "ninja", "make", "pkg-config", "python3", "env"]:
+        for tool in ["gcc", "g++", "cmake", "meson", "ninja", "make", "pkg-config", "python3", "env"] + (["gperf"] if "gperf" in facts.get("build_tools", {}) else []):
             located = (root / facts["build_tools"]["meson"]["launcher"] if tool == "meson"
                        and "meson" in facts.get("build_tools", {}) else shutil.which(tool, path=environment["PATH"]))
             if not located:
@@ -1075,6 +1152,7 @@ def generate(root, jobs, seconds):
         facts["generation_execution"] = records
         facts["generator_tool_versions"] = tool_versions
         facts["generator_environment"] = environment
+        verify_build_tools(root, facts.get("build_tools", {}))
         facts["staged_source_offer_digest"] = facts["source_offer_digest"]
         facts["source_offer_digest"] = digest(json.dumps({"staged_sources": facts["staged_source_offer_digest"], "helper_sha256": facts["helper_sha256"], "executed_generators": records}, sort_keys=True, separators=(",", ":")).encode())
         facts["remaining"] = "full unchanged FFmpeg configure/compiler/link/ELF closure witness"

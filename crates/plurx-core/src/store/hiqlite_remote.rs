@@ -68,6 +68,7 @@ impl RemoteStore for HiqliteAuthStore {
         let (mode, a, b) = proof.args()?;
         Ok(self
             .client()
+            // authority: current receiver/grant revocation and ownership decide control admission.
             .query_consistent_map::<RemoteReceiver, _>(AUTHORITY, params!(id, user, mode, a, b))
             .await
             .map_err(database_error)?
@@ -81,6 +82,7 @@ impl RemoteStore for HiqliteAuthStore {
     ) -> Result<Option<RemoteReceiver>, StoreError> {
         Ok(self
             .client()
+            // authority: return current active receiver identity after credential revocation.
             .query_consistent_map::<RemoteReceiver, _>(METADATA, params!(id, user))
             .await
             .map_err(database_error)?
@@ -89,12 +91,14 @@ impl RemoteStore for HiqliteAuthStore {
     }
     async fn remote_receivers(&self, user: i64) -> Result<Vec<RemoteReceiver>, StoreError> {
         self.client()
+            // authority: publish active receiver catalogue from committed revocation state.
             .query_consistent_map::<RemoteReceiver, _>(LIST_RECEIVERS, params!(user))
             .await
             .map_err(database_error)
     }
     async fn remote_grants(&self, user: i64) -> Result<Vec<RemoteGrant>, StoreError> {
         self.client()
+            // authority: publish current grants for the owner without resurrecting a revoked grant.
             .query_consistent_map::<RemoteGrant, _>(LIST_GRANTS, params!(user))
             .await
             .map_err(database_error)

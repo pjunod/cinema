@@ -1397,6 +1397,27 @@ and dependency-path observations on this repair remain pending. The upstream
 export evidence is
 `69796eeca0e1da2d89ca4d838393294d7b7b63774bc551e133f43df8b0c14b59`.
 
+The next actual generator on `2cd6000b3d2ad1da200dd83abc72a23ddefaad91`
+passes the authentic Vulkan-Headers isolated install and Vulkan-Loader's
+CMake consumer. Fontconfig's Meson setup then cannot find `gperf`; its
+upstream fallback attempts a Git download, which the offline container
+refuses. The attempt fails after 78.77 seconds without an OOM or deadline.
+The container stops and its network configuration is restored. The terminal
+receipt is `7f3a694cd573ef14889d7216e69b1784e5134867233313595b5297ae36900621`.
+
+The repair binds Bookworm `gperf` 3.1-1 amd64, its copyright, and its authentic
+DSC/original/Debian source offers through the existing distribution-source
+owner. The private bootstrap validates regular-file extraction, executable
+hash, ELF architecture and version, and rechecks its source/license authority
+around execution. It neither installs into the host nor substitutes generated
+metadata. The remaining upstream program/custom-target declarations were
+audited against the controlled tool path; optional test/documentation tools
+are not added as production requirements. Actual execution of this repair
+remains pending. The binary hash is
+`57cc814ac7be078e80b59e2baad4bfa6944f62ea7575de73e0f2d50b2adaa858`;
+the source/tool evidence is
+`be07d4d93f6a660b4f1d5a9d7ee92e0e8bd3b856a4f47e487a4748c321360f32`.
+
 The shipping source also closes a separate integration gap: published and CI
 smoke images bypassed the local `make docker` seam. Both now have a shared
 Bookworm package-export contract and consume its audited output; the renderer

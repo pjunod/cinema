@@ -260,6 +260,10 @@ impl PeerTransport {
             clock_guard.zip(clock_ticket),
             |response| async move {
                 if let Some((target, nonce, member_scoped)) = response_binding {
+                    #[cfg(test)]
+                    if signature.is_none() {
+                        eprintln!("Peer diagnostic stage=missing_response_signature path={path} status={}", response.status);
+                    }
                     let signature = signature.ok_or(PeerTransportError::InvalidResponse)?;
                     let payload = signed_response_payload(response.status.as_u16(), &response.body);
                     let verified = if member_scoped {
@@ -294,6 +298,8 @@ impl PeerTransport {
                         .map_err(|_| PeerTransportError::InvalidResponse)?
                     };
                     if !verified {
+                        #[cfg(test)]
+                        eprintln!("Peer diagnostic stage=response_authentication path={path} status={}", response.status);
                         return Err(PeerTransportError::InvalidResponse);
                     }
                 }
@@ -521,6 +527,11 @@ where
         if current.clock_generation != ticket.clock_generation
             || current.state_generation != ticket.state_generation
         {
+            #[cfg(test)]
+            eprintln!(
+                "Peer diagnostic stage=clock_ticket_changed status={}",
+                response.status
+            );
             return Err(PeerTransportError::InvalidResponse);
         }
         response.clock_timing = Some((timestamp_ms, received_ms, ticket));

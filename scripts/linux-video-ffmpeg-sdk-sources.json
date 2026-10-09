@@ -7046,6 +7046,34 @@
           }
         }
       }
+    },
+    "gperf": {
+      "archive": "gperf_3.1-1_amd64.deb",
+      "archive_sha256": "874667dd12145497e8227e6652fab8463a896a272fc6626428690525db746959",
+      "url": "https://deb.debian.org/debian/pool/main/g/gperf/gperf_3.1-1_amd64.deb",
+      "version": "3.1-1",
+      "configure_flags": [],
+      "source_offer": {
+        "package": "gperf",
+        "version": "3.1-1",
+        "files": {
+          "gperf_3.1-1.dsc": {
+            "sha256": "1fba8cd36ea5e041f8f7079336cfc6297bb7dae3d92d370ce43fbbb4d9ffa0e3",
+            "bytes": 1678,
+            "url": "https://deb.debian.org/debian/pool/main/g/gperf/gperf_3.1-1.dsc"
+          },
+          "gperf_3.1.orig.tar.gz": {
+            "sha256": "1f88819b78187350e7e6ca24b5e15cbf4083659773508d3f018b9b525e9d1cb8",
+            "bytes": 1208351,
+            "url": "https://deb.debian.org/debian/pool/main/g/gperf/gperf_3.1.orig.tar.gz"
+          },
+          "gperf_3.1-1.debian.tar.xz": {
+            "sha256": "b371e2f62314e2cd4c97a5c666ba6222f4177e83fe9a80c0febad05bb543bf63",
+            "bytes": 4068,
+            "url": "https://deb.debian.org/debian/pool/main/g/gperf/gperf_3.1-1.debian.tar.xz"
+          }
+        }
+      }
     }
   },
   "distribution_index_binding": {
@@ -7073,6 +7101,17 @@
       "consumed_by": "Fontconfig2.17.1 requires Meson>=1.6.1; Bookworm bootstrap1.0.1 insufficient",
       "python_requires": ">=3.10",
       "license_member": "meson-1.12.1/COPYING"
+    },
+    "gperf": {
+      "archive": "gperf_3.1-1_amd64.deb",
+      "archive_sha256": "874667dd12145497e8227e6652fab8463a896a272fc6626428690525db746959",
+      "url": "https://deb.debian.org/debian/pool/main/g/gperf/gperf_3.1-1_amd64.deb",
+      "version": "3.1-1",
+      "distribution_role": "gperf",
+      "executable_member": "usr/bin/gperf",
+      "executable_sha256": "57cc814ac7be078e80b59e2baad4bfa6944f62ea7575de73e0f2d50b2adaa858",
+      "architecture": "amd64",
+      "copyright_member": "usr/share/doc/gperf/copyright"
     }
   }
 }

@@ -140,6 +140,49 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
                           git_object(repository, "HEAD^{commit}"), ancestry.returncode == 0)
 
 
+def resolve_effort_history_binding(environment: Mapping[str, str], repository: Path) -> dict[str, object]:
+    """Authenticate a dispatched task's PR, live effort tips and actual main."""
+    from validation.python_unit_receipts import API, ReceiptError, identity
+
+    if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or environment.get("GITHUB_RUN_ATTEMPT") != "1"):
+        raise QualificationError("effort history requires a fresh manual task dispatch")
+    branch = environment.get("GITHUB_REF_NAME", "")
+    commit = environment.get("GITHUB_SHA", "")
+    if (not re.fullmatch(r"[A-Za-z0-9._/-]+", branch)
+            or environment.get("GITHUB_REF") != "refs/heads/" + branch
+            or not re.fullmatch(r"[0-9a-f]{40}", commit)
+            or git_object(repository, "HEAD^{commit}") != commit):
+        raise QualificationError("effort history checkout identity mismatch")
+    root = environment.get("GITHUB_API_URL", "").rstrip("/")
+    server = urllib.parse.urlsplit(environment.get("GITHUB_SERVER_URL", ""))
+    origin = urllib.parse.urlsplit(root)
+    if (origin.scheme, origin.netloc) != (server.scheme, server.netloc):
+        raise QualificationError("effort history API origin mismatch")
+    try:
+        api = API(root, environment.get("GITHUB_REPOSITORY", ""), environment.get("GITHUB_TOKEN", ""))
+        scope = identity(api, branch, commit)
+        pr = api_document(environment, "/pulls/" + str(scope["pr"]))
+        head = pr["head"]
+        base = pr["base"]
+        assert pr["number"] == scope["pr"] and pr["state"] == "open" and pr.get("merged") is False
+        assert head["repo"]["id"] == base["repo"]["id"] == scope["repository"]
+        assert head["ref"] == branch and head["sha"] == commit
+        assert base["ref"] == scope["base"] and base["ref"].startswith("effort/")
+        head_tip = api_document(environment, "/branches/" + urllib.parse.quote(branch, safe=""))["commit"]["id"]
+        base_tip = api_document(environment, "/branches/" + urllib.parse.quote(base["ref"], safe=""))["commit"]["id"]
+        main_tip = api_document(environment, "/branches/main")["commit"]["id"]
+        assert head_tip == commit and base["sha"] == base_tip
+        assert all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base_tip, main_tip))
+        for ancestor, descendant in ((base_tip, "HEAD"), (main_tip, base_tip)):
+            check = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant],
+                                   cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+            assert check.returncode == 0
+    except (ReceiptError, KeyError, TypeError, AssertionError) as exc:
+        raise QualificationError("effort task identity, live tips or main ancestry mismatch") from exc
+    return dict(base_sha=main_tip, effort_sha=base_tip, head_sha=commit, pull_request=scope["pr"])
+
+
 def build_receipt(
     environment: Mapping[str, str],
     results: Mapping[str, str],
@@ -224,8 +267,28 @@ def build_receipt(
             "qualification results are missing required jobs: "
             + ", ".join(sorted(missing))
         )
+    retained = None
+    if environment.get('PLURX_RETAINED_UNITS'):
+        try:
+            retained = json.loads(environment['PLURX_RETAINED_UNITS'])
+            assert binding is not None
+            assert retained['version'] == 1
+            assert retained['candidate_sha'] == tested_sha
+            assert retained['base_sha'] == binding['base_sha']
+            assert retained['pull_request'] == binding['pull_request']
+            assert re.fullmatch(r'[0-9a-f]{64}', retained['sha256'])
+            assert retained['attestation_comments']
+            assert set(retained['lanes']) <= {'rust', 'apple', 'android_jvm',
+                                              'android_device', 'windows_compile'}
+            assert all(row['mode'] == ('explicit-human-waiver' if lane == 'windows_compile'
+                                      else 'retained-unit-evidence')
+                       for lane, row in retained['lanes'].items())
+        except (KeyError, ValueError, TypeError, AssertionError) as exc:
+            raise QualificationError('retained unit verification binding invalid') from exc
     incomplete = {
-        name: result for name, result in results.items() if result != "success"
+        name: result for name, result in results.items()
+        if result != "success" and not (result == "skipped" and retained
+                                       and name in retained['lanes'])
     }
     if incomplete:
         detail = ", ".join(
@@ -264,6 +327,7 @@ def build_receipt(
         "run_id": environment["GITHUB_RUN_ID"],
         "run_attempt": environment["GITHUB_RUN_ATTEMPT"],
         "jobs": dict(sorted(results.items())),
+        "retained_unit_evidence": retained,
         "binding_mode": "authenticated-manual-promotion" if binding else "pull-request-event",
     }
 
@@ -306,6 +370,21 @@ def main(argv: list[str] | None = None) -> int:
             live_binding = resolve_manual_binding(environment, args.repository)
             if json.loads(environment.get("PLURX_PROMOTION_BINDING", "null")) != live_binding:
                 raise QualificationError("promotion metadata moved after qualification start")
+        if environment.get('PLURX_RETAINED_UNITS'):
+            from validation import promotion_unit_retention as retention
+            from validation.python_unit_receipts import ReceiptError
+            prior_proof = json.loads(environment['PLURX_RETAINED_UNITS'])
+            try:
+                api = retention.runner_api(environment)
+                raw = retention.attachment_bytes(api, live_binding['pull_request'],
+                    prior_proof['attachment_id'], prior_proof['attachment_uuid'], prior_proof['sha256'])
+                refreshed = retention.verify(api, raw, prior_proof['sha256'], live_binding,
+                    git_object(args.repository, 'HEAD^{commit}'), prior_proof['attachment_id'],
+                    prior_proof['attachment_uuid'])
+            except ReceiptError as exc:
+                raise QualificationError('retained unit proof refused at final gate: ' + str(exc)) from exc
+            if refreshed != prior_proof:
+                raise QualificationError('retained unit attestation changed after scope')
         raw_results = json.loads(os.environ["PLURX_QUALIFICATION_RESULTS"])
         if not isinstance(raw_results, dict) or not all(
             isinstance(key, str) and isinstance(value, str)

@@ -375,3 +375,79 @@ def test_cmake_exports_reject_build_paths_and_existing_sdk_bytes():
         with unittest.TestCase().assertRaises(ValueError):
             module.publish_generated_output(sdk, name, build, selected)
         assert not (sdk / name).exists()
+
+
+def test_bootstrap_package_rejects_changed_binary_wrong_abi_and_link_alias():
+    import struct
+    module = helper()
+    binary = bytearray(64)
+    binary[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", binary, 18, 62)
+    binary = bytes(binary)
+    row = {"version": "3.1-1", "architecture": "amd64", "executable_member": "usr/bin/gperf",
+           "executable_sha256": hashlib.sha256(binary).hexdigest(),
+           "copyright_member": "usr/share/doc/gperf/copyright"}
+    regular = {"usr/bin/gperf": binary, "usr/share/doc/gperf/copyright": b"original license"}
+    control = b"Package: gperf\nVersion: 3.1-1\nArchitecture: amd64\n"
+    assert module.bootstrap_tool_components(regular, {}, control, row)["gperf"] == binary
+    with unittest.TestCase().assertRaises(ValueError):
+        module.bootstrap_tool_components({**regular, "usr/bin/gperf": binary + b"changed"}, {}, control, row)
+    other = bytearray(binary)
+    struct.pack_into("<H", other, 18, 183)
+    wrong = bytes(other)
+    with unittest.TestCase().assertRaises(ValueError):
+        module.bootstrap_tool_components({**regular, "usr/bin/gperf": wrong}, {}, control,
+                                         {**row, "executable_sha256": hashlib.sha256(wrong).hexdigest()})
+    with unittest.TestCase().assertRaises(ValueError):
+        module.bootstrap_tool_components(regular, {"usr/bin/gperf": "/usr/bin/host-gperf"}, control, row)
+    with unittest.TestCase().assertRaises(ValueError):
+        module.bootstrap_tool_components(regular, {}, control.replace(b"3.1-1", b"3.2-1"), row)
+
+
+def test_private_bootstrap_fence_rejects_tool_license_and_source_offer_substitution():
+    import struct
+    module = helper()
+    binary = bytearray(64)
+    binary[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", binary, 18, 62)
+    binary = bytes(binary)
+    package = b"authenticated package fixture"
+    control = b"Package: gperf\nVersion: 3.1-1\nArchitecture: amd64\n"
+    regular = {"usr/bin/gperf": binary, "usr/share/doc/gperf/copyright": b"original license"}
+    row = {"version": "3.1-1", "architecture": "amd64", "executable_member": "usr/bin/gperf",
+           "executable_sha256": hashlib.sha256(binary).hexdigest(),
+           "copyright_member": "usr/share/doc/gperf/copyright",
+           "archive_sha256": hashlib.sha256(package).hexdigest(),
+           "source_offer": "provenance/distribution-sources/gperf",
+           "launcher": "provenance/build-tools/gperf/gperf"}
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory).resolve()
+        base = root / "provenance/build-tools/gperf"
+        base.mkdir(parents=True)
+        offered = root / row["source_offer"] / "original-package.deb"
+        offered.parent.mkdir(parents=True)
+        offered.write_bytes(package)
+        contents = {"gperf": binary, "copyright": b"original license", "control": control,
+                    "original-package.deb": package}
+        for name, data in contents.items():
+            (base / name).write_bytes(data)
+        (base / "gperf").chmod(0o555)
+        row["files"] = {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}
+        # Mock only archive decoding; byte/hash/fence checks still inspect real files.
+        with patch.object(module, "package_members", return_value=((regular, {}), ({"control": control}, {}))):
+            module.verify_build_tools(root, {"gperf": row})
+            for name in ["gperf", "copyright"]:
+                path = base / name
+                path.chmod(0o644)
+                path.write_bytes(contents[name] + b"changed")
+                if name == "gperf":
+                    path.chmod(0o555)
+                with unittest.TestCase().assertRaises(ValueError):
+                    module.verify_build_tools(root, {"gperf": row})
+                path.chmod(0o644)
+                path.write_bytes(contents[name])
+                if name == "gperf":
+                    path.chmod(0o555)
+            offered.write_bytes(package + b"changed")
+            with unittest.TestCase().assertRaises(ValueError):
+                module.verify_build_tools(root, {"gperf": row})

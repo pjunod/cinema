@@ -1,5 +1,6 @@
 //! Portable cluster backup ownership and scheduling.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -177,22 +178,32 @@ impl BackupManager {
         client: &hiqlite::Client,
         destination: &Path,
     ) -> Result<(PathBuf, ClusterBackupManifest), StoreError> {
-        let before = client.metrics_db().await.map_err(|error| {
-            StoreError::Database(format!("reading local Raft metrics: {error}"))
-        })?;
-        if before.last_applied.as_ref().map(|log| log.index) != before.last_log_index {
-            return Err(StoreError::Task(
-                "local voter is behind its observed Raft log; backup skipped".to_owned(),
-            ));
-        }
-        let applied = client.trigger_db_snapshot().await.map_err(|error| {
-            StoreError::Database(format!("triggering database snapshot: {error}"))
-        })?;
+        // One budget belongs to this already-acquired backup lease. Catch-up,
+        // the one snapshot trigger and publication all consume this deadline.
         let deadline = tokio::time::Instant::now() + self.snapshot_timeout;
-        loop {
+        wait_for_local_backup_apply(deadline, || async {
             let metrics = client.metrics_db().await.map_err(|error| {
-                StoreError::Database(format!("waiting for database snapshot: {error}"))
+                StoreError::Database(format!("reading local Raft metrics: {error}"))
             })?;
+            Ok((
+                metrics.last_applied.as_ref().map(|log| log.index),
+                metrics.last_log_index,
+            ))
+        })
+        .await?;
+        let applied = backup_phase_before_deadline(deadline, "snapshot trigger", async {
+            client.trigger_db_snapshot().await.map_err(|error| {
+                StoreError::Database(format!("triggering database snapshot: {error}"))
+            })
+        })
+        .await?;
+        loop {
+            let metrics = backup_phase_before_deadline(deadline, "snapshot publication", async {
+                client.metrics_db().await.map_err(|error| {
+                    StoreError::Database(format!("waiting for database snapshot: {error}"))
+                })
+            })
+            .await?;
             if metrics
                 .snapshot
                 .as_ref()
@@ -200,13 +211,10 @@ impl BackupManager {
             {
                 break;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(StoreError::Task(format!(
-                    "database snapshot did not publish applied index {applied} within {:?}",
-                    self.snapshot_timeout
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(50)),
+            )
+            .await;
         }
 
         let snapshot_dir = self
@@ -358,6 +366,54 @@ fn record_schedule_success(last_schedule_day: &AtomicI64, day: i64) {
     last_schedule_day.store(day, Ordering::Release);
 }
 
+async fn backup_phase_before_deadline<T>(
+    deadline: tokio::time::Instant,
+    phase: &str,
+    work: impl Future<Output = Result<T, StoreError>>,
+) -> Result<T, StoreError> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(StoreError::Task(format!(
+            "backup {phase} exceeded the original snapshot deadline"
+        )));
+    }
+    let result = tokio::time::timeout_at(deadline, work).await.map_err(|_| {
+        StoreError::Task(format!(
+            "backup {phase} exceeded the original snapshot deadline"
+        ))
+    })?;
+    // A ready future can win a poll against its simultaneously ready timer.
+    // Even then, completion at/after the original deadline is not admission.
+    if tokio::time::Instant::now() >= deadline {
+        return Err(StoreError::Task(format!(
+            "backup {phase} exceeded the original snapshot deadline"
+        )));
+    }
+    result
+}
+
+/// Observe only local metrics: no write, snapshot trigger, lease acquisition
+/// or deadline refresh is allowed while the local apply queue catches up.
+async fn wait_for_local_backup_apply<F, Fut>(
+    deadline: tokio::time::Instant,
+    mut read_progress: F,
+) -> Result<(), StoreError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(Option<u64>, Option<u64>), StoreError>>,
+{
+    loop {
+        let (applied, last_log) =
+            backup_phase_before_deadline(deadline, "local Raft catch-up", read_progress()).await?;
+        if applied == last_log {
+            return Ok(());
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + Duration::from_millis(50)),
+        )
+        .await;
+    }
+}
+
 pub(crate) fn parse_schedule_minute(value: &str) -> Option<u64> {
     let (hour, minute) = value.trim().split_once(':')?;
     let hour = hour.parse::<u64>().ok()?;
@@ -433,6 +489,110 @@ mod tests {
     use plurx_core::store::SqliteStore;
 
     use crate::job_lease::{acquire_cluster_job, AdmittedRoleJobAuthority};
+
+    #[tokio::test(start_paused = true)]
+    async fn backup_waits_for_the_current_log_apply() {
+        let mut samples = [(Some(1), Some(2)), (Some(2), Some(3)), (Some(3), Some(3))].into_iter();
+        let start = tokio::time::Instant::now();
+        wait_for_local_backup_apply(start + Duration::from_secs(1), || {
+            let sample = samples.next().expect("only three passive observations");
+            async move { Ok(sample) }
+        })
+        .await
+        .expect("the current log has applied");
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(100)
+        );
+        assert!(samples.next().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backup_lag_cannot_refresh_the_original_deadline() {
+        let start = tokio::time::Instant::now();
+        let mut log = 2;
+        let error = wait_for_local_backup_apply(start + Duration::from_millis(120), || {
+            log += 1;
+            let sample = (Some(log - 1), Some(log));
+            async move { Ok(sample) }
+        })
+        .await
+        .expect_err("continuous lag must expire");
+        assert!(error.to_string().contains("original snapshot deadline"));
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(120)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backup_stalled_metrics_read_is_bounded() {
+        let start = tokio::time::Instant::now();
+        let error = wait_for_local_backup_apply(start + Duration::from_millis(120), || {
+            std::future::pending::<Result<(Option<u64>, Option<u64>), StoreError>>()
+        })
+        .await
+        .expect_err("a stalled metrics read must expire");
+        assert!(error.to_string().contains("local Raft catch-up"));
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(120)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backup_metrics_error_is_not_retried() {
+        let start = tokio::time::Instant::now();
+        let mut reads = 0;
+        let error = wait_for_local_backup_apply(start + Duration::from_secs(1), || {
+            reads += 1;
+            async { Err(StoreError::Database("metrics unavailable".to_owned())) }
+        })
+        .await
+        .expect_err("a database error must remain visible");
+        assert_eq!(reads, 1);
+        assert!(error.to_string().contains("metrics unavailable"));
+        assert_eq!(tokio::time::Instant::now(), start);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backup_phase_rejects_completion_at_the_original_deadline() {
+        let start = tokio::time::Instant::now();
+        let error = backup_phase_before_deadline(
+            start + Duration::from_millis(120),
+            "snapshot publication",
+            async {
+                tokio::time::advance(Duration::from_millis(120)).await;
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("late ready completion cannot count as timely admission");
+        assert!(error.to_string().contains("original snapshot deadline"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backup_snapshot_trigger_inherits_the_spent_catchup_budget() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(120);
+        wait_for_local_backup_apply(deadline, || async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok((Some(3), Some(3)))
+        })
+        .await
+        .expect("catch-up leaves only twenty milliseconds");
+        let error = backup_phase_before_deadline(deadline, "snapshot trigger", async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok(())
+        })
+        .await
+        .expect_err("the trigger cannot acquire a new budget");
+        assert!(error.to_string().contains("snapshot trigger"));
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(120)
+        );
+    }
 
     #[test]
     fn schedule_is_one_strict_utc_minute() {

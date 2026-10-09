@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** follow-up implementation active; prior contribution handed off · **Updated:** 2026-10-08 · **Owner:** managing agent with
+**Status:** follow-up implementation active; prior contribution landed · **Updated:** 2026-10-08 · **Owner:** managing agent with
 three GPT-6.1 Sol builders · **Integration:** `effort/video-processing-followups`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
@@ -15,9 +15,10 @@ measurements, negative results, provenance and reproducible raw receipts.
 On 2026-10-08 the user explicitly promoted GPU subtitle compositing,
 non-Mac Profile 5 hardware decoding and the caption-bearing file-VOD
 VideoToolbox failure into active implementation. These are now required
-work, not conditional follow-ups. The accepted PR #904 remains with the
-merge coordinator; this work uses a separate effort based on the reviewed
-combined source `b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`.
+work, not conditional follow-ups. The accepted PR #904 source is an ancestor
+of Batch03's main landing `1088d7529401297bddced74bfa11c166457468d8`.
+This separate effort began at reviewed combined source
+`b8461f30f5ae6f69c32ec671a81f3d1aedb4f219` and is integrating that landing.
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
@@ -36,30 +37,24 @@ Accepted earlier packages and evidence remain read-only. The pinned Rust
 Unit execution and main landing remain with the designated merge coordinator.
 No final review or implementation completion is claimed for F1–F3 yet.
 
-**Latest checkpoint:** `50784a2b6` commits the complete pinned Linux SDK
-source closure. Its normal commit hook passes in 73 seconds, including
-workspace Clippy, formatting, catalog and JavaScript checks. Fresh static
-SDK staging passes in 7.25 seconds with a peak resident set of 763 MiB;
-this verifies source preparation, not generated headers or a linked package.
-Linux all-target check passes for core and daemon with `hiqlite-store` on
-Rust 1.97.1 in 7 minutes 19 seconds. A Clippy-only continuation passes on
-Rust-equivalent `7ae44966d` in 4 minutes 37 seconds; the original timeout
-and passing check are retained. All owned Linux processes are reaped. These
-passes precede integration of current main `079960dae`; that merged source
-requires fresh affected compilation. The updated Mac daemon release
-stopped on an actual memory-pressure warning after 202.5 seconds; its owned
-processes are absent and the partial cache is retained. The Bookworm retry
-passes FreeType configure, then refuses its missing pkg-config output after
-23.60 seconds. A repair invokes FreeType's genuine metadata make target;
-the other generator recipes were checked for the same omission. The real
-retry passes that step and then refuses a missing Vulkan CMake export after
-73.36 seconds. The repair uses Vulkan-Headers' upstream isolated install
-target to supply its authentic relocatable package configuration and binds
-consumer searches to the SDK. Actual post-repair generation remains pending.
-Unit execution, final
-adversarial review and merge handoff remain outstanding. The native build
-uses one job, actual memory-pressure monitoring and its own cache; unrelated
-compiler processes alone no longer prevent it from starting.
+**Latest checkpoint:** the source through `2cd6000b3` is committed and its
+normal compile hook passes. Linux check and Clippy pass on the earlier,
+Rust-equivalent `50784a2b6`/`7ae44966d` inputs. Batch03 has since landed as
+main `1088d7529`; that foundation and the current SDK repair are being
+integrated before final qualification. Changed Rust inputs require fresh
+compilation; the unchanged FFmpeg package evidence remains applicable.
+
+The actual SDK generator now passes the FreeType metadata target and the
+Vulkan-Headers export consumed by Vulkan-Loader. It next refuses a missing
+`gperf` bootstrap program during Fontconfig setup. The repair supplies a
+hash-bound Bookworm binary, copyright and source offer through the private
+tool owner; its actual execution remains pending. No host installation or
+network fallback substitutes for that dependency. The Mac daemon release
+on `2cd6000b3` is a precursor while the foundation changes. Its bounded
+build records warning-level pressure and stops for critical pressure or
+exhaustion, rather than discarding work on a transient warning alone. Final
+combined-source qualification, adversarial review, unit execution and merge
+handoff remain outstanding.
 
 **Integrated source:** `84ad32b51` prepares pinned Linux sources and generic
 strict Dolby patches; `622c1ee42` repairs caption SEI parsing; `a9e0f2c98`

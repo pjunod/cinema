@@ -120,6 +120,7 @@ impl InvitationStore for HiqliteAuthStore {
             return Err(StoreError::Identity("invalid broker scope".into()));
         }
         self.client()
+            // authority: report current invalid references before allowing broker cleanup.
             .query_consistent_map::<InvitationBrokerHealth, _>(
                 broker_health_query(),
                 params!(scope_hash.to_owned()),
@@ -132,6 +133,7 @@ impl InvitationStore for HiqliteAuthStore {
         validate_invitation_ids(&[], user)?;
         Ok(self
             .client()
+            // authority: committed retained references define the account cleanup budget.
             .query_consistent_map::<InvitationBudget, _>(CLEANUP_BUDGET, params!(user))
             .await?
             .pop()
@@ -152,6 +154,7 @@ impl InvitationStore for HiqliteAuthStore {
         let account = self.invitation_cleanup_budget(r.user_id).await?;
         let global = self
             .client()
+            // authority: committed cleanup budgets and invalid references fence transport admission.
             .query_consistent_map::<InvitationBudget, _>(GLOBAL_CLEANUP_BUDGET, params!())
             .await?
             .pop()
@@ -159,6 +162,7 @@ impl InvitationStore for HiqliteAuthStore {
             .budget;
         let invalid = self
             .client()
+            // authority: committed cleanup budgets and invalid references fence transport admission.
             .query_consistent_map::<InvitationInvalid, _>(CLEANUP_INVALID, params!(r.user_id))
             .await?
             .pop()
@@ -262,6 +266,7 @@ impl InvitationStore for HiqliteAuthStore {
         let reference = reference.encode()?;
         let invalid = self
             .client()
+            // authority: refuse cleanup of an incompatible committed broker reference.
             .query_consistent_map::<InvitationInvalid, _>(
                 cleanup_invalid_query(),
                 params!(id.to_owned(), user),
@@ -310,6 +315,7 @@ impl InvitationStore for HiqliteAuthStore {
         let id = id.to_owned();
         let invalid = self
             .client()
+            // authority: retained reference validity fences destructive cleanup.
             .query_consistent_map::<InvitationInvalid, _>(
                 cleanup_invalid_query(),
                 params!(id.to_owned(), user),
@@ -343,6 +349,7 @@ impl InvitationStore for HiqliteAuthStore {
     async fn invitation_revocations(&self) -> Result<Vec<InvitationRevocation>, StoreError> {
         Ok(self
             .client()
+            // authority: dispatch cleanup only from committed revocation work.
             .query_consistent_map::<InvitationRevocation, _>(REVOKE_WORK, params!())
             .await?)
     }
@@ -357,6 +364,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         Ok(self
             .client()
+            // authority: page committed retained revocations without inventing completed cleanup.
             .query_consistent_map::<InvitationRevocation, _>(REVOKE_PAGE, params!(after))
             .await?)
     }
@@ -430,6 +438,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         Ok(self
             .client()
+            // authority: committed phone login identity and generation fence binding.
             .query_consistent_map::<InvitationBinding, _>(BINDING, params!(id, user, hash))
             .await?
             .pop()
@@ -464,6 +473,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         Ok(self
             .client()
+            // authority: current opt-in consent and revocation decide invitation admission.
             .query_consistent_map::<InvitationConsent, _>(
                 LIST_CONSENTS,
                 params!(phone, user, after),
@@ -479,6 +489,7 @@ impl InvitationStore for HiqliteAuthStore {
         validate_invitation_ids(&[phone, receiver], user)?;
         Ok(self
             .client()
+            // authority: current phone/receiver/consent generations define the authority scope.
             .query_consistent_map::<InvitationScope, _>(
                 scope_query(true),
                 params!(phone, receiver, user),
@@ -495,6 +506,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         Ok(self
             .client()
+            // authority: cleanup must observe committed consent generations and retained references.
             .query_consistent_map::<InvitationConsent, _>(RETAINED_CONSENTS, params!(after))
             .await?)
     }
@@ -507,6 +519,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         Ok(self
             .client()
+            // authority: dispatch eligibility uses committed opt-in and endpoint generations.
             .query_consistent_map::<InvitationScope, _>(dispatch_candidates_query(), params!(after))
             .await?)
     }
@@ -518,6 +531,7 @@ impl InvitationStore for HiqliteAuthStore {
         validate_invitation_ids(&[receiver], user)?;
         Ok(self
             .client()
+            // authority: current receiver/login generations fence the exposed scopes.
             .query_consistent_map::<InvitationScope, _>(scope_query(false), params!(receiver, user))
             .await?)
     }
@@ -531,6 +545,7 @@ impl InvitationStore for HiqliteAuthStore {
         validate_invitation_ids(&[phone, id], user)?;
         Ok(self
             .client()
+            // authority: return the committed event and its current authority scope.
             .query_consistent_map::<InvitationEvent, _>(
                 event_query(true),
                 params!(phone, user, now, id),
@@ -551,6 +566,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         Ok(self
             .client()
+            // authority: poll committed revision-ordered events after current identity checks.
             .query_consistent_map::<InvitationEvent, _>(
                 event_query(false),
                 params!(phone, user, now, after),
@@ -561,6 +577,7 @@ impl InvitationStore for HiqliteAuthStore {
         validate_invitation_ids(&[phone], user)?;
         Ok(self
             .client()
+            // authority: the committed revision is the durable event acknowledgement boundary.
             .query_consistent_map::<InvitationRevision, _>(REVISION, params!(phone, user))
             .await?
             .pop()
@@ -593,6 +610,7 @@ impl InvitationStore for HiqliteAuthStore {
     ) -> Result<Option<InvitationPhone>, StoreError> {
         Ok(self
             .client()
+            // authority: current committed phone metadata prevents revoked identity reuse.
             .query_consistent_map::<InvitationPhone, _>(PHONE_METADATA, params!(id, user))
             .await?
             .pop())
@@ -608,6 +626,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         Ok(self
             .client()
+            // authority: current phone secret and generation fence authentication.
             .query_consistent_map::<InvitationPhone, _>(PHONE_AUTHORITY, params!(id, user, hash))
             .await?
             .pop())
@@ -618,6 +637,7 @@ impl InvitationStore for HiqliteAuthStore {
         after: &str,
     ) -> Result<Vec<InvitationPhone>, StoreError> {
         self.client()
+            // authority: list current phone identities from committed login and revocation state.
             .query_consistent_map::<InvitationPhone, _>(LIST_PHONES, params!(user, after))
             .await
             .map_err(database_error)
@@ -697,6 +717,7 @@ impl InvitationStore for HiqliteAuthStore {
     ) -> Result<Option<InvitationConsent>, StoreError> {
         Ok(self
             .client()
+            // authority: current opt-in consent, expiry and generations fence admission.
             .query_consistent_map::<InvitationConsent, _>(CONSENT, params!(p, r, user))
             .await?
             .pop())
@@ -711,6 +732,7 @@ impl InvitationStore for HiqliteAuthStore {
         }
         let mut row = self
             .client()
+            // authority: committed login token identity fences explicit phone rebind.
             .query_consistent_map::<InvitationLogin, _>(LOGIN, params!(digest))
             .await?
             .pop();

@@ -1989,12 +1989,7 @@ impl HiqliteAuthStore {
             .await
             .map_err(database_error)?;
 
-        for result in timeout_store(client.batch(super::sharing::SCHEMA)).await? {
-            result.map_err(database_error)?;
-        }
-        for result in timeout_store(client.batch(super::sharing_ingress_custody::SCHEMA)).await? {
-            result.map_err(database_error)?;
-        }
+        Self::install_baseline_sharing_schema(&client).await?;
         super::sharing_source_schema::provision_dispatch_guard(&client).await?;
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -2031,6 +2026,67 @@ impl HiqliteAuthStore {
         store.install_remote_schema(None).await?;
         store.install_invitation_schema(None).await?;
         Ok(store)
+    }
+
+    async fn install_baseline_sharing_schema(client: &Client) -> Result<(), StoreError> {
+        let mut objects = Vec::new();
+        for schema in [
+            super::sharing::SCHEMA,
+            super::sharing_ingress_custody::SCHEMA,
+        ] {
+            for part in baseline_sharing_statements(schema) {
+                let mut sql = part.trim();
+                while sql.starts_with("--") {
+                    sql = sql.split_once('\n').map_or("", |(_, rest)| rest.trim());
+                }
+                if sql.is_empty() {
+                    continue;
+                }
+                let words: Vec<_> = sql.split_whitespace().collect();
+                if words.len() < 3 || words[0] != "CREATE" || !matches!(words[1], "TABLE" | "INDEX")
+                {
+                    return Err(StoreError::Migration(
+                        "unsupported baseline sharing schema statement".into(),
+                    ));
+                }
+                objects.push((words[2], sql));
+            }
+        }
+        let names = objects
+            .iter()
+            .map(|(name, _)| format!("'{}'", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        // authority: committed sharing object shape fences bootstrap DDL.
+        let installed = timeout_store(client.query_consistent_map::<RemoteShapeRow, _>(
+            format!(
+                "SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names})"
+            ),
+            params!(),
+        ))
+        .await?;
+        let mut pending = Vec::new();
+        for (name, sql) in objects {
+            let existing = installed
+                .iter()
+                .filter(|row| row.name == name)
+                .collect::<Vec<_>>();
+            match existing.as_slice() {
+                [] => pending.push((sql.to_owned(), params!())),
+                [row] if row.sql == sql => {}
+                _ => {
+                    return Err(StoreError::Migration(format!(
+                        "incompatible sharing bootstrap object {name}"
+                    )))
+                }
+            }
+        }
+        if !pending.is_empty() {
+            for result in timeout_store(client.txn(pending)).await? {
+                result.map_err(database_error)?;
+            }
+        }
+        Ok(())
     }
 
     /// Open an already-bootstrapped cluster, refusing incompatible state.
@@ -3792,6 +3848,7 @@ impl HiqliteAuthStore {
     async fn remote_schema_current(&self) -> Result<bool, StoreError> {
         let rows = self
             .client()
+            // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(super::remote::SHAPE_SQL, params!())
             .await?;
         let shape = rows
@@ -3803,6 +3860,7 @@ impl HiqliteAuthStore {
         }
         let rows = self
             .client()
+            // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<CountRow, _>(
                 "SELECT count(*) AS count FROM remote_schema WHERE singleton=1 AND version=1",
                 params!(),
@@ -3857,6 +3915,7 @@ impl HiqliteAuthStore {
     async fn invitation_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
+            // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(super::invitations::SHAPE_SQL, params!())
             .await?;
         let shape = rows
@@ -3882,6 +3941,7 @@ impl HiqliteAuthStore {
         };
         let rows = self
             .client()
+            // authority: installed schema shape and marker fence adjunct migration and admission.
             .query_consistent_map::<CountRow, _>(
                 "SELECT count(*) AS count FROM invitation_schema WHERE singleton=1 AND version=$1",
                 params!(version),
@@ -7130,6 +7190,37 @@ fn sharing_lineage_is_ambiguous(version: i64, sharing_objects: i64) -> bool {
 struct RemoteShapeRow {
     name: String,
     sql: String,
+}
+
+fn baseline_sharing_statements(schema: &str) -> Vec<&str> {
+    let bytes = schema.as_bytes();
+    let (mut start, mut index, mut quoted, mut comment) = (0, 0, None, false);
+    let mut statements = Vec::new();
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if comment {
+            comment = byte != b'\n';
+        } else if let Some(quote) = quoted {
+            if byte == quote {
+                if bytes.get(index + 1) == Some(&quote) {
+                    index += 1;
+                } else {
+                    quoted = None;
+                }
+            }
+        } else if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
+            comment = true;
+            index += 1;
+        } else if matches!(byte, b'\'' | b'"') {
+            quoted = Some(byte);
+        } else if byte == b';' {
+            statements.push(&schema[start..index]);
+            start = index + 1;
+        }
+        index += 1;
+    }
+    statements.push(&schema[start..]);
+    statements
 }
 impl From<&mut Row<'_>> for RemoteShapeRow {
     fn from(row: &mut Row<'_>) -> Self {

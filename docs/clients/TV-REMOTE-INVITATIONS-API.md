@@ -1,5 +1,8 @@
 # Cinema background invitation API
 
+**Status:** open — wire contract recorded; HTTP delivery and provider qualification
+remain in progress · **Updated:** 2026-10-08
+
 This document answers how an explicitly paired phone opts into a generic
 screen-ready invitation, and what it must revalidate when the user taps it.
 The wire contract is fixed for B09 adapter work. The first implementation slice
