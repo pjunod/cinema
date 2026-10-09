@@ -46,6 +46,7 @@ async fn encoded_preparation_consumer(with_live_pressure: bool) {
         let short_path = base.path().join("ordinary-short.mkv");
         testfixtures::run(std::process::Command::new(testfixtures::ffmpeg()).args(["-v", "error", "-y", "-i"]).arg(&file.path).args(["-t", "0.1", "-an", "-c", "copy"]).arg(&short_path));
         let mut ordinary = media_file_at(short_path, 100); ordinary.id = 42;
+        ordinary.video_codec = Some("h264".into());
         let (_, index) = store_with_index(&ordinary).await;
         store.put_fragment_index(ordinary.id, &index).await.expect("foreground copy index");
         let mut small = settings(); small.working_set_bytes = playback_budget;

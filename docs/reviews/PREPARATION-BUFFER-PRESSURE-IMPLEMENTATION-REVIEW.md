@@ -18,6 +18,7 @@ of the design. It does not claim deployment or physical Apple TV acceptance.
 | F4 · P2 | Removed cold files could remain charged indefinitely; adoption racing initial inventory could duplicate claims. | Bounded revalidation releases only proved missing path claims; exact-key, inode/length-matched transfer recognizes media already owned by a live ordinary rendition. |
 | F5 · P2 | Recovered owner-count saturation permanently blocked a valid startup inventory. | A deferred directory retains scan ownership and admission stays closed until cleanup frees a slot. The scan then resumes. |
 | F6 · P1 | Startup cleanup with no in-memory rendition skipped durable quality dependencies. | Every exact-key cleanup checks durable dependencies before plan deletion or unlink, including reconstructed owners. |
+| F7 · P1 | A stale owner could delete a replacement's Store plan before detecting its different marker. | Validate the exact marker/directory incarnation before Store deletion under the key gate. The regression preserves the replacement marker, file and real plan with no in-memory rendition. |
 
 Secondary corrections recognize temporary/torn private markers and unreadable
 marker metadata before generic adoption or encoded deletion. Storage release

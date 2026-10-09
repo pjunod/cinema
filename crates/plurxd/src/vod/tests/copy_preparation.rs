@@ -363,7 +363,7 @@ async fn prepared_copy_consumer(control: u8) {
         let task = { let serve = Arc::clone(&serve); let incoming = incoming.clone(); let file = file.clone(); let object = object.clone(); let fence = active.fence();
             tokio::spawn(async move { serve.prepare_copy_output((&incoming).into(), &file, &settings(), &object, 64 << 20, fence, Instant::now() + Duration::from_secs(15), crate::admission::Admissions::new(),
                 (Arc::new(crate::ffmpeg::EncodedExecutable::capture().await.expect("executable")), crate::ffmpeg::EncodedEngine::capture(None).await.expect("engine")), || true).await }) };
-        let held = pause.reached().await;
+        let mut held = Some(pause.reached().await);
         let private_source = serve.shared.renditions.lock().await.values().find(|rendition| rendition.private_storage.is_some()).cloned();
         let reap_fault = Arc::new(PrivateWaitFailure { fail: AtomicBool::new(true), attempts: AtomicU64::new(0) });
         if control == 15 {
@@ -375,22 +375,36 @@ async fn prepared_copy_consumer(control: u8) {
         task.abort(); assert!(task.await.is_err_and(|error| error.is_cancelled()));
         serve.shared.preparation_storage.maintain(&serve.shared).await;
         assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 1, "constructor/writer/child still owns capacity");
-        assert_eq!(serve.shared.working_set.load(Relaxed), 0, "private teardown never charges ordinary pressure");
+        { let ordinary = incumbent.manifest.lock().await;
+            let owned = if ordinary.is_admitted() { 0 } else { ordinary.materialized_bytes() };
+            assert_eq!(serve.shared.working_set.load(Relaxed), owned, "private teardown never adds to the incumbent's ordinary pressure");
+        }
         if control == 15 {
             let source = private_source.as_ref().expect("source");
-            assert!(reap_fault.attempts.load(Acquire) >= 2, "real child.wait failures are retried by the owning reaper");
+            // The publication pause holds the exact-key build gate. Let its
+            // already-owned write settle so cleanup can acquire the gate and
+            // exercise the registered child reaper with the wait fault set.
+            held.take().expect("publication pause").release();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while reap_fault.attempts.load(Acquire) < 2 {
+                    serve.shared.preparation_storage.maintain(&serve.shared).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.expect("real child.wait failures are retried by the owning reaper");
             assert!(source.dir.path().join(super::preparation_storage::MARKER).exists());
             let other_key = "9".repeat(64);
             let other = private_storage_fixture(&serve, &other_key, 4096, 50 << 30).await;
             other.release();
-            for _ in 0..10 {
-                serve.shared.preparation_storage.maintain(&serve.shared).await;
-                if !base.path().join(&other_key).exists() { break; }
-            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while base.path().join(&other_key).exists() {
+                    serve.shared.preparation_storage.maintain(&serve.shared).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.expect("independent cleanup progresses during reap failure");
             assert!(!base.path().join(&other_key).exists(), "another cleanup progresses while this reaper fails");
             reap_fault.fail.store(false, Release);
         }
-        held.release();
+        if let Some(held) = held { held.release(); }
         if control == 15 {
             serve.shared.preparation_storage.maintain(&serve.shared).await;
             assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 1, "unlink fault remains owned after child reap clears");
@@ -420,7 +434,7 @@ async fn prepared_copy_consumer(control: u8) {
         assert!(held_capacity.0 > 0 && held_capacity.1 > 0);
         serve.shared.retained_artifacts.collect(base.path()).await;
         assert_eq!(serve.shared.retained_artifacts.test_capacity_snapshot(), held_capacity, "failed partial artifact remains pinned while scratch unlink fails");
-        assert!(super::retained::RetainedArtifactRegistry::reserve_preparation(&serve.shared, 1, held_capacity.0 + held_capacity.1 + held_capacity.2).await.is_none(), "cleanup failure cannot open a capacity-reuse gap");
+        assert!(super::retained::RetainedArtifactRegistry::reserve_preparation(&serve.shared, 1, held_capacity.0 + held_capacity.1).await.is_none(), "cleanup failure cannot open a capacity-reuse gap");
         serve.shared.test_hooks().private_failures.lock().expect("clear fault").clear();
         drain_private_cleanup(&serve).await;
         assert_eq!(serve.shared.preparation_media.load(Relaxed), 0);
@@ -480,7 +494,7 @@ async fn prepared_copy_consumer(control: u8) {
         serve.shared.retained_artifacts.collect(base.path()).await;
         assert!(serve.shared.retained_artifacts.test_has_artifact(&facts), "a truly expired artifact stays pinned while source cleanup is blocked");
         assert_eq!(serve.shared.retained_artifacts.test_capacity_snapshot(), blocked, "GC cannot uncharge the cleanup pin");
-        assert!(super::retained::RetainedArtifactRegistry::reserve_preparation(&serve.shared, 1, blocked.0 + blocked.1 + blocked.2).await.is_none(), "near-full retained budget cannot reuse pending cleanup capacity");
+        assert!(super::retained::RetainedArtifactRegistry::reserve_preparation(&serve.shared, 1, blocked.0 + blocked.1).await.is_none(), "near-full retained budget cannot reuse pending cleanup capacity");
         serve.shared.test_hooks().private_failures.lock().expect("clear fault").clear();
     }
     if control == 4 {

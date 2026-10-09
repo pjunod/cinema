@@ -502,17 +502,9 @@ async fn cleanup_attempt(
     if storage.inflight() != 0 {
         return Err("writers");
     }
-    if shared.hooks.get().private_cleanup_failure("store") {
-        return Err("store");
-    }
-    shared
-        .store
-        .forget_rendition_plan(&key)
-        .await
-        .map_err(|_| "store")?;
     let directory = shared.base.join(&key);
-    match tokio::fs::symlink_metadata(&directory).await {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+    let directory_exists = match tokio::fs::symlink_metadata(&directory).await {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Ok(metadata) if metadata.is_dir() => {
             match read_marker(&directory.join(MARKER)).await {
                 Ok(marker) if marker.key == key && marker.nonce == storage.nonce => {
@@ -523,59 +515,72 @@ async fn cleanup_attempt(
                         && storage.owns_directory(inode(&metadata)) => {}
                 _ => return Err("incarnation"),
             }
-            if shared
-                .hooks
-                .get()
-                .private_cleanup_failure_for("unlink", &key)
-            {
-                return Err("unlink");
-            }
-            let mut entries = tokio::fs::read_dir(&directory)
-                .await
-                .map_err(|_| "unlink")?;
-            let mut removed = 0;
-            while let Some(entry) = entries.next_entry().await.map_err(|_| "unlink")? {
-                if entry.file_name() == MARKER {
-                    continue;
-                }
-                if removed == BATCH {
-                    return Ok(false);
-                }
-                if !tokio::fs::symlink_metadata(entry.path())
-                    .await
-                    .map_err(|_| "unlink")?
-                    .is_file()
-                {
-                    return Err("namespace");
-                }
-                tokio::fs::remove_file(entry.path())
-                    .await
-                    .map_err(|_| "unlink")?;
-                if let (Some(rendition), Some(index)) = (
-                    rendition.as_ref(),
-                    planned_index(&entry.file_name().to_string_lossy()),
-                ) {
-                    let mut manifest = rendition.manifest.lock().await;
-                    let bytes = manifest
-                        .state(index)
-                        .filter(|state| state.is_materialized())
-                        .map_or(0, |state| state.bytes());
-                    if manifest.forget(index) && bytes > 0 {
-                        storage.free_media(bytes);
-                    }
-                }
-                removed += 1;
-            }
-            match tokio::fs::remove_file(directory.join(MARKER)).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                _ => return Err("unlink"),
-            }
-            tokio::fs::remove_dir(&directory)
-                .await
-                .map_err(|_| "unlink")?;
+            true
         }
         _ => return Err("namespace"),
+    };
+    // A replacement marker must preserve its Store row as well as its files.
+    // The exact-key gate holds namespace identity through this deletion.
+    if shared.hooks.get().private_cleanup_failure("store") {
+        return Err("store");
+    }
+    shared
+        .store
+        .forget_rendition_plan(&key)
+        .await
+        .map_err(|_| "store")?;
+    if directory_exists {
+        if shared
+            .hooks
+            .get()
+            .private_cleanup_failure_for("unlink", &key)
+        {
+            return Err("unlink");
+        }
+        let mut entries = tokio::fs::read_dir(&directory)
+            .await
+            .map_err(|_| "unlink")?;
+        let mut removed = 0;
+        while let Some(entry) = entries.next_entry().await.map_err(|_| "unlink")? {
+            if entry.file_name() == MARKER {
+                continue;
+            }
+            if removed == BATCH {
+                return Ok(false);
+            }
+            if !tokio::fs::symlink_metadata(entry.path())
+                .await
+                .map_err(|_| "unlink")?
+                .is_file()
+            {
+                return Err("namespace");
+            }
+            tokio::fs::remove_file(entry.path())
+                .await
+                .map_err(|_| "unlink")?;
+            if let (Some(rendition), Some(index)) = (
+                rendition.as_ref(),
+                planned_index(&entry.file_name().to_string_lossy()),
+            ) {
+                let mut manifest = rendition.manifest.lock().await;
+                let bytes = manifest
+                    .state(index)
+                    .filter(|state| state.is_materialized())
+                    .map_or(0, |state| state.bytes());
+                if manifest.forget(index) && bytes > 0 {
+                    storage.free_media(bytes);
+                }
+            }
+            removed += 1;
+        }
+        match tokio::fs::remove_file(directory.join(MARKER)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            _ => return Err("unlink"),
+        }
+        tokio::fs::remove_dir(&directory)
+            .await
+            .map_err(|_| "unlink")?;
     }
     if !storage.finish() {
         return Err("writers");

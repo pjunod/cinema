@@ -77,6 +77,35 @@ async fn stale_private_cleanup_cannot_touch_a_replacement_incarnation() {
     serve.shared.renditions.lock().await.remove(&key);
     drain_private_cleanup(&serve).await;
     assert_eq!(serve.shared.working_set.load(Relaxed), 73);
+
+    // No current map entry: the on-disk replacement alone must protect its
+    // durable plan from an old owner's retry.
+    let key = "8".repeat(64);
+    let storage = private_storage_fixture(&serve, &key, 4096, 8192).await;
+    let directory = base.path().join(&key);
+    let marker = directory.join(super::preparation_storage::MARKER);
+    let original_marker = tokio::fs::read(&marker).await.expect("old marker");
+    let mut replacement_marker: serde_json::Value = serde_json::from_slice(&original_marker).expect("marker");
+    replacement_marker["nonce"] = serde_json::json!(uuid::Uuid::new_v4());
+    tokio::fs::write(&marker, serde_json::to_vec(&replacement_marker).expect("replacement marker")).await.expect("replace owner");
+    tokio::fs::write(directory.join(segment_name(0)), b"replacement media").await.expect("replacement bytes");
+    let replacement = synthetic_rendition(base.path()).await;
+    let identity = SourceIdentity::new(1, 1, "replacement-generation");
+    assert!(serve.shared.store.put_rendition_plan(&key, 7, &replacement.plan, &identity).await.expect("replacement plan"));
+    storage.release();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            serve.shared.preparation_storage.maintain(&serve.shared).await;
+            if serve.preparation_storage_diagnostics().await.last_failure_class == "incarnation" { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("stale owner observes replacement");
+    assert!(serve.shared.store.rendition_plan(&key, &identity).await.expect("surviving plan").is_some());
+    assert_eq!(tokio::fs::read(directory.join(segment_name(0))).await.expect("surviving file"), b"replacement media");
+    assert_eq!(tokio::fs::read(&marker).await.expect("surviving marker"), serde_json::to_vec(&replacement_marker).expect("same replacement"));
+    tokio::fs::write(marker, original_marker).await.expect("restore fixture ownership");
+    drain_private_cleanup(&serve).await;
+    assert!(serve.shared.store.rendition_plan(&key, &identity).await.expect("retired old plan").is_none());
 }
 
 #[tokio::test]
@@ -217,11 +246,12 @@ async fn restored_private_cleanup_preserves_reserved_and_unreadable_durable_depe
     assert!(path.join(segment_name(0)).exists());
     assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 1);
     let connection = rusqlite::Connection::open(database).expect("fault connection");
-    connection.execute("UPDATE continuous_quality_ledgers SET ledger_json='invalid-json'", []).expect("actual lookup failure");
+    connection.execute("ALTER TABLE continuous_quality_ledgers RENAME TO unavailable_quality_ledgers", []).expect("actual lookup failure");
     assert!(store.quality_reserved_intervals(&key).await.is_err());
     serve.shared.preparation_storage.maintain(&serve.shared).await;
     assert!(path.join(super::preparation_storage::MARKER).exists());
     assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 1);
+    connection.execute("ALTER TABLE unavailable_quality_ledgers RENAME TO continuous_quality_ledgers", []).expect("restore lookup");
     connection.execute("DELETE FROM continuous_quality_ledgers", []).expect("clear durable obligation");
     assert!(store.quality_reserved_intervals(&key).await.expect("verified unreserved").is_empty());
     drain_private_cleanup(&serve).await;
