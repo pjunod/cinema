@@ -10899,9 +10899,11 @@ extension PlayerController {
             onSubtitleReady: { [weak self] in
                 self?.retryNativeSubtitleAfterReadiness()
             },
-            onProcessingGeneration: { [weak self] generation in
+            onProcessingGeneration: { [weak self] generation, report in
                 guard let self else { return }
-                if self.effectiveProcessingGeneration != generation { self.effectiveProcessing = nil }
+                self.effectiveProcessing = report.flatMap {
+                    $0.matches(generation: generation, delivered: self.deliveredRange) ? $0 : nil
+                }
                 self.effectiveProcessingGeneration = generation
             },
             // Deliberately ungated at this call site. Everything that could

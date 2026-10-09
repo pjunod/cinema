@@ -46,7 +46,7 @@ DV-off validation. Current playback keeps its compatible fallback.
 | M2 processing and lifecycle | Partial: bounded P7/FEL and base-only helpers; owned adapter merged in #946 | Normal playback integration, retained admission and served output evidence |
 | M3 routing and cache identity | In progress on `codex/dv-runtime-route`; first-window and generation paths wired, not yet accepted | Effective operation receipts, later-window fallback, base selection, audio and hardware encoding |
 | M4 settings and HDR10-E badge | Settings merged in #937: two default-off preferences persist independently with advisory Developer cards; receipt-backed web/Apple/Android presentation built and reviewed | Effective-generation reporting, runtime integration and route qualification |
-| M5 quality and performance | Initial raw-window measurements; matched comparisons in progress | Held-out corpus, matched bitrate, physical playback and full graph performance; current 4K helper is slower than realtime |
+| M5 quality and performance | Matched 24-picture software-decode/NVENC comparison recorded in §16; sustained throughput unresolved | Held-out corpus, matched bitrate, physical playback and full graph performance; current 4K helper is slower than realtime |
 | M6 release qualification | Not started | Exact-tree gates and separate acceptance for each proposed route |
 
 ## 3. Run the bounded offline comparison
@@ -466,3 +466,66 @@ establish a general quality improvement. Shared finite RGB48 packing preserves
 the previous expression across 1,830,864 inputs and four rounding modes.
 Decoder counts remain one thread per layer. Increased-thread experiments are
 not production resource settings or evidence of realtime playback.
+
+
+## 16. First matched real-source resource comparison
+
+On 2026-10-08, a private ROG run selected the same 24 pictures from the
+720–721-second window of the P7 FEL source used above. The processed cases used
+helper source `4662bb5dffeda73bb57f0f199a66b6d989e6d26b` (merged in #952),
+binary SHA256 `10881d42d734f3f5ceda333bbeace7b07dc0d2e38dbbc0145d9d197bc7213a16`.
+Both used five preroll pictures, one software HEVC thread per decoded layer,
+diagnostic pixel hashes off, and the actual RTX 4080 Laptop Vulkan device.
+Every case ran under a two-CPU quota and 4 GiB RAM limit. The ordinary case
+used the compatible P7 base with Dolby metadata removed before encoding.
+
+| Processing plus the same NVENC recipe | Elapsed seconds | CPU seconds, user + system | Cgroup peak RAM, bytes | Encoded bytes |
+|---|---:|---:|---:|---:|
+| Ordinary HDR10 base | 6.536 | 7.595 | 665,460,736 | 2,646,850 |
+| Base with DV RPU processing | 12.934 | 15.274 | 877,154,304 | 2,619,285 |
+| FEL reconstruction with DV processing | 13.622 | 15.668 | 1,340,755,968 | 2,785,301 |
+
+In this window, FEL added 0.688 seconds (5.3%) over processed base-only output.
+Base-only processing took 1.98 times the ordinary elapsed time; FEL processing
+took 2.08 times. These are measurements of this bounded experiment, not a
+prediction for every movie, a deployment capacity estimate or sustained
+throughput. All three cases used software decoding; this is not a comparison
+with the deployed ordinary hardware-decode or direct-copy path. The ordinary
+FFmpeg 8.1.2 decoder also differs from the helper's pinned FFmpeg 9 build and
+does not share its aggregate IO or BL/EL pairing guards.
+
+The common encoder was host FFmpeg 8.1.2, `hevc_nvenc`, Main10, preset `p1`,
+constant QP 18, no B frames, GOP 24, 24 fps, limited-range BT.2020/PQ and
+center-sited P010. Processed RGB48 was explicitly converted with zscale from
+full-range BT.2020 RGB to limited BT.2020 NCL. Source PTS were shifted by
+exactly 720 seconds before encoding. Both processed outputs consumed their
+complete NUT stream; the ordinary output was capped at 24 pictures **after**
+source-time trimming. Actual pre-encode source PTS and all encoded PTS matched.
+An earlier input-duration cap counted preroll and emitted only 19 pictures;
+that trial was rejected, preserved and replaced by the corrected measurement.
+
+Encoder completion followed helper completion by 0.415 seconds for FEL and
+0.268 seconds for base-only processing. Those tails are not the encoder's
+isolated cost: concurrent color conversion and raw-pipe backpressure are
+included in the elapsed measurement. Audio, GPU utilization and peak VRAM
+were not measured. Cgroup peak RAM is not a VRAM measurement.
+
+Same QP is not matched bitrate, and a larger output is not evidence of better
+quality. A nearest-sampled 32×18 region grid from the first encoded frame
+showed FEL/base differences up to 13/3/3 ten-bit Y/U/V codes. That demonstrates
+a changed picture only; it is neither a full-frame metric nor an independent
+Dolby reference. Matched-rate quality, broader sources and actual serving
+acceptance remain open. The completed retained measurement receipt is SHA256
+`5a09e4e8bfae4aa39240861be2b8f113e0bbfd82539ad4ed13745d2b7ab14bbf`.
+
+A separate private NVDEC experiment preserved all 24 decoded BL/EL hashes,
+raw RPUs, timestamps and rendered RGB hashes. Its clean software/NVDEC pair
+took 9.064/8.844 seconds without encoding (eight-CPU quota, four software
+threads per layer versus one hardware-decoder thread). CPU time fell from
+15.346 to 7.897 seconds, but elapsed time improved only 2.4%. It used the
+native HEVC decoder with CUDA acceleration, downloaded P010 and converted it
+exactly to planar ten-bit samples. That scratch implementation is not merged:
+the CPU saving did not resolve the wall-time bottleneck, and no real-time
+claim follows. It used pinned `nv-codec-headers` commit
+`57f8cc0bb68e5f16f3787ea92cea59000f7bf97f` and a separate FFmpeg installation;
+no host package or production service was changed.

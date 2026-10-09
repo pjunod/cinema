@@ -28,8 +28,9 @@ Do not mix system FFmpeg headers with these static libraries. Reuse the existing
 source-only dependency build described in the
 [combined controls guide](DV_HDR_COMBINED_CONTROLS.md); enable the additional
 NUT/MOV/MP4 components above before installing that FFmpeg prefix. Retained
-prefixes were used for this change; a clean dependency bootstrap or production
-container installation has not been qualified.
+prefixes were used for the controls. The separate Docker helper stages below
+now provide the clean pinned dependency build and installed bundle. Packaging
+checks do not establish real-film quality, Vulkan device acceptance or speed.
 
 ```sh
 sh tools/dv_processing/build.sh \
@@ -48,6 +49,45 @@ find the exact libplacebo build and Vulkan driver; the controls used explicit
 The helper build defaults to `CFLAGS="-O2 -fno-math-errno"`; callers may supply their own compiler
 flags for diagnostics. Do not use fast-math flags: finite-value checks and exact
 rounding are part of the processing contract.
+
+## Build the installed Linux bundle
+
+The [Dockerfile](../../Dockerfile) keeps `dv-processing-dependencies` separate from helper source
+and daemon builds. It uses the source pins above, Rust 1.97.1, Debian snapshot
+`20260928T000000Z`, and hash-pinned Python build tools. The
+[`build-dependencies.sh`](../../tools/dv_processing/build-dependencies.sh) and
+[`build-bundle.sh`](../../tools/dv_processing/build-bundle.sh) scripts also run
+on Linux with those dependencies installed. Build jobs are bounded to 1–4,
+with a default of 2.
+
+```bash
+# Check only the helper bundle on either shipped Linux architecture.
+docker build --platform linux/arm64 --target dv-processing-helper-check .
+docker build --platform linux/amd64 --target dv-processing-helper-check .
+```
+
+**How to read it:** the manifest check must report schema 1, libplacebo API 374
+and positive FFmpeg ABI majors. Every helper must load and exit with its
+usage status, and Mesa provider definitions must be installed. This headless
+check runs no GPU rendering, media encode or daemon
+suite. The normal `runtime-assets` stage installs the same bundle at
+`/usr/lib/plurx/dv-processing`. Jellyfin FFmpeg 8 remains the production encoder.
+
+The bundle has a private libplacebo directory and an exact source, tool,
+parser and library hash manifest. Only renderer subprocesses receive its
+`LD_LIBRARY_PATH`; ordinary Vulkan ICD discovery remains unchanged. The snapshot installs the portable Mesa Vulkan providers; no selected GPU or
+machine-specific ICD override is baked into the bundle.
+
+`sources/` retains the public dependency archives, libdovi header and locked
+Cargo dependencies, static FFmpeg libraries, helper source and build scripts.
+`licenses/` retains the upstream and linked Rust crate notices. To rebuild the
+bundle from its accompanying source directory, install the documented Linux
+build dependencies and hash-pinned `build-requirements.txt`, then set
+`PLURX_DV_BUILD_INPUTS` to the absolute `sources/build-inputs` directory before
+running `build-dependencies.sh` with a new absolute prefix. Run
+`build-bundle.sh` with that prefix and a new absolute output directory. The
+scripts verify every downloaded archive or header; a mismatch refuses the
+build.
 
 ## Streaming interface
 
@@ -99,7 +139,12 @@ picture must match exactly one coded picture and its fresh RPU. The helper
 exports original timestamps and coded access-unit/RPU hashes. Full decoded
 BL/EL and RGB hashes are optional diagnostics: set `PLURX_DV_FRAME_HASHES=1`
 (or the existing 64×64 debug mode) to emit them. They do not provide an
-independent post-encode playback check, so production skips their pixel scans. A later paired PTS at or beyond `END` proves the requested boundary.
+independent post-encode playback check, so production skips their pixel scans.
+A later paired PTS at or beyond `END` proves the requested boundary. Its RPU
+belongs to a later window and is not interpreted for this one. Unsupported
+metadata there therefore refuses the later window, while the completed earlier
+window remains usable. Preroll and every emitted picture still require valid
+metadata and matching layer timestamps.
 Natural EOF requires the final observed picture to reach `END` and agree in both
 directions with the declared video extent within one source tick. Unknown or
 inconsistent extent refuses. These observations establish source membership;
@@ -155,8 +200,10 @@ Validation retained for this change:
 
 The controls used software Vulkan and a two-CPU/two-GiB container limit.
 Those are experiment caps, not measured consumption or production concurrency
-budgets. No incremental FEL-on/off benchmark, real-time movie result, physical
-DV rendering or independent Dolby conformance result follows from these checks.
+budgets. These correctness checks do not establish real-time playback, physical DV
+rendering or independent Dolby conformance. The later [matched resource
+comparison](DV_HDR_PROCESSING_STATUS.md#16-first-matched-real-source-resource-comparison)
+records one real-source FEL/base/ordinary window with the same NVENC recipe.
 The production default Jellyfin FFmpeg 8 runtime still needs end-to-end acceptance;
 the exercised encoder was the retained FFmpeg 5.1.9/libx265 3.5 control runtime.
 
@@ -203,6 +250,11 @@ unchanged encoded base and unchanged DV-disabled decoded pixels:
 sh tools/dv_processing/controls/replay.sh \
   /absolute/new-scratch /absolute/accepted-dependencies /absolute/pinned-dovi-source
 ```
+
+The same replay runs `run_window_boundary.py`: 48 valid pictures followed by
+18 pictures with an invalid active-area RPU. Both FEL and base-only processing
+must emit and decode all 48 pictures in `[0, 2)` and refuse `[2, 2.75)`. The
+boundary picture remains subject to paired timestamp and duration checks.
 
 The dependency root contains `ffmpeg-prefix`, `prefix`, `include` and `lib` as
 above. This focused ARM64 control recipe uses the retained image

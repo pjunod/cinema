@@ -51,3 +51,37 @@ test('the actual seek boundary clears processing before optional seek machinery'
   assert.equal(context.PLAYER.effectiveProcessing,null);
   assert.equal(badge(context).arrow,'HDR10');
 });
+
+test('accepted current controls adopt late processing and omission clears the same generation',()=>{
+  const context=setup();
+  Object.assign(context,{window:{},CONTROL_CLIENT_ID:'client',
+    stopPlaybackControl:()=>{},playbackOwnsAttachedMedia:()=>true,
+    continueStoppingPlaybackControl:()=>false,settlePlaybackControlWaiters:()=>{},
+    settlePlaybackControlAcknowledgement:()=>{}});
+  class Reporter {
+    constructor(options){this.bootstrap=options.bootstrap;this.exchange=options.onExchange;}
+    start(){}
+  }
+  context.window.PlurxPlaybackControl={Reporter};
+  context.PlurxPlaybackControl=context.window.PlurxPlaybackControl;
+  const sourceText=fs.readFileSync(path.join(root,'player/directed-change.js'),'utf8');
+  const start=sourceText.indexOf('function startPlaybackControl(');
+  const end=sourceText.indexOf('async function openSession(',start);
+  vm.runInContext(sourceText.slice(start,end),context);
+  const p=context.PLAYER;
+  p.effectiveProcessing=null;
+  const reporter=context.startPlaybackControl(null,p,{generation});
+  assert.ok(reporter);
+  const exchange=response=>reporter.exchange({request:{},response,capture:{owner:p.controlOwner,intentGeneration:0}});
+  exchange({generation,effective_processing:report()});
+  assert.equal(badge(context).arrow,'HDR10-E');
+  exchange({generation});
+  assert.equal(p.effectiveProcessing,null);
+  exchange({generation,effective_processing:report()});
+  p.controlIntentGeneration=1;
+  exchange({generation});
+  assert.equal(badge(context).arrow,'HDR10-E','obsolete intent cannot clear current authority');
+  p.controlIntentGeneration=0;
+  exchange({generation,effective_processing:{...report(),generation:'22222222-2222-4222-8222-222222222222'}});
+  assert.equal(p.effectiveProcessing,null);
+});
