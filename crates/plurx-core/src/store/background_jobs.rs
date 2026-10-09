@@ -818,6 +818,7 @@ pub enum JobPayload {
     },
     SubtitleTranscribe {
         file_id: i64,
+        audio_index: i64,
         source_size: i64,
         source_mtime: i64,
         language: String,
@@ -1001,6 +1002,7 @@ impl JobPayload {
             } => *file_id > 0 && identifier(source_generation) && digest(pipeline_digest),
             Self::SubtitleTranscribe {
                 file_id,
+                audio_index,
                 source_size,
                 language,
                 model_sha256,
@@ -1009,6 +1011,7 @@ impl JobPayload {
             } => {
                 *file_id > 0
                     && *source_size > 0
+                    && *audio_index >= 0
                     && super::background_jobs_transcription::valid_language(language)
                     && digest(model_sha256)
                     && digest(pipeline_digest)

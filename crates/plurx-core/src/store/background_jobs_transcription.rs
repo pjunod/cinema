@@ -32,6 +32,7 @@ const OWNS: &str = r#"
  AND job.fence = json_extract($1,'$.token.fence') AND job.revision = json_extract($1,'$.token.revision')
  AND job.revision < 9223372036854775807
  AND job.lease_expires_ms = json_extract($1,'$.token.lease_expires_ms') AND job.lease_expires_ms > json_extract($1,'$.now_ms')
+ AND json_extract(job.payload_json,'$.audio_index') = json_extract($1,'$.source.audio_index')
  AND json_extract(job.payload_json,'$.file_id') = json_extract($1,'$.source.file_id')
  AND json_extract(job.payload_json,'$.source_size') = json_extract($1,'$.source.source_size')
  AND json_extract(job.payload_json,'$.source_mtime') = json_extract($1,'$.source.source_mtime')
@@ -54,6 +55,7 @@ pub(super) async fn publish<T: QueueSql>(
     let key = artifact_key(&input.source)?;
     let JobPayload::SubtitleTranscribe {
         file_id: _,
+        audio_index,
         source_size,
         source_mtime,
         language,
@@ -69,6 +71,7 @@ pub(super) async fn publish<T: QueueSql>(
         .as_ref()
         .ok_or_else(|| StoreError::Task("missing local caption provenance".into()))?;
     if input.now_ms < 0
+        || provenance.audio_index != *audio_index
         || provenance.artifact_key != key
         || &provenance.model_sha256 != model_sha256
         || &provenance.pipeline_digest != pipeline_digest

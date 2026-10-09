@@ -100,6 +100,7 @@ fn valid_identity(track: &DownloadedSubtitle) -> bool {
         None => track.provider_file_id > 0,
         Some(origin) => {
             track.provider_file_id == 0
+                && origin.audio_index >= 0
                 && super::background_jobs::digest(&origin.artifact_key)
                 && super::background_jobs::digest(&origin.model_sha256)
                 && super::background_jobs::digest(&origin.pipeline_digest)

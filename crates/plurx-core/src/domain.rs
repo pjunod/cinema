@@ -641,6 +641,9 @@ pub struct DownloadedSubtitle {
 /// Offline machine-generated caption provenance, distinct from provider downloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtitleTranscription {
+    /// Audio ordinal, selected from matching spoken-language tracks.
+    #[serde(default)]
+    pub audio_index: i64,
     pub artifact_key: String,
     pub model_sha256: String,
     pub pipeline_digest: String,

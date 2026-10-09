@@ -4694,6 +4694,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 .expect("online caption"));
             let source = JobPayload::SubtitleTranscribe {
                 file_id: id,
+                audio_index: 0,
                 source_size: file.size,
                 source_mtime: file.mtime,
                 language: "en".into(),
@@ -4762,6 +4763,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 source_mtime: file.mtime,
                 provider_file_id: 0,
                 transcription: Some(plurx_core::domain::SubtitleTranscription {
+                    audio_index: 0,
                     artifact_key: key.clone(),
                     model_sha256: "a".repeat(64),
                     pipeline_digest: "b".repeat(64),

@@ -73,8 +73,12 @@ async fn read_settings(state: &AppState) -> Result<Settings, StoreError> {
     let value = state.store.get_setting(&format!("{PREFIX}config")).await?;
     match value {
         None => Ok(Settings::default()),
-        Some(value) => serde_json::from_str(&value)
-            .map_err(|_| StoreError::Task("invalid transcription settings".into())),
+        Some(value) => {
+            let mut config: Settings = serde_json::from_str(&value)
+                .map_err(|_| StoreError::Task("invalid transcription settings".into()))?;
+            config.language = normalized_language(&config.language);
+            Ok(config)
+        }
     }
 }
 fn executable(command: &str) -> Option<PathBuf> {
@@ -126,9 +130,10 @@ pub async fn settings(
 pub async fn update_settings(
     admin: AdminUser,
     State(state): State<AppState>,
-    Json(config): Json<Settings>,
+    Json(mut config): Json<Settings>,
 ) -> Result<Json<Value>, ApiError> {
     config.validate()?; // Readiness is advisory and never rejects a saved choice.
+    config.language = normalized_language(&config.language);
     let raw =
         serde_json::to_string(&config).map_err(|error| ApiError::Internal(error.to_string()))?;
     state
@@ -214,12 +219,13 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
         english_only,
     })
 }
-fn pipeline_digest(config: &Settings, command: &Path, model: &Model) -> String {
+fn pipeline_digest(config: &Settings, command: &Path, model: &Model, audio_index: i64) -> String {
     hex::encode(Sha256::digest(format!(
-        "whisper.cpp-v1:mono16k:threads2:{}:{}:{}",
+        "whisper.cpp-v2:audio-language-default-lowest-ordinal-v1:mono16k:threads2:{}:{}:{}:{}",
         command.display(),
-        config.language,
-        model.digest
+        normalized_language(&config.language),
+        model.digest,
+        audio_index
     )))
 }
 fn eligible(file: &MediaFile) -> bool {
@@ -230,21 +236,91 @@ fn eligible(file: &MediaFile) -> bool {
             .duration_ms
             .is_some_and(|duration| duration > 0 && duration <= MAX_DURATION_MS)
 }
+fn normalized_language(value: &str) -> String {
+    let lowered = value.trim().to_ascii_lowercase();
+    let primary = lowered.split('-').next().unwrap_or("");
+    match primary {
+        "eng" => "en",
+        "fra" | "fre" => "fr",
+        "deu" | "ger" => "de",
+        "spa" => "es",
+        "ita" => "it",
+        "por" => "pt",
+        "jpn" => "ja",
+        "zho" | "chi" => "zh",
+        "kor" => "ko",
+        "rus" => "ru",
+        "nld" | "dut" => "nl",
+        "ara" => "ar",
+        "hin" => "hi",
+        "pol" => "pl",
+        "tur" => "tr",
+        "ukr" => "uk",
+        "swe" => "sv",
+        "dan" => "da",
+        "nor" => "no",
+        "fin" => "fi",
+        "ces" | "cze" => "cs",
+        "ell" | "gre" => "el",
+        "ron" | "rum" => "ro",
+        "hun" => "hu",
+        "heb" => "he",
+        "ind" => "id",
+        "tha" => "th",
+        "vie" => "vi",
+        "fil" | "tgl" => "tl",
+        "msa" | "may" => "ms",
+        "cat" => "ca",
+        "slk" | "slo" => "sk",
+        "hrv" => "hr",
+        "srp" => "sr",
+        "bul" => "bg",
+        "slv" => "sl",
+        "est" => "et",
+        "lav" => "lv",
+        "lit" => "lt",
+        "fas" | "per" => "fa",
+        "urd" => "ur",
+        "ben" => "bn",
+        "tam" => "ta",
+        "tel" => "te",
+        "mal" => "ml",
+        "mar" => "mr",
+        "guj" => "gu",
+        "pan" => "pa",
+        other => other,
+    }
+    .to_owned()
+}
 fn language_matches(existing: &str, language: &str) -> bool {
-    existing.eq_ignore_ascii_case(language)
-        || matches!(
-            (existing.to_ascii_lowercase().as_str(), language),
-            ("eng", "en")
-                | ("fra" | "fre", "fr")
-                | ("deu" | "ger", "de")
-                | ("spa", "es")
-                | ("ita", "it")
-                | ("por", "pt")
-                | ("jpn", "ja")
-                | ("zho" | "chi", "zh")
-                | ("kor", "ko")
-                | ("rus", "ru")
-        )
+    normalized_language(existing) == normalized_language(language)
+}
+/// Exact spoken-language match first; default wins within a class, then the
+/// smallest actual audio ordinal. An absent/undefined tag is a fallback, never
+/// permission to relabel a known incompatible spoken-language track.
+fn selected_audio(tracks: &[plurx_core::domain::AudioStream], language: &str) -> Option<i64> {
+    let best = |unknown: bool| {
+        tracks
+            .iter()
+            .filter(|track| {
+                if track.index < 0 {
+                    return false;
+                }
+                let tag = track.language.as_deref().unwrap_or("").trim();
+                let untagged = tag.is_empty()
+                    || ["und", "unknown", "n/a"]
+                        .iter()
+                        .any(|value| tag.eq_ignore_ascii_case(value));
+                if unknown {
+                    untagged
+                } else {
+                    !untagged && language_matches(tag, language)
+                }
+            })
+            .min_by_key(|track| (!track.default, track.index))
+            .map(|track| track.index)
+    };
+    best(false).or_else(|| best(true))
 }
 fn missing_language(file: &MediaFile, language: &str) -> bool {
     !file.subtitle_streams.iter().any(|track| {
@@ -260,13 +336,16 @@ fn enqueue_request(
     model: &Model,
     command: &Path,
 ) -> Result<EnqueueJob, StoreError> {
+    let audio_index = selected_audio(&file.audio_streams, &config.language)
+        .ok_or_else(|| StoreError::Task("no matching spoken-language audio track".into()))?;
     let payload = JobPayload::SubtitleTranscribe {
         file_id: file.id,
+        audio_index,
         source_size: file.size,
         source_mtime: file.mtime,
-        language: config.language.clone(),
+        language: normalized_language(&config.language),
         model_sha256: model.digest.clone(),
-        pipeline_digest: pipeline_digest(config, command, model),
+        pipeline_digest: pipeline_digest(config, command, model, audio_index),
     };
     let key = artifact_key(&payload)?;
     let now = crate::state::clock_ms();
@@ -315,11 +394,14 @@ pub async fn enqueue(
                 .into(),
         ));
     }
+    if selected_audio(&file.audio_streams, &config.language).is_none() {
+        return Err(ApiError::BadRequest(format!("No audio track matches subtitle language {}; all audio tracks have incompatible language tags", config.language)));
+    }
     let model = tokio::time::timeout(Duration::from_secs(60), open_model(&config.model_path))
         .await
         .map_err(|_| ApiError::ServiceUnavailable("Model fingerprint timed out".into()))?
         .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
-    if model.english_only && config.language != "en" {
+    if model.english_only && normalized_language(&config.language) != "en" {
         return Err(ApiError::ServiceUnavailable(
             "Configured model supports English only; choose a multilingual model for this language"
                 .into(),
@@ -341,6 +423,9 @@ async fn transcribe(
     cancel: &CancellationToken,
     decoder: &str,
 ) -> Result<String, StoreError> {
+    let audio_index = selected_audio(&file.audio_streams, &config.language)
+        .ok_or_else(|| StoreError::Task("no matching spoken-language audio track".into()))?;
+    let audio_map = format!("0:a:{audio_index}");
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
         .await
         .map_err(StoreError::Task)?;
@@ -379,7 +464,7 @@ async fn transcribe(
     decode
         .args([
             "-map",
-            "0:a:0",
+            &audio_map,
             "-vn",
             "-sn",
             "-dn",
@@ -422,6 +507,7 @@ async fn transcribe(
         .map_err(|error| StoreError::Task(error.to_string()))?;
     let output_base = scratch.path().join("caption");
     let mut whisper = tokio::process::Command::new(command);
+    let whisper_language = normalized_language(&config.language);
     whisper.args([
         "--threads",
         "2",
@@ -429,7 +515,7 @@ async fn transcribe(
         "1",
         "--no-gpu",
         "--language",
-        &config.language,
+        &whisper_language,
         "--output-vtt",
         "--no-prints",
         "--model",
@@ -600,7 +686,7 @@ async fn pass(
         *model_cache = Some((config.model_path.clone(), model));
     }
     let model = &model_cache.as_ref().expect("model fingerprint installed").1;
-    if model.english_only && config.language != "en" {
+    if model.english_only && normalized_language(&config.language) != "en" {
         return Ok(());
     }
     if !state.transcode.fragment_worker_idle(&admission) {
@@ -634,6 +720,7 @@ async fn pass(
         };
         let JobPayload::SubtitleTranscribe {
             file_id,
+            audio_index,
             source_size,
             source_mtime,
             ref pipeline_digest,
@@ -642,7 +729,7 @@ async fn pass(
         else {
             unreachable!()
         };
-        if pipeline_digest != &self::pipeline_digest(&config, &command, model) {
+        if pipeline_digest != &self::pipeline_digest(&config, &command, model, audio_index) {
             continue;
         }
         let file = state.store.get_file(file_id).await?;
@@ -700,7 +787,11 @@ async fn pass(
         };
         let cancel = fence.loss_token().child_token();
         let operation = async {
-            if file.size != source_size || file.mtime != source_mtime || !eligible(&file) {
+            if file.size != source_size
+                || file.mtime != source_mtime
+                || !eligible(&file)
+                || selected_audio(&file.audio_streams, &config.language) != Some(audio_index)
+            {
                 return Err(StoreError::Task(
                     "transcription source changed or exceeds bound".into(),
                 ));
@@ -741,9 +832,15 @@ async fn pass(
                         source_mtime,
                         provider_file_id: 0,
                         transcription: Some(SubtitleTranscription {
+                            audio_index,
                             artifact_key: artifact_key(&payload)?,
                             model_sha256: model.digest.clone(),
-                            pipeline_digest: self::pipeline_digest(&config, &command, model),
+                            pipeline_digest: self::pipeline_digest(
+                                &config,
+                                &command,
+                                model,
+                                audio_index,
+                            ),
                             adapter: "whisper.cpp".into(),
                             generated_at_ms: crate::state::clock_ms(),
                         }),
@@ -824,7 +921,10 @@ async fn automatic_page(
             break;
         }
         if let Some(file) = state.store.get_file(*id).await? {
-            if eligible(&file) && missing_language(&file, &config.language) {
+            if eligible(&file)
+                && selected_audio(&file.audio_streams, &config.language).is_some()
+                && missing_language(&file, &config.language)
+            {
                 let _ = publisher
                     .enqueue_transcription(enqueue_request(&file, config, model, command)?)
                     .await?;
@@ -1011,6 +1111,57 @@ mod tests {
                 .expect("scratch root")
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn transcription_selects_matching_audio_ordinals_and_rejects_known_mismatch() {
+        use plurx_core::domain::AudioStream;
+        let track = |index, language: Option<&str>, default| AudioStream {
+            index,
+            language: language.map(str::to_owned),
+            default,
+            ..Default::default()
+        };
+        let dual = vec![
+            track(0, Some("jpn"), true),
+            track(5, Some("eng"), false),
+            track(12, Some("en"), true),
+        ];
+        assert_eq!(selected_audio(&dual, "en"), Some(12));
+        assert_eq!(selected_audio(&dual, "eng"), Some(12));
+        assert_eq!(selected_audio(&dual, "ja"), Some(0));
+        assert_eq!(selected_audio(&dual, "jpn"), Some(0));
+        assert_eq!(
+            selected_audio(&dual, "fr"),
+            None,
+            "known Japanese/English audio is not French"
+        );
+        assert_eq!(
+            selected_audio(
+                &[
+                    track(7, Some("und"), true),
+                    track(3, None, false),
+                    track(1, Some("jpn"), true)
+                ],
+                "en"
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            selected_audio(
+                &[track(7, Some("und"), true), track(3, Some("en-US"), false)],
+                "eng"
+            ),
+            Some(3),
+            "a real language match wins over default untagged audio"
+        );
+        assert!(language_matches("en", "eng"));
+        assert!(language_matches("eng", "en"));
+        assert_eq!(
+            normalized_language("eng"),
+            "en",
+            "English-only model and CLI use canonical code"
         );
     }
 
