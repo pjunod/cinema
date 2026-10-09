@@ -5900,3 +5900,21 @@ source = "clients/apple/Sources/PlaybackControlReporter.swift"
 source_anchor = 'code == "control_unavailable" || code == "serving_fenced"'
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testARetryHonoursTheServersRetryAfter"
+
+
+[[fixes]]
+id = "android.serving-fence-retry-after-header"
+commits = ["92d9f4e4ff2e99203f7b414f7e8296ae91b49978"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+source_anchor = 'failure(response.code, response.body?.string().orEmpty(), json, response.header("Retry-After"))'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlTransportTest.kt"
+test_anchor = "headerOnlyServingFenceCarriesTheServersDelay"
+
+[[fixes]]
+id = "apple.serving-fence-retry-after-header"
+commits = []
+supplements = "android.serving-fence-retry-after-header"
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = 'retryAfterHeader: response.value(forHTTPHeaderField: "Retry-After")'
+test = "clients/apple/Tests/PlaybackControlTransportTests.swift"
+test_anchor = "testHeaderOnlyServingFenceCarriesTheServersDelay"
