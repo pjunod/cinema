@@ -1040,7 +1040,7 @@ mod tests {
     #[tokio::test]
     async fn transcription_held_source_model_and_complete_caption_pipeline() {
         use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().expect("fixture");
+        let root = crate::test_tempdir().expect("canonical fixture");
         let (file, model, decoder, whisper) = process_fixture(root.path()).await;
         std::fs::write(&whisper,"#!/bin/sh\nset -eu\ntest \"$(cat /dev/fd/5)\" = model\nfor last do :; done\nprintf 'WEBVTT\\n\\n00:00:00.000 --> 00:00:01.000\\nSynthetic speech.\\n' > \"$last.vtt\"\n").expect("adapter");
         std::fs::set_permissions(&whisper, std::fs::Permissions::from_mode(0o700))
@@ -1074,7 +1074,7 @@ mod tests {
     #[tokio::test]
     async fn transcription_pcm_preserves_nonzero_origin_delayed_audio_and_internal_gap() {
         use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().expect("fixture");
+        let root = crate::test_tempdir().expect("canonical fixture");
         let (mut file, model, _, whisper) = process_fixture(root.path()).await;
         let decoder = crate::ffmpeg::ffmpeg_bin();
         // Video defines container origin 7s. Audio starts at 7.4s, contains
@@ -1232,7 +1232,7 @@ mod tests {
     #[tokio::test]
     async fn transcription_zero_exit_decode_error_refuses_inference_and_publication() {
         use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().expect("fixture");
+        let root = crate::test_tempdir().expect("canonical fixture");
         let (file, model, decoder, whisper) = process_fixture(root.path()).await;
         std::fs::write(&decoder,
             "#!/bin/sh\nset -eu\nfor last do :; done\nhead -c 128 /dev/zero > \"$last\"\nprintf 'Error while decoding stream: corrupt audio packet\\n' >&2\nexit 0\n"
@@ -1278,7 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn transcription_stop_reaps_owned_child_before_scratch_retirement() {
         use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().expect("fixture");
+        let root = crate::test_tempdir().expect("canonical fixture");
         let (file, model, decoder, whisper) = process_fixture(root.path()).await;
         std::fs::write(
             &whisper,

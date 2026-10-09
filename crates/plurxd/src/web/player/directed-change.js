@@ -578,7 +578,7 @@ function retryReadyNativeSubtitle(player,delivery){
     return true;
   }
   if(!player.sessionId) return false;
-  const video=document.getElementById("video");
+  const video=/** @type {HTMLVideoElement} */ (document.getElementById("video"));
   const track=video&&video.textTracks&&video.textTracks[ordinal];
   if(!track) return false;
   track.mode="disabled";
@@ -590,7 +590,7 @@ async function applyReadySubtitleSidecar(player,index){
   return applyReadySubtitleRevision(player,index,arguments[2]||null);
 }
 async function applyReadySubtitleRevision(player,index,revision){
-  const video=document.getElementById("video");
+  const video=/** @type {HTMLVideoElement} */ (document.getElementById("video"));
   if(!video) return;
   const off=player.offset||0;
   const intent=player.controlIntentGeneration||0;

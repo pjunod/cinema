@@ -189,7 +189,7 @@ mod cached_owner_delivery_tests {
             lease_expires_at_ms: now + 60_000,
             recipe_json: "{}".into(),
             response_json: "{}".into(),
-            publication_ready_at_ms: 0,
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
             now_ms: now,
         };

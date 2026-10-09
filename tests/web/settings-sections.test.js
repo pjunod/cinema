@@ -1829,7 +1829,7 @@ test("transcription readiness never overrides enable or disables Save", async ()
 test("transcription queue refusal is not displayed as successful work", async () => {
   const panel={isConnected:true,textContent:"",innerHTML:""},button={isConnected:true,disabled:false};
   let outcome="queue_full";
-  const generate=new Function("document","api",`${shippedSource("generateSubtitles")} return generateSubtitles;`)(
+  const generate=new Function("document","api",`${shippedSource("generateSubtitles")}\nreturn generateSubtitles;`)(
     {getElementById:()=>panel},async()=>({outcome,job_id:"job-a"}));
   await generate("42",button);
   assert.match(panel.textContent,/queue is full/);

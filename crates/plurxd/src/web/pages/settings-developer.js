@@ -686,12 +686,13 @@ async function openSubtitleTranscription(button){
 async function saveSubtitleTranscription(button){
   const panel=document.getElementById("subtitle-transcription-form"),status=document.getElementById("st-status");
   if(!panel||!status)return;
-  const interval=Number(document.getElementById("st-interval").value);
+  const input=id=>/** @type {HTMLInputElement} */ (document.getElementById(id));
+  const interval=Number(input("st-interval").value);
   if(!Number.isInteger(interval)||interval<0||interval>10080){status.textContent="Choose a whole number of minutes from 0 to 10080.";return;}
-  const body={enabled:document.getElementById("st-enabled").checked,
-    command:document.getElementById("st-command").value.trim(),
-    model_path:document.getElementById("st-model").value.trim(),
-    language:document.getElementById("st-language").value.trim(),interval_mins:interval};
+  const body={enabled:input("st-enabled").checked,
+    command:input("st-command").value.trim(),
+    model_path:input("st-model").value.trim(),
+    language:input("st-language").value.trim(),interval_mins:interval};
   if(button)button.disabled=true;
   status.textContent="Saving…";
   try{

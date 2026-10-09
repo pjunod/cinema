@@ -145,7 +145,8 @@ test("file route census allows only explicit local administration and reader exc
     "pages/reader.js":["`/files/${routeFileId}/publication`"],
     "pages/analysis.js":["`/files/${row.file_id}/analysis`"],
     "detail/track-facts.js":["`/files/${fileId}/analysis`","`/files/${id}/preparation`"],
-    "detail/preplay-selection.js":["`/files/${fileId}/subtitles/search?language=${encodeURIComponent(language)}`","`/files/${fileId}/subtitles/download`","`/api/v1/files/${exactWireId(file)}/content`","`/files/${id}/dv-conversion`"],
+    // Caption generation is a Local-only administrative job, never a shared Source action.
+    "detail/preplay-selection.js":["`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`","`/files/${fileId}/subtitles/search?language=${encodeURIComponent(language)}`","`/files/${fileId}/subtitles/download`","`/api/v1/files/${exactWireId(file)}/content`","`/files/${id}/dv-conversion`"],
     // Continuous enrollment is Local-only; the real Start guard is exercised below.
     "player/continuous-quality.js":["`/files/${fileId}/hls/continuous-candidates`","`/files/${fileId}/hls/continuous-sessions`"],
   };
