@@ -9662,3 +9662,11 @@ missing main's new planned_codec field and exits1 in298.027seconds. All three
 receive planned_codec:None, preserving their original unspecified codec
 behavior. This is source compilation feedback; no unit test executes. Its
 failed log/lease remain unchanged, and the retry uses separate owned records.
+
+
+The current-main integration lands as ee0655789 after the separate normal
+hook succeeds in363.166seconds (workspace all-target Clippy5m52s, catalog3398,
+formatting and86served scripts). No units execute. Main's new planned_codec
+field controls VideoToolbox execution; prepared owner binding therefore also
+requires exact codec equality. The existing restored-source refusal fixture
+adds a codec mismatch with otherwise unchanged candidate identity/digest.

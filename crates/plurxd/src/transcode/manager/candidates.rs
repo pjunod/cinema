@@ -1232,6 +1232,7 @@ impl TranscodeManager {
             || selected.id != actual.id
             || selected.recipe_digest != actual.recipe_digest
             || selected.route != actual.route
+            || selected.planned_codec != actual.planned_codec
             || selected.grade != actual.grade
             || selected.width != actual.width
             || selected.height != actual.height
@@ -2542,6 +2543,9 @@ mod snapshot_catalog_regression {
         let mut wrong_candidate = eligible.clone();
         wrong_candidate.candidate.recipe_digest[0] ^= 1;
         refusals.push(wrong_candidate);
+        let mut wrong_codec = eligible.clone();
+        wrong_codec.candidate.planned_codec = Some("unproven-codec".into());
+        refusals.push(wrong_codec);
         let mut unsupported = eligible.clone();
         unsupported.dispatch_supported = false;
         refusals.push(unsupported);
