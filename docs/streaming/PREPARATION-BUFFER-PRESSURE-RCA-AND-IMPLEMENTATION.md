@@ -455,3 +455,10 @@ session evidence. The checksum-provisioned K08 upstream oracle passed
 separately. Web control/settings passed 41 tests, iOS/tvOS build 219 passed,
 and both selected tvOS warning XCTest passed. The normal hook and fresh main
 gate remain required; remaining broad Linux units are watched after merge.
+
+The separately coordinated receipt/history repair then landed as
+`1de457260`. Its four changed files contain validation metadata and controls;
+the Rust, Cargo/toolchain and native client source diff from `1088d7529` is
+empty. Integrating this metadata preserves the reviewed product source and
+its applicable proofs. The exact merged candidate still receives the compiler
+loop before push and the current-base gate before landing.
