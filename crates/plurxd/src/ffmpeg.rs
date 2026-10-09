@@ -3074,8 +3074,11 @@ async fn font_render_engine_inner(
 
     match font_probe_output(configuration, execution).await {
         Ok(stdout) => {
-            digest.update((stdout.len() as u64).to_be_bytes());
-            digest.update(&stdout);
+            // fc-conflist also reports available but inactive rules. Those
+            // files are not consumed by this authority and may appear when a
+            // build prefix or system inventory changes. Bind only the ordered
+            // active rows; their paths and versions remain attested below.
+            hash_active_font_configuration(&mut digest, &stdout);
             for rule in String::from_utf8_lossy(&stdout)
                 .lines()
                 .filter_map(|line| line.strip_prefix("+ "))
@@ -3127,6 +3130,16 @@ async fn font_render_engine_inner(
         fonts,
         listing,
     })
+}
+
+fn hash_active_font_configuration(digest: &mut Sha256, stdout: &[u8]) {
+    digest.update(b"plurx/font-render/active-configuration-v1\0");
+    for line in stdout.split(|byte| *byte == b'\n') {
+        if line.starts_with(b"+ ") {
+            digest.update((line.len() as u64).to_be_bytes());
+            digest.update(line);
+        }
+    }
 }
 
 struct FontObjectVersions {
@@ -6076,6 +6089,26 @@ mod tests {
     fn font_inventory_keeps_a_load_tolerant_probe_budget() {
         assert!(FONT_ENGINE_PROBE_TIMEOUT >= Duration::from_secs(30));
         assert!(FONT_ENGINE_PROBE_TIMEOUT > ENGINE_PROBE_TIMEOUT);
+    }
+
+    #[test]
+    fn font_identity_ignores_inactive_configuration_inventory() {
+        fn identity(configuration: &[u8]) -> Vec<u8> {
+            let mut digest = Sha256::new();
+            hash_active_font_configuration(&mut digest, configuration);
+            digest.finalize().to_vec()
+        }
+        let consumed = b"+ /fonts/conf.d/10-hinting.conf: Hinting\n+ /fonts/fonts.conf: Root\n";
+        let with_available = b"- /build/conf.avail/00-unused.conf: Unused\n+ /fonts/conf.d/10-hinting.conf: Hinting\n- /other/99-unused.conf: Other\n+ /fonts/fonts.conf: Root\n";
+        assert_eq!(identity(consumed), identity(with_available));
+        assert_ne!(
+            identity(consumed),
+            identity(b"+ /fonts/conf.d/11-hinting.conf: Hinting\n+ /fonts/fonts.conf: Root\n")
+        );
+        assert_ne!(
+            identity(consumed),
+            identity(b"+ /fonts/fonts.conf: Root\n+ /fonts/conf.d/10-hinting.conf: Hinting\n")
+        );
     }
 
     #[tokio::test]
