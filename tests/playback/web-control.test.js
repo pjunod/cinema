@@ -7919,3 +7919,38 @@ test("cached captions follow the attached local or shared owner namespace and fe
     assert.deepEqual(f.track.items.map(c=>c.text),["owner"]);
   }
 });
+
+
+test("paused subtitle selection projects ordinal zero and Off immediately", async () => {
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const h=new Function("PlaybackPolicy",[
+    "const file={id:'1',video_codec:'h264',subtitle_streams:[{index:0,language:'eng',title:'English'}]};",
+    "let PLAYER={fileId:'1',curSub:-1,subs:file.subtitle_streams,sessionId:'caption-session',offset:0,hls:{subtitleDisplay:false,subtitleTrack:-1}};",
+    "const WATCH={accepted:true,page:{files:[file],playable:file},folds:{subs:false,audio:false}};",
+    "const video={paused:true,currentTime:10,textTracks:[{mode:'disabled'}],querySelectorAll:()=>[]};",
+    "let ccOn=false;const cc={classList:{toggle(_name,value){ccOn=value;}}};",
+    "const ledger={innerHTML:'',querySelectorAll:()=>[]},band={innerHTML:'',querySelectorAll:()=>[]};",
+    "const document={activeElement:null,getElementById(id){return {video,pbsubs:cc,'watch-ledger':ledger,'watch-band-ledger':band}[id]||null;}};",
+    "function closeMenu(){}function endWait(){}function subNeedsBurn(){return false;}function positionForPlaybackIntent(){return 10;}",
+    "function supersedePlaybackControlIntent(){}function notifyPlaybackControl(){}function restartPendingPlaybackOpen(){return false;}function nativeHlsSubtitleOrdinal(){return 0;}",
+    "function playbackOwnsAttachedMedia(){return false;}function esc(s){return String(s);}function fmtMbps(){return '';}function fmtSize(){return '';}function fmtDur(){return '';}",
+    "function audioFactLabel(t){return t.title;}function subFactLabel(t){return t.title;}function langName(){return 'English';}",
+    ...["setSub","clearSubs","rememberPlaybackSelection","pbSyncSubIcon","watchCurrentFile",
+      "watchSelectedAudio","watchSelectedSub","watchTrackChip","watchFoldButton","watchTrackRow",
+      "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds"].map(shippedSource),
+    "return {setSub,video,player:PLAYER,ledger,band,ccOn:()=>ccOn};",
+  ].join("\n"))(policy);
+  await h.setSub(0);
+  assert.equal(h.video.paused,true,"selection must not resume paused playback");
+  assert.equal(h.player.curSub,0);
+  assert.equal(h.player.hls.subtitleTrack,0);
+  assert.equal(h.ccOn(),true);
+  assert.match(h.ledger.innerHTML,/data-watch-sub="0" aria-pressed="true"[^>]*>English</);
+  assert.equal(h.band.innerHTML,h.ledger.innerHTML);
+  await h.setSub(-1);
+  assert.equal(h.video.paused,true);
+  assert.equal(h.player.curSub,-1);
+  assert.equal(h.ccOn(),false);
+  assert.match(h.ledger.innerHTML,/data-watch-sub="-1" aria-pressed="true"[^>]*>Off</);
+  assert.equal(h.band.innerHTML,h.ledger.innerHTML);
+});
