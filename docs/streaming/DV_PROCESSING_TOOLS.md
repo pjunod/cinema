@@ -155,8 +155,10 @@ Validation retained for this change:
 
 The controls used software Vulkan and a two-CPU/two-GiB container limit.
 Those are experiment caps, not measured consumption or production concurrency
-budgets. No incremental FEL-on/off benchmark, real-time movie result, physical
-DV rendering or independent Dolby conformance result follows from these checks.
+budgets. These correctness checks do not establish real-time playback, physical DV
+rendering or independent Dolby conformance. The later [matched resource
+comparison](DV_HDR_PROCESSING_STATUS.md#16-first-matched-real-source-resource-comparison)
+records one real-source FEL/base/ordinary window with the same NVENC recipe.
 The production default Jellyfin FFmpeg 8 runtime still needs end-to-end acceptance;
 the exercised encoder was the retained FFmpeg 5.1.9/libx265 3.5 control runtime.
 
