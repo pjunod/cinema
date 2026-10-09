@@ -5,7 +5,7 @@ import Foundation
 /// Separate from `PlaybackControlReporter` because the reporter's rules are
 /// about ordering and the transport's are about what a server's refusal means.
 /// The reporter classifies a failure by `status`, `code` and `retry_after_ms`;
-/// producing those faithfully from an HTTP response is this file's whole job,
+/// producing those and Retry-After faithfully from an HTTP response is this file's whole job,
 /// and getting it wrong would make a retryable refusal look terminal.
 struct PlaybackControlTransport {
     /// Absolute origin of the server this session belongs to. The bootstrap's
@@ -74,7 +74,7 @@ struct PlaybackControlTransport {
             throw ControlTransportError(status: nil, code: nil)
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw Self.failure(status: http.statusCode, body: data)
+            throw Self.failure(response: http, body: data)
         }
         do {
             return try PlaybackControl.decoder.decode(ControlResponse.self, from: data)
@@ -89,19 +89,43 @@ struct PlaybackControlTransport {
     /// A refusal carries the fields the reporter classifies on. Every one is
     /// optional on the wire, and a body that is missing or unparseable still
     /// yields the status, which is enough to decide retryable from terminal.
-    static func failure(status: Int, body: Data) -> ControlTransportError {
-        var failure = ControlTransportError(status: status, code: nil)
+    static func failure(response: HTTPURLResponse, body: Data) -> ControlTransportError {
+        failure(status: response.statusCode, body: body,
+                retryAfterHeader: response.value(forHTTPHeaderField: "Retry-After"))
+    }
+
+    static func failure(status: Int, body: Data, retryAfterHeader: String? = nil) -> ControlTransportError {
+        let headerDelay = retryAfterHeaderMs(retryAfterHeader)
+        var failure = ControlTransportError(status: status, code: nil, retryAfterMs: headerDelay)
         guard let object = try? JSONSerialization.jsonObject(with: body),
               let fields = object as? [String: Any]
         else { return failure }
         failure.code = fields["code"] as? String
         if let generation = fields["generation"] as? String { failure.generation = generation }
         if let epoch = fields["control_epoch"] as? Int { failure.controlEpoch = epoch }
-        if let retryAfter = fields["retry_after_ms"] as? Int { failure.retryAfterMs = retryAfter }
+        if let retryAfter = fields["retry_after_ms"] as? Int {
+            // Honor both server signals without shortening either valid
+            // delay. Keep legacy body-only errors unchanged.
+            if let headerDelay {
+                if (0...PlaybackControl.maximumExchangeMs).contains(retryAfter) {
+                    failure.retryAfterMs = max(headerDelay, retryAfter)
+                }
+            } else { failure.retryAfterMs = retryAfter }
+        }
         if let invalidField = fields["invalid_field"] as? String {
             failure.invalidField = invalidField
         }
         return failure
+    }
+
+    // Local control routes advertise delta-seconds. Reject malformed,
+    // overflowing and over-budget values; the reporter owns the bounds.
+    private static func retryAfterHeaderMs(_ header: String?) -> Int? {
+        guard let value = header?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }),
+              let seconds = Int(value), seconds <= PlaybackControl.maximumExchangeMs / 1_000
+        else { return nil }
+        return seconds * 1_000
     }
 }
 
@@ -217,7 +241,9 @@ final class PlaybackControlSession {
         observe: @escaping () -> PlayerControlObservation?,
         linkReceipt: @escaping @MainActor @Sendable () -> String? = { nil },
         onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {},
+        onSubtitleUnavailable: @escaping @MainActor @Sendable () -> Void = {},
         onProcessingGeneration: @escaping @MainActor @Sendable (String?, EffectiveProcessingReport?) -> Void = { _, _ in },
+
         // The prepared-handoff return path. A `prepare` reaches the player
         // already proven whole — the reporter refuses a malformed one as a
         // protocol violation before this is called — so the player never has
@@ -249,6 +275,7 @@ final class PlaybackControlSession {
         answers.begin(generation: generation)
         let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         let subtitleReadiness = SubtitleReadinessRetryState()
+        let subtitleUnavailable = SubtitleUnavailableNoticeState()
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -303,8 +330,23 @@ final class PlaybackControlSession {
                         onExchangeFailure(failure)
                     }
                 }
+                if exchange.capture.hasSameIntent(as: latest.load()), subtitleUnavailable.record(
+                    exchange.response?.delivery?.subtitleReadiness, commitUnavailable: false,
+                    intent: exchange.capture.intentGeneration
+                ) {
+                    scheduleSubtitleReady { [weak self] in
+                        guard self?.activeGeneration == generation,
+                              exchange.capture.hasSameIntent(as: latest.load()),
+                              subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness,
+                                                         intent: exchange.capture.intentGeneration)
+                        else { return }
+                        onSubtitleUnavailable()
+                    }
+                }
                 if exchange.capture.hasSameIntent(as: latest.load()), subtitleReadiness.record(
-                    exchange.response?.delivery?.subtitleReadiness, commitReady: false
+                    exchange.response?.delivery?.subtitleReadiness, commitReady: false,
+                    intent: exchange.capture.intentGeneration,
+                    revision: exchange.response?.delivery?.subtitleRevision
                 ) {
                     scheduleSubtitleReady { [weak self] in
                         // A ready edge can wait for MainActor while a new
@@ -312,7 +354,9 @@ final class PlaybackControlSession {
                         // callback executes, not when it was enqueued.
                         guard self?.activeGeneration == generation,
                               exchange.capture.hasSameIntent(as: latest.load()),
-                              subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
+                              subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness,
+                                                       intent: exchange.capture.intentGeneration,
+                                                       revision: exchange.response?.delivery?.subtitleRevision)
                         else { return }
                         onSubtitleReady()
                     }

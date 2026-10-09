@@ -636,8 +636,10 @@ Forgejo can remove a run's artifacts when a different job in that run is
 retried. The successful Python job remains attempt 1 and retains its log.
 New main-lane attempts therefore write bounded, checksummed start/final journal
 frames into that log as well as publishing artifacts. Log-only restoration
-requires a successful Python job and a completed final snapshot; partial
-snapshots remain diagnostic evidence, not an automatic failure waiver.
+requires an authenticated terminal Python job and a completed final snapshot;
+whole-job failure after those records does not discard their positive outcomes.
+The unframed legacy fallback still requires a successful job. Partial snapshots
+remain diagnostic evidence, not an automatic failure waiver.
 Restoration authenticates
 the same repository, PR, branch, workflow, source and Python job, and still
 requires original provenance for every inherited success. Framing detects
@@ -733,3 +735,21 @@ Run `make history-check` on the final committed tree before pushing, as well
 as the focused regressions. An uncommitted audit does not inspect the future
 commit's subject or landing attribution. A new current-head development gate
 still must pass before integration; this recovery does not make run4506 green.
+## Completed Python phase interrupted before Node
+
+A preflight deadline can expire after every Python method passes and its
+completed log journal is emitted, before either final artifact upload. The
+framed Python receipt preserves those individual passes under their original
+source and run; a fresh attempt still must finish every remaining gate.
+
+The separate Node journal can continue only when the authenticated immutable
+workflow places Node immediately after a mandatory successful Python-final
+upload. Both start artifacts and their successful publications must survive,
+Python's complete start/final frames must agree with its start artifact, and
+the terminal log must record the deadline after the final frame. Neither final
+artifact/publication nor any Node outcome may exist. Conditions or error
+continuation that bypass the upload, changed producer/environment identity,
+partial frames and ambiguous attempts refuse recovery. This proof imports no
+Node outcomes and manufactures no final journal. It is generic to this phase
+boundary, with no run-specific exemption. The main preflight budget is fifteen
+minutes so provisioning, contracts and journal publications can all finish.

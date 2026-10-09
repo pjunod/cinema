@@ -1521,6 +1521,8 @@ async fn resources(
     }
     let (payload, guard) = opened.into_parts();
     let guard = std::sync::Arc::new(guard);
+    let mut subtitle_complete = None;
+    let mut subtitle_absent = false;
     let (body, len, etag, mime) = match payload {
         crate::transcode::source_actor::SourceResourcePayload::Playlist(bytes) => {
             validate_sharing_playlist(&input.resource, &bytes).map_err(|_| unavailable())?;
@@ -1539,6 +1541,19 @@ async fn resources(
             ) {
                 return Err(unavailable());
             }
+            let len = bytes.len() as u64;
+            (axum::body::Body::from(bytes), len, None, "text/vtt")
+        }
+        crate::transcode::source_actor::SourceResourcePayload::CachedSubtitle {
+            bytes,
+            complete,
+            absent,
+        } => {
+            if input.resource.cached_subtitle_revision().is_none() {
+                return Err(unavailable());
+            }
+            subtitle_complete = Some(complete);
+            subtitle_absent = absent;
             let len = bytes.len() as u64;
             (axum::body::Body::from(bytes), len, None, "text/vtt")
         }
@@ -1589,6 +1604,16 @@ async fn resources(
         response
             .headers_mut()
             .insert(key, value.parse().map_err(|_| unavailable())?);
+    }
+    if let Some(complete) = subtitle_complete {
+        response.headers_mut().insert(
+            "x-plurx-subtitle-complete",
+            axum::http::HeaderValue::from_static(if complete { "true" } else { "false" }),
+        );
+        response.headers_mut().insert(
+            "x-plurx-subtitle-absent",
+            axum::http::HeaderValue::from_static(if subtitle_absent { "true" } else { "false" }),
+        );
     }
     if let Some(etag) = etag {
         response

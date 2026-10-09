@@ -1705,6 +1705,7 @@ impl TranscodeManager {
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
                         source_tick, native_bl, preferences,
                         destination, mode, encoder: processed_encoder, runtime_cache: self.runtime_cache.clone(), prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
+                        report_revision: std::sync::atomic::AtomicU64::new(0),
                         published_receipt: std::sync::Mutex::new(None) };
                     let mut processed_options = retained.1.clone();
                     processed_options.pipeline = self.live_lookup_options(self.rate_control_snapshot(),
@@ -1981,6 +1982,10 @@ impl TranscodeManager {
             req.audio_offset_ms.clamp(-15_000, 15_000)
         };
         let encoding = self.prepare_vod_encoding(req, &file).await?;
+        let processed_dv_profile = encoding
+            .as_ref()
+            .filter(|encoding| encoding.preserves_processed_dv())
+            .map(|_| 8);
         let target_height = encoding
             .as_ref()
             .map_or(file.height.unwrap_or(0), |encoding| {
@@ -1996,7 +2001,7 @@ impl TranscodeManager {
             });
         let encoder = encoding
             .as_ref()
-            .map_or("vod", |encoding| encoding.plan.encoder().label());
+            .map_or("vod", |encoding| encoding.delivered_encoder_label());
         let codec_qualification = encoding.as_ref().map(|encoding| {
             (
                 encoding.plan.encoder(),
@@ -2228,6 +2233,7 @@ impl TranscodeManager {
             });
         }
         Ok(StartInfo {
+            processed_dv_profile,
             retained_output: self
                 .vod
                 .hls_facts(&start.session_id)

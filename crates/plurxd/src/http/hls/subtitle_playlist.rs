@@ -498,6 +498,16 @@ pub(super) async fn subtitle_vtt_local_before(
     segment: &str,
     publication_deadline: Instant,
 ) -> Result<Response, ApiError> {
+    if let Some(revision) = segment.strip_prefix("cached-") {
+        return cached_subtitle_revision_local_before(
+            state,
+            session,
+            index,
+            revision,
+            publication_deadline,
+        )
+        .await;
+    }
     subtitle_vtt_local_before_with_source(
         state,
         session,
@@ -505,6 +515,50 @@ pub(super) async fn subtitle_vtt_local_before(
         segment,
         publication_deadline,
         &ProductionSubtitleSegmentSource(state.subtitle_source_access()),
+    )
+    .await
+}
+
+/// Read only the published bytes of this exact session's frozen source. The
+/// ordinary media relay reaches the owner before this function runs.
+pub(super) async fn cached_subtitle_revision_local_before(
+    state: &AppState,
+    session: &str,
+    index: i64,
+    revision: &str,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    if !plurx_core::sharing_resources::valid_cached_subtitle_revision(revision) {
+        return Err(ApiError::BadRequest("invalid subtitle revision".into()));
+    }
+    let (_, file, owner) = session_file(state, session, deadline).await?;
+    let response = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        super::super::stream::subtitle_vtt_for_file_revision(state, &file, index, Some(revision)),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())??;
+    let name = format!("subs/{index}/cached-{revision}");
+    if response.status() != StatusCode::OK {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            "subtitle-segment",
+            Some(&name),
+            deadline,
+        )
+        .await?;
+        return Ok(response);
+    }
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media("subtitle-segment", Some(&name)),
+        true,
+        response,
+        deadline,
     )
     .await
 }
@@ -797,54 +851,10 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
                     windowing,
                     "serving an empty subtitle segment while its sidecar cache warms"
                 );
-                // An empty segment says "there are no cues here", which is
-                // true while a sidecar is warming and a lie once it has
-                // failed — and players keep the bytes in memory whatever
-                // `no-store` says, so the lie is what a client is left with.
-                // A refusal with `Retry-After` is the honest answer, and the
-                // memo's own remaining time is the only moment a retry could
-                // achieve anything.
-                //
-                // Behind an operator switch, and off by default, because the
-                // cost of being honest here is not yet measured: AVPlayer
-                // blocks the muxed video for about two seconds on a subtitle
-                // segment, and whether each engine keeps playing video
-                // through a subtitle 503 or stalls the picture has to be
-                // observed per engine before this becomes the default. The
-                // Developer tab reports what has been observed and does not
-                // gate the switch on it.
-                if whole_track == crate::subtitles::SidecarState::Failed
-                    && state.subtitle_not_ready_503().await
-                {
-                    let retry_after =
-                        crate::subtitles::failure_memo_remaining(&state.subs_dir, &file, index)
-                            .await
-                            .map(|remaining| remaining.as_secs().max(1))
-                            .unwrap_or(1);
-                    tracing::info!(
-                        target: "plurxd::http::hls",
-                        session = %crate::transcode::session_log_id(session),
-                        file_id = file.id,
-                        index,
-                        retry_after,
-                        "refusing a subtitle segment whose sidecar extraction failed"
-                    );
-                    authorize_attempt_status(
-                        state,
-                        session,
-                        &owner,
-                        "subtitle-segment",
-                        None,
-                        publication_deadline,
-                    )
-                    .await?;
-                    return Ok((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        [(header::RETRY_AFTER, retry_after.to_string())],
-                        [(header::CACHE_CONTROL, "no-store")],
-                    )
-                        .into_response());
-                }
+                // Caption failure belongs to delivery.subtitle_readiness on
+                // control, not the media transport. AVPlayer stalls video on
+                // a terminal subtitle 503; the native/text selection remains
+                // attached while the control path reports unavailable.
                 (b"WEBVTT\n\n".to_vec(), "no-store", false)
             }
         }

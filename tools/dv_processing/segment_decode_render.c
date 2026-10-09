@@ -62,6 +62,34 @@ struct layer {
   int count, index;
 };
 static struct layer layers[2];
+// Matroska commonly exposes a selected track's endpoint through DURATION
+// while leaving AVStream.duration unknown. Parse only its fixed decimal clock;
+// the container/audio maximum cannot stand in for this video declaration.
+static int video_duration_ns(const char *text, int64_t *duration) {
+  if (!text) return 0;
+  size_t length = strnlen(text, 33);
+  if (length < 18 || length > 25) return 0;
+  size_t hours_digits = length - 16;
+  if (text[hours_digits] != ':' || text[hours_digits + 3] != ':' ||
+      text[hours_digits + 6] != '.') return 0;
+  int64_t hours = 0, minute = 0, second = 0, fraction = 0;
+  for (size_t i = 0; i < length; i++) {
+    if (i == hours_digits || i == hours_digits + 3 || i == hours_digits + 6) continue;
+    if (text[i] < '0' || text[i] > '9') return 0;
+    int digit = text[i] - '0';
+    if (i < hours_digits) hours = hours * 10 + digit;
+    else if (i < hours_digits + 3) minute = minute * 10 + digit;
+    else if (i < hours_digits + 6) second = second * 10 + digit;
+    else fraction = fraction * 10 + digit;
+  }
+  if (minute >= 60 || second >= 60 || hours > INT64_MAX / 3600000000000LL) return 0;
+  int64_t tail = (minute * 60 + second) * 1000000000LL + fraction;
+  int64_t whole = hours * 3600000000000LL;
+  if (whole > INT64_MAX - tail || whole + tail <= 0) return 0;
+  *duration = whole + tail;
+  return 1;
+}
+
 static void need(int ok, const char *reason) {
   if (!ok) {
     fprintf(stderr, "Segment refused: %s\n", reason);
@@ -714,6 +742,22 @@ int main(int argc, char **argv) {
                last_emitted_end + 1 >= stream->start_time + stream->duration &&
                last_emitted_end - 1 <= stream->start_time + stream->duration,
            "source EOF disagrees with declared video extent");
+    } else if (av_dict_get(stream->metadata, "DURATION", NULL, 0)) {
+      const AVDictionaryEntry *declared = av_dict_get(stream->metadata, "DURATION", NULL, 0);
+      int64_t endpoint_ns;
+      need(video_duration_ns(declared->value, &endpoint_ns),
+           "invalid declared video DURATION extent");
+      need(av_compare_ts(last_emitted_end + 1, source_time_base,
+                         endpoint_ns, (AVRational){1, 1000000000}) >= 0 &&
+               av_compare_ts(last_emitted_end - 1, source_time_base,
+                             endpoint_ns, (AVRational){1, 1000000000}) <= 0,
+           "source EOF disagrees with declared video DURATION extent");
+      // A known container maximum may contradict the selected video, but
+      // can never supply its missing declaration (other tracks may outlast it).
+      need(input->duration == AV_NOPTS_VALUE || input->duration <= 0 ||
+               av_compare_ts(last_emitted_end - 1, source_time_base,
+                             input->duration, (AVRational){1, AV_TIME_BASE}) <= 0,
+           "source EOF extent unavailable or inconsistent");
     } else {
       need(input->nb_streams == 1 && input->duration != AV_NOPTS_VALUE &&
                input->duration > 0 &&

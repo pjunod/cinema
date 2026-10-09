@@ -1096,7 +1096,13 @@ pub fn dv_author_profile81_window(
         .map_err(|_| invalid())?;
         output.extend_from_slice(&fragment.bytes);
     }
-    if index != source_rpus.len() || output.len() > 64 * 1024 * 1024 {
+    if index != source_rpus.len() || !reader.saw_trailer() || reader.buffered() != 0 {
+        return Err(invalid());
+    }
+    // RPU insertion changes moof offsets. Do not retain a stale random-access
+    // index: emit empty entries for the actual tracks and a correct mfro.
+    output.extend_from_slice(&completed_window_trailer(&init));
+    if output.len() > 64 * 1024 * 1024 {
         return Err(invalid());
     }
     dv_validate_encoded_window(
@@ -1109,6 +1115,26 @@ pub fn dv_author_profile81_window(
         DvDestination::Profile81,
     )?;
     Ok(output)
+}
+
+fn completed_window_trailer(init: &crate::fmp4::Init) -> Vec<u8> {
+    let size = 24 + 24 * init.tracks.len() as u32;
+    let mut trailer = Vec::with_capacity(size as usize);
+    trailer.extend_from_slice(&size.to_be_bytes());
+    trailer.extend_from_slice(b"mfra");
+    for track in &init.tracks {
+        trailer.extend_from_slice(&24_u32.to_be_bytes());
+        trailer.extend_from_slice(b"tfra");
+        trailer.extend_from_slice(&0x01000000_u32.to_be_bytes());
+        trailer.extend_from_slice(&track.id.to_be_bytes());
+        trailer.extend_from_slice(&0_u32.to_be_bytes()); // one-byte traf/trun/sample numbers
+        trailer.extend_from_slice(&0_u32.to_be_bytes()); // no stale offset entries
+    }
+    trailer.extend_from_slice(&16_u32.to_be_bytes());
+    trailer.extend_from_slice(b"mfro");
+    trailer.extend_from_slice(&0_u32.to_be_bytes());
+    trailer.extend_from_slice(&size.to_be_bytes());
+    trailer
 }
 
 /// Inputs are collected by the daemon from its held source and completed

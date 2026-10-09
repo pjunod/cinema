@@ -1,3 +1,21 @@
+# Subtitle batch census, base0c4ae0aa5 -> reviewed worker/owner delivery:
+# +2 publication_ready_at_ms fields belong only to cached_owner_delivery's
+# admitted activation fixtures; no new production publication fence is added.
+# +6 namespaced task sites: main's shutdown-bound transcription loop; two
+# awaited no-follow model open/identity spawn_blocking calls; one receiver
+# duplex fixture server that aborts and awaits; and cached_owner_delivery's
+# graceful HTTP server and awaited learner-client drain. Its dedicated
+# stack-sized test thread is joined (+1 method-spawn).
+# +9 timer sites: three shutdown/model/idle worker timers, three bounded
+# Stop fixture observations, one retained-window publication fixture timeout,
+# one remote-owner fixture timeout and the existing request deadline wrapped
+# around cached-caption forwarding. All stay awaited by their current owner.
+# +4 process constructors are the worker decoder/whisper and finite fixture
+# generator/probe; each uses bounded::output_command and its reap ownership.
+# +5 broad launch-shaped method matches are response.status assertions/checks
+# (five in cached_owner_delivery, one in subtitle_playlist, minus one removed
+# chunk_02 assertion). They start no OS child. No pattern/scope relaxation.
+
 # PR #947 inherited census reconciliation (source-only base 079960dae):
 # vod/tests/chunk_03.rs additions in 142d9f4e07 and b38387a133 implement
 # retirement_releases_background_admission_with_publication_locks_held and
@@ -1078,7 +1096,8 @@ expected_occurrences = 52
 [[module_symbols]]
 id = "m4-vod-status-owner-admission"
 pattern = "response_status_owner_is_current"
-expected_occurrences = 7
+# DV report projection revalidates the physical session owner after its lookup.
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-vod-supersession-transaction"
@@ -1423,7 +1442,7 @@ pattern = "publication_ready_at_ms"
 # staged link proof can be shown to end at commit. No shipped fence moves.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 137
+expected_occurrences = 139
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1480,7 +1499,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # A05 recovery: 35 -> 38, three new exact ack/typed-recovery fixtures use
 # the existing blocked activation then Confirm. No new shipped sentinel write.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 49
+# +1 subtitle remote-owner fixture starts its activation publication-blocked
+# before Confirm, matching the admitted durable owner; no production writer.
+expected_occurrences = 50
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1949,6 +1970,9 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# PR947 unit follow-up: one joined test-only blocking worker owns each
+# simulated boot runtime; runtime destruction settles its detached writers
+# before the helper returns its SQLite handle for inspection or restart.
 # PR913: +2 joined source_actor monitor-failure fixture tasks, no detached owner.
 # Shared H2 drain: the accepted driver moves to JoinSet.spawn; two finite
 # regression drivers are explicitly stopped and joined (+1 net).
@@ -2823,7 +2847,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # regression tasks retain their original owners.
 # Final DV/main integration: measured union of the reviewed DV sites and
 # PR #947 ownership additions above; neither history is discarded.
-expected_occurrences = 922
+# Includes the measured PR #969 main follow-up additions.
+# Final subtitle/current-main union: main adds one awaited startup fixture
+# spawn_blocking owner with its own drained runtime; cached_owner_delivery
+# removes its second relay task and reuses StartupObservationHttp's existing
+# owned listener/router. The two task deltas cancel; no new detached owner.
+# DV/subtitle main union; measured by the focused ownership census.
+expected_occurrences = 928
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3042,7 +3072,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # it starts no media producer.
 # Final DV/main integration: measured union of the reviewed DV sites and
 # PR #947 ownership additions above; neither history is discarded.
-expected_occurrences = 65
+# DV adds its awaited/reaped held-descriptor probe child; subtitle main adds
+# its joined stack-sized cached-owner fixture thread. Both owners are retained.
+expected_occurrences = 66
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3066,6 +3098,9 @@ expected_occurrences = 15
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# PR947 unit follow-up: the inventory-cancellation regression replaces
+# scheduler-turn counting with one five-second completion deadline and one
+# twenty-millisecond condition poll; all ownership/accounting assertions stay.
 # Backup passive catch-up: 1618 -> 1622, exactly +4 in backup.rs.
 # The existing publication sleep becomes sleep_until (no count delta).
 # One new timeout_at bounds local metrics, the single trigger and publication
@@ -4320,7 +4355,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # nine finite fixture observation bounds/polls add no independent scheduler.
 # Final DV/main integration: measured union of the reviewed DV sites and
 # PR #947 ownership additions above; neither history is discarded.
-expected_occurrences = 1652
+# Includes the measured PR #969 main follow-up additions.
+# Final subtitle/current-main union: +2 main preparation-storage fixture
+# observations (one finite timeout and one sleep while its retained filesystem
+# owner settles). No production timer or polling authority is introduced.
+# Post-merge cached-owner fixture: +2 finite observations (readiness timeout
+# and retry sleep) wait for actual production sampler/heartbeat publication.
+# Its retained sampler is cancelled and joined; it replaces the old spawned
+# learner drain, whose staged listeners/writers now drain directly. Task and
+# process counts stay unchanged; no production owner or timer is added.
+# DV/subtitle main union; measured by the focused ownership census.
+expected_occurrences = 1665
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4365,6 +4410,9 @@ expected_occurrences = 5
 
 [[module_structures]]
 id = "process-command-construction"
+# PR947 unit follow-up: one finite synchronous test-only FFmpeg remux of
+# existing CC0 Main10 HDR10/P5 controls makes the declared DV fixture truthful;
+# testfixtures::run waits and reaps it before exact box/profile/RPU assertions.
 # Main PR915: +2 VOD fixture children (sleep and true), owned by the real
 # registered ChildJob and settled writers before their admission is released.
 # Durable queue adds two test-only shell children, in background_jobs.rs and
@@ -4731,7 +4779,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # fixture collector.
 # Final DV/main integration: measured union of the reviewed DV sites and
 # PR #947 ownership additions above; neither history is discarded.
-expected_occurrences = 249
+# Includes the measured PR #969 main follow-up additions.
+# Final subtitle/current-main union: +1 main native-DV fixture Command
+# constructs the committed HDR10/P5 control; the synchronous fixture collector
+# owns and reaps it. No production process constructor is added.
+# DV/subtitle main union; measured by the focused ownership census.
+expected_occurrences = 254
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5336,7 +5389,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # The same release-triggered runtime task above launches no OS child.
 # Final DV/main integration: measured union of the reviewed DV sites and
 # PR #947 ownership additions above; neither history is discarded.
-expected_occurrences = 737
+# DV/subtitle main union; measured by the focused ownership census.
+expected_occurrences = 742
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

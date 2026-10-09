@@ -3263,9 +3263,10 @@ class Controller internal constructor(
                     effectiveProcessing = report?.takeIf { it.matches(generation, deliveredRange) }
                     effectiveProcessingGeneration = generation
                 },
-            onSubtitleUnavailable = {
-                raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
-            },
+                onSubtitleUnavailable = {
+                    if (selectedSubtitle != null) raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
+                },
+
                 onPrepare = ::onPrepareAction,
                 onAcknowledged = ::acknowledgementDelivered,
                 onEffectiveSelection = { effective ->
@@ -3361,13 +3362,19 @@ class Controller internal constructor(
                 return@launch
             }
             textSelectionArmed = false
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                .build()
-            kotlinx.coroutines.yield()
-            textSelectionArmed = true
-            applyTextSelection()
+            retryNativeTextRendition(
+                player,
+                isCurrent = {
+                    playbackControlBootstrapFence.isCurrent(claim, sessionId) &&
+                        playbackIntent.generation() == intentGeneration &&
+                        selectedSubtitle == index &&
+                        subtitleDelivery == SubtitleDelivery.NativeSession
+                },
+                restore = {
+                    textSelectionArmed = true
+                    applyTextSelection()
+                },
+            )
         }
     }
 
@@ -4141,16 +4148,19 @@ class Controller internal constructor(
     private fun settleVideoPlaybackIntentIfPresented() {
         val pending = playbackIntent.pendingSeek ?: return
         val first = firstVideoFrameForSeek ?: return
-        // A progressive remux may start at the preceding keyframe. Its first
+        // A copied stream may start at the preceding keyframe. Its first
         // rendered frame proves the new surface is live; later rendered output
         // and a clock that has crossed the target prove arrival at the seek.
-        if (!progressiveTransport || first.first != pending.sequence ||
-            first.second !in (pending.targetMs - 2_000L)..pending.targetMs ||
-            !presentationForeground || !player.isPlaying ||
-            textSelectionArmed || audioSelectionArmed ||
-            selectionRecipe?.let(recipeOwnership::canPresent) != true ||
-            (player.videoDecoderCounters?.renderedOutputBufferCount ?: 0) <= first.third
-        ) return
+        if (!copyPrerollHasRenderedProgress(
+                transport = recipeOwnership.attachedTransport,
+                pending = pending,
+                firstFrame = first,
+                foreground = presentationForeground,
+                playing = player.isPlaying,
+                selectionReady = !textSelectionArmed && !audioSelectionArmed &&
+                    selectionRecipe?.let(recipeOwnership::canPresent) == true,
+                renderedOutputCount = player.videoDecoderCounters?.renderedOutputBufferCount ?: 0,
+            )) return
         if (playbackTelemetry.presentedVideoProgress(playbackIntent, realPosition(), pending.sequence, monotonicNowMs())) {
             playbackControl.playerChanged()
             disarmVideoPresentation()

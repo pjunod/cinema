@@ -209,7 +209,7 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 | Rolling output retention (added 2026-10-04) | `vod_rolling_retention` | main-merge defects build, 2026-10-04 | built; default off | a qualified fleet run: retention stays inside its headroom on every node and released artifacts are deleted within a tick | (a) stays → Paul chooses: Settings → Playback beside the cache budget, or removed |
 | Prepared quality handoff | `prepared_quality_handoff` | [QUALITY-SWITCH-CONTINUITY-BUILD](../playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | in execution | M2-Android, M1-web, M3; physical-client fleet receipt | (a) stays → Settings → Playback |
 | Second player in this browser | browser-local | same | same | same | (a) stays → moves with prepared handoff |
-| Refuse a subtitle segment that failed | `subtitle_not_ready_503` | [SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT](../clients/SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | open | AVPlayer, Media3 and hls.js observations | (a) stays → toggle removed, refusal becomes default |
+| Generate subtitles offline | `subtitle-transcription` configuration | [Subtitle completion ledger](../clients/SUBTITLE-RELIABILITY-COMPLETION.md) | active | Real transcription, cancellation, source replacement and caption playback | Permanent controls move to Maintenance |
 | PGS subtitle overlay | `pgs_overlay` | [APPLE-PGS-OVERLAY-ACCEPTANCE](../clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md) | open | Apple and Android physical acceptance | (a) stays → Settings → Playback |
 | Parallel playback subtitle ranges | none (automatic) | K-09 | merged: M0–M5 | fleet evidence of a peer range exchange | (a) stays → card removed |
 | Stored PGS tracks | `subtitle_stored_sources` | K-09 | merged: M0–M5 | fleet and device evidence | (a) stays → Settings → Maintenance |
@@ -276,3 +276,10 @@ invalid fragment or unusable encoder result; that never changes the saved choice
 Next-episode metadata preparation uses the existing autoplay preference.
 HLS acknowledgement batching is part of normal delivery ownership. The plain
 VAAPI HDR graph publishes its measured capability through system diagnostics.
+
+The failed-subtitle 503 experiment is retired by the October subtitle repair.
+Actual AVPlayer remained at time zero through eighteen seconds of permanent
+503 responses while the empty-response control continued playing. Caption
+failure is reported through playback control, without turning a subtitle
+failure into a video transport stall. This is removal of an unsafe experiment,
+not a readiness observation overriding an operator switch.

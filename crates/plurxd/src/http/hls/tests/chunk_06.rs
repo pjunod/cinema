@@ -5406,3 +5406,20 @@ fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
     caps.progressive_hevc_sample_entries = Some(vec!["hvc1".into()]);
     assert!(!explicit_hls_hevc_claim(&caps));
 }
+
+#[test]
+fn subtitle_playlist_keeps_takeover_and_sliding_discontinuity_epochs() {
+    for (video, expected) in [
+        ("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:42\n#EXT-X-DISCONTINUITY-SEQUENCE:3\n#EXT-X-DISCONTINUITY\n#EXTINF:6.0,\nseg00042.m4s\n",
+         "#EXT-X-DISCONTINUITY-SEQUENCE:3\n#EXT-X-DISCONTINUITY\n#EXTINF:6.000000,\nseg00042.vtt\n"),
+        ("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:43\n#EXT-X-DISCONTINUITY-SEQUENCE:4\n#EXTINF:6.0,\nseg00043.m4s\n",
+         "#EXT-X-DISCONTINUITY-SEQUENCE:4\n#EXTINF:6.000000,\nseg00043.vtt\n"),
+        ("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nseg00000.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:6.0,\nseg00001.m4s\n#EXT-X-ENDLIST\n",
+         "seg00000.vtt\n#EXT-X-DISCONTINUITY\n#EXTINF:6.000000,\nseg00001.vtt\n#EXT-X-ENDLIST\n"),
+    ] {
+        let subtitles = subtitle_media_playlist(video.as_bytes());
+        assert!(subtitles.contains(expected), "{subtitles}");
+        assert_eq!(subtitles.matches("#EXT-X-DISCONTINUITY\n").count(),
+                   video.matches("#EXT-X-DISCONTINUITY\n").count());
+    }
+}

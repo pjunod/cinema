@@ -88,6 +88,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Observe the public Window callback before native dispatch. Keep the
+        // original callback, so forwarding cannot re-enter this wrapper.
+        val nativeWindowCallback = window.callback
+        window.callback = object : android.view.Window.Callback by nativeWindowCallback {
+            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                tv.plurx.app.remote.RemotePhysicalInput.observe(event) { RemoteRuntime.get(applicationContext).physicalInput() }
+                return nativeWindowCallback.dispatchKeyEvent(event)
+            }
+        }
         val rootView = java.lang.ref.WeakReference(window.decorView)
         RemoteRuntime.get(applicationContext).mainWindowEligible = { rootView.get()?.hasWindowFocus() == true }
         // Keep a real-hardware capability snapshot in logcat even before sign
@@ -114,10 +123,6 @@ class MainActivity : ComponentActivity() {
     override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
         if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) RemoteRuntime.get(applicationContext).physicalInput()
         return super.dispatchTouchEvent(event)
-    }
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        tv.plurx.app.remote.RemotePhysicalInput.observe(event) { RemoteRuntime.get(applicationContext).physicalInput() }
-        return super.dispatchKeyEvent(event)
     }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)

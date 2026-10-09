@@ -378,6 +378,7 @@ impl VodServe {
         #[cfg(target_os = "linux")]
         {
             let publication = self.session_rendition(session_id).await?;
+            let owner = publication.owner;
             let (rendition, _, _) = publication.result.ok()?;
             if rendition.closed.load(Relaxed)
                 || rendition.failure().is_some()
@@ -395,7 +396,15 @@ impl VodServe {
             else {
                 return None;
             };
-            runtime.effective_report(plan, incarnation_id)
+            if !self
+                .response_status_owner_is_current(session_id, &owner)
+                .await
+            {
+                return None;
+            }
+            // No await follows this final allowance check: a seek processed
+            // during the owner lookup cannot return a previously cloned report.
+            runtime.effective_report(plan, incarnation_id, &owner.incarnation)
         }
         #[cfg(not(target_os = "linux"))]
         {

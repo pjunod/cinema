@@ -428,10 +428,12 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) prepared: std::sync::Mutex<Option<(u32, VerifiedWindow)>>,
     pub(crate) failure_episode: DvDigest,
     pub(crate) preparation_budget: std::time::Duration,
+    pub(crate) report_revision: std::sync::atomic::AtomicU64,
     pub(crate) published_receipt: std::sync::Mutex<
         Option<(
             plurx_core::transcode::dv_processing::DvProcessingReceipt,
             DvDigest,
+            crate::vodencode::dv_report_lifetime::PublicationOwners,
         )>,
     >,
 }
@@ -448,19 +450,21 @@ impl RuntimeRecipe {
         &self,
         plan: &plurx_core::transcode::dv_processing::DvProcessingPlan,
         session_id: &str,
+        physical_owner: &Arc<()>,
     ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
         if episode_failed(&self.failure_episode) {
             return None;
         }
-        let published = self.published_receipt.lock().expect("DV published receipt");
-        let (receipt, shape) = published.as_ref()?;
+        let mut published = self.published_receipt.lock().expect("DV published receipt");
+        let (receipt, shape, owners) = published.as_mut()?;
+        let generation = owners.authorize(physical_owner, session_id)?;
         let mut receipt = receipt.clone();
-        receipt.bind_publication(session_id, shape.clone()).ok()?;
+        receipt.bind_publication(&generation, shape.clone()).ok()?;
         receipt
             .hdr10_effective_report(
                 &plurx_core::transcode::dv_processing::DvProductionRegistry,
                 plan,
-                session_id,
+                &generation,
                 shape,
             )
             .ok()
@@ -472,11 +476,21 @@ impl RuntimeRecipe {
         receipt: plurx_core::transcode::dv_processing::DvProcessingReceipt,
         encoded_payloads: &[DvDigest],
         plan_digest: &DvDigest,
+        physical_owners: &[Arc<()>],
+        report_revision: u64,
     ) {
         if !episode_failed(&self.failure_episode) {
             let shape =
                 digest(&serde_json::to_vec(encoded_payloads).expect("encoded sample digest list"))
                     .expect("encoded sample shape");
+            let mut published = self.published_receipt.lock().expect("DV published receipt");
+            if self
+                .report_revision
+                .load(std::sync::atomic::Ordering::Acquire)
+                != report_revision
+            {
+                return;
+            }
             tracing::debug!(target: "plurxd::vodserve",
                 destination = ?self.destination, processing_mode = ?self.mode,
                 frames = receipt.served_frames().len(), el_frames = receipt.counts().el_accepted,
@@ -485,12 +499,29 @@ impl RuntimeRecipe {
                 ).copied().unwrap_or(0),
                 plan_digest = %plan_digest.as_str(), object_shape = %shape.as_str(),
                 "DV processed window published");
-            self.published_receipt
-                .lock()
-                .expect("DV published receipt")
-                .replace((receipt, shape));
+            let mut owners = published
+                .take()
+                .map(|(_, _, owners)| owners)
+                .unwrap_or_default();
+            let accepted = owners.published(
+                physical_owners,
+                report_revision,
+                self.report_revision
+                    .load(std::sync::atomic::Ordering::Acquire),
+            );
+            debug_assert!(accepted, "publication revision checked under the same lock");
+            published.replace((receipt, shape, owners));
         }
     }
+    pub(crate) fn invalidate_report_owner(&self, physical: &Arc<()>) {
+        let mut published = self.published_receipt.lock().expect("DV published receipt");
+        self.report_revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some((_, _, owners)) = published.as_mut() {
+            owners.invalidate(physical);
+        }
+    }
+
     pub(crate) fn refuse_episode(&self) {
         fail_episode(&self.failure_episode);
         self.clear_published_window();

@@ -1221,6 +1221,11 @@ pub(crate) struct DeliveryView {
     /// answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle_readiness: Option<String>,
+    /// Identity of the ready whole track or demand window. A new window or
+    /// whole-track publication can repair buffered empty fragments without
+    /// ever passing through an observed warming state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_revision: Option<String>,
     /// Whether this playback's one preparation slot is doing anything, when
     /// this server evaluated it.
     ///
@@ -1374,6 +1379,7 @@ impl DeliveryView {
                     .to_owned()
                 }),
                 subtitle_readiness: subtitle_readiness.clone(),
+                subtitle_revision: None,
                 // Resolved at the emit site: the answer depends on the action
                 // this exchange ends up carrying, which is decided after the
                 // delivery view is built.
@@ -1412,6 +1418,7 @@ impl DeliveryView {
                 producer_decision: info.producer_decision.map(str::to_owned),
                 hold_reason: info.producer_hold.map(str::to_owned),
                 subtitle_readiness,
+                subtitle_revision: None,
                 preparation: None,
                 owner_node_hash: node_hash(owner_node_id),
                 owner_epoch,
@@ -3116,6 +3123,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             producer_decision: None,
             hold_reason: None,
             subtitle_readiness: None,
+            subtitle_revision: None,
             preparation: None,
             owner_node_hash: "n-test".to_owned(),
             owner_epoch: 1,
@@ -15773,6 +15781,7 @@ mod tests {
                     producer_decision: None,
                     hold_reason: None,
                     subtitle_readiness: None,
+                    subtitle_revision: None,
                     preparation: None,
                     owner_node_hash: "n-test".to_owned(),
                     owner_epoch: 1,
@@ -16381,6 +16390,7 @@ mod tests {
             producer_decision: None,
             hold_reason: reason.map(str::to_owned),
             subtitle_readiness: None,
+            subtitle_revision: None,
             preparation: None,
             owner_node_hash: "n-0123456789abcdef".to_owned(),
             owner_epoch: 1,
@@ -17234,13 +17244,17 @@ mod tests {
 
         let relayed: DeliveryView = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(relayed.subtitle_readiness, None);
+        assert_eq!(relayed.subtitle_revision, None);
+        assert!(!json.contains("subtitle_revision"));
 
         let mut ready = delivery_with_hold(None);
         ready.subtitle_readiness = Some("ready".to_owned());
+        ready.subtitle_revision = Some("opaque-window-revision".to_owned());
         let round_tripped: DeliveryView =
             serde_json::from_str(&serde_json::to_string(&ready).expect("serialize"))
                 .expect("deserialize");
         assert_eq!(round_tripped.subtitle_readiness.as_deref(), Some("ready"));
+        assert_eq!(round_tripped.subtitle_revision, ready.subtitle_revision);
     }
 
     /// A response written by a node one release ahead must still parse here.
@@ -18521,6 +18535,7 @@ mod tests {
             producer_decision: None,
             hold_reason: None,
             subtitle_readiness: None,
+            subtitle_revision: None,
             preparation: None,
             owner_node_hash: "n-test".to_owned(),
             owner_epoch: 1,
@@ -20303,6 +20318,7 @@ mod tests {
                 producer_decision: None,
                 hold_reason: None,
                 subtitle_readiness: None,
+                subtitle_revision: None,
                 preparation: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,
@@ -24611,6 +24627,7 @@ mod tests {
                 producer_decision: None,
                 hold_reason: None,
                 subtitle_readiness: None,
+                subtitle_revision: None,
                 preparation: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,

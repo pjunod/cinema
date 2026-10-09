@@ -1,7 +1,7 @@
 # Dolby Vision processing — implementation evidence and remaining work
 
 **Status:** open — serving integration and Linux packaging under qualification ·
-**Updated:** 2026-10-08 · **Integration:** `effort/dv-hdr-processing`
+**Updated:** 2026-10-09 · **Integration:** `effort/dv-hdr-processing`
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
 [source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
@@ -434,10 +434,11 @@ These individual observations are not steady-state throughput, a matched
 FEL-versus-base comparison, or a quality result. They identify an unresolved
 performance problem. The running production service was not changed.
 
-Normal VOD routing, audio, cache/publication receipts and fallback integration
-remain in progress. Base-only P5/P8 processing needs its own profile-aware path;
-it cannot inherit a FEL receipt. Matched quality/resource measurements, device
-acceptance and final effort qualification remain open. No Windows validation,
+At this stage, normal VOD routing, audio, cache/publication receipts and
+fallback integration remained open; §17 records the later implementation.
+Base-only P5/P8 processing has a separate profile-aware path and cannot inherit
+a FEL receipt. §16 records the matched resource measurements. Independent
+quality, device acceptance and final effort qualification remain open. No Windows validation,
 per-task full suite or merge-coordinator handoff is part of this effort.
 
 The production trace now omits decoded BL/EL and RGB pixel digests; explicit
@@ -460,7 +461,7 @@ decoded layer and explicitly report no FEL contribution. Thirteen focused
 controls cover polynomial and MMR mapping, omitted FEL, metadata refusals,
 window limits and diagnostic mode. The [helper guide](DV_PROCESSING_TOOLS.md)
 contains the exact replay command and supported envelope. Production selection
-and effective-report projection remain part of the open routing integration.
+and effective-report projection were subsequently implemented in §17.
 
 The independent scalar comparison did not meet its original four-RGB48-code
 tolerance: P5 reached six codes and the P8 affine/piecewise cases reached 27.
@@ -581,7 +582,247 @@ checks do not replace normal HTTP serving acceptance.
 
 Final acceptance must use the normal daemon's HTTP create, control, HLS and
 media endpoints, including audio, a nonzero seek, multiple supported windows,
-a later unsupported window and ordinary reopen. Synthetic 256×144 fixtures
-meet the existing minimum transcode height and prove routing and timing only. The real 4K case must retain the eight-second
-budget and demonstrate compatible fallback if it is exceeded. These checks
-are pending; no successful final serving result is claimed here.
+a later unsupported window and ordinary reopen. Synthetic 256×144 fixtures qualify the Profile 8.1 copy route but clamp below
+the HDR10 output geometry; HDR10 acceptance uses 1920×1080 sources. The 4K
+resource case must retain the eight-second budget and demonstrate compatible
+fallback if it is exceeded. The final bounded results are recorded in §22; no general
+serving result is claimed here.
+
+
+## 18. Verified inputs for final HTTP acceptance
+
+**Status:** independently verified source fixtures, 2026-10-09. Processed
+HTTP serving acceptance is recorded separately; this preparation establishes
+no successful processed daemon result.
+
+Normal HDR10 processing inherits the ordinary source-height clamp. A 256×144
+source meets the minimum transcode contract but its clamped output is outside
+the qualified HDR10 points, so requesting 1080 does not make that source an
+HDR10 acceptance fixture. The prepared 1920×1080 P5/P7/P8 variants qualify the
+source geometry; small P7 remains useful for bounded Profile 8.1 routing.
+The separate 3840×2160 synthetic P7/FEL variant checks resource refusal under
+the unchanged eight-second window budget. It is not real-movie quality or
+native ROG performance evidence.
+
+Two fixture errors were preserved and corrected in separate `*-zero` outputs.
+The compound muxer omitted average/nominal frame-rate fields, causing a
+`293/12` probe result despite encoder PTS at 24 fps. It now copies both fields
+from the encoder stream without rewriting packet PTS. Default AAC muxing also
+shifted video by +21 ms to avoid negative priming timestamps. The corrected
+mux uses `-copyts -avoid_negative_ts disabled`: first video PTS is actually
+zero, first AAC PTS is −21 ms, and both frame-rate fields are `24/1`.
+Every picture PTS was checked against `frame / 24` within 0.501 ms of the
+Matroska clock. Every encoded video packet payload hash matches its parent,
+so source pixels and RPU payloads were preserved by the timing correction.
+The renderer's zero initial source-origin guard was not relaxed.
+
+Supported fixtures contain 144 decoded pictures and independently parsed
+RPUs. The 1080 late P7 case contains 66; after 48 valid RPUs, Level 5 top and
+bottom offsets become 540/540, leaving no active 1080-line area. Earlier
+32/32 offsets were invalid only for the original 64-line source and cannot
+qualify the enlarged late-refusal case. Ten-bit PQ/BT2020 NCL, AAC, profile
+5/7/8 compatibility 0/6/1 and P7-only enhancement configuration were checked.
+
+The compact [fixture reproduction archive](../evidence/dv-processing-2026-10-09/dv-fixture-reproduction.tar.gz) is
+61,575 bytes, SHA256
+`9cea3c16f462f203186ea47d94e7b3000305bbce5c36ecf2847b617cdabc5ef2`.
+Its sorted, timestamp-normalized inventory contains source/patches, frozen
+RPU/editor inputs, recipes, receipts and dependency identities. The internal
+manifest SHA256 is
+`046d73d8e4bbeaba842c6c5d689fbb0878e72c1660fa1392649a77c3603f5055`.
+Generated movies, credentials, daemon configuration and user movies are
+excluded; their synthetic output hashes are retained in receipts.
+
+The muxer links the helper-pinned FFmpeg revision
+`bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa` (avformat 63.1.101). The recorded
+fixture encoder is FFmpeg 5.1.9 with libx265 ultrafast in local ARM64 image
+`sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9`.
+The independent parser is `dovi_tool 2.1.2`, built offline from existing pinned
+source revision `83e1fdad6dcd5995556235946e7c5c0f9010d5a1`; its observed
+macOS executable SHA256 is
+`ab0c865bd8b28b9be59d7dd64ca061c305bb65b6b31eee7ade3d8bd6143ef2bc`.
+The manifest distinguishes encoder identity from helper dependency identity.
+
+After extracting the archive, use an existing dependency prefix built by
+`tools/dv_processing/build-dependencies.sh` with pinned Rust 1.97.1. Select an
+FFmpeg encoder with libx265/lavfi/AAC and an independent parser explicitly:
+
+```bash
+python3 fixtures/reproduce.py 1080 --out /absolute/new-output \
+  --ffmpeg /path/to/ffmpeg --ffmpeg-prefix /path/to/dependencies/ffmpeg
+python3 fixtures/verify.py --out /absolute/new-output \
+  --ffmpeg /path/to/ffmpeg --ffprobe /path/to/ffprobe \
+  --dovi-tool /path/to/dovi_tool
+```
+
+These source receipts do not prove daemon adoption, audio playback, multiple
+processed windows or ordinary reopen. Those require actual advertised HTTP
+bytes and the fresh publication marker. Parsed metadata differences prove
+adaptation, not FEL visual gain. A/V checks using a 100 ms tolerance are an
+acceptance bound, not a frame-perfect synchronization claim. Nonzero initial
+source origin remains a documented fallback limitation of the supported
+renderer scope rather than being hidden by modified probe facts.
+
+
+## 19. Serving checks found and corrected two integration failures
+
+PR #967 corrected the reconstructed-video encoder clock. The real HTTP path
+reached an adapter that expected `1/<timescale>`, while the builder emitted
+frame-duration notation. The reconstructed route now binds the encoder clock,
+filter time base, mapped PTS and MP4 timescale to the same rational grid. Its
+actual builder-to-adapter regression covers Software/NVENC, 24 fps/NTSC and a
+nonzero window with AAC. This argument-contract check is not an emitted NTSC
+media qualification. Ordinary output clocks are unchanged.
+
+PR #970 retains completed output in a private named temporary file through
+its held-descriptor probe. On the Docker macOS bind cache, an anonymous file's
+original descriptor remained valid but reopening it through `/proc/self/fd`
+failed with `ENOENT`. The same bytes probed successfully from a named file on
+that cache and an anonymous file on the container overlay. The actual
+completed-MP4 regression verifies HEVC Main 10 headers, `0600` permissions and
+automatic removal after the probe. Input custody and header validation remain
+unchanged. Both fixes passed their smallest focused regression, independent
+review and the normal pinned compiler/lint hook; no full suite was repeated.
+
+The HTTP acceptance daemon is built from committed source, with the normal
+Jellyfin FFmpeg 8.1.3 encoder/probe and the separately pinned static bound probe.
+A temporary diagnostic wrapper was removed before acceptance. The helper uses
+software Vulkan on the local ARM64 Linux container. These checks can establish
+serving mechanics and conservative fallback, not native ROG throughput or a
+physical Dolby Vision display result.
+
+
+## 20. Complete publication and keep reports bound to their viewer
+
+Normal HTTP checks exposed two further integration defects. The Profile 8.1
+encoder produced valid pictures and metadata, but packet authoring dropped
+its completion trailer. The unchanged publisher therefore refused to commit
+the output. HDR10 windows did publish successfully, but starting each next
+prefetch erased the prior processing report before clients could observe it.
+
+Reviewed commit `d1c6216e8d2c61ac37c72bb0f41b0c31827d7adc` fixes both boundaries.
+Profile 8.1 authoring requires the authentic input completion trailer and no
+unconsumed remainder. Since RPU insertion changes sample sizes, it regenerates
+a version-1 zero-entry random-access footer for the actual track identifiers
+and its matching size record instead of copying invalid old offsets. The
+publisher's completion requirements remain unchanged. A retained three-picture
+NTSC control now passes through the real Rust author and publisher; missing
+and truncated completion inputs are refused.
+
+HDR10 reporting retains the completed publication during ordinary prefetch.
+Its allowance belongs to the physical viewer attachment and binds once to the
+accepted incarnation UUID. Replacement, accepted seek, retained replay and
+failure cannot reuse that allowance. A producer captures the report revision
+when it starts; a seek changes that revision under the publication lock, so
+an older producer cannot restore the retired report. The prepared first
+window retains its original revision. Owner lookup completes before the
+final synchronous report projection; independent review caught and corrected
+the opposite ordering, which could return a report invalidated during an
+await. The paused-query regression exercises the portable authorization
+state, not the complete Linux HTTP endpoint.
+
+The admitted Profile 8.1 plan also projects its actual destination and encoder
+into Start responses and HLS metadata. Its physical method remains transcode,
+with a PQ-compatible base. An optional bounded, session-bound owner header
+carries the marker between peers; the existing strict START JSON body stays
+compatible with older readers. Recovered descriptions preserve the admitted
+marker and actual encoder. Source tags alone cannot grant the marker.
+
+Pinned Rust 1.97.1 compiled the affected daemon and passed the real
+source-author-to-publisher regression, two report-owner regressions, prepared
+Profile 8.1 Start projection, peer-header compatibility and retained-replay
+negative. The core completion regression passed with `hiqlite-store` enabled.
+Seven ownership inventory checks passed, followed by the normal formatting,
+workspace all-target Clippy and embedded JavaScript hook. Independent final
+review approved the committed DV correction and verified its source hashes.
+These focused checks do not claim final HTTP acceptance or qualification of
+the complete effort; those results are recorded only after execution.
+
+
+## 21. Final-window duration belongs to the selected video track
+
+The first actual Profile 8.1 HTTP case published two complete windows with
+48 reconstructed FEL pictures each, but prefetch of the final window refused
+`source EOF extent unavailable or inconsistent`. For the multi-track Matroska
+fixture, FFmpeg left `AVStream.duration` unavailable while the selected video
+track's `DURATION` tag declared `00:00:05.999000000`. That endpoint matched the
+last decoded picture plus its duration; the audio/container maximum was
+6.000 seconds. Requiring a single-stream input for the fallback declaration
+therefore refused a valid video ending whenever this duration representation
+accompanied audio.
+
+Commit `deaa1496868bf559e5704a009436df021b296e25` reads only the selected
+video's fixed decimal duration clock
+when its ordinary stream duration is unavailable. Parsing is bounded, minute
+and second fields are checked, and nanosecond arithmetic rejects overflow.
+The declared endpoint must still match the decoded ending within the existing
+one-source-tick tolerance. Actual EOF, requested-window coverage, zero initial
+source origin and the source-file fence are unchanged. Audio duration cannot
+stand in for video duration; unknown, malformed and inconsistent declarations
+remain refusals. A known positive container extent must also not end earlier
+than the decoded video, within the same tolerance. This is an upper bound,
+not a substitute for the selected video's declaration; a later AAC tail is
+valid. The first patch passed the selected-track controls but the retained
+long-terminal regression exposed this missing contradiction check. Its
+1.708-second video declaration conflicted with a mutated 0.600-second
+container declaration. That attempt remains evidence of the caught defect,
+not final acceptance.
+
+The warm ARM64 helper build passed with warnings denied. The focused real
+renderer control passed the final-picture case with AAC in both FEL and
+base/RPU modes. Missing video duration, malformed clock, invalid minute and
+mismatched endpoint each refused with its specific cause and no completion
+record. A seventh case refused the shorter-container contradiction, and the
+existing long-terminal control again refused with its original cause. The
+independent final source review approved the committed correction. Final bounded HTTP results with the rebuilt helper and matching daemon
+source identity appear in §22; the earlier failed attempt remains retained.
+
+The AMD64 helper bundle also compiled offline against the retained public
+library prefix, with normal `-Wall -Wextra -Werror` flags. Manifest validation
+passed in both the compiler image and the existing minimal runtime image;
+all three helper binaries loaded and returned their expected usage refusal.
+No daemon or dependency rebuild was needed for that packaging check. Its
+source aggregate SHA256 is
+`cd20e90a091990675be2c8660305407432a0deacb5519fb7965b18dd0c2f0a8b`,
+manifest SHA256 is
+`5921263b0adc5d6df324dff1cad74144d42aee96eb3c9fd0913de56798ae5337`,
+and renderer SHA256 is
+`962e62499840d9ef471c20f8d732aa6e0c4690f4e77b5c5d7d89bad11473645f`.
+The observed helper ABI remains 374 / avcodec 63 / avformat 63 / avutil 61.
+This emulated AMD64 loader/build proof is not a performance measurement.
+
+
+## 22. Final bounded HTTP serving evidence
+
+The [HTTP summary](../evidence/dv-processing-2026-10-09/http-summary.json)
+and [artifact manifest](../evidence/dv-processing-2026-10-09/http-manifest.json)
+bind the final local Linux daemon to `deaa1496868bf559e5704a009436df021b296e25`.
+Its Rust 1.97.1 build passed. The matching ARM helper manifest is
+`8f239187b834882f12f6cea16737d070e552c688a9c9e993a8b7ebbaf9041760`.
+The normal Jellyfin FFmpeg 8.1.3 path and unchanged eight-second private
+window limit were used with software Vulkan. The export retains 487 artifacts
+including failed attempts; credentials and private configuration are excluded.
+
+- P5 and P8 produced actual HEVC Main 10 PQ HDR10 with AAC and effective
+  enhancement reports. P8 correctly reported base/RPU processing without FEL.
+- P7/FEL survived one genuine in-session seek: accepting it cleared the old
+  report; the actual 4–6 second source window then published 48 reconstructed
+  pictures with 48 FEL/NLQ contributions and a fresh report. The collector
+  honored one explicit segment-pending retry within its 20-second bound.
+- P7 to P8.1 published nonzero 2–4 and 4–6 second windows. Independent parsing
+  found 48 profile-8 RPUs per window, associated with the corresponding
+  source frames, alongside 48 FEL/NLQ contributions and synchronized AAC.
+- Synthetic 4K exceeded the unchanged eight-second private-window deadline.
+  Ordinary compatible HDR10/AAC succeeded, including a fresh same-playback
+  reopen with the failed enhancement excluded and no HDR10-E report.
+- The late malformed-metadata case instead reached a private-output resource
+  refusal. Fresh compatible fallback passed, but the intended invalid active
+  area diagnostic remains **unproven**. Its strict analyzer failure is retained.
+
+A/V agreement uses a 100 ms bound. These are synthetic serving, timing,
+metadata and fallback results, not physical ROG/display acceptance, sustained
+4K throughput, independent reference-picture agreement or Dolby conformance.
+The full-unit campaign and promotion result are recorded on PR #968 against
+its final integrated head; the earlier serving source does not certify later
+main changes. Both optional features remain default-off in Developer settings
+with the broader reference, hardware and metadata limits still visible.

@@ -647,6 +647,7 @@ struct PreparedReplacementAction: Equatable {
 struct ControlDelivery: Codable, Equatable {
     /// Extensible relay value: only the exact value `ready` has client meaning.
     var subtitleReadiness: String?
+    var subtitleRevision: String? = nil
     /// How far the server has got with a preparation for the newest ask:
     /// `staging`, `offered`, or `none`.
     ///
@@ -661,19 +662,40 @@ enum SubtitleReadinessDecision {
     static func meansReady(_ value: String?) -> Bool { value == "ready" }
 }
 
+/// A terminal extraction failure gets one notice per current selection/seek intent.
+/// Readiness success remains independently retryable when the cache recovers.
+final class SubtitleUnavailableNoticeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var toldIntent: Int?
+
+    func record(_ value: String?, commitUnavailable: Bool = true, intent: Int = 0) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard value == "unavailable", toldIntent != intent else { return false }
+        if commitUnavailable { toldIntent = intent }
+        return true
+    }
+}
+
 /// Turns a non-ready → ready edge into one retry and suppresses repeated
 /// control cadence at `ready`. The reporter actor records into this locked
 /// bridge; the player consumes the edge on MainActor.
 final class SubtitleReadinessRetryState: @unchecked Sendable {
     private let lock = NSLock()
     private var lastReady: Bool?
+    private var lastIntent: Int?
+    private var lastRevision: String?
 
-    func record(_ value: String?, commitReady: Bool = true) -> Bool {
+    func record(_ value: String?, commitReady: Bool = true, intent: Int = 0, revision: String? = nil) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         let ready = SubtitleReadinessDecision.meansReady(value)
-        defer { if !ready || commitReady { lastReady = ready } }
-        return lastReady == false && ready
+        defer {
+            if !ready || commitReady { lastReady = ready; lastIntent = intent; lastRevision = revision }
+        }
+        // Warming can finish between control exchanges. The first ready
+        // observation for this intent must repair any cached empty segments.
+        return ready && (lastReady != true || lastIntent != intent || lastRevision != revision)
     }
 }
 
@@ -1193,7 +1215,7 @@ actor PlaybackControlReporter {
         }
         let retryableControl = (status == 425 && code == "owner_transition")
             || (status == 429 && code == "control_rate_limited")
-            || (status == 503 && code == "control_unavailable")
+            || (status == 503 && (code == "control_unavailable" || code == "serving_fenced"))
         let retryableTransport = status == 408 || status == nil
         guard retryableControl || retryableTransport else {
             stop()

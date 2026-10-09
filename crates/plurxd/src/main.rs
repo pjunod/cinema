@@ -86,6 +86,7 @@ mod storeprobe;
 mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
+mod subtitle_transcription;
 mod subtitles;
 mod telemetry;
 mod titlestore;
@@ -3206,6 +3207,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(http::file_grants::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(subtitle_transcription::run(
         state.clone(),
         background_shutdown.clone(),
     ));
@@ -7772,6 +7777,29 @@ mod startup_tests {
     /// Boots `config` over `root`, checks it is serving, shuts it down, and
     /// hands back the store it ran on.
     async fn boot_serve_and_drain(
+        config: &Config,
+        root: &std::path::Path,
+    ) -> Arc<dyn plurx_core::store::Store> {
+        let config = config.clone();
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            // Each simulated process owns its runtime. Settle its detached
+            // tasks and blocking writers before a later boot reopens the file.
+            // The SQLite handle owns its connections independently; subsequent
+            // inspection runs on the caller's current runtime.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("boot runtime");
+            let store = runtime.block_on(boot_serve_and_drain_in_runtime(&config, &root));
+            drop(runtime);
+            store
+        })
+        .await
+        .expect("boot runtime worker")
+    }
+
+    async fn boot_serve_and_drain_in_runtime(
         config: &Config,
         root: &std::path::Path,
     ) -> Arc<dyn plurx_core::store::Store> {
