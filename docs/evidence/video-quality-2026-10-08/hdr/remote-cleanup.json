@@ -1,0 +1,146 @@
+{
+  "at": "2026-10-09T02:07:42.101817+00:00",
+  "owned_roots": [
+    {
+      "path": "/var/tmp/plurx-hdr-baseline-8m-control-0gta8ut2",
+      "files": 3,
+      "bytes": 22617,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-baseline-control-5ni94ia2",
+      "files": 3,
+      "bytes": 22620,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-chromatic-20261008-e417tvm5",
+      "files": 143,
+      "bytes": 1552564,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-effort1-8m-control-5y5o47d_",
+      "files": 3,
+      "bytes": 22836,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-pressure-20261008-jt2c70_7",
+      "files": 8,
+      "bytes": 60071579,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-pressure2m-20261008-1rhk0x9y",
+      "files": 8,
+      "bytes": 58206530,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-pressure2m-effort1-20261008-g8kosw8b",
+      "files": 5,
+      "bytes": 56827829,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-qmax18-8m-control-s0oi7wvc",
+      "files": 3,
+      "bytes": 22800,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-qmax18-control-m96y8w6r",
+      "files": 3,
+      "bytes": 22803,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-qmax24-control-ifb46tz4",
+      "files": 3,
+      "bytes": 22803,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-real-1800-20261008-0oaxzxw4",
+      "files": 8,
+      "bytes": 59010616,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-real-1800-effort1-20261008-ls7ovtj3",
+      "files": 5,
+      "bytes": 57041828,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-real-20261008-q3gd1mcu",
+      "files": 11,
+      "bytes": 59934960,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-real-3600-20261008-i2imqliw",
+      "files": 8,
+      "bytes": 54134159,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-real-3600-effort1-20261008-iyphvnrs",
+      "files": 5,
+      "bytes": 51851211,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-stage-20261008-0j2h3urd",
+      "files": 1,
+      "bytes": 873,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl",
+      "files": 1,
+      "bytes": 6793,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-vaapi-qualification.3lf6Bj3V",
+      "files": 7,
+      "bytes": 35763,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-vaapi-qualification.57qhT4Qh",
+      "files": 11,
+      "bytes": 15661470,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-vaapi-qualification.RTbFrti1",
+      "files": 7,
+      "bytes": 35755,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-vaapi-qualification.ljTsHpYH",
+      "files": 11,
+      "bytes": 15684801,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-vaapi-qualification.qIunAc6a",
+      "files": 11,
+      "bytes": 15661005,
+      "removed": true
+    },
+    {
+      "path": "/var/tmp/plurx-vaapi-qualification.ySTJ8daL",
+      "files": 7,
+      "bytes": 36034,
+      "removed": true
+    }
+  ],
+  "running_mount_conflicts": false,
+  "original_borrowed_capture_untouched": true,
+  "production_changes": false
+}
