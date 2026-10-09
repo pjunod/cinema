@@ -1,11 +1,17 @@
 // Actual libdovi parser with synthetic textures: not an encoded HEVC
 // association proof.
 #include <float.h>
+#include <libavutil/mem.h>
+#include <libavutil/sha.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "nlq_clipping.h"
+#include "dv_trace.h"
+#include "rgb48.h"
 
 #include <libdovi/rpu_parser.h>
 #include <libplacebo/filters.h>
@@ -42,7 +48,8 @@ static void probe_log(void *priv, enum pl_log_level level,
 // Bounded parser-to-shader projection. Only the generated identity P7 controls
 // are admitted here; these guards are not a production profile capability.
 static void map_parsed_rpu(const uint8_t *bytes, size_t size,
-                           struct pl_dovi_metadata *out) {
+                           struct pl_dovi_metadata *out, bool observations,
+                           int picture_width, int picture_height) {
   require(bytes && size > 0 && size <= 65536,
           "bounded fresh decoder-attached RPU bytes");
   DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(bytes, size);
@@ -91,17 +98,29 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
           "LINEAR_DZ mapping and DM metadata");
   require(dm->signal_eotf == 65535 && dm->signal_full_range_flag == 1,
           "PQ full-range reconstructed control representation");
-  require(dm->dm_data.level2.len == 0 && dm->dm_data.level8.len == 0,
+  // This master-domain reconstruction does not target a display. L2/L8 display
+  // trims remain unapplied and are exported in the original RPU for a later
+  // P8.1 display mapper. HDR10 output explicitly reports that limitation.
+  require(dm->dm_data.level2.len <= 16 && dm->dm_data.level8.len <= 16,
           "unsupported creative trims");
-  require(!dm->dm_data.level3 && !dm->dm_data.level4 &&
-              dm->dm_data.level10.len == 0 && !dm->dm_data.level255,
+  // L4 is retained as opaque per-frame display metadata. Its temporal
+  // display-mapping semantics are not implemented by this master renderer.
+  // L3 offsets describe display-mapping statistics, not master reconstruction.
+  // Their original values also travel in the exported, unapplied metadata.
+  for (size_t i = 0; i < dm->dm_data.level8.len; i++)
+    require(dm->dm_data.level8.list && dm->dm_data.level8.list[i] &&
+                dm->dm_data.level8.list[i]->length == 10,
+            "unsupported extended L8 trim format");
+  require(dm->dm_data.level10.len == 0 && !dm->dm_data.level255,
           "unsupported metadata level");
   if (dm->dm_data.level5)
-    require(dm->dm_data.level5->active_area_left_offset == 0 &&
-                dm->dm_data.level5->active_area_right_offset == 0 &&
-                dm->dm_data.level5->active_area_top_offset == 0 &&
-                dm->dm_data.level5->active_area_bottom_offset == 0,
-            "unsupported active area metadata");
+    require((unsigned)dm->dm_data.level5->active_area_left_offset +
+                    dm->dm_data.level5->active_area_right_offset <
+                (unsigned)picture_width &&
+                (unsigned)dm->dm_data.level5->active_area_top_offset +
+                    dm->dm_data.level5->active_area_bottom_offset <
+                (unsigned)picture_height,
+            "invalid active area metadata");
   if (dm->dm_data.level9)
     require(dm->dm_data.level9->length == 1 &&
                 dm->dm_data.level9->source_primary_index == 0,
@@ -147,17 +166,18 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
     out->comp[component].poly_coeffs[0][1] =
         integer[1] + fraction[1] / denominator;
     const DoviRpuDataNlq *nlq = mapping->nlq;
-    // This libplacebo revision does not apply vdr_in_max clipping. Reject
-    // controls that require it rather than pretending the operation exists.
-    require(nlq->vdr_in_max_int[component] == 1 &&
-                nlq->vdr_in_max[component] == 0,
-            "unsupported bounded vdr_in_max residual clipping");
     require(nlq->nlq_offset[component] <= 1023 &&
                 nlq->linear_deadzone_slope_int[component] == 0 &&
                 nlq->linear_deadzone_threshold_int[component] == 0 &&
                 nlq->linear_deadzone_slope[component] < (1ULL << 23) &&
                 nlq->linear_deadzone_threshold[component] < (1ULL << 23),
             "bounded fractional NLQ parameters");
+    require(nlq_clip_is_nonbinding(nlq->nlq_offset[component],
+                                   nlq->linear_deadzone_slope[component],
+                                   nlq->linear_deadzone_threshold[component],
+                                   nlq->vdr_in_max_int[component],
+                                   nlq->vdr_in_max[component]),
+            "unsupported bounded vdr_in_max residual clipping");
     double slope = nlq->linear_deadzone_slope[component];
     double threshold = nlq->linear_deadzone_threshold[component];
     out->nlq[component].offset = nlq->nlq_offset[component] / 1023.0f;
@@ -200,14 +220,15 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
     }
   }
   out->nlq_active = true;
-  printf(
-      "{\"kind\":\"parsed_rpu\",\"bytes\":%zu,\"profile\":7,\"el_type\":"
-      "\"FEL\","
-      "\"parser_error\":false,\"bl_depth\":10,\"el_depth\":10,\"vdr_depth\":12,"
-      "\"mapping_segments\":1,\"nlq_method\":\"LINEAR_DZ\",\"creative_l2_"
-      "count\":%zu,"
-      "\"creative_l8_count\":%zu,\"creative_trims_applied\":false}\n",
-      size, dm->dm_data.level2.len, dm->dm_data.level8.len);
+  if (observations)
+    printf("{\"kind\":\"parsed_rpu\",\"bytes\":%zu,\"profile\":7,\"el_type\":"
+           "\"FEL\","
+           "\"parser_error\":false,\"bl_depth\":10,\"el_depth\":10,\"vdr_"
+           "depth\":12,"
+           "\"mapping_segments\":1,\"nlq_method\":\"LINEAR_DZ\",\"creative_l2_"
+           "count\":%zu,"
+           "\"creative_l8_count\":%zu,\"creative_trims_applied\":false}\n",
+           size, dm->dm_data.level2.len, dm->dm_data.level8.len);
   dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free_data_mapping(mapping);
   dovi_rpu_free_header(header);
@@ -219,8 +240,7 @@ static void save_rgb48le(const char *name, const float *rgba) {
   require(output != NULL, "packed RGB allocation");
   for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
     for (int component = 0; component < 3; component++) {
-      float value = fminf(1, fmaxf(0, rgba[4 * pixel + component]));
-      uint16_t code = (uint16_t)lrintf(value * 65535);
+      uint16_t code = dv_pack_finite_rgb48(rgba[4 * pixel + component]);
       size_t offset = (size_t)(3 * pixel + component) * 2;
       output[offset] = (uint8_t)code;
       output[offset + 1] = (uint8_t)(code >> 8);
@@ -272,7 +292,8 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
   require(log != NULL, "logging context");
   pl_vulkan vk =
       pl_vulkan_create(log, pl_vulkan_params(.allow_software = true));
-  require(vk != NULL, "software Vulkan device");
+  require(vk != NULL, "Vulkan device");
+  require(dv_gpu_runtime(vk), "actual Vulkan runtime identity");
   pl_gpu gpu = vk->gpu;
   pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
                               PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE |
@@ -314,7 +335,7 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
                        void (*write_rgb)(const uint8_t *, size_t, void *),
                        void *rgb_output, bool debug) {
   struct pl_dovi_metadata parsed;
-  map_parsed_rpu(rpu, rpu_size, &parsed);
+  map_parsed_rpu(rpu, rpu_size, &parsed, true, WIDTH, HEIGHT);
   pl_gpu gpu = context.gpu;
   pl_fmt format = context.format;
   pl_renderer renderer = context.renderer;
@@ -424,18 +445,30 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
     for (int c = 0; c < 4; c++)
       require(isfinite(output[4 * pixel + c]), "finite rendered RGBA");
     for (int c = 0; c < 3; c++) {
-      uint16_t code =
-          (uint16_t)lrintf(fminf(1, fmaxf(0, output[4 * pixel + c])) * 65535);
+      uint16_t code = dv_pack_finite_rgb48(output[4 * pixel + c]);
       packed[6 * pixel + 2 * c] = (uint8_t)code;
       packed[6 * pixel + 2 * c + 1] = (uint8_t)(code >> 8);
     }
   }
   write_rgb(packed, (size_t)WIDTH * HEIGHT * 6, rgb_output);
+  char rgb_field[84] = "";
+  if (debug || dv_frame_hashes()) {
+    struct AVSHA *sha = av_sha_alloc();
+    uint8_t digest[32];
+    char rgb_hash[65];
+    require(sha && av_sha_init(sha, 256) == 0, "rendered RGB SHA256");
+    av_sha_update(sha, packed, (size_t)WIDTH * HEIGHT * 6);
+    av_sha_final(sha, digest);
+    av_free(sha);
+    for (int i = 0; i < 32; i++)
+      snprintf(rgb_hash + 2 * i, 3, "%02x", digest[i]);
+    snprintf(rgb_field, sizeof(rgb_field), ",\"rgb_sha256\":\"%s\"", rgb_hash);
+  }
   free(packed);
   printf("{\"kind\":\"rendered_frame\",\"frame\":%d,\"width\":%d,\"height\":%d,"
          "\"pts\":\"%s\",\"duration\":\"%s\",\"el_bound\":true,\"nlq_active\":"
-         "true,\"render_errors\":%u,\"production_qualified\":false}\n",
-         frame_index, WIDTH, HEIGHT, pts, duration, errors.errors);
+         "true%s,\"render_errors\":%u,\"production_qualified\":false}\n",
+         frame_index, WIDTH, HEIGHT, pts, duration, rgb_field, errors.errors);
   for (int layer = 0; layer < 2; layer++)
     for (int c = 0; c < 3; c++)
       pl_tex_destroy(gpu, &textures[layer][c]);

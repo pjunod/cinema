@@ -37,8 +37,10 @@ this helper is not evidence that arbitrary source gaps fit MP4 sample tables.
 The bound is 64 frames, 3840×2160, one complete picture per length-prefixed HEVC
 packet, 32 MiB per packet and 64 KiB per RPU. Inputs must be BT.2020/PQ limited
 range HEVC. Existing RPUs, EL NALs, repeated/missing PTS, missing frames, partial
-NALs, unsupported layers/temporal IDs, missing source metadata and creative
-L2/L8 or complex L3/L4/L10/L255 metadata refuse. DV level is selected from the
+NALs, unsupported layers/temporal IDs, missing source metadata, extended L8
+forms and L10/L255 metadata refuse. Supported L2, L3,
+L4, L5 and length-10 L8 display instructions remain unapplied in the
+reconstructed master and are verified unchanged across P8.1 adaptation. DV level is selected from the
 shortest actual interval and raster using FFmpeg's levels 1–9 table; each
 access unit must fit that level's high-tier peak bitrate bound. The renderer
 retains the stronger mapping, signal, active-area and source-pair guards.
@@ -61,3 +63,14 @@ input refuse. The one-picture 4K run establishes raster/resource functionality;
 the six-picture control establishes reorder association. Synthetic decoded
 source controls do not establish movie quality, sustained throughput, physical
 DV-client rendering, independent reference conformance, or serving readiness.
+
+## Fragmented MP4 output
+
+Append `fmp4` to the existing invocation to write an init plus one media fragment.
+The input must be keyframe-led with PTS equal to DTS and a uniform contiguous
+frame grid. Timestamp rescaling must be exact in the actual post-header output
+clock; the complete endpoint and FFmpeg timestamp-spacing limit are checked.
+The helper preserves absolute timestamps and uses `hev1` for retained in-band
+parameter sets. Default Matroska output remains available for arbitrary accepted
+source timing. The caller must discard all output on refusal, including a
+possible init-only file, and separately validate its delivery container contract.

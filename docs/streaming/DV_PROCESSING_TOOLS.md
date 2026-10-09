@@ -45,14 +45,19 @@ builds with `-std=c11 -Wall -Wextra -Werror`. At runtime the dynamic loader must
 find the exact libplacebo build and Vulkan driver; the controls used explicit
 `LD_LIBRARY_PATH`, `VK_ICD_FILENAMES` and a private `XDG_RUNTIME_DIR`.
 
+The helper build defaults to `CFLAGS="-O2 -fno-math-errno"`; callers may supply their own compiler
+flags for diagnostics. Do not use fast-math flags: finite-value checks and exact
+rounding are part of the processing contract.
+
 ## Streaming interface
 
 ```text
-segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT]
+segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START END MAX_PREROLL]]
 ```
 
-`SOURCE` is a held descriptor for a finite, timestamped segment. `OUTPUT_DIR`
-is a private generation directory. `VIDEO_INDEX` is the absolute stream index.
+`SOURCE` is a held descriptor for the original timestamped movie when `START`,
+`END` and `MAX_PREROLL` are supplied; the older finite-input form remains available
+for controls. `OUTPUT_DIR` is a private generation directory. `VIDEO_INDEX` is the absolute stream index.
 The accepted output policy is `bt2020-pq-master-clip`: a BT.2020/PQ master-domain
 representation, not a target display or a claim that creative trims were applied.
 
@@ -75,9 +80,32 @@ even when a partial media file or metadata files exist.
 The current envelope is 1–64 pictures, BL at most 3840×2160, equal or half-size
 EL, bounded HEVC packets and at most 16 queued pictures per layer. Streaming
 removes the total RGB scratch bound; it does not remove frame/raster/source
-bounds. Arbitrary movies need the serving layer's interval, dependency preroll,
-seek, cancellation and continuity handling. Passing an entire movie to this
-finite helper is not that implementation.
+bounds. Window mode seeks the original held source, decodes dependency preroll,
+and emits only source PTS in `[START, END)`. Both endpoints are nonnegative `N/D`
+with denominator at most `INT32_MAX`; the span is at most three seconds and
+`MAX_PREROLL` is 0–512 paired pictures. Window mode also accepts `EL_W=EL_H=0`
+to discover equal or half-size EL from the first actual decoded frame before GPU
+initialization. The decoder pixel ceiling remains bounded by BL geometry. The three-second envelope admits the
+normal 48-picture 24000/1001 entry, whose exact duration is 2.002 seconds.
+
+Window reads share a 128 MiB aggregate budget across probing, seeks and decode;
+a seek does not reset it. The file itself may be larger. IO staging is 64 KiB,
+individual FFmpeg allocations are limited to 64 MiB, packets to 16 MiB, and
+packet count to 4096. These bounds do not establish a total GPU/decoder-memory
+budget. The daemon still owns deadlines, resource admission and cancellation.
+
+The input access-unit trace is captured before both decoders. Each emitted
+picture must match exactly one coded picture and its fresh RPU. The helper
+exports original timestamps and coded access-unit/RPU hashes. Full decoded
+BL/EL and RGB hashes are optional diagnostics: set `PLURX_DV_FRAME_HASHES=1`
+(or the existing 64×64 debug mode) to emit them. They do not provide an
+independent post-encode playback check, so production skips their pixel scans. A later paired PTS at or beyond `END` proves the requested boundary.
+Natural EOF requires the final observed picture to reach `END` and agree in both
+directions with the declared video extent within one source tick. Unknown or
+inconsistent extent refuses. These observations establish source membership;
+the serving layer must separately verify its output frame grid and packaging.
+NUT preserves source PTS here but does not serialize explicit packet durations;
+`timing.tsv` remains the separate duration record.
 
 The encoder must preserve the input time base (`-enc_time_base -1` in the
 exercised FFmpeg path), source PTS and color interpretation. RGB is full-range
@@ -135,3 +163,113 @@ the exercised encoder was the retained FFmpeg 5.1.9/libx265 3.5 control runtime.
 Only focused controls run on this task. The full suite runs once on the completed,
 frozen effort branch; Windows validation is waived for this effort. No merge
 coordinator handoff is authorized.
+
+## Master-domain metadata policy
+
+The accepted reconstruction subset is fresh P7 FEL with the documented identity
+reshape and source matrix, 10-bit BL/EL and 12-bit reconstructed signal. The
+renderer applies the FEL residual and source color conversion. It does not apply
+Dolby display trims, crop the picture, or certify a Dolby display mapping.
+
+L2 trims, L3 statistics offsets, opaque L4 anchors, a valid nonempty L5 active
+rectangle and short L8 trims (length 10) may accompany this master reconstruction.
+Their original values remain in the exported RPU. The P8.1 author verifies exact
+preservation of these fields while removing the mapping already baked into the
+new base pictures. HDR10 output cannot carry those Dolby display instructions;
+its effective report must keep creative-trim application false. Longer L8 forms
+and the other unsupported metadata forms still refuse.
+
+The pinned renderer omits `vdr_in_max` clipping. Admission therefore proves that
+clipping cannot bind for **any** supported 10-bit EL code, using the maximum
+LINEAR_DZ residual at the farthest endpoint. The decision uses integer arithmetic
+and reserves 2^-16 rounding headroom for the binary32 shader. A limit of 0.125
+with offset 512, slope 2048/2^23 and zero threshold passes; a limit that actually
+clips the same residual refuses. The focused arithmetic regression is:
+
+```sh
+python3 tools/dv_processing/test_metadata.py
+```
+
+This is a supported-subset policy, not a claim that every P7 movie, or every
+Dolby Vision profile, can use the helper. Unsupported input retains the ordinary
+playback fallback.
+
+The focused retained-metadata graph replay uses generated 64×64 BL/EL controls,
+not copied movie content. It covers a nonzero-start original-source window,
+pre-GPU metadata refusal, inconsistent EOF extent, actual P8.1 RPU roundtrip,
+unchanged encoded base and unchanged DV-disabled decoded pixels:
+
+```sh
+sh tools/dv_processing/controls/replay.sh \
+  /absolute/new-scratch /absolute/accepted-dependencies /absolute/pinned-dovi-source
+```
+
+The dependency root contains `ffmpeg-prefix`, `prefix`, `include` and `lib` as
+above. This focused ARM64 control recipe uses the retained image
+`sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9`,
+Rust 1.97.1 and the committed public fixture-generator lockfile. Its separate
+software encoder is FFmpeg 5.1.9/x265 3.5. The recipe refuses an existing scratch
+directory and copies only control inputs and helper sources into the new one.
+It is not a clean deployment bootstrap or a substitute for native worker checks.
+
+## One-fragment P8.1 packaging
+
+The author accepts an optional final `fmp4` argument. It writes one init and one
+fragment, retaining absolute timestamps and the adapted per-frame RPU. This
+mode requires a keyframe-led, non-reordered, uniform contiguous frame grid.
+After the header establishes the output clock, every PTS and duration must
+rescale exactly, spacing must be positive and smaller than `INT_MAX`, and the
+complete endpoint must fit `INT64_MAX`. An init-only file left by refusal must
+never be published. The serving layer owns explicit source-to-output mapping.
+
+The sample entry is `hev1`, because encoded base packets retain in-band parameter
+sets. Retagging these samples as `hvc1` would misdescribe them. Device acceptance
+and final HLS publication remain integration checks; this helper alone does not
+prove them. The focused replay includes the actual author's output-clock guard
+with endpoint, nonunit input clock and timestamp-spacing boundaries.
+
+The `gpu_runtime` trace records the selected Vulkan device and driver UUIDs,
+API/driver versions, vendor/device IDs and device type from the actual physical
+device. The worker binds this observation separately from helper/library hashes;
+a configured GPU name or an available driver is insufficient. Diagnostic digest
+mode must preserve every output byte and all required source/timing observations.
+
+## Base-only Dolby Vision processing
+
+Append `base-rpu` to the window invocation and supply zero for both EL dimensions
+to process one decoded base layer. This mode accepts the supported fresh
+P5/compatibility-0, P8/compatibility-1 and P7/compatibility-6 inputs, using the
+public libplacebo AVFrame uploader and Dolby metadata mapper. Polynomial and
+MMR reshaping and the source RPU color transform are applied once. There is no
+EL decode or residual contribution; the corresponding observations explicitly
+report no FEL/NLQ. Unsupported metadata, reuse, profiles and timing still refuse.
+
+The `accepted_source_base` event binds each decoded base picture to its actual
+RPU, profile, source geometry and timestamp. `base_processing_complete` records
+one decoded layer. This is a separate operation set for the daemon selector;
+a FEL receipt must never be reused for base-only processing.
+
+Thirteen focused controls cover five mapping families, P7 with omitted FEL,
+unsupported or missing metadata, frame bounds, declared EL refusal and explicit
+diagnostic mode. Replay them with the same dependency prefixes:
+
+```sh
+sh tools/dv_processing/controls/replay_base.sh \
+  /absolute/new-base-controls /absolute/dependency-root /absolute/dovi-source
+python3 tools/dv_processing/test_metadata.py
+```
+
+The generator uses the pinned Rust 1.97.1 toolchain and public dependencies; the
+replay reuses the tiny encoded fixtures and compiles the actual helper. A separate
+scalar RGB48 comparison exceeds its declared four-code tolerance: P5 reaches six codes
+and the two P8 controls reach 27. That failure is retained. A later comparison
+after the same Main10 encode finds identical P5 YUV and at most one chroma code
+of difference for P8; this diagnostic does not turn the earlier bound into a
+pass or establish general visual improvement.
+
+Finite RGB48 packing now shares one conversion function. It preserves the
+previous clamping and rounding, including signed-zero behavior. Its focused
+regression compares the actual shared function with the previous expression
+over 1,830,864 finite inputs and four rounding modes. Decoder thread counts
+remain one per layer; the separately measured four-thread experiment requires
+explicitly increased worker admission and is not a production default.
