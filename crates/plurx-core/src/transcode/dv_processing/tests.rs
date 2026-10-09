@@ -1,6 +1,121 @@
 use super::*;
 use std::path::PathBuf;
 
+#[test]
+fn completed_packet_authoring_keeps_base_and_dynamic_association() {
+    use crate::fmp4::{self, Unit};
+    // Three Main10 pictures encoded at 24000/1001 by the retained x265
+    // control, then authored by the independently built C libdovi mux tool.
+    // Its absolute start is deliberately nonzero; this is no movie receipt.
+    let encoded = include_bytes!("../../../tests/fixtures/dv-runtime/authored.mp4");
+    let rpus = vec![
+        include_bytes!("../../../tests/fixtures/dv-runtime/frame-000.nal").to_vec(),
+        include_bytes!("../../../tests/fixtures/dv-runtime/frame-001.nal").to_vec(),
+        include_bytes!("../../../tests/fixtures/dv-runtime/frame-002.nal").to_vec(),
+    ];
+    let independently_authored_payloads = dv_validate_encoded_window(
+        encoded,
+        (64, 64),
+        24000,
+        48048,
+        1001,
+        &rpus,
+        DvDestination::Profile81,
+    )
+    .expect("independent C authored control");
+    let mut reader = fmp4::FragmentReader::new();
+    reader.push(encoded);
+    let Some(Unit::Init(mut init)) = reader.next_unit().expect("control init") else {
+        panic!("control init missing");
+    };
+    fmp4::remove_dolby_vision_record(&mut init).expect("remove control DV record");
+    let video = init.video().expect("video").id;
+    let mut base = init.bytes.clone();
+    while let Some(unit) = reader.next_unit().expect("control fragment") {
+        let Unit::Fragment(mut fragment) = unit else {
+            continue;
+        };
+        fmp4::rewrite_video_samples(&mut fragment, &init.tracks, video, |sample| {
+            let mut output = Vec::new();
+            let mut at = 0;
+            while at < sample.len() {
+                let count = u32::from_be_bytes(
+                    sample[at..at + 4].try_into().expect("validated NAL length"),
+                ) as usize;
+                let end = at + 4 + count;
+                if (sample[at + 4] >> 1) & 63 != 62 {
+                    output.extend_from_slice(&sample[at..end]);
+                }
+                at = end;
+            }
+            Ok(output)
+        })
+        .expect("strip RPUs while preserving base packets");
+        base.extend_from_slice(&fragment.bytes);
+    }
+    let base_payloads = dv_validate_encoded_window(
+        &base,
+        (64, 64),
+        24000,
+        48048,
+        1001,
+        &rpus,
+        DvDestination::Hdr10,
+    )
+    .expect("HDR10 control");
+    let authored = dv_author_profile81_window(&base, (64, 64), 24000, 48048, 1001, &rpus, 1)
+        .expect("packet-aware author");
+    assert_eq!(base_payloads.len(), 3);
+    assert_eq!(
+        dv_validate_encoded_window(
+            &authored,
+            (64, 64),
+            24000,
+            48048,
+            1001,
+            &rpus,
+            DvDestination::Profile81
+        )
+        .expect("exact associated adaptation"),
+        independently_authored_payloads
+    );
+    let mut swapped = rpus.clone();
+    swapped.swap(0, 1);
+    assert!(dv_validate_encoded_window(
+        &authored,
+        (64, 64),
+        24000,
+        48048,
+        1001,
+        &swapped,
+        DvDestination::Profile81
+    )
+    .is_err());
+    assert!(dv_validate_encoded_window(
+        &authored,
+        (64, 64),
+        24000,
+        0,
+        1001,
+        &rpus,
+        DvDestination::Profile81
+    )
+    .is_err());
+    assert!(
+        dv_author_profile81_window(&base, (64, 64), 24000, 48048, 1001, &rpus[..2], 1).is_err()
+    );
+    assert!(dv_validate_encoded_window(
+        &authored[..authored.len() - 1],
+        (64, 64),
+        24000,
+        48048,
+        1001,
+        &rpus,
+        DvDestination::Profile81
+    )
+    .is_err());
+}
+
 fn digest(c: char) -> DvDigest {
     DvDigest::new(c.to_string().repeat(64)).expect("valid synthetic control")
 }
@@ -102,6 +217,7 @@ fn input(destination: DvDestination) -> DvResolutionInput {
         source: source(),
         selected_backend: backend(),
         capability: Some(DvCapabilityEvidence {
+            completed_window_checked: false,
             scope: DvEvidenceScope::SyntheticControl,
             identity: backend(),
             schema: DV_CONTRACT_VERSION,
@@ -110,7 +226,7 @@ fn input(destination: DvDestination) -> DvResolutionInput {
             encoder: Encoder::Software,
             raster: (64, 64),
             bl_shape: bl_shape(),
-            el_shape: el_shape(),
+            el_shape: Some(el_shape()),
             max_frames: 64,
             target: DvTargetPolicy::new(1, 10_000_000, 5, digest('f'))
                 .expect("valid synthetic control"),
@@ -905,4 +1021,122 @@ fn effective_report_cannot_turn_synthetic_receipt_into_hdr10_enhancement() {
     assert!(receipt
         .hdr10_effective_report(&DvProductionRegistry, &plan, "invalid", &digest('c'))
         .is_err());
+}
+
+#[test]
+fn base_piecewise_rpu_accepts_delta_pivots_and_counts_actual_segments() {
+    let raw = include_bytes!("../../../tests/fixtures/dv-runtime/p8-piecewise.nal");
+    let metadata = DvBaseMetadata::from_raw_rpu(raw, (64, 64)).expect("reviewed piecewise RPU");
+    assert_eq!(metadata.profile, 8);
+    assert_eq!(metadata.polynomial_segments, 4);
+    assert_eq!(metadata.mmr_segments, 0);
+    assert!(metadata
+        .applied_operations
+        .contains(&DvOperation::PolynomialReshape));
+    assert!(!metadata
+        .applied_operations
+        .contains(&DvOperation::MmrReshape));
+    assert!(!metadata
+        .applied_operations
+        .contains(&DvOperation::LinearNlqResidual));
+}
+
+#[test]
+fn completed_window_report_binds_publication_without_pixel_checksum_authority() {
+    let mut raw = dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(include_bytes!(
+        "../../../tests/fixtures/dv-runtime/frame-000.nal"
+    ))
+    .expect("actual authored control source RPU");
+    let dm = raw.vdr_dm_data.as_mut().expect("metadata");
+    dm.remove_metadata_level(10);
+    dm.remove_metadata_level(255);
+    for curve in &mut raw.rpu_data_mapping.as_mut().expect("mapping").curves {
+        let polynomial = curve.polynomial.as_mut().expect("affine control");
+        polynomial.poly_coef_int[0][0] = 0;
+        polynomial.poly_coef_int[0][1] = 1;
+        polynomial.poly_coef[0][0] = 0;
+        polynomial.poly_coef[0][1] = 0;
+    }
+    raw.modified = true;
+    let raw = raw.write_hevc_unspec62_nalu().expect("control RPU rewrite");
+    let parsed = DvParsedMetadata::from_raw_rpu(&raw).expect("independent source parse");
+    assert!(!parsed.other_metadata_levels.contains(&10));
+    assert!(!parsed.other_metadata_levels.contains(&255));
+    assert!(parsed.runtime_supported(), "{parsed:?}");
+    // Only this private test changes the completion flag. It exercises report
+    // binding, and does not turn the control into daemon execution evidence.
+    let mut plan = plan(DvDestination::Hdr10);
+    plan.capability.scope = DvEvidenceScope::ProductionRoute;
+    plan.capability.completed_window_checked = true;
+    plan.capability.subset = DvMetadataSubset::RuntimeP7MasterDomainLinearDzV1;
+    let mut receipt = dv_receipt_completed_window(&plan, &[key(0)], &[duration()], &[raw])
+        .expect("completed receipt");
+    let session = "00000000-0000-0000-0000-000000000001";
+    let shape = digest('d');
+    assert!(receipt
+        .hdr10_effective_report(&DvProductionRegistry, &plan, session, &shape)
+        .expect("valid focused control")
+        .is_none());
+    receipt
+        .bind_publication(session, shape.clone())
+        .expect("exact publication binding");
+    let report = receipt
+        .hdr10_effective_report(&DvProductionRegistry, &plan, session, &shape)
+        .expect("valid focused control")
+        .expect("completed published HDR10 window");
+    assert!(
+        report.fel_contributed,
+        "actual paired-layer custody does not depend on diagnostic pixel SHA"
+    );
+    assert!(receipt
+        .hdr10_effective_report(
+            &DvProductionRegistry,
+            &plan,
+            "00000000-0000-0000-0000-000000000002",
+            &shape
+        )
+        .expect("valid focused control")
+        .is_none());
+    assert!(receipt
+        .hdr10_effective_report(&DvProductionRegistry, &plan, session, &digest('e'))
+        .expect("valid focused control")
+        .is_none());
+    receipt.terminal_failure = Some(DvFallbackReason::BackendFailure);
+    assert!(receipt
+        .hdr10_effective_report(&DvProductionRegistry, &plan, session, &shape)
+        .expect("valid focused control")
+        .is_none());
+}
+
+#[test]
+fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
+    let grid = super::super::VodFrameGrid::new(24_000, 1_001).expect("NTSC cadence");
+    let source: Vec<_> = (0..48)
+        .map(|ordinal| DvFrameKey {
+            absolute_video_index: 2,
+            continuity_epoch: 9,
+            pts: DvTimestamp::new((ordinal * 1_001 + 12) / 24, 1_000)
+                .expect("valid bounded clock fixture"),
+            display_ordinal: ordinal as u64,
+        })
+        .collect();
+    let mapped = dv_map_source_to_output_grid(&source, (1, 1_000), grid, 0, 48)
+        .expect("valid bounded clock fixture");
+    assert_eq!(mapped.len(), 48);
+    assert_eq!(
+        mapped[1].source.pts,
+        DvTimestamp::new(42, 1_000).expect("valid bounded clock fixture")
+    );
+    assert_eq!(
+        mapped[1].output_pts,
+        DvTimestamp::new(1_001, 24_000).expect("valid bounded clock fixture")
+    );
+    assert!(dv_map_source_to_output_grid(&source[..47], (1, 1_000), grid, 0, 48).is_err());
+    let mut dropped = source.clone();
+    dropped[24].pts = dropped[25].pts;
+    assert!(dv_map_source_to_output_grid(&dropped, (1, 1_000), grid, 0, 48).is_err());
+    let mut wrong = source.clone();
+    wrong[47].pts = DvTimestamp::new(1_970, 1_000).expect("valid bounded clock fixture");
+    assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&source, (1, 24), grid, 0, 48).is_err());
 }

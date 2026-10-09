@@ -2550,7 +2550,55 @@ pub struct ResolvedTranscode {
     output_metadata_policy: Option<OutputMetadataPolicy>,
 }
 
+/// A reconstructed-output encoder attached to its unchanged source plan.
+/// Ordinary producer entry points accept ResolvedTranscode, never this wrapper.
+#[derive(Debug, Clone, Copy)]
+pub struct CompletedReconstructedOutputPlan<'a> {
+    source: &'a ResolvedTranscode,
+    codec: super::encoder::CompletedReconstructedOutputContract,
+}
+impl<'a> CompletedReconstructedOutputPlan<'a> {
+    pub fn source_plan(&self) -> &'a ResolvedTranscode {
+        self.source
+    }
+    pub fn encoder(&self) -> Encoder {
+        self.codec.encoder()
+    }
+    pub fn encoder_name(&self) -> &'static str {
+        self.codec.encoder_name()
+    }
+    pub fn input_contract(&self) -> super::pipeline::ReconstructedPqInput {
+        self.codec.input_contract()
+    }
+    pub fn codec_contract(&self) -> &super::encoder::CompletedReconstructedOutputContract {
+        &self.codec
+    }
+    pub fn encode_args(&self, bitrate_kbps: u32, force_idr: bool) -> Vec<String> {
+        self.codec.encode_args(bitrate_kbps, force_idr, Some(1))
+    }
+}
+
 impl ResolvedTranscode {
+    /// Select only the encode half of an independently reconstructed PQ route.
+    /// Source binding, decode, ordinary options and their digest stay unchanged.
+    pub fn completed_reconstructed_output(
+        &self,
+        encoder: Encoder,
+    ) -> Option<CompletedReconstructedOutputPlan<'_>> {
+        if self.output_contract.output_grade() != OutputGrade::Hdr10
+            || self.output_contract.output_codec() != "hevc"
+            || self.options.subtitle_burn.is_some()
+            || self.options.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
+        {
+            return None;
+        }
+        let codec = super::encoder::CompletedReconstructedOutputContract::resolve(encoder)?;
+        Some(CompletedReconstructedOutputPlan {
+            source: self,
+            codec,
+        })
+    }
+
     pub fn output_metadata_policy(&self) -> Option<OutputMetadataPolicy> {
         self.output_metadata_policy
     }

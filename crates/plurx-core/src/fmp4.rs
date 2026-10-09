@@ -2132,6 +2132,23 @@ pub fn dolby_vision_record(init: &Init) -> Result<Option<DolbyVisionRecord>, Fmp
     DolbyVisionRecord::parse(&init.bytes[existing.payload]).map(Some)
 }
 
+/// A packet-preserving author keeps any in-band VPS/SPS/PPS. Declare that
+/// representation explicitly rather than inheriting an out-of-band promise.
+pub fn declare_hevc_parameter_sets_in_band(init: &mut Init) -> Result<(), Fmp4Error> {
+    let locations = locate_hevc_sample_entries(&init.bytes)?;
+    if locations.len() != 1 {
+        return malformed("one HEVC sample entry required");
+    }
+    let location = locations
+        .into_iter()
+        .next()
+        .flatten()
+        .ok_or_else(|| Fmp4Error::Malformed("no HEVC sample entry".into()))?;
+    let entry = location.ancestors[1];
+    init.bytes[entry.start + 4..entry.start + 8].copy_from_slice(b"hev1");
+    Ok(())
+}
+
 /// Write `record` into this init's video sample entry, replacing whatever
 /// configuration was there.
 ///
@@ -2510,6 +2527,92 @@ pub fn validate_hevc_sample_description_reference(
         ));
     }
     Ok(())
+}
+
+/// Exact Main10/PQ/BT.2020/limited-range output configuration read from the
+/// private encoded artifact. Catalog tags and encoder argv cannot substitute
+/// for these bytes. SPS header probing remains the daemon's independent check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HevcHdr10SampleEntryFacts {
+    pub width: u16,
+    pub height: u16,
+    pub profile_idc: u8,
+    pub luma_bit_depth: u8,
+    pub chroma_bit_depth: u8,
+}
+
+pub fn hevc_hdr10_sample_entry_facts(init: &Init) -> Result<HevcHdr10SampleEntryFacts, Fmp4Error> {
+    validate_hevc_decoder_configuration(init)?;
+    let video = init
+        .video()
+        .ok_or_else(|| Fmp4Error::Unsupported("no encoded video".into()))?;
+    if video.codec != Some(VideoCodec::Hevc) || video.has_edit_list {
+        return Err(Fmp4Error::Unsupported(
+            "encoded HDR10 requires HEVC without edits".into(),
+        ));
+    }
+    if validate_hevc_sample_entries(init)? != HevcSampleEntryLayout::Single {
+        return Err(Fmp4Error::Unsupported(
+            "encoded HDR10 needs one HEVC description".into(),
+        ));
+    }
+    let location = locate_configuring_hvcc(&init.bytes)?
+        .ok_or_else(|| Fmp4Error::Malformed("missing encoded hvcC".into()))?;
+    let configuration = &init.bytes[location.payload.clone()];
+    let profile_idc = configuration[1] & 0x1f;
+    let luma_bit_depth = 8 + (configuration[17] & 7);
+    let chroma_bit_depth = 8 + (configuration[18] & 7);
+    if configuration[21] & 3 != 3
+        || profile_idc != 2
+        || configuration[16] & 3 != 1
+        || luma_bit_depth != 10
+        || chroma_bit_depth != 10
+    {
+        return Err(Fmp4Error::Unsupported(
+            "encoded HEVC is not Main10 YUV420P10".into(),
+        ));
+    }
+    let entry = location.ancestors[1];
+    let body = entry.start + entry.header_len;
+    let width = u16::from_be_bytes(
+        init.bytes[body + 24..body + 26]
+            .try_into()
+            .expect("validated visual header"),
+    );
+    let height = u16::from_be_bytes(
+        init.bytes[body + 26..body + 28]
+            .try_into()
+            .expect("validated visual header"),
+    );
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return malformed("encoded HDR10 has invalid raster");
+    }
+    let colors = find_children(&init.bytes, body + 78..location.sample_entry_end, b"colr")?;
+    if colors.len() != 1 {
+        return Err(Fmp4Error::Unsupported(
+            "encoded HDR10 needs one color record".into(),
+        ));
+    }
+    let (at, color) = &colors[0];
+    let color = &init.bytes[at.start + color.header_len..at.start + color.size];
+    if color.len() != 11
+        || color[..4] != *b"nclx"
+        || u16::from_be_bytes([color[4], color[5]]) != 9
+        || u16::from_be_bytes([color[6], color[7]]) != 16
+        || u16::from_be_bytes([color[8], color[9]]) != 9
+        || color[10] != 0
+    {
+        return Err(Fmp4Error::Unsupported(
+            "encoded color is not limited BT.2020 PQ NCL".into(),
+        ));
+    }
+    Ok(HevcHdr10SampleEntryFacts {
+        width,
+        height,
+        profile_idc,
+        luma_bit_depth,
+        chroma_bit_depth,
+    })
 }
 
 pub fn validate_hevc_decoder_configuration(init: &Init) -> Result<(), Fmp4Error> {

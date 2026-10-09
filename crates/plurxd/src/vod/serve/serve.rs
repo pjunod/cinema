@@ -370,6 +370,40 @@ impl VodServe {
         })
     }
 
+    pub(crate) async fn dv_effective_report(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
+        #[cfg(target_os = "linux")]
+        {
+            let publication = self.session_rendition(session_id).await?;
+            let (rendition, _, _) = publication.result.ok()?;
+            if rendition.closed.load(Relaxed)
+                || rendition.failure().is_some()
+                || rendition
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| !source.unchanged())
+            {
+                return None;
+            }
+            let encoding = rendition.recipe.encoding.as_ref()?;
+            let runtime = encoding.dv_runtime.as_ref()?;
+            let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) =
+                &encoding.dv_processing
+            else {
+                return None;
+            };
+            runtime.effective_report(plan, incarnation_id)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (session_id, incarnation_id);
+            None
+        }
+    }
+
     /// One immutable plan entry's film-time window for WebVTT children.
     pub async fn segment_window(&self, session_id: &str, segment_index: i64) -> Option<(f64, f64)> {
         let index = u32::try_from(segment_index).ok()?;

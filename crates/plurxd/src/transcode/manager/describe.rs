@@ -1,6 +1,15 @@
 use super::*;
 
 impl TranscodeManager {
+    pub(crate) async fn dv_effective_report(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
+        self.vod
+            .dv_effective_report(session_id, incarnation_id)
+            .await
+    }
     #[cfg(test)]
     pub(crate) fn test_hold_source_software_capacity(&self) -> Option<crate::admission::SwPermit> {
         self.admissions

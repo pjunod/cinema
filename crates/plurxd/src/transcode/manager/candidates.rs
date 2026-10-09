@@ -1180,9 +1180,11 @@ fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
 /// some of them as unset. Widening it changes no planning identity:
 /// `PlanningBinding::from_snapshot` hashes the file, probe, reorder flag and
 /// generation, never this map.
-pub(crate) const QUALITY_PLANNING_KEYS: [&str; 22] = [
+pub(crate) const QUALITY_PLANNING_KEYS: [&str; 24] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
+    keys::DV_HDR_PROCESSING,
+    keys::DV_FEL_REENCODE,
     keys::AUDIO_LANG,
     keys::SUB_LANG,
     keys::SUB_MODE,
@@ -1234,6 +1236,154 @@ mod tests {
 #[cfg(test)]
 mod snapshot_catalog_regression {
     use super::*;
+    #[tokio::test]
+    async fn dv_choices_are_atomic_and_cannot_grant_an_unqualified_worker_route() {
+        use plurx_core::{
+            domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
+            store::SqliteStore,
+            transcode::dv_processing::{DvFallbackReason as Reason, DvSelection},
+        };
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "dv-choice".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "bounded control".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let parsed = plurx_core::scan::probe::parse_probe_json(&serde_json::json!({
+            "streams":[{"index":0,"codec_type":"video","codec_name":"hevc", "profile":"Main 10",
+                "width":64,"height":64,"pix_fmt":"yuv420p10le",
+                "side_data_list":[{"side_data_type":"DOVI configuration record",
+                    "dv_profile":7,"dv_level":1,"dv_bl_signal_compatibility_id":6,
+                    "el_present_flag":1,"rpu_present_flag":1}]}]
+        }));
+        let id = store
+            .upsert_file(item, "/sanitized/dv-choice.mkv", 1234, 123, &parsed)
+            .await
+            .expect("file");
+        let initial = store
+            .playback_planning_snapshot(id, &QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("source");
+        let prefs = TranscodeManager::vod_dv_preferences_from_snapshot(&initial);
+        assert!(!prefs.hdr_processing && !prefs.fel_reencode && prefs.conversion_permitted);
+        let mut request: SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id":id,"playback_id":"dv-choice","automatic":false,
+            "kind":{"kind":"transcode","height":64},"start_seconds":0.0,
+            "audio_offset_ms":0,"hdr10":true,"presentation":"vod"
+        }))
+        .expect("request");
+        assert!(matches!(
+            TranscodeManager::vod_dv_processing_from_snapshot(&initial, &request).expect("route"),
+            DvSelection::KeepExisting(Reason::PreferenceDisabled)
+        ));
+        store
+            .put_setting(keys::DV_HDR_PROCESSING, "1")
+            .await
+            .expect("HDR preference");
+        store
+            .put_setting(keys::DV_FEL_REENCODE, "0")
+            .await
+            .expect("FEL preference");
+        store
+            .put_setting(keys::DV_CONVERT, "0")
+            .await
+            .expect("conversion permission");
+        let hdr = store
+            .playback_planning_snapshot(id, &QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("source");
+        let prefs = TranscodeManager::vod_dv_preferences_from_snapshot(&hdr);
+        assert!(prefs.hdr_processing && !prefs.fel_reencode && !prefs.conversion_permitted);
+        assert_eq!(prefs.planning_input_generation, hdr.generation);
+        assert!(hdr.generation > initial.generation);
+        assert!(
+            !TranscodeManager::vod_dv_preferences_from_snapshot(&initial).hdr_processing,
+            "an attached rendition retains its atomic saved choices"
+        );
+        assert_ne!(
+            crate::media_pool::PlanningBinding::from_snapshot(&initial),
+            crate::media_pool::PlanningBinding::from_snapshot(&hdr)
+        );
+        let mut same_revision = initial.clone();
+        same_revision.settings = hdr.settings.clone();
+        assert_eq!(
+            crate::media_pool::PlanningBinding::from_snapshot(&initial),
+            crate::media_pool::PlanningBinding::from_snapshot(&same_revision),
+            "unavailable processing intent must preserve the ordinary worker binding"
+        );
+        assert!(
+            matches!(
+                TranscodeManager::vod_dv_processing_from_snapshot(&hdr, &request)
+                    .expect("HDR route"),
+                DvSelection::KeepExisting(Reason::ProductionUnqualified)
+            ),
+            "HDR processing does not depend on DV conversion permission, nor grant qualification"
+        );
+        request.kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: false,
+        };
+        assert!(matches!(
+            TranscodeManager::vod_dv_processing_from_snapshot(&hdr, &request)
+                .expect("native route"),
+            DvSelection::KeepExisting(Reason::NativeCompatible)
+        ));
+        request.kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: true,
+        };
+        store
+            .put_setting(keys::DV_FEL_REENCODE, "1")
+            .await
+            .expect("FEL preference");
+        let fel = store
+            .playback_planning_snapshot(id, &QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("source");
+        assert!(matches!(
+            TranscodeManager::vod_dv_processing_from_snapshot(&fel, &request).expect("P8.1 route"),
+            DvSelection::KeepExisting(Reason::ConversionForbidden)
+        ));
+        store
+            .put_setting(keys::DV_CONVERT, "1")
+            .await
+            .expect("conversion permission");
+        let allowed = store
+            .playback_planning_snapshot(id, &QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("source");
+        assert!(
+            matches!(
+                TranscodeManager::vod_dv_processing_from_snapshot(&allowed, &request)
+                    .expect("P8.1 route"),
+                DvSelection::KeepExisting(Reason::ProductionUnqualified)
+            ),
+            "saved choices and scanner flags cannot grant a runtime qualification"
+        );
+    }
+
     #[tokio::test]
     async fn encoded_vod_reorder_choice_is_exact_across_catalog_evidence_and_restore() {
         use plurx_core::{
@@ -1289,7 +1439,7 @@ mod snapshot_catalog_regression {
             .await
             .expect("snapshot")
             .expect("source");
-        assert_eq!(QUALITY_PLANNING_KEYS.len(), 22);
+        assert_eq!(QUALITY_PLANNING_KEYS.len(), 24);
         assert!(
             QUALITY_PLANNING_KEYS.len() <= 32,
             "one settings statement binds at most 32 keys"

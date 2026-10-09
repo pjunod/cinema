@@ -30,34 +30,36 @@ mod vod;
 pub use avc_qualification::QualifiedSdrAvc;
 pub use decode::{
     plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
-    AutoQualityRateProfile, CapabilityStatus, DecodeBackend, DecodeCacheIdentity,
-    DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata,
-    DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason,
-    DecodeSourceIdentity, DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain,
-    FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry, OutputBandwidth,
-    OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
-    Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
-    SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
-    VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
-    UNQUALIFIED_ARTIFACT_NAMESPACE,
+    AutoQualityRateProfile, CapabilityStatus, CompletedReconstructedOutputPlan, DecodeBackend,
+    DecodeCacheIdentity, DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity,
+    DecodeCatalogMetadata, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
+    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, Deinterlace, DynamicRangeClass,
+    FrameDomain, FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry,
+    OutputBandwidth, OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding,
+    PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
+    StreamSelectionProvenance, SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions,
+    TranscodeRequest, VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
+    RESOLVED_TRANSCODE_PLAN_VERSION, UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
     benchmark_encoder, detect_encoders, detect_video_decoders, validate_quality_rate_control,
-    validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
-    OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
-    VideoCodec,
+    validate_quality_rate_control_yielding, CompletedReconstructedOutputContract,
+    EffectiveRateControl, Encoder, EncoderCaps, OutputCodecContract, OutputGrade,
+    QualityRateControlValidation, QualityRc, RateMode, VideoCodec,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
     MacosProcessingSelection, MACOS_PROCESSING_GRAPH_REVISION,
 };
-pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
+pub use pipeline::{Pipeline, ReconstructedPqInput, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
-    vod_audio_anchor, vod_pipe_args, vod_pipe_args_with_reorder, vod_shared_audio_args,
-    vod_shared_audio_plan, VodFrameGrid, VodPresentationFamily, VodRenditionBandwidth,
-    VodSharedAudioRecipe, VodSharedAudioRendition, VodVideoFamily, VodVideoRung,
-    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
+    vod_audio_anchor, vod_completed_reconstructed_pipe_args, vod_pipe_args,
+    vod_pipe_args_with_reorder, vod_reconstructed_pipe_args, vod_reconstructed_video_origin,
+    vod_shared_audio_args, vod_shared_audio_plan, VodFrameGrid, VodPresentationFamily,
+    VodRenditionBandwidth, VodSharedAudioRecipe, VodSharedAudioRendition, VodVideoFamily,
+    VodVideoRung, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY,
+    VOD_SHARED_AUDIO_CPU_THREADS,
 };
 
 use crate::domain::MediaFile;
