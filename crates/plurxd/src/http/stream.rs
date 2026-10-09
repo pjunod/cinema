@@ -4723,21 +4723,84 @@ mod tests {
         for (profile, compatibility, expected_tag, expected_box) in
             [(8u8, 1u8, "hvc1", b"dvvC"), (5u8, 0u8, "dvh1", b"dvcC")]
         {
-            let feed = plurx_core::testfixtures::with_dolby_vision_rpus(
-                &plurx_core::testfixtures::pipe("closed-gop"),
-            );
+            // A DV record must describe the actual base layer: Jellyfin's
+            // muxer rejects an 8-bit SDR source labelled P8.1 or P5. These
+            // committed CC0 controls carry HDR10 Main10 and P5 IPT-PQ-C2
+            // respectively; the P5 control already has matching P5 RPUs.
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/macos-processing")
+                .join(if profile == 8 {
+                    "hdr10.mp4"
+                } else {
+                    "strict_p5_fresh.mp4"
+                });
+            let mut fixture_command = Command::new(crate::ffmpeg::ffmpeg_bin());
+            fixture_command
+                .args(["-hide_banner", "-loglevel", "error", "-i"])
+                .arg(fixture)
+                .args([
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-sn",
+                    "-c:v",
+                    "copy",
+                    "-tag:v",
+                    expected_tag,
+                    "-strict",
+                    "unofficial",
+                    "-bsf:v",
+                    "filter_units=remove_types=32-34",
+                    "-movflags",
+                    "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+                    "-f",
+                    "mp4",
+                    "pipe:1",
+                ]);
+            let feed = plurx_core::testfixtures::run(&mut fixture_command);
+            let feed = if profile == 8 {
+                plurx_core::testfixtures::with_dolby_vision_rpus(&feed)
+            } else {
+                feed
+            };
             let mut reader = FragmentReader::new();
             reader.push(&feed);
             let Some(Unit::Init(mut source_init)) = reader.next_unit().expect("source init") else {
                 panic!("fixture must begin with an init");
             };
-            let old_init_len = source_init.bytes.len();
+            let video = source_init.video().expect("source video track");
+            let video_id = video.id;
+            let nal_length_size = video.nal_length_size;
             let record = fmp4::DolbyVisionRecord::new(profile, 6, false, true, true, compatibility)
                 .expect("native DV record");
             fmp4::set_dolby_vision_record(&mut source_init, &record)
                 .expect("write source DV record");
-            let mut source_bytes = source_init.bytes;
-            source_bytes.extend_from_slice(&feed[old_init_len..]);
+            let mut source_bytes = source_init.bytes.clone();
+            while let Some(unit) = reader.next_unit().expect("source media") {
+                if let Unit::Fragment(mut fragment) = unit {
+                    if profile == 8 {
+                        // Match the injected RPUs to the single HDR10 layer
+                        // rather than merely relabelling Profile 7 metadata.
+                        fmp4::rewrite_video_samples(
+                            &mut fragment,
+                            &source_init.tracks,
+                            video_id,
+                            |sample| {
+                                let mut converted = Vec::new();
+                                plurx_core::transcode::dvconvert::convert_length_prefixed(
+                                    sample,
+                                    nal_length_size,
+                                    &mut converted,
+                                )
+                                .expect("convert fixture RPUs to P8.1");
+                                Ok(converted)
+                            },
+                        )
+                        .expect("rewrite P8.1 fixture samples");
+                    }
+                    source_bytes.extend_from_slice(&fragment.bytes);
+                }
+            }
 
             let base = crate::test_tempdir().expect("native DV progressive fixture");
             let input = base.path().join(format!("p{profile}-source.mp4"));
