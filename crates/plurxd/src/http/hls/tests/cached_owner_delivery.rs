@@ -259,11 +259,41 @@ mod cached_owner_delivery_tests {
                 axum::routing::post(super::super::super::internal_media_sessions::relay),
             )
             .with_state(owner.state.clone());
-        leader
-            .heartbeat()
-            .await
-            .expect("actual owner readiness heartbeat");
+        // Production starts this sampler before heartbeat publication. Without
+        // it, an unsampled node truthfully stays out of the media directory.
+        let sampler_stop = tokio_util::sync::CancellationToken::new();
+        let sampler = tokio::spawn(
+            selected
+                .replication_monitor()
+                .passive_metrics_loop(sampler_stop.clone().cancelled_owned()),
+        );
         let checks = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    leader
+                        .heartbeat()
+                        .await
+                        .expect("actual owner readiness heartbeat");
+                    let peers = ingress
+                        .membership
+                        .media_peers()
+                        .await
+                        .expect("actual committed media directory");
+                    if let Some(peer) = peers
+                        .iter()
+                        .find(|peer| peer.node_id == owner.state.node_id && peer.reachable)
+                    {
+                        assert_eq!(
+                            peer.http_base.as_deref(),
+                            Some(source_config.cluster.join_url.as_str()),
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            })
+            .await
+            .expect("actual sampled owner becomes eligible before relay");
             let response = subtitle_vtt(
                 State(ingress.clone()),
                 AxPath((session.clone(), 0, format!("cached-{revision}"))),
@@ -321,11 +351,13 @@ mod cached_owner_delivery_tests {
         })
         .catch_unwind()
         .await;
+        sampler_stop.cancel();
+        sampler.await.expect("owned passive sampler drained");
         startup.stop_and_drain().await;
-        let drain = tokio::spawn(async move { learner_client.shutdown().await }).await;
-        if let Ok(result) = drain {
-            result.expect("cached caption fixture");
-        }
+        learner_client
+            .shutdown_retained_startup()
+            .await
+            .expect("retained learner listeners and writers drained");
         selected.shutdown().await.expect("cached caption fixture");
         if let Err(panic) = checks {
             std::panic::resume_unwind(panic);

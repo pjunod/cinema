@@ -4318,7 +4318,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Final subtitle/current-main union: +2 main preparation-storage fixture
 # observations (one finite timeout and one sleep while its retained filesystem
 # owner settles). No production timer or polling authority is introduced.
-expected_occurrences = 1645
+# Post-merge cached-owner fixture: +2 finite observations (readiness timeout
+# and retry sleep) wait for actual production sampler/heartbeat publication.
+# Its retained sampler is cancelled and joined; it replaces the old spawned
+# learner drain, whose staged listeners/writers now drain directly. Task and
+# process counts stay unchanged; no production owner or timer is added.
+expected_occurrences = 1647
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
