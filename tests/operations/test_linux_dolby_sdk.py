@@ -451,3 +451,25 @@ def test_private_bootstrap_fence_rejects_tool_license_and_source_offer_substitut
             offered.write_bytes(package + b"changed")
             with unittest.TestCase().assertRaises(ValueError):
                 module.verify_build_tools(root, {"gperf": row})
+
+
+def test_bootstrap_claims_normalize_staged_license_path_without_losing_source_identity():
+    module = helper()
+    declared = {"meson": {"version": "1.12.1", "url": "https://example.org/meson.tar.gz",
+                          "archive_sha256": "a" * 64, "archive": "meson-1.12.1.tar.gz",
+                          "consumed_by": "minimum supported upstream version",
+                          "license_member": "meson-1.12.1/COPYING"},
+                "gperf": {"version": "3.1-1", "executable_sha256": "b" * 64}}
+    observed = {"meson": {"version": "1.12.1", "url": "https://example.org/meson.tar.gz",
+                          "archive_sha256": "a" * 64,
+                          "license_member": "source/meson-1.12.1/COPYING"},
+                "gperf": dict(declared["gperf"])}
+    module.validate_build_tool_claims(declared, observed)
+    for key in ["version", "url", "archive_sha256", "license_member"]:
+        tampered = {**observed, "meson": {**observed["meson"], key: "substituted"}}
+        with unittest.TestCase().assertRaises(ValueError):
+            module.validate_build_tool_claims(declared, tampered)
+    with unittest.TestCase().assertRaises(ValueError):
+        module.validate_build_tool_claims(declared, {"meson": observed["meson"]})
+    with unittest.TestCase().assertRaises(ValueError):
+        module.validate_build_tool_claims(declared, {**observed, "gperf": {**observed["gperf"], "executable_sha256": "c" * 64}})

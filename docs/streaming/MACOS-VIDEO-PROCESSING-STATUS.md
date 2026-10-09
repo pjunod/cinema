@@ -33,28 +33,44 @@ Routes owns Linux runtime/strict context and shared pipeline integration.
 Dolby also owns the Linux SDK, shipping assembly and sealed-parser packaging.
 The manager owns this ledger and serializes shared file/compiler ownership.
 Accepted earlier packages and evidence remain read-only. The pinned Rust
-1.97.1 compiler lane permits two jobs with one explicit owner at a time.
+1.97.1 native and Linux compiler lanes each have one job and an explicit
+owner; independent lanes run concurrently with the isolated SDK build.
 Unit execution and main landing remain with the designated merge coordinator.
 No final review or implementation completion is claimed for F1–F3 yet.
 
-**Latest checkpoint:** the source through `2cd6000b3` is committed and its
-normal compile hook passes. Linux check and Clippy pass on the earlier,
-Rust-equivalent `50784a2b6`/`7ae44966d` inputs. Batch03 has since landed as
-main `1088d7529`; that foundation and the current SDK repair are being
-integrated before final qualification. Changed Rust inputs require fresh
-compilation; the unchanged FFmpeg package evidence remains applicable.
+**Latest checkpoint:** the actual main landing and private `gperf` bootstrap
+repair are committed together as `2139fa9c4c0aff8a0503d72f53b8eaaa9d54630f`.
+Its normal hook passes: catalog, Rust formatting, workspace Clippy and 86
+embedded JavaScript checks. No unit suite was run. Three independent lanes
+are proceeding against this source: the native release build, Linux
+check/Clippy and the isolated Bookworm SDK generator.
 
-The actual SDK generator now passes the FreeType metadata target and the
-Vulkan-Headers export consumed by Vulkan-Loader. It next refuses a missing
-`gperf` bootstrap program during Fontconfig setup. The repair supplies a
-hash-bound Bookworm binary, copyright and source offer through the private
-tool owner; its actual execution remains pending. No host installation or
-network fallback substitutes for that dependency. The Mac daemon release
-on `2cd6000b3` is a precursor while the foundation changes. Its bounded
-build records warning-level pressure and stops for critical pressure or
-exhaustion, rather than discarding work on a transient warning alone. Final
-combined-source qualification, adversarial review, unit execution and merge
-handoff remain outstanding.
+The earlier `2cd6000b3` Mac release completed in 1,590.286 seconds with its
+owned process group fully reaped. Matching executable and debug symbols are
+preserved. The initial capture rejected Cargo's debug-symbol symlink; a
+separate capture verified its contained regular target and matching UUID.
+That capture correction does not change the successful compiler result.
+Warning-level pressure did not abort the build; final source changes still
+require the new release. Linux check and Clippy passes on earlier sources
+are retained as historical evidence, not substituted for current inputs.
+
+The SDK generator has passed the genuine FreeType metadata target and
+Vulkan-Headers export consumed by Vulkan-Loader. Its next missing input was
+Fontconfig's `gperf` bootstrap program. The committed repair supplies an
+authenticated Bookworm binary, copyright and source offer through the
+private tool owner. Static staging now passes. The actual generator then
+refused a raw-lock versus staged-record representation mismatch before
+running upstream projects. A narrow normalization repair preserves the
+existing archive, module and license checks; its execution is pending.
+No global installation or network fallback substitutes for dependencies.
+
+Final Linux hardware acceptance also requires an actual amd64 daemon;
+ARM Linux type/lint checks alone cannot supply that executable. A warm
+build-cache candidate is identified, but its current owner must release it
+before reuse. Native text/caption API checks, full CPU/GPU comparisons,
+shipping Linux runtime qualification, final adversarial review and merge
+handoff remain outstanding. The designated merge coordinator owns unit
+execution and main landing.
 
 **Integrated source:** `84ad32b51` prepares pinned Linux sources and generic
 strict Dolby patches; `622c1ee42` repairs caption SEI parsing; `a9e0f2c98`

@@ -1418,6 +1418,27 @@ remains pending. The binary hash is
 the source/tool evidence is
 `be07d4d93f6a660b4f1d5a9d7ee92e0e8bd3b856a4f47e487a4748c321360f32`.
 
+The `2139fa9c4c0aff8a0503d72f53b8eaaa9d54630f` static staging passes
+in 7.62 seconds with a sampled peak RSS of 801,980,416 bytes. The manifest is
+`d6e7781535210c1ab2e6f72a5a564d564e9463891b78632380867ed12919fead`.
+An earlier copy attempt stopped on the obsolete warning-only guard; a second
+admission refused before launching a child. Those records remain negative.
+The bounded copy now uses measured headroom with its unchanged 1 GiB RSS and
+90-second limits, and still refuses critical pressure or exhausted headroom.
+
+The remote attempt verifies all 6,630 input hashes, then refuses before any
+upstream generator because the newly generalized bootstrap claim comparison
+expects raw lock fields in Meson's existing execution record. That record
+omits transport filename and explanatory rationale, and stores the license
+under its staged `source/` path. The repair compares version, URL, archive
+hash and normalized license location while retaining the independent raw
+archive, complete module inventory, launcher and license-byte checks. The
+same function owns the exact tool-role inventory; `gperf` claims remain
+exact. The 0.291-second failure has no OOM; the owned container is stopped
+and network state restored. Its terminal receipt is
+`48291b910d032146571334b54e6b6accb1758432915c0a780fd80da77b6595b2`.
+Actual execution of this representation repair is still pending.
+
 The shipping source also closes a separate integration gap: published and CI
 smoke images bypassed the local `make docker` seam. Both now have a shared
 Bookworm package-export contract and consume its audited output; the renderer

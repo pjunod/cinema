@@ -876,6 +876,21 @@ def bounded_generator(argv, cwd, environment, log, deadline):
             "log_sha256": digest(log.read_bytes())}
 
 
+def validate_build_tool_claims(declared, observed):
+    if set(declared) != set(observed) or set(declared) - {"meson", "gperf"}:
+        raise ValueError("private build-tool role inventory changed")
+    for name, claims in declared.items():
+        if name == "meson":
+            # Archive filename is a transport label and consumed_by is a human
+            # rationale. Actual bytes/module inventory are independently fenced.
+            expected = {key: claims[key] for key in ["version", "url", "archive_sha256"]}
+            expected["license_member"] = "source/" + member_path(claims["license_member"])
+        else:
+            expected = claims
+        if any(observed[name].get(key) != value for key, value in expected.items()):
+            raise ValueError("bootstrap tool/source claims changed from immutable lock")
+
+
 def verified_staging(root):
     root = root.resolve(strict=True)
     if not root.is_absolute() or any(root.is_relative_to(Path(p)) for p in ["/Applications", "/Library", "/System", "/usr", "/opt"]):
@@ -900,11 +915,7 @@ def verified_staging(root):
     lock = json.loads(lock_data)
     if set(lock["sources"]) != set(facts["consumed_sources"]):
         raise ValueError("consumed role inventory changed after staging")
-    if set(lock.get("build_tools", {})) != set(facts.get("build_tools", {})):
-        raise ValueError("private build-tool role inventory changed")
-    for name, claims in lock.get("build_tools", {}).items():
-        if any(facts["build_tools"][name].get(key) != value for key, value in claims.items()):
-            raise ValueError("bootstrap tool/source claims changed from immutable lock")
+    validate_build_tool_claims(lock.get("build_tools", {}), facts.get("build_tools", {}))
     verify_build_tools(root, facts.get("build_tools", {}))
     distribution = facts.get("distribution_inputs", {})
     for role, row in distribution.get("roles", {}).items():
