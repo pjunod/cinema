@@ -1,6 +1,6 @@
 # Subtitle reliability — completion ledger
 
-**Status:** implementation integrated; UI snapshots and remaining acceptance finishing before the single final review.
+**Status:** WebVTT/offline implementation integrated; UI snapshots complete; A/53 file-caption repair linked to its active video-processing effort; final subtitle review next.
 **Updated:** 2026-10-09 · **Initial base:** `1088d7529` · **Current main integrated:** `12680bf2e` · **Integration:** `codex/subtitle-timeline-and-window` · **Batched PR:** [#961](http://forge.lan:3000/noirr/plurx/pulls/961)
 
 Cinema subtitles fail across clients: selection may produce nothing, cues can
@@ -81,6 +81,7 @@ handoffs against actual titles. AVPlayer testing also showed that answering
 | [Parallel ranges](PARALLEL-SUBTITLE-RANGES-STATUS.md) | #517 landed as `38f61dfe6`; its pending-PR status was stale | Current/next ranges and complete-track takeover stay visible without a video restart |
 | [Online downloads](../features/SUBTITLE-DOWNLOADS-IMPLEMENTATION.md) | #498 landed as `0e2c3fd47`, implementation `843ed9bb5`; not an unbuilt feature | Provider configuration/quota smoke where configured; durable caption playback on clients |
 | [PGS startup and overlay](PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md) | Two-device startup bar passed September 24; broader corpus still open | Color/geometry/alpha, intervals, active-cue seeks and late data across clients |
+| [VideoToolbox file/DVR A/53 captions](../streaming/VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) | Owned by the active `effort/video-processing-followups` integration: SEI parser repair `622c1ee42` plus source-clock repair; retained normal-API caption cases pass there | Preserve the existing effort ownership and passing evidence; final qualification/landing there remains a dependency, not a completed claim for this PR |
 | [Mac E2 subtitle processing](../streaming/MACOS-VIDEO-PROCESSING-STATUS.md) | CPU composition after native processing is integrated; HLG text/bitmap checks exist | Reconcile E2 acceptance; GPU composition is conditional on measured benefit, not a required second renderer |
 | [Offline transcription](../performance/PERF2-PLAN.md#102-subtitles-on-demand--the-whisper-queue) | Implemented in `6fae0a350`, `8df243175` and `718e35a47`; separate from online downloads | Bounded offline command job, Stop/lease ownership, durable caption provenance, settings and tests |
 | [Physical verification](SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | Historical cases remain useful; build numbers and PGS refusal expectations are stale | Record each current case separately; excluded hardware stays untested |
@@ -129,8 +130,11 @@ in the independent clone, and it is no longer used. Cleanup remains tracked.
 | Sol 6.1 · offline transcription | Bounded command job, queue/Stop ownership and durable caption provenance | integrated through `718e35a47`; matching audio ordinal bound to job/publication; normal pinned hooks passed |
 | Sol 6.1 · acceptance | Reconcile PGS/Mac/download/cluster evidence, complete available-hardware cases and repair concrete gaps | unsafe-503 retirement/native notices integrated as `4f6a1d7e2`; physical and bounded Mac composition checks passed; remaining replicated-store/app acceptance prepared |
 
-Next: finish UI fixture snapshots and the future-window browser fixture, then request the sole
-adversarial agent review. Named cluster and new worker regressions run after
+UI generation is complete: 78 captures, 10,849 structural facts and no
+console/page errors. It also exposed a canonical decimal file-ID mismatch in
+client logging; `20ef21267` accepts the existing web spelling without losing
+64-bit precision. The future-window browser fixture is prepared. Next is the
+sole adversarial agent review. Named cluster and new worker regressions run after
 that review alongside the fast lane. The live online provider is unconfigured;
 no successful provider request is claimed.
 No production deployment or completion of the whole backlog is claimed yet.
@@ -146,3 +150,14 @@ The current main fast lane unconditionally runs `make web-unit-check` in its
 web compile job, which conflicts with this batch's explicit no-repeat
 instruction. The PR remains draft while the validation route is resolved;
 no duplicate full web suite has been launched and no green gate is claimed.
+
+### Existing caption-processing effort
+
+P06 is not silently closed. Read-only inspection of the active video-processing
+effort found its already committed caption-preserving SEI parser repair and
+normal-API evidence, including a separately repaired file-source clock.
+Those changes remain owned by that effort; rebuilding or copying a partial
+subset here would duplicate work and omit coupled timestamp fixes. The
+subtitle ledger tracks its final qualification and landing as an explicit
+dependency. The current batch repairs client WebVTT delivery and implements
+the previously missing offline generation path.
