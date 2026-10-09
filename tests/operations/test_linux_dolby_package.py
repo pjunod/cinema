@@ -20,6 +20,62 @@ def recipe():
 
 
 class LinuxDolbyPackageCase(unittest.TestCase):
+    def test_provenance_links_are_metadata_and_never_dereferenced(self):
+        module = recipe()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "original"
+            source.mkdir()
+            (source / "recipe").write_bytes(b"genuine source")
+            (source / "recipe").chmod(0o755)
+            (source / "unbuilt.so").symlink_to("unbuilt.so.1")
+            host = root / "host-secret"
+            host.write_bytes(b"must not copy")
+            (source / "tool-alias").symlink_to(host)
+            links = module.copy_provenance_bytes(source, root / "emitted")
+            self.assertEqual(links["links"], {"unbuilt.so": "unbuilt.so.1", "tool-alias": str(host)})
+            self.assertEqual(list((root / "emitted").iterdir()), [root / "emitted/recipe"])
+            self.assertEqual((root / "emitted/recipe").read_bytes(), b"genuine source")
+            self.assertEqual((root / "emitted/recipe").stat().st_mode & 0o777, 0o755)
+            import os
+            os.mkfifo(source / "special")
+            with self.assertRaisesRegex(ValueError, "special file"):
+                module.copy_provenance_bytes(source, root / "refused")
+
+    def test_assembly_retains_original_recipe_and_refuses_build_witness_tampering(self):
+        module = recipe()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "original-recipe"
+            old.write_bytes(b"actual old compiler recipe")
+            steps = {}
+            for step in ["configure", "compile", "install"]:
+                evidence = root / "build-evidence" / step / "attempt-1"
+                evidence.mkdir(parents=True)
+                log = evidence / "output.log"
+                log.write_bytes(step.encode())
+                steps[step] = {"status": 0, "log_name": "output.log", "log_sha256": module.sha(log),
+                               "environment": {"HOME": str(evidence)}}
+            facts = {"state": "installed", "recipe_sha256": module.sha(old), "executed_steps": steps}
+            state = root / "build-state.json"
+            state.write_text(json.dumps(facts))
+            self.assertEqual(module.installed_build_facts(root, old), (facts, old))
+            wrong = root / "different-recipe"
+            wrong.write_bytes(b"different")
+            with self.assertRaisesRegex(ValueError, "recipe differs"):
+                module.installed_build_facts(root, wrong)
+            facts["state"] = "compiled"
+            state.write_text(json.dumps(facts))
+            with self.assertRaisesRegex(ValueError, "three successful"):
+                module.installed_build_facts(root, old)
+            facts["state"] = "installed"
+            state.write_text(json.dumps(facts))
+            (root / "build-evidence/compile/attempt-1/output.log").write_bytes(b"changed witness")
+            with self.assertRaisesRegex(ValueError, "witness log changed"):
+                module.installed_build_facts(root, old)
+            with self.assertRaisesRegex(ValueError, "exact prepared recipe"):
+                module.read_facts(root)
+
     def test_actual_elf_version_requirements_keep_library_and_weak_association(self):
         module = recipe()
         text = """Version symbols section '.gnu.version' contains 3 entries:

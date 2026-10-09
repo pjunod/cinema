@@ -15,6 +15,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import time
 
 
@@ -83,6 +84,67 @@ def read_facts(root):
     if facts["recipe_sha256"] != sha(Path(__file__)):
         raise ValueError("build stages must use the exact prepared recipe")
     return facts
+
+
+def installed_build_facts(root, recorded_recipe=None):
+    """Packaging may retain an exact earlier compiler recipe, never rewrite it."""
+    recipe = Path(__file__) if recorded_recipe is None else recorded_recipe
+    if recipe.is_symlink() or not recipe.is_file():
+        raise ValueError("original compilation recipe must be retained regular bytes")
+    facts = json.loads((root / "build-state.json").read_text())
+    if facts["recipe_sha256"] != sha(recipe):
+        raise ValueError("recorded compilation recipe differs from installed build authority")
+    if facts["state"] != "installed" or set(facts["executed_steps"]) != {"configure", "compile", "install"}:
+        raise ValueError("assembly requires all three successful installed-build witnesses")
+    for step, witness in facts["executed_steps"].items():
+        evidence = Path(witness["environment"]["HOME"])
+        expected = (root / "build-evidence" / step).resolve(strict=True)
+        if not expected.is_relative_to(root.resolve(strict=True)):
+            raise ValueError("original build witness escapes its owner")
+        if (witness["status"] != 0 or witness["log_name"] != "output.log"
+                or evidence.resolve(strict=True).parent != expected
+                or not re.fullmatch(r"attempt-[0-9]+", evidence.name)):
+            raise ValueError("invalid original build witness: " + step)
+        log = evidence / witness["log_name"]
+        if log.is_symlink() or sha(log) != witness["log_sha256"]:
+            raise ValueError("original build witness log changed: " + step)
+    return facts, recipe
+
+
+def copy_provenance_bytes(source, destination):
+    """Serialize aliases as metadata; never follow scratch or host tool links."""
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError("provenance source must be a real directory")
+    destination.mkdir()
+    links = {}
+    for directory, folders, files in os.walk(source, followlinks=False):
+        parent = Path(directory)
+        relative = parent.relative_to(source)
+        target = destination / relative
+        target.mkdir(exist_ok=True)
+        for name in sorted([*folders, *files]):
+            path = parent / name
+            mode = path.lstat().st_mode
+            member = str(path.relative_to(source))
+            if stat.S_ISLNK(mode):
+                links[member] = os.readlink(path)
+                if name in folders:
+                    folders.remove(name)
+            elif stat.S_ISREG(mode):
+                with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as original:
+                    before = os.fstat(original.fileno())
+                    if not stat.S_ISREG(before.st_mode):
+                        raise ValueError("provenance file changed type during copy")
+                    with (target / name).open("xb") as output:
+                        shutil.copyfileobj(original, output)
+                    original.seek(0)
+                    if hashlib.file_digest(original, "sha256").hexdigest() != sha(target / name):
+                        raise ValueError("provenance regular bytes changed during copy")
+                    (target / name).chmod(before.st_mode & 0o777)
+            elif not stat.S_ISDIR(mode):
+                raise ValueError("special file in build provenance: " + member)
+    return {"schema_version": 1, "representation": "original-link-text-only", "links": links,
+            "scope": "Aliases are original metadata, not emitted files or claimed built library bytes."}
 
 
 def host():
@@ -215,10 +277,10 @@ def build_step(root, step, jobs, seconds):
     return facts
 
 
-def assemble(root, parser_binary, parser_provenance, output):
+def assemble(root, parser_binary, parser_provenance, output, recorded_recipe=None):
     """Assemble only real installed outputs and a source-matched sealed parser."""
     host()
-    facts = read_facts(root)
+    facts, compilation_recipe = installed_build_facts(root, recorded_recipe)
     output = new_private_output(output)
     if facts["state"] != "installed":
         raise ValueError("packaging requires installed outputs and a new absolute output")
@@ -274,12 +336,14 @@ def assemble(root, parser_binary, parser_provenance, output):
         provenance = output / "provenance"
         provenance.mkdir()
         shutil.copytree(root / "source-offer", provenance / "source-offer")
-        shutil.copytree(sdk / "provenance", provenance / "sdk")
+        sdk_links = copy_provenance_bytes(sdk / "provenance", provenance / "sdk")
+        (provenance / "sdk-original-links.json").write_text(json.dumps(sdk_links, indent=2) + "\n")
         shutil.copytree(parser_provenance, provenance / "sealed-parser")
         shutil.copytree(root / "build-evidence", provenance / "build-evidence")
         shutil.copy2(root / "prepared-source.json", provenance / "prepared-source.json")
         shutil.copy2(root / "build-state.json", provenance / "build-state.json")
-        shutil.copy2(Path(__file__), provenance / "build-linux-dolby-ffmpeg")
+        shutil.copy2(compilation_recipe, provenance / "build-linux-dolby-ffmpeg")
+        shutil.copy2(Path(__file__), provenance / "package-assembly-recipe.py")
         for name in ["COPYING.GPLv2", "COPYING.GPLv3", "COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md"]:
             shutil.copy2(root / "source" / name, provenance / name)
         for name in ["config.h", "ffbuild/config.mak"]:
@@ -287,6 +351,9 @@ def assemble(root, parser_binary, parser_provenance, output):
                 raise ValueError("configuration changed after its actual configure witness")
             shutil.copy2(root / "source" / name, provenance / Path(name).name)
         capsule = {"schema_version": 1, "source": union,
+                   "compiled_recipe_sha256": facts["recipe_sha256"],
+                   "assembly_recipe_sha256": sha(Path(__file__)),
+                   "sdk_original_links_sha256": sha(provenance / "sdk-original-links.json"),
                    "executables": {"ffmpeg_sha256": sha(output / "ffmpeg"),
                        "ffprobe_sha256": sha(output / "ffprobe"),
                        "sealed_parser_sha256": sha(output / "sealed-ffprobe")},
@@ -536,6 +603,7 @@ def main():
     parser.add_argument("--source-archive", type=Path)
     parser.add_argument("--sealed-parser", type=Path)
     parser.add_argument("--sealed-parser-provenance", type=Path)
+    parser.add_argument("--recorded-build-recipe", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--deadline-seconds", type=int, default=600)
@@ -543,6 +611,8 @@ def main():
     for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"]:
         parser.add_argument("--" + argument.lower().replace("_", "-"), default="")
     args = parser.parse_args()
+    if args.recorded_build_recipe is not None and args.step != "assemble":
+        parser.error("recorded compilation authority is assembly-only")
     if args.step == "pipeline":
         facts = package_pipeline(args.root, args.jobs, args.deadline_seconds)
     elif args.step in ["docker-build", "install-shipping"]:
@@ -573,7 +643,7 @@ def main():
     elif args.step == "assemble":
         if args.sealed_parser is None or args.sealed_parser_provenance is None or args.output is None:
             parser.error("assemble requires sealed parser, its provenance, and a new output")
-        facts = assemble(args.root, args.sealed_parser, args.sealed_parser_provenance, args.output)
+        facts = assemble(args.root, args.sealed_parser, args.sealed_parser_provenance, args.output, args.recorded_build_recipe)
     else:
         facts = build_step(args.root, args.step, args.jobs, args.deadline_seconds)
     print(json.dumps({"state": facts.get("state", "pending-ELF-closure"), "runtime_qualification": False}, sort_keys=True))

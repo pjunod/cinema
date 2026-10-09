@@ -38,7 +38,9 @@ owner; independent lanes run concurrently with the isolated SDK build.
 Unit execution and main landing remain with the designated merge coordinator.
 No final review or implementation completion is claimed for F1–F3 yet.
 
-**Latest checkpoint:** integration source is `354bd87e5f4356ae677bc16c67672985dd58f261`.
+**Latest checkpoint:** the producer/parser build evidence uses
+`354bd87e5f4356ae677bc16c67672985dd58f261`; subsequent packaging repairs
+retain those exact compiled inputs and their original build authority.
 The `e9fdc02a` font-identity repair passes pinned Rust 1.97.1 all-target compilation
 and the normal commit hook (catalog, formatting, Clippy and 86 embedded
 JavaScript checks). The repaired release build and focused ordinary-API
@@ -148,9 +150,17 @@ automatically verifies the installed static archives against authenticated
 Debian members and retains their matching source offers. A supplement mode
 can attach those records to the existing compiled parser without changing
 its binary or original build recipe. Its 22 public inputs are size/hash
-verified; actual supplement and package audit remain pending. Compilation
-alone is not shipping acceptance. No global installation or network fallback
-substitutes for dependencies.
+verified, and the actual offline supplement and explicit verification pass.
+The first assembly then fails before ELF audit because a recursive copy
+follows SDK scratch-tree aliases: some point to deliberately unbuilt library
+outputs and others to host build tools. The repair copies regular provenance
+bytes and records all original link members/targets as hash-bound metadata.
+It neither invents libraries nor copies host tools through those aliases.
+Assembly retains the original compilation recipe and all three verified
+build logs, while identifying its corrected packaging recipe separately.
+The failed package remains preserved. Corrected assembly, ELF audit and
+hardware/API qualification remain pending. No global installation or network
+fallback substitutes for dependencies.
 
 Final Linux hardware acceptance also requires an actual amd64 daemon;
 ARM Linux type/lint checks alone cannot supply that executable. A warm
