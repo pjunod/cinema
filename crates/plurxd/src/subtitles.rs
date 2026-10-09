@@ -1347,20 +1347,6 @@ pub(crate) async fn readiness_revision_with_store(
     (state, revision)
 }
 
-/// How much longer this track's failure memo stands, when one does.
-///
-/// The memo is what stops a player re-launching a full-source read every six
-/// seconds against a track that has just failed, so it is also the honest
-/// `Retry-After`: it says when this server will next be willing to try, which
-/// is the only moment a retry could do anything. Observation only.
-pub async fn failure_memo_remaining(dir: &Path, file: &MediaFile, index: i64) -> Option<Duration> {
-    let cached = vtt_path(dir, file, index);
-    let memos = negative_memos().lock().await;
-    let memo = memos.get(&cached)?;
-    memo.expires_at
-        .checked_duration_since(tokio::time::Instant::now())
-}
-
 /// Read a warm sidecar without launching extraction. Used by AVPlayer's
 /// short-deadline segmented subtitle route, where a cache miss must return an
 /// empty segment immediately and warm in the background.

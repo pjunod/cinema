@@ -1430,6 +1430,20 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(decoded.effectiveSelection?.qualityAuto, true)
     }
 
+    func testUnavailableSubtitleNotifiesOncePerIntentWithoutConsumingReadyRetry() {
+        let notice = SubtitleUnavailableNoticeState()
+        let readiness = SubtitleReadinessRetryState()
+        XCTAssertFalse(notice.record(nil, intent: 1))
+        XCTAssertFalse(notice.record("unknown", intent: 1))
+        XCTAssertTrue(notice.record("unavailable", commitUnavailable: false, intent: 1))
+        XCTAssertTrue(notice.record("unavailable", intent: 1))
+        XCTAssertFalse(notice.record("unavailable", intent: 1))
+        XCTAssertFalse(notice.record("warming", intent: 1))
+        XCTAssertTrue(readiness.record("ready", intent: 1))
+        XCTAssertFalse(notice.record("unavailable", intent: 1))
+        XCTAssertTrue(notice.record("unavailable", intent: 2))
+    }
+
     func testSubtitleReadinessDecisionAndTransitionAreClosedAndSingleShot() {
         for (value, expected) in [
             ("ready", true),

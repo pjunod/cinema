@@ -3242,9 +3242,9 @@ class Controller internal constructor(
                 observe = ::playbackControlObservation,
                 linkReceipt = { if (playbackControlBootstrapFence.isCurrent(claim, sessionId)) currentLinkReceipt() else null },
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
-            onSubtitleUnavailable = {
-                raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
-            },
+                onSubtitleUnavailable = {
+                    if (selectedSubtitle != null) raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
+                },
                 onPrepare = ::onPrepareAction,
                 onAcknowledged = ::acknowledgementDelivered,
                 onEffectiveSelection = { effective ->

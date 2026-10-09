@@ -10788,7 +10788,6 @@ mod tests {
                 "subtitle_stored_sources",
                 "subtitle_cluster_sources",
                 "subtitle_backfill",
-                "subtitle_not_ready_503",
                 "chapter_thumbnails",
                 "dolby_vision_convert",
                 "source_probe_comparison",
@@ -11323,6 +11322,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn retired_subtitle_transport_refusal_is_absent_from_settings_and_readiness() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting("playback.subtitle_not_ready_503", "1")
+            .await
+            .expect("retain old choice without deleting operator data");
+        let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert!(settings.get("subtitle_not_ready_503").is_none());
+        let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        assert!(!readiness["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["id"] == "subtitle_not_ready_503"));
+    }
+
     /// Both new switches answer from the store on the next request, and the
     /// settings page and the readiness route agree with the server about what
     /// the stored string means.
@@ -11340,13 +11358,11 @@ mod tests {
         let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(settings["pgs_overlay"], serde_json::json!(false));
         assert_eq!(settings["dolby_vision_convert"], serde_json::json!(true));
-        assert_eq!(settings["subtitle_not_ready_503"], serde_json::json!(false));
         assert!(!state
             .pgs_overlay_enabled()
             .await
             .expect("read the overlay switch"));
         assert!(state.transcode.dv_convert_enabled().await);
-        assert!(!state.subtitle_not_ready_503().await);
 
         // Both keys set on every row, because a leftover from the previous
         // one would make this pass by accident.
@@ -11361,17 +11377,6 @@ mod tests {
             state
                 .store
                 .put_setting(plurx_core::store::keys::PGS_OVERLAY, overlay_value)
-                .await
-                .expect("store a hand-written value");
-            // The subtitle refusal is read in the same three places and takes
-            // the same default-off spelling, so it rides the same rows rather
-            // than getting a census of its own.
-            state
-                .store
-                .put_setting(
-                    plurx_core::store::keys::SUBTITLE_NOT_READY_503,
-                    overlay_value,
-                )
                 .await
                 .expect("store a hand-written value");
             state
@@ -11401,9 +11406,6 @@ mod tests {
                     settings["dolby_vision_convert"].clone(),
                     reported("pgs_overlay"),
                     reported("dolby_vision_convert"),
-                    state.subtitle_not_ready_503().await,
-                    settings["subtitle_not_ready_503"].clone(),
-                    reported("subtitle_not_ready_503"),
                 ),
                 (
                     overlay,
@@ -11412,9 +11414,6 @@ mod tests {
                     serde_json::json!(convert),
                     serde_json::json!(overlay),
                     serde_json::json!(convert),
-                    overlay,
-                    serde_json::json!(overlay),
-                    serde_json::json!(overlay),
                 ),
                 "{stored}: the server, the settings page and the readiness route must \
                  not disagree about one stored string"

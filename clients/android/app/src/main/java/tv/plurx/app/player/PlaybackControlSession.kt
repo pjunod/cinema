@@ -478,9 +478,18 @@ class PlaybackControlSession(
                 // viewer nothing leaves them watching a track that is selected
                 // and will never fill in.
                 if (exchange.capture.hasSameIntent(latest.get()) &&
-                    subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness)
+                    subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness,
+                        commitUnavailable = false, intent = exchange.capture.intentGeneration)
                 ) {
-                    onSubtitleUnavailable()
+                    dispatchSubtitleReady {
+                        synchronized(verdictLock) {
+                            if (generation == verdictGeneration &&
+                                exchange.intentGeneration == verdictIntentGeneration &&
+                                exchange.capture.hasSameIntent(latest.get()) &&
+                                subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness,
+                                    intent = exchange.capture.intentGeneration)) onSubtitleUnavailable()
+                        }
+                    }
                 }
                 if (exchange.capture.hasSameIntent(latest.get()) && subtitleReadiness.record(
                         exchange.response?.delivery?.subtitleReadiness, commitReady = false,

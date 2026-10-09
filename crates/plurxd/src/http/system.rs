@@ -2131,10 +2131,6 @@ pub struct SettingsDto {
     /// Forward subtitle materialization span. Absent storage resolves to the
     /// bounded 200-second server default.
     pub subtitle_window_secs: i64,
-    /// Answer a subtitle segment whose sidecar extraction has failed with
-    /// `503` + `Retry-After` rather than an empty track. Off by default; the
-    /// Developer tab's readiness rows are advisory and never override it.
-    pub subtitle_not_ready_503: bool,
     /// Let the PGS overlay and burn paths read a track the subtitle-source
     /// store kept instead of the whole source. On by default; off makes both
     /// ignore the store entirely.
@@ -2615,10 +2611,6 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         analysis_backoff_base_secs,
         analysis_backoff_max_secs,
         subtitle_window_secs,
-        subtitle_not_ready_503: plurx_core::store::stored_switch(
-            setting(keys::SUBTITLE_NOT_READY_503).as_deref(),
-            false,
-        ),
         subtitle_stored_sources: plurx_core::store::stored_switch(
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
             true,
@@ -2897,7 +2889,6 @@ pub struct UpdateSettings {
     pub analysis_backoff_base_secs: Option<i64>,
     pub analysis_backoff_max_secs: Option<i64>,
     pub subtitle_window_secs: Option<i64>,
-    pub subtitle_not_ready_503: Option<bool>,
     pub subtitle_stored_sources: Option<bool>,
     pub subtitle_cluster_sources: Option<bool>,
     pub subtitle_backfill: Option<bool>,
@@ -3070,7 +3061,6 @@ impl UpdateSettings {
             || self.analysis_backoff_base_secs.is_some()
             || self.analysis_backoff_max_secs.is_some()
             || self.subtitle_window_secs.is_some()
-            || self.subtitle_not_ready_503.is_some()
             || self.subtitle_stored_sources.is_some()
             || self.subtitle_cluster_sources.is_some()
             || self.subtitle_backfill.is_some()
@@ -3774,12 +3764,6 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::SUBTITLE_WINDOW_SECS, &seconds.to_string())
-            .await?;
-    }
-    if let Some(on) = req.subtitle_not_ready_503 {
-        state
-            .store
-            .put_setting(keys::SUBTITLE_NOT_READY_503, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.subtitle_stored_sources {

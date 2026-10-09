@@ -468,11 +468,12 @@ and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
   only as a sidecar, never as a native rendition, because converting them to
   WebVTT while slicing segments would discard the positioning and typography
   the release was authored with — picking one in a session burns it instead.
-  Bitmap subs (PGS/VobSub) are a picture rather than text, so there is nothing
-  to hand a `<track>` — picking one restarts the stream as a transcode with the
-  subtitle drawn into the frames. The menu says `burned in` on those, because
-  that restart is a cost worth knowing about before you choose between two
-  English tracks.
+  Bitmap subtitles are pictures. PGS-capable Apple and Android clients receive
+  `pgs-v1` bitmap overlays while the video session and delivered HDR/Dolby Vision
+  range stay unchanged. Clients without that capability, and other bitmap
+  formats such as VobSub, retain supported burn/refusal policy; selecting a
+  burn may reopen the stream, and an unsupported HDR burn is explicitly
+  refused. The menu identifies overlay and burn routes before selection.
 - **Copy-video segments are cut where a player loses nothing:** on an HEVC or
   H.264 copy session, plurx does the segmenting itself and places a boundary
   only in front of a keyframe with no leading picture to discard — every

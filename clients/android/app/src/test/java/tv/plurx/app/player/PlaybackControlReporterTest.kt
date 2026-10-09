@@ -940,6 +940,21 @@ class PlaybackControlWireTest {
     }
 
     @Test
+    fun `unavailable subtitle notifies once per intent without consuming ready retry`() {
+        val notice = SubtitleUnavailableNoticeState()
+        val readiness = SubtitleReadinessRetryState()
+        assertFalse(notice.record(null, intent = 1))
+        assertFalse(notice.record("unknown", intent = 1))
+        assertTrue(notice.record("unavailable", commitUnavailable = false, intent = 1))
+        assertTrue(notice.record("unavailable", intent = 1))
+        assertFalse(notice.record("unavailable", intent = 1))
+        assertFalse(notice.record("warming", intent = 1))
+        assertTrue(readiness.record("ready", intent = 1))
+        assertFalse(notice.record("unavailable", intent = 1))
+        assertTrue(notice.record("unavailable", intent = 2))
+    }
+
+    @Test
     fun `subtitle readiness is closed and a ready edge retries once`() {
         mapOf(
             "ready" to true,

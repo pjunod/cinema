@@ -251,4 +251,6 @@ dependencies {
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.test.manifest)
+    // Isolated physical Compose tests need the same host activity as debug.
+    add("capabilityProbeImplementation", libs.androidx.ui.test.manifest)
 }

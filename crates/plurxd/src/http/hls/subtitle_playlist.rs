@@ -797,54 +797,10 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
                     windowing,
                     "serving an empty subtitle segment while its sidecar cache warms"
                 );
-                // An empty segment says "there are no cues here", which is
-                // true while a sidecar is warming and a lie once it has
-                // failed — and players keep the bytes in memory whatever
-                // `no-store` says, so the lie is what a client is left with.
-                // A refusal with `Retry-After` is the honest answer, and the
-                // memo's own remaining time is the only moment a retry could
-                // achieve anything.
-                //
-                // Behind an operator switch, and off by default, because the
-                // cost of being honest here is not yet measured: AVPlayer
-                // blocks the muxed video for about two seconds on a subtitle
-                // segment, and whether each engine keeps playing video
-                // through a subtitle 503 or stalls the picture has to be
-                // observed per engine before this becomes the default. The
-                // Developer tab reports what has been observed and does not
-                // gate the switch on it.
-                if whole_track == crate::subtitles::SidecarState::Failed
-                    && state.subtitle_not_ready_503().await
-                {
-                    let retry_after =
-                        crate::subtitles::failure_memo_remaining(&state.subs_dir, &file, index)
-                            .await
-                            .map(|remaining| remaining.as_secs().max(1))
-                            .unwrap_or(1);
-                    tracing::info!(
-                        target: "plurxd::http::hls",
-                        session = %crate::transcode::session_log_id(session),
-                        file_id = file.id,
-                        index,
-                        retry_after,
-                        "refusing a subtitle segment whose sidecar extraction failed"
-                    );
-                    authorize_attempt_status(
-                        state,
-                        session,
-                        &owner,
-                        "subtitle-segment",
-                        None,
-                        publication_deadline,
-                    )
-                    .await?;
-                    return Ok((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        [(header::RETRY_AFTER, retry_after.to_string())],
-                        [(header::CACHE_CONTROL, "no-store")],
-                    )
-                        .into_response());
-                }
+                // Caption failure belongs to delivery.subtitle_readiness on
+                // control, not the media transport. AVPlayer stalls video on
+                // a terminal subtitle 503; the native/text selection remains
+                // attached while the control path reports unavailable.
                 (b"WEBVTT\n\n".to_vec(), "no-store", false)
             }
         }

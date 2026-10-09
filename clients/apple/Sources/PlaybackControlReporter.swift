@@ -662,6 +662,21 @@ enum SubtitleReadinessDecision {
     static func meansReady(_ value: String?) -> Bool { value == "ready" }
 }
 
+/// A terminal extraction failure gets one notice per current selection/seek intent.
+/// Readiness success remains independently retryable when the cache recovers.
+final class SubtitleUnavailableNoticeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var toldIntent: Int?
+
+    func record(_ value: String?, commitUnavailable: Bool = true, intent: Int = 0) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard value == "unavailable", toldIntent != intent else { return false }
+        if commitUnavailable { toldIntent = intent }
+        return true
+    }
+}
+
 /// Turns a non-ready → ready edge into one retry and suppresses repeated
 /// control cadence at `ready`. The reporter actor records into this locked
 /// bridge; the player consumes the edge on MainActor.

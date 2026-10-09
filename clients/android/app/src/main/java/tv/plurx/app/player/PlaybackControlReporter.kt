@@ -774,25 +774,14 @@ internal object SubtitleReadinessDecision {
     fun meansUnavailable(value: String?): Boolean = value == "unavailable"
 }
 
-/**
- * One notice per run of `unavailable`, not one per exchange.
- *
- * The reporter exchanges every couple of seconds, so a bare equality test
- * would put a banner on screen on a cadence. The viewer needs to be told
- * once, and told again only if the track recovers and fails afresh.
- */
+/** A terminal failure gets one notice per selection/seek intent, independently of ready retries. */
 internal class SubtitleUnavailableNoticeState {
-    private var told = false
+    private var toldIntent: Long? = null
 
     @Synchronized
-    fun record(value: String?): Boolean {
-        val unavailable = SubtitleReadinessDecision.meansUnavailable(value)
-        if (!unavailable) {
-            told = false
-            return false
-        }
-        if (told) return false
-        told = true
+    fun record(value: String?, commitUnavailable: Boolean = true, intent: Long = 0): Boolean {
+        if (!SubtitleReadinessDecision.meansUnavailable(value) || toldIntent == intent) return false
+        if (commitUnavailable) toldIntent = intent
         return true
     }
 }
