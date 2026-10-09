@@ -120,7 +120,8 @@ internal fun continuousNetworkEof(
 ): ContinuousNetworkEof? {
     if (!readEof || !currentOwner || !network || resource == null || authorized == null ||
         resource.initialization || resource.role !in setOf("video", "audio") ||
-        bytes !in 1..ContinuousQualityMedia.MAX_MEDIA_BYTES.toLong() || authorized.transactionIds.isEmpty() ||
+        bytes !in 1..ContinuousQualityMedia.MAX_MEDIA_BYTES.toLong() ||
+        (resource.role == "video" && authorized.transactionIds.isEmpty()) ||
         completedAtMs?.let { it !in 0..ContinuousQualityWire.MAX_SAFE_INTEGER } == true) return null
     val artifact = authorized.interval.text("artifact_id") ?: return null
     val rendition = resource.row.text("rendition_id") ?: return null
@@ -150,6 +151,8 @@ internal class ContinuousReadOnlyProbe {
     private var longFrameGaps = 0L
     private var counterBoundReached = false
     private var lastEof: ContinuousNetworkEof? = null
+    private var lastVideoEof: ContinuousNetworkEof? = null
+    private var lastAudioEof: ContinuousNetworkEof? = null
     private fun sum(a: Long, b: Long): Long {
         if (a > ContinuousQualityWire.MAX_SAFE_INTEGER - b) { counterBoundReached = true; return ContinuousQualityWire.MAX_SAFE_INTEGER }
         return a + b
@@ -175,6 +178,8 @@ internal class ContinuousReadOnlyProbe {
             qualifiedVideoEofCount = sum(qualifiedVideoEofCount, 1); qualifiedVideoEofBytes = sum(qualifiedVideoEofBytes, value.bytes)
             lastQualifiedVideo = value
         }
+        if (value.role == "video") lastVideoEof = value
+        else if (value.role == "audio") lastAudioEof = value
         lastEof = value
     }
     @Synchronized fun detail(): String = buildString {
@@ -186,6 +191,19 @@ internal class ContinuousReadOnlyProbe {
             append(" qualified_eof_rendition_id=${it.renditionId} qualified_eof_artifact_id=${it.artifactId} qualified_eof_last_bytes=${it.bytes}")
             append(" qualified_eof_body_duration_ms=${it.bodyDurationMs} qualified_eof_completed_monotonic_ms=${it.completedAtMs}")
         }
+        fun appendRoleEof(role: String, value: ContinuousNetworkEof?) {
+            value?.let {
+                append(" ${role}_eof_family_id=${it.familyId} ${role}_eof_origin_sha256=${it.originSha256}")
+                append(" ${role}_eof_rendition_id=${it.renditionId} ${role}_eof_artifact_id=${it.artifactId}")
+                append(" ${role}_eof_last_bytes=${it.bytes} ${role}_eof_status=${it.status ?: "unknown"}")
+                append(" ${role}_eof_cache=${when(it.cacheAbsent) { true -> "absent"; false -> "configured"; null -> "unknown" }}")
+                append(" ${role}_eof_paced=${it.paced ?: "unknown"} ${role}_eof_scope=controlled_family")
+                append(" ${role}_eof_body_duration_ms=${it.bodyDurationMs ?: "unknown"}")
+                append(" ${role}_eof_completed_monotonic_ms=${it.completedAtMs ?: "unknown"}")
+            }
+        }
+        appendRoleEof("video", lastVideoEof)
+        appendRoleEof("audio", lastAudioEof)
         lastEof?.let {
             append(" eof_family_id=${it.familyId} eof_origin_sha256=${it.originSha256} eof_rendition_id=${it.renditionId} eof_artifact_id=${it.artifactId}")
             append(" eof_role=${it.role} eof_last_bytes=${it.bytes} eof_status=${it.status ?: "unknown"}")
