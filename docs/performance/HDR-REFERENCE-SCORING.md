@@ -167,3 +167,148 @@ consumer case failed against that source for both width-only and height-only
 joint resizes, then passed once after the check was added before libvmaf.
 That correction remains within the same sole review; earlier successes are
 retained at their original source hashes, not repeated or relabeled.
+
+## October 8 continuation — isolate the sharp edge before changing policy
+
+**Decision: retain the production policy.** The bounded calibration is complete,
+but the sharp-edge image criterion still fails. Both tested alternatives have
+measured drawbacks below. No image threshold, encoder flag or feature gate
+changed. The earlier continuous-ramp signal proof remains a narrower pass.
+
+The [video-quality programme](VIDEO-QUALITY-PROGRAM.md) asks for autonomous
+captured-image calibration. Its physical-display non-goal remains separate
+from S-11's broader device and artist-grade acceptance. The new
+[comparison receipts](../evidence/video-quality-2026-10-08/hdr/comparison-summary.json)
+are finite measurements on lab6's shipping image, not a claim that every HDR
+source or client is qualified.
+
+The original three-panel failure is reproducible. At the current image,
+its baseline encodes to the same SHA-256 as the retained older-image capture:
+maximum luma error **35**, mean **0.368015** ten-bit codes. The quality bars
+remain mean below 4 and maximum below 32. A separate decoder gives the exact
+same raw frame. Disabling HEVC in-loop filtering worsens the maximum to 39,
+so removing that filtering would compound the error.
+
+The [stage control](../evidence/video-quality-2026-10-08/hdr/stage-control-recovered-reference.json)
+compares every Y/U/V sample after source decode, software scale and P010
+conversion, and GPU upload/download. Each result is byte-identical to the
+original analytical reference. These measurements localize the damage to
+lossy encoding/reconstruction; tags, packing, scaling and upload are not the
+cause. The maximum lies at a sharp panel transition. This is an encoder
+quality/rate-control decision, not a reason for another playback retry or
+for weakening the image threshold.
+
+A less restrictive `-qmax 24` is byte-identical to the baseline. The explicit
+`-qmax 18` candidate passes the same sharp bar at both the original 20 Mbps
+diagnostic rate and the actual 1080p 8 Mbps rung: maximum **12**, mean
+**0.214770**. At 8 Mbps its synthetic file is 58,080 bytes versus 68,974.
+The [actual-rung pair](../evidence/video-quality-2026-10-08/hdr/sharp-8m-comparison.json)
+retains metadata, exact timestamps, actual hvcC, source/output hashes,
+commands and confirmed container/watcher cleanup. These synthetic savings
+are not an expected film saving.
+
+Two disjoint 48-frame windows from one private, plain-PQ 3840×2160 title
+were measured at 8 Mbps with the same 12 Mbps maximum and 16 Mbit buffer.
+Only anonymous numeric receipts leave the host. Mean PQ-code PSNR improves
+by 0.163 and 0.157 dB, while bytes increase **14.45% and 15.96%**. Mean SSIM
+improves, but worst-frame SSIM decreases by 0.000017 and 0.000084. The
+highest one-second packet rates are 8.19 and 8.82 Mbps. A separately authored
+colored moving/noise source improves worst-frame PSNR from 50.30 to 52.20 dB
+for 4.36% more bytes, with a 7.90 Mbps peak. All compared outputs decode to
+the same 48-frame rational grid and PQ/Main10 grade. Code-domain metrics are
+not an HDR perceptual score; two-second encode times on a two-CPU container
+do not establish sustained production throughput.
+
+The first real-title diagnostic used a 3840×2080 source forced to 1920×1080.
+That source does not fit the production aspect-preserving HDR rung, so its
+20 Mbps result is retained as a diagnostic only. The two later windows use
+a native 16:9 source and the actual rung budget. A missing remote raw frame
+also refused the first stage-control attempt before a container started;
+its failure remains recorded, followed by a hash-pinned analytical reference
+restoration. Neither refusal was relabeled as a pass.
+
+### Both candidate policies were rejected
+
+The client bitrate ceiling can reduce the HDR encoder budget below the normal
+8 Mbps rung. At a 2 Mbps target, 3 Mbps maximum and 4 Mbit buffer, `qmax 18`
+emits **11,318,880 packet bits over 2.002 seconds**. That exceeds even a
+full initial buffer plus maximum-rate allowance of **10,006,000 bits**. Its
+one-second peak is 5.75 Mbps; the baseline peaks at 1.83 Mbps. The
+[pressure receipt](../evidence/video-quality-2026-10-08/hdr/pressure2m-result.json)
+rejects a universal upper quantizer bound. Adding an arbitrary bitrate cutoff would
+hide the same unmeasured risk on harder content, so no such cutoff is added.
+
+A final, distinct candidate changes hardware effort with `compression_level 1`
+and leaves quantizers free to satisfy bitrate control. FFmpeg documents
+[VAAPI compression level](https://ffmpeg.org/ffmpeg-codecs.html#VAAPI-encoders)
+as a speed/quality tradeoff. This candidate passes the sharp bar (maximum 12,
+mean 0.284579) and keeps the 2 Mbps pressure peak at 2.25 Mbps. Its result is
+still mixed: the pressure sequence's mean PSNR improves 0.308 dB, but its
+worst frame falls from 47.53 to 45.98 dB. On the two real windows, mean PSNR
+changes by −0.006 and −0.133 dB, while mean SSIM improves. Bytes change by
++3.82% and −4.22%. This does not justify calling the alternative a consistent
+quality improvement or changing the production default.
+
+The [qualification decision](../evidence/video-quality-2026-10-08/hdr/qualification-summary.json)
+therefore retains bitrate-first production behavior. **Sharp-edge acceptance
+remains failed.** The experiments identified lossy encoder rate allocation and
+reconstruction as the relevant cause and rejected an apparent fix that breaks
+the network contract. That is a completed calibration decision, not completed
+broader image/client qualification. No new retry, watchdog, switch or
+per-title exception is introduced. Successful existing baselines were retained;
+only the new candidate ran on those same source conditions.
+
+### Chromatic SDR captures extend the neutral screen
+
+The [supplemental generator](../evidence/video-quality-2026-10-08/hdr/chromatic-calibration.py)
+reuses the existing production-bound tone-map harness with eight analytical
+BT.2020 swatches, including an explicitly synthetic warm proxy, at three
+exposures. Four PQ/HLG cases and three historical/current/no-dither variants
+produce twelve matched eight-frame BT.709 outputs on the shipping Jellyfin
+build. The [report](../evidence/video-quality-2026-10-08/hdr/chromatic/report.json)
+retains commands, tool/source hashes, metadata, frame correspondence and
+per-frame luma measurements.
+
+The agent inspected all four contact sheets:
+[PQ without MaxCLL](../evidence/video-quality-2026-10-08/hdr/chromatic/pq-absent-contact.png),
+[PQ1000](../evidence/video-quality-2026-10-08/hdr/chromatic/pq-1000-contact.png),
+[PQ4000](../evidence/video-quality-2026-10-08/hdr/chromatic/pq-4000-contact.png), and
+[HLG](../evidence/video-quality-2026-10-08/hdr/chromatic/hlg-contact.png).
+Rows show historical/current/no-dither; columns show 0.25/1/1.75 seconds.
+Neutral patches stay neutral,
+the warm proxy keeps its hue orientation, and no frame corruption or temporal
+flicker is visible. Saturated BT.2020 primaries clip in every variant;
+these deliberately out-of-gamut patches do not certify a perceptually
+optimized gamut map. On PQ4000 the current graph's luma maximum is 236
+versus the historical 254. Dithered PQ has one code above nominal 235;
+the corresponding no-dither outputs peak at 235. This is disclosed rather
+than called a strict legal-range clamp. The
+[inspection record](../evidence/video-quality-2026-10-08/hdr/chromatic/inspection.json)
+binds the actual PNG hashes and all four numerical ranges.
+
+These captures isolate the tone-map helper, rather than the entire production
+output contract. Their PQ1000/PQ4000 H.264 variants retain input Content-light
+SEI. The actual production chain separately deletes mastering-display and
+content-light frame metadata after tone mapping; that existing cleanup was
+outside the standalone harness. Thus the pixel comparison and BT.709 color
+tags are evidence, but these files must **not** be used as independently
+qualified SDR grade references. No production metadata defect was found.
+
+The first local attempt refused because that FFmpeg has no `zscale` filter;
+the retained shipping-image run supplies the real execution evidence. No
+new tone-map default follows. These are captured analytical images, not
+real skin, an independent artistic reference or a physical display reading.
+
+The [cleanup receipt](../evidence/video-quality-2026-10-08/hdr/remote-cleanup.json)
+confirms removal of all 23 exact directories owned by this continuation after
+inspection and receipt collection. No running container mounted them. The
+borrowed original failure bundle remains with its existing owner and retention
+policy. Private title bytes were never exported, and production media,
+settings, queues and services were untouched.
+
+A follow-up audit found the image-declared `/var/lib/plurx` volume survives
+container removal without `-v`. The same cleanup receipt records all sixteen
+volumes from these controls, matched by creation time to the reserved experiment
+windows. Each was empty and unreferenced before exact deletion. Other owners’
+volumes were excluded; no broad prune was used. Future isolated Docker captures
+must remove their anonymous volumes with `docker rm -fv`.
