@@ -2613,11 +2613,20 @@ test("a non-admin gets no membership panel at all", () => {
   assert.equal(html, "");
 });
 
-test("Settings itself still turns a non-admin away before any of this loads", () => {
-  // The panel guard above is belt and braces; this is the door. Asserted on the
-  // source because the redirect needs a location and a DOM to execute.
-  const viewSettings = shippedSource("viewSettings");
-  assert.match(viewSettings, /if\(!ME\.is_admin\)\{\s*location\.hash="#\/";\s*return;\s*\}/);
+test("Settings itself still turns a non-admin away before any of this loads", async () => {
+  const source = shippedSource("viewSettings");
+  const viewSettings = source.slice(0, source.indexOf("\n}") + 2);
+  assert.ok(viewSettings.endsWith("\n}"), "the shipped route function is complete");
+  const execute = new Function("ME", "location", "settingsRouteTab", "viewLocalRemoteSettings", "api",
+    `${viewSettings}; return viewSettings(1);`);
+  for (const tab of ["cluster", "maintenance", "developer"]) {
+    const location = { hash: `#/settings/${tab}` };
+    const local = [];
+    await execute({ is_admin: false }, location, () => tab,
+      generation => local.push(generation), () => { throw new Error("non-admin must not load admin settings"); });
+    assert.equal(location.hash, tab === "developer" ? "#/settings/developer" : "#/");
+    assert.deepEqual(local, tab === "developer" ? [1] : []);
+  }
 });
 
 // ---- the join token is bearer material ------------------------------------

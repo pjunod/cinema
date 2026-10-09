@@ -508,7 +508,12 @@ pub(super) async fn apply_forward_custody(
     custody: &ForwardCustody,
     deadline: Instant,
 ) -> Result<CustodyReply, ApiError> {
-    let (entry, value) = retained(state, wire)?;
+    let retained_result = retained(state, wire);
+    #[cfg(test)]
+    if retained_result.is_err() {
+        eprintln!("Source custody diagnostic stage=retained_authority");
+    }
+    let (entry, value) = retained_result?;
     let reg = registration(&custody.ingress)?;
     let _registration = entry.registration_gate.acquire(deadline).await?;
     let result = match &custody.action {
@@ -540,7 +545,11 @@ pub(super) async fn apply_forward_custody(
                 .await
         }
     }
-    .map_err(|_| unavailable())?;
+    .map_err(|_| {
+        #[cfg(test)]
+        eprintln!("Source custody diagnostic stage=store_write");
+        unavailable()
+    })?;
     entry.changed.notify_waiters();
     Ok(match result {
         SourceCustodyWrite::Applied | SourceCustodyWrite::ExactReplay => {

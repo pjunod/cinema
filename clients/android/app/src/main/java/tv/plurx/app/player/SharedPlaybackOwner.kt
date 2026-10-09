@@ -141,6 +141,11 @@ internal class SharedPlaybackOwner(
     private val job = SupervisorJob(parent.coroutineContext[Job])
     private val scope = CoroutineScope(parent.coroutineContext + job)
     private val commands = Mutex()
+    private val cleanupScope = CoroutineScope(parent.coroutineContext + SupervisorJob())
+    private var cleanup: Job? = null
+    private var networkOperation: Job? = null
+    val remoteStartAvailable: Boolean get() = !closing && plan == null && !commands.isLocked
+    val remoteTransportAvailable: Boolean get() = !closing && session != null && !sessionEnded && !commands.isLocked
     /** One identity per player, across reopens and handoffs: the same viewer continuing. */
     private val clientInstanceId = UUID.randomUUID().toString()
     private var plan: SharedPlaybackPlan? = null
@@ -175,8 +180,9 @@ internal class SharedPlaybackOwner(
 
     /** Run [block] as owned work. Each command takes [commands] itself, and the
      * mutex is fair, so launches reach B in the order they were made. */
-    fun launch(block: suspend SharedPlaybackOwner.() -> Unit): Job = scope.launch {
-        if (!closing) runCatching { block() }.onFailure { report(it) }
+    fun launch(block: suspend SharedPlaybackOwner.() -> Unit): Job {
+        retireNetworkOperation()
+        return scope.launch { if (!closing) runCatching { block() }.onFailure { report(it) } }
     }
 
     /** First Start, then the owned cadence. */
@@ -192,6 +198,45 @@ internal class SharedPlaybackOwner(
         starting.value = true
         try { attach(initial, initial.subject.resumeMs, playWhenReady = true) } finally { starting.value = false }
     }
+
+    /** Network work never queues behind physical preparation. Admission is rechecked
+     * after every B response and immediately before the incumbent renderer changes. */
+    suspend fun startRemote(initial: SharedPlaybackPlan, network: Boolean = true, permitted: () -> Boolean): tv.plurx.app.remote.RemoteOutcome {
+        if (!remoteStartAvailable || !permitted() || !commands.tryLock()) return tv.plurx.app.remote.RemoteOutcome.Unavailable
+        val operation = kotlinx.coroutines.currentCoroutineContext()[Job]
+        if (network) networkOperation = operation
+        starting.value = true
+        try {
+            if (!permitted() || closing) return tv.plurx.app.remote.RemoteOutcome.Unavailable
+            attach(initial, initial.subject.resumeMs, true) { !closing && permitted() }
+            startCadence()
+            return tv.plurx.app.remote.RemoteOutcome.Applied
+        } finally {
+            starting.value = false
+            if (networkOperation === operation) networkOperation = null
+            commands.unlock()
+        }
+    }
+
+    suspend fun setPlayingRemote(playing: Boolean, permitted: () -> Boolean): tv.plurx.app.remote.RemoteOutcome {
+        if (!remoteTransportAvailable || !permitted() || !commands.tryLock()) return tv.plurx.app.remote.RemoteOutcome.Unavailable
+        val operation = kotlinx.coroutines.currentCoroutineContext()[Job]
+        networkOperation = operation
+        try {
+            if (!permitted() || closing) return tv.plurx.app.remote.RemoteOutcome.Unavailable
+            val view = renderer.snapshot()
+            val outcome = control(state(view).copy(demand = if (playing) PlaybackDemand.ACTIVE else PlaybackDemand.HOLD))
+            if (!permitted() || closing) return tv.plurx.app.remote.RemoteOutcome.Unavailable
+            if (outcome != null && outcome !is SharedControlOutcome.Accepted) return tv.plurx.app.remote.RemoteOutcome.Unavailable
+            renderer.setPlaying(playing)
+            return tv.plurx.app.remote.RemoteOutcome.Applied
+        } finally {
+            if (networkOperation === operation) networkOperation = null
+            commands.unlock()
+        }
+    }
+
+    fun retireNetworkOperation() { networkOperation?.cancel() }
 
     /** Start the owned exchange cadence: control renewals at B's own interval,
      * progress and status every second tick. A tick that finds a command
@@ -583,7 +628,8 @@ internal class SharedPlaybackOwner(
     }
 
     /** Start, attach, then release the predecessor: make before break. */
-    private suspend fun attach(next: SharedPlaybackPlan, positionMs: Long, playWhenReady: Boolean) {
+    private suspend fun attach(next: SharedPlaybackPlan, positionMs: Long, playWhenReady: Boolean, permitted: () -> Boolean = { !closing }) {
+        check(permitted())
         val previous = session
         var started: SharedBoundSession
         if (next.direct) {
@@ -591,6 +637,7 @@ internal class SharedPlaybackOwner(
             if (direct.playable) {
                 started = direct
                 try {
+                    check(permitted())
                     renderer.attachDirect(client.directUrl(direct), positionMs, playWhenReady)
                     commit(next, direct, null)
                 } catch (error: Throwable) {
@@ -600,18 +647,21 @@ internal class SharedPlaybackOwner(
             } else {
                 // A type ExoPlayer cannot read as a file: release it and take
                 // the same decision as Copy HLS once.
-                runCatching { client.end(direct) }
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(direct) } }
                 val hls = sharedPlaybackPlan(next.subject, SharedDecisionClient.Result(next.decision, next.caps), next.selection,
                     next.request.playback_id, UUID.randomUUID().toString(), allowDirect = false)
-                started = attachHls(hls, positionMs, playWhenReady)
+                check(permitted())
+                started = attachHls(hls, positionMs, playWhenReady, permitted)
             }
-        } else started = attachHls(next, positionMs, playWhenReady)
+        } else started = attachHls(next, positionMs, playWhenReady, permitted)
         if (previous != null && previous.sessionId != started.sessionId) runCatching { client.end(previous) }
     }
 
-    private suspend fun attachHls(next: SharedPlaybackPlan, positionMs: Long, playWhenReady: Boolean): SharedStartedPlayback {
+    private suspend fun attachHls(next: SharedPlaybackPlan, positionMs: Long, playWhenReady: Boolean, permitted: () -> Boolean = { !closing }): SharedStartedPlayback {
+        check(permitted())
         val started = client.start(next.subject.context, next.request)
         try {
+            check(permitted())
             renderer.attachHls(client.playlistUrl(started), positionMs, playWhenReady)
             commit(next, started, SharedControlChannel(client, started, clientInstanceId,
                 sharedControlCapabilities(next.caps, preparedHandoff), prepared = preparedHandoff))
@@ -631,11 +681,25 @@ internal class SharedPlaybackOwner(
 
     /** Cancel and join every owned job, send the last ordered beat, release the
      * renderer, then end the B session. Never called from inside [scope]. */
-    suspend fun stop(watched: Boolean = false) {
-        if (closing) return
+    fun beginStop(watched: Boolean = false): Job {
+        cleanup?.let { return it }
         closing = true
         renderer.setPlaying(false)
-        job.cancelAndJoin()
+        retireNetworkOperation()
+        job.cancel()
+        return cleanupScope.launch {
+            try { kotlinx.coroutines.withTimeout(30_000) { finishStop(watched) } }
+            finally { releaseRenderer(); (cleanupScope.coroutineContext[Job])?.cancel() }
+        }.also { cleanup = it }
+    }
+
+    suspend fun stop(watched: Boolean = false) { beginStop(watched).join() }
+
+    private var rendererReleased = false
+    private fun releaseRenderer() { if (!rendererReleased) { rendererReleased = true; renderer.release() } }
+
+    private suspend fun finishStop(watched: Boolean) {
+        job.join()
         val current = session; val plan = plan
         // A successor that was switched to but never settled is B's to retire
         // only if the commit landed; end it explicitly so nothing is left.
@@ -648,7 +712,7 @@ internal class SharedPlaybackOwner(
             val result = if (view.framePresented) runCatching { client.orderedProgress(current, plan.subject.watchSequence, position, duration, watched) }.getOrNull() else null
             if (result == SharedProgressResult.PreviousBeatAcknowledged) runCatching { client.orderedProgress(current, plan.subject.watchSequence, position, duration, watched) }
         }
-        renderer.release()
+        releaseRenderer()
         if (current != null) runCatching { client.end(current) }
         unsettled?.let { runCatching { client.end(it) } }
         session = null; channel = null; statusSummary.value = null

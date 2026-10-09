@@ -1004,10 +1004,12 @@ final class AppModel: ObservableObject {
     /// A fresh authorized Shared plan from fresh B details. `fileId` nil takes
     /// the first deliverable file of those details (the next episode, which
     /// inherits nothing from the episode that ended).
-    func prepareSharedPlayback(reference: SharedPlaybackReference, fileId requested: String?) async throws -> SharedPlaybackPlan {
+    func prepareSharedPlayback(reference: SharedPlaybackReference, fileId requested: String?, current: (@MainActor () -> Bool)? = nil) async throws -> SharedPlaybackPlan {
         do {
+            guard current?() ?? true else { throw CancellationError() }
             let catalogue = try SharedLibraryClient()
             let detail = try await catalogue.detail(reference); try catalogue.requireCurrent()
+            guard !Task.isCancelled, current?() ?? true else { throw CancellationError() }
             let chosen: SharedLibraryFile?
             if let requested { chosen = detail.files.first { $0.fileId == requested } }
             else { chosen = detail.files.first { $0.fileBase != nil } }
@@ -1015,9 +1017,10 @@ final class AppModel: ObservableObject {
                 throw APIError.transport("Playback is unavailable for this Shared title.")
             }
             let context = try await PlaybackFileContext.authenticatedDetail(reference: reference, fileId: fileId)
-            guard context.lifecycleGeneration == detail.lifecycleGeneration else { throw APIError.badURL }
+            guard !Task.isCancelled, current?() ?? true, context.lifecycleGeneration == detail.lifecycleGeneration else { throw APIError.badURL }
             let client = try SharedDecisionClient()
             let result = try await client.decision(context: context, quality: playbackQuality)
+            guard !Task.isCancelled, current?() ?? true else { throw CancellationError() }
             let position = detail.watch.map { $0.watched ? 0 : $0.positionMs } ?? 0
             let subject = SharedPlaybackSubject(context: context, title: detail.item.title, resumeMs: position, watchSequence: detail.watch?.sequence ?? 0)
             return try SharedPlaybackPlan.make(subject: subject, decision: result.decision, caps: result.caps, quality: playbackQuality)

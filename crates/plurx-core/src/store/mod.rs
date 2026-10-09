@@ -65,6 +65,14 @@ pub use field_order_backfill::{
     field_order_backfill_page, FieldOrderBackfillPage, FieldOrderBackfillPort,
 };
 mod file_grants;
+pub mod invitations;
+pub use invitations::InvitationStore;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_invitations;
+pub mod remote;
+pub use remote::RemoteStore;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_remote;
 pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
@@ -2132,6 +2140,9 @@ pub mod keys {
     /// Missing is off. Runtime observations are advisory and never rewrite
     /// the saved choice; incompatible inputs retain their existing renderer.
     pub const MACOS_VIDEO_PROCESSING_ENABLED: &str = "playback.macos_video_processing_enabled";
+    /// Separate opt-in for negotiated Mac HEVC output. Missing is off;
+    /// runtime readiness never refuses or rewrites the saved choice.
+    pub const MACOS_HEVC_OUTPUT_ENABLED: &str = "playback.macos_hevc_output_enabled";
     /// Operator override for HEVC copy without configuration/source proof.
     /// Off by default. Readiness is advisory and never prevents saving it.
     pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
@@ -5788,6 +5799,8 @@ pub trait Store:
     + PretranscodeJobStore
     + OfflinePackageStore
     + FileGrantStore
+    + RemoteStore
+    + InvitationStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
@@ -5845,6 +5858,8 @@ impl<T> Store for T where
         + PretranscodeJobStore
         + OfflinePackageStore
         + FileGrantStore
+        + RemoteStore
+        + InvitationStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore

@@ -68,6 +68,39 @@ function hevcTiersSync(can, mse){
   });
 }
 
+// HLS/fMP4 is authorized by the selected hls.js MediaSource path, not a
+// progressive file decoder. Native HLS has no codec-specific API here and
+// therefore remains unclaimed until an actual playlist probe is available.
+async function hlsHevcSampleEntries(claimedTiers, claimedPqTiers, injected){
+  const probe=injected||{};
+  let video=probe.videoElement, mc=probe.mediaCapabilities, mse=probe.mediaSource;
+  if(video===undefined){ try{ video=document.createElement("video"); }catch(e){ video=null; } }
+  if(mc===undefined){ try{ mc=navigator.mediaCapabilities; }catch(e){ mc=null; } }
+  if(mse===undefined){ try{ mse=window.MediaSource||window.ManagedMediaSource; }catch(e){ mse=null; } }
+  const native=probe.nativeHls===undefined?(!video||useNativeHls(video)):probe.nativeHls;
+  const hls=probe.hlsJsSupported===undefined?hlsJsSupported():probe.hlsJsSupported;
+  if(native||!hls||!mc||typeof mc.decodingInfo!=="function"||!mse||typeof mse.isTypeSupported!=="function") return [];
+  const summary=hevcTierSummary(claimedTiers,claimedPqTiers);
+  if(!summary.maxheight) return [];
+  const required=HEVC_TIERS.filter(t=>t.height<=summary.maxheight&&(t.depth===8?summary.depth8:summary.depth10));
+  // Include the lowest Main10 rung even when the shared ceiling is below it.
+  if(summary.depth10&&!required.some(t=>t.depth===10)) required.push(HEVC_TIERS.find(t=>t.depth===10));
+  for(const tier of required){
+    const contentType=`video/mp4; codecs="${tier.codec}"`;
+    try{
+      if(!mse.isTypeSupported(`video/mp4; codecs="${tier.codec},mp4a.40.2"`)) return [];
+      const videoConfig={contentType,width:tier.width,height:tier.height,bitrate:tier.bitrate,framerate:24};
+      const answer=await mc.decodingInfo({type:"media-source",video:videoConfig});
+      if(!answer||answer.supported!==true) return [];
+      if(summary.pq10&&tier.depth===10){
+        const pq=await mc.decodingInfo({type:"media-source",video:{...videoConfig,transferFunction:"pq"}});
+        if(!pq||pq.supported!==true) return [];
+      }
+    }catch(e){ return []; }
+  }
+  return ["hvc1"];
+}
+
 // Progressive packaging is a separate claim from decoder availability. A
 // MediaSource success cannot authorize a plain <video src>, and a successful
 // hvc1 probe says nothing about hev1 (or either Dolby Vision label).
@@ -281,6 +314,7 @@ let PLAY_CAPS=buildPlayCaps(hevcTierSummary(PLAY_HEVC_TIERS, null));
 // Safe even before the async probe settles: [] is an explicit restrictive
 // claim, never the legacy/unrestricted omission.
 PLAY_CAPS.progressiveHevcSampleEntries=[];
+PLAY_CAPS.hlsHevcSampleEntries=[];
 // The capability query string every /decision and /stream.mp4 carries.
 //
 //   vcodec     CSV of decodable video codecs. `hevc` = an HEVC decoder exists;
@@ -379,6 +413,8 @@ function capsDocument(c, limits){
     // `overlay` protocol, and tells it the truth when a viewer picks a bitmap
     // track: that delivery needs a burn-in. Add the key here the day a
     // renderer lands, not before.
+    hls_hevc_sample_entries:Array.isArray(c.hlsHevcSampleEntries)
+      ?c.hlsHevcSampleEntries.filter(x=>x==="hvc1"||x==="hev1").filter((x,i,a)=>a.indexOf(x)===i).slice(0,2):[],
     progressive_hevc_sample_entries:Array.isArray(c.progressiveHevcSampleEntries)
       ?c.progressiveHevcSampleEntries.slice(0,4):[],
     // Only when this browser has one; absent is not a claim.
@@ -571,6 +607,7 @@ const PLAY_CAPS_READY=(async()=>{
     PLAY_CAPS.progressiveHevcSampleEntries=
       await progressiveHevcSampleEntries(
         PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS,dvProfiles);
+    PLAY_CAPS.hlsHevcSampleEntries=await hlsHevcSampleEntries(PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS);
     CAPS_Q=capsQuery(PLAY_CAPS);
   }catch(e){}
   return PLAY_CAPS;

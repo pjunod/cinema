@@ -20,6 +20,8 @@ counters fail the capture, and neither valid remains unknown.
 Receipts and RGB stream incrementally; no sample history is held in memory.
 Run control and capture as independent processes. Run a separate control-off
 baseline with capture's --control omitted; this tool does not automate retries.
+Own-process CPU observations are advisory and UNKNOWN when unavailable. They
+never replace monotonic sampling brackets or excuse a wall-clock capture gap.
 Both receipts use host CLOCK_MONOTONIC nanoseconds. They cannot synchronize a
 browser clock, identify a physical presentation time, or prove audio continuity.
 """
@@ -39,6 +41,27 @@ WIDTH, HEIGHT, READ_WIDTH = 672, 4, 42
 
 def stopped(args):
     return args.stop_file is not None and args.stop_file.exists()
+
+
+def own_process_cpu_ns():
+    """Advisory process CPU only; an unavailable clock never changes wall verdicts."""
+    try:
+        value = time.process_time_ns()
+        return value if type(value) is int and value >= 0 else None
+    except Exception:
+        return None
+
+
+def own_process_cpu_observation(before, reply, complete):
+    valid = all(type(value) is int and value >= 0 for value in (before, reply, complete))
+    valid = valid and before <= reply <= complete
+    return {"status": "measured" if valid else "unknown", "clock": "process_time_ns",
+            "scope": "all threads of this acquisition process only; excludes X server/browser CPU",
+            "read_order": "CPU before request wall; CPU after reply wall; CPU before processing-complete wall",
+            "request_cpu_ns": before, "reply_cpu_ns": reply, "processing_complete_cpu_ns": complete,
+            "acquisition_cpu_ns": reply - before if valid else None,
+            "processing_cpu_ns": complete - reply if valid else None,
+            "advisory_only": True, "wall_sampling_criteria_unchanged": True}
 
 
 class XImage(c.Structure):
@@ -382,9 +405,11 @@ def capture(x, args, emit, output):
     emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes, "calibrated_sampling": mappings, "vertical_search": search})
     try:
         while time.monotonic_ns() < end and not stopped(args):
+            cpu_before = own_process_cpu_ns()
             before = time.monotonic_ns()
             pointer = x.lib.XGetImage(x.display, x.root, left, top, width, height, c.c_ulong(-1).value, 2)
             after = time.monotonic_ns()
+            cpu_reply = own_process_cpu_ns()
             if not pointer:
                 raise RuntimeError("XGetImage failed")
             try:
@@ -417,7 +442,9 @@ def capture(x, args, emit, output):
                     decoded.update({"video_search_" + str(frame): frame for frame in details["valid_frames"]})
                 row["video_counter"] = resolve_video_frames(decoded)
                 conflicts += row["video_counter"]["status"] == "conflicting"
+                cpu_complete = own_process_cpu_ns()
                 row["processing_complete_ns"] = time.monotonic_ns()
+                row["own_process_cpu"] = own_process_cpu_observation(cpu_before, cpu_reply, cpu_complete)
                 emit(row)
                 packet += 1
             finally:

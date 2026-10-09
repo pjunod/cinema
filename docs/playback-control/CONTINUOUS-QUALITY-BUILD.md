@@ -9454,3 +9454,211 @@ check. Their local sequence/monotonic brackets supply diagnostic ordering,
 not publication authority or native presentation proof. Both recipe objects
 are validated before diagnostic serialization. The next parent hook and
 exact-source Linux build precede runtime admission.
+
+### 10.298 · Frozen first-prepared runtime admission
+
+Draft844 is pushed atf32594248d44a8f9a6ba9f1aad52b6d33909f1c9 with57
+statically resolved regression fields. The parent normal one-job hook passes
+3m46-second workspace Clippy, catalog3166, formatting and77 JavaScript syntax
+checks. No units execute. Exact committed-source Linux build passes3m15s on
+verified Rust1.97.1. Archive SHA256 is
+`5ab09193fe400eaff2390e19dd5a7648de5489ed02dc3a5367c3bb21daaffd58`;
+binary SHA256 is
+`b1666e5c2919936e0d9d0203d4844f010881a1a51c1c6be35728883cdf9e0657`.
+All83 QA243 production Swift inputs and345 APK156 Android inputs plus three
+reader assets match this frozen source. APK156 upgrades only the owned idle
+emulator installation in7.329 seconds; exact installed bytes and version are
+read back. No playback follows from these build/install facts.
+
+A fresh paired warm begins once inretained-reuse-f32594248-prepared1,
+guard1679044/daemon1679058, absolute deadline1791509095623 and60-second
+cleanup reserve starting1791509035623. It retains ordinary60-second media
+touches with120-second maximum gap and never resets the deadline. Both
+artifacts must independently prove current cost, immutable member bytes,
+ETag, no encoder and no unexpected preparation job before phone admission.
+The first480 job is running; no warm or native pass is claimed at this entry.
+
+The executable QA243 proof callback joins streamed prepared media to the
+current authoritative retained member table and owner-local first-seal /
+caller-ready events. Private RemoteStartRequest canonical hashes are compared
+only between owner and caller for the same prepared identity. They are a
+different domain from the catalog encoder recipe digest; do not equate them.
+The member table separately proves current source, audio, catalog recipe,
+actual resolved candidate, artifact and output identity. Unknown or missing
+bindings refuse the experimental cliff; no new production authority is added.
+Cross-host wall clocks do not prove seal ordering. The server-local event
+sequence and successful seal/caller checks provide that ordering, before the
+acknowledgement and activation sites. The actual current playback target is
+recorded; historical70.841 is never substituted into the control request.
+
+Browser short-preflight helpers are rebound offline to this same source and
+binary. They retain the fixed one-second settled baseline before acquisition,
+four spaced rows, all captured transition samples and unchanged sampling
+bounds. They remain inactive while native owns the backend lane. Android's
+full-series driver also remains inactive; an offline timing fix samples the
+hold start once so its mandatory30-second post-acceptance hold is not rejected
+by a second clock read. Its2100-second budget and required2400-second fixture
+are unchanged; that longer fixture has not been generated. Final adversarial
+review, external Fable pause and merge-coordinator handoff remain pending.
+
+### 10.299 · QA243 failure narrows the remaining first-prepared miss
+
+Both current480/720 warm artifacts strictly pass: actual first members are
+536457 and1059880 bytes, with exact retained ETag/body digest, no new encoder
+or unexpected output job. Actual480 average/peak are2159845/2441628;
+7204160937/4561088. Current5Mb/s lies within
+4394930.4≤link<5929414.4 bits per second. Preserve these current costs separately
+from1659; historical constants are not evidence. QA243 launches after fresh
+canonical unlocked/connected/DDI/version243/idle checks, as ownedPID7552.
+
+The focused run fails ordinary Auto-entry metadataReady. It performs no cliff
+or full series. Manual720 succeeds in the same run, with40.486-second alignment
+in2563ms and later52.548-second alignment in25ms. Failed Auto seeks70.528 with
+origin0, duration1800, seekable0–1800, loaded54–57.961 and item time0. Generation3
+issues the actual70528/1000 CMTime with zero tolerances; the bounded wait ends
+after4096ms. Current prepared item/pipeline identities remain valid and native
+error is unreported. Completionfalse arrives16ms after abandonment with the
+item no longer prepared, so that completion is not the initiating cause.
+
+Actual Auto manifest isHTTP200 VOD, sequence0,900 two-second entries,1800-second
+sum, ENDLIST and no EXT-X-START offset. Observed Auto segments0/27/28/29 reach
+HTTP200 and upstream EOF with non-retained ETags; segment35 is not observed.
+Segment27 request-to-headers takes3813.337ms on the same proxy clock and
+request-to-EOF3839.857ms; these intervals are separate from phone-clock seek
+measurements. Do not subtract cross-host clocks or assert sole causality.
+Incumbent503/410 responses follow failure/end and are not assigned as cause.
+Media random-access/PTS details and native access/error logs remain unmeasured.
+
+The four owner-local debug events establish FIRST capture then complete caller
+readiness for manual720 and failed Auto, local sequences0→1 and2→3. Per identity,
+private canonical recipe hashes agree and current owner checks pass. Both
+choices honestly seal None, with no artifact/output hash. Thus no actual
+prepared cached-body pass exists. One initial native480 encoder/new preparation
+job is observed independently of the strict ordinary warm holders; later encoder
+count is zero, while that historical new job remains in the raw census. The
+cliff proof remains false; no resource row is ignored or reclassified as a pass.
+
+The final comparison group matches candidate, recipe, geometry, grade, route,
+file, audio offset, actual audio delivery, engine/executable/source/playlist and
+all81 producer arguments. LogicalOutput differs only in audio_claim and
+owner_node_id. Restored catalog context currently has ownerNone, whereas normal
+creation records the eligible owner. This is a source-supported repair seam;
+the separate claim difference still requires exact observed capability evidence.
+No equality or ownership predicate is relaxed. All12 safe failure files are
+independently verified against manifestSHA256
+`ae1b7857c9eb83d58ef093920df3295a3de51700e7f940ace08bd70d54c5a563`.
+The app has118 facts, proxy115 and SDK38 probes; their different scopes remain.
+Owned phone/proxy/forward/control cleanup passes and the shared warm backend is
+untouched. The ignored coordinator originally serializes a failed receipt but
+exits0; future helper exits nonzero on failure while preserving this original
+receipt/hash. No retry, unit execution or final review occurs at this entry.
+
+The audio difference is now explained by authoritative durable data: the warm
+claim has one AAC stereo48k sink and decoderAAC; actual native initial/manual/
+Auto requests have five stereo sinks and decodersAAC/AC3/ALAC/EAC3/MP3. Strict
+claim rejection is correct. Actual normalized candidate_catalog.caps is retained
+and its audio decoder/sink snapshot exactly matches the request claim. Export
+SHA256 `e9c4a02717abb098e435e77a34cb55d6cf674174fe129ed6eb553a5df6d2ed27`
+preserves all13 normalized fields; the original wire capability document was
+not retained and is not reconstructed. The next seed uses this observed
+normalized authority, without guessed HDMI/hardware values or relaxed equality.
+The third job is an unbound ordinary480 preparation: normalized geometry false,
+no candidate ID/digest and the actual native audio claim. It is distinct from
+the bound720 recipe. Its physical FFmpeg PID-to-job/session mapping was not
+retained and remains unknown. Any next resource receipt must retain the whole
+raw census and define its preparation baseline explicitly; this failed run
+is not promoted by later attribution.
+
+
+### 10.300 · Browser geometry integrity passes; lifecycle and sampling still fail
+
+Focused geometryf325a1 preserves every captured sample and the unchanged
+thresholds. All1947 samples across three raw streams independently decode with
+zero unknown/conflicting counters. The fixed pre-acquisition baseline is
+1000.998ms and bounded spaced search is active. Actual native Mute succeeds;
+Unmute fails before a fifth phase. The failed menu still reports the prior
+fullscreen/unmuted state while the observed content video is normal/muted.
+Popup closure after the first command was not measured, so stale-target
+causality remains unproven. Future helpers require observed closure and a
+fresh trusted context/popup event before inspecting the actual target; labels
+or IDs are never guessed.
+
+There are18 sampling-upper-gap violations; maximum51.35314ms exceeds12.5ms.
+That largest bracket contains previousXGet2.787ms, elapsed after-reply
+processing39.193ms, next wait7.848ms and nextXGet1.525ms. Processing median is
+4.549ms/p955.921ms. Elapsed processing can include descheduling; CPU or
+compositor causality is not established. Add advisory own-process CPU
+endpoints beside existing monotonic brackets, reporting unknown when
+unavailable. These never replace wall bounds, subtract waits or turn a sampling
+failure into a pass. One authored regression exercises capture and the actual
+frame-clock analyzer to preserve the failed wall verdict with zero/unknown CPU
+metadata; it remains unexecuted.
+
+All22 original optical evidence files pass independent SHA/length verification
+against manifest5661bff3f05fb0d910ce2fb4b81e32c6ec22070ca1e969d769e07be19485e00b.
+Exact daemon1699539, coordinator1699504, guard1699503, display1699499 and
+Firefox1702552 are absent. Profile/runtime/config/authority and helper scratch
+are removed. The exact staleX525 socket is removed only after no kernel
+listener and matching owner/type; no global preferences or foreign files change.
+Overall verdict remains failed, with no runtime retry or full twenty claim.
+
+### 10.301 · Bind fresh restored ownership from ordinary eligible-source authority
+
+Integrate source repair153ee1fd1 from properly committed0adbb3a89. Local and
+remote preparation callers supply private current source authority. Only the
+serialized genuinely new, unattached FirstPreparation obtains the ordinary
+eligible local catalog. Exact candidate/recipe/geometry/grade/source binding,
+decoder compatibility, complete nonpartial dispatch support and agreement with
+the reserved owner are required before injecting that owner into restored
+context. No artifact supplies ownership. Missing authority preserves normal
+nonretained preparation; recovery, attached retries and sealed choices never
+refresh or reinterpret absence. Audio and shared-unbound predicates remain.
+The source-restore regression includes owner/source/candidate/dispatch refusals.
+
+Pinned Hiqlite all-target source check passes134seconds. Clippy finds an enum
+size issue from carrying AppState by value; private Arc storage corrects it.
+Final Hiqlite all-target Clippy/source compilation passes186seconds. The first
+bounded normal hook reaches its original600-second limit and its owned group
+is verified gone; a separate serialized hook attempt succeeds in68.582seconds,
+including59.74-second workspace Clippy/catalog3166/formatting/77JS checks.
+No successful source check or unit suite is rerun, and no units execute.
+
+Next warm uses exact observed normalized native capabilities. An explicitly
+named ordinary unbound480 setup job is prepared before phone admission,
+separately from the two qualified candidate artifacts. It must match the
+observed current source/claim/legacy role and be terminal; no legacy cached
+playback is inferred. Existing awaited manual720 facts can establish a
+prospective durable resource baseline before Auto within four seconds of the
+unchanged five-second HTTP timeout. The full raw census stays visible; live
+FFmpeg or unclassified/new jobs refuse admission. Later target proof requires
+actual Some seal/current owner/body/ETag/EOF and zero new jobs after that exact
+baseline. No retrospective subtraction, initial cache claim, production
+selection change or native readiness/overlap/budget extension is allowed.
+These next helpers are preparation only; no retry or promotion occurs here.
+
+
+### 10.302 Current-main integration and longer source closure
+
+Integrate main1088d7529401297bddced74bfa11c166457468d8 before the next
+qualification freeze. Conflict resolution retains both prepared-owner binding
+and selected-output-codec helpers, Android version155 and Apple version226.
+The parent includes the eligible-owner repair and advisory process CPU timing;
+wall sampling limits remain unchanged. Current main changes client capability
+inputs, so APK156/QA243 equality and the f325 normalized native caps packet are
+historical evidence. New client builds and current capability proof are needed.
+
+The isolated2400-second source materialization completes in294.028seconds.
+The approved-node fixture is1246989788bytes, SHA256
+27c6987176016755e89371c962ebbe862953dda66f63e4333d3db489e90efe8c.
+All57600video and112501audio packets have complete strictly increasing
+per-track PTS/DTS, retained payload/sequence hashes and decoded clock prefix.
+AAC priming PTS-1024 is recorded. Worker and transferred helper are gone;
+free storage6001704960bytes exceeds the4GiB reserve. This is source preparation,
+not playback acceptance. No unit tests, full series or promotion occurs.
+
+
+The first current-main hook reports three test-source candidate initializers
+missing main's new planned_codec field and exits1 in298.027seconds. All three
+receive planned_codec:None, preserving their original unspecified codec
+behavior. This is source compilation feedback; no unit test executes. Its
+failed log/lease remain unchanged, and the retry uses separate owned records.

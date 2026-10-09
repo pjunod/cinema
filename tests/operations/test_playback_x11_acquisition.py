@@ -6,6 +6,8 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import ctypes
 import hashlib
+import json
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -306,3 +308,48 @@ class PlaybackX11PixelLayoutTests(unittest.TestCase):
         image.bytes_per_line = 1
         with self.assertRaises(RuntimeError):
             ACQUISITION.strip(image, bytes(4), (0, 0))
+
+
+class PlaybackX11CpuObservationSafetyTests(unittest.TestCase):
+    def test_cpu_metadata_cannot_override_wall_sampling_failure(self):
+        # Capture two valid images across a real wall gap in the mocked host
+        # clock. Even a zero-CPU wait must remain a failed sampling interval.
+        x = FakeX(encoded_pixels(42))
+        args = SimpleNamespace(video=(0, 0), video_alternate=None, control=None,
+                               seconds=.1, rate=120, stop_file=None)
+        for cpu_values in ([10] * 6, [None] * 6):
+            rows = []
+            with self.subTest(cpu_values=cpu_values), TemporaryDirectory() as directory:
+                with patch.object(ACQUISITION.time, "monotonic_ns", side_effect=[
+                        0, 0, 1_000_000, 2_000_000, 3_000_000, 4_000_000,
+                        20_000_000, 21_000_000, 22_000_000, 23_000_000,
+                        24_000_000, 1_000_000_000]), \
+                     patch.object(ACQUISITION, "own_process_cpu_ns", side_effect=cpu_values), \
+                     patch.object(ACQUISITION, "paced", return_value=None):
+                    ACQUISITION.capture(x, args, rows.append, Path(directory))
+            samples = [row for row in rows if row["type"] == "sample"]
+            self.assertEqual(len(samples), 2)
+            self.assertEqual(samples[1]["reply_ns"] - samples[0]["request_ns"], 21_000_000)
+            self.assertEqual(samples[0]["own_process_cpu"]["status"],
+                             "unknown" if cpu_values[0] is None else "measured")
+            self.assertTrue(samples[0]["own_process_cpu"]["advisory_only"])
+            script = """
+                const {analyzeFrameClock}=require('./scripts/playback-frame-clock.js');
+                const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+                const plain=input.map(({at_ms,frame})=>({at_ms,frame}));
+                const options={startMs:1,endMs:22,maximumSamplingGapMs:12.5};
+                const observed=analyzeFrameClock(input,options),baseline=analyzeFrameClock(plain,options);
+                process.stdout.write(JSON.stringify({observed,baseline}));
+            """
+            payload = [{"at_ms": row["reply_ns"] / 1e6,
+                        "frame": row["video_counter"]["frame"],
+                        "own_process_cpu": row["own_process_cpu"]} for row in samples]
+            result = subprocess.run(["node", "-e", script], cwd=ROOT, input=json.dumps(payload),
+                                    text=True, capture_output=True, check=True, timeout=10)
+            verdicts = json.loads(result.stdout)
+            self.assertEqual(verdicts["observed"], verdicts["baseline"])
+            self.assertFalse(verdicts["observed"]["complete"])
+            self.assertEqual(verdicts["observed"]["capture_gaps"], 1)
+        with patch.object(ACQUISITION.time, "process_time_ns", side_effect=OSError("unavailable")):
+            self.assertIsNone(ACQUISITION.own_process_cpu_ns())
+        self.assertEqual(ACQUISITION.own_process_cpu_observation(3, 2, 1)["status"], "unknown")

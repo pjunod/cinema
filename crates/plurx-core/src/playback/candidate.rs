@@ -218,6 +218,9 @@ pub struct QualityCandidate {
     pub id: CandidateId,
     pub recipe_digest: [u8; 32],
     pub route: CandidateRoute,
+    /// Descriptive server-resolved output codec; the exact recipe remains authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_codec: Option<String>,
     /// False only for exact compatible legacy cache recipes; identity remains distinct.
     #[serde(
         default = "normalized_geometry_default",
@@ -385,6 +388,7 @@ mod policy_regressions {
             id: CandidateId::for_recipe_digest(recipe_digest),
             recipe_digest,
             route,
+            planned_codec: None,
             normalized_geometry: true,
             width: height * 16 / 9,
             height,

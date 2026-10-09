@@ -1,0 +1,167 @@
+{
+  "base": "079960daebd5a1e23dff2b0e8f8506c1238bc1b0",
+  "branch": "integration/batch-003-into-main",
+  "chain": {
+    "base": "079960daebd5a1e23dff2b0e8f8506c1238bc1b0",
+    "commit": "ffc03221d74de85312f567cf215113adc27416bb",
+    "event_sha256": "a1b31a589659d9363f2eadb8ff5ae0b376e5b1c8c361ab75544ec10641536c40",
+    "job": 45934,
+    "jobs": [
+      [
+        45932,
+        "fast-lane validation scope",
+        17257,
+        1,
+        "success"
+      ],
+      [
+        45933,
+        "fast-lane mobile release version",
+        17258,
+        1,
+        "success"
+      ],
+      [
+        45934,
+        "fast policy and contract preflight",
+        17259,
+        1,
+        "failure"
+      ],
+      [
+        45935,
+        "fast Rust gate",
+        17260,
+        1,
+        "skipped"
+      ],
+      [
+        45936,
+        "fast Windows compile",
+        0,
+        1,
+        "skipped"
+      ],
+      [
+        45937,
+        "fast web syntax gate",
+        17261,
+        1,
+        "skipped"
+      ],
+      [
+        45938,
+        "fast Apple compile",
+        17263,
+        1,
+        "skipped"
+      ],
+      [
+        45939,
+        "fast Android compile",
+        17262,
+        1,
+        "skipped"
+      ],
+      [
+        45940,
+        "Main promotion gate",
+        17264,
+        1,
+        "failure"
+      ]
+    ],
+    "log_bytes": 149455,
+    "log_sha256": "71bddd66a73771bb7fa8597f18a9de5db16488640f1383f8da393312e96f271c",
+    "run": 4540,
+    "sources": {
+      ".github/workflows/main-fast-lane.yml": "c504437ac012ebb70f44042f6c5bfb4f7b9f9716a9fa122f92863e6ec56f8f11",
+      "validation/main_preflight_adoption.py": "f3ad8ee5dffbb7f3e53c31ebd285dd1ef6046b37bd8e74851cbaa6cf7429e32e",
+      "validation/main_unit_receipts.py": "9a2be3a78c34f47d58ffa72b9d490e045e6dd1b28eebb6a8ef659eaa8f24cd93",
+      "validation/python_unit_receipts.py": "e5814a8127cd8bd7c7227c168316b1a90ad55511ac8507e8ddb46a908bee978b"
+    }
+  },
+  "commit": "62672d0865e3d6335065b10dc68f2a58ddb6ce07",
+  "event_head": "6518779b2cf24fb2a8cf434ffe0e23985e519d43",
+  "event_sha256": "812712e79f0d1087e0b8f0d0d106695e253598f4a68dfcffb891402253164c7e",
+  "job": 45673,
+  "jobs": [
+    [
+      45671,
+      "fast-lane validation scope",
+      17092,
+      1,
+      "success"
+    ],
+    [
+      45672,
+      "fast-lane mobile release version",
+      17093,
+      1,
+      "success"
+    ],
+    [
+      45673,
+      "fast policy and contract preflight",
+      17094,
+      1,
+      "failure"
+    ],
+    [
+      45674,
+      "fast Rust gate",
+      17096,
+      1,
+      "skipped"
+    ],
+    [
+      45675,
+      "fast Windows compile",
+      0,
+      1,
+      "skipped"
+    ],
+    [
+      45676,
+      "fast web syntax gate",
+      17097,
+      1,
+      "skipped"
+    ],
+    [
+      45677,
+      "fast Apple compile",
+      17099,
+      1,
+      "skipped"
+    ],
+    [
+      45678,
+      "fast Android compile",
+      17098,
+      1,
+      "skipped"
+    ],
+    [
+      45679,
+      "Main promotion gate",
+      17102,
+      1,
+      "failure"
+    ]
+  ],
+  "log_bytes": 146867,
+  "log_sha256": "f1a7896ceb55196a6db215893835350ae557d25ff84da80e94cfb259933e7d06",
+  "run": 4513,
+  "scope": {
+    "pr": 917,
+    "repository": 1
+  },
+  "sources": {
+    ".github/workflows/main-fast-lane.yml": "c504437ac012ebb70f44042f6c5bfb4f7b9f9716a9fa122f92863e6ec56f8f11",
+    "validation/main_preflight_adoption.py": "91841c4f105e31ec169f9d497be7c9fca9fc250b1220d6079592fb2cf3c6599c",
+    "validation/main_unit_receipts.py": "fecf10b37436ca6307d734c1fec37465df69dc01041af0d7dc5653f17249c748",
+    "validation/python_unit_receipts.py": "2cfbfdf8911c83d7c63803c3b447ef332e7d11d3b2f8a909592b222d24cd33bc"
+  },
+  "version": 1
+}

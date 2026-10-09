@@ -3,6 +3,10 @@
 
 package tv.plurx.app.player
 
+import tv.plurx.app.remote.*
+import kotlinx.serialization.json.*
+import java.util.UUID
+
 import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
@@ -345,6 +349,10 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
 }
 
 internal enum class PlayerPanel { Tracks, Settings, Info }
+internal enum class RemoteTrackMenuKind(val wireName: String) {
+    All("all"), Audio("audio"), Subtitles("subtitles"), Quality("quality");
+    companion object { fun fromWire(kind: String) = entries.firstOrNull { it != All && it.wireName == kind } }
+}
 
 internal enum class PlayerControlId {
     SkipBack30,
@@ -1155,6 +1163,128 @@ private fun PlayerContent(
         }
     }
 
+    val remoteClient = LocalRemoteClient.current
+    val remoteNavigation = LocalRemoteNavigation.current
+    val remoteScope = LocalRemoteScope.current
+    val remoteOwnerToken = remember(controller, remoteScope) { UUID.randomUUID().toString() }
+    val remotePreview = remember(controller) { RemotePreviewOwnership() }
+    var remoteTrackMenu by remember(controller) { mutableStateOf<RemoteTrackMenuKind?>(null) }
+    data class OwnedTrack(val kind: String, val id: String, val label: String, val selected: Boolean, val choose: () -> RemoteOutcome)
+    fun ownedTracks(): List<OwnedTrack> {
+        val result = mutableListOf<OwnedTrack>()
+        if (controller.deliveryMode != "direct" && plan.audio.isNotEmpty()) {
+            plan.audio.forEach { track -> result += OwnedTrack("audio", "server-audio:${track.index}", track.title ?: track.language ?: "Audio ${track.index}", controller.selectedAudio == track.index) {
+                controller.switchAudio(track.index); onAudioChanged(track.index); RemoteOutcome.Applied
+            } }
+        } else controller.player.currentTracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_AUDIO }.forEachIndexed { groupIndex, group ->
+            for (index in 0 until group.length) if (group.isTrackSupported(index)) result += OwnedTrack("audio", "native-audio:" + UUID.nameUUIDFromBytes((group.mediaTrackGroup.id + ":" + index + ":" + group.getTrackFormat(index).id).toByteArray()), group.getTrackFormat(index).label ?: group.getTrackFormat(index).language ?: "Audio ${index + 1}", group.isTrackSelected(index)) {
+                if (group !in controller.player.currentTracks.groups) RemoteOutcome.Unavailable else {
+                    controller.player.trackSelectionParameters = controller.player.trackSelectionParameters.buildUpon().setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, index)).setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, false).build(); RemoteOutcome.Applied
+                }
+            }
+        }
+        if (plan.subtitles.isNotEmpty()) {
+            result += OwnedTrack("subtitles", "subtitles-off", "Off", controller.selectedSubtitle == null) { if (controller.switchSubtitle(null)) { onSubtitleChanged(null); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
+            plan.subtitles.forEach { track -> result += OwnedTrack("subtitles", "server-subtitle:${track.index}", track.title ?: track.language ?: "Subtitle ${track.index}", controller.selectedSubtitle == track.index) {
+                if (controller.switchSubtitle(track.index)) { onSubtitleChanged(track.index); RemoteOutcome.Applied } else RemoteOutcome.Unavailable
+            } }
+        } else {
+            val text = controller.player.currentTracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
+            if (text.isNotEmpty()) result += OwnedTrack("subtitles", "subtitles-off", "Off", !controller.player.currentTracks.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_TEXT)) {
+                controller.player.trackSelectionParameters = controller.player.trackSelectionParameters.buildUpon().clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT).setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build(); RemoteOutcome.Applied
+            }
+            text.forEachIndexed { groupIndex, group -> for (index in 0 until group.length) if (group.isTrackSupported(index)) result += OwnedTrack("subtitles", "native-subtitle:" + UUID.nameUUIDFromBytes((group.mediaTrackGroup.id + ":" + index + ":" + group.getTrackFormat(index).id).toByteArray()), group.getTrackFormat(index).label ?: group.getTrackFormat(index).language ?: "Subtitle ${index + 1}", group.isTrackSelected(index)) {
+                if (group !in controller.player.currentTracks.groups) RemoteOutcome.Unavailable else {
+                    controller.player.trackSelectionParameters = controller.player.trackSelectionParameters.buildUpon().setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, index)).setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false).build(); RemoteOutcome.Applied
+                }
+            } }
+        }
+        qualityOptions(plan.ladder).forEach { option -> result += OwnedTrack("quality", "quality:${option.quality.storageValue}", option.label, preferences.playbackQuality == option.quality) {
+            vm.setPlaybackQuality(option.quality)
+            controller.prepareReplacement(option.quality) { position, quality -> onReload(position, "quality", quality) }
+            RemoteOutcome.Applied
+        } }
+        return result.take(64)
+    }
+
+    fun cancelNetworkPreview() {
+        val owned = remotePreview.owns(pendingMs)
+        pendingMs = remotePreview.cancel(pendingMs)
+        if (owned) repeatCount = 0
+    }
+    fun remoteCapabilities(): Set<String> = if (!controller.remoteCommandsAvailable() || blockingFault != null || isInPip || panel != null) emptySet() else
+        setOf("navigate", "select", "back", "set_playing", "stop") +
+            (if (ownedTracks().isNotEmpty()) setOf("open_tracks", "choose_track") else emptySet()) +
+            if (plan.durationMs > 0) setOf("seek_relative", "seek_absolute") else emptySet()
+    fun remoteDispatch(action: RemoteAction): RemoteOutcome {
+        if (action.type !in remoteCapabilities()) return RemoteOutcome.Unsupported
+        if (action.type == "open_tracks") {
+            val kind = action.text("kind") ?: return RemoteOutcome.Invalid
+            if (remoteTrackMenu != null || ownedTracks().none { it.kind == kind }) return RemoteOutcome.Unsupported
+            cancelNetworkPreview(); remoteNavigation?.changedContext(); remoteTrackMenu = RemoteTrackMenuKind.fromWire(kind) ?: return RemoteOutcome.Unsupported; return RemoteOutcome.Applied
+        }
+        if (action.type == "choose_track") {
+            val kind = action.text("kind")
+            if (remoteNavigation?.ownedChoicesReady != true || remoteTrackMenu == null || (remoteTrackMenu != RemoteTrackMenuKind.All && remoteTrackMenu?.wireName != kind)) return RemoteOutcome.Unsupported
+            val choice = ownedTracks().firstOrNull { it.kind == kind && it.id == action.text("option_id") } ?: return RemoteOutcome.Unavailable
+            val result = choice.choose(); if (result == RemoteOutcome.Applied) { remoteNavigation?.dispatch(RemoteAction("back", buildJsonObject {}), remoteNavigation.context); remoteTrackMenu = null }
+            return result
+        }
+        if (remoteTrackMenu != null && action.type in setOf("navigate", "select", "back"))
+            return remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unavailable
+        if (action.type == "set_playing") {
+            // Desired state still observes the existing pending-scrub commit boundary.
+            if (pendingMs != null) applyOutcome(PlayerInputOutcome.Commit, PlayerContractInput.PlayPause)
+            return if (controller.requestRemotePlaying(action.fields.getValue("playing").jsonPrimitive.boolean)) RemoteOutcome.Applied else RemoteOutcome.Unavailable
+        }
+        if (action.type == "stop") {
+            if (!controller.requestRemotePlaying(false)) return RemoteOutcome.Unavailable
+            cancelNetworkPreview(); onExit(); return RemoteOutcome.Applied
+        }
+        if (action.type == "seek_relative" || action.type == "seek_absolute") {
+            if (inputState() in setOf(PlayerInputState.Failed, PlayerInputState.Menu, PlayerInputState.Info)) return RemoteOutcome.Unsupported
+            if (pendingMs != null) applyOutcome(PlayerInputOutcome.Commit, PlayerContractInput.PlayPause)
+            val destination = if (action.type == "seek_absolute") action.fields.getValue("position_ms").jsonPrimitive.long
+                else controller.realPosition() + action.fields.getValue("seconds").jsonPrimitive.long * 1000
+            if (destination !in 0..plan.durationMs) return RemoteOutcome.Invalid
+            seekWithMarkerUndo(destination); poke(); return RemoteOutcome.Applied
+        }
+        val input = when (action.type) {
+            "navigate" -> when (action.text("direction")) { "left" -> PlayerContractInput.Left; "right" -> PlayerContractInput.Right; "up" -> PlayerContractInput.Up; else -> PlayerContractInput.Down }
+            "select" -> PlayerContractInput.Select
+            "back" -> PlayerContractInput.Back
+            else -> return RemoteOutcome.Unsupported
+        }
+        val outcome = PlayerInputPolicy.route(playerSurface, inputState(), input)
+        if (outcome in setOf(PlayerInputOutcome.FocusRow, PlayerInputOutcome.Activate, PlayerInputOutcome.MenuFocus))
+            return remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unavailable
+        if (outcome == PlayerInputOutcome.Ignore) return RemoteOutcome.Unsupported
+        val before = pendingMs
+        repeatCount = 0
+        val applied = applyOutcome(outcome, input)
+        remotePreview.claim(before, pendingMs)
+        return if (applied && !(outcome == PlayerInputOutcome.Preview && pendingMs == before)) RemoteOutcome.Applied else RemoteOutcome.Unsupported
+    }
+    SideEffect {
+        controller.onPhysicalTransport = { remoteClient?.physicalInput() }
+        remoteClient?.playback?.attach(RemotePlaybackAdapter.Owner(remoteOwnerToken, remoteScope, ::remoteCapabilities, {
+            buildJsonObject {
+                put("media", buildJsonObject { put("type", "item"); put("item_id", itemId) })
+                put("title", RemoteWire.safeLabel(plan.title, fallback = "Playing")); put("playing", playbackIntent.playbackRequested)
+                put("position_ms", controller.realPosition().coerceAtLeast(0)); put("duration_ms", plan.durationMs.coerceAtLeast(0))
+                put("tracks", JsonArray(ownedTracks().map { track -> buildJsonObject { put("kind", track.kind); put("option_id", track.id); put("label", RemoteWire.safeLabel(track.label)) } }))
+            }
+        }, ::remoteDispatch, ::cancelNetworkPreview, { controller.remoteCommandsAvailable() && panel == null && blockingFault == null && !isInPip && (remoteTrackMenu == null || remoteNavigation?.ownedChoicesReady == true) }))
+    }
+    DisposableEffect(remoteClient, remoteOwnerToken) { onDispose { controller.onPhysicalTransport = null; remoteClient?.playback?.detach(remoteOwnerToken) } }
+    if (panel != null || blockingFault != null || isInPip) RemoteRestricted()
+    if (remoteTrackMenu != null) {
+        val kind = remoteTrackMenu
+        RemoteChoiceDialog(if (kind == RemoteTrackMenuKind.All) "Audio and subtitles" else "Choose ${kind?.wireName}", ownedTracks().filter { kind == RemoteTrackMenuKind.All && it.kind != "quality" || it.kind == kind?.wireName }.map { track ->
+            RemoteChoice(track.id, RemoteWire.safeLabel(track.label), track.selected, track.choose)
+        }) { remoteTrackMenu = null; poke(); focus(panelOpener) }
+    }
+
     BackHandler(enabled = !isInPip) {
         applyOutcome(
             PlayerInputPolicy.route(
@@ -1573,7 +1703,7 @@ private fun PlayerContent(
                 onSeekBack = { controller.seekBy(-10_000); poke() },
                 onSeekForward = { controller.seekBy(10_000); poke() },
                 onSeekForward30 = { controller.seekBy(30_000); poke() },
-                onScrub = { pendingMs = it.coerceIn(0L, plan.durationMs.coerceAtLeast(0L)) },
+                onScrub = { remoteNavigation?.physicalInput(); pendingMs = it.coerceIn(0L, plan.durationMs.coerceAtLeast(0L)) },
                 onScrubEnd = {
                     pendingMs?.let(::seekWithMarkerUndo)
                     pendingMs = null
@@ -1581,7 +1711,7 @@ private fun PlayerContent(
                 },
                 onTracks = {
                     panelOpener = PlayerControlId.Tracks
-                    panel = PlayerPanel.Tracks
+                    if (isTelevision(context)) remoteTrackMenu = RemoteTrackMenuKind.All else panel = PlayerPanel.Tracks
                 },
                 onSettings = {
                     panelOpener = PlayerControlId.Settings
@@ -1807,6 +1937,11 @@ internal fun Controls(
     onPip: (() -> Unit)?,
     onTransportHeight: (Int) -> Unit = {},
 ) {
+    RemoteOrder(buildList {
+        if (durationMs > 0) add("player:Timeline")
+        addAll(listOf("SkipBack30", "SkipBack", "PlayPause", "SkipForward", "SkipForward30").map { "player:$it" })
+        if (onTracks != null) add("player:Tracks")
+    })
     val ownFocus = remember { PlayerControlFocus() }
     val resolvedFocus = focus ?: ownFocus
     val formFactor = currentFormFactor()
@@ -1823,6 +1958,7 @@ internal fun Controls(
     // node that was never attached.
     val upFromTransport = if (durationMs > 0L) resolvedFocus.timeline else FocusRequester.Cancel
 
+    @Composable
     fun transportModifier(control: PlayerControlId): Modifier = Modifier
         .focusRequester(resolvedFocus.requester(control))
         .focusProperties { up = upFromTransport }
@@ -1837,7 +1973,7 @@ internal fun Controls(
             if (onTracks != null) {
                 TvIconButton(
                     onClick = onTracks,
-                    modifier = transportModifier(PlayerControlId.Tracks),
+                    modifier = transportModifier(PlayerControlId.Tracks).remoteAction("player:Tracks", "Audio and subtitles") { onTracks(); RemoteOutcome.Applied },
                 ) {
                     Icon(Icons.Filled.ClosedCaption, contentDescription = "Audio and subtitles", tint = Color.White)
                 }
@@ -1950,7 +2086,7 @@ internal fun Controls(
                     },
                     onTouchPreview = onScrub,
                     onTouchCommit = onScrubEnd,
-                    modifier = Modifier.padding(top = 4.dp),
+                    modifier = Modifier.padding(top = 4.dp).remoteAction("player:Timeline", "Playback timeline") { RemoteOutcome.Unsupported },
                 )
             }
 
@@ -2042,7 +2178,19 @@ private fun TransportButtons(
     onSeekForward: () -> Unit,
     onSeekForward30: () -> Unit,
 ) {
+    @Composable
     fun modifier(control: PlayerControlId, size: Dp): Modifier = Modifier
+        .remoteAction("player:${control.name}", when (control) { PlayerControlId.SkipBack30 -> "Back 30 seconds"; PlayerControlId.SkipBack -> "Back 10 seconds"; PlayerControlId.PlayPause -> if (isPlaying) "Pause" else "Play"; PlayerControlId.SkipForward -> "Forward 10 seconds"; PlayerControlId.SkipForward30 -> "Forward 30 seconds"; else -> "Playback control" }) {
+            when (control) {
+                PlayerControlId.SkipBack30 -> onSeekBack30()
+                PlayerControlId.SkipBack -> onSeekBack()
+                PlayerControlId.PlayPause -> onPlayPause()
+                PlayerControlId.SkipForward -> onSeekForward()
+                PlayerControlId.SkipForward30 -> onSeekForward30()
+                else -> return@remoteAction RemoteOutcome.Unsupported
+            }
+            RemoteOutcome.Applied
+        }
         .size(size)
         .focusRequester(focus.requester(control))
         .focusProperties { up = if (timelineAbove) focus.timeline else FocusRequester.Cancel }
@@ -3122,16 +3270,43 @@ private fun BackChip(onExit: () -> Unit) {
 /** Explicit Shared dispatch, without a numeric Local PlanLike sentinel. Every
  * control here asks the server first; the picture moves only after B accepts. */
 @Composable
-internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, onEnded: () -> Unit = {}, onExit: () -> Unit) {
+internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, incumbent: SharedPlayerController? = null, onEnded: () -> Unit = {}, onExit: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val controller = remember(vm, plan) { SharedPlayerController(context, vm) }
+    val controller = remember(vm, plan, incumbent) { incumbent ?: SharedPlayerController(context, vm) }
+    val remoteClient = LocalRemoteClient.current
+    val remoteNavigation = LocalRemoteNavigation.current
+    val remoteToken = remember(controller) { "shared-player:" + UUID.randomUUID().toString() }
+    var remoteLive by remember(controller) { mutableStateOf(true) }
+    val currentExit by rememberUpdatedState(onExit)
+    fun remoteOwned() = remoteLive && remoteNavigation?.scope == remoteToken
+    fun exitOwned(home: Boolean): RemoteOutcome {
+        if (!remoteOwned()) return RemoteOutcome.StaleContext
+        controller.beginStop(); remoteLive = false
+        if (home) remoteNavigation?.onHome?.invoke() else currentExit()
+        return RemoteOutcome.Applied
+    }
+    DisposableEffect(remoteNavigation, remoteToken) {
+        remoteNavigation?.enter(remoteToken, "playback") { exitOwned(false); true }
+        onDispose { remoteLive = false; remoteNavigation?.releaseScope(remoteToken) }
+    }
+    SideEffect {
+        remoteClient?.playback?.attach(RemotePlaybackAdapter.Owner(remoteToken, remoteToken,
+            { setOf("set_playing", "stop", "back", "home") }, { null }, { action ->
+                when (action.type) { "stop", "back" -> exitOwned(false); "home" -> exitOwned(true); else -> RemoteOutcome.Unsupported }
+            }, controller::retireNetworkOperation, ::remoteOwned, { action ->
+                if (action.type != "set_playing") null else RemoteDeferredEffect(
+                    RemoteDeferredBinding(remoteToken, remoteToken, plan.subject.context.toString()), ::remoteOwned,
+                    { check -> controller.setPlayingRemote(action.boolean("playing") == true) { remoteOwned() && check() } })
+            }))
+    }
+    DisposableEffect(remoteClient, remoteToken) { onDispose { remoteClient?.playback?.detach(remoteToken) } }
     val starting by controller.owner.starting.collectAsStateWithLifecycle()
     val failure by controller.owner.failure.collectAsStateWithLifecycle()
     val statusSummary by controller.owner.statusSummary.collectAsStateWithLifecycle()
     val selection by controller.owner.selection.collectAsStateWithLifecycle()
     val playing by controller.playing.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    BackHandler { scope.launch { controller.stop(); onExit() } }
+    BackHandler { remoteClient?.physicalInput(); controller.beginStop(); onExit() }
     LaunchedEffect(plan) { controller.start(plan) }
     val ended by controller.ended.collectAsStateWithLifecycle()
     val finished by rememberUpdatedState(onEnded)
@@ -3151,19 +3326,19 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
         statusSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         failure?.let { Text(it) }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            androidx.compose.material3.TextButton(onClick = { controller.seekBy(-10_000) }, enabled = !starting) { Text("−10 s") }
-            androidx.compose.material3.TextButton(onClick = { controller.togglePlaying() }, enabled = !starting) { Text(if (playing) "Pause" else "Play") }
-            androidx.compose.material3.TextButton(onClick = { controller.seekBy(30_000) }, enabled = !starting) { Text("+30 s") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.seekBy(-10_000) }, enabled = !starting) { Text("−10 s") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.togglePlaying() }, enabled = !starting) { Text(if (playing) "Pause" else "Play") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.seekBy(30_000) }, enabled = !starting) { Text("+30 s") }
             selection?.let { current ->
-                SharedChoiceMenu("Quality", current.quality.label, tv.plurx.app.data.PlaybackQuality.entries.map { it.label to current.copy(quality = it) }, !starting, controller::change)
+                SharedChoiceMenu("Quality", current.quality.label, tv.plurx.app.data.PlaybackQuality.entries.map { it.label to current.copy(quality = it) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
                 val audio = plan.decision.presentation.audio
                 if (audio.size > 1) SharedChoiceMenu("Audio", audio.firstOrNull { it.index.toInt() == current.audio }?.let(::sharedTrackLabel) ?: "Default",
-                    audio.filter { it.index in 0..1024 }.map { sharedTrackLabel(it) to current.copy(audio = it.index.toInt()) }, !starting, controller::change)
+                    audio.filter { it.index in 0..1024 }.map { sharedTrackLabel(it) to current.copy(audio = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
                 val subtitles = plan.decision.presentation.subtitles.filter { it.native == true && it.index in 0..1024 }
                 if (subtitles.isNotEmpty()) SharedChoiceMenu("Subtitles", subtitles.firstOrNull { it.index.toInt() == current.subtitle }?.let { sharedTrackLabel(it.language, it.title, it.codec) } ?: "Off",
-                    listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, controller::change)
+                    listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
             }
-            androidx.compose.material3.TextButton(onClick = { scope.launch { controller.stop(); onExit() } }) { Text("Close") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.beginStop(); onExit() }) { Text("Close") }
         }
     }
 }
@@ -3181,9 +3356,11 @@ private fun SharedChoiceMenu(
     onChoose: (tv.plurx.app.data.SharedSelection) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    val remoteClient = LocalRemoteClient.current
+    RemoteRestricted(open)
     Box {
-        androidx.compose.material3.TextButton(onClick = { open = true }, enabled = enabled) { Text("$label: $current") }
-        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); open = true }, enabled = enabled) { Text("$label: $current") }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { remoteClient?.physicalInput(); open = false }) {
             options.forEach { (text, choice) ->
                 androidx.compose.material3.DropdownMenuItem(text = { Text(text) }, onClick = { open = false; onChoose(choice) })
             }

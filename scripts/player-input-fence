@@ -34,6 +34,8 @@ TOKENS = (
 TEST_TREE_MARKERS = ("/androidTest/", "/src/test/", "clients/apple/Tests/")
 
 WHOLE_FILE_ALLOWLIST = {
+    Path("clients/android/app/src/main/java/tv/plurx/app/remote/RemotePhysicalInputAdapter.kt"):
+        "Observe native physical input only to retire companion credits, then delegate unchanged; no player policy or key injection.",
     Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerKeyAdapter.kt"):
         "Android player key codes are decoded into contract inputs here.",
     Path("clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvKeyAdapter.kt"):
@@ -70,6 +72,12 @@ TOKEN_FILE_ALLOWLIST = {
 # line of the next file.
 WEB = Path("crates/plurxd/src/web")
 WEB_REGIONS = (
+    (
+        WEB / "pages/remote.js",
+        "// companion-direction-key-adapter:begin",
+        "// companion-direction-key-adapter:end",
+        "Trusted Enter/Space on focused companion direction buttons starts/releases bounded repeat; no receiver/player key policy.",
+    ),
     (
         WEB / "pages/activity.js",
         "function activityTabsHtml(){",

@@ -1,10 +1,16 @@
 package tv.plurx.app.player
 
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.SemanticsNodeInteraction
+import android.content.res.Configuration
+import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
-import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
@@ -50,12 +56,13 @@ class PlaybackInfoOverlayTest {
                             encoder = "nvenc",
                             recent_speed = 1.25,
                             ahead_seconds = 12,
+                            production_ahead_seconds = 12,
                             delivered_bytes = 86_000_000,
                             delivered_bps = 12_300_000,
                         ),
                     ),
                     reasons = listOf("Source exceeds the selected output rung"),
-                    mode = PlaybackStatsMode.Standard,
+                    mode = PlaybackStatsMode.Details,
                     onMode = {},
                     onDismiss = {},
                 )
@@ -63,21 +70,35 @@ class PlaybackInfoOverlayTest {
         }
 
         compose.onNodeWithText("Playback info").assertIsDisplayed()
-        compose.onNodeWithText("Method").assertIsDisplayed()
-        compose.onNodeWithText("Position").assertIsDisplayed()
-        compose.onAllNodesWithText("Resolution", useUnmergedTree = true).assertCountEquals(2)
-        compose.onNodeWithText("Buffer").assertExists()
-        compose.onNodeWithText("Stalls").assertExists()
-        compose.onNodeWithText("Delivery rate").assertExists()
-        compose.onNodeWithText("Delivered").assertExists()
-        compose.onNodeWithText("Encode speed").assertExists()
-        compose.onNodeWithText("Server ahead").assertExists()
-        compose.onNodeWithText("Control").assertExists()
-
-        val close = compose.onNodeWithContentDescription("Close playback info")
+        val close = compose.onNodeWithText("Close")
         compose.waitUntil(timeoutMillis = 2_000) {
             close.fetchSemanticsNode().config.getOrElse(SemanticsProperties.Focused) { false }
         }
         close.assertHasClickAction().assertIsFocused()
+
+        // Details owns the labeled observations; Standard is an overview.
+        val television = InstrumentationRegistry.getInstrumentation().targetContext.resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_TELEVISION
+        fun reveal(node: SemanticsNodeInteraction): SemanticsNodeInteraction {
+            if (television) node.performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+            else node.performScrollTo()
+            return node.assertIsDisplayed()
+        }
+        fun detail(label: String) { reveal(compose.onNodeWithText(label)) }
+        detail("Source frame")
+        detail("Stream frame")
+        detail("Player display size")
+        detail("Buffering interruptions")
+        reveal(compose.onNodeWithText("Buffer & delivery  +")).performClick()
+        detail("Buffered on device")
+        detail("Server response rate")
+        detail("Server responses completed")
+        reveal(compose.onNodeWithText("Server work  +")).performClick()
+        detail("Encode speed")
+        detail("Production actual")
+        detail("Control")
+        reveal(compose.onNodeWithText("Session & history  +")).performClick()
+        detail("Method")
+        detail("Position")
+        close.assertHasClickAction()
     }
 }

@@ -1427,6 +1427,8 @@ impl TranscodeManager {
                 options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
             }
         }
+        options.output_codec =
+            Self::selected_output_codec(req.candidate_context.as_deref(), encoder);
         // Catalog identity describes the muxed candidate. Verify that exact
         // plan before deriving the video-only or shared-AAC execution recipe.
         let phase_started = std::time::Instant::now();
@@ -1463,6 +1465,8 @@ impl TranscodeManager {
                 catalog_options.effective_rate_control =
                     plurx_core::transcode::EffectiveRateControl::Vbr;
             }
+            catalog_options.output_codec =
+                Self::selected_output_codec(Some(context), catalog_encoder);
             Some(
                 self.resolve_vod_movie_plan(
                     file,
@@ -1532,6 +1536,7 @@ impl TranscodeManager {
         // Encoding retains these execution options for publication and
         // diagnostics. Its graph must agree with the immutable plan.
         options.pipeline = plan.options().pipeline;
+        options.strict_dolby = plan.options().strict_dolby.clone();
         if let Some(frame_rate) = plan
             .output_contract()
             .normalized_geometry()
@@ -3417,6 +3422,7 @@ mod retained_recovery_tests {
             width: 1280,
             height: 720,
             target_height: 720,
+            planned_codec: None,
             average_bps: None,
             peak_bps: None,
             grade: OutputGrade::Sdr,

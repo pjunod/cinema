@@ -824,7 +824,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val decision = try {
             api().decisionV2ForContext(fileContext, request, DecisionCapsReq(snapshot.document), validLinkReceipt(linkReceipt))
         } catch (error: HttpException) {
-            if (!shouldFallBackToLegacyDecision(error.code())) throw error
+            if (!shouldFallBackToLegacyDecision(error.code(), snapshot.document)) throw error
             api().decisionForContext(fileContext, snapshot.legacyQuery + request)
         }
         return PlaybackDecision(decision, snapshot)
@@ -909,16 +909,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** A Shared Start from fresh B details. A null [fileId] takes the first
      * launchable file of those details (the next episode); either way the
      * context, decision and playback id are new, never inherited. */
-    internal suspend fun prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String?): SharedPlaybackPlan {
+    internal suspend fun prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String?, permitted: () -> Boolean = { true }): SharedPlaybackPlan {
+        check(permitted())
         val catalogue = SharedLibraryClient.create()
-        val detail = catalogue.detail(reference); catalogue.requireCurrent()
+        val detail = catalogue.detail(reference); catalogue.requireCurrent(); check(permitted())
         val chosen = fileId ?: detail.files.firstOrNull { it.file_base != null }?.file_id
         require(detail.delivery_status == "available" && chosen != null && detail.files.any { it.file_id == chosen && it.file_base != null }) { "Playback is unavailable for this Shared title." }
         val fileId: String = chosen
         val context = PlaybackFileContext.authenticatedDetail(reference, fileId)
         require(context.lifecycleGeneration == detail.lifecycle_generation)
         val selection = tv.plurx.app.data.SharedSelection(_preferences.value.playbackQuality)
+        check(permitted())
         val result = SharedDecisionClient.create().decision(context, getApplication<Application>(), selection.decisionQuery())
+        check(permitted())
         val position = detail.watch?.let { if (it.watched) 0 else it.position_ms } ?: 0
         val subject = SharedPlaybackSubject(context, detail.item.title, position, detail.watch?.sequence ?: 0)
         // Direct play when the Source's decision says these caps take the file
@@ -931,11 +934,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * Shared next episode: Source order resolved through B's viewer routes, then
      * a fresh authorized Start of it. Null when the series has no next episode.
      */
-    internal suspend fun prepareNextSharedEpisode(current: SharedPlaybackReference): Pair<SharedPlaybackReference, SharedPlaybackPlan>? {
+    internal suspend fun prepareNextSharedEpisode(current: SharedPlaybackReference, permitted: () -> Boolean = { true }): Pair<SharedPlaybackReference, SharedPlaybackPlan>? {
         val catalogue = SharedLibraryClient.create()
+        check(permitted())
         val next = catalogue.nextEpisode(current) ?: return null
+        check(permitted())
         catalogue.requireCurrent()
-        return next to prepareSharedPlayback(next, null)
+        return next to prepareSharedPlayback(next, null, permitted)
     }
 
     suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId), linkReceipt: String? = null): HlsStart {

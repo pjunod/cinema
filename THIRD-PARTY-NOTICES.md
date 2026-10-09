@@ -15,7 +15,7 @@ and never reaches a shipped artifact (§5).
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 497 source-bearing crates in the root workspace · license fields
+the work. 546 source-bearing crates in the root workspace · license fields
 verified 2026-09-17; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
@@ -146,20 +146,21 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-497 source-bearing crates resolve into a plurx build, excluding the five
+546 source-bearing crates resolve into a plurx build, excluding the five
 first-party crates and the vendored ones above (`s3-simple` resolves only in
 the fork's optional backup graph, never in this one). Every one is permissive:
 
 | License expression | Crates |
 |---|---:|
-| `MIT OR Apache-2.0` | 263 |
+| `MIT OR Apache-2.0` | 273 |
 | `MIT` | 115 |
-| `Apache-2.0 OR MIT` | 26 |
+| `Apache-2.0 OR MIT` | 28 |
+| `Apache-2.0 WITH LLVM-exception` | 27 |
 | `Unicode-3.0` | 18 |
-| `MIT/Apache-2.0` | 16 |
+| `MIT/Apache-2.0` | 17 |
+| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 12 |
 | `Apache-2.0` | 11 |
-| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 5 |
-| `Unlicense OR MIT` | 4 |
+| `Unlicense OR MIT` | 5 |
 | `Unlicense/MIT` | 4 |
 | `Apache-2.0 OR ISC OR MIT` | 3 |
 | `Apache-2.0/MIT` | 3 |
@@ -177,6 +178,7 @@ the fork's optional backup graph, never in this one). Every one is permissive:
 | `Apache-2.0 / MIT` | 1 |
 | `Apache-2.0 AND ISC` | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 |
+| `BSD-2-Clause OR MIT OR Apache-2.0` | 1 |
 | `BSD-3-Clause` | 1 |
 | `MIT AND BSD-3-Clause` | 1 |
 | `MIT OR BSD-3-Clause` | 1 |
@@ -206,10 +208,11 @@ workspaces ships in any artifact, so they are out of scope for distribution,
 but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (497)</summary>
+<summary>Full crate list (546)</summary>
 
 | Crate | Version | License |
 |---|---|---|
+| `addr2line` | 0.26.1 | Apache-2.0 OR MIT |
 | `adler2` | 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
 | `aead` | 0.5.2 | MIT OR Apache-2.0 |
 | `ahash` | 0.8.12 | MIT OR Apache-2.0 |
@@ -223,6 +226,7 @@ but they are not covered by the table above.
 | `anstyle-wincon` | 3.0.11 | MIT OR Apache-2.0 |
 | `anyerror` | 0.1.13 | Apache-2.0 |
 | `anyhow` | 1.0.104 | MIT OR Apache-2.0 |
+| `arbitrary` | 1.5.0 | MIT OR Apache-2.0 |
 | `arc-swap` | 1.9.2 | MIT OR Apache-2.0 |
 | `argon2` | 0.5.3 | MIT OR Apache-2.0 |
 | `arrayvec` | 0.7.8 | MIT OR Apache-2.0 |
@@ -278,14 +282,29 @@ but they are not covered by the table above.
 | `clap_builder` | 4.6.2 | MIT OR Apache-2.0 |
 | `clap_derive` | 4.6.1 | MIT OR Apache-2.0 |
 | `clap_lex` | 1.1.0 | MIT OR Apache-2.0 |
+| `cobs` | 0.3.0 | MIT OR Apache-2.0 |
 | `colorchoice` | 1.0.5 | MIT OR Apache-2.0 |
 | `combine` | 4.6.7 | MIT |
 | `compact_str` | 0.9.1 | MIT |
 | `const-oid` | 0.10.2 | Apache-2.0 OR MIT |
 | `core-foundation` | 0.10.1 | MIT OR Apache-2.0 |
 | `core-foundation-sys` | 0.8.7 | MIT OR Apache-2.0 |
+| `cpp_demangle` | 0.5.1 | MIT OR Apache-2.0 |
 | `cpufeatures` | 0.2.17 | MIT OR Apache-2.0 |
 | `cpufeatures` | 0.3.0 | MIT OR Apache-2.0 |
+| `cranelift-assembler-x64` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-assembler-x64-meta` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-bforest` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-bitset` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen-meta` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen-shared` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-control` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-entity` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-frontend` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-isle` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-native` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-srcgen` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
 | `crc` | 3.4.0 | MIT OR Apache-2.0 |
 | `crc-catalog` | 2.5.0 | MIT OR Apache-2.0 |
 | `crc32fast` | 1.5.0 | MIT OR Apache-2.0 |
@@ -325,6 +344,8 @@ but they are not covered by the table above.
 | `dyn-stack-macros` | 0.1.3 | MIT |
 | `either` | 1.17.0 | MIT OR Apache-2.0 |
 | `email_address` | 0.2.9 | MIT |
+| `embedded-io` | 0.4.0 | MIT OR Apache-2.0 |
+| `embedded-io` | 0.6.1 | MIT OR Apache-2.0 |
 | `encoding_rs` | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause |
 | `enum-as-inner` | 0.6.1 | MIT/Apache-2.0 |
 | `equivalent` | 1.0.2 | Apache-2.0 OR MIT |
@@ -368,6 +389,7 @@ but they are not covered by the table above.
 | `getrandom` | 0.2.17 | MIT OR Apache-2.0 |
 | `getrandom` | 0.3.4 | MIT OR Apache-2.0 |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 |
+| `gimli` | 0.33.0 | MIT OR Apache-2.0 |
 | `h2` | 0.4.16 | MIT |
 | `half` | 2.7.1 | MIT OR Apache-2.0 |
 | `hashbrown` | 0.16.1 | MIT OR Apache-2.0 |
@@ -419,6 +441,7 @@ but they are not covered by the table above.
 | `jsonschema-value` | 0.50.1 | MIT |
 | `kamadak-exif` | 0.6.1 | BSD-2-Clause |
 | `lazy_static` | 1.5.0 | MIT OR Apache-2.0 |
+| `leb128fmt` | 0.1.0 | MIT OR Apache-2.0 |
 | `libc` | 0.2.189 | MIT OR Apache-2.0 |
 | `libm` | 0.2.16 | MIT |
 | `libpgs` | 0.6.0 | MIT OR Apache-2.0 |
@@ -429,6 +452,7 @@ but they are not covered by the table above.
 | `log` | 0.4.33 | MIT OR Apache-2.0 |
 | `lru-slab` | 0.1.2 | MIT OR Apache-2.0 OR Zlib |
 | `lz4-sys` | 1.11.1+lz4-1.10.0 | MIT |
+| `mach2` | 0.6.0 | BSD-2-Clause OR MIT OR Apache-2.0 |
 | `macro_rules_attribute` | 0.2.3 | Apache-2.0 OR MIT OR Zlib |
 | `macro_rules_attribute-proc_macro` | 0.2.3 | Apache-2.0 OR MIT OR Zlib |
 | `maplit` | 1.0.2 | MIT/Apache-2.0 |
@@ -436,6 +460,7 @@ but they are not covered by the table above.
 | `matchit` | 0.8.4 | MIT AND BSD-3-Clause |
 | `mdns-sd` | 0.20.3 | Apache-2.0 OR MIT |
 | `memchr` | 2.8.3 | Unlicense OR MIT |
+| `memfd` | 0.6.6 | MIT OR Apache-2.0 |
 | `memmap2` | 0.9.11 | MIT OR Apache-2.0 |
 | `micromap` | 0.3.0 | MIT |
 | `mime` | 0.3.17 | MIT OR Apache-2.0 |
@@ -459,6 +484,7 @@ but they are not covered by the table above.
 | `num-rational` | 0.4.2 | MIT OR Apache-2.0 |
 | `num-traits` | 0.2.19 | MIT OR Apache-2.0 |
 | `num_cpus` | 1.17.0 | MIT OR Apache-2.0 |
+| `object` | 0.40.0 | Apache-2.0 OR MIT |
 | `oid-registry` | 0.8.1 | MIT OR Apache-2.0 |
 | `once_cell` | 1.21.4 | MIT OR Apache-2.0 |
 | `once_cell_polyfill` | 1.70.2 | MIT OR Apache-2.0 |
@@ -482,11 +508,14 @@ but they are not covered by the table above.
 | `pkg-config` | 0.3.33 | MIT OR Apache-2.0 |
 | `poly1305` | 0.8.0 | Apache-2.0 OR MIT |
 | `portable-atomic` | 1.15.0 | Apache-2.0 OR MIT |
+| `postcard` | 1.1.3 | MIT OR Apache-2.0 |
 | `potential_utf` | 0.1.5 | Unicode-3.0 |
 | `powerfmt` | 0.2.0 | MIT OR Apache-2.0 |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 |
 | `proc-macro-crate` | 3.5.0 | MIT OR Apache-2.0 |
 | `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 |
+| `pulley-interpreter` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `pulley-macros` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
 | `pulp` | 0.22.3 | MIT |
 | `pulp-wasm-simd-flag` | 0.1.1 | MIT |
 | `qrcode` | 0.14.1 | MIT OR Apache-2.0 |
@@ -518,6 +547,7 @@ but they are not covered by the table above.
 | `ref-cast` | 1.0.26 | MIT OR Apache-2.0 |
 | `ref-cast-impl` | 1.0.26 | MIT OR Apache-2.0 |
 | `referencing` | 0.50.1 | MIT |
+| `regalloc2` | 0.15.2 | Apache-2.0 WITH LLVM-exception |
 | `regex` | 1.13.1 | MIT OR Apache-2.0 |
 | `regex-automata` | 0.4.16 | MIT OR Apache-2.0 |
 | `regex-syntax` | 0.8.11 | MIT OR Apache-2.0 |
@@ -529,6 +559,7 @@ but they are not covered by the table above.
 | `rust-embed` | 8.12.0 | MIT |
 | `rust-embed-impl` | 8.12.0 | MIT |
 | `rust-embed-utils` | 8.12.0 | MIT |
+| `rustc-demangle` | 0.1.28 | MIT/Apache-2.0 |
 | `rustc-hash` | 2.1.3 | Apache-2.0 OR MIT |
 | `rustc_version` | 0.4.1 | MIT OR Apache-2.0 |
 | `rusticata-macros` | 4.1.0 | MIT/Apache-2.0 |
@@ -587,7 +618,9 @@ but they are not covered by the table above.
 | `synstructure` | 0.13.2 | MIT |
 | `sysctl` | 0.6.0 | MIT |
 | `tap` | 1.0.1 | MIT |
+| `target-lexicon` | 0.13.5 | Apache-2.0 WITH LLVM-exception |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 |
+| `termcolor` | 1.4.1 | Unlicense OR MIT |
 | `thiserror` | 1.0.69 | MIT OR Apache-2.0 |
 | `thiserror` | 2.0.19 | MIT OR Apache-2.0 |
 | `thiserror-impl` | 1.0.69 | MIT OR Apache-2.0 |
@@ -631,6 +664,7 @@ but they are not covered by the table above.
 | `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 |
 | `unicode-normalization-alignments` | 0.1.12 | MIT/Apache-2.0 |
 | `unicode-segmentation` | 1.13.3 | MIT OR Apache-2.0 |
+| `unicode-width` | 0.2.2 | MIT OR Apache-2.0 |
 | `unicode-xid` | 0.2.6 | MIT OR Apache-2.0 |
 | `unicode_categories` | 0.1.1 | MIT OR Apache-2.0 |
 | `universal-hash` | 0.5.1 | MIT OR Apache-2.0 |
@@ -658,7 +692,24 @@ but they are not covered by the table above.
 | `wasm-bindgen-macro` | 0.2.126 | MIT OR Apache-2.0 |
 | `wasm-bindgen-macro-support` | 0.2.126 | MIT OR Apache-2.0 |
 | `wasm-bindgen-shared` | 0.2.126 | MIT OR Apache-2.0 |
+| `wasm-encoder` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| `wasm-encoder` | 0.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wasm-streams` | 0.4.2 | MIT OR Apache-2.0 |
+| `wasmparser` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| `wasmparser` | 0.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| `wasmprinter` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| `wasmtime` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-environ` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-component-util` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-core` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-cranelift` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-fiber` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-jit-debug` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-jit-icache-coherence` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-unwinder` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-versioned-export-macros` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wast` | 261.0.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| `wat` | 1.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `web-sys` | 0.3.103 | MIT OR Apache-2.0 |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 |
 | `webpki-root-certs` | 1.0.9 | CDLA-Permissive-2.0 |

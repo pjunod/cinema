@@ -1,9 +1,10 @@
 # Continuous-quality matrix — what the retained receipts establish
 
 **Status:** incomplete · **Inventoried:** 2026-10-08 ·
-**Candidate baseline:** `60c0f0f00` ·
+**Candidate baseline:** `f32594248d44a8f9a6ba9f1aad52b6d33909f1c9` ·
 **Measured browser source:** `909e0c7b7` · **Prior browser:** `67520f7a8` ·
-**Native diagnostic source:** `71d7f2ba4` · **Current qualification:** pending
+**Native diagnostic source:** `71d7f2ba4` ·
+**Measured Android source:** `3201f925c` · **Current qualification:** pending
 
 Companion to [CONTINUOUS-QUALITY-BUILD.md](CONTINUOUS-QUALITY-BUILD.md#83-acceptance-is-a-per-switch-result-not-an-average).
 This inventory separates current component evidence from older or missing
@@ -13,9 +14,14 @@ and the final platform-wide acceptance decision.
 
 ## 1. Read source and scope before a pass
 
-This update parsed 622 top-level JSON files for report source/outcome; 186
+The earlier browser inventory parsed 622 top-level JSON files for report
+source/outcome; 186
 contain `server.build`, and 2 explicitly attest `909e0c7b7`. No report in
-that set qualifies the new `60c0f0f00` candidate.
+that set qualified its then-current `60c0f0f00` candidate. The Android
+receipts added below bind `3201f925c`; they do not qualify the current
+`f32594248d44a8f9a6ba9f1aad52b6d33909f1c9` tree. Its 57 statically
+resolved regression fields are references, not executed regressions or
+runtime qualification.
 The original 192-report inventory and its historical hashes remain intact.
 "Absent" means no qualifying receipt was located in the inspected set or
 ledger, not that none can exist elsewhere. A filename does not attest source.
@@ -58,6 +64,11 @@ ends its series; no diagnostic helper aggregates retries into a pass.
 | Target CPU / source-read contention | older scoped pass | 087e27680: competing decode and target active on one CPU; observed read_chars; both read_bytes deltas zero. | Current-source contention absent; no disk-pressure or shared-reader-fairness claim. |
 | Shared-reader fairness | absent | Existing two-viewer pressure pass does not measure ownership/fairness of a shared source reader. | Concurrent reader identity, progress per consumer, cancellation of one without starvation of the other. |
 | Physical disk pressure | absent | Retained CPU/read probe recorded zero physical read_bytes. | Bounded owned-file I/O with actual physical read/write evidence and incumbent continuity; no user caches or global settings. |
+| Android UI13 Connect | source-bound setup failure | Server 3201f925c and owned emulator APK154: Connect failed; 63 Plurx nodes had no known manual/form controls. No Login, Play or quality request. A later read-only fresh-launch view exposed the manual control; the failed view's cause remains unmeasured. | Preserve the failure; do not count setup diagnostics as transitions or infer a production cause. |
+| Android UI14 requested 480 | source-bound outside-family refusal | Server 3201f925c/APK154: initial 1080 and actual 720/1080 family were observed. Target 480 was absent; the helper stopped before quality input. Normal Signout and exact cleanup completed. | This is a scope refusal, not a 480 playback failure or a successful switch. Actual 720/480 coverage remains absent. |
+| Android UI15 actual 1080→720 | scoped UI/SDK protocol pass | Server 3201f925c/APK154, actual 720/1080 family: normal shipped UI selected 720; actual target POSTs returned 200. New transaction accepted 720 revision 2/latest 2 with requested and accepted filmTick 912; SDK reported via=continuous quality=720 after 13,623 ms. Initial revision 1/tick 0 is excluded. Normal Signout failed; owned app force-stop and exact runtime cleanup were verified. | One emulator transition only. No 15-manual/5-Auto series, 720/480 pair, independent output capture, physical audio/display or newer-tree qualification. Preserve Signout failure separately from the observed switch. |
+| Android prepared 1080 / first-prepared | retained-current failure; new diagnostics unmeasured | UI11 on 2314ccb45/APK153 requested 1080 outside its 480/720 continuous family. Successor media returned 200, but SDK retained the incumbent after 12,326 ms; no 1080 settlement. Later diagnostic source compilation is not a successful prepared handoff. | Qualify the prepared route separately from continuous family switches; current first-prepared/server correction remains unqualified. |
+| Android APK156 | compile/install preparation only | Read-only Auto/EOF/frame diagnostics compiled with JBR 21; unit test sources compiled but were not run. APK SHA de71f37a5d0244c2a3f88ca21dc08884acc02564f8ade20177f95e37033637ef; 345 Android inputs and 3 generated reader assets matched parent 36fa91aba and frozen f32594248. Owned emulator installation/readback/idle passed in 7.329 s. | APK156 runtime is unmeasured; compile/install cannot qualify a switch, Auto journal or EOF probe. |
 | Safari / iOS / tvOS / Android matrix | separately owned/incomplete | Platform owners retain native receipts and failures; desktop evidence cannot qualify these rows. | Obtain their source/device-specific runtime evidence through parent; full acceptance remains open. |
 | iOS normal-selection full series | prior-source method-path full-series failed | Lab 236 fresh namespace binds server 909e0c7b7 through launch controller/build ledger; SDK receipt has no server.build field. Fifteen manual requests each observed; 346 playback probes; zero actual Auto changes; series terminal native_failure/app_script_stopped. No UI taps or physical/audio capture. Later lab238 on71d7f2ba4 reports 145 Auto fact rows and 79 SDK playback probes. Binding observer repaired, but 156 completed 200 segments have no link receipt; planned cliff did not apply; zero actual Auto changes. This diagnostic does not erase236 full-series failure. | First verify accepted Auto control/successor registration and one real applied cliff on new exact source. Only after that blocker is fixed start a fresh required20-transition series; no repeated15-manual diagnostic just to reconfirm prior success. |
 
@@ -99,6 +110,29 @@ The native app receipt and launch controller live in the owned ignored
 the JSON inventory. The caption packet proof and native final owned-process
 guard are separately bound there; construction/cleanup evidence does not
 change playback verdicts. Preserve failure status and source-binding scope.
+
+The Android additions are separate from that historical JSON scan. UI13 and
+UI14 retain their owned `cq-android-continuous-ui13/controller-result.json`
+and `cq-android-continuous-ui14/controller-result.json` receipts under
+`target/`; neither is promoted to a successful transition. UI15's safe
+package is retained under
+`target/cq-acceptance-runtime/android3201-ui15-evidence/`; archive SHA256
+`d8de04cbbcc872c46c8d6822db058b2cbfa2f901be4aac20ead4c6d76443c4b2`.
+Its controller, request/SDK proof and cleanup preserve the failed Signout.
+The prepared-route failure is retained separately under
+`target/cq-acceptance-runtime/android2314-owner-ui11-evidence/`.
+
+APK156 preparation is retained under
+`target/cq-acceptance-runtime/android-a9-apk156-preparation/`.
+The source/provenance package SHA256 is
+`048340af3ddb04c61cc0cc70b11c729191e7445091a1f6fefafcebab07d90794`;
+its later `owned-install-result.json` SHA256 is
+`11267ca84af406011e540dcb2fdea31fef891b12f1f9e011d3b32496503b8c98`.
+The subsequent all-345-input/three-reader comparison also matches frozen
+`f32594248d44a8f9a6ba9f1aad52b6d33909f1c9`; source equality is not runtime
+acceptance. Installation used no server binary or playback lane. These receipts do not
+update the historical companion JSON or establish current server/browser
+qualification.
 
 ## 4. Focused lifecycle helper — record state without claiming capture
 
@@ -153,16 +187,16 @@ merge session.
 ## 6. Small runtime batches — fix the failed path before a new series
 
 The parent owns source freeze, exact compilation and the shared lab lane.
-The current `60c0f0f00` candidate contains the merged geometry/panel work and
-receipt-registration repair. Compile/readiness preparation does not qualify
-it. Android 153 has the same 345 tracked source files at `b234bd090`, `dfb9e2a03`
-and `60c0f0f00`; a server-only change does not require rebuilding that APK.
-The receipt inventory binds the signed compile/APK provenance separately.
+The current candidate is `f32594248d44a8f9a6ba9f1aad52b6d33909f1c9`.
+The measured Android switch remains on server `3201f925c` and APK154;
+APK156's later source/compile/install evidence remains separate. Current
+first-prepared, integrated server and browser qualification are still open.
+No prior component receipt transfers acceptance to the new tree.
 
 | Order | Smallest useful batch | Evidence needed before moving on |
 |---|---|---|
 | 1 | Phone Auto registration and one actual cliff, after the diagnostic lane releases. | Accepted Auto control and correctly bound successor/body receipts, then an applied cliff with actual target progress. Native 238 repaired observer binding but observed 0 receipts and did not apply its cliff. Do not repeat 15 manual changes just to reconfirm them. |
-| 2 | Retry only Android's failed fixture/Play step and720→1080 on a fresh isolated lab. | CurrentAPK 153; explicit manual loopback lab URL/login prerequisites; exact fixture identity; unique Play control with ASCII padding trimmed; corroborate SDK target evidence. Prior909 selector failure remains recorded, with 0 playback events. UI taps alone do not prove settlement. |
+| 2 | One actual 720→480 companion switch if the fresh session's family contains both; separately diagnose prepared 1080. | APK156 on a newly source-bound frozen lab; actual incumbent/family/member/recipe/cost proof before normal UI selection, then new transaction/revision/accepted filmTick and SDK continuous target. UI15 proves only 1080→720 on 3201; UI13/UI14 and prepared UI11 failures remain. No target tap outside the measured family. Only after focused success run the required fresh 15-manual/5-Auto series with actual accepted Auto changes and scoped client EOF/frame probes. |
 | 3 | One mute-cycle state case and one 2x clock case. | Each fresh named receipt preserves identity/counters and End census. These cases remain unmeasured and cannot supply audio or quality-plus-rate/mute proof. |
 | 4 | Required current-source browser20-transition series after focused blockers are fixed. | One frozen candidate;20 consecutive actual transitions including 5 Auto; independently calibrated output. Incorporate lifecycle states in that new series where supported rather than replaying old675/909 successes merely for reassurance. Existing state helpers do not yet implement plus-switch assertions. |
 | 5 | Remaining platform/source/pressure gaps as separate scoped cases. | TV initial startup first; actual Safari native-HLS availability; separately authorized real/VFR/source-copy families and measured shared-reader/disk work. Do not relabel pause as background, an emulator as a physical low-end device, or read_chars as disk pressure. |
@@ -176,7 +210,8 @@ When the candidate moves, the required final series must qualify its new tree.
 ```bash
 # Prepared commands only: parent supplies exact new build and owned paths.
 CQ_SERVER=/owned/source/target/debug/plurxd
-CQ_BUILD=60c0f0f00
+CQ_BUILD=f32594248
+# Full archive identity: f32594248d44a8f9a6ba9f1aad52b6d33909f1c9
 CQ_FIXTURES=/owned/fixtures
 CQ_FIREFOX=/owned/firefox
 CQ_GECKODRIVER=/owned/geckodriver
@@ -219,5 +254,6 @@ new backend/proxy templates require an explicit expected server source and
 verify `/system` before UI entry. Normal Signout may need bounded Settings
 scrolling and returns to the cached server's Login screen, so the next fresh
 connection uses the shipped **Use a different server** control first.
-No preparation enables a feature, changes a readiness threshold or starts a
-backend, device app or test suite.
+These inactive preparations grant no runtime slot. APK156 installation has
+completed on the owned emulator with the app idle; its playback and probes
+remain unmeasured. No unit execution or current-tree acceptance follows.

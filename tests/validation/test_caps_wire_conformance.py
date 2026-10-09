@@ -203,3 +203,12 @@ class CapsWireConformance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HlsHevcWireConformance(unittest.TestCase):
+    def test_transport_claim_is_independent_and_optional(self):
+        self.assertIn("var hlsHevcSampleEntries: [String]? = nil", read(APPLE))
+        self.assertIn("val hls_hevc_sample_entries: List<String>? = null", read(ANDROID))
+        self.assertIn("hls_hevc_sample_entries:Array.isArray(c.hlsHevcSampleEntries)", read(WEB))
+        self.assertNotIn("hlsHevcSampleEntries: hevc ?", read(APPLE))
+        self.assertNotIn("hlsHevcSampleEntries=PLAY_CAPS.progressiveHevcSampleEntries", read(WEB))

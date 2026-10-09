@@ -153,6 +153,12 @@ jobs:
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint
+      - name: Provision checksummed public K08 oracle sources
+        run: |
+          set -eu
+          fixture="$RUNNER_TEMP/hiqlite-public-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
+          printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
       - name: Check CI, deploy, and shipping contracts
         env:
           GITHUB_TOKEN: ${{ github.token }}

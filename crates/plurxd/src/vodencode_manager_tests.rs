@@ -1165,6 +1165,11 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3")
         .await
         .expect("audio-only capacity");
+    // An oversized family may own an idle pool exclusively. Make this
+    // refusal phase genuinely non-idle without changing the family budget.
+    let unrelated_live = video.admissions
+        .try_admit_software(3, 1, crate::admission::Priority::Live)
+        .expect("unrelated live CPU credit");
     let refused = create(&manager, &request)
         .await
         .err()
@@ -1229,6 +1234,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         .expect("incumbent survives family denial")
         .result
         .is_ok());
+    drop(unrelated_live);
     manager
         .vod
         .end(&incumbent.session_id, crate::vodserve::Terminal::Deleted)

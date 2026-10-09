@@ -736,6 +736,7 @@ def audit_merge_regressions(
     ledger: MergeLedger,
     boundary: str | None,
     post_boundary: frozenset[str],
+    landed_baseline: str | None = None,
 ) -> LandingAudit:
     """Audit the `Regression-Test:` lines on landing commits past the boundary.
 
@@ -831,11 +832,19 @@ def audit_merge_regressions(
             )
         )
 
-    landed_set = (
-        frozenset(_git(root, "rev-list", *landings, "--not", boundary, "--").split())
-        if landings
-        else frozenset()
-    )
+    if landed_baseline is not None:
+        # The authenticated promotion base is actual main. Integration task
+        # landings still validate their own fields, but their first-parent
+        # ancestors have not thereby landed on main.
+        landed_set = frozenset(
+            _git(root, "rev-list", landed_baseline, "--not", boundary, "--").split()
+        )
+    else:
+        landed_set = (
+            frozenset(_git(root, "rev-list", *landings, "--not", boundary, "--").split())
+            if landings
+            else frozenset()
+        )
     return LandingAudit(
         rows=tuple(rows),
         errors=tuple(errors),
@@ -904,7 +913,12 @@ def audit_history(
     coverage_path: Path = DEFAULT_COVERAGE,
     client_fixes_path: Path | None = None,
     merge_ledger_path: Path | None = None,
+    landed_baseline: str | None = None,
 ) -> HistoryReport:
+    if landed_baseline is not None:
+        if not re.fullmatch(r"[0-9a-f]{40}", landed_baseline):
+            raise HistoryError("promotion history baseline must be an immutable commit SHA")
+        _git(root, "merge-base", "--is-ancestor", landed_baseline, "HEAD")
     entries = load_coverage(coverage_path)
     client_fixes = load_client_fixes(
         client_fixes_path or root / "tests" / "client-fixes.toml"
@@ -940,7 +954,7 @@ def audit_history(
         post_boundary,
     )
     landing = audit_merge_regressions(
-        root, history_heads, merge_ledger, boundary, post_boundary
+        root, history_heads, merge_ledger, boundary, post_boundary, landed_baseline
     )
     errors.extend(landing.errors)
 
@@ -1204,6 +1218,28 @@ def _write_report(path: Path, report: HistoryReport) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def authenticated_history_baseline(environment: dict[str, str], root: Path) -> str | None:
+    """Inputs select authentication; they never authorize a baseline themselves."""
+    fields = ("PLURX_PROMOTION_PR", "PLURX_PROMOTION_HEAD_SHA", "PLURX_PROMOTION_BASE_SHA")
+    effort_task = environment.get("PLURX_HISTORY_CONTEXT") == "effort-task"
+    if not effort_task and not any(environment.get(field) for field in fields):
+        return None
+    from validation.qualification import (
+        QualificationError, resolve_effort_history_binding, resolve_manual_binding,
+    )
+
+    try:
+        if effort_task:
+            if any(environment.get(field) for field in fields):
+                raise QualificationError("ambiguous history context")
+            binding = resolve_effort_history_binding(environment, root)
+        else:
+            binding = resolve_manual_binding(environment, root)
+    except QualificationError as exc:
+        raise HistoryError("authenticated promotion history binding refused") from exc
+    return str(binding["base_sha"])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Verify every historical corrective commit has validation evidence."
@@ -1220,7 +1256,8 @@ def main(argv: list[str] | None = None) -> int:
             verify_migration_fidelity(args.compare_legacy, DEFAULT_COVERAGE)
             print("regression-ledger migration preserves every legacy entry")
             return 0
-        report = audit_history()
+        baseline = authenticated_history_baseline(dict(os.environ), REPO_ROOT)
+        report = audit_history(landed_baseline=baseline)
     except HistoryError as exc:
         print(f"history audit error: {exc}", file=sys.stderr)
         return 2

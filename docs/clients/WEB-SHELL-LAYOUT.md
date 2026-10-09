@@ -202,7 +202,16 @@ had to be edited.
 | 70 | [`pages/shared-artwork.js`](../../crates/plurxd/src/web/pages/shared-artwork.js) | Authenticated B-only Shared artwork, bounded streaming reads and owned bitmap/canvas retirement. Opaque browser decoder and GPU storage remain separate qualification limits. | **New.** Shared artwork integration. |
 | 71 | [`pages/shared-libraries.js`](../../crates/plurxd/src/web/pages/shared-libraries.js) | Separate full-reference Shared browsing, bounded B catalogue reads, and independent Continue Watching groups. | **New.** Shared catalogue integration. |
 | 72 | [`pages/sharing-management.js`](../../crates/plurxd/src/web/pages/sharing-management.js) | Exact integer admin sharing transport, transient invitation/pairing drafts, complete viewer matrices and Tailnet endpoint editors. | **New.** Shared management integration. |
-| 73 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
+| 73 | [`core/remote-navigation.js`](../../crates/plurxd/src/web/core/remote-navigation.js) | Semantic scope/action registry, spatial focus, safe snapshots and revision invalidation; registration and dispatch interfaces documented in the source header. | **New.** Remote adapter. |
+| 74 | [`core/remote-router.js`](../../crates/plurxd/src/web/core/remote-router.js) | Safe Home/library/category/detail/search navigation and existing playback-owner adapters; unknown routes and unowned overlays reject remote commands. Network authentication belongs to the receiver integration. | **New.** Remote adapter. |
+| 75 | [`core/remote-guard.js`](../../crates/plurxd/src/web/core/remote-guard.js) | Strict v1 whole-body decoding and receiver-local admission/ACK guard. | **New.** Remote integration. |
+| 76 | [`core/remote-client.js`](../../crates/plurxd/src/web/core/remote-client.js) | Same-origin bearer/proof transport and scoped device credentials. | **New.** Remote integration. |
+| 77 | [`core/remote-receiver.js`](../../crates/plurxd/src/web/core/remote-receiver.js) | Exclusive foreground Web Lock receiver, presence, serial polling and existing semantic owner dispatch. | **New.** Remote integration. |
+| 78 | [`core/remote-controller.js`](../../crates/plurxd/src/web/core/remote-controller.js) | Explicit lease acquisition, bounded sequence allocation, desired-state controls and held-direction retirement. | **New.** Remote integration. |
+| 79 | [`pages/remote-pairing.js`](../../crates/plurxd/src/web/pages/remote-pairing.js) | Physically approved TV pairing dialog, bounded QR rendering and generation-fenced phone grant flow. | **New.** Remote integration. |
+| 80 | [`pages/settings-remote.js`](../../crates/plurxd/src/web/pages/settings-remote.js) | Non-admin device-local Developer choices, screen registration and account grant management. | **New.** Remote integration. |
+| 81 | [`pages/remote.js`](../../crates/plurxd/src/web/pages/remote.js) | Mobile web screen picker, foreground controls, safe suggestions and lifecycle integration. | **New.** Remote integration. |
+| 82 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
 
 ## 3. Adding a file
 

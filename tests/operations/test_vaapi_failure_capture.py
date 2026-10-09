@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import runpy
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,7 @@ class VaapiFailureCaptureTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(CAPTURE.read_bytes()).hexdigest(),
                          '7df472326256a68074b0a5f26621f50a7b03897c6183f5ed09d6667e8076cf5f')
         self.assertEqual(hashlib.sha256(WRAPPER.read_bytes()).hexdigest(),
-                         '7a23d2f2953da23d2457163e38f1145da0836c652be7f3d4e6aa447f7bbcb842')
+                         '3a21930760fef315e25467eda3c4b96984331b41877e9aeda08900fada0b59ab')
         self.capture = runpy.run_path(str(CAPTURE))
 
     def test_fixed_signal_selection_preserves_ramp_and_original_sharp_reference(self):
@@ -134,8 +135,10 @@ class VaapiFailureCaptureTests(unittest.TestCase):
         self.assertIn('^[0-9a-f]{64}$', wrapper)
         self.assertNotIn('docker rm -f "$container"', wrapper)
         self.assertIn('kill "$watcher"', wrapper)
-        self.assertIn('for job in $(jobs -p)', wrapper)
-        self.assertNotIn('jobs -pr', wrapper)
+        self.assertIn('for job in $(jobs -pr) $(jobs -ps)', wrapper)
+        self.assertNotIn('for job in $(jobs -p);', wrapper)
+        self.assertNotIn('for job in $(jobs -pr);', wrapper)
+        self.assertIn('if watcher_running; then kill "$watcher"', wrapper)
         self.assertIn('[ "$status" -ne 0 ] &&', wrapper)
         self.assertIn('-le 524288', wrapper)
         self.assertIn('datetime.timedelta(hours=48)', wrapper)
@@ -207,6 +210,70 @@ else: sys.exit(99)
                         self.assertEqual(removals, [])
                         self.assertIsNone(receipt['cleanup']['container_id'])
                         self.assertEqual(receipt['cleanup']['container_result'], 'identity_unresolved')
+
+    def test_watcher_job_states_exclude_completed_but_keep_running_and_stopped(self):
+        # Exercise the actual Bash helper only: no wrapper admission, Docker,
+        # HTTP, media or GPU. Completed exit status must survive the later wait.
+        wrapper = WRAPPER.read_text()
+        function = wrapper[wrapper.index('watcher_running() {'):wrapper.index('cleanup() {')]
+        script = '''set -euo pipefail
+watcher=''
+cleanup_test() {
+ for owned in $(jobs -pr) $(jobs -ps); do
+  [ "$owned" != "$watcher" ] || kill -KILL "$owned" 2>/dev/null || true
+ done
+ [ -z "$watcher" ] || wait "$watcher" 2>/dev/null || true
+}
+trap cleanup_test EXIT
+''' + function + '''
+(exit 7) & watcher=$!
+for ((n=0;n<200;n++)); do
+ kill -0 "$watcher" 2>/dev/null || break
+ sleep 0.01
+done
+if kill -0 "$watcher" 2>/dev/null; then exit 10; fi
+if watcher_running; then exit 11; fi
+if wait "$watcher"; then exit 12; else [ "$?" -eq 7 ]; fi
+watcher=''
+echo completed_false_reaped_7
+sleep 30 & watcher=$!
+watcher_running || exit 13
+echo running_true
+kill -STOP "$watcher"
+stopped=false
+for ((n=0;n<200;n++)); do
+ # Bash 3.2 without job control can leave a stopped child in jobs -pr.
+ # Prove the OS stop independently, then require the actual helper to count it.
+ state=$(ps -o stat= -p "$watcher")
+ [[ "$state" = *T* ]] && stopped=true
+ [ "$stopped" = false ] || break
+ sleep 0.01
+done
+[ "$stopped" = true ] || exit 14
+watcher_running || exit 15
+echo stopped_true
+kill -KILL "$watcher"
+if wait "$watcher" 2>/dev/null; then exit 16; else [ "$?" -eq 137 ]; fi
+watcher=''
+echo stopped_reaped_137
+'''
+        process = subprocess.Popen(['bash', '-c', script], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, start_new_session=True,
+                                   env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LC_ALL': 'C'})
+        try:
+            stdout, stderr = process.communicate(timeout=8)
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=2)
+            process.stdout.close()
+            process.stderr.close()
+        self.assertEqual(process.returncode, 0, stderr.decode(errors='replace'))
+        self.assertEqual(stdout.decode().splitlines(), [
+            'completed_false_reaped_7', 'running_true', 'stopped_true', 'stopped_reaped_137'])
 
 
 if __name__ == '__main__':

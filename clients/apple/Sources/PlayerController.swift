@@ -12454,11 +12454,22 @@ extension PlayerController: PreparedSuccessorHost {
 final class SharedPlayerController: ObservableObject {
     private enum Operation {
         case start
+        case remoteStart(SharedPlaybackPlan, () -> Bool, (CinemaRemoteOutcome) -> Void)
         case control(SharedControlIntent)
+        case remoteControl(SharedControlIntent, () -> Bool, (CinemaRemoteOutcome) -> Void)
         case change(SharedDirectedChange)
         case restartDirect(session: String)
     }
     let player = AVPlayer()
+    private let makeClient: () throws -> SharedDecisionClient
+    init() { makeClient = { try SharedDecisionClient() } }
+    #if DEBUG
+    private var beforeStopCleanup: (() async -> Void)?
+    init(testConfiguration: URLSessionConfiguration, beforeStopCleanup: (() async -> Void)? = nil) {
+        makeClient = { try SharedDecisionClient(testConfiguration: testConfiguration) }
+        self.beforeStopCleanup = beforeStopCleanup
+    }
+    #endif
     @Published private(set) var playback: SharedStartedMedia?
     @Published private(set) var plan: SharedPlaybackPlan?
     @Published private(set) var failure: String?
@@ -12473,6 +12484,8 @@ final class SharedPlayerController: ObservableObject {
     private let clientInstanceId = UUID().uuidString.lowercased()
     private var operation: Task<Void, Never>?
     private var operationSerial = 0
+    private var networkOperationSerial: Int?
+    private var stopCleanup: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var unreleased: [SharedStartedMedia] = []
     private var timeObserver: Any?
@@ -12530,16 +12543,62 @@ final class SharedPlayerController: ObservableObject {
 
     /// Seek, pause or play. On HLS B accepts it first; on direct play there is
     /// no control route (Local or shared), so the renderer is the whole state.
-    func control(_ intent: SharedControlIntent) async { await run(.control(intent)) }
+    func control(_ intent: SharedControlIntent) async {
+        await retireNetworkBeforePhysicalOperation()
+        await run(.control(intent))
+    }
+    private(set) var remoteRetryRequiresPreparation = false
+    var remoteStartAvailable: Bool { !closing && !busy && plan == nil }
+    // A visible stopped/ended owner still admits idempotent Stop and exit.
+    var remoteStopAvailable: Bool { true }
+    func startRemote(_ plan: SharedPlaybackPlan, permit: @escaping () -> Bool) async -> CinemaRemoteOutcome {
+        guard remoteStartAvailable, permit() else { return .unavailable }
+        self.plan = plan; starting = true
+        player.appliesMediaSelectionCriteriaAutomatically = false
+        authorizationObserver = Session.shared.observeAuthorizationChanges { [weak self] _ in Task { @MainActor in await self?.stop() } }.id
+        var result: CinemaRemoteOutcome = .unavailable
+        await run(.remoteStart(plan, permit, { result = $0 }), network: true)
+        starting = false
+        if result != .applied, !closing, playback == nil,
+           self.plan?.request.requestId == plan.request.requestId {
+            self.plan = nil
+            remoteRetryRequiresPreparation = true
+            failure = "Shared playback could not be confirmed. Press Play to prepare this file again."
+            if let authorizationObserver { Session.shared.removeAuthorizationObserver(authorizationObserver); self.authorizationObserver = nil }
+        } else if result == .applied {
+            remoteRetryRequiresPreparation = false
+            failure = nil
+        }
+        return result
+    }
+    var remoteTransportAvailable: Bool { !closing && playback != nil && !busy && !sessionEnded }
+    func cancelNetworkControl() {
+        guard networkOperationSerial == operationSerial else { return }
+        operation?.cancel()
+    }
+    private func retireNetworkBeforePhysicalOperation() async {
+        guard networkOperationSerial == operationSerial, let pending = operation else { return }
+        pending.cancel()
+        await pending.value
+    }
+    /// Uses the incumbent operation owner and B control channel. A network
+    /// request never preempts unrelated preparation or creates another renderer.
+    func controlRemote(_ intent: SharedControlIntent, permit: @escaping () -> Bool) async -> CinemaRemoteOutcome {
+        guard intent == .play || intent == .pause, remoteTransportAvailable, permit() else { return .unavailable }
+        var result: CinemaRemoteOutcome = .unavailable
+        await run(.remoteControl(intent, permit, { result = $0 }), network: true)
+        return result
+    }
 
     /// Quality, audio or subtitle. B declines a directed change on a shared
     /// session with `preparation: "none"`, and the answer is a fresh Start.
-    func change(_ change: SharedDirectedChange) async { await run(.change(change)) }
+    func change(_ change: SharedDirectedChange) async { await retireNetworkBeforePhysicalOperation(); await run(.change(change)) }
 
     func currentPositionMs() -> Int { positionMs().map { Int($0) } ?? lastPositionMs }
 
-    private func run(_ op: Operation) async {
+    private func run(_ op: Operation, network: Bool = false) async {
         guard !closing else { return }
+        if network && operation != nil { return }
         if let current = operation {
             // Only a preparation that has not reached its switch yields, and
             // only to one waiting action: it settles `aborted` and returns.
@@ -12551,10 +12610,11 @@ final class SharedPlayerController: ObservableObject {
         }
         operationSerial += 1
         let serial = operationSerial
+        networkOperationSerial = network ? serial : nil
         busy = true; preemptRequested = false
         let task = Task {
             await self.perform(op)
-            if self.operationSerial == serial, !self.closing { self.operation = nil; self.busy = false }
+            if self.operationSerial == serial, !self.closing { self.operation = nil; self.busy = false; self.networkOperationSerial = nil }
         }
         operation = task
         await task.value
@@ -12563,7 +12623,15 @@ final class SharedPlayerController: ObservableObject {
     private func perform(_ op: Operation) async {
         switch op {
         case .start: await performStart()
-        case .control(let intent): await performControl(intent)
+        case .remoteStart(let plan, let permit, let complete):
+            do {
+                guard permit(), !closing, !Task.isCancelled else { complete(.unavailable); return }
+                let client = try makeClient(); self.client = client
+                try await attach(plan, client: client, play: true, predecessor: nil, permit: permit)
+                complete(playing ? .applied : .unavailable)
+            } catch { complete(.unavailable) }
+        case .control(let intent): _ = await performControl(intent)
+        case .remoteControl(let intent, let permit, let complete): complete(await performControl(intent, permit: permit))
         case .change(let change): await performChange(change)
         case .restartDirect(let session): await restartDirect(session)
         }
@@ -12572,7 +12640,7 @@ final class SharedPlayerController: ObservableObject {
     private func performStart() async {
         guard let plan else { return }
         do {
-            let client = try SharedDecisionClient(); self.client = client
+            let client = try makeClient(); self.client = client
             try await attach(plan, client: client, play: true, predecessor: nil)
         } catch {
             if !closing, !(error is CancellationError) { failure = error.localizedDescription }
@@ -12584,13 +12652,14 @@ final class SharedPlayerController: ObservableObject {
     /// only then release `predecessor`. A failed successor leaves the
     /// predecessor attached and serving.
     private func attach(_ plan: SharedPlaybackPlan, client: SharedDecisionClient, play: Bool,
-                        predecessor: SharedStartedMedia?) async throws {
+                        predecessor: SharedStartedMedia?, permit: (() -> Bool)? = nil) async throws {
+        if let permit, !permit() || closing || Task.isCancelled { throw CancellationError() }
         let media = try await client.startMedia(context: plan.subject.context, request: plan.request)
         let url: URL
         var nextChannel: SharedControlChannel?
         do {
             try Task.checkCancellation()
-            guard !closing else { throw CancellationError() }
+            guard !closing, permit?() ?? true else { throw CancellationError() }
             switch media {
             case .hls(let started):
                 url = try client.playlistURL(playback: started)
@@ -12611,8 +12680,17 @@ final class SharedPlayerController: ObservableObject {
                 url = try client.directURL(direct)
             }
         } catch {
-            unreleased.append(media); await releaseUnreleased(client)
+            unreleased.append(media)
+            let cleanup = Task { await self.releaseUnreleased(client) }
+            await cleanup.value
             throw error
+        }
+        // The returned B session must be released if its exact permit retired;
+        // it must never attach to a replacement native renderer owner.
+        if let permit, !permit() || closing || Task.isCancelled {
+            let cleanup = Task { try? await client.end(media: media) }
+            await cleanup.value
+            throw CancellationError()
         }
         // Direct play reads the signed alias with no account header.
         let item = AVPlayerItem(url: url)
@@ -12630,9 +12708,18 @@ final class SharedPlayerController: ObservableObject {
             await player.seek(to: CMTime(seconds: Double(resume) / 1000, preferredTimescale: 1000),
                               toleranceBefore: .zero, toleranceAfter: .zero)
         }
-        await applySubtitle(plan, item: item)
-        await releaseUnreleased(client)
+        await applySubtitle(plan, item: item, permit: permit)
+        let release = Task { await self.releaseUnreleased(client) }
+        await release.value
         guard !closing, player.currentItem === item else { return }
+        if let permit, !permit() || Task.isCancelled {
+            player.pause(); playing = false
+            // This session is owned but was never allowed to start rendering.
+            let cleanup = Task { try? await client.end(media: media) }
+            await cleanup.value
+            if player.currentItem === item { player.replaceCurrentItem(with: nil); playback = nil; channel = nil }
+            throw CancellationError()
+        }
         if play { player.play() } else { player.pause() }
         playing = play
         installTimeObserver()
@@ -12648,44 +12735,63 @@ final class SharedPlayerController: ObservableObject {
         }
     }
 
-    private func applySubtitle(_ plan: SharedPlaybackPlan, item: AVPlayerItem) async {
+    private func applySubtitle(_ plan: SharedPlaybackPlan, item: AVPlayerItem, permit: (() -> Bool)? = nil) async {
         guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
-              player.currentItem === item else { return }
+              !closing, permit?() ?? true, player.currentItem === item else { return }
         _ = PlayerController.selectNativeSubtitle(plan.rawSubtitleIndex, tracks: plan.decision.presentation.subtitles ?? [],
                                               in: group, of: item)
     }
 
-    private func performControl(_ intent: SharedControlIntent) async {
-        guard let media = playback, let client, let plan else { return }
+    private func performControl(_ intent: SharedControlIntent, permit: (() -> Bool)? = nil) async -> CinemaRemoteOutcome {
+        func allowed() -> Bool { !closing && !Task.isCancelled && (permit?() ?? true) }
+        guard allowed(), let media = playback, let client, let plan else { return .unavailable }
         notice = nil
         switch media {
         case .direct:
+            guard allowed() else { return .unavailable }
             await applyRenderer(intent)
+            return allowed() ? .applied : .unavailable
         case .hls(let started):
             if sessionEnded {
-                if intent == .pause { return }
+                if intent == .pause { return .applied }
+                guard permit == nil, allowed() else { return .unavailable }
                 await reopen(at: target(intent), change: nil, play: intent == .play)
-                return
+                return .applied
             }
-            guard var channel else { return }
+            guard var channel else { return .unavailable }
             do {
                 let request = try channel.request(intent, sample: sample(), selection: try plan.frozenControlSelection())
+                guard allowed() else { return .unavailable }
                 self.channel = channel
-                let outcome = try await exchange(request, playback: started, channel: channel, client: client)
+                let outcome = try await exchange(request, playback: started, channel: channel, client: client, permit: permit)
+                // Settling an already-owned unwanted offer is resource cleanup,
+                // independent of the expired/cancelled semantic permission.
+                let cleanup: (() async -> Void)?
+                if case .offered(let offer, _) = outcome { cleanup = { await self.abortUnwanted(offer, playback: started, client: client) } }
+                else { cleanup = nil }
+                return await SharedRemoteControlCompletion.finish(cleanup: cleanup, permit: allowed) {
+                // Once B was contacted, cancellation/expiry cannot prove rollback.
                 switch SharedControlStep.after(intent, outcome: outcome, playing: playing, restartAllowed: restartAllowance) {
                 case .apply:
+                    guard allowed() else { return .unavailable }
                     await applyRenderer(intent)
-                    if case .offered(let offer, _) = outcome { await abortUnwanted(offer, playback: started, client: client) }
-                case .pauseEnded: player.pause(); playing = false; sessionEnded = true
+                    return .applied
+                case .pauseEnded:
+                    guard allowed() else { return .unavailable }
+                    player.pause(); playing = false; sessionEnded = true
+                    return .applied
                 case .reopen(let play):
+                    guard permit == nil, allowed() else { return .unavailable }
                     restartAllowance = false
                     await reopen(at: target(intent), change: nil, play: play)
-                case .ended: failure = "This Shared session ended."
-                case .refused: notice = "The Shared server did not accept this control. Try again."
+                    return .applied
+                case .ended: failure = "This Shared session ended."; return .unavailable
+                case .refused: notice = "The Shared server did not accept this control. Try again."; return .unsupported
                 }
-            } catch is CancellationError {
+                }
             } catch {
-                notice = "The Shared server did not accept this control. Try again."
+                if allowed() { notice = "The Shared server did not accept this control. Try again." }
+                return .unavailable
             }
         }
     }
@@ -12733,12 +12839,14 @@ final class SharedPlayerController: ObservableObject {
 
     /// One exchange, replayed once with identical bytes when B asks for it.
     private func exchange(_ request: SharedControlRequest, playback: SharedStartedPlayback,
-                          channel: SharedControlChannel, client: SharedDecisionClient) async throws -> SharedControlOutcome {
+                          channel: SharedControlChannel, client: SharedDecisionClient, permit: (() -> Bool)? = nil) async throws -> SharedControlOutcome {
+        if let permit, !permit() || Task.isCancelled || closing { throw CancellationError() }
         let first = try await client.control(playback: playback, channel: channel, request: request)
         lastExchangeMs = PlaybackControlSession.monotonicMs()
         guard case .retry(let delay) = first else { return first }
         try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
         defer { lastExchangeMs = PlaybackControlSession.monotonicMs() }
+        if let permit, !permit() || Task.isCancelled || closing { throw CancellationError() }
         return try await client.control(playback: playback, channel: channel, request: request)
     }
 
@@ -12895,14 +13003,30 @@ final class SharedPlayerController: ObservableObject {
         }
     }
 
-    func stop(watched: Bool = false) async {
-        guard !closing else { return }; closing = true
+    /// Local stop is synchronous; owned resource cleanup survives dismissal,
+    /// command-credit expiry and cancellation of the caller awaiting its result.
+    @discardableResult
+    func beginStop(watched: Bool = false) -> Task<Void, Never> {
+        if let stopCleanup { return stopCleanup }
+        closing = true
         player.pause(); playing = false
         if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
         for observer in itemObservers { NotificationCenter.default.removeObserver(observer) }
         itemObservers = []; statusObservation = nil
         if let authorizationObserver { Session.shared.removeAuthorizationObserver(authorizationObserver); self.authorizationObserver = nil }
-        if let operation { operation.cancel(); await operation.value }
+        operation?.cancel()
+        let cleanup = Task { @MainActor in await self.finishStop(watched: watched) }
+        stopCleanup = cleanup
+        return cleanup
+    }
+
+    func stop(watched: Bool = false) async { await beginStop(watched: watched).value }
+
+    private func finishStop(watched: Bool) async {
+        #if DEBUG
+        await beforeStopCleanup?()
+        #endif
+        if let operation { await operation.value }
         operation = nil; busy = false; preparing = false
         discardPreparedSuccessor(); preparation = nil
         await progressTask?.value
