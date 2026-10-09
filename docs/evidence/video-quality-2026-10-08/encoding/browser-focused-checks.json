@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-09T03:31:00.479614+00:00",
+  "scope": "Focused browser-reproducer failure-path checks after the final adversarial review. Fake CDP sockets, child processes and page context only; no real browser or media matrix rerun.",
+  "implementation": {
+    "path": "docs/evidence/video-quality-2026-10-08/encoding/probe-clients.mjs",
+    "sha256": "4ab8913159cbac564b875fd1f77c6998ee7dd7809fc9e6ccf0294f55e89f050a",
+    "unchanged_between_initial_and_selective_runs": true
+  },
+  "final_test_source": {
+    "path": "docs/evidence/video-quality-2026-10-08/encoding/probe-clients-failure.test.mjs",
+    "sha256": "6b31966a2c2f1f60199755dbe4e4f8499f9888eb59c5e69a9f3477e5c46df93e"
+  },
+  "initial_run": {
+    "command": "node --test docs/evidence/video-quality-2026-10-08/encoding/probe-clients-failure.test.mjs",
+    "exit_code": 1,
+    "tests": 10,
+    "passed": 8,
+    "failed": 2,
+    "retained_passing_tests": [
+      "fatal manifest rejects the page startup promise before its deadline",
+      "a manifest that never responds has a hard page startup deadline",
+      "a play promise that never settles has a hard page startup deadline",
+      "CDP request timeout rejects an unresponsive awaitPromise command",
+      "CDP socket close rejects every pending request and future sends",
+      "CDP socket error rejects every pending request and future sends",
+      "DevTools startup timeout reaps its partial child with kill fallback before profile removal",
+      "profile is retained and cleanup fails explicitly if even SIGKILL does not reap the child"
+    ],
+    "failed_tests": [
+      "target-discovery failure cleans a launched child before returning a driver",
+      "WebSocket-open timeout cleans the partial socket, child and profile"
+    ],
+    "failure_reason": "The two fake partial-startup fixtures allowed only 25 ms for DevTools discovery while the poll interval is 50 ms, so they timed out before reaching their intended discovery/open failure boundary."
+  },
+  "selective_repair": {
+    "source_changed": false,
+    "test_change": "Only the two failed fixtures override startupMs to 100; all other fixture values and assertions remain unchanged.",
+    "command": "node --test --test-name-pattern='target-discovery failure|WebSocket-open timeout' docs/evidence/video-quality-2026-10-08/encoding/probe-clients-failure.test.mjs",
+    "exit_code": 0,
+    "tests": 2,
+    "passed": 2,
+    "failed": 0,
+    "passing_tests": [
+      "target-discovery failure cleans a launched child before returning a driver",
+      "WebSocket-open timeout cleans the partial socket, child and profile"
+    ]
+  },
+  "result": "Each of the ten checks has one passing result against the unchanged final implementation. The initial eight checks were not rerun.",
+  "raw_output": {
+    "saved_file": null,
+    "availability": "Console results were observed in the tool transcript; no raw TAP or console-output file was saved. This receipt summarizes those results and does not reconstruct raw output."
+  },
+  "additional_check": {
+    "command": "git diff --check -- docs/evidence/video-quality-2026-10-08/encoding/probe-clients.mjs docs/evidence/video-quality-2026-10-08/encoding/probe-clients-failure.test.mjs",
+    "exit_code": 0
+  },
+  "historical_browser_receipts": "Successful Chrome measurements remain unchanged and are not represented as rerun with this repaired reproducer."
+}

@@ -1,0 +1,68 @@
+{
+  "disposition": "rejected before all HLS timing cells; 24 startup cells remain valid",
+  "current": {
+    "bytes": 323150,
+    "sha256": "686eeb0cca49f5b65dde6a9f536916a48f1d3df8554efcd0c9350282cd1014b2",
+    "top_level_boxes": [
+      {
+        "offset": 0,
+        "bytes": 24,
+        "type": "styp"
+      },
+      {
+        "offset": 24,
+        "bytes": 52,
+        "type": "sidx"
+      },
+      {
+        "offset": 76,
+        "bytes": 52,
+        "type": "sidx"
+      },
+      {
+        "offset": 128,
+        "bytes": 1856,
+        "type": "moof"
+      },
+      {
+        "offset": 1984,
+        "bytes": 321166,
+        "type": "mdat"
+      }
+    ]
+  },
+  "control": {
+    "bytes": 322734,
+    "sha256": "ceb6861fd86290ffb19436680b52f195169bcc733bf25e8402c1b23390166b02",
+    "top_level_boxes": [
+      {
+        "offset": 0,
+        "bytes": 24,
+        "type": "styp"
+      },
+      {
+        "offset": 24,
+        "bytes": 52,
+        "type": "sidx"
+      },
+      {
+        "offset": 76,
+        "bytes": 52,
+        "type": "sidx"
+      },
+      {
+        "offset": 128,
+        "bytes": 1856,
+        "type": "moof"
+      },
+      {
+        "offset": 1984,
+        "bytes": 320750,
+        "type": "mdat"
+      }
+    ]
+  },
+  "first_different_byte": 66,
+  "difference_bytes": 416,
+  "interpretation": "Actual independent encoded media fragments, not playlist HTML or auth responses. Different encoded payloads do not isolate body-owner overhead under an exact-byte comparison; no HLS timings were used. Encoder variance cause was not determined or presented as a product defect. Source-copy VOD uses identical media and the same production pump_local_media owner for the remaining comparison."
+}

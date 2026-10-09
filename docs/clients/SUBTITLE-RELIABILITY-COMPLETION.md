@@ -1,7 +1,7 @@
 # Subtitle reliability — completion ledger
 
-**Status:** WebVTT/offline implementation integrated; UI snapshots complete; A/53 file-caption repair linked to its active video-processing effort; final subtitle review next.
-**Updated:** 2026-10-09 · **Initial base:** `1088d7529` · **Current main integrated:** `12680bf2e` · **Integration:** `codex/subtitle-timeline-and-window` · **Batched PR:** [#961](http://forge.lan:3000/noirr/plurx/pulls/961)
+**Status:** WebVTT/offline implementation integrated; UI snapshots complete; A/53 file-caption repair linked to its active video-processing effort; the sole adversarial review returned three findings on `f717f7c08`; corrections are in progress.
+**Updated:** 2026-10-09 · **Initial base:** `1088d7529` · **Current main integrated:** `0c4ae0aa5` · **Integration:** `codex/subtitle-timeline-and-window` · **Batched PR:** [#961](http://forge.lan:3000/noirr/plurx/pulls/961)
 
 Cinema subtitles fail across clients: selection may produce nothing, cues can
 arrive late, and a selected track can stop displaying. WebVTT is already
@@ -133,8 +133,8 @@ in the independent clone, and it is no longer used. Cleanup remains tracked.
 UI generation is complete: 78 captures, 10,849 structural facts and no
 console/page errors. It also exposed a canonical decimal file-ID mismatch in
 client logging; `20ef21267` accepts the existing web spelling without losing
-64-bit precision. The future-window browser fixture is prepared. Next is the
-sole adversarial agent review. Named cluster and new worker regressions run after
+64-bit precision. The future-window browser fixture is prepared. The sole adversarial agent
+review completed on candidate `f717f7c08`; the three findings below are being corrected. Named cluster and new worker regressions run after
 that review alongside the fast lane. The live online provider is unconfigured;
 no successful provider request is claimed.
 No production deployment or completion of the whole backlog is claimed yet.
@@ -161,3 +161,20 @@ subset here would duplicate work and omit coupled timestamp fixes. The
 subtitle ledger tracks its final qualification and landing as an explicit
 dependency. The current batch repairs client WebVTT delivery and implements
 the previously missing offline generation path.
+
+### Final review dispositions
+
+One independent adversarial agent reviewed the complete candidate
+`f717f7c08` without running tests. No second review is planned.
+
+| Finding | Correction owner | Current disposition |
+|---|---|---|
+| P1: control readiness comes from the session owner, but the cached VTT file route reads only ingress-local cache | Window-delivery builder | Implemented session-owned cache delivery and shared receiver/Source mapping; real signed remote-owner regression written, final compile pending |
+| P2: PCM conversion discards initial audio offsets and timestamp gaps, shifting generated captions | Transcription builder | Implemented source-clock-normalized PCM with bounded leading/gap silence and overlap handling; real offset/gap diagnosis and pinned compilation passed; integrated as `0816ed580` |
+| P2: FFmpeg can emit decode errors yet exit zero, allowing partial captions to publish as complete | Transcription builder | Implemented strict decoder errors plus error-level stderr veto before inference/publication; integrated as `0816ed580`; new regressions await final validation |
+
+New unit execution remains deferred until these corrections are integrated.
+The retained pass ledger contains 503 named results; retries must exclude
+every passing case. The existing CI web job cannot consume these local
+results, so local qualification must remain explicitly identified and never
+be represented as an actual green Main promotion gate.

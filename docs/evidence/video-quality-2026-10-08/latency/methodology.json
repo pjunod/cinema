@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "scope": "Bounded same-source causal qualification; physical display and full idle-machine capacity are not claimed.",
+  "controls": {
+    "episode": "Same production web scripts and daemon; disposable browser replaces only prepareNextEpisodeIfNearEnd with no-op in unprepared cells. Natural ended route stays production.",
+    "probe": "Same source/production parser, verification owner cannot populate decoder cache or pass fresh seed in control; independent decoder cache remains warm across starts.",
+    "hls": "Same current owner, storage quantum,4KiB accepted prefix/deadlines; control adds owner reconciliation before each following body frame. No control becomes a product option."
+  },
+  "episode_results": "episode-analysis.json",
+  "close_fix": "boundary-fix-analysis.json",
+  "measurement_endpoint": {
+    "episode": "requestVideoFrameCallback compositor submission; last actual outgoing callback to first successor callback; not physical panel acknowledgement.",
+    "probe": "Matched FFmpeg first-video-frame decode process completion; includes decoder exit/flush, not UI or panel proof.",
+    "hls": "Full authenticated HTTP body receipt plus exact length/SHA equality; raw elapsed distribution per request."
+  },
+  "resources": "Daemon process-tree RSS/CPU endpoints; HLS sampled max every100ms includes sampler overhead and is not kernel peak RSS. Retired child CPU is unavailable. Shared-host load/census retained.",
+  "rules": [
+    "Single batch adversarial review occurs only when merge-ready; regressions/fast lane afterward.",
+    "No unit suites were executed during these measurements.",
+    "Failed setup or boundary receipts are retained; no failed measurement is silently relabelled successful.",
+    "Temporary daemon libraries/settings/credentials are isolated; no production queue/settings were touched."
+  ],
+  "commands": {
+    "episode": "PLURX_FFMPEG=\"$TOOLS/ffmpeg\" PLURX_FFPROBE=\"$TOOLS/ffprobe\" node docs/evidence/video-quality-2026-10-08/latency/video-latency.cjs --server \"$CURRENT/plurxd\" --output \"$OUT/episodes\" --pairs 3 --trigger ended",
+    "probe": "PLURX_FFMPEG=\"$TOOLS/ffmpeg\" PLURX_FFPROBE=\"$TOOLS/ffprobe\" PLURX_HWACCEL=software node docs/evidence/video-quality-2026-10-08/latency/video-server-latency.cjs --current \"$CURRENT/plurxd\" --control \"$PROBE_CONTROL/plurxd\" --output \"$OUT/probe\" --case probe",
+    "hls": "PLURX_FFMPEG=\"$TOOLS/ffmpeg\" PLURX_FFPROBE=\"$FFPROBE\" PLURX_HWACCEL=software node docs/evidence/video-quality-2026-10-08/latency/video-server-latency.cjs --current \"$CURRENT/plurxd\" --control \"$HLS_CONTROL/plurxd\" --output \"$OUT/hls\" --case hls",
+    "combined_release": "PLURX_FFMPEG=\"$TOOLS/ffmpeg\" PLURX_FFPROBE=\"$TOOLS/ffprobe\" PLURX_HWACCEL=software node docs/evidence/video-quality-2026-10-08/latency/video-server-latency.cjs --current \"$CURRENT/plurxd\" --control \"$PROBE_CONTROL/plurxd\" --output \"$OUT/probe\" --case all --control-design combined-independent-probe-and-per-frame-roundtrip",
+    "final_web_pair": "PLURX_FFMPEG=\"$TOOLS/ffmpeg\" PLURX_FFPROBE=\"$TOOLS/ffprobe\" node docs/evidence/video-quality-2026-10-08/latency/video-latency.cjs --server \"$CURRENT/plurxd\" --output \"$OUT/episodes\" --pairs 1 --matrix final-pair --trigger ended",
+    "release_hls": "PLURX_FFMPEG=$TOOLS/ffmpeg PLURX_FFPROBE=$TOOLS/ffprobe PLURX_HWACCEL=software node docs/evidence/video-quality-2026-10-08/latency/video-server-latency.cjs --current $CURRENT --control $CONTROL --output $NEW_OUTPUT --case hls --hls-source copy --control-design combined-independent-probe-and-per-frame-roundtrip"
+  },
+  "release_control_isolation": {
+    "design": "Combined independent-probe and per-frame-owner-roundtrip patches, same release profile and runtime inputs otherwise.",
+    "probe_api": "Create response timestamp is recorded before any HLS GET by this controller, so HTTP media-body patch is inactive during API preparation timing.",
+    "first_frame": "Common decoder first-frame result exercises both control changes and is explicitly labelled combined, not probe-only attribution.",
+    "hls": "Warm encoded object has identical hash/length; each serving interval asserts zero source-probe metric delta so the independent-probe patch is inactive.",
+    "startup": "Require parser identity, completed caption probe, and no daemon child processes before matched measurements. Startup initialization is excluded from measurements."
+  },
+  "rejected_provisioning_attempts": [
+    {
+      "receipt": "probe-final-receipt.json.gz",
+      "reason": "Unoptimized packaged WASM compilation exceeded production identity budget; the common index wait timed out before measurements."
+    },
+    {
+      "receipt": "probe-qualified-receipt.json.gz",
+      "reason": "Common60s harness health deadline expired during startup capability probing; zero measured probe cells."
+    },
+    {
+      "receipt": "hls-final-receipt.json.gz",
+      "reason": "Six-file fixture set exceeded the background index pass of4 files; owned daemon stopped before measurement. Final harness uses1HLS object/4probe files."
+    },
+    {
+      "receipt": "hls-measured-receipt.json.gz",
+      "reason": "Warm-object equality rejected before measurement. Original hlsjs traversal followed only one playlist level and did not retain payload bytes, so exact cause was not proven. Final harness follows at most4levels, checks an ISO media box and preserves both payloads for diagnosis."
+    }
+  ],
+  "release_results": {
+    "summary": "qualification-summary.json",
+    "startup": "release-startup-analysis.json",
+    "hls": "release-hls-analysis.json",
+    "episode": "release-episode-analysis.json"
+  },
+  "captured_harness_reproduction": "The committed video-server-latency.cjs matches successful HLS capture. Apply release-startup-harness.patch in a disposable checkout to reconstruct the exact earlier startup-capture harness SHA; no product Rust control is committed."
+}

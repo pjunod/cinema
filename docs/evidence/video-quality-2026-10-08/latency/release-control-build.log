@@ -1,0 +1,13 @@
+   Compiling rust_decimal v1.42.1 ($CHECKOUT/vendor/rust_decimal)
+   Compiling bitvec_helpers v4.0.2 ($CHECKOUT/vendor/bitvec_helpers)
+   Compiling dolby_vision v3.4.0 ($CHECKOUT/vendor/dolby_vision)
+   Compiling byte-unit v5.2.5
+   Compiling openraft v0.9.25
+   Compiling plurxd v0.3.0 ($CHECKOUT/crates/plurxd)
+   Compiling plurx-pgs v0.3.0 ($CHECKOUT/crates/plurx-pgs)
+   Compiling plurx-compat-jellyfin v0.3.0 ($CHECKOUT/crates/plurx-compat-jellyfin)
+   Compiling hiqlite-wal v0.14.0 ($CHECKOUT/vendor/hiqlite-wal)
+   Compiling hiqlite v0.14.0 ($CHECKOUT/vendor/hiqlite)
+   Compiling plurx-core v0.3.0 ($CHECKOUT/crates/plurx-core)
+   Compiling plurx-compat-plex v0.3.0 ($CHECKOUT/crates/plurx-compat-plex)
+    Finished `release` profile [optimized + debuginfo] target(s) in 18m 04s

@@ -145,6 +145,7 @@ class FixtureServer(ThreadingHTTPServer):
         self.segment_ordinals = []
         self.segment_requests = 0
         self.sidecar_requests = 0
+        self.cached_paths = []
         self.lock = threading.Lock()
 
 
@@ -172,6 +173,20 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/assets/") and asset in shell_assets():
             kind = "text/css" if asset.endswith(".css") else "text/javascript"
             return self.reply(200, (WEB / asset).read_bytes(), f"{kind}; charset=utf-8")
+        session_prefix = "/hls/subtitle-readiness/"
+        if route.startswith(session_prefix):
+            route = "/" + route[len(session_prefix):]
+        if route.startswith("/subs/") and "/cached-" in route:
+            revision = route.rsplit("/cached-", 1)[1]
+            with self.server.lock:
+                self.server.sidecar_requests += 1
+                self.server.cached_paths.append(urlsplit(self.path).path)
+            bounds = {"window-a": (0, 12), "window-b": (72, 95), "whole": (0, 96)}
+            if revision not in bounds:
+                return self.reply(204)
+            start, end = bounds[revision]
+            body = f"WEBVTT\n\n00:{start // 60:02d}:{start % 60:02d}.000 --> 00:{end // 60:02d}:{end % 60:02d}.000\n{revision}\n\n".encode()
+            return self.reply(200, body, "text/vtt", complete=revision == "whole")
         if route == "/master.m3u8":
             return self.reply(200, MASTER.encode(), "application/vnd.apple.mpegurl")
         if route.startswith("/subs/") and route.endswith("index.m3u8"):
@@ -188,9 +203,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.segment_ordinals.append(int(Path(route).stem.removeprefix("seg")))
             return self.reply(200, EMPTY_SEGMENT, "text/vtt")
         if route.startswith("/api/v1/files/") and "/subs/" in route:
-            # The whole-track sidecar, which is what `ready` means exists.
+            # Legacy direct file reads remain distinct from session-owned readiness.
             with self.server.lock:
                 self.server.sidecar_requests += 1
+                self.server.cached_paths.append(urlsplit(self.path).path)
             if self.server.window_delivery:
                 revision = parse_qs(urlsplit(self.path).query).get("revision", [""])[0]
                 bounds = {"window-a": (0, 12), "window-b": (72, 95), "whole": (0, 96)}
@@ -217,7 +233,8 @@ SETUP = """
         bufSegSecs:4,marks:{},abr:{},offset:0,bookOffset:0,mediaAttachment:null,
         fileId:5615,sessionId:'subtitle-readiness',burnedSub:null,curSub:0,
         subs:[{index:0,codec:'subrip',language:'eng',text:true,native:true}]};
-      attachHls(video,'/master.m3u8',0);
+      PLAYER.probeUrl='/hls/subtitle-readiness/master.m3u8';
+      attachHls(video,PLAYER.probeUrl,0);
     }
 """
 
@@ -283,11 +300,15 @@ def exercise_windows(page, server):
         track:PLAYER.hls.subtitleTrack,time:subtitleFixtureVideo.currentTime,hls:Hls.version})""")
     with server.lock:
         result.update(partial=partial, before=before, future_requests=future_requests,
-                      sidecar_requests=server.sidecar_requests, segments=server.segment_ordinals)
+                      sidecar_requests=server.sidecar_requests, cached_paths=server.cached_paths,
+                      segments=server.segment_ordinals)
     if (before != 0 or not first or not second or partial['track'] != 0
             or partial['display'] or partial['mode'] != 'showing'
             or not result['sameVideo'] or result['session'] != 'subtitle-readiness'
-            or result['error'] is not None):
+            or result['error'] is not None
+            or len(result['cached_paths']) != 3
+            or not all(path.startswith('/hls/subtitle-readiness/subs/0/cached-')
+                       for path in result['cached_paths'])):
         raise AssertionError(json.dumps(result))
     print(json.dumps(result, sort_keys=True))
     print("PASS  real hls.js keeps future window requests and visible cues through whole-track takeover")
