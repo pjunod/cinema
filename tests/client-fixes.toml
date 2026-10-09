@@ -5780,3 +5780,36 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func queueBlackFrameRecovery"
 test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
 test_anchor = "testQueuedBlackFrameRecoveryRearmsAfterViewerActionSupersedesTrigger"
+
+[[fixes]]
+id = "apple.growing-resume-preparation-budget"
+commits = ["2bc3425f5a5f08160ca6bb121a21e0bf7f20efab"]
+source = "clients/apple/Sources/PlayerItemReadiness.swift"
+source_anchor = "enum PlayerItemReadiness"
+test = "clients/apple/Tests/AppleItemReadinessTests.swift"
+test_anchor = "testGrowingResumeWaitsForPublicationAtTwentyOneSeconds"
+
+[[fixes]]
+id = "apple.staged-poll-continuation-fence"
+commits = ["46bf6fe8a1438d4a3f22ab68afe8b7bb3cfcae61"]
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case recoveryEvidenceAfterStagedPoll ="
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
+
+[[fixes]]
+id = "android.prepared-video-surface-coordinate-space"
+commits = ["32b2111d9", "142d9f4e0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "host.width, host.height, output.surfaceWidth, output.surfaceHeight,"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PreparedVideoSurfaceRenderingTest.kt"
+test_anchor = "decoderFrameFillsThePreparedSurfaceWidth"
+
+[[fixes]]
+id = "android.playback-panel-light-theme-contrast"
+commits = []
+supplements = "android.prepared-video-surface-coordinate-space"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "color = if (selected) Accent else OnBg"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
+test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"

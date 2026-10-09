@@ -2823,7 +2823,7 @@ impl ResolvedTranscode {
         if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50 {
             feed(
                 "video_sample_envelope",
-                b"continuous-avc-high50-bt709-colr-v3",
+                b"continuous-avc-high50-bt709-colr-v4",
             );
         }
 
@@ -2959,6 +2959,7 @@ impl ResolvedTranscode {
             feed("normalization_version", b"upright-square-v1");
             if let Some(profile) = geometry.rate_profile {
                 feed("auto_quality_rate_profile", profile.name().as_bytes());
+                feed("avc_high50_signaling", b"level-idc-constraints-v1");
             }
             if let Some(rate) = geometry.frame_rate {
                 feed(

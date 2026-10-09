@@ -331,3 +331,47 @@ def test_cold_source_urls_are_downloadable_archives_and_required_submodules_are_
     placebo = lock["sources"]["libplacebo"]
     assert {module["path"] for module in placebo["submodules"]} == {"3rdparty/glad", "3rdparty/jinja", "3rdparty/markupsafe", "3rdparty/fast_float", "3rdparty/Vulkan-Headers"}
     assert all("nuklear" not in module["path"] for module in placebo["submodules"])
+
+
+def test_isolated_cmake_install_cannot_redirect_into_sdk_or_host():
+    module = helper()
+    private = ["cmake", "--install", "{build}", "--prefix", "{build}/installed"]
+    generator = {
+        "source_root": ".", "commands": [{"cwd": "build", "argv": private}],
+        "outputs": {"share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake": {
+            "root": "build", "path": "installed/share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake"
+        }}
+    }
+    module.validate_generator(generator)
+    for prefix in ["{sdk}", "/usr", "/tmp/host-sdk", "{build}/../outside"]:
+        redirected = {**generator, "commands": [{"cwd": "build", "argv": private[:-1] + [prefix]}]}
+        with unittest.TestCase().assertRaises(ValueError):
+            module.validate_generator(redirected)
+    for argv in [["make", "install"], ["cmake", "--install", "{source}", "--prefix", "{build}/installed"]]:
+        with unittest.TestCase().assertRaises(ValueError):
+            module.validate_generator({**generator, "commands": [{"cwd": "build", "argv": argv}]})
+
+
+def test_cmake_exports_reject_build_paths_and_existing_sdk_bytes():
+    module = helper()
+    name = "share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake"
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory).resolve()
+        build, sdk = root / "build", root / "sdk"
+        origin = build / "installed" / name
+        origin.parent.mkdir(parents=True)
+        relative = b'set(_IMPORT_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../..")\n'
+        origin.write_bytes(relative)
+        selected = {"root": "build", "path": "installed/" + name}
+        result = module.publish_generated_output(sdk, name, build, selected)
+        assert (sdk / name).read_bytes() == relative
+        assert result["sha256"] == hashlib.sha256(relative).hexdigest()
+        origin.write_bytes(b"changed valid bytes\n")
+        with unittest.TestCase().assertRaises(ValueError):
+            module.publish_generated_output(sdk, name, build, selected)
+        assert (sdk / name).read_bytes() == relative
+        (sdk / name).unlink()
+        origin.write_bytes(('set(VulkanHeaders_DIR "' + str(build) + '/installed")\n').encode())
+        with unittest.TestCase().assertRaises(ValueError):
+            module.publish_generated_output(sdk, name, build, selected)
+        assert not (sdk / name).exists()

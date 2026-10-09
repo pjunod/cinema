@@ -215,7 +215,28 @@
       },
       "generator": {
         "source_root": "Vulkan-Headers-6433e5c70bb9ec995f72d767934acaff8ef11ae3",
-        "commands": [],
+        "commands": [
+          {
+            "cwd": "build",
+            "argv": [
+              "cmake",
+              "-DCMAKE_INSTALL_PREFIX={sdk}",
+              "-DVULKAN_HEADERS_ENABLE_TESTS=OFF",
+              "-DVULKAN_HEADERS_ENABLE_INSTALL=ON",
+              "{source}"
+            ]
+          },
+          {
+            "cwd": "build",
+            "argv": [
+              "cmake",
+              "--install",
+              "{build}",
+              "--prefix",
+              "{build}/installed"
+            ]
+          }
+        ],
         "outputs": {
           "include/vk_video/vulkan_video_codec_av1std.h": {
             "root": "source",
@@ -408,6 +429,14 @@
           "share/vulkan/registry/vk.xml": {
             "root": "source",
             "path": "registry/vk.xml"
+          },
+          "share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake": {
+            "root": "build",
+            "path": "installed/share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake"
+          },
+          "share/cmake/VulkanHeaders/VulkanHeadersConfigVersion.cmake": {
+            "root": "build",
+            "path": "installed/share/cmake/VulkanHeaders/VulkanHeadersConfigVersion.cmake"
           }
         },
         "depends_on": []

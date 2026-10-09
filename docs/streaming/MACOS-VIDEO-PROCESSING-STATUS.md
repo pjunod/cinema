@@ -41,16 +41,22 @@ source closure. Its normal commit hook passes in 73 seconds, including
 workspace Clippy, formatting, catalog and JavaScript checks. Fresh static
 SDK staging passes in 7.25 seconds with a peak resident set of 763 MiB;
 this verifies source preparation, not generated headers or a linked package.
-Exact-source Linux all-target check passes for core and daemon with
-`hiqlite-store` on Rust 1.97.1 in 7 minutes 19 seconds. Clippy runs without
-diagnostics until the shared phase deadline; it remains incomplete, and
-the passing check is retained. All owned Linux processes are reaped. The updated Mac daemon release
+Linux all-target check passes for core and daemon with `hiqlite-store` on
+Rust 1.97.1 in 7 minutes 19 seconds. A Clippy-only continuation passes on
+Rust-equivalent `7ae44966d` in 4 minutes 37 seconds; the original timeout
+and passing check are retained. All owned Linux processes are reaped. These
+passes precede integration of current main `079960dae`; that merged source
+requires fresh affected compilation. The updated Mac daemon release
 stopped on an actual memory-pressure warning after 202.5 seconds; its owned
 processes are absent and the partial cache is retained. The Bookworm retry
 passes FreeType configure, then refuses its missing pkg-config output after
 23.60 seconds. A repair invokes FreeType's genuine metadata make target;
-the other generator recipes were checked for the same omission. Actual
-post-repair generation remains pending. Unit execution, final
+the other generator recipes were checked for the same omission. The real
+retry passes that step and then refuses a missing Vulkan CMake export after
+73.36 seconds. The repair uses Vulkan-Headers' upstream isolated install
+target to supply its authentic relocatable package configuration and binds
+consumer searches to the SDK. Actual post-repair generation remains pending.
+Unit execution, final
 adversarial review and merge handoff remain outstanding. The native build
 uses one job, actual memory-pressure monitoring and its own cache; unrelated
 compiler processes alone no longer prevent it from starting.

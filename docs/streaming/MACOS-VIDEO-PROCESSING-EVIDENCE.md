@@ -1376,6 +1376,27 @@ qualification remain open.
 | Actual generator terminal receipt | `d11a6a76e80532415d63ec0c297f3ae8fab3eb9c379cd9cab7c4b07237352798` |
 | FreeType upstream producer evidence | `9e0935266890627002b1150471205e22f79c4b7378c61cb43a39b69badfdad4c` |
 
+The FreeType retry on `7ae44966d5f57b684d281ed2f7628efdf05e3bdb` passes
+the genuine metadata make target. It proceeds through the remaining earlier
+roles, then Vulkan-Loader's CMake configuration cannot find
+`VulkanHeadersConfig.cmake`. The headers role exports headers and registry
+XML but omits the upstream CMake package export that its consumer requires.
+The attempt fails after 73.36 seconds without an OOM or deadline; its owned
+container stops and its network configuration is restored. The terminal
+receipt is `b40cfee95003358da0da797b7efe3c7dc7132e5cd2421d7da3a34d1cc5bd4c07`.
+
+The repair configures the pinned Vulkan-Headers project and uses its genuine
+header-only CMake install into an isolated build subdirectory. Only its
+declared relocatable package exports are copied into the SDK. A general
+install into the SDK or host remains refused, as do existing-output
+replacement and exports containing the build path. CMake consumers search
+the authenticated SDK/sysroot for packages, libraries and headers; bootstrap
+programs retain their fixed tool path. The consumer/producer audit covers
+the remaining CMake, Meson and pkg-config dependencies. Actual generation
+and dependency-path observations on this repair remain pending. The upstream
+export evidence is
+`69796eeca0e1da2d89ca4d838393294d7b7b63774bc551e133f43df8b0c14b59`.
+
 The shipping source also closes a separate integration gap: published and CI
 smoke images bypassed the local `make docker` seam. Both now have a shared
 Bookworm package-export contract and consume its audited output; the renderer

@@ -482,7 +482,7 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_dire
         files = {}
         for destination, source in sorted(row.get("files", {}).items()):
             destination = member_path(destination)
-            if not destination.startswith(("include/", "lib/pkgconfig/", "share/vulkan/registry/")):
+            if not destination.startswith(("include/", "lib/pkgconfig/", "share/vulkan/registry/", "share/cmake/VulkanHeaders/")):
                 raise ValueError("SDK consumption must name headers, pkg-config or the Vulkan registry")
             contents, origin = resolved(member_path(source["member"]), regular, links)
             if digest(contents) != source["sha256"]:
@@ -726,7 +726,7 @@ def validate_generator(generator):
         for token in command["argv"]:
             if not isinstance(token, str) or not token or "\x00" in token or "\n" in token:
                 raise ValueError("generator argv must be literal tokens")
-            if token in ["install", "--install", "test", "check"]:
+            if token in ["install", "--install", "test", "check"] and command["argv"] != ["cmake", "--install", "{build}", "--prefix", "{build}/installed"]:
                 raise ValueError("header generation must not install or replace official runtime libraries")
             if token.startswith(("--prefix=", "-DCMAKE_INSTALL_PREFIX=", "PREFIX=")) and token.split("=", 1)[1] != "{sdk}":
                 raise ValueError("project configuration prefix must be the private SDK")
@@ -736,7 +736,7 @@ def validate_generator(generator):
         if executable.startswith("./"):
             member_path(executable[2:])
     for destination, row in generator["outputs"].items():
-        if not member_path(destination).startswith(("include/", "lib/pkgconfig/", "share/vulkan/registry/")):
+        if not member_path(destination).startswith(("include/", "lib/pkgconfig/", "share/vulkan/registry/", "share/cmake/VulkanHeaders/")):
             raise ValueError("generated SDK output outside consumed header/pkg-config/registry roles")
         if row.get("root") not in ["source", "build"]:
             raise ValueError("output must come from actual project source or generator build")
@@ -901,6 +901,8 @@ def publish_generated_output(sdk, name, base, selected, addition=None):
     if not origin.is_relative_to(base) or not origin.is_file() or origin.stat().st_size > MAX_MEMBER:
         raise ValueError("generated output must be a bounded contained project file")
     contents = origin.read_bytes()
+    if name.startswith("share/cmake/VulkanHeaders/") and str(base).encode() in contents:
+        raise ValueError("installed CMake export must not retain the generator build path")
     if name.endswith(".pc") and re.search(rb"@[A-Za-z_][A-Za-z0-9_]*@", contents):
         raise ValueError("unconfigured pkg-config template cannot enter the SDK")
     transform = None
@@ -1020,6 +1022,19 @@ def generate(root, jobs, seconds):
                 for index, command in enumerate(row["generator"]["commands"]):
                     argv = [token.format_map(substitutions) for token in command["argv"]]
                     cwd = source if command["cwd"] == "source" else build
+                    if argv[0] == "cmake" and "-P" not in argv and "--install" not in argv:
+                        # Packages/libraries/headers belong to the authenticated
+                        # SDK, while bootstrap programs use the fixed tool PATH.
+                        argv[1:1] = [
+                            "-DCMAKE_PREFIX_PATH=" + str(root / "sdk") + ";" + str(root / "sdk/sysroot/usr"),
+                            "-DCMAKE_FIND_ROOT_PATH=" + str(root / "sdk") + ";" + str(root / "sdk/sysroot"),
+                            "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+                            "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+                            "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+                            "-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER",
+                            "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
+                            "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF",
+                        ]
                     program = ((root / facts["build_tools"]["meson"]["launcher"]) if argv[0] == "meson"
                         and "meson" in facts.get("build_tools", {}) else
                         (cwd / argv[0]).resolve(strict=True) if argv[0].startswith("./") else

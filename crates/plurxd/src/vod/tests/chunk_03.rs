@@ -3478,12 +3478,12 @@
             }),
             from_disk: false,
         };
-        let sink = RenditionSink {
+        let sink = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(),
             shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition),
             epoch: 0,
         };
-        let stale = RenditionSink {
+        let stale = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(),
             shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition),
             epoch: 1,
@@ -3534,7 +3534,7 @@
         };
         tokio::fs::write(rendition.dir.path().join(INIT_NAME), init).await.expect("init");
         serve.shared.retained_artifacts.collect(temp.path()).await;
-        let sink = RenditionSink { shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0 };
+        let sink = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(), shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0 };
         for entry in 0..rendition.plan.len() {
             sink.materialize(entry as u32, vec![7; 1000 + entry]).await.expect("actual publication");
         }
@@ -3597,7 +3597,7 @@
         let serve = bare_serve(temp.path());
         let rendition = synthetic_rendition(temp.path()).await;
 
-        let sink = RenditionSink {
+        let sink = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(),
             shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition),
             epoch: rendition.gen_epoch.load(Relaxed),
@@ -3622,7 +3622,7 @@
         assert_eq!(serve.shared.working_set.load(Relaxed), 0);
 
         // The replacement's own sink — current epoch — writes normally.
-        let fresh = RenditionSink {
+        let fresh = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(),
             shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition),
             epoch: rendition.gen_epoch.load(Relaxed),
@@ -3966,7 +3966,7 @@
         let serve = local_serve(base.path().to_path_buf(), store.clone());
         let mut rendition = synthetic_rendition(base.path()).await;
         Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
-        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+        let sink = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(), shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
         let original = b"already-delivered-before-scheduled-ack";
         sink.materialize(0, original.to_vec()).await.expect("first publication");
@@ -3974,7 +3974,7 @@
         let charged = serve.shared.working_set.load(Relaxed);
         let publication = rendition.publication_serial.load(Relaxed);
         rendition.gen_epoch.fetch_add(1, Relaxed);
-        let restarted = RenditionSink { shared: Arc::clone(&serve.shared),
+        let restarted = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(), shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
         restarted.materialize(0, b"different-encoder-history-before-pin".to_vec())
             .await.expect("traverse existing publication");
@@ -3999,7 +3999,7 @@
         let serve = local_serve(base.path().to_path_buf(), store.clone());
         let mut rendition = synthetic_rendition(base.path()).await;
         Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
-        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+        let sink = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(), shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
         let original = b"original-immutable-media";
         sink.materialize(0, original.to_vec()).await.expect("first publication");
@@ -4024,7 +4024,7 @@
         let charged = serve.shared.working_set.load(Relaxed);
         let publication = rendition.publication_serial.load(Relaxed);
         rendition.gen_epoch.fetch_add(1, Relaxed);
-        let restarted = RenditionSink { shared: Arc::clone(&serve.shared),
+        let restarted = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(), shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
         restarted.materialize(0, b"different-regenerated-media".to_vec()).await.expect("traverse cached reserved interval");
         let path = rendition.dir.path().join(segment_name(0));
@@ -4080,7 +4080,7 @@
             assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("reserve"));
         }
         assert!(store.quality_reserved_intervals(&rendition.key).await.is_err(), "lookup is unavailable");
-        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+        let sink = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(), shared: Arc::clone(&serve.shared),
             rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
         sink.materialize(0, b"ordinary-media".to_vec()).await
             .expect("ordinary playback does not depend on the quality ledger");
@@ -4333,4 +4333,93 @@
             assert!(!origin.still_live(), "actual VOD attachment retirement invalidates desired origin");
             assert!(!gate.observation_is_current(origin).await);
         }
+    }
+
+
+    /// A retiring owner can hold either gate while joining its output writer.
+    /// The writer must leave the lock queue, settle, and release real admission
+    /// without requiring the owner to unlock or bypass the admission policy.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retirement_releases_background_admission_with_publication_locks_held() {
+        use crate::vodgen::Sink;
+        for hold_build in [true, false] {
+            let temp = crate::test_tempdir().expect("retirement fixture");
+            let serve = bare_serve(temp.path());
+            let rendition = synthetic_rendition(temp.path()).await;
+            let admissions = crate::admission::Admissions::new();
+            let permit = admissions.try_acquire(1, crate::admission::Priority::Background)
+                .expect("background slot");
+            let child = tokio::process::Command::new("sleep").arg("60")
+                .kill_on_drop(true).spawn().expect("real child");
+            let job = crate::process_control::ChildJob::attach(&child).expect("child job");
+            let (registration, writers) = rendition.slot
+                .attach_registered_job_owned(child, job, 0, Some(Box::new(permit))).await;
+            let sink = RenditionSink {
+                shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition),
+                epoch: 0, retirement: registration.retirement(),
+            };
+            let gate = serve.shared.rendition_build_gate(&rendition.key);
+            let build = if hold_build { Some(gate.lock().await) } else { None };
+            let manifest = if hold_build { None } else { Some(rendition.manifest.lock().await) };
+            let publication = sink.materialize(0, vec![7; 128]);
+            tokio::pin!(publication);
+            assert!(futures_util::poll!(&mut publication).is_pending(), "writer is queued behind the owner");
+            rendition.slot.request_registered_retirement(&registration).await.expect("retire");
+            let error = tokio::time::timeout(Duration::from_secs(2), publication).await
+                .expect("retirement wakes the lock waiter").expect_err("retired publication");
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            assert!(admissions.background_is_active(), "writer still owns its settlement barrier");
+            writers.settled();
+            let receipt = tokio::time::timeout(Duration::from_secs(2), registration.wait_confirmed_reap())
+                .await.expect("actual child and writer reap while both owner locks stay held");
+            assert_eq!(receipt.writers(), crate::prodrun::WriterSettlement::Settled);
+            assert!(!admissions.background_is_active());
+            assert!(admissions.try_acquire(1, crate::admission::Priority::Live).is_some(),
+                "the next tablet transcode can start without overriding background priority");
+            drop(manifest); drop(build);
+            assert!(!rendition.dir.path().join(segment_name(0)).exists(), "no retired bytes published");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_output_survives_retirement_and_manifest_contention() {
+        use crate::vodgen::Sink;
+        let temp = crate::test_tempdir().expect("completion fixture");
+        let serve = bare_serve(temp.path());
+        let mut rendition = synthetic_rendition(temp.path()).await;
+        let path = temp.path().join("source.bin");
+        tokio::fs::write(&path, b"held source version").await.expect("source");
+        let source = crate::fragment_index_cluster::open_source_fence(&media_file_at(path, 10_000), None)
+            .await.expect("held source");
+        let owned = Arc::get_mut(&mut rendition).expect("unshared fixture");
+        owned.source = Some(source);
+        *owned.identity.get_mut() = IdentityState {
+            identity: Some(InitIdentity { muxer_init: "muxer".into(), served_init: "served".into(), promotion: Default::default() }),
+            from_disk: false,
+        };
+        let admissions = crate::admission::Admissions::new();
+        let permit = admissions.try_acquire(1, crate::admission::Priority::Background).expect("background permit");
+        let child = tokio::process::Command::new("sleep").arg("60").kill_on_drop(true).spawn().expect("child");
+        let job = crate::process_control::ChildJob::attach(&child).expect("job");
+        let (registration, writers) = rendition.slot.attach_registered_job_owned(child, job, 0, Some(Box::new(permit))).await;
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0, retirement: registration.retirement() };
+        let completion = DeferredCompletionSink::new(&sink);
+        for entry in 0..rendition.plan.len() {
+            completion.materialize(entry as u32, vec![7; 1000 + entry]).await.expect("committed output");
+        }
+        let manifest = rendition.manifest.lock().await;
+        rendition.slot.request_registered_retirement(&registration).await.expect("retirement");
+        tokio::time::timeout(Duration::from_secs(2), completion.completed_output()).await.expect("trailer does not wait on manifest");
+        assert!(completion.completed.load(Acquire));
+        writers.settled();
+        tokio::time::timeout(Duration::from_secs(2), registration.wait_confirmed_reap()).await.expect("writer and child settle before completion metadata");
+        assert!(!admissions.background_is_active());
+        let proof = sink.completed_output();
+        tokio::pin!(proof);
+        assert!(futures_util::poll!(&mut proof).is_pending(), "proof waits for the temporary reader instead of disappearing");
+        drop(manifest);
+        tokio::time::timeout(Duration::from_secs(2), proof).await.expect("completion resumes");
+        assert!(rendition.output_measurement.lock().expect("measurement").complete_rates().is_some(), "retirement did not discard a verified complete trailer");
     }

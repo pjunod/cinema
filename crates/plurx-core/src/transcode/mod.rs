@@ -2074,13 +2074,23 @@ fn hls_args_inner(
             plan.options().video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50
         })
     {
-        // The class explicitly promises H.264 High level5.0, not a profile
-        // inferred from the requested height or encoder default.
+        // Hardware encoders consume level_idc (50). In particular VAAPI
+        // treats the unrecognized decimal alias "5.0" as integer 5, producing
+        // an invalid SPS. x264 owns a string-valued level option instead.
+        // Clear only the newer constraint-set bits: constrained High remains
+        // valid High, and every family member must publish avc1.640032.
         args.extend([
             "-profile:v".to_owned(),
             "high".to_owned(),
             "-level:v".to_owned(),
-            "5.0".to_owned(),
+            if encoder == Encoder::Software {
+                "5.0"
+            } else {
+                "50"
+            }
+            .to_owned(),
+            "-bsf:v".to_owned(),
+            "h264_metadata=zero_new_constraint_set_flags=1".to_owned(),
         ]);
     }
 

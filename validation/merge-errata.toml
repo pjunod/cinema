@@ -304,7 +304,7 @@ tree = "d243ca02ef6b6ed322d7d0ae35827f345b2a03b0"
 parents = ["f4eb3cb9db0757d3f6feda10dc9cb1586afaf6d0", "b6ebc3f6e7ccacf7d04efd24f0f312f81d797315"]
 title = "fix(vaapi-qualification): restore original sharp-panel diagnostic input"
 pull = "909"
-reason = "Verified PR909 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All 4 original Regression-Test trailers remain mandatory own-tree evidence; this row recognizes the exact immutable merge identity and waives no checks."
+reason = "Verified Forgejo PR #909 merge identity. Its custom API title omitted the PR number, so the next recognized main landing exposed its corrective child as outside a landing. This pins the actual immutable commit, tree and ordered parents; every original Regression-Test remains mandatory against its own tree. No evidence or gate is waived."
 
 [[landings]]
 commit = "98af2eca9049c61524a013b5bd578ff79a64ed6d"
@@ -312,4 +312,12 @@ tree = "fb7783bff20a9d695fb97e46d4334db0708c1f16"
 parents = ["4a737e92c07c3692f607a4c6d8b08a71fc0e22ca", "4e98734d17790c822aaa7afe5289d4d3e32c71ba"]
 title = "fix(sharing): compile source custody without replicated store"
 pull = "910"
-reason = "Verified PR910 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All 1 original Regression-Test trailers remain mandatory own-tree evidence; this row recognizes the exact immutable merge identity and waives no checks."
+reason = "Verified Forgejo PR #910 merge identity. Its custom API title omitted the PR number, so the next recognized main landing exposed its corrective child as outside a landing. This pins the actual immutable commit, tree and ordered parents; every original Regression-Test remains mandatory against its own tree. No evidence or gate is waived."
+
+[[errata]]
+commit = "4e98734d17790c822aaa7afe5289d4d3e32c71ba"
+reason = "Fast lane for PR #915 found this existing corrective commit in main ancestry outside an audited PR landing. Its own immutable message carries Regression-Test: crates/plurx-core/src/store/sharing_source_session_tests.rs::sharing_source_ingress_admission_accepts_current_accounting_but_refuses_changed_authority. Record the missing landing attribution without changing the audit boundary or claiming a new test run; #915 carries its own checked regression trailers into its landing."
+
+[[errata]]
+commit = "b6ebc3f6e7ccacf7d04efd24f0f312f81d797315"
+reason = "Fast lane for PR #915 found this existing corrective commit in main ancestry outside an audited PR landing. Its immutable message carries four Regression-Test anchors in tests/operations/test_vaapi_failure_capture.py, including test_fixed_signal_selection_preserves_ramp_and_original_sharp_reference and test_failed_luma_keeps_full_identity_coordinates_and_reference_regions. Record the missing landing attribution without changing the audit boundary or claiming a new test run; #915 carries its own checked regression trailers into its landing."
