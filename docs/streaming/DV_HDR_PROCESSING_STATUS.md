@@ -400,3 +400,38 @@ M3 worker selection, actual routing/cache receipts and concurrent graph custody
 remain open. M5 comparative resource measurements have not run. Correctness
 controls and configured resource caps are not a benchmark. No broad CI or full
 suite was dispatched for these helpers.
+
+## 14. Original movie windows and current integration limits
+
+The owned adapter merged in effort PR #946 at
+`f7bca9202b44124bfd3ac42609a7e05297e82ef3`. It uses the held original source,
+real child registration, cancellation/reaping, resource admission and bounded
+post-completion evidence. The exact merged tree passed focused source-only
+Linux compilation and actual 3- and 64-picture streaming controls. A process
+exit alone cannot publish media or mint an effective-processing report.
+
+The helper now seeks bounded original-source windows, verifies coded/decoded
+frame and RPU membership, and accepts retained L2/L3/L4/L5/short-L8 metadata in
+its supported master-reconstruction subset. Nonzero L4 anchors remain opaque
+display instructions; they are not temporal processing implemented by this
+renderer. Actual parser roundtrips preserve three varying anchor pairs, while
+master pixels and encoded base packets remain unchanged. Reviewed arithmetic
+proves the omitted residual clipping cannot bind for an admitted 10-bit code.
+The optional one-fragment authoring mode validates the actual output clock.
+
+A private native ROG check reconstructed 24 actual 4K FEL pictures from a
+one-second Beekeeper window at 720 seconds. With the RTX 4080 Laptop selected
+as the sole Vulkan device, two CPU cores of quota and no encoder, the initial
+unoptimized helper took 33.39 seconds; an isolated `-O2` helper took 15.56
+seconds. All 24 source timestamps and reconstructed RGB SHA256 values matched
+between builds; the build now defaults to `-O2`. Both runs included five preroll
+pairs, source seeking and startup.
+These individual observations are not steady-state throughput, a matched
+FEL-versus-base comparison, or a quality result. They identify an unresolved
+performance problem. The running production service was not changed.
+
+Normal VOD routing, audio, cache/publication receipts and fallback integration
+remain in progress. Base-only P5/P8 processing needs its own profile-aware path;
+it cannot inherit a FEL receipt. Matched quality/resource measurements, device
+acceptance and final effort qualification remain open. No Windows validation,
+per-task full suite or merge-coordinator handoff is part of this effort.
