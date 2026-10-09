@@ -49,34 +49,17 @@ pub(crate) fn verify_windows_source_path(
 /// what a Compose file produces for an unset variable, and treating that as a
 /// binary called "" would fail every spawn with a confusing ENOENT.
 fn resolve_bin(override_value: Option<String>, fallback: &str) -> String {
-    override_value
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| fallback.to_owned())
-}
-
-fn default_bin(name: &str) -> String {
-    #[cfg(windows)]
-    {
-        if let Ok(executable) = std::env::current_exe() {
-            if let Some(directory) = executable.parent() {
-                let sibling = directory.join(format!("{name}.exe"));
-                if sibling.is_file() {
-                    return sibling.to_string_lossy().into_owned();
-                }
-            }
-        }
-    }
-    name.to_owned()
+    plurx_core::process::resolve_media_tool(override_value, fallback, None)
 }
 
 /// ffmpeg binary, overridable via `PLURX_FFMPEG` (jellyfin-ffmpeg / pinned path).
 pub fn ffmpeg_bin() -> String {
-    resolve_bin(std::env::var("PLURX_FFMPEG").ok(), &default_bin("ffmpeg"))
+    plurx_core::process::media_tool_bin("ffmpeg", std::env::var("PLURX_FFMPEG").ok())
 }
 
 /// ffprobe binary, overridable via `PLURX_FFPROBE` (jellyfin-ffmpeg / pinned).
 pub fn ffprobe_bin() -> String {
-    resolve_bin(std::env::var("PLURX_FFPROBE").ok(), &default_bin("ffprobe"))
+    plurx_core::process::media_tool_bin("ffprobe", std::env::var("PLURX_FFPROBE").ok())
 }
 
 /// Dedicated self-contained parser for descriptor-bound local source facts.
@@ -2832,14 +2815,38 @@ async fn bounded_command_output_with_limits(
     bounded_command_output_cancellable(command, timeout, max_bytes, label, None, work).await
 }
 
+/// Captured by the existing bounded child owner even on a nonzero exit.
+/// Pipe overflow remains an error and cannot establish frame absence.
+pub(crate) struct BoundedCommandOutcome {
+    pub(crate) status: std::process::ExitStatus,
+    pub(crate) output: Result<BoundedOutput, String>,
+}
+
 pub(crate) async fn bounded_command_output_cancellable(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
     cancel: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process_control::ChildWork,
 ) -> Result<BoundedOutput, String> {
+    let outcome =
+        bounded_command_capture_cancellable(command, timeout, max_bytes, label, cancel, work)
+            .await?;
+    if !outcome.status.success() {
+        return Err(format!("{label} exited {}", outcome.status));
+    }
+    outcome.output
+}
+
+pub(crate) async fn bounded_command_capture_cancellable(
+    mut command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+) -> Result<BoundedCommandOutcome, String> {
     if cancel.is_some_and(|token| token.is_cancelled()) {
         return Err(format!("{label} cancelled"));
     }
@@ -2866,12 +2873,10 @@ pub(crate) async fn bounded_command_output_cancellable(
                 child.wait()
             );
             let status = status.map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err(format!("{label} exited {status}"));
-            }
-            Ok(BoundedOutput {
-                stdout: stdout?,
-                stderr: stderr?,
+            Ok(BoundedCommandOutcome {
+                status,
+                output: stdout
+                    .and_then(|stdout| stderr.map(|stderr| BoundedOutput { stdout, stderr })),
             })
         };
         tokio::pin!(collect);
@@ -5764,6 +5769,29 @@ mod tests {
         assert_eq!(
             resolve_bin(Some("/opt/jellyfin-ffmpeg/ffmpeg".to_owned()), "ffmpeg"),
             "/opt/jellyfin-ffmpeg/ffmpeg"
+        );
+    }
+
+    #[test]
+    fn package_siblings_supply_defaults_without_overriding_operator_paths() {
+        let package = crate::test_tempdir().expect("package");
+        #[cfg(windows)]
+        let name = "ffprobe.exe";
+        #[cfg(not(windows))]
+        let name = "ffprobe";
+        let binary = package.path().join(name);
+        std::fs::write(&binary, b"packaged probe").expect("package artifact");
+        let bundled =
+            plurx_core::process::resolve_media_tool(None, "ffprobe", Some(package.path()));
+        assert_eq!(bundled, binary.to_string_lossy());
+        assert_eq!(
+            resolve_bin(Some("/operator/ffprobe".into()), &bundled),
+            "/operator/ffprobe"
+        );
+        assert_eq!(resolve_bin(None, &bundled), bundled);
+        assert_eq!(
+            plurx_core::process::resolve_media_tool(None, "ffmpeg", Some(package.path())),
+            "ffmpeg"
         );
     }
 

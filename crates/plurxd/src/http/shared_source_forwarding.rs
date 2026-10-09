@@ -1579,7 +1579,11 @@ pub(crate) async fn ack_http(
 ) -> Response {
     custody_inner(state, headers, body, ACK_PATH)
         .await
-        .unwrap_or_else(|error| error.into_response())
+        .unwrap_or_else(|error| {
+            #[cfg(test)]
+            eprintln!("Source ACK diagnostic stage=handler_refusal");
+            error.into_response()
+        })
 }
 async fn custody_inner(
     state: AppState,
@@ -1598,10 +1602,14 @@ async fn custody_inner(
         || wire.custody.ingress.node_id != auth.node_id
         || matches!(wire.custody.action, CustodyAction::Register) != (path == REGISTER_PATH)
     {
+        #[cfg(test)]
+        eprintln!("Source custody diagnostic stage=wire_identity");
         return Err(unavailable());
     }
     if let CustodyAction::Ack { receipt } = &wire.custody.action {
         if !receipt.matches(&wire.custody.ingress.driver) {
+            #[cfg(test)]
+            eprintln!("Source custody diagnostic stage=receipt_identity");
             return Err(unavailable());
         }
     }

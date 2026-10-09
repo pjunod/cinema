@@ -59,8 +59,13 @@ impl CodecQualificationMetrics {
             Pipeline::LibplaceboVaapi => 8,
             Pipeline::TonemapCuda => 9,
             Pipeline::VtScaleSdr => 10,
+            Pipeline::VtScaleHdr10 => 12,
+            Pipeline::DoviStrictTonemapx => 13,
+            Pipeline::VtDoviTonemapx => 14,
+            Pipeline::VtDoviMetal => 15,
+            Pipeline::DoviMetal => 16,
             Pipeline::VtToneMapMetal => 11,
-            Pipeline::LibplaceboSoftware => 12,
+            Pipeline::LibplaceboSoftware => 17,
         }
     }
 
@@ -206,6 +211,11 @@ mod pipeline_metric_tests {
             Pipeline::TonemapCuda,
             Pipeline::VtScaleSdr,
             Pipeline::VtToneMapMetal,
+            Pipeline::VtScaleHdr10,
+            Pipeline::DoviStrictTonemapx,
+            Pipeline::VtDoviTonemapx,
+            Pipeline::VtDoviMetal,
+            Pipeline::DoviMetal,
             Pipeline::LibplaceboSoftware,
         ];
         assert_eq!(QUALIFICATION_PIPELINES, expected);

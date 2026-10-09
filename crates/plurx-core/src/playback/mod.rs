@@ -2129,6 +2129,37 @@ mod tests {
     }
 
     #[test]
+    fn hls_hevc_claim_is_independent_exact_and_bounded() {
+        let legacy: DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v": 2, "progressive_hevc_sample_entries": ["hvc1"]
+        }))
+        .expect("legacy progressive capability");
+        assert!(legacy.hls_hevc_sample_entries.is_none());
+        for entries in [vec![], vec!["hvc1"], vec!["hev1"], vec!["hvc1", "hev1"]] {
+            let caps = DeviceCaps {
+                hls_hevc_sample_entries: Some(entries.into_iter().map(str::to_owned).collect()),
+                ..DeviceCaps::default()
+            };
+            assert!(caps.validate_hls_hevc_sample_entries().is_ok());
+        }
+        for entries in [
+            vec!["HVC1"],
+            vec!["dvh1"],
+            vec!["hvc1", "hvc1"],
+            vec!["hvc1", "hev1", "avc1"],
+        ] {
+            let caps = DeviceCaps {
+                hls_hevc_sample_entries: Some(entries.into_iter().map(str::to_owned).collect()),
+                ..DeviceCaps::default()
+            };
+            assert!(caps.validate_progressive_hevc_sample_entries().is_err());
+        }
+        assert!(DeviceCaps::from_legacy_query(&LegacyCaps::default())
+            .hls_hevc_sample_entries
+            .is_none());
+    }
+
+    #[test]
     fn progressive_hevc_sample_entry_validation_is_exact_and_bounded() {
         for entries in [vec![], vec!["hvc1"], vec!["hvc1", "hev1", "dvh1", "dvhe"]] {
             let caps = DeviceCaps {

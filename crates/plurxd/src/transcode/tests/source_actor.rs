@@ -1114,7 +1114,7 @@ async fn source_actual_actor(
             .wait_ready(Instant::now() + Duration::from_secs(15))
             .await
             .expect("actual admitted owner");
-        ingress_fixture.close_transport(false).await;
+        ingress_fixture.close_transport(false, None).await;
         let fresh = state
             .membership
             .observe_source_admission_members()
@@ -1145,7 +1145,7 @@ async fn source_actual_actor(
             &assignment,
         ))
         .await;
-        let _monitor = reconnected.monitor_actor(actor.clone());
+        let monitor = reconnected.monitor_actor(actor.clone());
         let opened = actor
             .open_resource(
                 &SharingHlsResource::parse("index.m3u8").expect("typed reconnect resource"),
@@ -1162,9 +1162,10 @@ async fn source_actual_actor(
             .await
             .expect("actual reconnect retirement budget")
             .expect("actual reconnect retirement");
+        monitor.join().await;
         return;
     }
-    let _ingress_monitor = ingress_fixture.monitor_actor(actor.clone());
+    let ingress_monitor = ingress_fixture.monitor_actor(actor.clone());
     let joined = manager
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
@@ -1280,6 +1281,7 @@ async fn source_actual_actor(
                 .expect("already physically settled exact replay"),
             SourceReleaseOutcome::ExactReplay
         );
+        ingress_monitor.join().await;
         return;
     }
     if matches!(mode, 3 | 19 | 28) {
@@ -1308,6 +1310,7 @@ async fn source_actual_actor(
                 .expect("already settled exact SQL replay"),
             SourceReleaseOutcome::ExactReplay
         );
+        ingress_monitor.join().await;
         return;
     }
     // A cancelled response wait leaves the independently owned start intact.
@@ -1454,6 +1457,7 @@ async fn source_actual_actor(
                 "timed actual read job descriptor closed before final guard drop",
             );
             actor.retire().await.expect("actual timed read retirement");
+            ingress_monitor.join().await;
             return;
         }
         call.abort();
@@ -1480,6 +1484,7 @@ async fn source_actual_actor(
             false,
             "actual read descriptor closes before settled actor is visible",
         );
+        ingress_monitor.join().await;
         return;
     }
     if (36..=41).contains(&mode) || mode == 45 {
@@ -1517,6 +1522,7 @@ async fn source_actual_actor(
             );
             drop(held);
             actor.retire().await.expect("actual status retirement");
+            ingress_monitor.join().await;
             return;
         }
         let pause = actor.0.status_hooks.pause(matches!(mode, 39 | 41));
@@ -1557,6 +1563,7 @@ async fn source_actual_actor(
                     .retire()
                     .await
                     .expect("actual status job joins retirement");
+                ingress_monitor.join().await;
                 return;
             }
             40 | 41 => tokio::time::sleep(Duration::from_millis(5100)).await,
@@ -1595,6 +1602,7 @@ async fn source_actual_actor(
             .retire()
             .await
             .expect("actual raced status retirement");
+        ingress_monitor.join().await;
         return;
     }
     if (30..=35).contains(&mode) || matches!(mode, 46 | 47) {
@@ -1687,6 +1695,7 @@ async fn source_actual_actor(
                 .retire()
                 .await
                 .expect("actual refused-control retirement");
+            ingress_monitor.join().await;
             return;
         }
         let (accepted, held) = actor
@@ -1776,6 +1785,7 @@ async fn source_actual_actor(
             );
             drop(held);
             actor.retire().await.expect("retire after directed change");
+            ingress_monitor.join().await;
             return;
         }
         if mode == 47 {
@@ -1815,6 +1825,7 @@ async fn source_actual_actor(
                 .retire()
                 .await
                 .expect("retire after refused acknowledgement");
+            ingress_monitor.join().await;
             return;
         }
         let mut pause = request.clone();
@@ -1851,6 +1862,7 @@ async fn source_actual_actor(
             .retire()
             .await
             .expect("retire after held actual control body");
+        ingress_monitor.join().await;
         return;
     }
     if mode == 4 {
@@ -1888,6 +1900,7 @@ async fn source_actual_actor(
             .expect("retained exact route")
             .expect("ended route");
         assert_eq!(ended.state, "ended");
+        ingress_monitor.join().await;
         return;
     }
     let native_body = if mode >= 21 {
@@ -2088,6 +2101,7 @@ async fn source_actual_actor(
         .expect("postreap, postbody release");
     assert_eq!(manager.admissions.software_in_use(), 0);
     assert!(manager.lookup_source_worker(&assignment).is_none());
+    ingress_monitor.join().await;
 }
 
 #[tokio::test]
@@ -2312,11 +2326,42 @@ impl Drop for SourceFactoryIngressFixture {
         }
     }
 }
-struct SourceFactoryIngressMonitor(tokio::task::JoinHandle<()>);
+struct SourceFactoryIngressMonitor(Option<tokio::task::JoinHandle<()>>);
+impl SourceFactoryIngressMonitor {
+    async fn join(mut self) {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            self.0.as_mut().expect("retained monitor"),
+        )
+        .await
+        .expect("fixture ingress monitor deadline")
+        .expect("fixture ingress monitor panicked");
+        self.0.take();
+    }
+}
 impl Drop for SourceFactoryIngressMonitor {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
     }
+}
+
+// A lost custody CAS is acceptable only after the actual owner finishes and
+// its exact ledger retains the very receipt this fixture independently joined.
+fn source_fixture_ack_race_committed(
+    error: &plurx_core::error::StoreError,
+    mut ledger: plurx_core::sharing_ingress_custody::IngressCustodyState,
+    registration: &plurx_core::sharing_ingress_custody::IngressRegistration,
+    confirmation: &str,
+) -> bool {
+    error
+        .to_string()
+        .contains("NOT NULL constraint failed: sharing_source_session_bindings.incarnation_id")
+        && ledger.is_sealed()
+        && ledger.settled()
+        && ledger.acknowledge(registration, confirmation)
+            == plurx_core::sharing_ingress_custody::CustodyMutation::Replay
 }
 impl SourceFactoryIngressFixture {
     async fn new(
@@ -2462,9 +2507,9 @@ impl SourceFactoryIngressFixture {
             .expect("registered actual ingress permission")
     }
     async fn close(self) {
-        self.close_transport(true).await;
+        self.close_transport(true, None).await;
     }
-    async fn close_transport(mut self, seal: bool) {
+    async fn close_transport(mut self, seal: bool, retirement_owner: Option<SourceViewerActor>) {
         if seal {
             let sealed = self
                 .state
@@ -2504,15 +2549,45 @@ impl SourceFactoryIngressFixture {
                 &self.registration,
                 receipt.confirmation(),
             )
-            .await
-            .expect("exact actual receipt ACK");
-        assert!(matches!(ack, plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied | plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::ExactReplay));
+            .await;
+        match ack {
+            Ok(
+                plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied
+                | plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::ExactReplay,
+            ) => {}
+            Err(error) if retirement_owner.is_some() => {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    retirement_owner.expect("retirement owner").retire(),
+                )
+                .await
+                .expect("actual owner settlement deadline")
+                .expect("actual owner settlement");
+                let ledger = self
+                    .state
+                    .store
+                    .source_ingress_custody(&self.assignment)
+                    .await
+                    .expect("reread exact custody after competing ACK")
+                    .expect("retained exact custody");
+                assert!(
+                    source_fixture_ack_race_committed(
+                        &error,
+                        ledger.state,
+                        &self.registration,
+                        receipt.confirmation()
+                    ),
+                    "receipt ACK failed without an exact committed accounting race: {error}"
+                );
+            }
+            result => panic!("exact actual receipt ACK refused: {result:?}"),
+        }
         self.obligation
             .release_after_ack(&receipt)
             .expect("actual closure after durable ACK");
     }
     fn monitor_actor(self, actor: SourceViewerActor) -> SourceFactoryIngressMonitor {
-        SourceFactoryIngressMonitor(tokio::spawn(async move {
+        SourceFactoryIngressMonitor(Some(tokio::spawn(async move {
             loop {
                 let changed = actor.0.changed.notified();
                 tokio::pin!(changed);
@@ -2531,8 +2606,8 @@ impl SourceFactoryIngressFixture {
             // The production actor owns seal/retirement. This fixture owns
             // only its actual accepted transport and joined receipt/ACK; a
             // second seal CAS would race that actor's retained cleanup owner.
-            self.close_transport(false).await;
-        }))
+            self.close_transport(false, Some(actor)).await;
+        })))
     }
 }
 
@@ -2574,7 +2649,7 @@ async fn source_two_owner_generation_fixture(
     ))
     .await
     .expect("first actual owner");
-    let _monitor_a = ingress_a.monitor_actor(actor_a.clone());
+    let monitor_a = ingress_a.monitor_actor(actor_a.clone());
     actor_a
         .wait_ready(Instant::now() + Duration::from_secs(15))
         .await
@@ -2609,7 +2684,7 @@ async fn source_two_owner_generation_fixture(
     ))
     .await
     .expect("second actual owner");
-    let _monitor_b = ingress_b.monitor_actor(actor_b.clone());
+    let monitor_b = ingress_b.monitor_actor(actor_b.clone());
     actor_b
         .wait_ready(Instant::now() + Duration::from_secs(15))
         .await
@@ -2618,6 +2693,7 @@ async fn source_two_owner_generation_fixture(
         .await
         .expect("first retirement deadline")
         .expect("first actual retirement");
+    monitor_a.join().await;
     assert!(manager.lookup_source_worker(&assignment_a).is_none());
     assert!(manager.lookup_source_worker(&assignment_b).is_some());
     // Exercise the same private per-owner collection used by rendition dispatch;
@@ -2644,6 +2720,7 @@ async fn source_two_owner_generation_fixture(
         .await
         .expect("second retirement deadline")
         .expect("second actual retirement");
+    monitor_b.join().await;
 }
 
 async fn source_actual_unknown_register_reconciliation(
@@ -2681,7 +2758,7 @@ async fn source_actual_unknown_register_reconciliation(
         .open()
         .any(|slot| slot.same_driver(&registration)));
     assert_eq!(snapshot.owner_identity, assignment.custody_identity());
-    fixture.close_transport(false).await;
+    fixture.close_transport(false, None).await;
     let receipt = obligation.joined().await;
     let snapshot = state
         .store
@@ -2774,4 +2851,82 @@ async fn source_actual_unknown_register_reconciliation(
         SourceReleaseOutcome::Released
     );
     assert!(manager.lookup_source_worker(&assignment).is_none());
+}
+
+#[test]
+fn source_fixture_ack_race_requires_exact_sealed_settled_receipt() {
+    use plurx_core::error::StoreError;
+    use plurx_core::sharing_ingress_custody::{IngressCustodyState, IngressRegistration};
+    let registration = IngressRegistration {
+        node_id: "fixture".into(),
+        boot_id: uuid::Uuid::new_v4(),
+        connection_id: uuid::Uuid::new_v4(),
+        driver_sequence: 1,
+        registration_sequence: 1,
+        closed_confirmation: None,
+    };
+    let confirmation = "a".repeat(64);
+    let race = StoreError::Database(
+        "NOT NULL constraint failed: sharing_source_session_bindings.incarnation_id".into(),
+    );
+    let mut ledger = IngressCustodyState::default();
+    ledger.register(registration.clone());
+    assert!(!source_fixture_ack_race_committed(
+        &race,
+        ledger.clone(),
+        &registration,
+        &confirmation
+    ));
+    ledger.acknowledge(&registration, &confirmation);
+    assert!(!source_fixture_ack_race_committed(
+        &race,
+        ledger.clone(),
+        &registration,
+        &confirmation
+    ));
+    ledger.seal();
+    assert!(source_fixture_ack_race_committed(
+        &race,
+        ledger.clone(),
+        &registration,
+        &confirmation
+    ));
+    assert!(!source_fixture_ack_race_committed(
+        &StoreError::Database("disk I/O error".into()),
+        ledger.clone(),
+        &registration,
+        &confirmation
+    ));
+    assert!(!source_fixture_ack_race_committed(
+        &race,
+        ledger.clone(),
+        &registration,
+        &"b".repeat(64)
+    ));
+    let mut other = registration.clone();
+    other.registration_sequence += 1;
+    assert!(!source_fixture_ack_race_committed(
+        &race,
+        ledger.clone(),
+        &other,
+        &confirmation
+    ));
+    ledger.compact_settled();
+    assert!(!source_fixture_ack_race_committed(
+        &race,
+        ledger,
+        &registration,
+        &confirmation
+    ));
+}
+
+#[tokio::test]
+async fn source_fixture_monitor_join_propagates_task_failure() {
+    let monitor = SourceFactoryIngressMonitor(Some(tokio::spawn(async {
+        panic!("injected fixture monitor failure")
+    })));
+    let joined = tokio::spawn(monitor.join()).await;
+    assert!(joined
+        .expect_err("monitor panic must reach the fixture")
+        .is_panic());
 }

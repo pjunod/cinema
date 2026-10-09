@@ -577,6 +577,21 @@ final class LiveTvPlayerController: ObservableObject {
     }
     #endif
 
+    /// Remote Stop settles the visible owner synchronously; cleanup follows
+    /// with the same serial ownership fence as ordinary tuning.
+    func stopFromRemote() {
+        serial += 1
+        let expected = serial
+        detach()
+        busy = false
+        endAudioSession()
+        Task {
+            guard serial == expected else { return }
+            do { try await lease?.stop() }
+            catch { if serial == expected { message = "Cleanup is unconfirmed. Retry Stop before starting another channel." } }
+        }
+    }
+
     func stop(clearProfile: Bool = false) async {
         if clearProfile { loadId = UUID(); channels = [] }
         do { try await stopChecked() }
@@ -1386,6 +1401,8 @@ enum LiveTvGuideTopEdge: Equatable {
 /// The half-hour grid. One horizontal offset shared by every row, so the
 /// channel column and the times cannot drift apart from the cells.
 struct LiveTvGuideGrid: View {
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
+    var onRemoteProgramme: ((LiveTvChannel, LiveTvProgramme) -> Void)? = nil
     private struct FocusKey: Hashable {
         let channelId: String
         let programmeStart: Int?
@@ -1512,6 +1529,7 @@ struct LiveTvGuideGrid: View {
                         #else
                         .buttonStyle(.plain)
                         #endif
+                        .remoteControl("live:channel:" + row.channel.id, label: row.channel.title, enabled: row.channel.watchable) { onAiring(row.channel) }
                         .background(Palette.bg)
                         // The header is part of the vertical scroll content,
                         // so focus can reveal every row. Cancel only the
@@ -1571,6 +1589,7 @@ struct LiveTvGuideGrid: View {
                                 #else
                                 .buttonStyle(.plain)
                                 #endif
+                                .modifier(LiveRemoteProgrammeControl(channel: row.channel, programme: cell.programme, activate: onRemoteProgramme))
                                 .offset(x: cell.left + 3, y: 5)
                                 .accessibilityLabel(
                                     "\(row.channel.title), \(cell.programme.title), "
@@ -1627,6 +1646,10 @@ struct LiveTvGuideGrid: View {
                 }
             }
         }
+        #if os(tvOS)
+        .onAppear { updateRemoteGuideOrder() }
+        .onChange(of: remoteGuideKeys) { _, _ in updateRemoteGuideOrder() }
+        #endif
         .coordinateSpace(name: "live-tv-guide-scroll")
         .onPreferenceChange(LiveTvGuideScrollOriginKey.self) { scrollOrigin = $0 }
         .overlay(alignment: .topLeading) {
@@ -1778,7 +1801,14 @@ struct LiveTvGuideGrid: View {
     /// Returns whether the press was used. `onMoveCommand` consumes every
     /// direction it is given, so anything this declines is a dead press —
     /// which is why the chips are handled here rather than left to the engine.
-    @discardableResult
+    private var remoteGuideKeys: [String] {
+        RemoteGuideOrder.keys(layout.rows.map { row in (channelID: row.channel.id, programmeStarts: row.cells.map { $0.programme.start }) })
+    }
+    private func updateRemoteGuideOrder() {
+        guard onRemoteProgramme != nil else { return }
+        remoteNavigation.setOrder(scope: "live-tv", keys: remoteGuideKeys, columns: 1)
+    }
+
     private func moveFocus(_ direction: LiveTvContractInput) -> Bool {
         guard let current = focusedCell else { return false }
         if let chip = current.paging { return movePagingFocus(chip, direction) }
@@ -1953,6 +1983,12 @@ struct LiveTvGuideGrid: View {
 
 struct LiveTvView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
+    @EnvironmentObject private var remotePlayback: RemotePlaybackAdapter
+    @State private var remoteOwner = UUID()
+    @State private var remoteMenu: String?
+    @State private var remoteProgramme: LiveTvProgramme?
+    @State private var remoteProgrammeChannel: LiveTvChannel?
     @Environment(\.scenePhase) private var scenePhase
     let onLeave: () -> Void
     @ObservedObject private var live = LiveTvPlayerController.shared
@@ -2068,6 +2104,85 @@ struct LiveTvView: View {
     @State private var now = Int(Date().timeIntervalSince1970)
 
     private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+
+    private func updateLiveRemoteOrder() {
+        let channels = visibleChannels.filter(\.watchable).map { "live:channel:" + $0.id }
+        remoteNavigation.setOrder(scope: "live-tv", keys: ["live:channels", "live:guide", "live:guide-time", "live:captions", "live:play"] + channels, columns: 1)
+    }
+    private func openLiveRemoteMenu(_ name: String, opener: String) {
+        remoteNavigation.openModal(scope: "live-tv:" + name, opener: opener) { remoteMenu = nil }
+        remoteMenu = name
+    }
+    private func openRemoteProgramme(_ channel: LiveTvChannel, _ programme: LiveTvProgramme) {
+        remoteProgramme = programme
+        remoteProgrammeChannel = channel
+        openLiveRemoteMenu("programme", opener: "live:programme:" + channel.id + ":" + String(programme.start))
+    }
+    @ViewBuilder
+    private var liveRemoteMenu: some View {
+        if let menu = remoteMenu {
+            RemoteChoicePanel(scope: "live-tv:" + menu, title: menu == "programme" ? (remoteProgramme?.title ?? "Programme") : menu.capitalized,
+                              choices: liveRemoteChoices(menu))
+        }
+    }
+    private func liveRemoteChoices(_ menu: String) -> [RemoteChoice] {
+        switch menu {
+        case "guide-time":
+            var choices = [RemoteChoice(id: "now", label: "Now", selected: false) { returnGuideToNow() }]
+            if canPageGuide(by: -1) { choices.insert(RemoteChoice(id: "earlier", label: "Earlier", selected: false) { pageGuide(by: -1) }, at: 0) }
+            if canPageGuide(by: 1) { choices.append(RemoteChoice(id: "later", label: "Later", selected: false) { pageGuide(by: 1) }) }
+            return choices
+        case "tracks":
+            return [RemoteChoice(id: "auto", label: "Automatic", selected: live.captions.selection == .automatic, choose: live.captions.makeSelectionAction(.automatic)),
+                    RemoteChoice(id: "off", label: "Off", selected: live.captions.selection == .off, choose: live.captions.makeSelectionAction(.off))] + live.captions.choices.map { choice in
+                RemoteChoice(id: String(choice.id), label: choice.label, selected: live.captions.selection == .track(choice.id), choose: live.captions.makeSelectionAction(.track(choice.id)))
+            }
+        case "programme":
+            guard let channel = remoteProgrammeChannel, channel.watchable, let programme = remoteProgramme, programme.start <= now, programme.end > now else { return [] }
+            return [RemoteChoice(id: "watch", label: "Watch live", selected: false) { selectAiring(channel) }]
+        default: return []
+        }
+    }
+    private func attachLiveRemote() {
+        remotePlayback.attach(.init(token: remoteOwner, scope: "live-tv", actions: [.navigate, .select, .back, .setPlaying, .stop, .openTracks, .chooseTrack], snapshot: {
+            guard let channel = live.watching, live.playing else { return nil }
+            let tracks = liveRemoteChoices("tracks").map { CinemaRemoteTrackOption(kind: .subtitles, optionID: $0.id, label: RemoteTextBounds.label($0.label)) }
+            return .init(media: .liveChannel(channel.id), title: RemoteTextBounds.label(channel.title), playing: !live.paused && !live.systemPaused,
+                         positionMs: 0, durationMs: 0, tracks: Array(tracks.prefix(64)))
+        }, dispatch: dispatchLiveRemote, cancelNetworkGesture: {}))
+    }
+    private func dispatchLiveRemote(_ action: CinemaRemoteAction) -> CinemaRemoteOutcome {
+        switch action.type {
+        case .setPlaying:
+            guard live.playing, let requested = action.playing else { return .unavailable }
+            live.setPaused(!requested)
+            return .applied
+        case .stop:
+            guard live.playing || live.busy else { return .unavailable }
+            live.stopFromRemote()
+            fullscreen = false
+            return .applied
+        case .openTracks:
+            guard live.playing, action.kind == .subtitles else { return .unsupported }
+            openLiveRemoteMenu("tracks", opener: "live:captions")
+            return .applied
+        case .chooseTrack:
+            guard remoteMenu == "tracks", action.kind == .subtitles, let choice = liveRemoteChoices("tracks").first(where: { $0.id == action.optionID }) else { return .staleContext }
+            choice.choose(); remoteNavigation.closeModal()
+            return .applied
+        case .navigate, .select, .back:
+            guard fullscreen, !remoteNavigation.hasOwnedModal else { return .unsupported }
+            let input: LiveTvContractInput
+            switch action.type {
+            case .back: input = .back
+            case .select: input = .select
+            default:
+                switch action.direction { case .up: input = .up; case .down: input = .down; case .left: input = .left; case .right: input = .right; case nil: return .invalid }
+            }
+            return applyLiveOutcome(LiveTvInputRouting.route(surface: .tenFoot, state: liveInputState, input: input)) ? .applied : .unsupported
+        default: return .unsupported
+        }
+    }
 
     init(onLeave: @escaping () -> Void = {}) {
         self.onLeave = onLeave
@@ -2219,7 +2334,13 @@ struct LiveTvView: View {
         .toolbar { phoneNavigationActions }
         #endif
         .background(Palette.bg)
-
+        .remoteScope("live-tv")
+        .remoteRestricted(showingSearch || showingInfo || showingMore || showingLayout || detail != nil || showingDvrActivity || showingTouchRecordings)
+        .overlay { liveRemoteMenu }
+        .onAppear { attachLiveRemote(); updateLiveRemoteOrder() }
+        .onChange(of: browse) { _, _ in remoteNavigation.contextChanged(); updateLiveRemoteOrder() }
+        .onChange(of: visibleChannels.map(\.id)) { _, _ in updateLiveRemoteOrder() }
+        .onChange(of: live.watching?.id) { _, _ in remoteNavigation.contextChanged(); attachLiveRemote() }
         .task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
         .task { await dvr.load(origin: model.origin, token: Session.shared.credentials.token) }
         // One read of the schedule and the reminders per guide load, and none
@@ -2237,6 +2358,7 @@ struct LiveTvView: View {
             Task { await dvr.refreshDue() }
         }
         .onDisappear {
+            if !fullscreen { remotePlayback.detach(remoteOwner) }
             onScreen = false
             if !fullscreen && mayRelease { Task { await live.stop() } }
         }
@@ -2259,6 +2381,11 @@ struct LiveTvView: View {
             // has gone — because a write made while it is still animating out
             // targets a covered presentation and is dropped.
             fullscreenSurface
+                .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: "live-tv"))
+                .remoteScope("live-tv")
+                .overlay { liveRemoteMenu }
+                .remoteRestricted(showingSearch || showingInfo || showingMore || showingLayout || detail != nil || showingDvrActivity)
+                .onDisappear { remoteNavigation.detachPresentation(remoteOwner); attachLiveRemote() }
                 .sheet(item: $detail, onDismiss: { returnGuideFocusAfterProgrammeSheet() }) {
                     programme in programmeDetail(programme)
                 }
@@ -2637,8 +2764,10 @@ struct LiveTvView: View {
             HStack(spacing: 0) {
                 segment("On now", active: browse == .list) { requestChannelFocus() }
                     .focused($focusedControl, equals: .channels)
+                    .remoteControl("live:channels", label: "Channels") { browse = .list }
                 segment("Guide", active: browse == .guide) { requestGuideFocus() }
                     .focused($focusedControl, equals: .guide)
+                    .remoteControl("live:guide", label: "Guide") { browse = .guide }
                 segment(recordingsLabel, active: browse == .recordings) { showRecordings() }
                     .focused($focusedControl, equals: .recordings)
             }
@@ -2666,6 +2795,10 @@ struct LiveTvView: View {
             .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
             .focusEffectDisabled()
             .focused($focusedControl, equals: .layout)
+            Button("Guide time") { openLiveRemoteMenu("guide-time", opener: "live:guide-time") }
+                .remoteControl("live:guide-time", label: "Guide time") { openLiveRemoteMenu("guide-time", opener: "live:guide-time") }
+            Button("Captions") { openLiveRemoteMenu("tracks", opener: "live:captions") }
+                .remoteControl("live:captions", label: "Captions", enabled: live.playing) { openLiveRemoteMenu("tracks", opener: "live:captions") }
             Button { showingMore = true } label: {
                 Label("More", systemImage: "ellipsis")
             }
@@ -3051,6 +3184,7 @@ struct LiveTvView: View {
     private var guideGrid: some View {
         GeometryReader { geometry in
             LiveTvGuideGrid(
+                onRemoteProgramme: openRemoteProgramme,
                 layout: LiveTvGuideReducer.gridLayout(
                     guide: live.guide, channels: visibleChannels,
                     window: LiveTvGridMetrics.window(start: guideWindowStart), now: now,
@@ -3504,6 +3638,7 @@ struct LiveTvView: View {
                 .focusEffectDisabled()
         } else if browse == .guide {
             LiveTvGuideGrid(
+                onRemoteProgramme: openRemoteProgramme,
                 layout: LiveTvGuideReducer.gridLayout(
                     guide: live.guide,
                     channels: visibleChannels,
@@ -3585,8 +3720,15 @@ struct LiveTvView: View {
                     .focused($focusedChannelId, equals: channel.id)
                     .disabled(!channel.watchable)
                     .id(channel.id)
+                    .remoteControl("live:channel:" + channel.id, label: channel.title, enabled: channel.watchable && !live.busy) {
+                        if channel.watchable && !live.busy { selectAiring(channel) }
+                    }
                 }
             }
+        }
+        .onChange(of: remoteNavigation.requestedFocus) { _, key in
+            guard remoteNavigation.activeScope == "live-tv", let key, key.hasPrefix("live:channel:") else { return }
+            scroll.scrollTo(String(key.dropFirst(13)), anchor: .center)
         }
         .onChange(of: focusedChannelId) { _, channelId in
             channelFocusCoordinator.focusChanged(active: channelId != nil)
@@ -4113,16 +4255,19 @@ struct LiveTvView: View {
                 )
             }
             .focused($focusedControl, equals: .pillPlay)
+            .remoteControl("live:play", label: live.paused ? "Play live" : "Pause") { live.togglePause() }
             Button { openTemporaryGuide() } label: {
                 Label("Guide", systemImage: "rectangle.grid.3x2")
             }
             .focused($focusedControl, equals: .pillGuide)
+            .remoteControl("live:guide", label: "Guide") { openTemporaryGuide() }
             // Focus on the list is requested when the cover has gone
             // (`restoreBrowseFocusAfterCover`), not here while it is still up.
             Button { browse = .list; fullscreen = false } label: {
                 Label("Channels", systemImage: "list.bullet")
             }
             .focused($focusedControl, equals: .pillChannels)
+            .remoteControl("live:channels", label: "Channels") { browse = .list; fullscreen = false }
             Button { coverSheetOpener = .pillInfo; showStreamInfo() } label: {
                 Label("Info", systemImage: "info.circle")
             }
@@ -4290,6 +4435,7 @@ struct LiveTvView: View {
                                     .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                                     .focusEffectDisabled()
                                     .focused($focusedControl, equals: .guideClose)
+                                    .remoteControl("live:guide-close", label: "Close guide") { closeTemporaryGuide() }
                             }
                             tvBrowseContent(
                                 contentWidth: max(640, Double(geometry.size.width) - 40),
@@ -4542,5 +4688,16 @@ struct LiveTvView: View {
         }
         .padding()
         .background(Palette.bg)
+    }
+}
+
+private struct LiveRemoteProgrammeControl: ViewModifier {
+    let channel: LiveTvChannel
+    let programme: LiveTvProgramme
+    let activate: ((LiveTvChannel, LiveTvProgramme) -> Void)?
+    func body(content: Content) -> some View {
+        content.remoteControl("live:programme:" + channel.id + ":" + String(programme.start), label: programme.title, enabled: activate != nil) {
+            activate?(channel, programme)
+        }
     }
 }

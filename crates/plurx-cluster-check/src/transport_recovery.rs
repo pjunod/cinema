@@ -467,6 +467,7 @@ impl Drop for RecoveryWriter {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryRuntimeStatus {
+    pub last_log_index: Option<u64>,
     pub snapshot_index: Option<u64>,
     pub purged_index: Option<u64>,
     pub applied_index: Option<u64>,
@@ -1838,6 +1839,10 @@ async fn exercise_role_campaign(
             .checked_add(RECOVERY_DEADLINE)
             .context("recovery deadline overflow")?;
         let recovery = async {
+            let target_watermark = request_status(cluster, TARGET_NODE)
+                .await?
+                .last_log_index
+                .context("recovery target has no retained Raft log watermark")?;
             observed_phase(diagnostics, "target_reset", cycle, None, async {
                 let identity = diagnostics
                     .registered_for_node(TARGET_NODE)?
@@ -1852,11 +1857,21 @@ async fn exercise_role_campaign(
                     diagnostics.process_action("reap", &identity, &Ok(()))?;
                 }
                 kill_result?;
-                delete_disposable_target(cluster_root, TARGET_NODE)?;
+                // Retain this admitted node's Raft identity. Erasing its volume
+                // would request an unfenced legacy removal when it restarts.
+                // Snapshot transfer is proved below and by the unchanged actual
+                // source/target transport and installed-image assertions.
                 Ok(())
             })
             .await?;
             let leader = cluster.leader_among(&[1, 2, 3]).await?;
+            // Capture after the target is reaped: this leader watermark also
+            // covers entries that raced the target's pre-kill observation.
+            let leader_watermark = request_status(cluster, leader)
+                .await?
+                .last_log_index
+                .context("recovery leader has no Raft log watermark")?;
+            let retained_watermark = target_watermark.max(leader_watermark);
             let purge_evidence = trigger_and_wait_for_snapshot(
                 cluster,
                 leader,
@@ -1866,6 +1881,7 @@ async fn exercise_role_campaign(
                 diagnostics,
             )
             .await?;
+            prove_retained_identity_requires_snapshot(&purge_evidence, retained_watermark)?;
             let snapshot_index = purge_evidence.snapshot_index;
             let purged_index = purge_evidence.purged_index;
             let source_snapshot =
@@ -2231,6 +2247,24 @@ fn snapshot_purge_evidence(
         snapshot_index,
         purged_index,
     })
+}
+
+/// A retained target cannot replay the prefix that the leader has purged.
+/// Both the fresh snapshot and its observed purge must exceed the watermark
+/// captured across target shutdown; equality is insufficient evidence.
+fn prove_retained_identity_requires_snapshot(
+    evidence: &SnapshotPurgeEvidence,
+    retained_watermark: u64,
+) -> Result<()> {
+    if evidence.snapshot_index <= retained_watermark || evidence.purged_index <= retained_watermark
+    {
+        bail!(
+            "fresh snapshot {} and purge {} do not exceed retained Raft watermark {retained_watermark}",
+            evidence.snapshot_index,
+            evidence.purged_index
+        );
+    }
+    Ok(())
 }
 
 async fn wait_for_installed_snapshot(
@@ -3542,6 +3576,7 @@ pub(super) async fn recovery_runtime_status(client: &Client) -> Result<RecoveryR
     let metrics = client.metrics_db().await?;
     let snapshot_metrics = client.local_db_snapshot_metrics()?.snapshot();
     Ok(RecoveryRuntimeStatus {
+        last_log_index: metrics.last_log_index,
         snapshot_index: metrics.snapshot.map(|log| log.index),
         purged_index: metrics.purged.map(|log| log.index),
         applied_index: metrics.last_applied.map(|log| log.index),
@@ -3666,23 +3701,6 @@ async fn wait_for_installed_snapshot_file(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-}
-
-fn delete_disposable_target(root: &Path, node_id: u64) -> Result<()> {
-    let target = root.join(format!("node-{node_id}"));
-    let expected_name = format!("node-{node_id}");
-    if !root.is_absolute()
-        || target.parent() != Some(root)
-        || target.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str())
-        || !target.starts_with(root)
-    {
-        bail!("refused unsafe recovery target deletion {target:?}");
-    }
-    if target.exists() {
-        std::fs::remove_dir_all(&target)
-            .with_context(|| format!("remove disposable recovery node {target:?}"))?;
-    }
-    Ok(())
 }
 
 async fn spawn_recovery_node(
@@ -4660,6 +4678,29 @@ mod tests {
             validate_transport_recovery_role_report(&report)
                 .unwrap_or_else(|error| panic!("{cycles}-cycle report failed: {error:#}"));
         }
+    }
+
+    #[test]
+    fn retained_identity_requires_a_snapshot_beyond_its_shutdown_watermark() {
+        let evidence = snapshot_purge_evidence(1_279, 1_279).expect("observed purge");
+        prove_retained_identity_requires_snapshot(&evidence, 1_278)
+            .expect("retained logs cannot cover the purged prefix");
+    }
+
+    #[test]
+    fn retained_identity_rejects_equal_or_newer_retained_logs() {
+        let evidence = snapshot_purge_evidence(1_279, 1_279).expect("observed purge");
+        assert!(prove_retained_identity_requires_snapshot(&evidence, 1_279).is_err());
+        assert!(prove_retained_identity_requires_snapshot(&evidence, 1_280).is_err());
+    }
+
+    #[test]
+    fn retained_identity_rejects_a_purge_that_has_not_crossed_its_watermark() {
+        let evidence = SnapshotPurgeEvidence {
+            snapshot_index: 1_280,
+            purged_index: 1_279,
+        };
+        assert!(prove_retained_identity_requires_snapshot(&evidence, 1_279).is_err());
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;
+mod invitations;
 mod jellyfin_catalog;
 mod jellyfin_identity;
 mod jellyfin_login;
@@ -32,6 +33,7 @@ mod outbox;
 mod pretranscode;
 mod publication;
 mod reading;
+mod remote;
 mod sessions;
 mod shared_cache;
 mod sharing;
@@ -1293,6 +1295,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::sharing::SCHEMA,
     // v105: exact Source/receiver outer-ingress custody; preserved across restore.
     super::sharing_ingress_custody::SCHEMA,
+    // v106: additive Cinema receiver credentials, with independent replica marker.
+    REMOTE_SCHEMA,
+    // v107: separately versioned opt-in invitation consent/admission.
+    super::invitations::SCHEMA_V1,
+    // v108: durable phone revision and broker transport generation fence.
+    super::invitations::MIGRATION_V2,
+    // v109: explicit phone login rebind invalidates consent atomically.
+    super::invitations::MIGRATION_V3,
+    // v110: refuse destructive cleanup of incompatible legacy broker references.
+    super::invitations::MIGRATION_V4,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1436,6 +1448,13 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     .with_downloaded_subtitles(&row.get::<_, String>(31)?)
     .map_err(|e| conversion_err(31, format!("downloaded_subtitles: {e}")))
 }
+
+const REMOTE_SCHEMA: &str = r#"CREATE TABLE remote_schema (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1)) STRICT;
+CREATE TABLE remote_receivers (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, platform TEXT NOT NULL, secret_hash TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER) STRICT;
+CREATE TABLE remote_grants (id TEXT PRIMARY KEY, receiver_id TEXT NOT NULL REFERENCES remote_receivers(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, secret_hash TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER) STRICT;
+CREATE INDEX remote_grants_receiver ON remote_grants(receiver_id, revoked_at);
+CREATE TABLE remote_claim_budget (user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, window_started INTEGER NOT NULL, attempts INTEGER NOT NULL) STRICT;
+INSERT INTO remote_schema VALUES(1,1);"#;
 
 const USER_COLS: &str = "id, username, password_hash, is_admin, created_at";
 
@@ -2683,7 +2702,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("marker"),
-            105
+            110 // The append-only chain now also includes Cinema v106-v110.
         );
         assert!(conn
             .query_row(
@@ -3410,9 +3429,10 @@ mod tests {
         // compatibility-only logins, bounded negotiations with exact native
         // references, and manual-edit watch revisions; v102 adds quality
         // cancellation and v103 continuous dependencies; v104–v105 add sharing
-        // authority and outer-ingress custody.
+        // authority and outer-ingress custody; v106-v110 append Cinema receiver
+        // credentials, consent, revision fencing, login rebind and cleanup guards.
         assert_eq!(
-            version, 105,
+            version, 110,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

@@ -253,6 +253,14 @@ impl TranscodeManager {
         self.macos_video_processing_enabled.store(enabled, Release);
     }
 
+    pub(crate) fn macos_hevc_output_enabled(&self) -> bool {
+        self.macos_hevc_output_enabled.load(Acquire)
+    }
+
+    pub(crate) fn set_macos_hevc_output_enabled(&self, enabled: bool) {
+        self.macos_hevc_output_enabled.store(enabled, Release);
+    }
+
     pub(crate) fn macos_video_report(&self) -> Arc<crate::macos_video::MacosVideoReport> {
         self.macos_video_probe.snapshot()
     }
@@ -260,6 +268,7 @@ impl TranscodeManager {
     pub(crate) fn macos_video_diagnostics(&self) -> serde_json::Value {
         let mut report = self.macos_video_report().diagnostics();
         report["enabled"] = serde_json::json!(self.macos_video_processing_enabled());
+        report["hevc_output_enabled"] = serde_json::json!(self.macos_hevc_output_enabled());
         report
     }
 
@@ -280,6 +289,18 @@ impl TranscodeManager {
             Err(error) => tracing::warn!(target: "plurxd::transcode", %error,
                 "could not refresh saved Mac processing preference; retaining published choice"),
         }
+        match self
+            .store
+            .get_setting(keys::MACOS_HEVC_OUTPUT_ENABLED)
+            .await
+        {
+            Ok(value) => self.set_macos_hevc_output_enabled(plurx_core::store::stored_switch(
+                value.as_deref(),
+                false,
+            )),
+            Err(error) => tracing::warn!(target: "plurxd::transcode", %error,
+                "could not refresh saved Mac HEVC output preference; retaining published choice"),
+        }
     }
 
     pub(crate) async fn apply_macos_video_processing_setting(
@@ -294,6 +315,21 @@ impl TranscodeManager {
             )
             .await?;
         self.set_macos_video_processing_enabled(enabled);
+        Ok(())
+    }
+
+    pub(crate) async fn apply_macos_hevc_output_setting(
+        &self,
+        enabled: bool,
+    ) -> Result<(), plurx_core::error::StoreError> {
+        let _serial = self.macos_video_preference_update.lock().await;
+        self.store
+            .put_setting(
+                keys::MACOS_HEVC_OUTPUT_ENABLED,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+        self.set_macos_hevc_output_enabled(enabled);
         Ok(())
     }
 

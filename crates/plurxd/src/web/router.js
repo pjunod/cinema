@@ -59,6 +59,8 @@ async function render(){
   if(AUTOPLAY_NEXT_PREPARED&&location.hash!==`#/item/${AUTOPLAY_NEXT_PREPARED.page.id}`)
     clearAutoplayNextPreparation();
   const generation=++PAGE_RENDER_GENERATION;
+  CinemaRemote.clear();
+  cinemaRemoteRouteChanged();
   if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
   if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
   if(typeof sharingRouteChanged==="function")sharingRouteChanged();
@@ -100,6 +102,7 @@ async function render(){
     else if(h.startsWith("#/library/")) await viewLibrary(h.split("/")[2]);
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
+    else if(h==="#/remote") await viewRemote(generation);
     else if(h==="#/activity") await viewActivity(generation);
     else if(h==="#/live-tv") await viewLiveTv(generation);
     else if(h.startsWith("#/recordings")) await viewRecordings(generation);
@@ -112,7 +115,15 @@ async function render(){
     // pending offset never survives the route that was on screen when it was
     // armed. Without it, switching layout on Settings scrolled the NEXT page.
     if(generation===PAGE_RENDER_GENERATION) restoreScroll();
-    if(generation===PAGE_RENDER_GENERATION) markBootReady();
+    if(generation===PAGE_RENDER_GENERATION){
+      markBootReady();
+      cinemaRemoteReceiverSync();
+      cinemaRemoteSuggest();
+      if(CINEMA_REMOTE_RETURN&&CINEMA_REMOTE_RETURN.route===location.hash){
+        if(LIB_VIEW&&CINEMA_REMOTE_RETURN.route.match(/^#\/(library|category)\//)) libGoPage(CINEMA_REMOTE_RETURN.page);
+        CinemaRemote.focusById(CINEMA_REMOTE_RETURN.id); CINEMA_REMOTE_RETURN=null;
+      }
+    }
   }catch(e){
     if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m){ m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure(h,generation,"render_error"); markBootReady(); }else toast(e.message); }
   }

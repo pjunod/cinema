@@ -79,7 +79,7 @@ function card(it, watchCtx){
   // state either, so it got flagged as unwatched.
   const cls = `poster k-${esc(it.kind||"item")}${(!watched&&!prog)?" unw":""}`;
   const itemId=exactWireId(it);
-  return `<div class="${cls}" onclick="location.hash='#/item/${itemId}'">
+  return `<div class="${cls}" data-remote-item="${itemId}" onclick="location.hash='#/item/${itemId}'">
     <div class="artbox">${img}${dur}${watched}</div><div class="meta"><div class="t">${esc(main)}</div><div class="s"><span class="stxt">${sub}</span>${resb}</div>${watchLine(it,watchCtx)}</div>${prog}</div>`;
 }
 // Folder and photo cards. A folder opens its page; a photo opens the lightbox
@@ -90,7 +90,7 @@ function homeCard(it){
   if(it.kind==='folder'){
     const n=it.child_count;
     const sub=n==null? "Folder" : `${n} item${n===1?'':'s'}`;
-    return `<div class="poster k-folder" onclick="location.hash='#/item/${itemId}'">
+    return `<div class="poster k-folder" data-remote-item="${itemId}" onclick="location.hash='#/item/${itemId}'">
       <div class="artbox">${artHtml(it, '', true)}</div>
       <div class="meta"><div class="t">${esc(it.title)}</div><div class="s"><span class="stxt">${esc(sub)}</span></div></div></div>`;
   }

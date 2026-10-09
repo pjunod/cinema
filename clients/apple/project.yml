@@ -16,7 +16,7 @@ settings:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "217"
+    CURRENT_PROJECT_VERSION: "218"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -39,6 +39,12 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.app
         TARGETED_DEVICE_FAMILY: "1,2"          # iPhone + iPad
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: iOS.entitlements
+      configs:
+        Debug:
+          APNS_ENVIRONMENT: development
+        Release:
+          APNS_ENVIRONMENT: production
     info:
       path: Support/iOS-Info.plist
       properties:
@@ -113,6 +119,8 @@ targets:
     platform: iOS
     sources:
       - path: Tests
+      - path: ../../crates/plurx-core/tests/fixtures/remote-control-v1.json
+        buildPhase: resources
       - path: ../../tests/contracts/channel-subject-wire.json
         buildPhase: resources
       - path: ../../tests/contracts/native-api.json
@@ -149,6 +157,8 @@ targets:
     platform: tvOS
     sources:
       - path: Tests
+      - path: ../../crates/plurx-core/tests/fixtures/remote-control-v1.json
+        buildPhase: resources
       - path: ../../tests/contracts/channel-subject-wire.json
         buildPhase: resources
       - path: ../../tests/contracts/native-api.json

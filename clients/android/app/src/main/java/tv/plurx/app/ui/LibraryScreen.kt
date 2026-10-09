@@ -31,6 +31,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
+import tv.plurx.app.ui.components.RequestInitialFocus
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -65,10 +71,12 @@ import tv.plurx.app.ui.components.PosterCard
 import tv.plurx.app.ui.components.SafeTopRow
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.theme.Muted
+import tv.plurx.app.remote.*
 
 internal enum class WatchFilter(val label: String) {
     Everything("Everything"), Unwatched("Unwatched"), InProgress("In progress"), Watched("Watched")
 }
+
 
 @Composable
 fun LibraryScreen(
@@ -121,6 +129,12 @@ internal fun LibraryScreen(
     val landscape = kind == "home"
     LaunchedEffect(preferences.libraryPresentation) { presentation = preferences.libraryPresentation }
     var shown by remember(pager) { mutableStateOf<List<Item>>(emptyList()) }
+    RemoteOrder((listOf("library:back", "choice:Sort", "choice:Show", "choice:View") + if (rows) groups.flatMap { group -> listOf("row:library-group:" + group.key + ":all") + group.items.map { "row:library-group:" + group.key + ":item:" + it.id } } else shown.map { "item:" + it.id }).distinct().take(16384)) { key ->
+        if (!rows) {
+            val index = shown.indexOfFirst { "item:" + it.id == key }
+            if (index >= 0) scope.launch { gridState.scrollToItem(index) }
+        }
+    }
     LaunchedEffect(pager) { pager.ensure(40) }
     LaunchedEffect(pager, gridState, rows) {
         if (rows) return@LaunchedEffect
@@ -156,7 +170,7 @@ internal fun LibraryScreen(
         SafeTopRow(
             Modifier.fillMaxWidth().padding(start = side - 12.dp, end = side, top = 8.dp),
         ) {
-            TvIconButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) {
+            TvIconButton(onClick = onBack, modifier = Modifier.remoteAction("library:back", "Back") { onBack(); RemoteOutcome.Applied }.focusRequester(backFocus)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Column(Modifier.weight(1f)) {
@@ -233,6 +247,7 @@ internal fun LibraryScreen(
                 rowItems(groups, key = { it.key }) { group ->
                     MediaRow(
                         title = "${group.label} · ${group.items.size}${if (load.complete) "" else " loaded"}",
+                        remoteKey = "library-group:" + group.key,
                         items = group.items, posterWidth = rowWidth, landscape = landscape,
                         onViewAll = { expandedGroup = group.key }, onOpen = { onOpenItem(it.id) },
                     )
@@ -255,19 +270,64 @@ internal fun LibraryScreen(
     // so closing View all returns to the same horizontal and vertical position.
     val expanded = groups.firstOrNull { it.key == expandedGroup }
     if (expanded != null) {
-        Dialog(onDismissRequest = { expandedGroup = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val navigation = LocalRemoteNavigation.current
+        val remoteScope = LocalRemoteScope.current
+        val token = remember(remoteScope, expanded.key) { java.util.UUID.randomUUID().toString() }
+        val prefix = "library-expanded:$token:item"
+        val currentItems by rememberUpdatedState(expanded.items)
+        val semanticItems = currentItems.distinctBy { it.id }.take(16382)
+        val semanticIds = semanticItems.map { it.id }.toSet()
+        val keys = listOf("library-expanded:$token:close") + (if (load.error != null) listOf("library-expanded:$token:retry") else emptyList()) + semanticItems.map { "$prefix:${it.id}" }
+        val expandedGrid = rememberLazyGridState()
+        val currentOpen by rememberUpdatedState(onOpenItem)
+        val currentRetry by rememberUpdatedState(retry)
+        var owned by remember(token) { mutableStateOf(false) }
+        fun closeExpanded() { navigation?.closeMenu(token); expandedGroup = null }
+        DisposableEffect(navigation, remoteScope, token) {
+            owned = navigation?.enterMenu(token, keys, RemotePresentationKind.LibraryGroup, realize = { key ->
+                val index = currentItems.indexOfFirst { "$prefix:${it.id}" == key }
+                if (index >= 0) scope.launch { if (navigation.menuOwned(token)) expandedGrid.scrollToItem(index) }
+            }) { expandedGroup = null } == true
+            onDispose { navigation?.closeMenu(token) }
+        }
+        SideEffect { if (owned) navigation?.updateMenu(token, keys) }
+        Dialog(onDismissRequest = { closeExpanded() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            if (!owned) RemoteRestricted()
+            val view = LocalView.current
+            val windowView = (view.parent as? DialogWindowProvider)?.window?.decorView ?: view
+            DisposableEffect(navigation, windowView, token, owned) {
+                if (owned) navigation?.ownedWindow(token, windowView)
+                onDispose { navigation?.ownedWindow(token, null) }
+            }
+            val first = remember(token) { FocusRequester() }
+            RequestInitialFocus(first, enabled = owned, reinforce = false)
             Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).navigationBarsPadding()) {
                 SafeTopRow(Modifier.fillMaxWidth().padding(horizontal = side, vertical = 8.dp)) {
-                    TextButton(onClick = { expandedGroup = null }) { Text("All rows") }
+                    TextButton(onClick = { closeExpanded() }, modifier = Modifier.remoteAction("library-expanded:$token:close", "All rows", enabled = owned) {
+                        if (navigation?.menuOwned(token) != true) RemoteOutcome.StaleContext else { closeExpanded(); RemoteOutcome.Applied }
+                    }.focusRequester(first)) { Text("All rows") }
                     Text("${expanded.label} · ${expanded.items.size}${if (load.complete) "" else " loaded"}", style = MaterialTheme.typography.titleLarge)
                 }
-                LibraryLoadError(load.error, Modifier.padding(horizontal = side), retry)
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(rowWidth),
-                    contentPadding = PaddingValues(side),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(22.dp),
-                ) {
-                    items(expanded.items, key = { it.id }) { item -> PosterCard(item, width = rowWidth, landscape = landscape) { onOpenItem(item.id) } }
+                if (load.error != null) Row(Modifier.fillMaxWidth().padding(horizontal = side)) {
+                    Text("Incomplete library: ${load.error}", modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = { currentRetry() }, modifier = Modifier.remoteAction("library-expanded:$token:retry", "Retry", enabled = owned) {
+                        if (navigation?.menuOwned(token) != true) RemoteOutcome.StaleContext else { currentRetry(); RemoteOutcome.Applied }
+                    }) { Text("Retry") }
+                }
+                CompositionLocalProvider(LocalRemoteItemPrefix provides prefix) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(rowWidth), state = expandedGrid,
+                        contentPadding = PaddingValues(side),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(22.dp),
+                    ) {
+                        items(currentItems, key = { it.id }) { item -> PosterCard(item, width = rowWidth, landscape = landscape,
+                            remoteEnabled = owned && item.id in semanticIds,
+                            remoteActivate = {
+                                if (navigation?.menuOwned(token) != true || item.id !in semanticIds) RemoteOutcome.StaleContext
+                                else { closeExpanded(); currentOpen(item.id); RemoteOutcome.Applied }
+                            }) { closeExpanded(); currentOpen(item.id) }
+                        }
+                    }
                 }
             }
         }

@@ -626,6 +626,8 @@ paths = [
   "crates/plurxd/src/transcode/**",
   "crates/plurxd/fixtures/macos-processing/**",
   "crates/plurxd/src/macos_video.rs",
+  "crates/plurxd/src/macos_video/live.rs",
+  "crates/plurxd/src/macos_video/p5.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
@@ -828,6 +830,26 @@ id = "identity.access"
 title = "Accounts, tokens, and authorization boundaries"
 contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate; cache-only recovery authorization is published only from a current Store-backed admin read, is invalidated around credential mutations, and fails closed on every committed peer until its signed begin/end revocation fence is acknowledged or expires at the proof TTL. A closed or empty proof cache is that node's condition and never a verdict on the caller: the recovery guard answers its cached proof first and without touching the Store, and on a miss falls back to one bounded Store read, so a Store-known administrator is admitted, a Store-known non-admin is refused as forbidden, only a credential the Store has no row for is unauthorized, and a node that cannot find out answers a named service-unavailable refusal rather than a 401 that ends a working session. The one-time revocation-protocol activation names the precondition blocking it and retries on a bounded backoff."
 paths = [
+  # Fixed-purpose publisher/ticket notification authority and provider boundaries.
+  "crates/plurx-notification-broker/**",
+  # Receiver-local remote authority/freshness/replay boundaries and shared fixtures.
+  "crates/plurx-core/src/store/invitations.rs",
+  "crates/plurx-core/src/store/invitations/**",
+  "crates/plurx-core/src/store/sqlite/invitations.rs",
+  "crates/plurx-core/src/store/hiqlite_invitations.rs",
+  "crates/plurx-core/tests/store_contract/invitations.rs",
+  "crates/plurx-core/src/store/remote.rs",
+  "crates/plurx-core/src/store/remote_tests.rs",
+  "crates/plurx-core/src/store/sqlite/remote.rs",
+  "crates/plurx-core/src/store/hiqlite_remote.rs",
+  "crates/plurx-core/tests/store_contract/remote.rs",
+  "crates/plurxd/src/http/remote.rs",
+  "crates/plurxd/src/http/remote/**",
+  "crates/plurxd/tests/remote_owner_forwarding/mod.rs",
+  "tests/web/cinema-remote-settings.test.js",
+  "crates/plurx-core/src/remote_control.rs",
+  "crates/plurx-core/src/remote_control/tests.rs",
+  "crates/plurx-core/tests/fixtures/remote-control-v1.json",
   "crates/plurx-core/src/auth.rs",
   "crates/plurx-core/src/secrets.rs",
   "crates/plurx-core/src/store/sqlite/{apikeys,users}.rs",
@@ -890,6 +912,14 @@ paths = [
   "docs/streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md",
   "scripts/dv-evidence",
   "scripts/generate-macos-video-fixtures",
+  "scripts/generate-macos-video-extensions",
+  "scripts/generate-macos-p5-fixtures",
+  "scripts/append-macos-p5-terminal-nals",
+  "scripts/generate-macos-live-fixtures",
+  "scripts/generate-macos-extension-fixtures",
+  "scripts/macos-video-fixture-rpu.rs",
+  "scripts/qualify-macos-dolby-strict",
+  "scripts/macos-dolby-flush.c",
   "scripts/decoder-media-baseline",
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
@@ -1100,8 +1130,9 @@ depends_on = ["server.api", "identity.access", "playback.pipeline"]
 [[points]]
 id = "web.experience"
 title = "Embedded web player and administration UI"
-contract = "Every file of the shipped web app — a shell of markup and tags plus the sixty-five assets it serves in a fixed order — remains syntactically valid, loads in an order that resolves with no file naming a binding a later one declares, carries its own strict-mode prologue, is readable in every theme, and is structurally stable across layouts; and the document that maps those files stays in step with what is served. Its Activity warning names incomplete nodes and renders a missing Activity origin, authentication refusal, HTTP failure, transport unreachability, timeout, and invalid response as distinct plain-language outcomes. Its admin cluster panel separates health, node cards, direct all-voter evidence, an operations rail whose membership controls are expansions of the rows that state their preconditions, and diagnostics; keeps the direct all-voter status current on a gate of its own while the tab is open, repainting only on a change it renders and never under an open modal; presents two voters as a reconfiguration waypoint rather than redundancy; renders the server's conservative restart verdict plus process, serving, Raft, WAL, snapshot, media, build, and protocol evidence; keeps unreachable voters explicit blockers; binds restart prepare/cancel controls to the current backend; renders maintenance acknowledgement, handoff, catch-up, and session drain as explicit preflights; permits a bounded election only with quorum; turns lost quorum into an original-voter restoration and preservation workspace without unsafe force reconfiguration; renders every typed refusal as an actionable sentence; uses the authenticated redacted support-bundle route; stays absent for a non-admin; holds a minted join token in memory only — never in browser storage, a URL, or a log; and its playback-control reporter completes real exchanges in a real browser rather than only satisfying source-level assertions in Node. A refusal of either Store-free cluster recovery read — the direct all-voter status and the support bundle — is reported in the panel that reports the cluster and never ends the operator's session, including a 401, because that guard answers from a process-local proof cache whose closure describes the cluster; every other route's 401 still ends it."
+contract = "Every file of the shipped web app — a shell of markup and tags plus the sixty-five assets it serves in a fixed order — remains syntactically valid, loads in an order that resolves with no file naming a binding a later one declares, carries its own strict-mode prologue, is readable in every theme, and is structurally stable across layouts; and the document that maps those files stays in step with what is served. Its Activity warning names incomplete nodes and renders a missing Activity origin, authentication refusal, HTTP failure, transport unreachability, timeout, and invalid response as distinct plain-language outcomes. Its admin cluster panel separates health, node cards, direct all-voter evidence, an operations rail whose membership controls are expansions of the rows that state their preconditions, and diagnostics; keeps the direct all-voter status current on a gate of its own while the tab is open, repainting only on a change it renders and never under an open modal; presents two voters as a reconfiguration waypoint rather than redundancy; renders the server's conservative restart verdict plus process, serving, Raft, WAL, snapshot, media, build, and protocol evidence; keeps unreachable voters explicit blockers; binds restart prepare/cancel controls to the current backend; renders maintenance acknowledgement, handoff, catch-up, and session drain as explicit preflights; permits a bounded election only with quorum; turns lost quorum into an original-voter restoration and preservation workspace without unsafe force reconfiguration; renders every typed refusal as an actionable sentence; uses the authenticated redacted support-bundle route; stays absent for a non-admin; holds a minted join token in memory only — never in browser storage, a URL, or a log; and its playback-control reporter completes real exchanges in a real browser rather than only satisfying source-level assertions in Node. A refusal of either Store-free cluster recovery read — the direct all-voter status and the support bundle — is reported in the panel that reports the cluster and never ends the operator's session, including a 401, because that guard answers from a process-local proof cache whose closure describes the cluster; every other route's 401 still ends it. Its optional source-only desktop CEC adapter uses strict native messaging, one explicit document binding, receiver-local freshness deadlines, and the existing semantic input router; foreign installation registrations and stale or superseded input are refused."
 paths = [
+  "clients/desktop-remote/**",
   "brand/tokens.css",
   "crates/plurxd/src/http/web.rs",
   "crates/plurxd/src/web/**",
@@ -1132,7 +1163,7 @@ paths = [
   # dev-only, never served or shipped (THIRD-PARTY-NOTICES §7).
   "tools/web-types/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive", "desktop-cec-host", "desktop-cec-extension"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline"]
 
 [[points]]
@@ -1194,11 +1225,18 @@ paths = [
   "scripts/ci-execution-mode",
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
+  "scripts/provision-hiqlite-upstream",
   "scripts/image-base-drift",
   "scripts/p02-release-cost.py",
   "scripts/p02-release-cost.Dockerfile",
   "scripts/build-static-ffprobe",
   "scripts/build-macos-video-ffmpeg",
+  "scripts/build-macos-source-parser",
+  "scripts/package-macos",
+  "scripts/macos-source-parser.entitlements",
+  "scripts/macos-source-parser-licenses/**",
+  "scripts/prepare-macos-video-ffmpeg",
+  "scripts/macos-video-ffmpeg-patches/**",
   "scripts/build-static-vmaf-scorer",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
@@ -1384,3 +1422,21 @@ paths = [
 ]
 checks = ["rust-gate", "rust-gate-ci", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption", "web-static"]
 depends_on = ["identity.access", "cluster.auth", "persistence.upgrades"]
+
+[[checks]]
+id = "desktop-cec-host"
+title = "Desktop CEC framing, freshness, structured adapters and installation ownership"
+command = "python3 -m unittest discover -s clients/desktop-remote/tests -p 'test_*.py'"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["python3"]
+missing = "fail"
+timeout_seconds = 30
+
+[[checks]]
+id = "desktop-cec-extension"
+title = "Desktop CEC document binding, local credit deadlines and semantic delivery"
+command = "node --test clients/desktop-remote/tests/extension.test.mjs"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["node"]
+missing = "fail"
+timeout_seconds = 30
