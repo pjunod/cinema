@@ -1,5 +1,11 @@
 #[tokio::test]
-async fn encoded_exact_resolver_claimed_worker_and_new_attachment_hold_complete_background_output() {
+async fn encoded_exact_resolver_claimed_worker_and_new_attachment_hold_complete_background_output() { encoded_preparation_consumer(false).await; }
+
+#[tokio::test]
+async fn completed_encoded_preparation_does_not_spill_into_live_playback() { encoded_preparation_consumer(true).await; }
+
+#[allow(clippy::disallowed_methods)]
+async fn encoded_preparation_consumer(with_live_pressure: bool) {
     use plurx_core::store::background_jobs::*;
     testfixtures::require_ffmpeg();
     let base = crate::test_tempdir().expect("encoded preparation");
@@ -31,6 +37,23 @@ async fn encoded_exact_resolver_claimed_worker_and_new_attachment_hold_complete_
         plurx_core::transcode::EncoderCaps::default(), plurx_core::transcode::Pipeline::Cpu)
         .with_cache(base.path().join("cache"), "encoded-test".into(), "test-local".into())
         .with_copy_test_vod(Arc::clone(&serve));
+    let mut owed = None;
+    let viewer_pause = (with_live_pressure).then(|| serve.shared.test_hooks().ordinary_materialize.arm("foreground owed during encoded preparation"));
+    let mut viewer_held = None;
+    let playback_budget = 64 << 10;
+    if with_live_pressure {
+        store.put_setting(plurx_core::store::keys::VOD_WORKING_SET_BYTES, &playback_budget.to_string()).await.expect("small playback budget");
+        let short_path = base.path().join("ordinary-short.mkv");
+        testfixtures::run(std::process::Command::new(testfixtures::ffmpeg()).args(["-v", "error", "-y", "-i"]).arg(&file.path).args(["-t", "0.1", "-an", "-c", "copy"]).arg(&short_path));
+        let mut ordinary = media_file_at(short_path, 100); ordinary.id = 42;
+        let (_, index) = store_with_index(&ordinary).await;
+        store.put_fragment_index(ordinary.id, &index).await.expect("foreground copy index");
+        let mut small = settings(); small.working_set_bytes = playback_budget;
+        let pause = viewer_pause.as_ref().expect("foreground barrier owner");
+        create(&serve, &ordinary, "encoded-incumbent", "ordinary", &small).await;
+        viewer_held = Some(pause.reached().await);
+        owed = Some({ let serve = Arc::clone(&serve); tokio::spawn(async move { fetch(&serve, "encoded-incumbent", &segment_name(0)).await }) });
+    }
     let mut selected = request("encoded", 0.0);
     selected.file_id = id;
     selected.kind = SessionKind::Transcode { height: 360 };
@@ -74,6 +97,15 @@ async fn encoded_exact_resolver_claimed_worker_and_new_attachment_hold_complete_
     assert_eq!(artifact.observation.preimage.playlist, serve.shared.sessions.lock().await.get("later-encoded")
         .expect("session").live_rendition().expect("rendition").playlist);
     assert!(artifact.observation.rates.wire_bytes > 0);
+    if with_live_pressure {
+        assert!(artifact.observation.rates.wire_bytes > playback_budget);
+        assert_eq!(serve.shared.working_set.load(Relaxed), 0, "encoded settlement leaves private media outside the viewer budget");
+        assert!(!owed.as_ref().expect("owed segment").is_finished());
+        viewer_held.take().expect("foreground barrier").release();
+        drop(tokio::time::timeout(Duration::from_secs(5), owed.take().expect("foreground request")).await.expect("viewer advances").expect("foreground task"));
+        drain_private_cleanup(&serve).await;
+        serve.end("encoded-incumbent", Terminal::Deleted).await;
+    }
 }
 
 /// Distinct automatic evidence: the manual None-context case above is not
