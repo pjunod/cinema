@@ -1496,6 +1496,10 @@ pub fn router(state: AppState) -> Router {
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))
+        .route(
+            "/subtitle-transcription",
+            get(crate::subtitle_transcription::settings),
+        )
         .route("/subtitle-provider", get(subtitle_downloads::settings))
         // Advisory only. The Developer section lists what must be true
         // before each switch is safe; this is the other half — what this
@@ -1662,6 +1666,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/users/{id}/devices/{prefix}",
             delete(users::revoke_user_device),
+        )
+        .route(
+            "/subtitle-transcription",
+            put(crate::subtitle_transcription::update_settings),
+        )
+        .route(
+            "/files/{id}/subtitles/transcribe",
+            post(crate::subtitle_transcription::enqueue),
         )
         .route("/settings", put(system::update_settings))
         .route(

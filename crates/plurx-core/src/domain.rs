@@ -628,11 +628,24 @@ pub struct DownloadedSubtitle {
     pub source_size: i64,
     pub source_mtime: i64,
     pub provider_file_id: i64,
+    /// Local generation has no provider identity; zero is reserved for this provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription: Option<SubtitleTranscription>,
     pub language: String,
     pub title: String,
     pub hearing_impaired: bool,
     pub forced: bool,
     pub vtt: String,
+}
+
+/// Offline machine-generated caption provenance, distinct from provider downloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleTranscription {
+    pub artifact_key: String,
+    pub model_sha256: String,
+    pub pipeline_digest: String,
+    pub adapter: String,
+    pub generated_at_ms: i64,
 }
 
 impl MediaFile {

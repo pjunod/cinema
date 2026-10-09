@@ -225,6 +225,13 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND active_job IS NULL
       AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'media_probe' AND state IN ('queued','running','cancelling')
         AND json_extract(payload_json,'$.coordinator') = json_extract(body,'$.payload.coordinator')) >= 128 THEN 'queue_full'
+    WHEN json_extract(body,'$.payload.kind') = 'subtitle_transcribe' AND NOT EXISTS (
+      SELECT 1 FROM files WHERE id = json_extract(body,'$.payload.file_id')
+        AND size = json_extract(body,'$.payload.source_size') AND mtime = json_extract(body,'$.payload.source_mtime')
+        AND probe_json IS NOT NULL) THEN 'source_changed'
+    WHEN json_extract(body,'$.payload.kind') = 'subtitle_transcribe' AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'subtitle_transcribe'
+        AND state IN ('queued','running','cancelling')) >= 32 THEN 'queue_full'
     WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND NOT EXISTS (
       SELECT 1 FROM items WHERE id = json_extract(body,'$.payload.item_id')) THEN 'source_changed'
     WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND EXISTS (
@@ -598,6 +605,7 @@ pub enum JobKind {
     FragmentIndexBuild,
     ArtifactHydrate,
     SubtitleExtract,
+    SubtitleTranscribe,
     LibraryScan,
     MetadataRefresh,
     ArtifactVerify,
@@ -616,6 +624,7 @@ impl JobKind {
             | Self::EncodedOutputPrepare
             | Self::FragmentIndexBuild
             | Self::ArtifactHydrate
+            | Self::SubtitleTranscribe
             | Self::SubtitleExtract
             | Self::ArtifactVerify
             | Self::ArtworkDerivative
@@ -807,6 +816,14 @@ pub enum JobPayload {
         track: Option<u32>,
         pipeline_digest: String,
     },
+    SubtitleTranscribe {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        language: String,
+        model_sha256: String,
+        pipeline_digest: String,
+    },
     LibraryScan {
         library_id: i64,
         generation: String,
@@ -847,6 +864,7 @@ impl JobPayload {
             Self::FragmentIndexBuild { .. } => JobKind::FragmentIndexBuild,
             Self::ArtifactHydrate { .. } => JobKind::ArtifactHydrate,
             Self::SubtitleExtract { .. } => JobKind::SubtitleExtract,
+            Self::SubtitleTranscribe { .. } => JobKind::SubtitleTranscribe,
             Self::LibraryScan { .. } => JobKind::LibraryScan,
             Self::MetadataRefresh { .. } => JobKind::MetadataRefresh,
             Self::ArtifactVerify { .. } => JobKind::ArtifactVerify,
@@ -981,6 +999,20 @@ impl JobPayload {
                 pipeline_digest,
                 ..
             } => *file_id > 0 && identifier(source_generation) && digest(pipeline_digest),
+            Self::SubtitleTranscribe {
+                file_id,
+                source_size,
+                language,
+                model_sha256,
+                pipeline_digest,
+                ..
+            } => {
+                *file_id > 0
+                    && *source_size > 0
+                    && super::background_jobs_transcription::valid_language(language)
+                    && digest(model_sha256)
+                    && digest(pipeline_digest)
+            }
             Self::MediaProbe {
                 file_id,
                 source_generation,
@@ -1564,6 +1596,10 @@ pub trait BackgroundJobStore: Send + Sync {
         content_digest: &str,
         model_digest: &str,
     ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError>;
+    async fn publish_transcription_job(
+        &self,
+        request: super::background_jobs_transcription::PublishTranscription,
+    ) -> Result<JobPublishOutcome, StoreError>;
     async fn publish_embedding_job(
         &self,
         request: super::background_jobs_embeddings::PublishEmbeddingJob,
@@ -1974,6 +2010,12 @@ LIMIT 1
         model_digest: &str,
     ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError> {
         super::background_jobs_embeddings::lookup(self, item_id, content_digest, model_digest).await
+    }
+    async fn publish_transcription_job(
+        &self,
+        request: super::background_jobs_transcription::PublishTranscription,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_transcription::publish(self, request).await
     }
     async fn publish_embedding_job(
         &self,

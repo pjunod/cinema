@@ -1161,6 +1161,31 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    /// Offline subtitle discovery admits work under the same cursor owner.
+    pub async fn enqueue_transcription(
+        &self,
+        request: super::background_jobs::EnqueueJob,
+    ) -> Result<super::background_jobs::EnqueueOutcome, StoreError> {
+        if request.request.scope != "subtitle-transcription"
+            || !matches!(
+                request.payload,
+                super::background_jobs::JobPayload::SubtitleTranscribe { .. }
+            )
+        {
+            return Err(StoreError::Task(
+                "invalid transcription discovery request".into(),
+            ));
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .enqueue_job_fenced(request, lease, replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Admit one hot-copy interest under the discovery lease. Worker execution
     /// remains owned by the common queue, never by this planner lease.
     pub async fn enqueue_hot_copy(

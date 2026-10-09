@@ -3614,6 +3614,7 @@ mod tests {
             source_size: file.size,
             source_mtime: file.mtime,
             provider_file_id: 1,
+            transcription: None,
             language: "en".into(),
             title: "Example".into(),
             hearing_impaired: false,

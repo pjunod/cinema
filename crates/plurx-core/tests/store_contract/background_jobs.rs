@@ -4651,3 +4651,241 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
         }
     }).await;
 }
+
+#[tokio::test]
+async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop_fenced() {
+    for_each_backend(|store, backend| async move {
+        for (index, scenario) in ["published", "cancelled", "source_replaced"]
+            .into_iter()
+            .enumerate()
+        {
+            let now = 1_000 + index as i64 * 40_000;
+            let (_, id) = seed_file(&store, &format!("transcription-{scenario}")).await;
+            let file = store.get_file(id).await.expect("file").expect("file");
+            store
+                .upsert_file(
+                    file.item_id,
+                    file.path.to_str().expect("path"),
+                    file.size,
+                    file.mtime,
+                    &plurx_core::domain::ProbeResult {
+                        raw_json: Some("{}".into()),
+                        video_codec: Some("h264".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("probe");
+            // A provider identity never shares the generated-caption namespace.
+            let online = plurx_core::domain::DownloadedSubtitle {
+                source_size: file.size,
+                source_mtime: file.mtime,
+                provider_file_id: 123,
+                transcription: None,
+                language: "en".into(),
+                title: "Provider caption".into(),
+                hearing_impaired: false,
+                forced: false,
+                vtt: "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nProvider\n".into(),
+            };
+            assert!(store
+                .add_downloaded_subtitle(id, &online)
+                .await
+                .expect("online caption"));
+            let source = JobPayload::SubtitleTranscribe {
+                file_id: id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                language: "en".into(),
+                model_sha256: "a".repeat(64),
+                pipeline_digest: "b".repeat(64),
+            };
+            let key = plurx_core::store::background_jobs_transcription::artifact_key(&source)
+                .expect("key");
+            let mut french = source.clone();
+            let JobPayload::SubtitleTranscribe { language, .. } = &mut french else {
+                unreachable!()
+            };
+            *language = "fr".into();
+            assert_ne!(
+                key,
+                plurx_core::store::background_jobs_transcription::artifact_key(&french)
+                    .expect("key")
+            );
+            let job_id = uuid::Uuid::new_v4().to_string();
+            assert!(
+                matches!(
+                    store
+                        .enqueue_job(EnqueueJob {
+                            id: job_id.clone(),
+                            payload: source.clone(),
+                            dedupe_key: format!("transcription:{key}"),
+                            priority: 0,
+                            not_before_ms: now,
+                            now_ms: now,
+                            request: JobRequest {
+                                scope: "subtitle-transcription".into(),
+                                request_id: job_id.clone(),
+                                request_digest: key.clone(),
+                                consumer_kind: "subtitle_transcribe".into(),
+                                consumer_ref: key.clone(),
+                                target_node_id: None,
+                                deadline_ms: None,
+                                retain_identity: false
+                            }
+                        })
+                        .await
+                        .expect("enqueue"),
+                    EnqueueOutcome::Accepted { .. }
+                ),
+                "{backend}"
+            );
+            let ClaimOutcome::Claimed { job } = store
+                .claim_artifact_job(ClaimJob {
+                    job_id: job_id.clone(),
+                    expected_revision: 0,
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::SubtitleTranscribe,
+                    payload_version: 1,
+                    now_ms: now,
+                    dispatched_at_ms: now,
+                })
+                .await
+                .expect("claim")
+            else {
+                panic!("{backend}: claim refused")
+            };
+            let caption = plurx_core::domain::DownloadedSubtitle {
+                source_size: file.size,
+                source_mtime: file.mtime,
+                provider_file_id: 0,
+                transcription: Some(plurx_core::domain::SubtitleTranscription {
+                    artifact_key: key.clone(),
+                    model_sha256: "a".repeat(64),
+                    pipeline_digest: "b".repeat(64),
+                    adapter: "whisper.cpp".into(),
+                    generated_at_ms: now,
+                }),
+                language: "en".into(),
+                title: "Machine transcription (whisper.cpp)".into(),
+                hearing_impaired: false,
+                forced: false,
+                vtt: "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nGenerated\n".into(),
+            };
+            let publication =
+                plurx_core::store::background_jobs_transcription::PublishTranscription {
+                    token: job.token.expect("token"),
+                    source,
+                    caption,
+                    now_ms: now + 1,
+                };
+            if scenario == "cancelled" {
+                store
+                    .cancel_job(CancelJob {
+                        job_id: job_id.clone(),
+                        now_ms: now + 1,
+                    })
+                    .await
+                    .expect("Stop");
+            }
+            if scenario == "source_replaced" {
+                store
+                    .upsert_file(
+                        file.item_id,
+                        file.path.to_str().expect("path"),
+                        file.size + 1,
+                        file.mtime + 1,
+                        &plurx_core::domain::ProbeResult {
+                            raw_json: Some("{}".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("replace source");
+            }
+            let outcome = store
+                .publish_transcription_job(publication.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: publish: {error}"));
+            let current = store.get_file(id).await.expect("file").expect("file");
+            if scenario == "published" {
+                assert!(
+                    matches!(
+                        outcome,
+                        JobPublishOutcome::Published { .. }
+                            | JobPublishOutcome::AlreadyPublished { .. }
+                    ),
+                    "{backend}"
+                );
+                assert_eq!(
+                    current.downloaded_subtitles.len(),
+                    2,
+                    "{backend}: distinct provider and local captions"
+                );
+                assert_eq!(
+                    current
+                        .downloaded_subtitle(current.subtitle_streams.len() as i64 - 1)
+                        .expect("selectable caption")
+                        .transcription
+                        .as_ref()
+                        .expect("provenance")
+                        .artifact_key,
+                    key
+                );
+                assert_eq!(
+                    store
+                        .background_job(&job_id)
+                        .await
+                        .expect("job")
+                        .expect("job")
+                        .state,
+                    JobState::Succeeded
+                );
+                assert!(matches!(
+                    store
+                        .publish_transcription_job(publication)
+                        .await
+                        .expect("replay"),
+                    JobPublishOutcome::AlreadyPublished { .. }
+                ));
+                assert_eq!(
+                    store
+                        .get_file(id)
+                        .await
+                        .expect("file")
+                        .expect("file")
+                        .downloaded_subtitles
+                        .len(),
+                    2
+                );
+            } else {
+                assert!(
+                    matches!(
+                        outcome,
+                        JobPublishOutcome::LostOwnership | JobPublishOutcome::SourceChanged
+                    ),
+                    "{backend}"
+                );
+                assert!(
+                    current
+                        .downloaded_subtitles
+                        .iter()
+                        .all(|caption| caption.transcription.is_none()),
+                    "{backend}: Stop/stale source cannot publish"
+                );
+                assert_ne!(
+                    store
+                        .background_job(&job_id)
+                        .await
+                        .expect("job")
+                        .expect("job")
+                        .state,
+                    JobState::Succeeded
+                );
+            }
+        }
+    })
+    .await;
+}
