@@ -4003,7 +4003,34 @@ class Controller internal constructor(
         autoUpgradeSinceMs = null
     }
 
+    private var continuousProbeLastMs: Long? = null
+    private fun reportContinuousReadOnlyProbe() {
+        val now = monotonicNowMs()
+        if (continuousProbeLastMs?.let { now >= it && now - it < 1_000 } == true) return
+        continuousProbeLastMs = now
+        // One finite observation on the existing cadence; reporting cannot
+        // interrupt Auto, control or actual frame ownership.
+        runCatching {
+            val attachment = liveContinuous() ?: return@runCatching
+            val detail = attachment.probeDetail() ?: return@runCatching
+            val counters = continuousPlayer.videoDecoderCounters
+            val dropped = counters?.droppedBufferCount?.takeIf { it >= 0 }
+            val decoderEpoch = counters?.let { System.identityHashCode(it).toLong() and 0xffffffffL }
+            val mode = when (playbackControlSelection().quality) {
+                QualitySelection.Auto, is QualitySelection.AutoCandidate -> "auto"
+                is QualitySelection.Manual -> "manual"
+                QualitySelection.Original -> "original"
+            }
+            playbackTelemetry.report(event = "continuous_owned_probe", level = "info",
+                message = "Owned continuous output and body observations.",
+                detail = "$detail control_mode=$mode decoder_dropped=${dropped ?: "unknown"} decoder_counter_epoch=${decoderEpoch ?: "unknown"} " +
+                    "playing=${player.playWhenReady && presentationForeground} playback_state=${player.playbackState} " +
+                    "stall_count=$playbackStallCount error_code=${player.playerError?.errorCode ?: "none"}")
+        }
+    }
+
     private fun playbackControlPlayerChanged() {
+        reportContinuousReadOnlyProbe()
         tickDisplayAwareAuto()
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()

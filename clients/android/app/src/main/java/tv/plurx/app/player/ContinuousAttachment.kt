@@ -71,6 +71,7 @@ internal class ContinuousAttachment(
     private val periodReleaseRequested = AtomicBoolean()
     private val videoOwned = AtomicBoolean()
     private val audioDecoderOwned = AtomicBoolean()
+    private val readOnlyProbe = ContinuousReadOnlyProbe()
     private val frame = AtomicReference<ContinuousOutputEvidence.Event.Frame?>()
     private val audioHead = AtomicReference<Long?>(null)
     private val sampledClock = ContinuousPlaybackClock()
@@ -119,7 +120,9 @@ internal class ContinuousAttachment(
                     val result = reservations.retainUnexposed(resource)
                     if (result != null) retained(result.failedRow, result.request, result.cancelProven)
                     result != null
-                }, { resource, bytes -> disposalBarriers.await(artifactKey(resource, ContinuousQualityMedia.digest(bytes))) })
+                }, { resource, bytes -> disposalBarriers.await(artifactKey(resource, ContinuousQualityMedia.digest(bytes))) },
+                eofObserved = { facts -> runCatching { output.emit(ContinuousOutputEvidence.Event.NetworkEof(facts), owner) } },
+                cacheAbsent = runCatching { profile.http.cache == null }.getOrNull())
         }
         val extractor = ContinuousHlsExtractorFactory(owner, queues::accepted, { verified ->
             queues.completed(verified)?.let { append ->
@@ -169,9 +172,32 @@ internal class ContinuousAttachment(
         wake.trySend(Unit)
     }
 
+    /** Read only, sampled by the controller's existing metrics cadence. */
+    fun probeDetail(): String? {
+        if (closed.get() || output.owner() !== owner) return null
+        val observed = frame.get() ?: return null
+        val matching = queues.queuedArtifacts().filter { load ->
+            load.resource.role == "video" && observed.format.width.toLong() == load.resource.row.number("width") &&
+                observed.format.height.toLong() == load.resource.row.number("height") &&
+                frameTick(load.resource.row, observed.positionUs)?.let { contains(load.authorized.interval, it) } == true
+        }
+        if (matching.size != 1) return null
+        val load = matching.single()
+        val tick = frameTick(load.resource.row, observed.positionUs) ?: return null
+        return readOnlyProbe.detail() + " family_id=${start.family.text("family_id")} " +
+            "frame_candidate_id=${load.resource.row.text("candidate_id")} frame_rendition_id=${load.resource.rendition} " +
+            "frame_artifact_id=${load.authorized.interval.text("artifact_id")} film_tick=$tick " +
+            "timescale=${load.resource.row.number("timescale")} width=${observed.format.width} height=${observed.format.height} " +
+            "frame_observed_at_ms=${observed.observedAtMs} latest_intent_revision=${protocol.ledger?.number("latest_intent_revision") ?: "unknown"}"
+    }
+
     private fun observe(event: ContinuousOutputEvidence.Event) {
         when (event) {
-            is ContinuousOutputEvidence.Event.Frame -> frame.set(event)
+            is ContinuousOutputEvidence.Event.Frame -> {
+                frame.set(event)
+                runCatching { readOnlyProbe.frame(event.observedAtMs, event.positionUs) }
+            }
+            is ContinuousOutputEvidence.Event.NetworkEof -> runCatching { readOnlyProbe.eof(event.facts) }.let { Unit }
             is ContinuousOutputEvidence.Event.AudioHead -> audioHead.set(event.positionUs)
             ContinuousOutputEvidence.Event.VideoOwned -> videoOwned.set(true)
             ContinuousOutputEvidence.Event.VideoFreed -> { videoReleaseEpoch.incrementAndGet(); videoOwned.set(false); frame.set(null) }

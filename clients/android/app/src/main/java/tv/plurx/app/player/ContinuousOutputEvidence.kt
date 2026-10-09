@@ -11,6 +11,7 @@ import kotlinx.serialization.json.*
 internal class ContinuousOutputEvidence {
     sealed interface Event {
         data class Frame(val positionUs: Long, val format: Format, val observedAtMs: Long) : Event
+        data class NetworkEof(val facts: ContinuousNetworkEof) : Event
         data class AudioHead(val positionUs: Long) : Event
         data object VideoFreed : Event
         data object AudioSinkFlushed : Event
@@ -100,4 +101,96 @@ internal fun continuousAcceptedPresentation(
         frame.observedAtMs !in 0..ContinuousQualityWire.MAX_SAFE_INTEGER) return null
     return ContinuousAcceptedPresentation(candidate, familyId, rendition, artifactId, id, revision,
         filmTick, timescale, frame.format.width, frame.format.height, frame.observedAtMs)
+}
+
+/** Whole HTTP body consumed to upstream EOF and already immutably authorized.
+ * A controlled-family object has family membership, not a muxed-candidate nonce. */
+internal data class ContinuousNetworkEof(
+    val familyId: String, val originSha256: String, val renditionId: String,
+    val artifactId: String, val role: String, val bytes: Long,
+    val status: Int?, val cacheAbsent: Boolean?, val paced: Boolean?,
+    val bodyDurationMs: Long?, val completedAtMs: Long?,
+)
+
+internal fun continuousNetworkEof(
+    readEof: Boolean, currentOwner: Boolean, familyId: String, originSha256: String,
+    resource: ContinuousQualityMedia.Resource?, authorized: ContinuousQualityMedia.Authorized?,
+    bytes: Long, network: Boolean, status: Int?, cacheAbsent: Boolean?, paced: Boolean?,
+    bodyDurationMs: Long?, completedAtMs: Long?,
+): ContinuousNetworkEof? {
+    if (!readEof || !currentOwner || !network || resource == null || authorized == null ||
+        resource.initialization || resource.role !in setOf("video", "audio") ||
+        bytes !in 1..ContinuousQualityMedia.MAX_MEDIA_BYTES.toLong() || authorized.transactionIds.isEmpty() ||
+        completedAtMs?.let { it !in 0..ContinuousQualityWire.MAX_SAFE_INTEGER } == true) return null
+    val artifact = authorized.interval.text("artifact_id") ?: return null
+    val rendition = resource.row.text("rendition_id") ?: return null
+    if (listOf(familyId, originSha256, artifact, rendition).any { !Regex("[0-9a-f]{64}").matches(it) } ||
+        authorized.interval.text("rendition_id") != rendition) return null
+    return ContinuousNetworkEof(familyId, originSha256, rendition, artifact, resource.role, bytes,
+        status?.takeIf { it in 100..599 }, cacheAbsent, paced, bodyDurationMs?.takeIf { it in 1..120_000L }, completedAtMs)
+}
+
+/** Saturating absolute counters belong to one attachment. No timer or player
+ * clock invents a frame, and a transport close does not invent EOF. */
+internal class ContinuousReadOnlyProbe {
+    private var frames = 0L
+    private var eofCount = 0L
+    private var eofBytes = 0L
+    private var videoEofCount = 0L
+    private var videoEofBytes = 0L
+    private var audioEofCount = 0L
+    private var audioEofBytes = 0L
+    private var qualifiedVideoEofCount = 0L
+    private var qualifiedVideoEofBytes = 0L
+    private var lastQualifiedVideo: ContinuousNetworkEof? = null
+    private var lastFrameAtMs: Long? = null
+    private var lastFramePositionUs: Long? = null
+    private var nonprogressingFrames = 0L
+    private var maximumFrameGapMs = 0L
+    private var longFrameGaps = 0L
+    private var counterBoundReached = false
+    private var lastEof: ContinuousNetworkEof? = null
+    private fun sum(a: Long, b: Long): Long {
+        if (a > ContinuousQualityWire.MAX_SAFE_INTEGER - b) { counterBoundReached = true; return ContinuousQualityWire.MAX_SAFE_INTEGER }
+        return a + b
+    }
+    @Synchronized fun frame(observedAtMs: Long, positionUs: Long) {
+        lastFramePositionUs?.let { if (positionUs <= it) nonprogressingFrames = sum(nonprogressingFrames, 1) }
+        lastFramePositionUs = positionUs
+        frames = sum(frames, 1)
+        lastFrameAtMs?.let { previous ->
+            if (observedAtMs >= previous) {
+                val gap = observedAtMs - previous
+                maximumFrameGapMs = maxOf(maximumFrameGapMs, gap)
+                if (gap >= 100) longFrameGaps = sum(longFrameGaps, 1)
+            }
+        }
+        lastFrameAtMs = observedAtMs
+    }
+    @Synchronized fun eof(value: ContinuousNetworkEof) {
+        eofCount = sum(eofCount, 1); eofBytes = sum(eofBytes, value.bytes)
+        if (value.role == "video") { videoEofCount = sum(videoEofCount, 1); videoEofBytes = sum(videoEofBytes, value.bytes) }
+        else { audioEofCount = sum(audioEofCount, 1); audioEofBytes = sum(audioEofBytes, value.bytes) }
+        if (value.role == "video" && value.status == 200 && value.cacheAbsent == true && value.paced == false && value.bodyDurationMs != null && value.completedAtMs != null) {
+            qualifiedVideoEofCount = sum(qualifiedVideoEofCount, 1); qualifiedVideoEofBytes = sum(qualifiedVideoEofBytes, value.bytes)
+            lastQualifiedVideo = value
+        }
+        lastEof = value
+    }
+    @Synchronized fun detail(): String = buildString {
+        append("frame_count=$frames eof_count=$eofCount eof_bytes=$eofBytes ")
+        append("video_eof_count=$videoEofCount video_eof_bytes=$videoEofBytes audio_eof_count=$audioEofCount audio_eof_bytes=$audioEofBytes ")
+        append("qualified_video_eof_count=$qualifiedVideoEofCount qualified_video_eof_bytes=$qualifiedVideoEofBytes ")
+        append("maximum_frame_gap_ms=$maximumFrameGapMs frame_gaps_ge100ms=$longFrameGaps nonprogressing_frame_count=$nonprogressingFrames counter_bound_reached=$counterBoundReached")
+        lastQualifiedVideo?.let {
+            append(" qualified_eof_rendition_id=${it.renditionId} qualified_eof_artifact_id=${it.artifactId} qualified_eof_last_bytes=${it.bytes}")
+            append(" qualified_eof_body_duration_ms=${it.bodyDurationMs} qualified_eof_completed_monotonic_ms=${it.completedAtMs}")
+        }
+        lastEof?.let {
+            append(" eof_family_id=${it.familyId} eof_origin_sha256=${it.originSha256} eof_rendition_id=${it.renditionId} eof_artifact_id=${it.artifactId}")
+            append(" eof_role=${it.role} eof_last_bytes=${it.bytes} eof_status=${it.status ?: "unknown"}")
+            append(" eof_cache=${when(it.cacheAbsent) { true -> "absent"; false -> "configured"; null -> "unknown" }}")
+            append(" eof_paced=${it.paced ?: "unknown"} eof_scope=controlled_family")
+        }
+    }
 }

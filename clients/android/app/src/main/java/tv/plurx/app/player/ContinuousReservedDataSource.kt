@@ -7,6 +7,7 @@ import androidx.media3.common.C
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.HttpDataSource
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.URI
@@ -44,7 +45,12 @@ internal class ContinuousReservedDataSource(
     private val publish: (ContinuousLoadContext.Verified) -> Unit = {},
     private val retainFailure: suspend (ContinuousQualityMedia.Resource) -> Boolean = { false },
     private val beforeAuthorize: suspend (ContinuousQualityMedia.Resource, ByteArray) -> Unit = { _, _ -> },
+    private val eofObserved: (ContinuousNetworkEof) -> Unit = {},
+    private val cacheAbsent: Boolean? = null,
+
 ) : BaseDataSource(false) {
+    private val diagnosticFamilyId = family.text("family_id").orEmpty()
+    private val diagnosticOriginSha256 = ContinuousQualityMedia.digest(origin.toByteArray(Charsets.UTF_8))
     private val origin = URI(origin)
     private val parent = schedulePath.removeSuffix("quality-schedule")
     private val playlists = buildSet {
@@ -90,18 +96,26 @@ internal class ContinuousReservedDataSource(
             val whole = dataSpec.buildUpon().setPosition(0).setLength(C.LENGTH_UNSET.toLong())
                 .setHttpRequestHeaders(dataSpec.httpRequestHeaders.filterKeys { !it.equals("Range", true) && !it.equals("If-Range", true) }).build()
             val known = source.open(whole)
+            // Headers have arrived; measure actual body consumption, not producer/header wait.
+            val bodyStartedAtMs = runCatching { android.os.SystemClock.elapsedRealtime() }.getOrNull()
             val bound = if (resource == null) 2 * 1024 * 1024 else ContinuousQualityMedia.MAX_MEDIA_BYTES
             if (known > bound) throw IOException("Continuous media payload bound")
             val bytes = ByteArrayOutputStream()
             val buffer = ByteArray(8192)
+            var readEof = false
             while (true) {
                 if (!job.isActive || !loads.isAlive()) throw IOException("Continuous media request cancelled")
                 val count = source.read(buffer, 0, buffer.size)
-                if (count == C.RESULT_END_OF_INPUT) break
+                if (count == C.RESULT_END_OF_INPUT) { readEof = true; break }
                 if (count <= 0) throw IOException("Continuous media read made no progress")
                 if (bytes.size() + count > bound) throw IOException("Continuous media payload bound")
                 bytes.write(buffer, 0, count)
             }
+            val eofAtMs = runCatching { android.os.SystemClock.elapsedRealtime() }.getOrNull()
+            val bodyDurationMs = if (eofAtMs != null && bodyStartedAtMs != null)
+                (eofAtMs - bodyStartedAtMs).takeIf { it > 0 } else null
+            val network = source is HttpDataSource
+            val responseCode = runCatching { (source as? HttpDataSource)?.responseCode }.getOrNull()
             headers = source.responseHeaders
             source.close()
             upstream.compareAndSet(source, null)
@@ -120,6 +134,15 @@ internal class ContinuousReservedDataSource(
                 if (resource != null && authorization != null) ContinuousLoadContext.bind(ContinuousLoadContext.Verified(owner, resource, authorization))
                 transferStarted(dataSpec)
                 started = true
+                // Reporting is downstream of EOF, immutable authorization and
+                // the same current-owner fence as publication. It cannot fail open().
+                runCatching {
+                    val paced = headers.entries.firstOrNull { it.key.equals("X-Plurx-Producer-Paced", true) }
+                        ?.value?.singleOrNull().let { when(it) { "0" -> false; "1" -> true; else -> null } }
+                    continuousNetworkEof(readEof, job.isActive && loads.isAlive() && opening.get() === job,
+                        diagnosticFamilyId, diagnosticOriginSha256, resource, authorization,
+                        retained.size.toLong(), network, responseCode, cacheAbsent, paced, bodyDurationMs, eofAtMs)?.let(eofObserved)
+                }
             }
             return (slice.second - slice.first).toLong()
         } catch (error: Exception) {

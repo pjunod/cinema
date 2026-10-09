@@ -148,4 +148,58 @@ class ContinuousOutputEvidenceTest {
             tx, frame, "d".repeat(64), 96, 1))
     }
 
+    @Test fun networkEofProbeRejectsMissingEofFailedAuthorizationAndForeignOwner() {
+        val (row, _, _) = acceptedJournalFixture()
+        val resource = ContinuousQualityMedia.Resource("video", row, false, 2)
+        val authorized = ContinuousQualityMedia.Authorized(buildJsonObject {
+            put("artifact_id", "d".repeat(64)); put("rendition_id", "b".repeat(64))
+        }, setOf("12345678-1234-1234-1234-123456789abc"))
+        fun eof(read: Boolean = true, owner: Boolean = true,
+                auth: ContinuousQualityMedia.Authorized? = authorized,
+                media: ContinuousQualityMedia.Resource? = resource, network: Boolean = true) =
+            continuousNetworkEof(read, owner, "c".repeat(64), "e".repeat(64), media, auth,
+                100, network, 200, true, false, 10, 5_000)
+        assertNotNull(eof())
+        assertNull(eof(read = false))
+        assertNull(eof(owner = false))
+        assertNull(eof(auth = null))
+        assertNull(eof(network = false))
+        assertNull(eof(media = resource.copy(initialization = true)))
+        assertNull(eof(auth = authorized.copy(interval = buildJsonObject {
+            put("artifact_id", "d".repeat(64)); put("rendition_id", "f".repeat(64))
+        })))
+        val output = ContinuousOutputEvidence()
+        val old = Any(); val current = Any(); val probe = ContinuousReadOnlyProbe()
+        output.subscribe(old) { if (it is ContinuousOutputEvidence.Event.NetworkEof) probe.eof(it.facts) }
+        output.unsubscribe(old)
+        output.subscribe(current) { if (it is ContinuousOutputEvidence.Event.NetworkEof) probe.eof(it.facts) }
+        output.emit(ContinuousOutputEvidence.Event.NetworkEof(requireNotNull(eof())), old)
+        assertTrue(probe.detail().contains("eof_count=0 eof_bytes=0"))
+        output.emit(ContinuousOutputEvidence.Event.NetworkEof(requireNotNull(eof())), current)
+        assertTrue(probe.detail().contains("eof_count=1 eof_bytes=100"))
+        assertTrue(probe.detail().contains("qualified_video_eof_count=1 qualified_video_eof_bytes=100"))
+    }
+
+    @Test fun readOnlyProbeKeepsAbsoluteHardwareCountersAndUnknownEofProvenance() {
+        val probe = ContinuousReadOnlyProbe()
+        probe.frame(1_000, 0); probe.frame(1_041, 41_667); probe.frame(1_300, 83_333)
+        val uncertain = ContinuousNetworkEof("a".repeat(64), "b".repeat(64), "c".repeat(64),
+            "d".repeat(64), "video", 128, null, null, null, null, 2_000)
+        probe.eof(uncertain)
+        val first = probe.detail()
+        assertTrue(first.contains("frame_count=3 eof_count=1 eof_bytes=128"))
+        assertTrue(first.contains("frame_gaps_ge100ms=1"))
+        assertTrue(first.contains("eof_status=unknown eof_cache=unknown eof_paced=unknown"))
+        assertTrue(first.contains("qualified_video_eof_count=0 qualified_video_eof_bytes=0"))
+        assertEquals(first, probe.detail())
+        probe.frame(1_341, 83_333)
+        assertTrue(probe.detail().contains("nonprogressing_frame_count=1"))
+        probe.eof(uncertain.copy(status = 200, cacheAbsent = true, paced = false, bodyDurationMs = 20))
+        assertTrue(probe.detail().contains("eof_count=2 eof_bytes=256"))
+        assertTrue(probe.detail().contains("qualified_video_eof_count=1 qualified_video_eof_bytes=128"))
+        probe.eof(uncertain.copy(status = 200, cacheAbsent = true, paced = false, bodyDurationMs = 20, completedAtMs = null))
+        assertTrue(probe.detail().contains("eof_count=3 eof_bytes=384"))
+        assertTrue(probe.detail().contains("qualified_video_eof_count=1 qualified_video_eof_bytes=128"))
+    }
+
 }
