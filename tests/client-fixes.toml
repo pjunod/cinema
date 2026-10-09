@@ -5891,3 +5891,12 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlR
 source_anchor = 'code in setOf("control_unavailable", "serving_fenced")'
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "temporaryServingFenceReplaysThenResumesFreshControl"
+
+
+[[fixes]]
+id = "apple.temporary-serving-fence-control-retry"
+commits = ["bf956ba589c37c96a8985b5e8a4ea6a058faa3cb"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = 'code == "control_unavailable" || code == "serving_fenced"'
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testARetryHonoursTheServersRetryAfter"
