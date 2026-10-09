@@ -2799,7 +2799,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # DV adapter: +11 dv_segment.rs matches: five cancellation-aware async owners
 # retain or await helper/encoder reap and six producer_spawn calls use the
 # existing registered child owner (including the finite probe fixture).
-expected_occurrences = 913
+# DV serving integration: +3 bounded spawn_blocking bridges in dv_runtime.rs
+# (manifest loading, private-window validation, retained prepared-window extraction),
+# and +1 generation.rs task observing the same retained generation cancellation.
+# These hold existing custody; they do not elect or acquire a new producer owner.
+expected_occurrences = 917
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4283,7 +4287,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # DV adapter: +14 bounded helper-stage and finite fixture waits in
 # dv_segment.rs; +1 empty-slot predecessor regression bound in prodrun.rs.
 # Expiry cancels owned work and still awaits child/writer settlement.
-expected_occurrences = 1637
+# DV serving integration: +2 dv_runtime.rs bounded retirement polling/deadline
+# timers and +1 generation.rs cancellation polling timer. The existing generation
+# and caller preparation budget retain authority; no retry election is added.
+expected_occurrences = 1640
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4687,7 +4694,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # shell. The existing Live producer command site is only refactored in place.
 # DV adapter: +1 finite sleep predecessor fixture constructor; the existing
 # ProducerSlot retains and retires its child and writer barrier.
-expected_occurrences = 246
+# DV serving integration: +1 vodgen.rs test-only FFmpeg command for the actual
+# nonzero video/AAC emitted-timestamp regression; no production launcher added.
+expected_occurrences = 247
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5285,7 +5294,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it remains retained and joined by Drop, not an unowned child launch.
 # DV adapter: +1 spawn of that same finite sleep predecessor fixture,
 # registered and reaped by the existing ProducerSlot.
-expected_occurrences = 734
+# DV serving integration: +2 HTTP response.status() comparisons in hls/control.rs
+# bounded owner-report projection. These are structural false positives, not
+# process launches; producer ownership remains unchanged.
+expected_occurrences = 736
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
