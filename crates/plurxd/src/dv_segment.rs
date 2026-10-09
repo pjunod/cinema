@@ -5,7 +5,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use crate::{
-    admission::{HwSlot, SwPermit, TranscodePermit},
+    admission::{RetainedTranscodePermit, TranscodePermit},
     fragment_index_cluster::SourceFence,
     prodrun::{ProducerRegistration, ProducerSlot, ProducerWriters},
     producer_spawn::{self, Descriptors, Progress, SpawnOptions, Spawned},
@@ -36,6 +36,22 @@ pub(crate) struct SegmentShape {
     pub(crate) el: (u32, u32),
 }
 impl SegmentShape {
+    fn window_frame_bytes(&self) -> Result<u64, String> {
+        if self.el == (0, 0) {
+            // Native EL geometry is observed by the paired decoders before
+            // rendering; the whole-source window helper enforces same/half.
+            // Finite scratch/mux mode still requires explicit dimensions.
+            Self {
+                video_index: self.video_index,
+                max_frames: self.max_frames,
+                bl: self.bl,
+                el: self.bl,
+            }
+            .frame_bytes()
+        } else {
+            self.frame_bytes()
+        }
+    }
     fn frame_bytes(&self) -> Result<u64, String> {
         let (w, h) = self.bl;
         let (ew, eh) = self.el;
@@ -90,6 +106,21 @@ impl SegmentShape {
     }
 }
 
+/// The exact existing graph credit. A retained worker keeps its family
+/// reservation and exclusive process claim; this adapter never reacquires it.
+pub(crate) enum SegmentAdmission {
+    Owned(TranscodePermit),
+    Retained(crate::vodencode::EncodeWorkerPermit),
+}
+impl SegmentAdmission {
+    fn resources(&self) -> RetainedTranscodePermit<'_> {
+        match self {
+            Self::Owned(permit) => permit.retained_resources(),
+            Self::Retained(worker) => worker.retained_resources(),
+        }
+    }
+}
+
 /// Executable paths are worker configuration, never request-controlled. Recipe
 /// argv already selects encoder/output and keeps source time with -copyts. Its
 /// NUT video is fd3; original source audio remains fd4 (independent demux input).
@@ -104,7 +135,7 @@ pub(crate) struct SegmentRequest {
     pub(crate) shape: SegmentShape,
     pub(crate) source: Arc<SourceFence>,
     pub(crate) source_offsets: Arc<Semaphore>,
-    pub(crate) admission: TranscodePermit,
+    pub(crate) admission: SegmentAdmission,
     pub(crate) producer: Arc<ProducerSlot>,
     pub(crate) at: u32,
     /// Bounds renderer/mux preparation up to encoder handoff. The existing
@@ -236,8 +267,7 @@ struct Resources {
     source: Arc<SourceFence>,
     original_offset: u64,
     _offset_lane: Option<OwnedSemaphorePermit>,
-    _hardware: HwSlot,
-    _cpu: SwPermit,
+    _admission: SegmentAdmission,
     directory: Arc<tempfile::TempDir>,
 }
 impl Drop for Resources {
@@ -282,7 +312,7 @@ fn one_thread_cap(scope: &[String], flags: &[&str]) -> Result<usize, String> {
 }
 
 fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
-    // Only the concrete finite x265 recipe is supported. Input decoder options
+    // Concrete x265 or NVENC recipes are supported. Input decoder options
     // precede their own -i; output codec caps follow the last input.
     let inputs: Vec<_> = args
         .iter()
@@ -317,7 +347,7 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .ok_or("thread budget overflow")?;
     let codecs: Vec<_> = output.windows(2).filter(|p| p[0] == "-c:v").collect();
     if codecs.len() != 1
-        || codecs[0][1] != "libx265"
+        || !matches!(codecs[0][1].as_str(), "libx265" | "hevc_nvenc")
         || args.iter().any(|a| {
             a == "-codec"
                 || a == "-c"
@@ -328,7 +358,7 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
                 || (a.starts_with("-x265-params") && a != "-x265-params")
         })
     {
-        return Err("finite segment adapter requires its bounded x265 video recipe".into());
+        return Err("segment adapter requires its bounded Main10 encoder recipe".into());
     }
     let audio: Vec<_> = output.windows(2).filter(|p| p[0] == "-c:a").collect();
     if audio.len() > 1 || (inputs.len() == 2 && audio.is_empty()) {
@@ -362,6 +392,18 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .windows(2)
         .filter(|p| p[0] == "-x265-params")
         .collect();
+    if codecs[0][1] == "hevc_nvenc" {
+        let surfaces: Vec<_> = output
+            .windows(2)
+            .filter(|pair| pair[0] == "-surfaces")
+            .collect();
+        if !params.is_empty() || surfaces.len() != 1 || surfaces[0][1] != "4" {
+            return Err(
+                "NVENC needs its bounded four-surface recipe without x265 parameters".into(),
+            );
+        }
+        return Ok(());
+    }
     if params.len() != 1 {
         return Err("x265 needs one explicit pool/frame-thread bound".into());
     }
@@ -423,9 +465,12 @@ async fn run(
     cancel: CancellationToken,
 ) -> Result<SegmentProducer, String> {
     let raw_limit = request.shape.validate()?;
-    let (hardware, cpu) = request.admission.into_parts();
-    let hardware = hardware.ok_or("segment requires concrete GPU admission")?;
-    let cpu = cpu
+    let admission = request.admission;
+    let held = admission.resources();
+    held.hardware
+        .ok_or("segment requires concrete GPU admission")?;
+    let cpu = held
+        .software
         .filter(|permit| permit.threads() >= 2)
         .ok_or("segment requires two admitted decoder threads")?;
     check_encoder_budget(&request.encoder_args, cpu.threads())?;
@@ -467,8 +512,7 @@ async fn run(
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
-        _hardware: hardware,
-        _cpu: cpu,
+        _admission: admission,
         directory: Arc::new(directory),
     });
     // /dev/fd on macOS shares the description's offset. A fresh demuxer
@@ -614,6 +658,7 @@ async fn run(
 /// Exact original-source presentation interval. This is a processing window,
 /// never a replacement source identity or backend qualification.
 #[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
 pub(crate) struct SegmentWindow {
     pub(crate) start: (i64, u32),
     pub(crate) end: (i64, u32),
@@ -654,6 +699,7 @@ pub(crate) struct StreamingSegmentRequest {
     /// Renderer completion must be bounded even after encoder handoff.
     pub(crate) renderer_deadline: Instant,
     pub(crate) window: Option<SegmentWindow>,
+    pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
 }
 
 #[cfg(target_os = "linux")]
@@ -693,19 +739,34 @@ async fn run_streaming(
         .map(SegmentWindow::args)
         .transpose()?;
     let windowed = window_args.is_some();
+    let base_only = stream.mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu;
+    if base_only && (!windowed || stream.request.shape.el != (0, 0)) {
+        return Err("base-RPU processing requires an original-source window and omitted EL".into());
+    }
     let request = stream.request;
-    request.shape.frame_bytes()?;
-    let (hardware, cpu) = request.admission.into_parts();
-    let hardware = hardware.ok_or("streaming segment requires concrete GPU admission")?;
-    let cpu = cpu
+    if windowed {
+        request.shape.window_frame_bytes()?;
+    } else {
+        request.shape.frame_bytes()?;
+    }
+    let admission = request.admission;
+    let held = admission.resources();
+    held.hardware
+        .ok_or("streaming segment requires concrete GPU admission")?;
+    let cpu = held
+        .software
         .filter(|permit| permit.threads() >= 5)
         .ok_or("concurrent renderer and encoder require at least five admitted CPU threads")?;
     check_encoder_budget(&request.encoder_args, cpu.threads() - 2)?;
     if !request.encoder_args.iter().any(|a| a == "-copyts")
-        || !request
-            .encoder_args
-            .windows(2)
-            .any(|p| p == ["-enc_time_base", "-1"])
+        || !request.encoder_args.windows(2).any(|p| {
+            p == ["-enc_time_base", "-1"]
+                || p[0] == "-enc_time_base:v"
+                    && p[1]
+                        .strip_prefix("1/")
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_some_and(|value| value > 0 && value <= i32::MAX as u32)
+        })
     {
         return Err("streaming encoder must retain the actual NUT timestamp base".into());
     }
@@ -741,8 +802,7 @@ async fn run_streaming(
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
-        _hardware: hardware,
-        _cpu: cpu,
+        _admission: admission,
         directory: Arc::new(directory),
     });
     (&resources.source.handle)
@@ -764,6 +824,9 @@ async fn run_streaming(
     args.push(fd(5));
     if let Some(window_args) = window_args {
         args.extend(window_args);
+    }
+    if base_only {
+        args.push("base-rpu".into());
     }
     let renderer_env: Vec<_> = request
         .renderer_env
@@ -966,6 +1029,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
     if streaming {
         #[cfg(target_os = "linux")]
         return spawn_streaming(StreamingSegmentRequest {
+            mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
             window: std::env::var("PLURX_DV_SEGMENT_WINDOW_START")
@@ -1201,7 +1265,7 @@ pub(crate) async fn physical_probe() {
                 },
                 source: source.clone(),
                 source_offsets: offsets.clone(),
-                admission,
+                admission: SegmentAdmission::Owned(admission),
                 producer: slot.clone(),
                 at: 0,
                 preparation_deadline: Instant::now() + Duration::from_secs(30),
@@ -1258,7 +1322,7 @@ pub(crate) async fn physical_probe() {
             },
             source: source.clone(),
             source_offsets: offsets.clone(),
-            admission,
+            admission: SegmentAdmission::Owned(admission),
             producer: slot.clone(),
             at: 0,
             preparation_deadline: Instant::now() + Duration::from_secs(30),
@@ -1384,9 +1448,11 @@ pub(crate) async fn physical_probe() {
             },
             source: source.clone(),
             source_offsets: offsets.clone(),
-            admission: admissions
-                .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
-                .expect("second actual graph admission"),
+            admission: SegmentAdmission::Owned(
+                admissions
+                    .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
+                    .expect("second actual graph admission"),
+            ),
             producer: slot.clone(),
             at: 1,
             preparation_deadline: Instant::now() + Duration::from_secs(30),
@@ -1438,9 +1504,11 @@ pub(crate) async fn physical_probe() {
                 },
                 source: source.clone(),
                 source_offsets: offsets.clone(),
-                admission: admissions
-                    .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
-                    .expect("refusal graph admission"),
+                admission: SegmentAdmission::Owned(
+                    admissions
+                        .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
+                        .expect("refusal graph admission"),
+                ),
                 producer: slot.clone(),
                 at: 2,
                 preparation_deadline: Instant::now() + Duration::from_secs(30),
@@ -1514,6 +1582,26 @@ mod tests {
         .map(str::to_owned);
         assert!(check_encoder_budget(&recipe, 3).is_ok());
         assert!(check_encoder_budget(&recipe, 2).is_err());
+        let nvenc = [
+            "-threads",
+            "1",
+            "-i",
+            &fd(3),
+            "-filter_threads",
+            "1",
+            "-c:v",
+            "hevc_nvenc",
+            "-threads:v",
+            "1",
+            "-surfaces",
+            "4",
+        ]
+        .map(str::to_owned);
+        assert!(check_encoder_budget(&nvenc, 3).is_ok());
+        assert!(check_encoder_budget(&nvenc, 2).is_err());
+        let mut automatic_surfaces = nvenc.clone();
+        automatic_surfaces[11] = "0".into();
+        assert!(check_encoder_budget(&automatic_surfaces, 3).is_err());
         let duplicate_input = [
             "-threads",
             "1",
@@ -1580,6 +1668,25 @@ mod tests {
             full_interval.validate().is_err(),
             "finite RGB scratch cap stays intact"
         );
+        let mut auto_el = SegmentShape {
+            video_index: 0,
+            max_frames: 64,
+            bl: (3840, 2160),
+            el: (0, 0),
+        };
+        assert_eq!(
+            auto_el.window_frame_bytes().expect("observed native EL"),
+            3840 * 2160 * 6
+        );
+        assert!(
+            auto_el.frame_bytes().is_err(),
+            "finite mode needs concrete EL"
+        );
+        auto_el.el = (0, 1080);
+        assert!(
+            auto_el.window_frame_bytes().is_err(),
+            "partial EL geometry cannot be inferred"
+        );
         shape.max_frames = 0;
         assert!(shape.validate().is_err());
         shape.max_frames = 65;
@@ -1644,6 +1751,105 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn retained_admission_keeps_family_and_worker_until_both_jobs_settle() {
+        use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
+        use crate::vodencode::{EncodePermit, RetainedEncodeAdmission};
+        let admissions = Admissions::new();
+        let estimate = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 5,
+            decoder_threads: Some(2),
+        };
+        let bundle = admissions
+            .try_admit_bundle(1, 5, &estimate, Priority::Live)
+            .expect("actual graph bundle");
+        let binding = RetainedEncodeAdmission::default();
+        let parent = binding.bind(EncodePermit::from(bundle));
+        let worker = parent
+            .clone()
+            .try_claim_worker()
+            .expect("exclusive retained worker");
+        let held = Arc::new(SegmentAdmission::Retained(worker));
+        assert!(held.resources().hardware.is_some());
+        assert_eq!(held.resources().software.expect("held CPU").threads(), 5);
+        assert!(
+            parent.clone().try_claim_worker().is_none(),
+            "no concurrent worker from retained credit"
+        );
+        let cache = tempfile::tempdir().expect("runtime cache");
+        let renderer = child("sleep", cache.path());
+        let encoder = child("sleep", cache.path());
+        let helper_slot = ProducerSlot::new();
+        let encoder_slot = ProducerSlot::new();
+        let (helper, helper_writers) = helper_slot
+            .attach_registered_job_owned(
+                renderer.child,
+                renderer.child_job,
+                0,
+                Some(Box::new(held.clone())),
+            )
+            .await;
+        let (encoded, encoder_writers) = encoder_slot
+            .attach_registered_job_owned(
+                encoder.child,
+                encoder.child_job,
+                0,
+                Some(Box::new(held.clone())),
+            )
+            .await;
+        drop(renderer.stdout);
+        drop(renderer.stderr);
+        drop(encoder.stdout);
+        drop(encoder.stderr);
+        drop(held);
+        drop(parent);
+        helper_slot
+            .request_registered_retirement(&helper)
+            .await
+            .expect("retire renderer");
+        helper_writers.settled();
+        helper.wait_confirmed_reap().await;
+        assert!(
+            admissions
+                .try_admit_bundle(1, 5, &estimate, Priority::Live)
+                .is_none(),
+            "encoder retains actual graph capacity after parent and renderer end"
+        );
+        assert!(
+            binding
+                .current()
+                .expect("encoder retains family")
+                .try_claim_worker()
+                .is_none(),
+            "encoder retains exclusive worker claim"
+        );
+        encoder_slot
+            .request_registered_retirement(&encoded)
+            .await
+            .expect("retire encoder");
+        assert!(
+            binding
+                .current()
+                .expect("writer retains family")
+                .try_claim_worker()
+                .is_none(),
+            "child exit does not release writer custody"
+        );
+        encoder_writers.settled();
+        encoded.wait_confirmed_reap().await;
+        assert!(
+            binding.current().is_none(),
+            "last settled graph releases family reservation"
+        );
+        assert!(
+            admissions
+                .try_admit_bundle(1, 5, &estimate, Priority::Live)
+                .is_some(),
+            "concrete GPU and CPU return once both owned jobs settle"
+        );
     }
 
     #[tokio::test]

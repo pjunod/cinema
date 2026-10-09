@@ -877,6 +877,8 @@ paths = [
   "crates/plurx-core/src/transcode/**",
   "crates/plurxd/src/transcoder_optimization.rs",
   "crates/plurx-core/tests/decoder_selection.rs",
+  "crates/plurx-core/tests/fixtures/dv-runtime/**",
+  "crates/plurxd/src/dv_runtime.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
   "scripts/fuzz-campaign",

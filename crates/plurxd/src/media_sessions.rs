@@ -3560,12 +3560,24 @@ fn validated_control_relay_response(
 ) -> Result<Response<Body>, PeerTransportError> {
     let status = StatusCode::from_u16(response.status.as_u16())
         .map_err(|_| PeerTransportError::InvalidResponse)?;
+    let mut processing_header = None;
     let body = if status.is_success() {
         let parsed =
             serde_json::from_slice::<crate::playback_control::ControlResponseV1>(&response.body)
                 .ok()
                 .filter(|parsed| parsed.is_valid_for(request))
                 .ok_or(PeerTransportError::InvalidResponse)?;
+        processing_header = response
+            .dv_processing_header
+            .as_ref()
+            .and_then(|header| {
+                plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+                    header.as_bytes(),
+                    &request.generation,
+                    parsed.effective_selection.dynamic_range.as_deref(),
+                )
+            })
+            .and_then(|report| serde_json::to_string(&report).ok());
         serde_json::to_vec(&parsed).map_err(|_| PeerTransportError::InvalidResponse)?
     } else {
         let parsed =
@@ -3575,10 +3587,14 @@ fn validated_control_relay_response(
                 .ok_or(PeerTransportError::InvalidResponse)?;
         serde_json::to_vec(&parsed).map_err(|_| PeerTransportError::InvalidResponse)?
     };
-    Response::builder()
+    let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CACHE_CONTROL, "no-store");
+    if let Some(report) = processing_header {
+        builder = builder.header("x-plurx-dv-processing", report);
+    }
+    builder
         .body(Body::from(body))
         .map_err(|_| PeerTransportError::InvalidResponse)
 }
@@ -7126,6 +7142,7 @@ mod tests {
     fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
         let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
         let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::CREATED,
             body: body.clone(),
@@ -7138,6 +7155,7 @@ mod tests {
         );
 
         let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::ALREADY_REPORTED,
             body: body.clone(),
@@ -7153,6 +7171,7 @@ mod tests {
         let mut legacy_info = valid_start_response();
         legacy_info.activation_generation = None;
         let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
@@ -9627,6 +9646,7 @@ mod tests {
 
     fn owner_answer(status: u16, body: &[u8]) -> PeerResponse {
         PeerResponse {
+            dv_processing_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::from_u16(status).expect("status"),
             body: body.to_vec(),
@@ -10774,6 +10794,7 @@ mod tests {
         for disposition in ["accepted", "replayed"] {
             let response = validated_control_relay_response(
                 PeerResponse {
+                    dv_processing_header: None,
                     clock_timing: None,
                     status: reqwest::StatusCode::OK,
                     body: body.clone(),
@@ -10790,6 +10811,38 @@ mod tests {
             )
             .expect("decode relayed terminal body");
             assert_eq!(decoded, expected, "{disposition} relay changed the ack");
+        }
+    }
+
+    #[tokio::test]
+    async fn processing_owner_header_preserves_old_control_body_and_refuses_wrong_incarnation() {
+        let request = terminal_relay_request();
+        let mut expected = terminal_relay_response(&request);
+        expected.effective_selection.dynamic_range = Some("hdr10".into());
+        let body = serde_json::to_vec(&expected).expect("legacy control body");
+        for generation in [&request.generation, &request.session_id] {
+            let header = serde_json::json!({"generation":generation,"hdr10_enhanced":true,"fel_contributed":false,
+                "applied_operations":["RpuColorConversion","TargetMapping"]}).to_string();
+            let response = validated_control_relay_response(
+                PeerResponse {
+                    dv_processing_header: Some(header),
+                    clock_timing: None,
+                    status: reqwest::StatusCode::OK,
+                    body: body.clone(),
+                },
+                &request,
+            )
+            .expect("ordinary-compatible relay");
+            assert_eq!(
+                response.headers().contains_key("x-plurx-dv-processing"),
+                generation == &request.generation
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .expect("relay body");
+            let parsed: crate::playback_control::ControlResponseV1 =
+                serde_json::from_slice(&bytes).expect("old strict body still decodes");
+            assert_eq!(parsed, expected);
         }
     }
 }

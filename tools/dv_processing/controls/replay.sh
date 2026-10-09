@@ -36,6 +36,7 @@ docker run --rm --cpus 2 --memory 2g \
     done
     /work/make_long_terminal /work/bl.mkv /work/el.mkv /work/valid/rpus /work/long-terminal-unpatched.mkv normal > /work/long-terminal-mux.jsonl
     python3 /work/run_controls.py
+    python3 /work/run_window_boundary.py
     /work/generator/target/release/segment-guard-controls /work parse
     python3 /work/check_metadata.py /work
   '

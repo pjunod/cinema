@@ -811,7 +811,7 @@ async function saveJellyfinCompatibility(btn){
 function dolbyVisionHdrProcessingCard(settings,readiness){
   return setCard(`${cardHead("Dolby Vision for HDR output","Use supported Dolby Vision picture information when delivering HDR.","")}
     ${togRow("dv-hdr-processing","Process Dolby Vision for HDR output","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
-    <p class="hint">Enhanced processing is not implemented in production yet; compatible playback remains available. Native Dolby Vision and required color conversion are preserved. Readiness never prevents saving. A running movie is unchanged.</p>
+    <p class="hint">New playback attempts supported Dolby Vision processing when the worker has the required tools and resources. Unsupported sources or processing failures use compatible playback. Native Dolby Vision and required color conversion are preserved. Readiness never prevents saving. A running movie is unchanged.</p>
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_backend_reference","Qualified backend and reference","Validate HDR output against an independent reference.")}
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_encoder_matrix","Production encoder matrix","Test processing with the encoders used by playback workers.")}
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_bitrate_quality","Quality at delivery bitrates","Compare picture quality at delivery bitrates.")}
@@ -828,13 +828,13 @@ async function saveDolbyVisionHdrProcessing(btn){
     if(!card||document.getElementById("dv-hdr-processing-card")!==card)return;
     if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
     card.outerHTML=dolbyVisionHdrProcessingCard(saved,DEVELOPER_READINESS);
-    toast("Dolby Vision HDR preference saved; applies to new playback decisions when qualified");
+    toast("Dolby Vision HDR preference saved; applies to new playback decisions");
   }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
 }
 function dolbyVisionFelReencodeCard(settings,readiness){
   return setCard(`${cardHead("FEL preservation for Profile 8.1","Use the enhancement layer when making a new Profile 8.1 picture.","")}
     ${togRow("dv-fel-reencode","Preserve FEL when converting to Profile 8.1","Default off. Dolby Vision conversion must also be allowed.",!!settings.dolby_vision_fel_reencode)}
-    <p class="hint">This preference never enables conversion by itself. Enhanced encoding is not implemented in production yet; permitted conversion keeps its existing fallback. Native Dolby Vision is preserved. Readiness never prevents saving. A running movie is unchanged.</p>
+    <p class="hint">This preference never enables conversion by itself. New playback attempts FEL reconstruction for supported Profile 7 sources when the worker has the required tools and resources. Unsupported sources or processing failures keep the existing permitted conversion fallback. Native Dolby Vision is preserved. Readiness never prevents saving. A running movie is unchanged.</p>
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_backend_reference","Qualified backend and reference","Independently validate the reconstructed picture and converted output, including HDR10 compatibility.")}
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_encoder_matrix","Production encoder matrix","Test reconstruction and conversion with the encoders used by playback workers.")}
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_bitrate_quality","Quality at delivery bitrates","Compare picture quality at delivery bitrates with the existing conversion.")}
@@ -851,7 +851,7 @@ async function saveDolbyVisionFelReencode(btn){
     if(!card||document.getElementById("dv-fel-reencode-card")!==card)return;
     if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
     card.outerHTML=dolbyVisionFelReencodeCard(saved,DEVELOPER_READINESS);
-    toast("FEL preservation preference saved; applies to new playback decisions when qualified");
+    toast("FEL preservation preference saved; applies to new playback decisions");
   }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
 }
 function contentEncodingCard(settings){

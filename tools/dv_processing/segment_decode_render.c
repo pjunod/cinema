@@ -253,6 +253,10 @@ static void hash_bytes(const uint8_t *bytes, size_t size, char hex[65]) {
 static void inspect_coded(AVPacket *packet) {
   need(packet->pts != AV_NOPTS_VALUE && packet->duration > 0,
        "coded AU needs original PTS/positive duration");
+  // Decode-order references can follow the requested presentation interval.
+  // Their Dolby metadata does not describe any picture this window emits.
+  if (compare_window(packet->pts, window_end) >= 0)
+    return;
   int bl = 0, el = 0, rpu = 0;
   size_t at = 0;
   const uint8_t *rpu_bytes = NULL;
@@ -317,15 +321,6 @@ static void render_pairs(void) {
          "unmatched or ambiguous BL/EL PTS/duration");
     need(last_pts == AV_NOPTS_VALUE || bl->pts > last_pts,
          "duplicate/out-of-order paired frame");
-    AVFrameSideData *raw =
-        av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_RPU_BUFFER);
-    need(raw && raw->size > 0 && raw->size < 4096,
-         "fresh decoder-attached RPU required; cached metadata insufficient");
-    uint8_t nalu[4098] = {0x7c, 0x01};
-    memcpy(nalu + 2, raw->data, raw->size);
-    struct base_mapping base_mapped;
-    if (base_only)
-      base_metadata(bl, nalu, raw->size + 2, source_profile, &base_mapped);
     if (window_mode) {
       need(++paired <= preroll_cap + frame_cap + 1,
            "bounded window decoded pair count");
@@ -336,22 +331,34 @@ static void render_pairs(void) {
              "independent BL/EL random-access preroll required before window");
         first_pair = true;
       }
-      if (compare_window(bl->pts, window_start) < 0 ||
-          compare_window(bl->pts, window_end) >= 0) {
+      // Observe the exclusive boundary before interpreting its RPU. A fresh
+      // unsupported RPU belongs to the next window, which must refuse it there.
+      if (compare_window(bl->pts, window_end) >= 0) {
+        last_pts = bl->pts;
+        boundary_pts = bl->pts;
+        window_done = true;
+        drop_pair();
+        return;
+      }
+    }
+    AVFrameSideData *raw =
+        av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_RPU_BUFFER);
+    need(raw && raw->size > 0 && raw->size < 4096,
+         "fresh decoder-attached RPU required; cached metadata insufficient");
+    uint8_t nalu[4098] = {0x7c, 0x01};
+    memcpy(nalu + 2, raw->data, raw->size);
+    struct base_mapping base_mapped;
+    if (base_only)
+      base_metadata(bl, nalu, raw->size + 2, source_profile, &base_mapped);
+    if (window_mode) {
+      if (compare_window(bl->pts, window_start) < 0) {
         struct pl_dovi_metadata guarded;
         if (!base_only)
           map_parsed_rpu(nalu, raw->size + 2, &guarded, false,
                          bl->width, bl->height);
         last_pts = bl->pts;
-        if (compare_window(bl->pts, window_start) < 0)
-          need(++preroll <= preroll_cap, "bounded preroll exhausted");
-        else {
-          boundary_pts = bl->pts;
-          window_done = true;
-        }
+        need(++preroll <= preroll_cap, "bounded preroll exhausted");
         drop_pair();
-        if (window_done)
-          return;
         continue;
       }
     }

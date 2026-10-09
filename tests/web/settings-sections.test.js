@@ -1865,7 +1865,9 @@ test("DV preferences stay independent and editable with unmet or unavailable rea
       assert.match(html,new RegExp(`TOG:dv-fel-reencode\\|[^|]*\\|[^|]*\\|checked=${fel}`));
       assert.match(html,/FOOT:saveDolbyVisionHdrProcessing/);
       assert.match(html,/FOOT:saveDolbyVisionFelReencode/);
-      assert.match(html,/Enhanced processing is not implemented in production yet/);
+      assert.match(html,/Unsupported sources or processing failures use compatible playback/);
+      assert.match(html,/Unsupported sources or processing failures keep the existing permitted conversion fallback/);
+      assert.doesNotMatch(html,/not implemented in production yet|when qualified/);
       assert.match(html,/This preference never enables conversion by itself/);
       assert.match(html,/HDR backend\/reference proof/);
       assert.match(html,/FEL\/P8.1 backend\/reference proof/);
