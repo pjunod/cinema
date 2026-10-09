@@ -1,6 +1,6 @@
 # Preparation buffer pressure — why a completed copy froze Apple TV
 
-**Status:** implementation in progress · **Written:**
+**Status:** built and reviewed; merge gate pending · **Written:**
 2026-10-08 · **Incident binary:** `6e1089d3fb27bde5cdd92d297249024ae2a6e9dd` ·
 **Source inspected:** `079960dae` · **Owner:** GPT-6.1 Sol implementation, following the approved review.
 
@@ -365,9 +365,9 @@ Forgejo API merging must pass `MergeMessageField`.
 | Independent evidence audit | Completed: confirms unchanged incident lifecycle, nonce-private ownership, admission shortcut failure, double-subtraction hazard, and release-versus-publication race. Incorporated into §3 and §6. |
 | Adversarial plan review | [Review](../reviews/PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md): F1–F3 resolved in §§3.1–3.3; final independent verdict approved to build. |
 | GPT-6.1 Sol build chat | Claimed 2026-10-08 in the build chat; pinned Rust 1.97.1 all-target daemon baseline check passed against `079960dae`. User authorizes implementation, reviews, fixes, PR/gates and merge to main. |
-| Implementation review | [Actual diff review](../reviews/PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md): F1–F6 corrected; final current-tree recheck pending. |
-| Unit/compile evidence | Pinned daemon all-target check passed during development. Original-tree settlement regression failed with exactly 1,595,580 bytes of spill and passed after repair. Web warning suite: 40 tests passed; iOS/tvOS builds and two tvOS warning XTests passed. Docs/index/build/infra checks: 50 passed after correcting the existing Android README build claim from 150 to declared 152. Expanded lifecycle proofs remain under validation. |
-| Main gate and merge | Pending; current candidate must pass required gate. Never call red, missing or superseded checks green. |
+| Implementation review | [Actual diff review](../reviews/PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md): F1–F7 corrected; approved at `4b8ae6f02`, no remaining findings. |
+| Unit/compile evidence | Pinned daemon all-target check passed during development. Original-tree settlement regression failed with exactly 1,595,580 bytes of spill and passed after repair. Web warning suite: 40 tests passed; iOS/tvOS builds and two tvOS warning XCTest passed. Docs/index/build/infra checks: 50 passed after correcting the existing Android README build claim from 150 to declared 152. Final focused lifecycle suite: 21 passed. Tracked hook: catalog, formatting, workspace all-target denied-warning Clippy and all 77 served JavaScript syntax checks passed. Native broad units reported font-environment failures and stalled executable fixtures; remaining broad units run after merge on pinned Linux/FFmpeg 6. |
+| Main gate and merge | [PR #947](http://forge.lan:3000/noirr/plurx/pulls/947), draft before ready gate; current candidate must pass required gate. Never call red, missing or superseded checks green. |
 | Deployment/device acceptance | No fix deployed. Recovery restart succeeded; actual movie playback and a background completion during playback remain to observe. |
 
 If main moves, integrate it and rerun affected proofs on the exact intended

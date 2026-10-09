@@ -662,7 +662,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
-| [PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md](reviews/PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md) | Actual storage-owner implementation review: findings, corrections and final recheck evidence. | open |
+| [PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md](reviews/PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md) | Actual storage-owner implementation review: seven findings corrected and final focused evidence approved. | done |
 | [PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md](reviews/PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md) | Adversarial review of the October 8 playback-buffer repair: capacity handoff, early cancellation, restart and cleanup-failure ownership; findings and dispositions. | open |
 | [S11-GRAIN720-NAL-EVIDENCE-20261002.md](reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md) | One retained synthetic Grain720 header census: 35 first IDRs, two extras, reviewable historical parser/control/result/process/cleanup snapshots and private audit-byte retention; sanitized-not-raw and original S11 qualification limits. | done |
 | [S11-RETAINED-NAL-CONTINUATION-20261002.md](reviews/S11-RETAINED-NAL-CONTINUATION-20261002.md) | Sixteen-context retained-header ledger: thirteen Linux passes plus three retained Grain successes, preserved Grain720 extras, raw-private hash/metric/cleanup identities and historical route/local/pressure failures; reviewer local access, not portable raw evidence or original S11 qualification. | done |

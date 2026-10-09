@@ -1,6 +1,6 @@
 # Preparation buffer pressure — adversarial implementation review
 
-**Status:** corrections under recheck · **Reviewed:** 2026-10-08 ·
+**Status:** approved at `4b8ae6f02` · **Reviewed:** 2026-10-08 ·
 **Base:** `079960dae` · **Reviewer:** independent `storage_review` agent.
 
 Companion to [the canonical repair ledger](../streaming/PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md)
@@ -28,11 +28,21 @@ The exact private plan row is retired after settlement and dependency clearance;
 retained reacquisition validates its full manifest against the newly resolved
 canonical rendition and does not require that old nonce-key row.
 
-## Recheck and remaining evidence
+## Final verdict and evidence
 
-The reviewer confirmed the concrete F1–F5 corrections and subsequently found F6.
-Final recheck must include its correction, actual child-wait failure with an
-independently progressing cleanup, combined unlink failure, and forced expired
-retained collection while source cleanup fails. The final verdict is pending
-focused current-tree test evidence; approval is not inferred from the earlier
-plan review or syntax checks.
+The same independent reviewer approved the corrected tree at `4b8ae6f02`
+with no remaining implementation findings. The pinned Rust 1.97.1 focused
+suite passed 21 tests, including copy and encoded foreground GET progress,
+real child-wait retries plus unlink failure and independent cleanup, forced
+expired retained collection, cancellation and restart inventory, unreadable
+real durable dependencies, and replacement marker/file/Store-plan survival.
+The tracked hook passed formatting, workspace all-target Clippy with denied
+warnings, catalog lint and all 77 served JavaScript syntax checks.
+
+[PR #947](http://forge.lan:3000/noirr/plurx/pulls/947) carries the corrective
+repair to main and preserves the named regression anchors. The required
+main gate remains separate from this review approval. The user requested
+watching and repairing the remaining broad units after merge. Native host
+font contracts and a stalled executable-fixture run are rerun on the pinned
+Linux/FFmpeg 6 surface; no failed test is hidden or waived. Deployment and
+physical Apple TV acceptance remain unclaimed.
