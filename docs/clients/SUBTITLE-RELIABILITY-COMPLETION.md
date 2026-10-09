@@ -1,7 +1,7 @@
 # Subtitle reliability — completion ledger
 
-**Status:** WebVTT/offline implementation integrated; UI snapshots complete; A/53 file-caption repair linked to its active video-processing effort; the sole adversarial review is complete, all three corrections are integrated, and final validation is running.
-**Updated:** 2026-10-09 · **Initial base:** `1088d7529` · **Current main integrated:** `e7a973887` · **Integration:** `codex/subtitle-timeline-and-window` · **Batched PR:** [#961](http://forge.lan:3000/noirr/plurx/pulls/961)
+**Status:** WebVTT/offline repair merged in PR #961 as `15becfc0c` under the owner's explicit merge-now instruction. Post-merge unit monitoring, the reviewed badge/fixture follow-up #972 is ready and CI observation continues; both real app scenarios pass. Windows compilation is explicitly omitted.
+**Updated:** 2026-10-09 · **Initial base:** `1088d7529` · **Current main integrated:** `e7a973887` · **Merged candidate:** `58f9d36e6` · **Follow-up:** `codex/subtitle-postmerge-qualification` · **Batched PR:** [#961](http://forge.lan:3000/noirr/plurx/pulls/961) · **Qualification follow-up:** [#972](http://forge.lan:3000/noirr/plurx/pulls/972)
 
 Cinema subtitles fail across clients: selection may produce nothing, cues can
 arrive late, and a selected track can stop displaying. WebVTT is already
@@ -126,7 +126,7 @@ in the independent clone, and it is no longer used. Cleanup remains tracked.
 
 | Owner | Assignment | State |
 |---|---|---|
-| Coordinator | Initial root-cause repair, integration, status, Developer UI, final review/gate | Initial repair committed as `46a15c280`; PR is draft |
+| Coordinator | Initial root-cause repair, integration, status, Developer UI, final review/gate | Initial repair committed as `46a15c280`; PR #961 merged as `15becfc0c`; post-merge verification active |
 | Sol 6.1 · window delivery | Serve already-ready bounded WebVTT to browser recovery without waiting for whole extraction; local/shared parity | integrated as `25cbac3c7` (agent commit `979621d26`); final batched validation pending |
 | Sol 6.1 · offline transcription | Bounded command job, queue/Stop ownership and durable caption provenance | integrated through `718e35a47`; matching audio ordinal bound to job/publication; normal pinned hooks passed |
 | Sol 6.1 · acceptance | Reconcile PGS/Mac/download/cluster evidence, complete available-hardware cases and repair concrete gaps | unsafe-503 retirement/native notices integrated as `4f6a1d7e2`; physical and bounded Mac composition checks passed; remaining replicated-store/app acceptance prepared |
@@ -149,8 +149,10 @@ them. New worker/window/failure-notice tests were deferred until the sole review
 
 The current main fast lane unconditionally runs `make web-unit-check` in its
 web compile job, which conflicts with this batch's explicit no-repeat
-instruction. The PR remains draft while the validation route is resolved;
-no duplicate full web suite has been launched and no green gate is claimed.
+instruction. The owner explicitly authorized merging before the gate and observing units
+afterward. PR #961 merged on October 9 at 05:20 UTC; no green Main promotion
+gate is claimed. The automatic post-merge coverage/unit run is being observed,
+and local passing cases remain excluded from manual retries.
 
 ### Existing caption-processing effort
 
@@ -174,8 +176,8 @@ One independent adversarial agent reviewed the complete candidate
 | P2: PCM conversion discards initial audio offsets and timestamp gaps, shifting generated captions | Transcription builder | Implemented source-clock-normalized PCM with bounded leading/gap silence and overlap handling; real offset/gap diagnosis and pinned compilation passed; integrated as `0816ed580` |
 | P2: FFmpeg can emit decode errors yet exit zero, allowing partial captions to publish as complete | Transcription builder | Implemented strict decoder errors plus error-level stderr veto before inference/publication; integrated as `0816ed580`; new regressions await final validation |
 
-All three corrections are integrated. Remaining unit execution is now running against `de7c724fa`, preserving every earlier passing case.
-The retained pass ledger contains 503 named results; retries must exclude
+All three corrections are integrated. Earlier named validation used `de7c724fa` and subsequent fixture corrections; final merged-source outcomes below distinguish each snapshot and preserve prior passes.
+The original retained pass ledger contains 503 named results, extended to 510 by seven new native cases; retries must exclude
 every passing case. The existing CI web job cannot consume these local
 results, so local qualification must remain explicitly identified and never
 be represented as an actual green Main promotion gate.
@@ -205,19 +207,75 @@ be represented as an actual green Main promotion gate.
 - Seventeen of 18 new daemon regressions pass, including real audio clock
   preservation and decoder-error rejection. The remaining remote-owner
   fixture needed to reuse the startup server's retained listener; it is
-  corrected and awaiting its failure-only retry. All four core/storage
+  corrected; its next failure identified an unsampled membership readiness
+  lifecycle in the fixture. The production passive sampler must publish actual
+  owner readiness before the real relay route is exercised. The corrected
+  fixture passes its one-case retry on `ea25e6328`; cancellation/join and
+  retained-startup shutdown also complete without the earlier cleanup panic. All four core/storage
   checks pass, including the real three-voter publication and Stop-fencing
   contracts; their passing executions will not be repeated.
 - The real embedded-caption app check failed: the debug daemon aborted with
   a Tokio worker stack overflow at `ensure_window_owned` while starting a
   window extraction. Its crash report and failed receipt are retained;
   nested poll frames exceed the worker stack because they embed the decoder
-  copy buffer. The buffer now has fixed-size heap ownership; the failed app
-  scenario awaits the rebuilt daemon. No stack increase or retry watchdog
-  is used.
+  copy buffer. The buffer now has fixed-size heap ownership; the repaired
+  app scenario passes initial captions, Off and seek/reselect on the rebuilt
+  merged daemon. No stack increase or retry watchdog is used.
 - The independent generated-caption app check passes end to end: actual
   queue completion, durable WebVTT/provenance, restart persistence, and a
   visible caption in Chrome. That passing scenario will not be repeated.
   It exposed a separate selected-track count error; the corrected count
   passes its one new focused regression after a fixture-only repair.
 - Local evidence does not claim a completed CI gate or a production deployment.
+
+### Post-merge continuation · October 9, 05:20 UTC
+
+The owner explicitly instructed: merge now and watch unit tests afterward;
+Windows compilation is not required. PR #961 landed as `15becfc0c`; its tree
+is byte-identical to qualified candidate `58f9d36e6`. This supersedes the
+earlier pending merge-gate decision for this batch only. Main's automatic
+coverage run 4598 is queued; it checks out current main when it starts, so its
+actual source must be recorded. Linux-only compiler run 4599 is dispatched.
+No Windows job was launched and no passing local unit is deliberately replayed.
+
+All final native compile-only checks pass on the merged source: iOS/tvOS app
+and test bundles, Android app/instrumentation bundles and unit-test sources.
+Their 593 source/resource inputs are separately hashed; no unit method ran.
+The new production future-size regression passes: extractor 4,112 bytes and
+range-preparing owner 17,824 bytes. The repaired embedded-caption app scenario passes without a worker-stack
+override: visible initial cue, Off clears cues, seek/reselect shows the
+expected cue at 12.070 seconds, and the same video/file/session remains
+attached without page/media errors. Generated-caption app acceptance remains
+passed and was not repeated. The historical screenshot includes a stale sidebar selection label; that
+functional pass does not certify the label. Follow-up `a27ba4549` updates
+the existing ledger on selection, and its one new paused ordinal-zero/Off
+regression passes without any media event or polling.
+
+Read-only measurements of the repaired debug binary put the same three
+nested poll frames at 225,824 bytes, down from 2,584,560 bytes. This is a
+named-frame subtotal, not an assertion about every possible stack path.
+
+All targeted Rust cases are now green: 178 retained passes plus 23 new
+passes (19 daemon, one core and three replicated-store cases). The final
+remote-owner retry executed exactly one case and preserved every prior
+positive, including the new stack-footprint case.
+
+### Retained qualification package
+
+[Download the sanitized qualification archive](evidence/subtitles-20261009/final-qualification.tar.gz)
+(579,246 bytes; SHA256
+`dc53ddb3f21936e783830161d716f2713612a9091cf60e68407f85408003a423`).
+It retains 40 relative files: per-case/source hashes, original failures,
+repaired app receipts and screenshots, reproducible drivers, native compile
+evidence, and the passing post-merge fixture/badge checks. The 62 accidental
+Node repeats and original source-binding limits remain explicit. No raw
+private logs, credentials, runtime configuration or database is included.
+The coordinator verified every archived manifest row before committing it.
+
+The small new follow-up delta `15becfc0c..a27ba4549` received its own
+adversarial review with no actionable findings; the already-merged large
+PR was not reviewed again. Only the new paused-selection regression ran
+afterward: one pass, no other test callbacks. The old device fixture server
+and its waiting shell are stopped, and its sole Pixel Fold reverse mapping
+is removed. Remaining cleanup waits until committed evidence and follow-up
+source are retained remotely; shared tool bundles are not removed.

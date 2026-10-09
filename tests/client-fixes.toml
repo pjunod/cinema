@@ -9,6 +9,14 @@ source_anchor = "<b>${tracks.length}</b> available"
 test = "tests/web/file-context.test.js"
 test_anchor = "folded subtitle availability includes the selected generated track"
 
+[[fixes]]
+id = "subtitles.paused-selection-projects-immediately"
+commits = ["a27ba45498ae716419f5f3461d3d817c803227eb"]
+source = "crates/plurxd/src/web/player/menus.js"
+source_anchor = 'if(typeof watchRenderLedger==="function") watchRenderLedger();'
+test = "tests/playback/web-control.test.js"
+test_anchor = "paused subtitle selection projects ordinal zero and Off immediately"
+
 # Subtitle batch source/test anchors; retained execution evidence is separate.
 [[fixes]]
 id = "subtitles.acknowledged-native-reselection"
