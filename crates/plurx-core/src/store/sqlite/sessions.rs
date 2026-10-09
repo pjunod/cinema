@@ -2299,21 +2299,21 @@ impl MediaSessionStore for SqliteStore {
             Ok(conn.execute(
                 crate::store::prepared_output::SEAL,
                 params![
+                    seal.already_complete,
+                    seal.expected_recipe_json,
                     proof,
+                    seal.expected_response_json,
                     seal.incarnation_id,
                     seal.session_id,
                     seal.user_id,
                     seal.playback_id,
                     seal.owner_node_id,
                     seal.owner_epoch,
-                    seal.expected_recipe_json,
-                    seal.expected_response_json,
+                    seal.deadline_ms,
+                    seal.now_ms,
                     seal.predecessor_incarnation_id,
                     seal.predecessor_owner_node_id,
                     seal.predecessor_owner_epoch,
-                    seal.now_ms,
-                    seal.deadline_ms,
-                    seal.already_complete
                 ],
             )? == 1)
         })

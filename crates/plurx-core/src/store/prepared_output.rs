@@ -166,24 +166,24 @@ pub(crate) fn sealed_reservation_matches(
 // Both backends use the same atomic ownership predicate. Only the private artifact
 // field and capture marker change; no playback pointer, request, lease or intent moves.
 pub(crate) const SEAL: &str = "UPDATE media_sessions AS s SET
- recipe_json=CASE WHEN $15 THEN s.recipe_json ELSE json_set($8, '$.retained_output', json($1)) END,
- response_json=CASE WHEN $15 THEN s.response_json ELSE json_set(json_remove($9, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) END
- WHERE s.incarnation_id=$2 AND s.session_id=$3 AND s.user_id=$4 AND s.playback_id=$5
- AND s.owner_node_id=$6 AND s.owner_epoch=$7 AND s.state='active'
- AND length(CAST(json_set($8, '$.retained_output', json($1)) AS BLOB))<=32768
- AND length(CAST(json_set(json_remove($9, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) AS BLOB))<=65536
- AND s.publication_ready_at_ms=9223372036854775807 AND s.lease_expires_at_ms=$14 AND s.lease_expires_at_ms>$13
- AND ((s.recipe_json=$8 AND s.response_json=$9)
- OR (NOT $15 AND s.recipe_json=json_set($8, '$.retained_output', json($1))
- AND s.response_json=json_set(json_remove($9, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true'))))
+ recipe_json=CASE WHEN $1 THEN s.recipe_json ELSE json_set($2, '$.retained_output', json($3)) END,
+ response_json=CASE WHEN $1 THEN s.response_json ELSE json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) END
+ WHERE s.incarnation_id=$5 AND s.session_id=$6 AND s.user_id=$7 AND s.playback_id=$8
+ AND s.owner_node_id=$9 AND s.owner_epoch=$10 AND s.state='active'
+ AND length(CAST(json_set($2, '$.retained_output', json($3)) AS BLOB))<=32768
+ AND length(CAST(json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) AS BLOB))<=65536
+ AND s.publication_ready_at_ms=9223372036854775807 AND s.lease_expires_at_ms=$11 AND s.lease_expires_at_ms>$12
+ AND ((s.recipe_json=$2 AND s.response_json=$4)
+ OR (NOT $1 AND s.recipe_json=json_set($2, '$.retained_output', json($3))
+ AND s.response_json=json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true'))))
  AND NOT EXISTS(SELECT 1 FROM quality_preparation_owners q JOIN quality_cancellation_receipts c ON c.receipt_key=q.cancellation_key WHERE q.staged_incarnation_id=s.incarnation_id)
  AND EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id
  AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms)
  AND EXISTS(SELECT 1 FROM media_session_preparations p JOIN media_playback_pointers ptr
  ON ptr.user_id=p.user_id AND ptr.playback_id=p.playback_id
  JOIN media_sessions predecessor ON predecessor.incarnation_id=p.expected_predecessor_incarnation_id
- WHERE p.user_id=$4 AND p.playback_id=$5 AND p.staged_incarnation_id=$2
- AND p.expected_predecessor_incarnation_id=$10 AND p.deadline_ms=$14 AND p.deadline_ms>$13
- AND ptr.current_incarnation_id=$10 AND predecessor.user_id=$4 AND predecessor.playback_id=$5
- AND predecessor.owner_node_id=$11 AND predecessor.owner_epoch=$12 AND predecessor.state='active'
- AND predecessor.lease_expires_at_ms>$13)";
+ WHERE p.user_id=$7 AND p.playback_id=$8 AND p.staged_incarnation_id=$5
+ AND p.expected_predecessor_incarnation_id=$13 AND p.deadline_ms=$11 AND p.deadline_ms>$12
+ AND ptr.current_incarnation_id=$13 AND predecessor.user_id=$7 AND predecessor.playback_id=$8
+ AND predecessor.owner_node_id=$14 AND predecessor.owner_epoch=$15 AND predecessor.state='active'
+ AND predecessor.lease_expires_at_ms>$12)";

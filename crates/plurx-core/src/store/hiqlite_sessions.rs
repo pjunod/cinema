@@ -3212,21 +3212,21 @@ impl MediaSessionStore for HiqliteAuthStore {
         let applied = timeout_store(self.session_client().execute(
             crate::store::prepared_output::SEAL,
             params!(
+                seal.already_complete,
+                seal.expected_recipe_json.as_str(),
                 proof,
+                seal.expected_response_json.as_str(),
                 seal.incarnation_id.as_str(),
                 seal.session_id.as_str(),
                 seal.user_id,
                 seal.playback_id.as_str(),
                 seal.owner_node_id.as_str(),
                 seal.owner_epoch,
-                seal.expected_recipe_json.as_str(),
-                seal.expected_response_json.as_str(),
+                seal.deadline_ms,
+                seal.now_ms,
                 seal.predecessor_incarnation_id.as_str(),
                 seal.predecessor_owner_node_id.as_str(),
                 seal.predecessor_owner_epoch,
-                seal.now_ms,
-                seal.deadline_ms,
-                seal.already_complete
             ),
         ))
         .await?;

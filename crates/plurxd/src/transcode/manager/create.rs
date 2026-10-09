@@ -23,6 +23,68 @@ impl Drop for FirstPreparationCleanup {
 
 use super::*;
 
+/// Bounded identity-only facts for ordering private seal and caller admission.
+/// These observations never participate in capture or publication authority.
+fn trace_prepared_capture(
+    seal: &plurx_core::store::PreparedOutputSeal,
+    owner_current: Option<bool>,
+    ready: bool,
+) {
+    if !tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG) {
+        return;
+    }
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    static START: OnceLock<Instant> = OnceLock::new();
+    let sequence = SEQUENCE
+        .fetch_update(Relaxed, Relaxed, |value| Some(value.saturating_add(1)))
+        .expect("saturating sequence always updates");
+    let monotonic_us = START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros()
+        .min(u64::MAX as u128) as u64;
+    let digest = |value: &[u8]| format!("{:x}", Sha256::digest(value));
+    let mut recipe: serde_json::Value =
+        serde_json::from_str(&seal.expected_recipe_json).expect("validated private recipe");
+    recipe
+        .as_object_mut()
+        .expect("validated private object")
+        .insert(
+            "retained_output".into(),
+            seal.retained_output
+                .clone()
+                .unwrap_or(serde_json::Value::Null),
+        );
+    let proof = seal.retained_output.as_ref();
+    let facts = serde_json::json!({
+        "sequence": sequence,
+        "monotonic_us": monotonic_us,
+        "session_sha256": digest(seal.session_id.as_bytes()),
+        "incarnation_sha256": digest(seal.incarnation_id.as_bytes()),
+        "owner_sha256": digest(seal.owner_node_id.as_bytes()),
+        "predecessor_sha256": digest(seal.predecessor_incarnation_id.as_bytes()),
+        "recipe_canonical_sha256": digest(&serde_json::to_vec(&recipe).expect("private JSON serializes")),
+        "file_binding_sha256": digest(&serde_json::to_vec(&recipe["request"]["file_id"]).expect("private JSON serializes")),
+        "artifact_sha256": proof.and_then(|proof| proof["artifact_id"].as_str()).map(|id| digest(id.as_bytes())),
+        "output_identity_sha256": proof.and_then(|proof| proof["output_identity"].as_str()).map(|id| digest(id.as_bytes())),
+        "owner_epoch": seal.owner_epoch,
+        "deadline_ms": seal.deadline_ms,
+        "capture_first": !seal.already_complete,
+        "retained_some": proof.is_some(),
+        "sealed_complete": ready,
+        "owner_checked": owner_current.is_some(),
+        "owner_current": owner_current.unwrap_or(false),
+        "ready": ready,
+    });
+    if owner_current.is_some() {
+        tracing::debug!(target: "plurxd::retained_reuse", capture_facts = %facts,
+            "Prepared retained output capture sealed");
+    } else {
+        tracing::debug!(target: "plurxd::retained_reuse", capture_facts = %facts,
+            "Prepared retained output caller ready");
+    }
+}
+
 fn recovered_retained_output_matches(
     capture: &crate::vodserve::RetainedOutputCapture,
     candidate_expected: Option<&RetainedOutputFacts>,
@@ -2432,28 +2494,32 @@ impl TranscodeManager {
         let Some(user_id) = route.principal.local_user_id() else {
             return false;
         };
-        self.store
-            .seal_prepared_output(&plurx_core::store::PreparedOutputSeal {
-                incarnation_id: route.incarnation_id,
-                session_id: route.session_id,
-                user_id,
-                playback_id: route.playback_id,
-                owner_node_id: route.owner_node_id,
-                owner_epoch: route.owner_epoch,
-                expected_recipe_json: route.recipe_json,
-                expected_response_json: route.response_json,
-                predecessor_incarnation_id: preparation.expected_predecessor_incarnation_id.clone(),
-                predecessor_owner_node_id: preparation.expected_predecessor_owner_node_id.clone(),
-                predecessor_owner_epoch: preparation.expected_predecessor_owner_epoch,
-                deadline_ms: preparation.deadline_ms,
-                now_ms: crate::media_sessions::unix_ms(),
-                already_complete: true,
-                retained_output: remote
-                    .retained_output
-                    .map(|proof| serde_json::to_value(proof).expect("private facts serialize")),
-            })
+        let seal = plurx_core::store::PreparedOutputSeal {
+            incarnation_id: route.incarnation_id,
+            session_id: route.session_id,
+            user_id,
+            playback_id: route.playback_id,
+            owner_node_id: route.owner_node_id,
+            owner_epoch: route.owner_epoch,
+            expected_recipe_json: route.recipe_json,
+            expected_response_json: route.response_json,
+            predecessor_incarnation_id: preparation.expected_predecessor_incarnation_id.clone(),
+            predecessor_owner_node_id: preparation.expected_predecessor_owner_node_id.clone(),
+            predecessor_owner_epoch: preparation.expected_predecessor_owner_epoch,
+            deadline_ms: preparation.deadline_ms,
+            now_ms: crate::media_sessions::unix_ms(),
+            already_complete: true,
+            retained_output: remote
+                .retained_output
+                .map(|proof| serde_json::to_value(proof).expect("private facts serialize")),
+        };
+        let ready = self
+            .store
+            .seal_prepared_output(&seal)
             .await
-            .is_ok_and(|sealed| sealed)
+            .is_ok_and(|sealed| sealed);
+        trace_prepared_capture(&seal, None, ready);
+        ready
     }
 
     /// Prime a genuinely new unpublished reservation and seal its private output
@@ -2651,6 +2717,7 @@ impl TranscodeManager {
                 {
                     return false;
                 }
+                trace_prepared_capture(&seal, Some(true), true);
                 cleanup.owner = None;
                 true
             };
