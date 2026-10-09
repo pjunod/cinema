@@ -135,7 +135,8 @@ receipt. A server rollout and an actual TCL playback remain outstanding.
 
 ## Dolby Vision badge parity — 2026-10-08
 
-**Status:** ready for PR review; Android build 156.
+**Status:** Android build 156 source compiled; [PR #959](http://forge.lan:3000/noirr/plurx/pulls/959)
+is the review, qualification and merge receipt. Physical acceptance is open.
 
 Android source badges now spell out Dolby Vision, show known profile numbers
 and retain the actual delivered profile when conversion changes it. Both
@@ -152,8 +153,9 @@ repairs are separate work and are not included in this change.
 
 ## Copied Dolby Vision playback repair — 2026-10-08
 
-**Status:** implementation compiled; Android build 157. PR review, fast-lane
-qualification, merge and physical acceptance are pending.
+**Status:** Android build 157 source compiled; [PR #962](http://forge.lan:3000/noirr/plurx/pulls/962)
+is the review, fast-lane qualification and merge receipt. Physical acceptance
+is open.
 
 The Lenovo TB322FC advertised Dolby Vision Profiles 5 and 8 on builds 153 and
 155. Its manual 720p choice produced AVC/SDR; selecting Auto produced a
@@ -210,6 +212,17 @@ so it cannot establish whether that proof expired or was lost to a capture
 race. No speculative server relaxation is included in this client repair.
 The permanent-reporting failure is independently reproduced and corrected
 regardless of the reason a temporary fence occurred.
+
+The existing continuity work is narrower than uninterrupted media serving:
+PR #798 (`e25824f20`) keeps rolling sessions through a brief authority loss;
+PR #807 (`3423cc8d8`, `04f3e3144`) applies the same grace to progressive
+playback and Live TV. New admissions still refuse immediately, and media
+requests still return temporary 503 while the node is fenced. The
+[October 4 incident record](../streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md)
+explicitly leaves serving existing media during the outage as a follow-up.
+Razr's retained session confirms the grace worked in this incident. Android's
+permanent reporter stop violated the client side of that temporary-refusal
+contract; this PR closes that gap, not the separate server-read follow-up.
 
 ### Evidence
 
