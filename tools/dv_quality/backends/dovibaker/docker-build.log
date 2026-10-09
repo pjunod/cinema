@@ -1,0 +1,103 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 640B done
+#1 WARN: FromPlatformFlagConstDisallowed: FROM --platform flag should not use constant value "linux/amd64" (line 2)
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 70B done
+#3 DONE 0.0s
+
+#4 [1/3] FROM docker.io/library/rust@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6
+#4 DONE 0.0s
+
+#5 [2/3] RUN apt-get update     && apt-get install -y --no-install-recommends python3-venv pkg-config     && rm -rf /var/lib/apt/lists/*
+#5 0.365 Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+#5 0.792 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+#5 0.795 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [34.8 kB]
+#5 1.350 Get:4 http://deb.debian.org/debian bookworm/main amd64 Packages [8790 kB]
+#5 1.867 Get:5 http://deb.debian.org/debian bookworm-updates/main amd64 Packages [6924 B]
+#5 2.346 Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [349 kB]
+#5 2.656 Fetched 9388 kB in 2s (3863 kB/s)
+#5 2.656 Reading package lists...
+#5 3.203 Reading package lists...
+#5 3.681 Building dependency tree...
+#5 3.830 Reading state information...
+#5 3.950 pkg-config is already the newest version (1.8.1-1).
+#5 3.950 pkg-config set to manually installed.
+#5 3.950 The following additional packages will be installed:
+#5 3.951   libpython3.11-minimal libpython3.11-stdlib python3-pip-whl
+#5 3.951   python3-setuptools-whl python3.11 python3.11-minimal python3.11-venv
+#5 3.951 Suggested packages:
+#5 3.951   python3.11-doc binfmt-support
+#5 4.023 The following NEW packages will be installed:
+#5 4.023   python3-pip-whl python3-setuptools-whl python3-venv python3.11-venv
+#5 4.024 The following packages will be upgraded:
+#5 4.024   libpython3.11-minimal libpython3.11-stdlib python3.11 python3.11-minimal
+#5 4.221 4 upgraded, 4 newly installed, 0 to remove and 35 not upgraded.
+#5 4.221 Need to get 8086 kB of archives.
+#5 4.221 After this operation, 3171 kB of additional disk space will be used.
+#5 4.221 Get:1 http://deb.debian.org/debian-security bookworm-security/main amd64 python3.11 amd64 3.11.2-6+deb12u9 [575 kB]
+#5 4.289 Get:2 http://deb.debian.org/debian-security bookworm-security/main amd64 libpython3.11-stdlib amd64 3.11.2-6+deb12u9 [1798 kB]
+#5 4.319 Get:3 http://deb.debian.org/debian-security bookworm-security/main amd64 python3.11-minimal amd64 3.11.2-6+deb12u9 [2055 kB]
+#5 4.344 Get:4 http://deb.debian.org/debian-security bookworm-security/main amd64 libpython3.11-minimal amd64 3.11.2-6+deb12u9 [821 kB]
+#5 4.370 Get:5 http://deb.debian.org/debian bookworm/main amd64 python3-pip-whl all 23.0.1+dfsg-1 [1717 kB]
+#5 4.385 Get:6 http://deb.debian.org/debian bookworm/main amd64 python3-setuptools-whl all 66.1.1-1+deb12u2 [1112 kB]
+#5 4.405 Get:7 http://deb.debian.org/debian-security bookworm-security/main amd64 python3.11-venv amd64 3.11.2-6+deb12u9 [5896 B]
+#5 4.406 Get:8 http://deb.debian.org/debian bookworm/main amd64 python3-venv amd64 3.11.2-1+b1 [1200 B]
+#5 4.636 debconf: delaying package configuration, since apt-utils is not installed
+#5 4.696 Fetched 8086 kB in 0s (21.9 MB/s)
+#5 4.790 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 23256 files and directories currently installed.)
+#5 4.811 Preparing to unpack .../0-python3.11_3.11.2-6+deb12u9_amd64.deb ...
+#5 5.009 Unpacking python3.11 (3.11.2-6+deb12u9) over (3.11.2-6+deb12u8) ...
+#5 5.170 Preparing to unpack .../1-libpython3.11-stdlib_3.11.2-6+deb12u9_amd64.deb ...
+#5 5.348 Unpacking libpython3.11-stdlib:amd64 (3.11.2-6+deb12u9) over (3.11.2-6+deb12u8) ...
+#5 5.902 Preparing to unpack .../2-python3.11-minimal_3.11.2-6+deb12u9_amd64.deb ...
+#5 5.944 Unpacking python3.11-minimal (3.11.2-6+deb12u9) over (3.11.2-6+deb12u8) ...
+#5 6.208 Preparing to unpack .../3-libpython3.11-minimal_3.11.2-6+deb12u9_amd64.deb ...
+#5 6.380 Unpacking libpython3.11-minimal:amd64 (3.11.2-6+deb12u9) over (3.11.2-6+deb12u8) ...
+#5 6.741 Selecting previously unselected package python3-pip-whl.
+#5 6.743 Preparing to unpack .../4-python3-pip-whl_23.0.1+dfsg-1_all.deb ...
+#5 6.744 Unpacking python3-pip-whl (23.0.1+dfsg-1) ...
+#5 6.901 Selecting previously unselected package python3-setuptools-whl.
+#5 6.902 Preparing to unpack .../5-python3-setuptools-whl_66.1.1-1+deb12u2_all.deb ...
+#5 6.903 Unpacking python3-setuptools-whl (66.1.1-1+deb12u2) ...
+#5 7.034 Selecting previously unselected package python3.11-venv.
+#5 7.036 Preparing to unpack .../6-python3.11-venv_3.11.2-6+deb12u9_amd64.deb ...
+#5 7.037 Unpacking python3.11-venv (3.11.2-6+deb12u9) ...
+#5 7.127 Selecting previously unselected package python3-venv.
+#5 7.128 Preparing to unpack .../7-python3-venv_3.11.2-1+b1_amd64.deb ...
+#5 7.131 Unpacking python3-venv (3.11.2-1+b1) ...
+#5 7.205 Setting up python3-setuptools-whl (66.1.1-1+deb12u2) ...
+#5 7.210 Setting up python3-pip-whl (23.0.1+dfsg-1) ...
+#5 7.214 Setting up libpython3.11-minimal:amd64 (3.11.2-6+deb12u9) ...
+#5 7.235 Setting up python3.11-minimal (3.11.2-6+deb12u9) ...
+#5 7.914 Setting up libpython3.11-stdlib:amd64 (3.11.2-6+deb12u9) ...
+#5 7.917 Setting up python3.11 (3.11.2-6+deb12u9) ...
+#5 8.568 Setting up python3.11-venv (3.11.2-6+deb12u9) ...
+#5 8.781 Setting up python3-venv (3.11.2-1+b1) ...
+#5 DONE 8.9s
+
+#6 [3/3] RUN python3 -m venv /opt/m0-venv     && /opt/m0-venv/bin/pip install --disable-pip-version-check cmake==3.31.6
+#6 3.727 Collecting cmake==3.31.6
+#6 3.825   Downloading cmake-3.31.6-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (27.8 MB)
+#6 4.475      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 27.8/27.8 MB 47.7 MB/s eta 0:00:00
+#6 4.591 Installing collected packages: cmake
+#6 5.382 Successfully installed cmake-3.31.6
+#6 DONE 5.6s
+
+#7 exporting to image
+#7 exporting layers
+#7 exporting layers 0.4s done
+#7 writing image sha256:46f56803b5908f91a626ad2bad328a42b9a53cbf09aec6bb5743a294fcbca98a done
+#7 naming to docker.io/codex/plurx-dv-m0-baker:replay done
+#7 DONE 0.4s
+
+ [33m1 warning found (use docker --debug to expand):
+[0m - FromPlatformFlagConstDisallowed: FROM --platform flag should not use constant value "linux/amd64" (line 2)
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/h5ku1y22gom0wipk25kbyznpu

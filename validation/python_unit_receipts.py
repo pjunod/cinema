@@ -1044,6 +1044,10 @@ def restore(api, scope, run, applicability=None):
                 "Ambiguous receipt job identity")
         require(matching[0]["attempt"] == 1,
                 f"Run {rid} was re-run; ambiguous receipt attempt, dispatch fresh runs only")
+        from validation.python_unit_empty_recovery import recover_empty_pr920
+        if recover_empty_pr920(api, scope, prior, jobs):
+            indexed.pop(rid, None)
+            continue  # Exact empty failures remain incomplete; no outcomes are imported.
         if matching[0]["status"] == "skipped":
             continue
         from validation.python_unit_zero_failure931 import recover as recover_zero_pr931
@@ -1088,6 +1092,9 @@ def restore(api, scope, run, applicability=None):
         zero931 = journal.get('complete') is False and recover_zero_pr931(
             api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
         inherited = preunit_history or zero931 or zero869 or journal.get('complete') is False and recover_inherited_pr742(
+            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
+        from validation.python_unit_inherited_recovery920 import recover_inherited_pr920
+        inherited = inherited or recover_inherited_pr920(
             api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
         recovered = inherited or journal.get("complete") is False and recover_discovery_passes(
             api, scope, prior, matching[0], markers[0], marker_raw, artifact, final_raw, journal, legacy)

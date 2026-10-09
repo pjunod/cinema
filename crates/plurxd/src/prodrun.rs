@@ -56,6 +56,8 @@ use std::{
 };
 
 use tokio::process::Child;
+#[cfg(unix)]
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{Mutex, Notify};
 
 use crate::prodexec::{after, Producer, Step, Termination};
@@ -258,6 +260,43 @@ pub struct ProducerSlot {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// Exclusive custody of a genuinely empty producer slot, acquired before spawn.
+/// Keeping the guard through preparation prevents another start from racing
+/// attachment. It never waits for an existing child's writer/reaper barrier.
+#[cfg(unix)]
+pub(crate) struct EmptyProducerSlot(OwnedMutexGuard<Inner>);
+
+#[cfg(unix)]
+impl EmptyProducerSlot {
+    pub(crate) fn attach_registered_job_owned(
+        mut self,
+        child: Child,
+        child_job: crate::process_control::ChildJob,
+        at: u32,
+        resources: Box<dyn Send>,
+    ) -> (ProducerRegistration, ProducerWriters) {
+        let (registration, writers) = registered_generation();
+        self.0.child = Some(child);
+        self.0.child_job = Some(child_job);
+        self.0.resources = Some(resources);
+        self.0.registration = Some(registration.clone());
+        self.0.belief = after(self.0.belief, Step::Start { at });
+        (registration, writers)
+    }
+}
+
+fn registered_generation() -> (ProducerRegistration, ProducerWriters) {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let registration = ProducerRegistration(Arc::new(GenerationLifetime {
+        identity: Arc::new(()),
+        writers: Mutex::new(Some(receiver)),
+        receipt: StdMutex::new(None),
+        settled: Notify::new(),
+        retirement: tokio_util::sync::CancellationToken::new(),
+    }));
+    (registration, ProducerWriters(sender))
+}
+
 struct Inner {
     child: Option<Child>,
     /// Windows descendant ownership follows the exact child through reap.
@@ -318,6 +357,22 @@ impl ProducerSlot {
         }
     }
 
+    /// Reserve a ready slot before starting any new child. Busy/reaping slots
+    /// refuse immediately; cancellation never has to await predecessor writers.
+    #[cfg(unix)]
+    pub(crate) fn try_reserve_empty(&self) -> io::Result<EmptyProducerSlot> {
+        let state = Arc::clone(&self.inner)
+            .try_lock_owned()
+            .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "producer slot is not ready"))?;
+        if state.child.is_some() || state.reaping.is_some() || state.resources.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "producer slot is not ready",
+            ));
+        }
+        Ok(EmptyProducerSlot(state))
+    }
+
     /// Nonblocking diagnostic read; contention means unknown, never authority.
     pub fn try_belief(&self) -> Option<Producer> {
         self.inner.try_lock().ok().map(|state| state.belief)
@@ -367,14 +422,7 @@ impl ProducerSlot {
         at: u32,
         resources: Option<Box<dyn Send>>,
     ) -> (ProducerRegistration, ProducerWriters) {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let registration = ProducerRegistration(Arc::new(GenerationLifetime {
-            identity: Arc::new(()),
-            writers: Mutex::new(Some(receiver)),
-            receipt: StdMutex::new(None),
-            settled: Notify::new(),
-            retirement: tokio_util::sync::CancellationToken::new(),
-        }));
+        let (registration, writers) = registered_generation();
         self.attach_resources_registered(
             child,
             Some(child_job),
@@ -383,7 +431,7 @@ impl ProducerSlot {
             Some(registration.clone()),
         )
         .await;
-        (registration, ProducerWriters(sender))
+        (registration, writers)
     }
     #[cfg(test)]
     pub(crate) async fn set_reap_hooks(&self, hooks: Arc<dyn ProducerReapHooks>) {
@@ -461,6 +509,25 @@ impl ProducerSlot {
     /// paper over it in the worst possible way.
     pub async fn perform(&self, step: Step, touch: impl FnOnce()) -> io::Result<Performed> {
         self.perform_for_generation(None, step, touch).await
+    }
+    /// Observe only this registered child without transferring its ownership.
+    /// Even after exit, admission and job custody remain until retirement and
+    /// the registered writer barrier confirm the generation is finished.
+    #[cfg(unix)]
+    pub(crate) async fn try_wait_registered(
+        &self,
+        generation: &ProducerRegistration,
+    ) -> io::Result<Option<std::process::ExitStatus>> {
+        let mut state = self.inner.lock().await;
+        if !state
+            .registration
+            .as_ref()
+            .is_some_and(|current| current.same_generation(generation))
+            || state.reaping.is_some()
+        {
+            return Err(no_child());
+        }
+        state.child.as_mut().ok_or_else(no_child)?.try_wait()
     }
     /// Storage deletion needs a settled child and every registered writer.
     /// An empty slot is accepted only when no registration or reap is pending.
@@ -804,6 +871,40 @@ mod tests {
             .await
             .expect("the slot is released for the next generation");
         slot.perform(terminate(), || {}).await.expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_reservation_refuses_a_predecessor_with_held_writers() {
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let (generation, writers) = slot.attach_registered_job_owned(child, job, 0, None).await;
+        slot.request_registered_retirement(&generation)
+            .await
+            .expect("retire predecessor");
+        assert!(
+            slot.try_reserve_empty().is_err(),
+            "held writer cannot admit a new child"
+        );
+        writers.settled();
+        generation.wait_confirmed_reap().await;
+        let reservation = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(reservation) = slot.try_reserve_empty() {
+                    break reservation;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("confirmed empty slot");
+        assert!(
+            slot.try_reserve_empty().is_err(),
+            "reservation prevents racing attachment"
+        );
+        drop(reservation);
+        assert!(slot.try_reserve_empty().is_ok());
     }
 
     #[tokio::test]

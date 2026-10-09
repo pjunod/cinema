@@ -1,0 +1,22 @@
+{
+  "scope": "Restricted supplied standard matrix; affine polynomial and declared linear residual; no approved Dolby oracle",
+  "result": "analytic-control-pass",
+  "results": [
+    {
+      "control": "reconstructed",
+      "max_code_error": 0,
+      "actual_sha256": "e0447575d024ce2455e4e7dd145bc7dab3748687f7db61e3f9f3cd731b86e873"
+    },
+    {
+      "control": "zero",
+      "max_code_error": 0,
+      "actual_sha256": "d4bbbd9854a5bdc7b2e52626630074d1631541d277d2f1dd81425a79d24f0791"
+    },
+    {
+      "control": "identity",
+      "max_code_error": 0,
+      "actual_sha256": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d"
+    }
+  ],
+  "p81_conformance": null
+}

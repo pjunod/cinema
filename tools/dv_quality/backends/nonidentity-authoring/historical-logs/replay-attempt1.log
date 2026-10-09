@@ -1,0 +1,177 @@
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded anes v0.1.6
+  Downloaded anyhow v1.0.86
+  Downloaded autocfg v1.3.0
+  Downloaded anstyle v1.0.7
+  Downloaded clap_lex v0.7.1
+  Downloaded clap v4.5.7
+  Downloaded once_cell v1.19.0
+  Downloaded crc-catalog v2.4.0
+  Downloaded tap v1.0.1
+  Downloaded cast v0.3.0
+  Downloaded ciborium-io v0.2.2
+  Downloaded is-terminal v0.4.17
+  Downloaded plotters-svg v0.3.7
+  Downloaded ciborium-ll v0.2.2
+  Downloaded itoa v1.0.11
+  Downloaded bitvec_helpers v3.1.5
+  Downloaded cfg-if v1.0.0
+  Downloaded equivalent v1.0.1
+  Downloaded radium v0.7.0
+  Downloaded same-file v1.0.6
+  Downloaded plotters-backend v0.3.6
+  Downloaded funty v2.0.0
+  Downloaded crc v3.2.1
+  Downloaded wyz v0.5.1
+  Downloaded serde_derive v1.0.203
+  Downloaded quote v1.0.36
+  Downloaded criterion-plot v0.5.0
+  Downloaded oorandom v11.1.5
+  Downloaded walkdir v2.5.0
+  Downloaded crossbeam-deque v0.8.5
+  Downloaded ciborium v0.2.2
+  Downloaded num-traits v0.2.19
+  Downloaded tinytemplate v1.2.1
+  Downloaded either v1.12.0
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded crossbeam-utils v0.8.20
+  Downloaded ryu v1.0.18
+  Downloaded proc-macro2 v1.0.85
+  Downloaded unicode-ident v1.0.12
+  Downloaded bitstream-io v2.4.1
+  Downloaded half v2.7.1
+  Downloaded tinyvec v1.6.0
+  Downloaded serde v1.0.203
+  Downloaded rayon-core v1.13.0
+  Downloaded indexmap v2.2.6
+  Downloaded memchr v2.7.4
+  Downloaded zerocopy-derive v0.8.27
+  Downloaded aho-corasick v1.1.3
+  Downloaded criterion v0.5.1
+  Downloaded itertools v0.10.5
+  Downloaded serde_json v1.0.117
+  Downloaded hashbrown v0.14.5
+  Downloaded plotters v0.3.6
+  Downloaded clap_builder v4.5.7
+  Downloaded rayon v1.12.0
+  Downloaded zerocopy v0.8.27
+  Downloaded syn v2.0.66
+  Downloaded bitvec v1.0.1
+  Downloaded regex v1.10.5
+  Downloaded regex-syntax v0.8.4
+  Downloaded regex-automata v0.4.7
+  Downloaded libc v0.2.155
+   Compiling proc-macro2 v1.0.85
+   Compiling unicode-ident v1.0.12
+   Compiling serde v1.0.203
+   Compiling crossbeam-utils v0.8.20
+   Compiling quote v1.0.36
+   Compiling zerocopy v0.8.27
+   Compiling syn v2.0.66
+   Compiling equivalent v1.0.1
+   Compiling autocfg v1.3.0
+   Compiling serde_derive v1.0.203
+   Compiling zerocopy-derive v0.8.27
+   Compiling serde_json v1.0.117
+   Compiling hashbrown v0.14.5
+   Compiling indexmap v2.2.6
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-epoch v0.9.18
+   Compiling radium v0.7.0
+   Compiling cfg-if v1.0.0
+   Compiling rayon-core v1.13.0
+   Compiling libc v0.2.155
+   Compiling either v1.12.0
+   Compiling ryu v1.0.18
+   Compiling itoa v1.0.11
+   Compiling half v2.7.1
+   Compiling crossbeam-deque v0.8.5
+   Compiling anstyle v1.0.7
+   Compiling plotters-backend v0.3.6
+   Compiling ciborium-io v0.2.2
+   Compiling anyhow v1.0.86
+   Compiling clap_lex v0.7.1
+   Compiling tap v1.0.1
+   Compiling regex-syntax v0.8.4
+   Compiling wyz v0.5.1
+   Compiling clap_builder v4.5.7
+   Compiling regex-automata v0.4.7
+   Compiling ciborium-ll v0.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling itertools v0.10.5
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling crc-catalog v2.4.0
+   Compiling bitstream-io v2.4.1
+   Compiling funty v2.0.0
+   Compiling bitvec_helpers v3.1.5
+   Compiling bitvec v1.0.1
+   Compiling crc v3.2.1
+   Compiling criterion-plot v0.5.0
+   Compiling walkdir v2.5.0
+   Compiling is-terminal v0.4.17
+   Compiling rayon v1.12.0
+   Compiling plotters v0.3.6
+   Compiling ciborium v0.2.2
+   Compiling regex v1.10.5
+   Compiling clap v4.5.7
+   Compiling tinytemplate v1.2.1
+   Compiling tinyvec v1.6.0
+   Compiling anes v0.1.6
+   Compiling once_cell v1.19.0
+   Compiling oorandom v11.1.5
+   Compiling criterion v0.5.1
+   Compiling dolby_vision v3.3.1 (/work/libdovi-source/dolby_vision)
+    Finished `release` profile [optimized] target(s) in 1m 31s
+     Running `work/libdovi-source/target/release/examples/m0_nonidentity /work`
+d7f4dce9f72a6d0ff1258790eebd47bce29f66785ceec8350e2504deff9eb65c  /work/cpu_processor
+{"accepted":true,"el_processing":true,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+{"accepted":true,"el_processing":true,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+{"accepted":true,"el_processing":true,"trim_processing":false,"pixels":256,"format":"rgb48le"}
+{
+  "scope": "Restricted supplied standard matrix; affine polynomial and declared linear residual; no approved Dolby oracle",
+  "result": "analytic-control-pass",
+  "results": [
+    {
+      "control": "reconstructed",
+      "max_code_error": 0,
+      "actual_sha256": "e0447575d024ce2455e4e7dd145bc7dab3748687f7db61e3f9f3cd731b86e873"
+    },
+    {
+      "control": "zero",
+      "max_code_error": 0,
+      "actual_sha256": "d4bbbd9854a5bdc7b2e52626630074d1631541d277d2f1dd81425a79d24f0791"
+    },
+    {
+      "control": "identity",
+      "max_code_error": 0,
+      "actual_sha256": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d"
+    }
+  ],
+  "p81_conformance": null
+}
+Linux 441de3241fe2 7.0.12-linuxkit #1 SMP PREEMPT Fri Aug 14 16:27:59 UTC 2026 aarch64 GNU/Linux
+ffmpeg version 5.1.9-0+deb12u1 Copyright (c) 2000-2026 the FFmpeg developers
+built with gcc 12 (Debian 12.2.0-14+deb12u1)
+configuration: --prefix=/usr --extra-version=0+deb12u1 --toolchain=hardened --libdir=/usr/lib/aarch64-linux-gnu --incdir=/usr/include/aarch64-linux-gnu --arch=arm64 --enable-gpl --disable-stripping --enable-gnutls --enable-ladspa --enable-libaom --enable-libass --enable-libbluray --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libflite --enable-libfontconfig --enable-libfreetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libjack --enable-libmp3lame --enable-libmysofa --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libpulse --enable-librabbitmq --enable-librist --enable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libtheora --enable-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-libwebp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-libzmq --enable-libzvbi --enable-lv2 --enable-omx --enable-openal --enable-opencl --enable-opengl --enable-sdl2 --disable-sndio --enable-libjxl --enable-pocketsphinx --enable-librsvg --enable-libdc1394 --enable-libdrm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-libx264 --enable-libplacebo --enable-librav1e --enable-shared
+libavutil      57. 28.100 / 57. 28.100
+libavcodec     59. 37.100 / 59. 37.100
+libavformat    59. 27.100 / 59. 27.100
+libavdevice    59.  7.100 / 59.  7.100
+libavfilter     8. 44.100 /  8. 44.100
+libswscale      6.  7.100 /  6.  7.100
+libswresample   4.  7.100 /  4.  7.100
+libpostproc    56.  6.100 / 56.  6.100
+Traceback (most recent call last):
+  File "/work/prepare_frames.py", line 13, in <module>
+    data = src.read_bytes()
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/pathlib.py", line 1051, in read_bytes
+    with self.open(mode='rb') as f:
+         ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/pathlib.py", line 1045, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/work/base16.rgb48le'

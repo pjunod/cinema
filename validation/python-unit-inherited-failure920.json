@@ -1,0 +1,112 @@
+{
+  "artifacts": {
+    "final": {
+      "id": 1947,
+      "sha256": "0124d89e6e4df3033a94a8a0093f6b8ab9cff62940331686bc9653756d4368eb",
+      "size": 29070
+    },
+    "start": {
+      "id": 1946,
+      "sha256": "f9391dfc3eb2e5f151cb56824387f82dd539e73b77ddfca13f55eb21a8e6b7da",
+      "size": 29070
+    }
+  },
+  "commit": "8148ffea9fcded4fef5f605a36fc8ae63e8f25b1",
+  "count": 1191,
+  "job": 45612,
+  "jobs": [
+    {
+      "attempt": 1,
+      "id": 45611,
+      "name": "effort validation scope",
+      "repo_id": 1,
+      "run_id": 4506,
+      "status": "success",
+      "task_id": 17044
+    },
+    {
+      "attempt": 1,
+      "id": 45612,
+      "name": "Python unit receipts",
+      "repo_id": 1,
+      "run_id": 4506,
+      "status": "failure",
+      "task_id": 17045
+    },
+    {
+      "attempt": 1,
+      "id": 45613,
+      "name": "effort Rust compile",
+      "repo_id": 1,
+      "run_id": 4506,
+      "status": "skipped",
+      "task_id": 17046
+    },
+    {
+      "attempt": 1,
+      "id": 45614,
+      "name": "effort Windows compile",
+      "repo_id": 1,
+      "run_id": 4506,
+      "status": "skipped",
+      "task_id": 17050
+    },
+    {
+      "attempt": 1,
+      "id": 45615,
+      "name": "effort web static contracts",
+      "repo_id": 1,
+      "run_id": 4506,
+      "status": "skipped",
+      "task_id": 17047
+    },
+    {
+      "attempt": 1,
+      "id": 45616,
+      "name": "effort Apple compile",
+      "repo_id": 1,
+      "run_id": 4506,
+      "status": "skipped",
+      "task_id": 17048
+    },
+    {
+      "attempt": 1,
+      "id": 45617,
+      "name": "effort Android compile",
+      "repo_id": 1,
+      "run_id": 4506,
+      "status": "skipped",
+      "task_id": 17049
+    },
+    {
+      "attempt": 1,
+      "id": 45618,
+      "name": "Effort development gate",
+      "repo_id": 1,
+      "run_id": 4506,
+      "status": "failure",
+      "task_id": 17051
+    }
+  ],
+  "log_bytes": 135513,
+  "log_sha256": "af3febeb8f1c8754dad9fb18ea5d655e0fc2cebd9c232c73471eb21df5762e83",
+  "passes_sha256": "f0ce52ccae5cda4e559e114380ae160b8e20cc45e9c108eb23d6e9874a485b45",
+  "provenance": "Original authenticated live run/job/source/log and ZIP witnesses. Identical incomplete start/final journals retain only original run4503 successes; history refused before unit discovery. No run4506 success or completed-attempt claim.",
+  "run": 4506,
+  "scope": {
+    "base": "effort/dv-hdr-processing",
+    "branch": "codex/dv-m0-harness",
+    "pr": 920,
+    "repository": 1
+  },
+  "source": {
+    "commit": "c761f2d1478a91c407964583e1b89ea0110457ab",
+    "run": 4503
+  },
+  "source_hashes": {
+    ".github/workflows/effort-ci.yml": "e55b9f38875a7f1720840c21dd43cc114fca2cc7ce460644c96a49b4a9e9aef8",
+    "validation/python_unit_receipts.py": "b060abfd0f59b23f53a9cb72e3c0b21259fe477d2742d48e1f4b39c0eef60a19"
+  },
+  "task": 17045,
+  "version": 1
+}

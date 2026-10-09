@@ -111,7 +111,7 @@ pub async fn control(
     })
     .await
     {
-        Ok(response) => response,
+        Ok(response) => public_control_processing(response).await,
         Err(_) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
             control_error(
@@ -123,6 +123,117 @@ pub async fn control(
                 Some(500),
                 None,
             )
+        }
+    }
+}
+
+async fn with_current_processing_header(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    mut response: Response,
+) -> Response {
+    if response.status() == StatusCode::OK {
+        if let Some(report) = state
+            .transcode
+            .dv_effective_report(&route.session_id, &route.incarnation_id)
+            .await
+        {
+            if let Ok(bytes) = serde_json::to_string(&report) {
+                if bytes.len() <= 4096 {
+                    if let Ok(header) = axum::http::HeaderValue::from_str(&bytes) {
+                        response
+                            .headers_mut()
+                            .insert("x-plurx-dv-processing", header);
+                    }
+                }
+            }
+        }
+    }
+    response
+}
+
+/// The internal relay retains its exact legacy JSON body. Only public ingress
+/// projects the bounded current-owner header onto the additive client field.
+async fn public_control_processing(mut response: Response) -> Response {
+    let Some(header) = response.headers_mut().remove("x-plurx-dv-processing") else {
+        return response;
+    };
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, crate::playback_control::MAX_RESPONSE_BYTES).await
+    {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let mut value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => return Response::from_parts(parts, axum::body::Body::from(bytes)),
+    };
+    let generation = value.get("generation").and_then(serde_json::Value::as_str);
+    let delivered = value
+        .get("effective_selection")
+        .and_then(|value| value.get("dynamic_range"))
+        .and_then(serde_json::Value::as_str);
+    if let Some(report) = generation.and_then(|generation| {
+        plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+            header.as_bytes(),
+            generation,
+            delivered,
+        )
+    }) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "effective_processing".into(),
+                serde_json::to_value(report).expect("validated processing report"),
+            );
+        }
+    }
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(
+        parts,
+        axum::body::Body::from(serde_json::to_vec(&value).expect("control JSON")),
+    )
+}
+
+#[cfg(test)]
+mod dv_processing_wire_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn public_report_uses_incarnation_and_omits_stale_or_missing_owner_evidence() {
+        let incarnation = "00000000-0000-0000-0000-000000000001";
+        let other = "00000000-0000-0000-0000-000000000002";
+        let body = serde_json::json!({"generation": incarnation, "effective_selection": {"dynamic_range": "hdr10"}});
+        let report = |generation: &str| {
+            serde_json::json!({"generation":generation,"hdr10_enhanced":true,"fel_contributed":true,
+            "applied_operations":["RpuColorConversion","TargetMapping","LinearNlqResidual"]})
+            .to_string()
+        };
+        for (owner, accepted) in [
+            (Some(report(incarnation)), true),
+            (Some(report(other)), false),
+            (None, false),
+        ] {
+            let mut response = Json(body.clone()).into_response();
+            if let Some(owner) = owner {
+                response.headers_mut().insert(
+                    "x-plurx-dv-processing",
+                    axum::http::HeaderValue::from_str(&owner).expect("bounded owner report"),
+                );
+            }
+            let response = public_control_processing(response).await;
+            assert!(!response.headers().contains_key("x-plurx-dv-processing"));
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .expect("public body");
+            let public: serde_json::Value = serde_json::from_slice(&bytes).expect("public JSON");
+            assert_eq!(public.get("effective_processing").is_some(), accepted);
+            assert_eq!(public["generation"], incarnation);
+            if accepted {
+                assert_eq!(public["effective_processing"]["generation"], incarnation);
+            }
         }
     }
 }
@@ -1764,7 +1875,9 @@ async fn control_inner_observed(
             }
         };
     }
-    control_local_observed(&state, &route, request, deadline_unix_ms, observation).await
+    let response =
+        control_local_observed(&state, &route, request, deadline_unix_ms, observation).await;
+    with_current_processing_header(&state, &route, response).await
 }
 
 /// Revalidate a durable following purpose at every normal control exchange.
@@ -2175,7 +2288,8 @@ pub(crate) async fn control_local(
     request: crate::playback_control::ControlRequestV1,
     deadline_unix_ms: i64,
 ) -> Response {
-    control_local_observed(state, route, request, deadline_unix_ms, None).await
+    let response = control_local_observed(state, route, request, deadline_unix_ms, None).await;
+    with_current_processing_header(state, route, response).await
 }
 
 async fn control_local_observed(

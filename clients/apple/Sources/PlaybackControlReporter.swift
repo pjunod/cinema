@@ -705,6 +705,7 @@ struct ControlResponse: Codable, Equatable {
     var controlEpoch: Int
     var acceptedSequence: Int
     var delivery: ControlDelivery? = nil
+    var effectiveProcessing: EffectiveProcessingReport? = nil
     /// What the session being reported on is actually delivering. The server
     /// has always sent this; until now Swift's decoder dropped it on the
     /// floor, so a client had no way to compare what it has against what a
@@ -715,7 +716,7 @@ struct ControlResponse: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case proto = "protocol"
         case generation, controlEpoch, acceptedSequence, delivery
-        case effectiveSelection, action
+        case effectiveSelection, effectiveProcessing, action
     }
 }
 

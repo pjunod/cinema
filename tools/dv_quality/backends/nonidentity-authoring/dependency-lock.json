@@ -1,0 +1,936 @@
+{
+  "scope": "Observed immutable hashes from prior reviewed pinned-source CPU/GPU replays; new rebuilds with differing hashes require new review",
+  "cpu_receipt_sha256": "d9f2345c8a93ae7ecacef60ab36839c7b47ae676b7c8534e1f738fd25e46a472",
+  "gpu_identity_receipt_sha256": "ce791d8b5ce6222ed5bd50a9193f7126d6a2e617b8a501533671ebeeffdf6c1a",
+  "cpu_image": "sha256:46f56803b5908f91a626ad2bad328a42b9a53cbf09aec6bb5743a294fcbca98a",
+  "gpu_image": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+  "cpu_files": {
+    "src/DoViBaker/DoViBaker/DoViProcessor.cpp": "e1c74f4710bba5bbcd8824b339cf3933e563f49772e1a11487f62324078d7aee",
+    "src/DoViBaker/include/DoViBaker.h": "5807c0af6edc4b40b75644f9c0bf523b50258b3b7ee5a23ceb83119b6e7e40be",
+    "src/DoViBaker/include/DoViCubes.h": "4f2e17903767e2ae1037001dda0ce1072cacbb6ddd2d95add3f35f44bdedf193",
+    "src/DoViBaker/include/DoViEetf.h": "cfdbc33c10afc0c88bf40ccb37400b01be4aad04246fe9c33ed8e13c8343f15e",
+    "src/DoViBaker/include/DoViProcessor.h": "e186d84404dd6a16a4953715ffab306cfa39c07c2e2d99d7e352a8ac2bd3aeee",
+    "src/DoViBaker/include/DoViStatsFileLoader.h": "66516624bdf166d8059c841a23bb43e1a153188d0ea3e7e8692b018f4da8580b",
+    "src/DoViBaker/include/DoViTonemap.h": "4ba9def992241a5bf374f9e34cf42dd174143920172510c255ef9ff847a018f4",
+    "src/DoViBaker/include/avisynth.h": "3abe0c36a6fbad6d3d8c8099e0214dc7eca6086b25936e76d6dce4695bd93623",
+    "src/DoViBaker/include/avs/alignment.h": "0fc6871dabe5a0a82d023ead216250bf9faf6511dbef56de22c5ad1123db1770",
+    "src/DoViBaker/include/avs/capi.h": "626e65b711a1d971c78e0a69e556f8a6d1c564b05b4567d33a3485dfec9e79e1",
+    "src/DoViBaker/include/avs/config.h": "863e46175c511195715ba7579d4cf343a0780a0b4276402b8d417e6ec15e77e5",
+    "src/DoViBaker/include/avs/cpuid.h": "a210f929d634f08e861a6b07f2e853134c46f3f0c90b3a2c1670a411aac59053",
+    "src/DoViBaker/include/avs/filesystem.h": "158c68c2f728d40c7777efaa796bc78de97ce49f776eb9268038062e1242f7c2",
+    "src/DoViBaker/include/avs/minmax.h": "f0173a7ea4b086269546f35ef51ba05b040f25dcf5fd0dbf29ea227892bf3b5b",
+    "src/DoViBaker/include/avs/posix.h": "da65b351571712693f7473b5c7fd33c2627e028c6f0ed5599239e0b7394ffc6b",
+    "src/DoViBaker/include/avs/types.h": "310c93ef160603e278eb0db1238fca92a98de9c83d653cb70d944cc93aee494c",
+    "src/DoViBaker/include/avs/win.h": "45a997f83e72611726fddeee02bd8f02ff6454d35b2c73b9db6394fd2762eb92",
+    "src/DoViBaker/include/def.h": "250f80540aca23dc1271aeab7a944d993deade20774c9634d60c20445851e66b",
+    "src/DoViBaker/include/dovi/rpu_parser.h": "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82",
+    "src/DoViBaker/include/timecube/timecube.h": "36094f412e7fcdb5127d5c3a57b8c9389cf6e1ee488997f1e2d59591c0cdb281",
+    "src/dovi_tool/Cargo.toml": "307192fa3c732300e964e8c952a16db9eed6b6195a6c78204b1517ccf87abd44",
+    "src/dovi_tool/Cargo.lock": "715faa8e92b23a00dd7cb317ebf4cf17741c0a955ffc5710da69c505ee494309",
+    "src/dovi_tool/dolby_vision/.gitignore": "c9b608d0b3d864486a1029b75dd8b5a7e22795b8ed514785287da19714e7ca5f",
+    "src/dovi_tool/dolby_vision/CHANGELOG.md": "e03c79a231ec9a93f1af402139c510528e1dbdc9abf2f17a459cda93da737df2",
+    "src/dovi_tool/dolby_vision/Cargo.toml": "96ffca9d254cfc849ddca0037dac959b5dd87a13d3a6171e1af3872c854ffcd6",
+    "src/dovi_tool/dolby_vision/LICENSE": "36701a9d30ccaaf1fa3bf93fdbf97c666a1d21efaf45188eca4b6db057c5414b",
+    "src/dovi_tool/dolby_vision/README.md": "0ed388d7e38af8275882947b8d8cfdb9b0a8b4e7b733984f4ca65e18028193de",
+    "src/dovi_tool/dolby_vision/benches/bench_main.rs": "eeb49d7c55018a151ba84c3e23afcd72cba6adca5b56b32a99444400dc24aabf",
+    "src/dovi_tool/dolby_vision/benches/benchmarks/mod.rs": "e4bb331fc579c5129adbe554e2343d4001ea4f22731cbdf995dae704be2fd06b",
+    "src/dovi_tool/dolby_vision/benches/benchmarks/parsing.rs": "e957c3bf75a4e6ed677669bbdeda9ca095434d7b7f20a9a5c7f33c2a0aa46905",
+    "src/dovi_tool/dolby_vision/benches/benchmarks/rewriting.rs": "03190d15fdc74ced20c9f7774391fff0d367ec714a7f54d640d04e6aa503f137",
+    "src/dovi_tool/dolby_vision/cbindgen.toml": "11fd870c2f387b93f0b52dd20a4c44c3a1a88ed0736f71a6409f9912119d2734",
+    "src/dovi_tool/dolby_vision/src/av1/emdf.rs": "1486ca3b5fac418b4747a970d7e21935f9f34f2352d7178535eb7335e45c6c50",
+    "src/dovi_tool/dolby_vision/src/av1/mod.rs": "eff02c60c1c60bc8d321cf12c4d0d3b2ffdaa09efc968d4e812720a9d3a41875",
+    "src/dovi_tool/dolby_vision/src/c_structs/buffers.rs": "da401d669479ea2221f72f24d46ba331eb440cd5a3b83fb0defb56711081f140",
+    "src/dovi_tool/dolby_vision/src/c_structs/extension_metadata.rs": "69e5676288ab35768f8e38ab1636e53f8e55b79ba9ab8e64761673d7079bc89b",
+    "src/dovi_tool/dolby_vision/src/c_structs/mod.rs": "baf502cdfb14847dc4b4ef5111a317417208a9d8e525a12339eb0ec57ad33d84",
+    "src/dovi_tool/dolby_vision/src/c_structs/rpu.rs": "32beb6bac2db5c4b164dd8f7774fbb9318a2aa47e229cef5d49502caaf659efb",
+    "src/dovi_tool/dolby_vision/src/c_structs/rpu_data_header.rs": "4259ae58199cb948d5b92c7480f116e33fd4d087175284718c6b635518ee5a6d",
+    "src/dovi_tool/dolby_vision/src/c_structs/rpu_data_mapping.rs": "7142f798c717aa2f8b55d617035f2fb57d7343b9bc51ccdbd59cdc42a4810e68",
+    "src/dovi_tool/dolby_vision/src/c_structs/rpu_data_nlq.rs": "5a831514931c1d77ecbe049644fc94a4e9c6b48d2ec1646419646c7edf0e8560",
+    "src/dovi_tool/dolby_vision/src/c_structs/vdr_dm_data.rs": "1d26a6bba767a3c01f684be7d2b1b06ea1d576cf2f25b273c4309f59671bc327",
+    "src/dovi_tool/dolby_vision/src/capi.rs": "aa4cc3726c8d96d3e9bda1ba94be1c312bddd92bf29e109c54f384bae755b8f7",
+    "src/dovi_tool/dolby_vision/src/lib.rs": "3e946417a35eb1f3ab5d2768497082e5b7f08d260aaeefa5b491861ef2164d32",
+    "src/dovi_tool/dolby_vision/src/rpu/dovi_rpu.rs": "3a291106e4403569264a6e5cbf9a4c6d311817ecac702e0734c19a1c79012e9c",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level1.rs": "13966602b26eb490638f2642bff05f781b392b183eb9d3d50e3733a098a2efca",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level10.rs": "b0146db23743cb96776e767f1c1d9fa08d7814929df168ff395f5116e9537027",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level11.rs": "7bcaf98f2007201cf24a6ae1de979d6c30ded4c9912763fb865df96291c6cf1a",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level2.rs": "986b32ae6bf3c260518b5b630995b8383cd89cd72256505e47b291aeed4b6369",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level254.rs": "f282c2145e1f3b625b0f19a26995dadad6edc03adeca26ca672a7b05caa46eed",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level255.rs": "d4effa8cd8fd14adafa2aeb8964d4f0c4ad860de35c9474ed4a58a5167763e6d",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level3.rs": "bbbffc1bb967e9104aa3cdb803d701f8eead0699053f4b9f07d9a9595aabfe08",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level4.rs": "5a56587ce0044bcc9e7abc3521e67f8482a31f41ab6591e8d2127f3789d710cb",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level5.rs": "7e049f9e17481cb2525b95ec16338d73de97375706ee423208a8cb42702df173",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level6.rs": "76c26312d1670f23b6287ebd9ec5e64fc23305e16b3e1d855a386612ed2e5a0a",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level8.rs": "ea7306af90182c63d412015fdef8f854a257a6460e26b8227fc4e23af76f294e",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level9.rs": "56b19ba7a23dcd3f8da460f701520a7bb7cf7ee6257512096544d8de3e53eb73",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/mod.rs": "3af0f87672b14b9b6ec94c82e42a993a761be153e4526d53fb19a093ad5623db",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/reserved.rs": "e9346baff3e1a8e574e2ccf6da4e7e7c45c81e7920ff53879d6f2424e0ebc30b",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/cmv29.rs": "24c203c5afaeb12ee554fdb0beac092ef8469b9c393313f105e2377f271318fa",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/cmv40.rs": "5e0d34d014bd3101082d5716f535b98789927de4a3adfc398d7508027c36a6dc",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/mod.rs": "ec4b12ab3aef9dbdf375023c45a2740bc01940fe70a5ca747995c4a522b5104c",
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/primaries.rs": "7cc5aee1a179c4e78476807996a0df57302c587b3e9d08273f3d278a984fccf6",
+    "src/dovi_tool/dolby_vision/src/rpu/generate.rs": "a72b7c7fa52e2691f895a2f73a6040e6060e4f42d2131014f73f58c50a02992d",
+    "src/dovi_tool/dolby_vision/src/rpu/mod.rs": "9f35cab7bae9a8078ec25277affd578489465db6e6c62e0641938c94a46c212e",
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/mod.rs": "c373ec3a3febf24ad762d3548d3bbd4096e9c73933821c2ca21ca3f057e012fe",
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile4.rs": "70fe254ba7ba620b581294ca94db0fb799b79d230c9d97b41e2cdb2b340861a8",
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile5.rs": "7225fb152575125a6d85388bc4c16660354c608c76fe7cc2db485c9fc8821612",
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile7.rs": "1e3adb0d8bad1f59643bd0b4f99ba05b8c9c91bb1f5b9f3ef05e43899e4a3937",
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile81.rs": "32934bdb533e10b3637ccdfd03040618968c68d7e869bf77bb17cf2b4f024c51",
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile84.rs": "68c0f035648434509217712922bbacb24879e218928aae40bfcdbcdfab83c9f8",
+    "src/dovi_tool/dolby_vision/src/rpu/rpu_data_header.rs": "f93ebd900063f2d6c3fc15b9c441e5a048993f62061de9fb15b4fb1f01ba92b9",
+    "src/dovi_tool/dolby_vision/src/rpu/rpu_data_mapping.rs": "9768a715e34f749823be3770727d978f85d3727b6b553db01980b7119e1270dd",
+    "src/dovi_tool/dolby_vision/src/rpu/rpu_data_nlq.rs": "aa5e769f3155d890688fd983c5e7e3759733777642bde6489ea30eb32e631f10",
+    "src/dovi_tool/dolby_vision/src/rpu/utils.rs": "18d532b489a307bbcb63416b4ec22da7dde221d5aa7e378b9a7ae805b66bddb7",
+    "src/dovi_tool/dolby_vision/src/rpu/vdr_dm_data.rs": "72aaaf8ee83a5d282b5ff80414b2619b6e057305710f297fe2ad2e200a77a48d",
+    "src/dovi_tool/dolby_vision/src/st2094_10/itu_t35/cm_data.rs": "1879e8b40d140089016407b1b747d7fe262ad511043aa63b9fec654483063d6d",
+    "src/dovi_tool/dolby_vision/src/st2094_10/itu_t35/dm_data.rs": "895fa37a0d0d4fb07b0e17498e330562896180643b51f8eb2c58ab507d6f9ba0",
+    "src/dovi_tool/dolby_vision/src/st2094_10/itu_t35/mod.rs": "342947e3f33f016f75b6b1f928738e31984d409b2cd253ba92c4d58f4906676d",
+    "src/dovi_tool/dolby_vision/src/st2094_10/mod.rs": "5099d4d1f1474dfc7ae28f54f13cebcfee2de38ae42eb8198865dc8ca8317258",
+    "src/dovi_tool/dolby_vision/src/utils.rs": "c79e00618563ef1bb9893a593d1bb36f4b06fb75d91f1be7c89833ba19a83d38",
+    "src/dovi_tool/dolby_vision/src/xml/mod.rs": "f3b790d1750c318ded00c6280bd836aa58a478f9a60f0924ec2a2409ecf0db47",
+    "src/dovi_tool/dolby_vision/src/xml/parser.rs": "09e93cc9c54f82814e176d94bee54aa8a4fcdb738df0bb1c88a96b58a96590e6",
+    "src/dovi_tool/dolby_vision/src/xml/tests.rs": "6d4f7cba329621692212609a5c9d0ded75c21fed404b484fca20dd3d1f911e3b",
+    "deps/lib/libdovi.a": "8c356c63b8dbeda35f3213df0716d9fd45ae607c2dd7d04bb974aaeda67f42ae"
+  },
+  "gpu_files": {
+    "include/libdovi/rpu_parser.h": "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82",
+    "prefix/include/libplacebo/cache.h": "8a9c73c67a560ef069999f4f087efaa8f7044c9723e0c76d6b5d0b44826a6281",
+    "prefix/include/libplacebo/colorspace.h": "045ae8a75caa8d1dc50dcfdf1b190817af3a07c0d381df20d86178095dab9a0d",
+    "prefix/include/libplacebo/common.h": "d61d6425038783aa93582d80d8e828ecb63fcfb6c6f9d5d1577e95d3996f4f10",
+    "prefix/include/libplacebo/config.h": "d8cf5d7c124c48984822d8dd42f7dc2ff3d8673f7c4c65505242da4494a5f1f2",
+    "prefix/include/libplacebo/d3d11.h": "563767b679766cb2c644d45ba0ab08cee419e1b61e9e8a4a8fa1b16ad7ab6ac6",
+    "prefix/include/libplacebo/dispatch.h": "9c4fa74d440d598458688b9b8d937aa5f8db54efa54381c73bfbf01b4d947dd5",
+    "prefix/include/libplacebo/dither.h": "4905faaca77818b1e4a658b55b48b1839de1a49635943411d2d1b5933156f1f5",
+    "prefix/include/libplacebo/dummy.h": "ee5a3bebc9e9a24353f3097e3822157d492a04c4026b62e30cf8c6522bc76645",
+    "prefix/include/libplacebo/filters.h": "84b857ee5c61e181cea655c4ba17b4b510ac441422dbf4d6eb25611f4e59c5d2",
+    "prefix/include/libplacebo/gamut_mapping.h": "a75332f7d17b2cb55e7b16a9bcb6a88b639ec957809a7913876cab1acfe0bf69",
+    "prefix/include/libplacebo/gpu.h": "76c4c95b8d6f7dd0512262d6e57d274725df28d6516fd2b0b247e9bcd442d0cf",
+    "prefix/include/libplacebo/log.h": "1a3ca9b8202f27d565b56c12407f4747f1303e9e1dcf48896c89c7c7c978f5ee",
+    "prefix/include/libplacebo/opengl.h": "ac93bc9a296b0545c83eb7bb02f71c824e3d030cb0432e83a72476b40475dbe9",
+    "prefix/include/libplacebo/options.h": "da06ca132b642d03d4254cd2e3158194ec341a91f2141ebc9c046fb17977cf90",
+    "prefix/include/libplacebo/renderer.h": "5b3b87d10294e4fae2548878425d7ec837c84a14529a107dd6ba95dd52e6510c",
+    "prefix/include/libplacebo/shaders/colorspace.h": "b3fa8f34f9f164f8006d41ae0a0e9c0c2a2f4fa948aba30969f6bd3fbc1f6f2f",
+    "prefix/include/libplacebo/shaders/custom.h": "eb7c317f6c93ce76a67f5e622d5c784e702545752a88535a4eb577fdcc74e50e",
+    "prefix/include/libplacebo/shaders/deinterlacing.h": "c3a21191792421f6cc707c24735c4a120a2135fd36e6e58c1b895def4244efb0",
+    "prefix/include/libplacebo/shaders/dithering.h": "d9a88640c54f1be410caa8a052bd05ad24ac9d4c71b6b9265754bf781bbc4f54",
+    "prefix/include/libplacebo/shaders/film_grain.h": "a6df80b759aaf45bd445fce1db3bcb26fc4fdc5e52c672d294bab709eaec24ab",
+    "prefix/include/libplacebo/shaders/icc.h": "0523a23ccf70b29aba5828b58cf4649a9c373c0a426f937dd6100845848b6122",
+    "prefix/include/libplacebo/shaders/lut.h": "aecb43257ed72adaa095178dd0f64800827519b320439f2ddd4be0eac8e61a9b",
+    "prefix/include/libplacebo/shaders/sampling.h": "dff03bfd6fd6fe38b8e05641252986ab301606be3fc5b914a61147ffc1ff33ae",
+    "prefix/include/libplacebo/shaders.h": "7bcfa51503e758b2b32e6f409396730ac12e369309ae2234c4fd4444fde3d63e",
+    "prefix/include/libplacebo/swapchain.h": "e89d20e46f6abadef8b57593103b27276711a31750d9ba27486cbe7ecdc98474",
+    "prefix/include/libplacebo/tone_mapping.h": "dcf32f6eca4aa4e323c1396a5f1359922c5117e3f3eab845b4b5d674598f471e",
+    "prefix/include/libplacebo/utils/dav1d.h": "f2215831184490b1a091150b9d45cf506b233017814e3864143c0f9b3d167520",
+    "prefix/include/libplacebo/utils/dav1d_internal.h": "e30b11d68050839d26d51bc5a39fae4af55e4b8a46110f26de334452f1de97b7",
+    "prefix/include/libplacebo/utils/dolbyvision.h": "46487cb4b604d26227710d2dc93054da9845c2d20534efbc64bc72a1305d948a",
+    "prefix/include/libplacebo/utils/frame_queue.h": "5fc5199f1ce8f8436a2b455ec17ff751f6e817df560e791ebf61dcdadb995e51",
+    "prefix/include/libplacebo/utils/libav.h": "34d220719e678ac891a0e5bf53ed2a6c794931f78d556c834d19b9d5ad8e16ea",
+    "prefix/include/libplacebo/utils/libav_internal.h": "542055662c561cbccbb479a89be0ed1b6e295bbc7b2298a83d8424d053d14189",
+    "prefix/include/libplacebo/utils/upload.h": "7bdb083ce74ea4039fc7b957dd0128d7aff398fef3e328b6a554ae97edce2dc1",
+    "prefix/include/libplacebo/vulkan.h": "0a5d5158d354ab544d98ce5afa346f0cde4d740b133eac5b0468a8463d7c2edc",
+    "lib/libdovi.a": "f9976d36eefcc1d8c000ae5f539ddfc09069b97ad6c56b6e3d665526a59cfc65",
+    "prefix/lib/aarch64-linux-gnu/libplacebo.so.374": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1",
+    "prefix/lib/aarch64-linux-gnu/pkgconfig/libplacebo.pc": "7d272847f4110c02199c431f847b75349efc5b5a91f629257abed2af7b4b0bcb"
+  },
+  "cpu_inventory": {
+    "src/dovi_tool/.github/actions/setup-release-env/action.yml": {
+      "sha256": "6283932d0edc72ed04395a9175a7248f73570f9f5f7846120ef1a444c6928e7b"
+    },
+    "src/dovi_tool/.github/workflows/ci.yml": {
+      "sha256": "1bf327960ebd7f873937e0c9e4e6f93b7c06dd89d0beb14942feab8f7231addd"
+    },
+    "src/dovi_tool/.github/workflows/release.yml": {
+      "sha256": "3a38ab8899fb16b97481b34baf9cd8a0cd4d65c09ef05ef39caa89a8a0352b32"
+    },
+    "src/dovi_tool/.gitignore": {
+      "sha256": "a7151b221f8782d44685b75dd5eaff8579575e037320a5ab399a164b41160aa8"
+    },
+    "src/dovi_tool/Cargo.lock": {
+      "sha256": "715faa8e92b23a00dd7cb317ebf4cf17741c0a955ffc5710da69c505ee494309"
+    },
+    "src/dovi_tool/Cargo.toml": {
+      "sha256": "307192fa3c732300e964e8c952a16db9eed6b6195a6c78204b1517ccf87abd44"
+    },
+    "src/dovi_tool/LICENSE": {
+      "sha256": "36701a9d30ccaaf1fa3bf93fdbf97c666a1d21efaf45188eca4b6db057c5414b"
+    },
+    "src/dovi_tool/README.md": {
+      "sha256": "3071b8f2deb05c410cb468310b65f88ddece75f674bd263368be7f684ba87179"
+    },
+    "src/dovi_tool/assets/NotoSans-Regular.ttf": {
+      "sha256": "4c8d67001d3c2977e5d6bf0a4f8add80cd564bd1df60b7569fd23751e7dda02a"
+    },
+    "src/dovi_tool/assets/av1-rpu/fel_orig.bin": {
+      "sha256": "0d5cf3b81630be65ab59a15ad527d5fbc1953dea88a8fe80a0adbdb30ecde69e"
+    },
+    "src/dovi_tool/assets/av1-rpu/p5-01-ref.bin": {
+      "sha256": "3c12515c5d446f74349a75ee6b9fe884a4fa7177b265fd6472bcb724d6bbb9ed"
+    },
+    "src/dovi_tool/assets/av1-rpu/p5-01.bin": {
+      "sha256": "e19fe340517584cf2aadf8a68d0c63bf0b2c0e57b321aa9815e3daee4ba6f987"
+    },
+    "src/dovi_tool/assets/av1-rpu/p84-01-ref.bin": {
+      "sha256": "08013bbee939d161dd41041c57d920e7e91c2e09b82248b3ea9650264041d10f"
+    },
+    "src/dovi_tool/assets/av1-rpu/p84-01.bin": {
+      "sha256": "7e286062d5bbfec690e02534d04d73df298d4c5f851a8d1a58351d828f31203d"
+    },
+    "src/dovi_tool/assets/editor_examples/active_area.json": {
+      "sha256": "9c852e3105da017b62374a27808b55b498b48cd355acc2bb37703ab2c1420457"
+    },
+    "src/dovi_tool/assets/editor_examples/active_area_all.json": {
+      "sha256": "de24bde7854d6681134db1411896684928dc32398a99af41d0c47aacf8b9eac7"
+    },
+    "src/dovi_tool/assets/editor_examples/crop.json": {
+      "sha256": "f06e7a7bec7f98679f64f6c3c4ce620d7fbcaa440c0eeff046ed4056b00646e6"
+    },
+    "src/dovi_tool/assets/editor_examples/duplicate.json": {
+      "sha256": "ec136b51fff4034177e72f62a9ac562747c7f27c7c560a15dd20c364c3b14fa0"
+    },
+    "src/dovi_tool/assets/editor_examples/fel_to_p81_encode.json": {
+      "sha256": "1009f3cab1a2100cfc01d52a466c97555e2265f9bca7e3cc5f3c437387145fda"
+    },
+    "src/dovi_tool/assets/editor_examples/l9_and_l11.json": {
+      "sha256": "736a6adedda4b3684aada419a9a3a95a82e3bc5ac2c6a5a06ad0d22613460f33"
+    },
+    "src/dovi_tool/assets/editor_examples/level6_metadata.json": {
+      "sha256": "48b1e85ecac013ec23d3bf2b29bb76ee4093071653c36be1ee7d6056b3805f04"
+    },
+    "src/dovi_tool/assets/editor_examples/levels.json": {
+      "sha256": "7a9540dce1aa2ca7f20a9f257ca509e56be7e027a60852bb42fae66ce695efca"
+    },
+    "src/dovi_tool/assets/editor_examples/mode.json": {
+      "sha256": "ca2ab03492983ae439018dc8ee83db7bc79061d7354877ed4a3ac3381763cbd0"
+    },
+    "src/dovi_tool/assets/editor_examples/p5_to_p81.json": {
+      "sha256": "54f0f6ccfd730e7d05d9fe8f79353ba6abc62ce27b5cc20617abd2468be5aedf"
+    },
+    "src/dovi_tool/assets/editor_examples/remove.json": {
+      "sha256": "df6f15cf6cc7a2dc232b00997fb925548e7be73f611992533dafd40c5aabcc50"
+    },
+    "src/dovi_tool/assets/editor_examples/remove_cmv4.json": {
+      "sha256": "334dad017286c08a5ec21292204b855d4b79b57ac9d70dc53dcaf23697c9ef04"
+    },
+    "src/dovi_tool/assets/editor_examples/scene_cuts.json": {
+      "sha256": "075e0db1f88559187adf2e6219829e91809eab5c3917f2a00a15458c0777cf0d"
+    },
+    "src/dovi_tool/assets/editor_examples/source_rpu.json": {
+      "sha256": "09c635fc7cabc8c2582a3e821af8e6588c12db9e1d234ec9c923c7aceb8e3bb6"
+    },
+    "src/dovi_tool/assets/generator_examples/default_cmv29.json": {
+      "sha256": "c0b5d4ad7e1832111ef790be18d840f6429f545915b225c57d72867b01978f6e"
+    },
+    "src/dovi_tool/assets/generator_examples/default_cmv40.json": {
+      "sha256": "e941eb69216731a74a9e6689284ab8fcd999d84ec882f4d9fb580f0abe9ea359"
+    },
+    "src/dovi_tool/assets/generator_examples/full_example.json": {
+      "sha256": "4a2e70af4b951c60a9d77cb88048994f9d043297eecd0707d6afc40e8b84cb91"
+    },
+    "src/dovi_tool/assets/generator_examples/l1_cmv29.json": {
+      "sha256": "917bc92ca3a7530003caa97150bdb48eb2132a486b5555e3ad0480a786418658"
+    },
+    "src/dovi_tool/assets/generator_examples/l1_cmv29_override_avg_cmv40.json": {
+      "sha256": "09235b1eb34fd318e371c61ec8aabb4f92d9e9e6061b2c988a59f70a39a0eba3"
+    },
+    "src/dovi_tool/assets/generator_examples/l1_cmv40.json": {
+      "sha256": "8a30698da1c21314eae2a1c15606f66204344ebf7fb1c3df2692ab248242506d"
+    },
+    "src/dovi_tool/assets/generator_examples/no_duration.json": {
+      "sha256": "7ae7e1f433393c64b4f4a0120da2a69b8ec0bb97559e2077f6e7d79d90541ae3"
+    },
+    "src/dovi_tool/assets/hevc_tests/no_aud_bl.hevc": {
+      "sha256": "42e289f59eb0be7fd0d8360e05ce0cb4fff82333b1cd0053e2bfc42514f112e1"
+    },
+    "src/dovi_tool/assets/hevc_tests/no_aud_injected.hevc": {
+      "sha256": "eff124305b865f0e17d62cf2525a8caedf7c97ba59b73fa47cad679219cb5587"
+    },
+    "src/dovi_tool/assets/hevc_tests/no_aud_muxed.hevc": {
+      "sha256": "0cb2401312a11824871c2113ac44aab28bec8261960550756dfa10b09c8dc586"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular.hevc": {
+      "sha256": "317bb6ad99743bc1033b8d7ff76f34258ded6e73bf379f90b276feaa26cd9c7e"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular_bl_start_code_4.hevc": {
+      "sha256": "3e657fb6ed7378cb368b61dbbf7c291868086e1448380eebc77ed1f2bc3f53ea"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular_convert_annexb.hevc": {
+      "sha256": "f2b68d13827f1f1c6fa4820ea697bac5e87d604846551737cb5fff4995b89b6e"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular_demux_bl_annexb.hevc": {
+      "sha256": "8fbb52732466b01270027534300249c8635fd6cde6a55f096c77173ad6bebbdb"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular_inject_annexb.hevc": {
+      "sha256": "f2b68d13827f1f1c6fa4820ea697bac5e87d604846551737cb5fff4995b89b6e"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular_rpu.bin": {
+      "sha256": "14fba3e654287d096a3e06646c9e476a4c96f9f4af89b4cf08ef7c93d37b1ee8"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular_rpu_mel.bin": {
+      "sha256": "5a51b81485b61fc4b91fae354c7ff2946a63beb7ca69358dc2cfff2605581ef8"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular_start_code_4.hevc": {
+      "sha256": "a6ccc91df7bbdf15746ddccd2de66415c2a2a9b6c078dfbdb31cde4818438b14"
+    },
+    "src/dovi_tool/assets/hevc_tests/regular_start_code_4_muxed_el.hevc": {
+      "sha256": "8b2d6ddbf4f2539f73de9e4e1c65c2d32b482bd2cc70a06ab7389679cc277f40"
+    },
+    "src/dovi_tool/assets/hevc_tests/sei-double-3byte-case.hevc": {
+      "sha256": "dd79723f56779dc84269eb0eaa8b2721ecba40413e329afe785c7fc7de7e0abf"
+    },
+    "src/dovi_tool/assets/hevc_tests/sei-double-3byte-start-code-4.hevc": {
+      "sha256": "0f7663274d32df53c0181d414363d554b74b145bd7d9af8800030f07ba4d0030"
+    },
+    "src/dovi_tool/assets/hevc_tests/sei-suffix-muxed-rpu.hevc": {
+      "sha256": "212d10563a14e53530fcd26736e81911d2f1fd1ab4c2b0b671838331c4b7e38b"
+    },
+    "src/dovi_tool/assets/hevc_tests/yusesope_regular_muxed.hevc": {
+      "sha256": "4defd559d51c4878e856664370c484fa2a2f8b68f44f82cf77796dec5dd48110"
+    },
+    "src/dovi_tool/assets/tests/cmv2_9.xml": {
+      "sha256": "0865a9c133570aa01f4ad2d0cacaa40562d7016627b3134a278019bcb691f11f"
+    },
+    "src/dovi_tool/assets/tests/cmv2_9_xml_with_l5_rpu.bin": {
+      "sha256": "cf9a3f40620e280acf40b531f4a6ce22e587263d0275b815ead3bc5a03550ac9"
+    },
+    "src/dovi_tool/assets/tests/cmv40_full_rpu.bin": {
+      "sha256": "0123fb229e67c69c646e4ed6cf1ae3ba7684a21b0c9654208d160b976fd6b457"
+    },
+    "src/dovi_tool/assets/tests/cmv4_0_2.xml": {
+      "sha256": "e85b0c9678d2c47ca9ec8fff31eb7904ad9e0f8c7313d5764866cd9d8b072235"
+    },
+    "src/dovi_tool/assets/tests/cmv4_0_2_custom_displays.xml": {
+      "sha256": "3f26debcb9e74879d0374f30ef6212eeecbb742f5b6bafbb42c67d1019862486"
+    },
+    "src/dovi_tool/assets/tests/cmv4_0_2_custom_displays_xml_rpu.bin": {
+      "sha256": "499e2f943e9aa22e6aa9fa25a76837c04f4a1a0ca99c69583ecfce8e3055e04c"
+    },
+    "src/dovi_tool/assets/tests/cmv4_0_2_xml_rpu.bin": {
+      "sha256": "8a44b49faff99f86ade157ddf5ce44650657380b35c833d6c7af7101b6560fec"
+    },
+    "src/dovi_tool/assets/tests/cmv4_0_2_xml_with_l5_rpu.bin": {
+      "sha256": "43cbbb14f6ac09090ae63041699bed7e352ca138978e247cf76d79db67b71a36"
+    },
+    "src/dovi_tool/assets/tests/cmv4_2_510_xml_rpu.bin": {
+      "sha256": "b5dbcdfe4d1302cb403d1d93c2679b05bd77681c843573063abf2d76f8ac109e"
+    },
+    "src/dovi_tool/assets/tests/cmv4_2_xml_510.xml": {
+      "sha256": "2627bd04a8dfa87ea69714c45b632d57d4e00f0d2db775fc7fdaa1fadc4b68bf"
+    },
+    "src/dovi_tool/assets/tests/data_before_crc32.bin": {
+      "sha256": "aef9e40fcd478fe0506d8d4a40f217f0d2dc45cb675ec43c462b623fa0aad15e"
+    },
+    "src/dovi_tool/assets/tests/empty_dmv1_blocks.bin": {
+      "sha256": "32d2e62e272a538f4457ca434d1c7afdc2cd065652d894ce79c92e3dc1b46aa0"
+    },
+    "src/dovi_tool/assets/tests/eof_rpu.bin": {
+      "sha256": "86c7c1e5a6021cbfce05c42552ec4c4503f4c2ada21042e7543c13d2fcc5f937"
+    },
+    "src/dovi_tool/assets/tests/fel_orig.bin": {
+      "sha256": "b2b27714b7279c4e24d1a795cb6f95d3ad06745db96d360698ee0932184117a0"
+    },
+    "src/dovi_tool/assets/tests/fel_rpu.bin": {
+      "sha256": "b2b27714b7279c4e24d1a795cb6f95d3ad06745db96d360698ee0932184117a0"
+    },
+    "src/dovi_tool/assets/tests/fel_to_81.bin": {
+      "sha256": "a8789cce21813d4eaefdd6ed726c31b59104465bc5d141bcdaeccd92795cd3ed"
+    },
+    "src/dovi_tool/assets/tests/fel_to_mel.bin": {
+      "sha256": "96382414538ad2b2460d27b232a3bda0c82067e9bd99e0211ebdb482cd44e531"
+    },
+    "src/dovi_tool/assets/tests/fix_se_write.bin": {
+      "sha256": "aa6051ac18c54070d3c43e2cbbd48b415ddbfbfe85a77540a381570cc5dd4005"
+    },
+    "src/dovi_tool/assets/tests/hdr10plus_metadata.json": {
+      "sha256": "623ccf27c186f378ebda4f46b4dd299c10848139e1fb2c9f809e63b960f6fc91"
+    },
+    "src/dovi_tool/assets/tests/level6_decimals.xml": {
+      "sha256": "c82b5a25bf6829f6e1a636c8b39d86d7a3e31380cd5cdedb405be843a8b76f1a"
+    },
+    "src/dovi_tool/assets/tests/mel_orig.bin": {
+      "sha256": "cabda945d36cd4c3eca9c2df05cf387562e648e3250be28632c9b2991f2ec60b"
+    },
+    "src/dovi_tool/assets/tests/mel_rpu.bin": {
+      "sha256": "60601a248ac3437a7399f922f58eb6061a791d2d749ec6c9be1464814012b46f"
+    },
+    "src/dovi_tool/assets/tests/mel_to_81.bin": {
+      "sha256": "2b746d62d5fe9be304a9b598657d4910a403107479df77a54d85d5ebe1e84eba"
+    },
+    "src/dovi_tool/assets/tests/mel_to_mel.bin": {
+      "sha256": "cabda945d36cd4c3eca9c2df05cf387562e648e3250be28632c9b2991f2ec60b"
+    },
+    "src/dovi_tool/assets/tests/mel_variable_l8_length13.bin": {
+      "sha256": "ce2233fb092c17df708ea99898009cc54b84560d192d24f01aca433ffc41dd9f"
+    },
+    "src/dovi_tool/assets/tests/p8_001_end_crc32.bin": {
+      "sha256": "5f072b6c870815a76eb65b4bdf973a75436a1c362e0e44dfe86b04c5877a2ce4"
+    },
+    "src/dovi_tool/assets/tests/poly_coef_int_logic.bin": {
+      "sha256": "2bae327534a39f779105513be68e81868b184d87dafdccc9539b14fef30dec25"
+    },
+    "src/dovi_tool/assets/tests/profile20_apple.bin": {
+      "sha256": "bc6d62614da690a83a73b2d691dc82bfc1d04652ad2a7b119ec36628e05bf242"
+    },
+    "src/dovi_tool/assets/tests/profile4.bin": {
+      "sha256": "320acf09a4d7a73841ac6886d501ae8937062701ba49028ed381eb9043f873a6"
+    },
+    "src/dovi_tool/assets/tests/profile5-02.bin": {
+      "sha256": "d3b835d2855d2288af653b884950566f0dcc874930c9e34d5f154d14d4a232f5"
+    },
+    "src/dovi_tool/assets/tests/profile5.bin": {
+      "sha256": "f2e6a33cdcad3bbe2be1baf0af6ff53a41dc63431477d29d138dbe4167dc13f2"
+    },
+    "src/dovi_tool/assets/tests/profile8.bin": {
+      "sha256": "3a493b711375dc9a20801b3c23ea0c56dce1f1af2b8c2f2c8e602aed82bcf513"
+    },
+    "src/dovi_tool/assets/tests/profile84.bin": {
+      "sha256": "21ff68089a1c168e4d6931078d46a566fd906f2c25f157b7171e03129989ecfb"
+    },
+    "src/dovi_tool/assets/tests/profile8_from_profile5-02.bin": {
+      "sha256": "a18ae25ee2c02a16f8d7d57d624ad84053fac5546fe835f8f5898a829b254888"
+    },
+    "src/dovi_tool/assets/tests/source_p5_to_p8_001_end_crc32.bin": {
+      "sha256": "f50459e03f53482f978cf4280d9a316e9717bcd95d2cfc62c30f3562fb172404"
+    },
+    "src/dovi_tool/assets/tests/source_rpu_replaced_fel_orig.bin": {
+      "sha256": "74529e243d29695b25c819c50670401810b9fce744f8be5602ca6bf80c8df177"
+    },
+    "src/dovi_tool/assets/tests/st2094_10_level3.bin": {
+      "sha256": "287ae6ef407026128c03b189341f607b0e8fe5ffc1ad8e6ebaa7d6242bee902f"
+    },
+    "src/dovi_tool/assets/tests/trailing_bytes_rpu.bin": {
+      "sha256": "3babd71b83958fe9b8455c068e90024cb03ea29dc26d7989588ec3848a49436a"
+    },
+    "src/dovi_tool/assets/tests/unordered_l8_blocks.bin": {
+      "sha256": "f3ab8beea029487f90cc049e82273b5cabe3cfbb75abee77145ec7cd9b240276"
+    },
+    "src/dovi_tool/build.rs": {
+      "sha256": "af4ccb8008d1511bdc6dc2c0ff0477686d27b42c6d147fa5e4048dfdced7deea"
+    },
+    "src/dovi_tool/docs/README.md": {
+      "sha256": "7444f12e1a450cae91ea082e5dadd47b1798856d15af02d12b998432b3f13a92"
+    },
+    "src/dovi_tool/docs/editor.md": {
+      "sha256": "84e20d71b8f0dc5ae36f94840d76d478d5583812862c7edeabed8b9de92197a9"
+    },
+    "src/dovi_tool/docs/generator.md": {
+      "sha256": "2288e4128566a1ebe77f2277d433406c6258b8c1e02520bfe8b1ead009c68f15"
+    },
+    "src/dovi_tool/docs/profiles.md": {
+      "sha256": "8a918dc37972f178bafc0c19f6e1d2c938bcb33ecf54cc799d01f370754491fc"
+    },
+    "src/dovi_tool/dolby_vision/.gitignore": {
+      "sha256": "c9b608d0b3d864486a1029b75dd8b5a7e22795b8ed514785287da19714e7ca5f"
+    },
+    "src/dovi_tool/dolby_vision/CHANGELOG.md": {
+      "sha256": "e03c79a231ec9a93f1af402139c510528e1dbdc9abf2f17a459cda93da737df2"
+    },
+    "src/dovi_tool/dolby_vision/Cargo.toml": {
+      "sha256": "96ffca9d254cfc849ddca0037dac959b5dd87a13d3a6171e1af3872c854ffcd6"
+    },
+    "src/dovi_tool/dolby_vision/LICENSE": {
+      "sha256": "36701a9d30ccaaf1fa3bf93fdbf97c666a1d21efaf45188eca4b6db057c5414b"
+    },
+    "src/dovi_tool/dolby_vision/README.md": {
+      "sha256": "0ed388d7e38af8275882947b8d8cfdb9b0a8b4e7b733984f4ca65e18028193de"
+    },
+    "src/dovi_tool/dolby_vision/benches/bench_main.rs": {
+      "sha256": "eeb49d7c55018a151ba84c3e23afcd72cba6adca5b56b32a99444400dc24aabf"
+    },
+    "src/dovi_tool/dolby_vision/benches/benchmarks/mod.rs": {
+      "sha256": "e4bb331fc579c5129adbe554e2343d4001ea4f22731cbdf995dae704be2fd06b"
+    },
+    "src/dovi_tool/dolby_vision/benches/benchmarks/parsing.rs": {
+      "sha256": "e957c3bf75a4e6ed677669bbdeda9ca095434d7b7f20a9a5c7f33c2a0aa46905"
+    },
+    "src/dovi_tool/dolby_vision/benches/benchmarks/rewriting.rs": {
+      "sha256": "03190d15fdc74ced20c9f7774391fff0d367ec714a7f54d640d04e6aa503f137"
+    },
+    "src/dovi_tool/dolby_vision/cbindgen.toml": {
+      "sha256": "11fd870c2f387b93f0b52dd20a4c44c3a1a88ed0736f71a6409f9912119d2734"
+    },
+    "src/dovi_tool/dolby_vision/examples/capi_rpu_file.c": {
+      "sha256": "b068299b6e5d7fee6a0dc0227b0307cc629b52985981616b431b2cd8149816f6"
+    },
+    "src/dovi_tool/dolby_vision/examples/capi_single_rpu.c": {
+      "sha256": "7dd53f31ff900380c894b9faf552d9c51cf4d99611570ea26ce217598e648484"
+    },
+    "src/dovi_tool/dolby_vision/examples/helpers.h": {
+      "sha256": "5ecf9d74d7c5168f2b10b926e24e9646e68cf359f6bc72693eba3d46542aa1eb"
+    },
+    "src/dovi_tool/dolby_vision/examples/m0_generate.rs": {
+      "sha256": "5caf2e1ec7a9087aee5907de006e8400ead499af42f7aab72f25c28498bff066"
+    },
+    "src/dovi_tool/dolby_vision/examples/simple_edit.cpp": {
+      "sha256": "d9a080ed754922ce04cb51cf028f6a273f9a09caa6818b6319b2ec8fa8d0bb8b"
+    },
+    "src/dovi_tool/dolby_vision/src/av1/emdf.rs": {
+      "sha256": "1486ca3b5fac418b4747a970d7e21935f9f34f2352d7178535eb7335e45c6c50"
+    },
+    "src/dovi_tool/dolby_vision/src/av1/mod.rs": {
+      "sha256": "eff02c60c1c60bc8d321cf12c4d0d3b2ffdaa09efc968d4e812720a9d3a41875"
+    },
+    "src/dovi_tool/dolby_vision/src/c_structs/buffers.rs": {
+      "sha256": "da401d669479ea2221f72f24d46ba331eb440cd5a3b83fb0defb56711081f140"
+    },
+    "src/dovi_tool/dolby_vision/src/c_structs/extension_metadata.rs": {
+      "sha256": "69e5676288ab35768f8e38ab1636e53f8e55b79ba9ab8e64761673d7079bc89b"
+    },
+    "src/dovi_tool/dolby_vision/src/c_structs/mod.rs": {
+      "sha256": "baf502cdfb14847dc4b4ef5111a317417208a9d8e525a12339eb0ec57ad33d84"
+    },
+    "src/dovi_tool/dolby_vision/src/c_structs/rpu.rs": {
+      "sha256": "32beb6bac2db5c4b164dd8f7774fbb9318a2aa47e229cef5d49502caaf659efb"
+    },
+    "src/dovi_tool/dolby_vision/src/c_structs/rpu_data_header.rs": {
+      "sha256": "4259ae58199cb948d5b92c7480f116e33fd4d087175284718c6b635518ee5a6d"
+    },
+    "src/dovi_tool/dolby_vision/src/c_structs/rpu_data_mapping.rs": {
+      "sha256": "7142f798c717aa2f8b55d617035f2fb57d7343b9bc51ccdbd59cdc42a4810e68"
+    },
+    "src/dovi_tool/dolby_vision/src/c_structs/rpu_data_nlq.rs": {
+      "sha256": "5a831514931c1d77ecbe049644fc94a4e9c6b48d2ec1646419646c7edf0e8560"
+    },
+    "src/dovi_tool/dolby_vision/src/c_structs/vdr_dm_data.rs": {
+      "sha256": "1d26a6bba767a3c01f684be7d2b1b06ea1d576cf2f25b273c4309f59671bc327"
+    },
+    "src/dovi_tool/dolby_vision/src/capi.rs": {
+      "sha256": "aa4cc3726c8d96d3e9bda1ba94be1c312bddd92bf29e109c54f384bae755b8f7"
+    },
+    "src/dovi_tool/dolby_vision/src/lib.rs": {
+      "sha256": "3e946417a35eb1f3ab5d2768497082e5b7f08d260aaeefa5b491861ef2164d32"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/dovi_rpu.rs": {
+      "sha256": "3a291106e4403569264a6e5cbf9a4c6d311817ecac702e0734c19a1c79012e9c"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level1.rs": {
+      "sha256": "13966602b26eb490638f2642bff05f781b392b183eb9d3d50e3733a098a2efca"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level10.rs": {
+      "sha256": "b0146db23743cb96776e767f1c1d9fa08d7814929df168ff395f5116e9537027"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level11.rs": {
+      "sha256": "7bcaf98f2007201cf24a6ae1de979d6c30ded4c9912763fb865df96291c6cf1a"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level2.rs": {
+      "sha256": "986b32ae6bf3c260518b5b630995b8383cd89cd72256505e47b291aeed4b6369"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level254.rs": {
+      "sha256": "f282c2145e1f3b625b0f19a26995dadad6edc03adeca26ca672a7b05caa46eed"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level255.rs": {
+      "sha256": "d4effa8cd8fd14adafa2aeb8964d4f0c4ad860de35c9474ed4a58a5167763e6d"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level3.rs": {
+      "sha256": "bbbffc1bb967e9104aa3cdb803d701f8eead0699053f4b9f07d9a9595aabfe08"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level4.rs": {
+      "sha256": "5a56587ce0044bcc9e7abc3521e67f8482a31f41ab6591e8d2127f3789d710cb"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level5.rs": {
+      "sha256": "7e049f9e17481cb2525b95ec16338d73de97375706ee423208a8cb42702df173"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level6.rs": {
+      "sha256": "76c26312d1670f23b6287ebd9ec5e64fc23305e16b3e1d855a386612ed2e5a0a"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level8.rs": {
+      "sha256": "ea7306af90182c63d412015fdef8f854a257a6460e26b8227fc4e23af76f294e"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/level9.rs": {
+      "sha256": "56b19ba7a23dcd3f8da460f701520a7bb7cf7ee6257512096544d8de3e53eb73"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/mod.rs": {
+      "sha256": "3af0f87672b14b9b6ec94c82e42a993a761be153e4526d53fb19a093ad5623db"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/blocks/reserved.rs": {
+      "sha256": "e9346baff3e1a8e574e2ccf6da4e7e7c45c81e7920ff53879d6f2424e0ebc30b"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/cmv29.rs": {
+      "sha256": "24c203c5afaeb12ee554fdb0beac092ef8469b9c393313f105e2377f271318fa"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/cmv40.rs": {
+      "sha256": "5e0d34d014bd3101082d5716f535b98789927de4a3adfc398d7508027c36a6dc"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/mod.rs": {
+      "sha256": "ec4b12ab3aef9dbdf375023c45a2740bc01940fe70a5ca747995c4a522b5104c"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/extension_metadata/primaries.rs": {
+      "sha256": "7cc5aee1a179c4e78476807996a0df57302c587b3e9d08273f3d278a984fccf6"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/generate.rs": {
+      "sha256": "a72b7c7fa52e2691f895a2f73a6040e6060e4f42d2131014f73f58c50a02992d"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/mod.rs": {
+      "sha256": "9f35cab7bae9a8078ec25277affd578489465db6e6c62e0641938c94a46c212e"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/mod.rs": {
+      "sha256": "c373ec3a3febf24ad762d3548d3bbd4096e9c73933821c2ca21ca3f057e012fe"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile4.rs": {
+      "sha256": "70fe254ba7ba620b581294ca94db0fb799b79d230c9d97b41e2cdb2b340861a8"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile5.rs": {
+      "sha256": "7225fb152575125a6d85388bc4c16660354c608c76fe7cc2db485c9fc8821612"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile7.rs": {
+      "sha256": "1e3adb0d8bad1f59643bd0b4f99ba05b8c9c91bb1f5b9f3ef05e43899e4a3937"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile81.rs": {
+      "sha256": "32934bdb533e10b3637ccdfd03040618968c68d7e869bf77bb17cf2b4f024c51"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/profiles/profile84.rs": {
+      "sha256": "68c0f035648434509217712922bbacb24879e218928aae40bfcdbcdfab83c9f8"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/rpu_data_header.rs": {
+      "sha256": "f93ebd900063f2d6c3fc15b9c441e5a048993f62061de9fb15b4fb1f01ba92b9"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/rpu_data_mapping.rs": {
+      "sha256": "9768a715e34f749823be3770727d978f85d3727b6b553db01980b7119e1270dd"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/rpu_data_nlq.rs": {
+      "sha256": "aa5e769f3155d890688fd983c5e7e3759733777642bde6489ea30eb32e631f10"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/utils.rs": {
+      "sha256": "18d532b489a307bbcb63416b4ec22da7dde221d5aa7e378b9a7ae805b66bddb7"
+    },
+    "src/dovi_tool/dolby_vision/src/rpu/vdr_dm_data.rs": {
+      "sha256": "72aaaf8ee83a5d282b5ff80414b2619b6e057305710f297fe2ad2e200a77a48d"
+    },
+    "src/dovi_tool/dolby_vision/src/st2094_10/itu_t35/cm_data.rs": {
+      "sha256": "1879e8b40d140089016407b1b747d7fe262ad511043aa63b9fec654483063d6d"
+    },
+    "src/dovi_tool/dolby_vision/src/st2094_10/itu_t35/dm_data.rs": {
+      "sha256": "895fa37a0d0d4fb07b0e17498e330562896180643b51f8eb2c58ab507d6f9ba0"
+    },
+    "src/dovi_tool/dolby_vision/src/st2094_10/itu_t35/mod.rs": {
+      "sha256": "342947e3f33f016f75b6b1f928738e31984d409b2cd253ba92c4d58f4906676d"
+    },
+    "src/dovi_tool/dolby_vision/src/st2094_10/mod.rs": {
+      "sha256": "5099d4d1f1474dfc7ae28f54f13cebcfee2de38ae42eb8198865dc8ca8317258"
+    },
+    "src/dovi_tool/dolby_vision/src/utils.rs": {
+      "sha256": "c79e00618563ef1bb9893a593d1bb36f4b06fb75d91f1be7c89833ba19a83d38"
+    },
+    "src/dovi_tool/dolby_vision/src/xml/mod.rs": {
+      "sha256": "f3b790d1750c318ded00c6280bd836aa58a478f9a60f0924ec2a2409ecf0db47"
+    },
+    "src/dovi_tool/dolby_vision/src/xml/parser.rs": {
+      "sha256": "09e93cc9c54f82814e176d94bee54aa8a4fcdb738df0bb1c88a96b58a96590e6"
+    },
+    "src/dovi_tool/dolby_vision/src/xml/tests.rs": {
+      "sha256": "6d4f7cba329621692212609a5c9d0ded75c21fed404b484fca20dd3d1f911e3b"
+    },
+    "src/dovi_tool/src/commands/convert.rs": {
+      "sha256": "a7d19398302011dbad7b801829c1e274ff9319cb043e7bff45ccfb9cb0190342"
+    },
+    "src/dovi_tool/src/commands/demux.rs": {
+      "sha256": "44d6a98d835deb2785015b289e4cd8d6ed71f2e309c08de394890e8ef0a2664e"
+    },
+    "src/dovi_tool/src/commands/editor.rs": {
+      "sha256": "75208b978ffce9fc1c9a373d80c99f5a75e89e080f4988a6e5b1279964a74b0b"
+    },
+    "src/dovi_tool/src/commands/export.rs": {
+      "sha256": "6baba0215e074d0747689f207958aac61e8341a997ba6c53dd2b942824643dc8"
+    },
+    "src/dovi_tool/src/commands/extract_rpu.rs": {
+      "sha256": "f6cdaa7f39518021af840afd618f4cdeffd1e1ba6c5c2d98a7f02e07571fc76e"
+    },
+    "src/dovi_tool/src/commands/generate.rs": {
+      "sha256": "e282e799f48b9c1df6982802f39d7198d7057eaa462634c3982d98df62044128"
+    },
+    "src/dovi_tool/src/commands/info.rs": {
+      "sha256": "92ead6ef43bf651f46ef389ebe2f564ee85e84ff0876010aa55ec4f084b0cd2b"
+    },
+    "src/dovi_tool/src/commands/inject_rpu.rs": {
+      "sha256": "13f7e2ca304e7690671505b4f48e3e6cd644bc0e9f435b24d18204681284521a"
+    },
+    "src/dovi_tool/src/commands/mod.rs": {
+      "sha256": "06a2152b184d563c873eb03d6d11eb1ad519212f4cad5d0cbfb5b2fabf3d0bb3"
+    },
+    "src/dovi_tool/src/commands/mux.rs": {
+      "sha256": "f8354c1e9acad429fae6e76e698d65628ea802a5a7074c2692efcd138029c023"
+    },
+    "src/dovi_tool/src/commands/plot.rs": {
+      "sha256": "cfb5966e243f3be1e9490ee6579915b33e19a30c475b29c4c008ed44e55b6cae"
+    },
+    "src/dovi_tool/src/commands/remove.rs": {
+      "sha256": "36c10212674b37962d31e0532d2383fefc1a77a54b3869f14914b49408141ad3"
+    },
+    "src/dovi_tool/src/dovi/converter.rs": {
+      "sha256": "11316159b2e66d57fb62e9ac173e80b81f790f6c613f80106a1ae8fb043f435c"
+    },
+    "src/dovi_tool/src/dovi/demuxer.rs": {
+      "sha256": "c20b76a77f5972e9548929cbb80922fdfabc8be91c1b789e63db473f136dac50"
+    },
+    "src/dovi_tool/src/dovi/editor.rs": {
+      "sha256": "cd13931836fe40dbdf0750542bd0f2e98551bfd8719adb92047e2f2842fcf7c2"
+    },
+    "src/dovi_tool/src/dovi/exporter.rs": {
+      "sha256": "270bfd77249be68846994bdd22cb3276c0e05ca52dfa2551ec34c3f87f1c9454"
+    },
+    "src/dovi_tool/src/dovi/general_read_write.rs": {
+      "sha256": "3502450321ae85a8f4064896eb66272ed19f084f4c1bc835a451f72f3aa422d6"
+    },
+    "src/dovi_tool/src/dovi/generator.rs": {
+      "sha256": "1704daa78c62b578c03585bb497b8c2dc862afe9f83f3f81336c832b574c86ec"
+    },
+    "src/dovi_tool/src/dovi/hdr10plus_utils.rs": {
+      "sha256": "e45fd303077984841429e099ef8da2117dc9b5dd016cd45c57c069d82ef7cfa6"
+    },
+    "src/dovi_tool/src/dovi/mod.rs": {
+      "sha256": "ef73fec3ea15b11fa114773fc6e2473092c244eb856212d39c8a769cbf29ef1a"
+    },
+    "src/dovi_tool/src/dovi/muxer.rs": {
+      "sha256": "74550db0cfb445a09c591202572c64edff4f4e50c843faf05884ffba9f3e1ea9"
+    },
+    "src/dovi_tool/src/dovi/plotter.rs": {
+      "sha256": "f6fdaaee43306d3db6c54eceefac774a75bc6b6d87cf4b95d9dfee2b6a94da6b"
+    },
+    "src/dovi_tool/src/dovi/remover.rs": {
+      "sha256": "620fadb84223a8dbc217c9db790a199d265fa02963154da12034598ce35b1adb"
+    },
+    "src/dovi_tool/src/dovi/rpu_extractor.rs": {
+      "sha256": "2bf6d73423a17bd21e86bf18c605078e2e2f8515e3ee8bab30428a5a0e9b710b"
+    },
+    "src/dovi_tool/src/dovi/rpu_info.rs": {
+      "sha256": "58000ed4c08bd5d984118f53e2785de2cd6c22a607bc86d1284747dab6f61842"
+    },
+    "src/dovi_tool/src/dovi/rpu_injector.rs": {
+      "sha256": "1ece344966493e3cc2307c777df2785379e858b3dcc773629f48fac99c018028"
+    },
+    "src/dovi_tool/src/main.rs": {
+      "sha256": "3bf682740b1029362c974c18f61f66f96c118614b823cfdd9782b0081fbf96ff"
+    },
+    "src/dovi_tool/src/tests/av1_rpu.rs": {
+      "sha256": "8fc0c342aa862165a3d43da4da9383b41d3b0fba9edd1978303a1e403af145b9"
+    },
+    "src/dovi_tool/src/tests/mod.rs": {
+      "sha256": "34be6882ff40f4420aefb98a40648b9cc201bd585669937a611ebd36b63cc236"
+    },
+    "src/dovi_tool/src/tests/rpu.rs": {
+      "sha256": "7fdb121853fd8df172ba958cdfcb75baf6c2c53c814626faf6e384e2393b2e2f"
+    },
+    "src/dovi_tool/tests/hevc/convert.rs": {
+      "sha256": "94d424040e3033e231e1a7c8f58136b76f58e8249312a9fff16ee8f9434b7361"
+    },
+    "src/dovi_tool/tests/hevc/demux.rs": {
+      "sha256": "159447a37153dd92ee8aa0a9f1b7c776cb5204895c9f31b5febfd7f83a9042b9"
+    },
+    "src/dovi_tool/tests/hevc/extract_rpu.rs": {
+      "sha256": "88229bd8622c3604d77a1bee029c3c8723e5de397ab59cf2d00f91975bfec709"
+    },
+    "src/dovi_tool/tests/hevc/inject_rpu.rs": {
+      "sha256": "1100ba8f23dc53a8efca8e37ccd4c7170169c9701b2f07d15f3f425bfd39c6bb"
+    },
+    "src/dovi_tool/tests/hevc/mod.rs": {
+      "sha256": "5b8576c0a32932e5152dac222db4b23423bbf9a1b52518f339d826384dd0cccd"
+    },
+    "src/dovi_tool/tests/hevc/mux.rs": {
+      "sha256": "aac8f005e6d03e3ca431144ba4931db4b2bf35bfaa939ff2f2e1c65563307eae"
+    },
+    "src/dovi_tool/tests/hevc/remove.rs": {
+      "sha256": "ff1f969a6570f20750c78a2b4bbf5999fb7700d2007b49800bbbbe134515f0eb"
+    },
+    "src/dovi_tool/tests/mod.rs": {
+      "sha256": "795a2142e60d15f159339ebd193cc072e6fcd8937e07308f863d6b973b5f9c0e"
+    },
+    "src/dovi_tool/tests/rpu/editor.rs": {
+      "sha256": "b174065133af80886936e5bea936455b467d6be64cb77ee02c91d392d925bf0b"
+    },
+    "src/dovi_tool/tests/rpu/export.rs": {
+      "sha256": "50d58f8cf71870cff527392296bc60b834567195350521ec44c6d002b16f41c3"
+    },
+    "src/dovi_tool/tests/rpu/generate.rs": {
+      "sha256": "6e8efef0124f870d6cd1bf6789162b699dbcfb577b60603ef1667649f545ff81"
+    },
+    "src/dovi_tool/tests/rpu/info.rs": {
+      "sha256": "ebcf9b71dd889a7a7cdb41394493721f6376e77ad0ba688af7133509e1bf82c6"
+    },
+    "src/dovi_tool/tests/rpu/mod.rs": {
+      "sha256": "c5a83ec0bf4b172990845f3c716aabddb4b847485f0b157df758b969ded2653f"
+    },
+    "src/dovi_tool/tests/rpu/plot.rs": {
+      "sha256": "7e7e8b789fd957075f78c925a36751add22632aa04b51dae12ce4556a4c6c9e1"
+    },
+    "src/DoViBaker/include/DoViBaker.h": {
+      "sha256": "5807c0af6edc4b40b75644f9c0bf523b50258b3b7ee5a23ceb83119b6e7e40be"
+    },
+    "src/DoViBaker/include/DoViCubes.h": {
+      "sha256": "4f2e17903767e2ae1037001dda0ce1072cacbb6ddd2d95add3f35f44bdedf193"
+    },
+    "src/DoViBaker/include/DoViEetf.h": {
+      "sha256": "cfdbc33c10afc0c88bf40ccb37400b01be4aad04246fe9c33ed8e13c8343f15e"
+    },
+    "src/DoViBaker/include/DoViProcessor.h": {
+      "sha256": "e186d84404dd6a16a4953715ffab306cfa39c07c2e2d99d7e352a8ac2bd3aeee"
+    },
+    "src/DoViBaker/include/DoViStatsFileLoader.h": {
+      "sha256": "66516624bdf166d8059c841a23bb43e1a153188d0ea3e7e8692b018f4da8580b"
+    },
+    "src/DoViBaker/include/DoViTonemap.h": {
+      "sha256": "4ba9def992241a5bf374f9e34cf42dd174143920172510c255ef9ff847a018f4"
+    },
+    "src/DoViBaker/include/avisynth.h": {
+      "sha256": "3abe0c36a6fbad6d3d8c8099e0214dc7eca6086b25936e76d6dce4695bd93623"
+    },
+    "src/DoViBaker/include/avs/alignment.h": {
+      "sha256": "0fc6871dabe5a0a82d023ead216250bf9faf6511dbef56de22c5ad1123db1770"
+    },
+    "src/DoViBaker/include/avs/capi.h": {
+      "sha256": "626e65b711a1d971c78e0a69e556f8a6d1c564b05b4567d33a3485dfec9e79e1"
+    },
+    "src/DoViBaker/include/avs/config.h": {
+      "sha256": "863e46175c511195715ba7579d4cf343a0780a0b4276402b8d417e6ec15e77e5"
+    },
+    "src/DoViBaker/include/avs/cpuid.h": {
+      "sha256": "a210f929d634f08e861a6b07f2e853134c46f3f0c90b3a2c1670a411aac59053"
+    },
+    "src/DoViBaker/include/avs/filesystem.h": {
+      "sha256": "158c68c2f728d40c7777efaa796bc78de97ce49f776eb9268038062e1242f7c2"
+    },
+    "src/DoViBaker/include/avs/minmax.h": {
+      "sha256": "f0173a7ea4b086269546f35ef51ba05b040f25dcf5fd0dbf29ea227892bf3b5b"
+    },
+    "src/DoViBaker/include/avs/posix.h": {
+      "sha256": "da65b351571712693f7473b5c7fd33c2627e028c6f0ed5599239e0b7394ffc6b"
+    },
+    "src/DoViBaker/include/avs/types.h": {
+      "sha256": "310c93ef160603e278eb0db1238fca92a98de9c83d653cb70d944cc93aee494c"
+    },
+    "src/DoViBaker/include/avs/win.h": {
+      "sha256": "45a997f83e72611726fddeee02bd8f02ff6454d35b2c73b9db6394fd2762eb92"
+    },
+    "src/DoViBaker/include/def.h": {
+      "sha256": "250f80540aca23dc1271aeab7a944d993deade20774c9634d60c20445851e66b"
+    },
+    "src/DoViBaker/include/dovi/rpu_parser.h": {
+      "sha256": "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82"
+    },
+    "src/DoViBaker/include/timecube/timecube.h": {
+      "sha256": "36094f412e7fcdb5127d5c3a57b8c9389cf6e1ee488997f1e2d59591c0cdb281"
+    },
+    "src/DoViBaker/DoViBaker/DoViProcessor.cpp": {
+      "sha256": "e1c74f4710bba5bbcd8824b339cf3933e563f49772e1a11487f62324078d7aee"
+    },
+    "deps/lib/libdovi.a": {
+      "sha256": "8c356c63b8dbeda35f3213df0716d9fd45ae607c2dd7d04bb974aaeda67f42ae"
+    }
+  },
+  "gpu_inventory": {
+    "prefix/include/libplacebo/cache.h": {
+      "sha256": "8a9c73c67a560ef069999f4f087efaa8f7044c9723e0c76d6b5d0b44826a6281"
+    },
+    "prefix/include/libplacebo/colorspace.h": {
+      "sha256": "045ae8a75caa8d1dc50dcfdf1b190817af3a07c0d381df20d86178095dab9a0d"
+    },
+    "prefix/include/libplacebo/common.h": {
+      "sha256": "d61d6425038783aa93582d80d8e828ecb63fcfb6c6f9d5d1577e95d3996f4f10"
+    },
+    "prefix/include/libplacebo/config.h": {
+      "sha256": "d8cf5d7c124c48984822d8dd42f7dc2ff3d8673f7c4c65505242da4494a5f1f2"
+    },
+    "prefix/include/libplacebo/d3d11.h": {
+      "sha256": "563767b679766cb2c644d45ba0ab08cee419e1b61e9e8a4a8fa1b16ad7ab6ac6"
+    },
+    "prefix/include/libplacebo/dispatch.h": {
+      "sha256": "9c4fa74d440d598458688b9b8d937aa5f8db54efa54381c73bfbf01b4d947dd5"
+    },
+    "prefix/include/libplacebo/dither.h": {
+      "sha256": "4905faaca77818b1e4a658b55b48b1839de1a49635943411d2d1b5933156f1f5"
+    },
+    "prefix/include/libplacebo/dummy.h": {
+      "sha256": "ee5a3bebc9e9a24353f3097e3822157d492a04c4026b62e30cf8c6522bc76645"
+    },
+    "prefix/include/libplacebo/filters.h": {
+      "sha256": "84b857ee5c61e181cea655c4ba17b4b510ac441422dbf4d6eb25611f4e59c5d2"
+    },
+    "prefix/include/libplacebo/gamut_mapping.h": {
+      "sha256": "a75332f7d17b2cb55e7b16a9bcb6a88b639ec957809a7913876cab1acfe0bf69"
+    },
+    "prefix/include/libplacebo/gpu.h": {
+      "sha256": "76c4c95b8d6f7dd0512262d6e57d274725df28d6516fd2b0b247e9bcd442d0cf"
+    },
+    "prefix/include/libplacebo/log.h": {
+      "sha256": "1a3ca9b8202f27d565b56c12407f4747f1303e9e1dcf48896c89c7c7c978f5ee"
+    },
+    "prefix/include/libplacebo/opengl.h": {
+      "sha256": "ac93bc9a296b0545c83eb7bb02f71c824e3d030cb0432e83a72476b40475dbe9"
+    },
+    "prefix/include/libplacebo/options.h": {
+      "sha256": "da06ca132b642d03d4254cd2e3158194ec341a91f2141ebc9c046fb17977cf90"
+    },
+    "prefix/include/libplacebo/renderer.h": {
+      "sha256": "5b3b87d10294e4fae2548878425d7ec837c84a14529a107dd6ba95dd52e6510c"
+    },
+    "prefix/include/libplacebo/shaders/colorspace.h": {
+      "sha256": "b3fa8f34f9f164f8006d41ae0a0e9c0c2a2f4fa948aba30969f6bd3fbc1f6f2f"
+    },
+    "prefix/include/libplacebo/shaders/custom.h": {
+      "sha256": "eb7c317f6c93ce76a67f5e622d5c784e702545752a88535a4eb577fdcc74e50e"
+    },
+    "prefix/include/libplacebo/shaders/deinterlacing.h": {
+      "sha256": "c3a21191792421f6cc707c24735c4a120a2135fd36e6e58c1b895def4244efb0"
+    },
+    "prefix/include/libplacebo/shaders/dithering.h": {
+      "sha256": "d9a88640c54f1be410caa8a052bd05ad24ac9d4c71b6b9265754bf781bbc4f54"
+    },
+    "prefix/include/libplacebo/shaders/film_grain.h": {
+      "sha256": "a6df80b759aaf45bd445fce1db3bcb26fc4fdc5e52c672d294bab709eaec24ab"
+    },
+    "prefix/include/libplacebo/shaders/icc.h": {
+      "sha256": "0523a23ccf70b29aba5828b58cf4649a9c373c0a426f937dd6100845848b6122"
+    },
+    "prefix/include/libplacebo/shaders/lut.h": {
+      "sha256": "aecb43257ed72adaa095178dd0f64800827519b320439f2ddd4be0eac8e61a9b"
+    },
+    "prefix/include/libplacebo/shaders/sampling.h": {
+      "sha256": "dff03bfd6fd6fe38b8e05641252986ab301606be3fc5b914a61147ffc1ff33ae"
+    },
+    "prefix/include/libplacebo/shaders.h": {
+      "sha256": "7bcfa51503e758b2b32e6f409396730ac12e369309ae2234c4fd4444fde3d63e"
+    },
+    "prefix/include/libplacebo/swapchain.h": {
+      "sha256": "e89d20e46f6abadef8b57593103b27276711a31750d9ba27486cbe7ecdc98474"
+    },
+    "prefix/include/libplacebo/tone_mapping.h": {
+      "sha256": "dcf32f6eca4aa4e323c1396a5f1359922c5117e3f3eab845b4b5d674598f471e"
+    },
+    "prefix/include/libplacebo/utils/dav1d.h": {
+      "sha256": "f2215831184490b1a091150b9d45cf506b233017814e3864143c0f9b3d167520"
+    },
+    "prefix/include/libplacebo/utils/dav1d_internal.h": {
+      "sha256": "e30b11d68050839d26d51bc5a39fae4af55e4b8a46110f26de334452f1de97b7"
+    },
+    "prefix/include/libplacebo/utils/dolbyvision.h": {
+      "sha256": "46487cb4b604d26227710d2dc93054da9845c2d20534efbc64bc72a1305d948a"
+    },
+    "prefix/include/libplacebo/utils/frame_queue.h": {
+      "sha256": "5fc5199f1ce8f8436a2b455ec17ff751f6e817df560e791ebf61dcdadb995e51"
+    },
+    "prefix/include/libplacebo/utils/libav.h": {
+      "sha256": "34d220719e678ac891a0e5bf53ed2a6c794931f78d556c834d19b9d5ad8e16ea"
+    },
+    "prefix/include/libplacebo/utils/libav_internal.h": {
+      "sha256": "542055662c561cbccbb479a89be0ed1b6e295bbc7b2298a83d8424d053d14189"
+    },
+    "prefix/include/libplacebo/utils/upload.h": {
+      "sha256": "7bdb083ce74ea4039fc7b957dd0128d7aff398fef3e328b6a554ae97edce2dc1"
+    },
+    "prefix/include/libplacebo/vulkan.h": {
+      "sha256": "0a5d5158d354ab544d98ce5afa346f0cde4d740b133eac5b0468a8463d7c2edc"
+    },
+    "prefix/lib/aarch64-linux-gnu/libplacebo.so": {
+      "symlink": "libplacebo.so.374"
+    },
+    "prefix/lib/aarch64-linux-gnu/libplacebo.so.374": {
+      "sha256": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1"
+    },
+    "prefix/lib/aarch64-linux-gnu/pkgconfig/libplacebo.pc": {
+      "sha256": "7d272847f4110c02199c431f847b75349efc5b5a91f629257abed2af7b4b0bcb"
+    },
+    "include/libdovi/rpu_parser.h": {
+      "sha256": "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82"
+    },
+    "lib/libdovi.a": {
+      "sha256": "f9976d36eefcc1d8c000ae5f539ddfc09069b97ad6c56b6e3d665526a59cfc65"
+    }
+  }
+}

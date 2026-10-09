@@ -905,7 +905,48 @@ struct Decision: Codable {
     var deliveredDolbyVisionProfile: Int?
 }
 
+struct EffectiveProcessingReport: Equatable, Codable {
+    var generation: String
+    var hdr10Enhanced: Bool
+    var felContributed: Bool
+    var appliedOperations: [String]
+
+    func matches(generation active: String?, delivered: String?) -> Bool {
+        hdr10Enhanced && delivered == "hdr10" && active == generation
+            && UUID(uuidString: generation) != nil
+            && !appliedOperations.isEmpty && appliedOperations.count <= 16
+            && appliedOperations.allSatisfy { !$0.isEmpty && $0.count <= 64 }
+    }
+
+    var detail: String {
+        let names = ["PolynomialReshape": "RPU polynomial mapping", "MmrReshape": "RPU MMR mapping",
+                     "RpuColorConversion": "RPU color conversion", "TargetMapping": "target mapping",
+                     "CreativeTrimApplication": "creative trims"]
+        let metadata = appliedOperations.compactMap { names[$0] }.joined(separator: ", ")
+        return "Dolby Vision–enhanced HDR10 · FEL used: \(felContributed ? "yes" : "no")"
+            + (metadata.isEmpty ? "" : " · Applied: \(metadata)")
+    }
+
+    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, felContributed, appliedOperations }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
+        hdr10Enhanced = ((try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == true)
+            && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
+        felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
+        appliedOperations = (try? values?.decode([String].self, forKey: .appliedOperations)) ?? []
+    }
+
+    init(generation: String, hdr10Enhanced: Bool, felContributed: Bool, appliedOperations: [String]) {
+        self.generation = generation
+        self.hdr10Enhanced = hdr10Enhanced
+        self.felContributed = felContributed
+        self.appliedOperations = appliedOperations
+    }
+}
+
 struct HlsStart: Codable {
+    var effectiveProcessing: EffectiveProcessingReport?
     let sessionId: String
     let playlistUrl: String
     var durationMs: Int?

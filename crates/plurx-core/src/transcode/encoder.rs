@@ -129,6 +129,92 @@ impl OutputCodecContract {
     }
 }
 
+/// Encode independently validated reconstructed PQ pictures. This is separate
+/// from OutputCodecContract: it grants no ordinary HDR/Dolby pipeline pairing
+/// and provides no processing receipt or decoder capability authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletedReconstructedOutputContract {
+    encoder: Encoder,
+    input: super::pipeline::ReconstructedPqInput,
+}
+impl CompletedReconstructedOutputContract {
+    pub(super) fn resolve(encoder: Encoder) -> Option<Self> {
+        let input = super::pipeline::ReconstructedPqInput::Rgb48Bt2020Pq;
+        input.pairs_with(encoder).then_some(Self { encoder, input })
+    }
+    pub fn encoder(self) -> Encoder {
+        self.encoder
+    }
+    pub fn encoder_name(self) -> &'static str {
+        if self.encoder == Encoder::Nvenc {
+            "hevc_nvenc"
+        } else {
+            "libx265"
+        }
+    }
+    pub fn input_contract(self) -> super::pipeline::ReconstructedPqInput {
+        self.input
+    }
+    pub fn grade(self) -> OutputGrade {
+        OutputGrade::Hdr10
+    }
+    pub fn codec(self) -> VideoCodec {
+        VideoCodec::Hevc
+    }
+    pub fn bit_depth(self) -> u8 {
+        10
+    }
+    pub fn rate_control(self) -> EffectiveRateControl {
+        EffectiveRateControl::Vbr
+    }
+    pub fn pixel_format(self) -> &'static str {
+        if self.encoder == Encoder::Nvenc {
+            "p010le"
+        } else {
+            "yuv420p10le"
+        }
+    }
+    pub fn encode_args(
+        self,
+        bitrate_kbps: u32,
+        force_idr: bool,
+        software_threads: Option<u32>,
+    ) -> Vec<String> {
+        if self.encoder == Encoder::Software {
+            return Encoder::Software.hdr10_encode_args(bitrate_kbps, force_idr, software_threads);
+        }
+        let mut args: Vec<String> = [
+            "-c:v",
+            "hevc_nvenc",
+            "-preset",
+            "p4",
+            "-profile:v",
+            "main10",
+            "-pix_fmt",
+            "p010le",
+            "-surfaces",
+            "4",
+            "-bf",
+            "0",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        // Inherit the same bounded bitrate and explicit PQ color contract,
+        // without software-only x265 options or a changed source decoder.
+        let bounded = Encoder::Software.hdr10_encode_args(bitrate_kbps, false, None);
+        for pair in bounded.chunks_exact(2) {
+            if !matches!(pair[0].as_str(), "-c:v" | "-preset" | "-x265-params") {
+                args.extend_from_slice(pair);
+            }
+        }
+        if force_idr {
+            args.extend(["-forced-idr".into(), "1".into()]);
+        }
+        args
+    }
+}
+
 #[cfg(test)]
 mod output_codec_contract_tests {
     use super::*;
@@ -141,6 +227,51 @@ mod output_codec_contract_tests {
         Encoder::Vaapi,
         Encoder::VideoToolbox,
     ];
+
+    #[test]
+    fn reconstructed_nvenc_contract_preserves_ordinary_hdr_refusal_and_bounds() {
+        assert!(OutputCodecContract::resolve(
+            Encoder::Nvenc,
+            Pipeline::Hdr10Passthrough,
+            EffectiveRateControl::Vbr
+        )
+        .is_none());
+        assert!(OutputCodecContract::resolve(
+            Encoder::Nvenc,
+            Pipeline::DoviPassthrough,
+            EffectiveRateControl::Vbr
+        )
+        .is_none());
+        let contract = CompletedReconstructedOutputContract::resolve(Encoder::Nvenc)
+            .expect("reconstructed NVENC");
+        assert_eq!(contract.input_contract().pixel_format(), "rgb48le");
+        let args = contract.encode_args(4000, true, Some(1));
+        for pair in [
+            ["-c:v", "hevc_nvenc"],
+            ["-preset", "p4"],
+            ["-profile:v", "main10"],
+            ["-pix_fmt", "p010le"],
+            ["-surfaces", "4"],
+            ["-bf", "0"],
+            ["-forced-idr", "1"],
+            ["-b:v", "4000k"],
+            ["-maxrate", "6000k"],
+            ["-bufsize", "8000k"],
+            ["-color_trc", "smpte2084"],
+        ] {
+            assert!(args.windows(2).any(|actual| actual == pair));
+        }
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "-x265-params" || arg == "-hwaccel"));
+        assert!(CompletedReconstructedOutputContract::resolve(Encoder::Qsv).is_none());
+        let software = CompletedReconstructedOutputContract::resolve(Encoder::Software)
+            .expect("software fallback");
+        assert_eq!(
+            software.encode_args(4000, true, Some(1)),
+            Encoder::Software.hdr10_encode_args(4000, true, Some(1))
+        );
+    }
 
     #[test]
     fn the_qualified_table_matches_todays_selection() {

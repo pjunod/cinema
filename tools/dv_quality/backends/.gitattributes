@@ -1,0 +1,13 @@
+# These reviewed evidence snapshots are SHA256-bound; preserve their exact bytes.
+* -text
+# Terminal CRs and blank unified-diff context are data, not editable source style.
+dovibaker/*.log -whitespace
+dovibaker/*.patch -whitespace
+
+p81-authoring/*.log -whitespace
+p81-authoring/lossless-rext-attempt/*.log -whitespace
+parsed-rpu/*.log -whitespace
+decoded-layers/render-evidence/*/*/probe.stderr -whitespace
+nonidentity-authoring/gpu/*/*/probe.stderr -whitespace
+nonidentity-authoring/encode.log -whitespace
+nonidentity-authoring/fresh-replay.log -whitespace

@@ -1500,6 +1500,9 @@ fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartResponse {
+    /// Owner answer carried separately from the strict legacy JSON body.
+    #[serde(skip)]
+    pub processed_dv_profile: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1650,6 +1653,13 @@ fn decode_remote_start_response(
     };
     serde_json::from_slice::<RemoteStartResponse>(&response.body)
         .ok()
+        .map(|mut info| {
+            info.processed_dv_profile = response
+                .dv_processing_header
+                .as_deref()
+                .and_then(|header| info.processed_dv_profile_from_header(header));
+            info
+        })
         .filter(RemoteStartResponse::is_valid)
         .filter(|info| {
             ownership == RemoteSessionStartOwnership::LegacyAmbiguous
@@ -1662,6 +1672,7 @@ fn decode_remote_start_response(
 impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
+            processed_dv_profile: info.processed_dv_profile,
             retained_output: info.retained_output,
             audio_delivery: info.audio_delivery,
             session_id: info.session_id,
@@ -1681,8 +1692,46 @@ impl From<StartInfo> for RemoteStartResponse {
 }
 
 impl RemoteStartResponse {
+    /// Optional bounded sidecar keeps older strict START body readers valid.
+    pub(crate) fn processed_dv_header(&self) -> Option<String> {
+        self.processed_dv_profile
+            .filter(|_| self.is_valid())
+            .map(|profile| {
+                serde_json::json!({
+                    "session_id": self.session_id,
+                    "processed_dv_profile": profile,
+                })
+                .to_string()
+            })
+    }
+
+    fn processed_dv_profile_from_header(&self, header: &str) -> Option<u8> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            session_id: String,
+            processed_dv_profile: u8,
+        }
+        if header.len() > 4096 {
+            return None;
+        }
+        let wire: Wire = serde_json::from_str(header).ok()?;
+        (wire.session_id == self.session_id
+            && wire.processed_dv_profile == 8
+            && self.vod
+            && self.grade == OutputGrade::Hdr10
+            && matches!(self.kind, SessionKind::Transcode { .. }))
+        .then_some(wire.processed_dv_profile)
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self.processed_dv_profile.is_none_or(|profile| {
+                profile == 8
+                    && self.vod
+                    && self.grade == OutputGrade::Hdr10
+                    && matches!(self.kind, SessionKind::Transcode { .. })
+            })
             && self
                 .retained_output
                 .as_ref()
@@ -3560,12 +3609,24 @@ fn validated_control_relay_response(
 ) -> Result<Response<Body>, PeerTransportError> {
     let status = StatusCode::from_u16(response.status.as_u16())
         .map_err(|_| PeerTransportError::InvalidResponse)?;
+    let mut processing_header = None;
     let body = if status.is_success() {
         let parsed =
             serde_json::from_slice::<crate::playback_control::ControlResponseV1>(&response.body)
                 .ok()
                 .filter(|parsed| parsed.is_valid_for(request))
                 .ok_or(PeerTransportError::InvalidResponse)?;
+        processing_header = response
+            .dv_processing_header
+            .as_ref()
+            .and_then(|header| {
+                plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+                    header.as_bytes(),
+                    &request.generation,
+                    parsed.effective_selection.dynamic_range.as_deref(),
+                )
+            })
+            .and_then(|report| serde_json::to_string(&report).ok());
         serde_json::to_vec(&parsed).map_err(|_| PeerTransportError::InvalidResponse)?
     } else {
         let parsed =
@@ -3575,10 +3636,14 @@ fn validated_control_relay_response(
                 .ok_or(PeerTransportError::InvalidResponse)?;
         serde_json::to_vec(&parsed).map_err(|_| PeerTransportError::InvalidResponse)?
     };
-    Response::builder()
+    let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CACHE_CONTROL, "no-store");
+    if let Some(report) = processing_header {
+        builder = builder.header("x-plurx-dv-processing", report);
+    }
+    builder
         .body(Body::from(body))
         .map_err(|_| PeerTransportError::InvalidResponse)
 }
@@ -7106,6 +7171,7 @@ mod tests {
     fn valid_start_response() -> RemoteStartResponse {
         let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
         RemoteStartResponse {
+            processed_dv_profile: None,
             retained_output: None,
             audio_delivery: None,
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -7127,6 +7193,7 @@ mod tests {
     fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
         let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
         let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::CREATED,
             body: body.clone(),
@@ -7139,6 +7206,7 @@ mod tests {
         );
 
         let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::ALREADY_REPORTED,
             body: body.clone(),
@@ -7154,6 +7222,7 @@ mod tests {
         let mut legacy_info = valid_start_response();
         legacy_info.activation_generation = None;
         let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
@@ -9488,6 +9557,41 @@ mod tests {
     }
 
     #[test]
+    fn processed_p81_owner_marker_is_optional_and_bound_to_pq_transcode() {
+        let ordinary = valid_start_response();
+        let json = serde_json::to_value(&ordinary).expect("ordinary response");
+        assert!(json.get("processed_dv_profile").is_none());
+        let decoded: RemoteStartResponse =
+            serde_json::from_value(json).expect("old owner response");
+        assert!(decoded.processed_dv_profile.is_none());
+        let mut processed = ordinary;
+        processed.grade = OutputGrade::Hdr10;
+        processed.processed_dv_profile = Some(8);
+        assert!(processed.is_valid());
+        let header = processed
+            .processed_dv_header()
+            .expect("processed owner sidecar");
+        assert_eq!(processed.processed_dv_profile_from_header(&header), Some(8));
+        let body = serde_json::to_value(&processed).expect("processed body");
+        assert!(
+            body.get("processed_dv_profile").is_none(),
+            "legacy strict body remains unchanged"
+        );
+        let wrong_session = header.replace(
+            &processed.session_id,
+            "00000000-0000-4000-8000-0000000000b2",
+        );
+        assert!(processed
+            .processed_dv_profile_from_header(&wrong_session)
+            .is_none());
+        processed.processed_dv_profile = Some(7);
+        assert!(!processed.is_valid());
+        processed.processed_dv_profile = Some(8);
+        processed.grade = OutputGrade::Sdr;
+        assert!(!processed.is_valid());
+    }
+
+    #[test]
     fn remote_start_response_is_bound_to_the_session_capability_and_reports_presentation() {
         let response = valid_start_response();
         assert!(response.is_valid());
@@ -9629,6 +9733,7 @@ mod tests {
 
     fn owner_answer(status: u16, body: &[u8]) -> PeerResponse {
         PeerResponse {
+            dv_processing_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::from_u16(status).expect("status"),
             body: body.to_vec(),
@@ -10776,6 +10881,7 @@ mod tests {
         for disposition in ["accepted", "replayed"] {
             let response = validated_control_relay_response(
                 PeerResponse {
+                    dv_processing_header: None,
                     clock_timing: None,
                     status: reqwest::StatusCode::OK,
                     body: body.clone(),
@@ -10792,6 +10898,38 @@ mod tests {
             )
             .expect("decode relayed terminal body");
             assert_eq!(decoded, expected, "{disposition} relay changed the ack");
+        }
+    }
+
+    #[tokio::test]
+    async fn processing_owner_header_preserves_old_control_body_and_refuses_wrong_incarnation() {
+        let request = terminal_relay_request();
+        let mut expected = terminal_relay_response(&request);
+        expected.effective_selection.dynamic_range = Some("hdr10".into());
+        let body = serde_json::to_vec(&expected).expect("legacy control body");
+        for generation in [&request.generation, &request.session_id] {
+            let header = serde_json::json!({"generation":generation,"hdr10_enhanced":true,"fel_contributed":false,
+                "applied_operations":["RpuColorConversion","TargetMapping"]}).to_string();
+            let response = validated_control_relay_response(
+                PeerResponse {
+                    dv_processing_header: Some(header),
+                    clock_timing: None,
+                    status: reqwest::StatusCode::OK,
+                    body: body.clone(),
+                },
+                &request,
+            )
+            .expect("ordinary-compatible relay");
+            assert_eq!(
+                response.headers().contains_key("x-plurx-dv-processing"),
+                generation == &request.generation
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .expect("relay body");
+            let parsed: crate::playback_control::ControlResponseV1 =
+                serde_json::from_slice(&bytes).expect("old strict body still decodes");
+            assert_eq!(parsed, expected);
         }
     }
 }

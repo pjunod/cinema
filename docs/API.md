@@ -14,7 +14,9 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-The ordinary listener (`:32400` by default) serves the five surfaces below.
+As of 2026-10-08, plurx has 354 routes declared by the ordinary listener's
+assembled router. The ordinary listener (`:32400` by default) serves the five
+surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
 (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
@@ -1852,6 +1854,16 @@ is the capability; `generation`, `control_epoch`, `client_instance_id` and
 `sequence` are mutation fences. Body ≤ **16 KiB**, the whole exchange wrapped
 in a **4-second** deadline, minimum interval 250 ms, advertised cadence
 5000 ms.
+
+An accepted public control response may include `effective_processing`, using
+the same completed-processing report as Start. Its `generation` is the current
+playback incarnation, and the report applies only to the delivered HDR10
+selection. Clients clear a previous report when an accepted response omits it;
+saved Developer preferences alone do not establish applied processing.
+The owner relays this optional report in a bounded private response header
+(4096 bytes), keeping the internal control JSON body compatible with older
+peers. The ingress validates the incarnation and HDR10 selection before public
+projection; a missing or stale header omits the report.
 
 The request reports what the client is doing — `demand` (`active` · `hold` ·
 `end`), `position_ms`, `buffered_from_ms` (absent means *no contiguity

@@ -46,6 +46,61 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
 
+# Cached source-only DV dependencies are independent of daemon and helper edits.
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS dv-processing-dependencies
+ARG DEBIAN_SNAPSHOT=20260928T000000Z
+ARG TARGETARCH
+ARG PLURX_DV_BUILD_JOBS=2
+ENV PLURX_DV_BUILD_JOBS=${PLURX_DV_BUILD_JOBS} PLURX_DV_BUILD_INPUTS=/build-inputs
+RUN sed -i \
+      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
+      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
+      /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl build-essential pkg-config ninja-build nasm python3-venv \
+      libvulkan-dev glslang-dev libxxhash-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY tools/dv_processing/build-requirements.txt /build-inputs/build-requirements.txt
+RUN python3 -m venv /opt/dv-build-python \
+    && /opt/dv-build-python/bin/pip install --require-hashes --only-binary=:all: -r /build-inputs/build-requirements.txt
+ENV PATH=/opt/dv-build-python/bin:${PATH}
+WORKDIR /build-inputs
+COPY rust-toolchain.toml .
+COPY tools/dv_quality/backends/parsed-rpu/fetch_parser.py tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock parsed-rpu/
+COPY tools/dv_quality/backends/libplacebo/fetch_sources.py libplacebo/
+COPY tools/dv_processing/build-dependencies.sh .
+RUN --mount=type=cache,id=plurx-dv-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    sh /build-inputs/build-dependencies.sh /opt/dv-dependencies
+
+# Only helper source changes invalidate this small compile/identity layer.
+FROM dv-processing-dependencies AS dv-processing-helpers
+COPY tools/dv_processing /build-inputs/dv_processing
+COPY LICENSE NOTICE /build-inputs/project-notices/
+ENV PLURX_DV_PROJECT_NOTICES=/build-inputs/project-notices
+RUN sh /build-inputs/dv_processing/build-bundle.sh /opt/dv-dependencies /opt/dv-bundle
+
+# Headless bundle/loader qualification without the daemon or production encoder.
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS dv-processing-helper-check
+ARG DEBIAN_SNAPSHOT=20260928T000000Z
+RUN sed -i \
+      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
+      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
+      /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      python3 libvulkan1 mesa-vulkan-drivers liblcms2-2 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing
+RUN python3 /usr/lib/plurx/dv-processing/sources/bundle-manifest.py \
+      /usr/lib/plurx/dv-processing/sources /usr/lib/plurx/dv-processing --verify \
+    && test -n "$(find /usr/share/vulkan/icd.d -name '*.json' -print -quit)" \
+    && for helper in segment_decode_render mux_rgb author_p81; do \
+      status=0; LD_LIBRARY_PATH=/usr/lib/plurx/dv-processing/lib \
+        /usr/lib/plurx/dv-processing/bin/$helper >/tmp/helper.out 2>/tmp/helper.err || status=$?; \
+      test "$status" -eq 1 && grep -q 'usage:' /tmp/helper.err || exit 1; \
+    done && rm /tmp/helper.out /tmp/helper.err
+
 # Pinned by digest for the same reason, and with more at stake: this layer
 # is the shipped image's entire userland, and `bookworm-slim` moves under
 # the same tag on every Debian point release.
@@ -126,7 +181,7 @@ RUN sed -i \
     && apt-get autoremove -y \
     && rm /usr/local/libexec/build-static-ffprobe /usr/local/libexec/build-static-vmaf-scorer \
     && apt-get install -y --no-install-recommends \
-        ffmpeg ca-certificates mesa-va-drivers curl \
+        ffmpeg ca-certificates mesa-va-drivers libvulkan1 mesa-vulkan-drivers liblcms2-2 libstdc++6 curl \
         "mkvtoolnix=${MKVTOOLNIX_VERSION}" \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install -y --no-install-recommends \
@@ -193,6 +248,10 @@ RUN sed -i \
         useradd -r -g plurx -d /var/lib/plurx plurx \
     && mkdir -p /var/lib/plurx \
     && chown plurx:plurx /var/lib/plurx
+
+# Private libplacebo affects only renderer subprocesses through their manifest.
+# No Vulkan ICD override: the worker retains normal host/device discovery.
+COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing
 
 # M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
 # install on a persistent runner. These two tool images are pinned by index

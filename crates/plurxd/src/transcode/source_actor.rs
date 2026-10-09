@@ -1878,7 +1878,7 @@ fn source_native_presentation(
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
             codecs,
-            supplemental_codecs: None,
+            supplemental_codecs: encoding.processed_dv_supplemental(),
             frame_rate: Some(
                 f64::from(encoding.grid.numerator) / f64::from(encoding.grid.denominator),
             ),
