@@ -521,9 +521,17 @@ fn complete_caption(vtt: &str) -> bool {
     })
 }
 
+/// Each node owns its scratch even when operators share a runtime-cache mount.
+fn scratch_cache(state: &AppState) -> PathBuf {
+    state
+        .runtime_cache_dir
+        .join("subtitle-transcription-nodes")
+        .join(hex::encode(Sha256::digest(state.node_id.as_bytes())))
+}
+
 pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let boot = uuid::Uuid::new_v4().to_string();
-    let root = state.runtime_cache_dir.join("subtitle-transcription");
+    let root = scratch_cache(&state).join("subtitle-transcription");
     if let Ok(mut entries) = tokio::fs::read_dir(&root).await {
         for _ in 0..32 {
             let Ok(Some(entry)) = entries.next_entry().await else {
@@ -700,7 +708,7 @@ async fn pass(
             plurx_core::process::bounded::cancellable(
                 cancel.clone(),
                 transcribe(
-                    &state.runtime_cache_dir,
+                    &scratch_cache(state),
                     &file,
                     &config,
                     &command,
