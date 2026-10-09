@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "status": "bounded qualification complete; final batch review and fast-lane execution owned by integrator",
+  "scope": "Episode metadata preparation, shared cold source probe and production local HLS response batching",
+  "source_binding": {
+    "original_runtime": "1088d7529401297bddced74bfa11c166457468d8",
+    "fixed_runtime_current": "9e018160c63a6984bac291decec2cc9083528fdd",
+    "control_base": "af2156beaddcbf06b85ceae5dce1fe54aa7f921d",
+    "runtime_inputs_identical_except_control_patches": true,
+    "later_main": "881d5bd37",
+    "later_main_distinction": "Later main changed private VOD preparation/storage ownership and prepared-switch measurement. This campaign is explicitly bound to frozen runtime manifests; it is not an exact-final-main resource or performance claim. Final integration compilation/regressions belong to the batch receipt."
+  },
+  "completed": [
+    {
+      "subject": "cold source preparation",
+      "receipt": "release-startup-receipt.json.gz",
+      "analysis": "release-startup-analysis.json",
+      "cells": 24,
+      "result": "All four cold/warm/resume pairs passed the exact collection counter contract. Cold 1 vs 2; warm/resume 1 vs 1. Cold API median 359.55 ms current vs 490.61 ms control. First-frame decoder-process endpoint is combined-control attribution."
+    },
+    {
+      "subject": "HLS response owner",
+      "receipt": "release-hls-receipt.json.gz",
+      "analysis": "release-hls-analysis.json",
+      "cells": 18,
+      "requests": 3600,
+      "result": "All source-copy response bytes/hash identical; no source collection during serving. Same production owner; daemon CPU lower in all nine pairs, serial latency lower in all three. Higher concurrency timing mixed; sampled RSS comparable and one daemon throughout."
+    },
+    {
+      "subject": "natural episode presentation",
+      "receipt": "episodes-final-receipt.json.gz",
+      "analysis": "episode-analysis.json",
+      "cells": 16,
+      "result": "All natural transitions reached successor frame 0 without media error or extra stall. 0/80 ms metadata and same/cross-season cases retained. Debug compiler resource contamination explicitly disqualifies this matrix from resource neutrality claims."
+    },
+    {
+      "subject": "fixed compiled-release episode and boundaries",
+      "receipt": "release-episode-receipt.json.gz",
+      "analysis": "release-episode-analysis.json",
+      "cells": 2,
+      "boundaries": 3,
+      "result": "One natural-ended pair and end-of-series/autoplay-off/close boundaries passed with embedded fixed asset and valid production parser identity. Gap383.3\u2192135.7ms at80ms metadata delay; no extra media GET. Metadata/CPU overhead reported, browser range cache and shared load retained."
+    }
+  ],
+  "identified_product_failure": {
+    "trace": "boundary-diagnostic-receipt.json.gz",
+    "cause": "closePlayer cancelled preparation, then cancelPendingSeek synchronously invoked pbTick before media was paused/detached, allowing a new preparation despite wantsPlayback=false. A late continuation could publish that preparation.",
+    "fix_commit": "af2156beaddcbf06b85ceae5dce1fe54aa7f921d",
+    "fix": "Use existing playback intent in preparation admission, current-owner validation and progress cancellation. No watcher, retry loop or feature switch.",
+    "confirmation": [
+      "boundary-fixed-qualified-receipt.json.gz",
+      "release-episode-receipt.json.gz"
+    ],
+    "deferred_unit_regressions": [
+      "tests/web/media-preparation.test.js::close seek cancellation tick cannot recreate next episode preparation",
+      "tests/web/media-preparation.test.js::stopped playback intent rejects late successor metadata"
+    ]
+  },
+  "invalid_or_rejected_scopes": [
+    {
+      "scope": "debug source-probe qualification",
+      "reason": "Production WASM identity compilation exceeded existing deadline; detached debug compiler invalidated performance/resource attribution. No deadline relaxation or parser bypass; replaced with matching release binaries."
+    },
+    {
+      "scope": "initial HLS setup",
+      "reason": "Startup capability/readiness delay and six-fixture versus four-file index pass limit. No timing cells accepted. Campaign helper supports bounded startup readiness; production unchanged."
+    },
+    {
+      "scope": "release encoded HLS warmup",
+      "receipt": "release-hls-encoded-rejection.json",
+      "reason": "Independent actual encoded payloads differed 416 bytes. Exact hash criterion rejected before HLS timing; retained successful startup cells and switched only HLS serving to same-owner exact source-copy payload."
+    },
+    {
+      "scope": "first source-copy HLS setup",
+      "receipt": "release-hls-copy-label-rejected-receipt.json.gz",
+      "reason": "Harness expected encoder copy, but current production VOD copy label is vod. Assertion corrected after source confirmation; no timing cell accepted."
+    }
+  ],
+  "limits": [
+    "Browser callback or decoder process evidence is not physical display proof.",
+    "Finite shared-host loopback generated-fixture comparisons, not statistical fleet capacity or universal speedup.",
+    "No runtime acknowledgement counter exists; per-frame control is source-defined and no observed ack count is invented.",
+    "Endpoint/sampled RSS and daemon CPU exclude allocator high water and retired child CPU; absolute startup RSS differences are not attributed to probe coalescing.",
+    "Preparation fetches metadata and has measured small overhead; no zero-cost claim.",
+    "All measurement-only Rust controls were restored and are not shipping changes."
+  ],
+  "workflow": {
+    "normal_fix_commit_hook": "passed",
+    "pinned_compiler": "rustc 1.97.1",
+    "release_builds": "both passed with matching optimized flags",
+    "unit_tests_executed_by_lane": false,
+    "review_and_fast_lane": "deferred to integrator once merge-ready per user override"
+  },
+  "cleanup": {
+    "owned_daemons_and_browser": "reaped after each run; none remain",
+    "binary_cache_cleanup": "integrator coordinates removal after source-bound receipts are committed and transferred",
+    "production_mutations": false
+  }
+}

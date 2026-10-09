@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "started_at": "2026-10-09T03:29:24.611500+00:00",
+  "device": "D432EF0E-617C-48E0-8C0E-6D9CCB665C82",
+  "runtime": "com.apple.CoreSimulator.SimRuntime.tvOS-26-5",
+  "device_type": "com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-1080p",
+  "source": "docs/evidence/video-quality-2026-10-08/native/video-native-apple.swift",
+  "source_sha256": "6dbe93f5a77532f6d93c54a5b1c015f95e854638a17ffe24cf2c371da91b3952",
+  "binary_sha256": "992e57bf960b843dd27b769e7773807142fda1fe40fabbe2a6f9b41a91a0d1db",
+  "cases": [
+    {
+      "case": "animation-bf0",
+      "started_at": "2026-10-09T03:29:29.166042+00:00",
+      "prior_receipt_absent": true,
+      "deadline_seconds": 105,
+      "launch_exit": 0,
+      "launch_stdout": "org.plurx.qualification.video: 58994\n",
+      "launch_stderr": "",
+      "receipt": "review-apple-animation-bf0-attempt1.json",
+      "receipt_sha256": "b9c896e6b68aa6711477a57a574b8bdfbeb7e478d685dd0c174ad0687e280483",
+      "receipt_fresh": true,
+      "result": "pass",
+      "phases": 4,
+      "initial_floor_exclusions": 0,
+      "elapsed_seconds": 11.824911666990374,
+      "terminate_exit": 0
+    },
+    {
+      "case": "animation-bf2",
+      "started_at": "2026-10-09T03:29:41.291643+00:00",
+      "prior_receipt_absent": true,
+      "deadline_seconds": 105,
+      "launch_exit": 0,
+      "launch_stdout": "org.plurx.qualification.video: 59177\n",
+      "launch_stderr": "",
+      "receipt": "review-apple-animation-bf2-attempt1.json",
+      "receipt_sha256": "6de58bd04a19772d58253fcb20992b2d3221757bca964135d719cb6e3fd34887",
+      "receipt_fresh": true,
+      "result": "pass",
+      "phases": 4,
+      "initial_floor_exclusions": 0,
+      "elapsed_seconds": 11.948668208002346,
+      "terminate_exit": 0
+    },
+    {
+      "case": "live-action-bf0",
+      "started_at": "2026-10-09T03:29:53.588047+00:00",
+      "prior_receipt_absent": true,
+      "deadline_seconds": 105,
+      "launch_exit": 0,
+      "launch_stdout": "org.plurx.qualification.video: 59414\n",
+      "launch_stderr": "",
+      "receipt": "review-apple-live-action-bf0-attempt1.json",
+      "receipt_sha256": "af8c3c861566ec1be60b6f2d9be27fa899a55014ef755b31f6e6515bb90d7bde",
+      "receipt_fresh": true,
+      "result": "pass",
+      "phases": 4,
+      "initial_floor_exclusions": 0,
+      "elapsed_seconds": 11.814501750006457,
+      "terminate_exit": 0
+    },
+    {
+      "case": "live-action-bf2",
+      "started_at": "2026-10-09T03:30:06.424058+00:00",
+      "prior_receipt_absent": true,
+      "deadline_seconds": 105,
+      "launch_exit": 0,
+      "launch_stdout": "org.plurx.qualification.video: 59712\n",
+      "launch_stderr": "",
+      "receipt": "review-apple-live-action-bf2-attempt1.json",
+      "receipt_sha256": "3fe72911976d29c07778fa951835ba4b0fa52c978315cb2ea6ac51682b1bf703",
+      "receipt_fresh": true,
+      "result": "pass",
+      "phases": 4,
+      "initial_floor_exclusions": 0,
+      "elapsed_seconds": 12.201809500009404,
+      "terminate_exit": 0
+    }
+  ],
+  "setup_attempts": [
+    {
+      "operation": "bootstatus",
+      "exit": 0,
+      "stdout": "Monitoring boot status for plurx-video-review-apple (D432EF0E-617C-48E0-8C0E-6D9CCB665C82).\nDevice already booted, nothing to do.\n\n",
+      "stderr": ""
+    },
+    {
+      "operation": "install",
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "scope": "Corrected native probe: initial floor exclusions apply only before first admitted phase frame; strict subsequent monotonicity is not filtered.",
+  "source_sha256_after": "6dbe93f5a77532f6d93c54a5b1c015f95e854638a17ffe24cf2c371da91b3952",
+  "binary_sha256_after": "992e57bf960b843dd27b769e7773807142fda1fe40fabbe2a6f9b41a91a0d1db",
+  "cleanup": {
+    "operations": [
+      {
+        "operation": "shutdown",
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "operation": "delete",
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "owned_device_absent": true
+  },
+  "finished_at": "2026-10-09T03:30:22.706825+00:00"
+}

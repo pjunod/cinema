@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "reviewed_head": "738ff237f8ae5286e55bc95ba1f453b0281b8b3a",
+  "reviewed_base": "881d5bd37da9f18d0367785736d34149c3ecbc31",
+  "review_count": 1,
+  "report_sha256": "5ddbe3332e78793e85a6e4dd7db4f7fc24ede99fef5f1503f78927b3eb1ff22e",
+  "reviewer": "independent final_adversarial_review agent",
+  "tests_or_builds_during_review": false,
+  "findings": [
+    {
+      "severity": "P2",
+      "subject": "Native target-floor filtering could hide established-phase reversals.",
+      "resolution": "Both probes now apply target-floor admission only before first frame and count exclusions. Historical scope narrowed; all32affected native phases pass fresh corrected captures.",
+      "evidence": "native/qualification.json"
+    },
+    {
+      "severity": "P2",
+      "subject": "Browser startup/CDP could hang and partial Chrome launch could escape cleanup.",
+      "resolution": "Bounded startup and CDP requests, transport-failure rejection, fatal media rejection, immediate child/profile ownership and bounded TERM/KILL reap before profile removal.",
+      "evidence": "encoding/browser-focused-checks.json"
+    }
+  ],
+  "additional_actionable_production_findings": [],
+  "retained_limits": [
+    "Frozen-source performance measurements are not relabelled as later-main measurements.",
+    "HDR sharp image bar remains failed; rejected candidates remain rejected.",
+    "Native framework/loopback captures do not prove physical display/audio or shipping UI.",
+    "Safari automation did not reach media."
+  ],
+  "final_fast_lane_and_landing": "PR956; retain per-check success and retry failures only."
+}
