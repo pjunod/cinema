@@ -1030,10 +1030,14 @@ impl Encoding {
         let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
             .expect("frozen VOD execution remains valid");
         #[cfg(target_os = "linux")]
-        if self.dv_runtime.is_some() {
-            return plurx_core::transcode::vod_reconstructed_pipe_args(
+        if let Some(runtime) = &self.dv_runtime {
+            let output = self
+                .plan
+                .completed_reconstructed_output(runtime.encoder)
+                .expect("verified reconstructed output encoder");
+            return plurx_core::transcode::vod_completed_reconstructed_pipe_args(
                 file,
-                &self.plan,
+                &output,
                 &execution,
                 self.grid,
                 duration_seconds,

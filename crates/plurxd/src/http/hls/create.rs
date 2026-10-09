@@ -2870,8 +2870,10 @@ async fn create_with_purpose_inner(
                 )
             })?;
             let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
-            response.effective_processing =
-                state.transcode.dv_effective_report(&route.session_id).await;
+            response.effective_processing = state
+                .transcode
+                .dv_effective_report(&route.session_id, &route.incarnation_id)
+                .await;
             // Same-session owner takeover advances only the control epoch.
             // Replaying the persisted create must not hand a restarted client
             // the stale epoch embedded when owner 1 first activated.
@@ -2976,8 +2978,10 @@ async fn create_with_purpose_inner(
                     state.media_sessions.seed_owned_lease(&route).await;
                 }
                 let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
-                response.effective_processing =
-                    state.transcode.dv_effective_report(&route.session_id).await;
+                response.effective_processing = state
+                    .transcode
+                    .dv_effective_report(&route.session_id, &route.incarnation_id)
+                    .await;
                 if let Some(control) = response.control.as_ref() {
                     response.control = control.refreshed(
                         &route.session_id,
@@ -3671,7 +3675,10 @@ async fn create_with_purpose_inner(
         None
     };
     let response = StartResponse {
-        effective_processing: state.transcode.dv_effective_report(&info.session_id).await,
+        effective_processing: state
+            .transcode
+            .dv_effective_report(&info.session_id, &incarnation_id)
+            .await,
         delivered_audio: info.audio_delivery.clone(),
         display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
         quality_candidate_id: request

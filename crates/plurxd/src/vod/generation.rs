@@ -230,13 +230,53 @@ pub(super) async fn spawn_generation(
             retirement,
         )
         .await;
-        if let Some(sink) = completed {
-            vodgen::Sink::completed_output(&sink).await;
-            if let Some(receipt) = receipt {
-                runtime.published_window(receipt, &encoded_payloads);
+        let trailer_complete = completed.is_some();
+        let mut publication_complete = false;
+        if let Some((sink, all_fresh)) = completed {
+            let completion_accepted = sink.completed_output_accepted().await;
+            // The driver changes the epoch under this same publication lock.
+            // A trailer alone cannot award evidence to a replaced generation.
+            let manifest = rendition.manifest.lock().await;
+            if completion_accepted
+                && rendition.gen_epoch.load(Relaxed) == epoch
+                && !rendition.closed.load(Relaxed)
+                && rendition.failure().is_none()
+                && rendition
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.unchanged())
+                && manifest
+                    .state(at)
+                    .is_some_and(|state| state.is_materialized() && state.bytes() > 0)
+                && matches!(&outcome, Some(Outcome::Ran { produced_through: Some(through) }) if *through >= at)
+            {
+                publication_complete = true;
+                // Traversing immutable cached media is valid playback, but
+                // those bytes are not this encoder window's evidence.
+                if all_fresh {
+                    if let Some(receipt) = receipt {
+                        runtime.published_window(receipt, &encoded_payloads);
+                    }
+                }
             }
         }
         if let Some(outcome) = outcome {
+            if rendition.gen_epoch.load(Relaxed) == epoch
+                && !rendition.closed.load(Relaxed)
+                && rendition.cancelled_preparation_epoch.load(Acquire) != epoch.saturating_add(1)
+                && (!trailer_complete
+                    || !publication_complete
+                    || matches!(&outcome, Outcome::Failed(_)))
+            {
+                // Exclude the episode before on_generation_end wakes clients.
+                runtime.refuse_episode();
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    "processed window did not complete publication".to_owned(),
+                );
+            }
             on_generation_end(shared, rendition, outcome, epoch).await;
         }
         drop(done);
@@ -484,7 +524,7 @@ pub(super) async fn spawn_generation(
         // for the manifest only after the reaper has released the writer's
         // resources and any cleanup owner can release its publication gate.
         let (outcome, completed) = outcome;
-        if let Some(sink) = completed {
+        if let Some((sink, _)) = completed {
             vodgen::Sink::completed_output(&sink).await;
         }
         let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
@@ -710,7 +750,7 @@ async fn run_generation(
     at: u32,
     epoch: u64,
     retirement: tokio_util::sync::CancellationToken,
-) -> (Option<Outcome>, Option<RenditionSink>) {
+) -> (Option<Outcome>, Option<(RenditionSink, bool)>) {
     let mut stdout = stdout;
     let need_pre_read = {
         let identity = rendition.identity.lock().await;
@@ -781,7 +821,8 @@ async fn run_generation(
     let completion = DeferredCompletionSink::new(&sink);
     let outcome = vodgen::run(src, generation, &completion, &rendition.key).await;
     let completed = completion.completed.load(Acquire);
-    (Some(outcome), completed.then_some(sink))
+    let all_fresh = completion.all_fresh();
+    (Some(outcome), completed.then_some((sink, all_fresh)))
 }
 
 /// The identity half of a pre-read generation. `false` means the generation
@@ -1311,13 +1352,21 @@ pub(super) fn verify_reserved_publication(
 pub(super) struct DeferredCompletionSink<'a> {
     sink: &'a RenditionSink,
     pub(super) completed: AtomicBool,
+    materialized: AtomicBool,
+    replayed: AtomicBool,
 }
 
 impl<'a> DeferredCompletionSink<'a> {
+    fn all_fresh(&self) -> bool {
+        self.materialized.load(Acquire) && !self.replayed.load(Acquire)
+    }
+
     pub(super) fn new(sink: &'a RenditionSink) -> Self {
         Self {
             sink,
             completed: AtomicBool::new(false),
+            materialized: AtomicBool::new(false),
+            replayed: AtomicBool::new(false),
         }
     }
 }
@@ -1328,7 +1377,12 @@ impl vodgen::Sink for DeferredCompletionSink<'_> {
     }
 
     async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
-        self.sink.materialize(entry, bytes).await
+        let fresh = self.sink.materialize_observed(entry, bytes).await?;
+        self.materialized.store(true, Release);
+        if !fresh {
+            self.replayed.store(true, Release);
+        }
+        Ok(())
     }
 }
 
@@ -1408,8 +1462,19 @@ impl RenditionSink {
 
 impl vodgen::Sink for RenditionSink {
     async fn completed_output(&self) {
+        self.completed_output_accepted().await;
+    }
+
+    async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
+        self.materialize_observed(entry, bytes).await.map(|_| ())
+    }
+}
+
+impl RenditionSink {
+    /// Whether the exact completion callback admitted its engine and source.
+    async fn completed_output_accepted(&self) -> bool {
         if !recipe_engine_is_current(&self.rendition.recipe).await {
-            return;
+            return false;
         }
         let manifest = self.rendition.manifest.lock().await;
         // Only vodgen's verified normal trailer reaches this callback. The
@@ -1443,9 +1508,12 @@ impl vodgen::Sink for RenditionSink {
             drop(measurement);
             drop(manifest);
             super::retained::RetainedArtifactRegistry::offer(&self.shared, &self.rendition);
+            true
+        } else {
+            false
         }
     }
-    async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
+    async fn materialize_observed(&self, entry: u32, bytes: Vec<u8>) -> io::Result<bool> {
         if self.rendition.closed.load(Relaxed) {
             // The quiet teardown: `NotFound` is how vodgen learns the session
             // ended normally rather than faulted.
@@ -1570,7 +1638,7 @@ impl vodgen::Sink for RenditionSink {
             self.rendition.slot.produced(entry).await;
             self.shared.pool.satisfy(&self.rendition.key, entry);
             self.rendition.kick();
-            return Ok(());
+            return Ok(false);
         }
         let len = bytes.len() as u64;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
@@ -1662,7 +1730,7 @@ impl vodgen::Sink for RenditionSink {
         }
         self.shared.pool.satisfy(&self.rendition.key, entry);
         self.rendition.kick();
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1672,6 +1740,57 @@ impl vodgen::Sink for RenditionSink {
 
 #[cfg(test)]
 mod writer_supervision_tests {
+    #[tokio::test]
+    async fn deferred_replay_keeps_original_bytes_without_fresh_receipt_authority() {
+        use super::*;
+        use crate::vodgen::Sink;
+        let base = crate::test_tempdir().expect("deferred replay fixture");
+        let serve = super::super::tests::bare_serve(base.path());
+        let rendition = super::super::tests::synthetic_rendition(base.path()).await;
+        let sink = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: rendition.gen_epoch.load(Relaxed),
+            retirement: tokio_util::sync::CancellationToken::new(),
+        };
+        let fresh = DeferredCompletionSink::new(&sink);
+        let original = b"immutable-original-window";
+        fresh
+            .materialize(0, original.to_vec())
+            .await
+            .expect("fresh publication");
+        fresh.completed_output().await;
+        assert!(fresh.completed.load(Acquire));
+        assert!(
+            fresh.all_fresh(),
+            "fresh accepted bytes may support their own receipt"
+        );
+        let charged = serve.shared.working_set.load(Relaxed);
+        let serial = rendition.publication_serial.load(Relaxed);
+        let replay = DeferredCompletionSink::new(&sink);
+        replay
+            .materialize(0, b"different-new-encoder-window".to_vec())
+            .await
+            .expect("valid retained traversal");
+        replay.completed_output().await;
+        assert!(
+            replay.completed.load(Acquire),
+            "a trailer alone also occurs on replay"
+        );
+        assert!(
+            !replay.all_fresh(),
+            "retained bytes cannot inherit the new encoder window receipt"
+        );
+        assert_eq!(
+            tokio::fs::read(rendition.dir.path().join(segment_name(0)))
+                .await
+                .expect("retained bytes"),
+            original
+        );
+        assert_eq!(serve.shared.working_set.load(Relaxed), charged);
+        assert_eq!(rendition.publication_serial.load(Relaxed), serial);
+    }
+
     #[tokio::test]
     async fn a_panicked_generation_writer_is_reported_and_a_clean_end_is_not() {
         let reported = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

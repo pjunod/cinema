@@ -226,7 +226,7 @@ fn input(destination: DvDestination) -> DvResolutionInput {
             encoder: Encoder::Software,
             raster: (64, 64),
             bl_shape: bl_shape(),
-            el_shape: el_shape(),
+            el_shape: Some(el_shape()),
             max_frames: 64,
             target: DvTargetPolicy::new(1, 10_000_000, 5, digest('f'))
                 .expect("valid synthetic control"),
@@ -1021,6 +1021,24 @@ fn effective_report_cannot_turn_synthetic_receipt_into_hdr10_enhancement() {
     assert!(receipt
         .hdr10_effective_report(&DvProductionRegistry, &plan, "invalid", &digest('c'))
         .is_err());
+}
+
+#[test]
+fn base_piecewise_rpu_accepts_delta_pivots_and_counts_actual_segments() {
+    let raw = include_bytes!("../../../tests/fixtures/dv-runtime/p8-piecewise.nal");
+    let metadata = DvBaseMetadata::from_raw_rpu(raw, (64, 64)).expect("reviewed piecewise RPU");
+    assert_eq!(metadata.profile, 8);
+    assert_eq!(metadata.polynomial_segments, 4);
+    assert_eq!(metadata.mmr_segments, 0);
+    assert!(metadata
+        .applied_operations
+        .contains(&DvOperation::PolynomialReshape));
+    assert!(!metadata
+        .applied_operations
+        .contains(&DvOperation::MmrReshape));
+    assert!(!metadata
+        .applied_operations
+        .contains(&DvOperation::LinearNlqResidual));
 }
 
 #[test]

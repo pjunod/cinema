@@ -37,6 +37,45 @@ pub(crate) struct ToolSet {
 fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
+fn renderer_source_identity() -> String {
+    let inputs: [(&str, &[u8]); 7] = [
+        (
+            "base_dv_renderer.h",
+            include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
+        ),
+        (
+            "dv_trace.h",
+            include_bytes!("../../../tools/dv_processing/dv_trace.h"),
+        ),
+        (
+            "fel_renderer.h",
+            include_bytes!("../../../tools/dv_processing/fel_renderer.h"),
+        ),
+        (
+            "nlq_clipping.h",
+            include_bytes!("../../../tools/dv_processing/nlq_clipping.h"),
+        ),
+        (
+            "nut_timing.h",
+            include_bytes!("../../../tools/dv_processing/nut_timing.h"),
+        ),
+        (
+            "rgb48.h",
+            include_bytes!("../../../tools/dv_processing/rgb48.h"),
+        ),
+        (
+            "segment_decode_render.c",
+            include_bytes!("../../../tools/dv_processing/segment_decode_render.c"),
+        ),
+    ];
+    let mut identity = Sha256::new();
+    for (name, bytes) in inputs {
+        identity.update(name.as_bytes());
+        identity.update([0]);
+        identity.update(Sha256::digest(bytes));
+    }
+    hex::encode(identity.finalize())
+}
 fn hash_file(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
@@ -115,6 +154,7 @@ impl ToolSet {
             let root = root.canonicalize().map_err(|e| e.to_string())?;
             let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             if manifest.schema != 1
+                || manifest.source_sha256 != renderer_source_identity()
                 || manifest.graph != "p7-fel-linear-dz-bt2020-pq-master-clip-v1"
                 || manifest.abi.get("libplacebo") != Some(&374)
                 || !["avcodec", "avformat", "avutil"]
@@ -240,13 +280,14 @@ pub(crate) struct VerifiedWindow {
 
 #[cfg(target_os = "linux")]
 impl PrivateWindow {
-    /// The encoder maps the original source pictures to generation-local
-    /// frame zero. Original source keys and the global output grid remain in
-    /// `observed`; no original timestamp is silently relabeled as local.
+    /// The encoder maps original source pictures to the generation-local
+    /// AAC preroll lattice. Original keys and the global grid remain in
+    /// `observed`; final sample validation checks the explicit local origin.
     pub(crate) async fn finalize(
         self,
         observed: ObservedWindow,
         grid: plurx_core::transcode::VodFrameGrid,
+        first_global_frame: u64,
         raster: (u32, u32),
         destination: plurx_core::transcode::dv_processing::DvDestination,
         source_level: Option<u8>,
@@ -261,13 +302,16 @@ impl PrivateWindow {
             .iter()
             .map(|picture| picture.rpu.clone())
             .collect();
+        let origin =
+            plurx_core::transcode::vod_reconstructed_video_origin(grid, first_global_frame)
+                .map_err(str::to_owned)?;
         let bytes = match destination {
             DvDestination::Hdr10 => self.encoded,
             DvDestination::Profile81 => dv_author_profile81_window(
                 &self.encoded,
                 raster,
                 grid.numerator,
-                0,
+                origin,
                 grid.denominator,
                 &rpus,
                 source_level.ok_or("held source has no DV level")?,
@@ -278,7 +322,7 @@ impl PrivateWindow {
             &bytes,
             raster,
             grid.numerator,
-            0,
+            origin,
             grid.denominator,
             &rpus,
             destination,
@@ -380,6 +424,8 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) native_bl: (u32, u32),
     pub(crate) preferences: plurx_core::transcode::dv_processing::DvPreferences,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
+    pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    pub(crate) encoder: plurx_core::transcode::Encoder,
     pub(crate) runtime_cache: PathBuf,
     pub(crate) prepared: std::sync::Mutex<Option<(u32, VerifiedWindow)>>,
     pub(crate) failure_episode: DvDigest,
@@ -503,7 +549,7 @@ impl RuntimeRecipe {
         }
         let result = async {
             use plurx_core::transcode::dv_processing::{
-                dv_plan_completed_window, DvCompletedWindowInput, DvElKind, DvPlaneRepresentation,
+                dv_plan_completed_window, DvCompletedWindowInput, DvPlaneRepresentation,
                 DvPlaneShape, DvRpuState, DvSourceCoverage, DvSourceFacts,
             };
             use plurx_core::transcode::{Pacing, TranscodeExecution};
@@ -529,9 +575,12 @@ impl RuntimeRecipe {
             let execution =
                 TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
                     .map_err(|e| e.to_string())?;
-            let args = plurx_core::transcode::vod_reconstructed_pipe_args(
+            let output = plan
+                .completed_reconstructed_output(self.encoder)
+                .ok_or("unsupported reconstructed output encoder")?;
+            let args = plurx_core::transcode::vod_completed_reconstructed_pipe_args(
                 file,
-                plan,
+                &output,
                 &execution,
                 grid,
                 end_seconds,
@@ -541,6 +590,7 @@ impl RuntimeRecipe {
             .map_err(str::to_owned)?;
             let deadline = tokio::time::Instant::now() + self.preparation_budget;
             let request = crate::dv_segment::StreamingSegmentRequest {
+                mode: self.mode,
                 request: crate::dv_segment::SegmentRequest {
                     renderer: self.tools.renderer.clone(),
                     renderer_env: self.tools.renderer_env.clone(),
@@ -576,6 +626,7 @@ impl RuntimeRecipe {
                 grid,
                 first_frame,
                 frames,
+                self.mode,
             )?;
             if observed.source_tick != self.source_tick
                 || observed
@@ -613,6 +664,16 @@ impl RuntimeRecipe {
             {
                 return Err("native EL shape changes within window".into());
             }
+            let first = observed
+                .pictures
+                .first()
+                .ok_or("no observed source frame")?;
+            if observed.pictures.iter().any(|picture| {
+                picture.profile != first.profile || picture.source_el_kind != first.source_el_kind
+            }) {
+                return Err("source RPU profile or EL kind changes within the window".into());
+            }
+            let full_fel = self.mode == plurx_core::transcode::dv_processing::DvProcessingMode::Fel;
             let source = DvSourceFacts::new(
                 file.dolby_vision,
                 plan.decode().input_video_stream(),
@@ -621,20 +682,30 @@ impl RuntimeRecipe {
                 plan.source_binding(),
                 backend.parser_identity().clone(),
                 DvRpuState::ValidatedFresh,
-                DvElKind::Fel,
+                first.source_el_kind,
                 Some(DvSourceCoverage::sampled(0, source_keys.clone()).map_err(|e| e.to_string())?),
                 Some(
                     DvPlaneShape::new(
                         self.native_bl.0,
                         self.native_bl.1,
-                        DvPlaneRepresentation::P7BaseYuv420P10Limited,
+                        if full_fel {
+                            DvPlaneRepresentation::P7BaseYuv420P10Limited
+                        } else if first.profile == 5 {
+                            DvPlaneRepresentation::DoviBaseP10Full
+                        } else {
+                            DvPlaneRepresentation::DoviBaseP10Limited
+                        },
                     )
                     .map_err(|e| e.to_string())?,
                 ),
-                Some(
-                    DvPlaneShape::new(el.0, el.1, DvPlaneRepresentation::P7ElYuv420P10Residual)
-                        .map_err(|e| e.to_string())?,
-                ),
+                if full_fel {
+                    Some(
+                        DvPlaneShape::new(el.0, el.1, DvPlaneRepresentation::P7ElYuv420P10Residual)
+                            .map_err(|e| e.to_string())?,
+                    )
+                } else {
+                    None
+                },
             )
             .map_err(|e| e.to_string())?;
             let raster = plan
@@ -647,6 +718,7 @@ impl RuntimeRecipe {
                 .finalize(
                     observed,
                     grid,
+                    first_frame,
                     raster,
                     self.destination,
                     file.dolby_vision
@@ -666,6 +738,8 @@ impl RuntimeRecipe {
                 preferences: self.preferences,
                 backend,
                 destination: self.destination,
+                encoder: self.encoder,
+                mode: self.mode,
                 source_keys: &source_keys,
                 source_rpus: &source_rpus,
                 source_tick: self.source_tick,
@@ -818,7 +892,11 @@ struct PairRow {
     rpu_sha256: String,
     bl_width: u32,
     bl_height: u32,
+    profile: Option<u8>,
+    fel_contributed: Option<bool>,
+    #[serde(default)]
     el_width: u32,
+    #[serde(default)]
     el_height: u32,
 }
 #[cfg(target_os = "linux")]
@@ -833,6 +911,12 @@ struct RenderRow {
     el_bound: bool,
     nlq_active: bool,
     render_errors: u32,
+    profile: Option<u8>,
+    fel_contributed: Option<bool>,
+    creative_trims_applied: Option<bool>,
+    polynomial_segments: Option<u32>,
+    mmr_segments: Option<u32>,
+    applied_operations: Option<Vec<plurx_core::transcode::dv_processing::DvOperation>>,
 }
 #[cfg(target_os = "linux")]
 #[derive(Deserialize)]
@@ -879,6 +963,8 @@ pub(crate) struct ObservedPicture {
     pub(crate) rpu: Vec<u8>,
     pub(crate) bl_shape: (u32, u32),
     pub(crate) el_shape: (u32, u32),
+    pub(crate) profile: u8,
+    pub(crate) source_el_kind: plurx_core::transcode::dv_processing::DvElKind,
 }
 #[cfg(target_os = "linux")]
 pub(crate) struct ObservedWindow {
@@ -929,6 +1015,7 @@ impl PrivateWindow {
         grid: plurx_core::transcode::VodFrameGrid,
         first_frame: u64,
         frames: usize,
+        mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     ) -> Result<ObservedWindow, String> {
         use plurx_core::transcode::dv_processing::*;
         let events = self.evidence.renderer_events()?;
@@ -938,6 +1025,7 @@ impl PrivateWindow {
         let mut complete = None;
         let mut segment = None;
         let mut gpu = None;
+        let mut base_complete = None;
         for line in events
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
@@ -953,7 +1041,10 @@ impl PrivateWindow {
                         serde_json::from_value::<GpuRuntime>(value).map_err(|e| e.to_string())?,
                     );
                 }
-                Some("accepted_source_pair") => {
+                Some(kind @ ("accepted_source_pair" | "accepted_source_base")) => {
+                    if (kind == "accepted_source_base") != (mode == DvProcessingMode::BaseRpu) {
+                        return Err("source observation uses the wrong processing mode".into());
+                    }
                     let row: PairRow = serde_json::from_value(value).map_err(|e| e.to_string())?;
                     if pairs.insert(row.frame, row).is_some() {
                         return Err("duplicate accepted source picture".into());
@@ -986,12 +1077,37 @@ impl PrivateWindow {
                         return Err("duplicate renderer completion".into());
                     }
                 }
+                Some("base_processing_complete") => {
+                    if base_complete.replace(value).is_some() {
+                        return Err("duplicate base completion".into());
+                    }
+                }
                 Some(_) => {}
                 None => return Err("renderer event has no kind".into()),
             }
         }
         let complete = complete.ok_or("no source window completion")?;
         let segment = segment.ok_or("no renderer completion")?;
+        if mode == DvProcessingMode::BaseRpu {
+            let base = base_complete
+                .as_ref()
+                .ok_or("no base processing completion")?;
+            if base.get("frames").and_then(serde_json::Value::as_u64) != Some(frames as u64)
+                || base
+                    .get("decoded_layers")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                || ["el_bound", "fel_contributed", "creative_trims_applied"]
+                    .iter()
+                    .any(|field| {
+                        base.get(*field).and_then(serde_json::Value::as_bool) != Some(false)
+                    })
+            {
+                return Err("base completion claims unsupported operations".into());
+            }
+        } else if base_complete.is_some() {
+            return Err("FEL graph emitted base completion".into());
+        }
         let gpu = gpu.ok_or("no observed Vulkan runtime identity")?;
         if gpu.api_version == 0
             || gpu.device_type > 4
@@ -1074,18 +1190,21 @@ impl PrivateWindow {
                 || rendered.pts != pair.pts
                 || rendered.duration != pair.duration
                 || (rendered.width, rendered.height) != (pair.bl_width, pair.bl_height)
-                || !rendered.el_bound
-                || !rendered.nlq_active
+                || rendered.el_bound != (mode == DvProcessingMode::Fel)
+                || rendered.nlq_active != (mode == DvProcessingMode::Fel)
                 || rendered.render_errors != 0
                 || pair.bl_width == 0
                 || pair.bl_height == 0
                 || pair.bl_width > 3840
                 || pair.bl_height > 2160
-                || pair.el_width == 0
-                || pair.el_height == 0
-                || !((pair.bl_width == pair.el_width && pair.bl_height == pair.el_height)
-                    || (pair.el_width.checked_mul(2) == Some(pair.bl_width)
-                        && pair.el_height.checked_mul(2) == Some(pair.bl_height)))
+                || (mode == DvProcessingMode::Fel
+                    && (pair.el_width == 0
+                        || pair.el_height == 0
+                        || !((pair.bl_width == pair.el_width && pair.bl_height == pair.el_height)
+                            || (pair.el_width.checked_mul(2) == Some(pair.bl_width)
+                                && pair.el_height.checked_mul(2) == Some(pair.bl_height)))))
+                || (mode == DvProcessingMode::BaseRpu
+                    && (pair.el_width != 0 || pair.el_height != 0))
             {
                 return Err("source, decoded pair and rendered picture do not agree".into());
             }
@@ -1093,10 +1212,40 @@ impl PrivateWindow {
             if hash(&rpu) != pair.rpu_sha256 {
                 return Err("raw RPU differs from source observation".into());
             }
-            let parsed = DvParsedMetadata::from_raw_rpu(&rpu).map_err(|e| e.to_string())?;
-            if !parsed.runtime_supported() {
-                return Err("unsupported runtime RPU metadata".into());
-            }
+            let (profile, source_el_kind) = if mode == DvProcessingMode::Fel {
+                let parsed = DvParsedMetadata::from_raw_rpu(&rpu).map_err(|e| e.to_string())?;
+                if !parsed.runtime_supported() {
+                    return Err("unsupported runtime RPU metadata".into());
+                }
+                (7, DvElKind::Fel)
+            } else {
+                let parsed = DvBaseMetadata::from_raw_rpu(&rpu, (pair.bl_width, pair.bl_height))
+                    .map_err(|e| e.to_string())?;
+                let mut actual = parsed.applied_operations.clone();
+                actual.retain(|operation| {
+                    !matches!(
+                        operation,
+                        DvOperation::Bt2020NclConversion | DvOperation::Main10Encoding
+                    )
+                });
+                if pair.profile != Some(parsed.profile)
+                    || rendered.profile != Some(parsed.profile)
+                    || pair.fel_contributed != Some(false)
+                    || rendered.fel_contributed != Some(false)
+                    || rendered.creative_trims_applied != Some(false)
+                    || rendered.applied_operations.as_ref() != Some(&actual)
+                    || rendered.polynomial_segments != Some(parsed.polynomial_segments)
+                    || rendered.mmr_segments != Some(parsed.mmr_segments)
+                    || base_complete
+                        .as_ref()
+                        .and_then(|value| value.get("profile"))
+                        .and_then(serde_json::Value::as_u64)
+                        != Some(u64::from(parsed.profile))
+                {
+                    return Err("base operations differ from actual raw RPU".into());
+                }
+                (parsed.profile, parsed.source_el_kind)
+            };
             let key = DvFrameKey {
                 absolute_video_index: stream,
                 continuity_epoch: epoch,
@@ -1125,6 +1274,8 @@ impl PrivateWindow {
                 rpu,
                 bl_shape: (pair.bl_width, pair.bl_height),
                 el_shape: (pair.el_width, pair.el_height),
+                profile,
+                source_el_kind,
             });
             optional_digest(pair.bl_sha256)?;
             optional_digest(pair.el_sha256)?;

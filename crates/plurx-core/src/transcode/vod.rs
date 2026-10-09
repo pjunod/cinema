@@ -18,6 +18,30 @@ pub fn vod_audio_anchor(start_seconds: f64) -> u64 {
     samples / VOD_AAC_FRAME_SAMPLES * VOD_AAC_FRAME_SAMPLES
 }
 
+/// Generation-local video origin on the same AAC preroll lattice used by
+/// the ordinary publisher. Source presentation keys remain in their clock.
+pub fn vod_reconstructed_video_origin(
+    grid: super::VodFrameGrid,
+    first_frame: u64,
+) -> Result<u64, &'static str> {
+    let ticks = u128::from(first_frame)
+        .checked_mul(u128::from(grid.denominator))
+        .ok_or("video origin overflow")?;
+    if grid.numerator == 0 {
+        return Err("invalid video clock");
+    }
+    // Preserve the incumbent publisher's rounding at AAC frame boundaries.
+    // Independently rounded integer anchors can differ by one AAC frame.
+    let anchor = u128::from(vod_audio_anchor(ticks as f64 / f64::from(grid.numerator)));
+    let anchor_ticks = (anchor * u128::from(grid.numerator)).div_ceil(u128::from(VOD_AUDIO_RATE));
+    u64::try_from(
+        ticks
+            .checked_sub(anchor_ticks)
+            .ok_or("negative video origin")?,
+    )
+    .map_err(|_| "video origin overflow")
+}
+
 /// Shared AAC has its own clock: each ordinary interval contains 94 complete
 /// AAC frames (2.005333 seconds), with only the final packet duration trimmed.
 /// Video rung boundaries never duplicate or reset these audio intervals.
@@ -1183,8 +1207,34 @@ pub fn vod_reconstructed_pipe_args(
     source_fd: &str,
     audio_fd: &str,
 ) -> Result<Vec<String>, &'static str> {
-    if plan.encoder() != super::Encoder::Software
-        || plan.output_contract().output_grade() != super::OutputGrade::Hdr10
+    let output = plan
+        .completed_reconstructed_output(plan.encoder())
+        .ok_or("unsupported reconstructed output contract")?;
+    vod_completed_reconstructed_pipe_args(
+        source,
+        &output,
+        execution,
+        grid,
+        duration_seconds,
+        source_fd,
+        audio_fd,
+    )
+}
+
+pub fn vod_completed_reconstructed_pipe_args(
+    source: &MediaFile,
+    output: &super::CompletedReconstructedOutputPlan<'_>,
+    execution: &TranscodeExecution,
+    grid: VodFrameGrid,
+    duration_seconds: f64,
+    source_fd: &str,
+    audio_fd: &str,
+) -> Result<Vec<String>, &'static str> {
+    let plan = output.source_plan();
+    if !matches!(
+        plan.encoder(),
+        super::Encoder::Software | super::Encoder::Nvenc
+    ) || plan.output_contract().output_grade() != super::OutputGrade::Hdr10
         || plan.output_contract().output_codec() != "hevc"
         || plan.options().subtitle_burn.is_some()
         || plan.options().video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
@@ -1256,12 +1306,22 @@ pub fn vod_reconstructed_pipe_args(
         }
     }
     let target = execution.start_seconds.max(0.0);
-    let anchor = vod_audio_anchor(target) as f64 / f64::from(VOD_AUDIO_RATE);
     let first_frame =
         (target * f64::from(grid.numerator) / f64::from(grid.denominator)).round() as u64;
+    let origin = vod_reconstructed_video_origin(grid, first_frame)?;
+    // MOV otherwise subtracts each track's first DTS, erasing the explicit
+    // video phase relative to the AAC preroll on nonzero windows.
+    if let Some(index) = args.iter().position(|arg| arg == "-movflags") {
+        args[index + 1].push_str("+frag_discont");
+    }
+    let pixel_format = if output.encoder() == super::Encoder::Nvenc {
+        "p010le"
+    } else {
+        "yuv420p10le"
+    };
     let filter = format!(
-        "zscale=matrixin=gbr:rangein=full:primariesin=bt2020:transferin=smpte2084:matrix=bt2020nc:range=limited:primaries=bt2020:transfer=smpte2084:w={width}:h={height}:dither=none,format=yuv420p10le,settb=expr=1/{},setpts=({}+N)*{}-{anchor:.9}/TB",
-        grid.numerator, first_frame, grid.denominator,
+        "zscale=matrixin=gbr:rangein=full:primariesin=bt2020:transferin=smpte2084:matrix=bt2020nc:range=limited:primaries=bt2020:transfer=smpte2084:w={width}:h={height}:dither=none,format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
+        grid.numerator, grid.denominator,
     );
     if let Some(index) = args.iter().position(|arg| arg == "-vf") {
         args[index + 1] = filter;
@@ -1269,7 +1329,37 @@ pub fn vod_reconstructed_pipe_args(
         let at = args.len().saturating_sub(1);
         args.splice(at..at, ["-vf".into(), filter]);
     }
-    if let Some(index) = args.iter().position(|arg| arg == "-x265-params") {
+    if output.encoder() == super::Encoder::Nvenc {
+        let mut index = last_input;
+        while index + 1 < args.len() {
+            if matches!(
+                args[index].as_str(),
+                "-c:v"
+                    | "-preset"
+                    | "-x265-params"
+                    | "-profile:v"
+                    | "-tier:v"
+                    | "-level:v"
+                    | "-b:v"
+                    | "-maxrate"
+                    | "-bufsize"
+                    | "-color_primaries"
+                    | "-color_trc"
+                    | "-colorspace"
+                    | "-color_range"
+                    | "-forced-idr"
+            ) {
+                args.drain(index..index + 2);
+            } else {
+                index += 1;
+            }
+        }
+        let at = args.len().saturating_sub(1);
+        args.splice(
+            at..at,
+            output.encode_args(plan.options().video_bitrate_kbps, true),
+        );
+    } else if let Some(index) = args.iter().position(|arg| arg == "-x265-params") {
         let mut parameters: Vec<_> = args[index + 1]
             .split(':')
             .filter(|item| {
@@ -1452,6 +1542,27 @@ mod tests {
     }
 
     #[test]
+    fn reconstructed_window_origin_preserves_aac_preroll_at_ntsc_seek() {
+        let grid = VodFrameGrid::new(24_000, 1001).expect("NTSC grid");
+        assert_eq!(vod_reconstructed_video_origin(grid, 0), Ok(0));
+        assert_eq!(vod_reconstructed_video_origin(grid, 48), Ok(48_048));
+        // At the next window, AAC preroll starts at sample 95232. The
+        // local video origin retains its sub-frame phase on that lattice.
+        let origin = vod_reconstructed_video_origin(grid, 96).expect("seek origin");
+        assert_eq!(origin, 48_480);
+        let anchor = vod_audio_anchor(96.0 * 1001.0 / 24_000.0);
+        assert_eq!(anchor, 95_232);
+        assert_eq!(96 * 1001 - origin, anchor / 2);
+        // This ordinary NTSC window sits on the floating sample boundary:
+        // the publisher's established anchor is one AAC frame below the
+        // independent integer calculation. Both actual lanes must agree.
+        let anchor = vod_audio_anchor(384.0 * 1001.0 / 24_000.0);
+        assert_eq!(anchor, 671_744);
+        assert_eq!(vod_reconstructed_video_origin(grid, 384), Ok(48_512));
+        assert_eq!(384 * 1001 - 48_512, anchor / 2);
+    }
+
+    #[test]
     fn reconstructed_window_encoder_keeps_one_to_one_video_and_audio_scope() {
         let (source, ordinary, execution, facts, capabilities) = encoded_recipe_fixture(true);
         let mut media = ordinary.options().clone();
@@ -1510,6 +1621,41 @@ mod tests {
             "/dev/fd/4"
         )
         .is_err());
+    }
+
+    #[test]
+    fn reconstructed_nvenc_keeps_verified_hardware_encoder_and_bounded_surfaces() {
+        use crate::transcode::*;
+        let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
+        let output = plan
+            .completed_reconstructed_output(Encoder::Nvenc)
+            .expect("bounded reconstructed NVENC output");
+        let args = vod_completed_reconstructed_pipe_args(
+            &source,
+            &output,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+        )
+        .expect("reconstructed hardware recipe");
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "hevc_nvenc"]));
+        assert!(args.windows(2).any(|pair| pair == ["-surfaces", "4"]));
+        assert!(args.windows(2).any(|pair| pair == ["-bf", "0"]));
+        assert!(!args
+            .iter()
+            .any(|argument| argument == "-x265-params" || argument == "-hwaccel"));
+        let filter = &args[args
+            .iter()
+            .position(|argument| argument == "-vf")
+            .expect("RGB conversion")
+            + 1];
+        assert!(
+            filter.contains("format=p010le")
+                && !filter.contains("fps=")
+                && !filter.contains("tpad=")
+        );
     }
 
     #[test]

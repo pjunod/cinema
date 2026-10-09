@@ -1690,11 +1690,16 @@ impl TranscodeManager {
                         .and_then(|value| u32::try_from(value).ok()).ok_or("held native raster unavailable");
                     let native_bl = (dimension("width")?, dimension("height")?);
                     let source = Arc::new(source);
+                    let mode = if file.dolby_vision.profile == Some(7) && file.dolby_vision.el_present != Some(false) {
+                        plurx_core::transcode::dv_processing::DvProcessingMode::Fel
+                    } else { plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu };
                     let preparation_budget = self.vod_settings(req).await?
                         .ok_or("DV processing requires the VOD preparation budget")?.block_budget;
+                    let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
+                    let processed_encoder = if worker_encoder == Encoder::Nvenc { Encoder::Nvenc } else { Encoder::Software };
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
                         source_tick, native_bl, preferences,
-                        destination, runtime_cache: self.runtime_cache.clone(), prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
+                        destination, mode, encoder: processed_encoder, runtime_cache: self.runtime_cache.clone(), prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
                         published_receipt: std::sync::Mutex::new(None) };
                     let mut processed_options = retained.1.clone();
                     processed_options.pipeline = self.live_lookup_options(self.rate_control_snapshot(),

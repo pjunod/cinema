@@ -312,7 +312,7 @@ fn one_thread_cap(scope: &[String], flags: &[&str]) -> Result<usize, String> {
 }
 
 fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
-    // Only the concrete finite x265 recipe is supported. Input decoder options
+    // Concrete x265 or NVENC recipes are supported. Input decoder options
     // precede their own -i; output codec caps follow the last input.
     let inputs: Vec<_> = args
         .iter()
@@ -347,7 +347,7 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .ok_or("thread budget overflow")?;
     let codecs: Vec<_> = output.windows(2).filter(|p| p[0] == "-c:v").collect();
     if codecs.len() != 1
-        || codecs[0][1] != "libx265"
+        || !matches!(codecs[0][1].as_str(), "libx265" | "hevc_nvenc")
         || args.iter().any(|a| {
             a == "-codec"
                 || a == "-c"
@@ -358,7 +358,7 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
                 || (a.starts_with("-x265-params") && a != "-x265-params")
         })
     {
-        return Err("finite segment adapter requires its bounded x265 video recipe".into());
+        return Err("segment adapter requires its bounded Main10 encoder recipe".into());
     }
     let audio: Vec<_> = output.windows(2).filter(|p| p[0] == "-c:a").collect();
     if audio.len() > 1 || (inputs.len() == 2 && audio.is_empty()) {
@@ -392,6 +392,18 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .windows(2)
         .filter(|p| p[0] == "-x265-params")
         .collect();
+    if codecs[0][1] == "hevc_nvenc" {
+        let surfaces: Vec<_> = output
+            .windows(2)
+            .filter(|pair| pair[0] == "-surfaces")
+            .collect();
+        if !params.is_empty() || surfaces.len() != 1 || surfaces[0][1] != "4" {
+            return Err(
+                "NVENC needs its bounded four-surface recipe without x265 parameters".into(),
+            );
+        }
+        return Ok(());
+    }
     if params.len() != 1 {
         return Err("x265 needs one explicit pool/frame-thread bound".into());
     }
@@ -687,6 +699,7 @@ pub(crate) struct StreamingSegmentRequest {
     /// Renderer completion must be bounded even after encoder handoff.
     pub(crate) renderer_deadline: Instant,
     pub(crate) window: Option<SegmentWindow>,
+    pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
 }
 
 #[cfg(target_os = "linux")]
@@ -726,6 +739,10 @@ async fn run_streaming(
         .map(SegmentWindow::args)
         .transpose()?;
     let windowed = window_args.is_some();
+    let base_only = stream.mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu;
+    if base_only && (!windowed || stream.request.shape.el != (0, 0)) {
+        return Err("base-RPU processing requires an original-source window and omitted EL".into());
+    }
     let request = stream.request;
     if windowed {
         request.shape.window_frame_bytes()?;
@@ -742,10 +759,14 @@ async fn run_streaming(
         .ok_or("concurrent renderer and encoder require at least five admitted CPU threads")?;
     check_encoder_budget(&request.encoder_args, cpu.threads() - 2)?;
     if !request.encoder_args.iter().any(|a| a == "-copyts")
-        || !request
-            .encoder_args
-            .windows(2)
-            .any(|p| p == ["-enc_time_base", "-1"])
+        || !request.encoder_args.windows(2).any(|p| {
+            p == ["-enc_time_base", "-1"]
+                || p[0] == "-enc_time_base:v"
+                    && p[1]
+                        .strip_prefix("1/")
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_some_and(|value| value > 0 && value <= i32::MAX as u32)
+        })
     {
         return Err("streaming encoder must retain the actual NUT timestamp base".into());
     }
@@ -803,6 +824,9 @@ async fn run_streaming(
     args.push(fd(5));
     if let Some(window_args) = window_args {
         args.extend(window_args);
+    }
+    if base_only {
+        args.push("base-rpu".into());
     }
     let renderer_env: Vec<_> = request
         .renderer_env
@@ -1005,6 +1029,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
     if streaming {
         #[cfg(target_os = "linux")]
         return spawn_streaming(StreamingSegmentRequest {
+            mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
             window: std::env::var("PLURX_DV_SEGMENT_WINDOW_START")
@@ -1557,6 +1582,26 @@ mod tests {
         .map(str::to_owned);
         assert!(check_encoder_budget(&recipe, 3).is_ok());
         assert!(check_encoder_budget(&recipe, 2).is_err());
+        let nvenc = [
+            "-threads",
+            "1",
+            "-i",
+            &fd(3),
+            "-filter_threads",
+            "1",
+            "-c:v",
+            "hevc_nvenc",
+            "-threads:v",
+            "1",
+            "-surfaces",
+            "4",
+        ]
+        .map(str::to_owned);
+        assert!(check_encoder_budget(&nvenc, 3).is_ok());
+        assert!(check_encoder_budget(&nvenc, 2).is_err());
+        let mut automatic_surfaces = nvenc.clone();
+        automatic_surfaces[11] = "0".into();
+        assert!(check_encoder_budget(&automatic_surfaces, 3).is_err());
         let duplicate_input = [
             "-threads",
             "1",
