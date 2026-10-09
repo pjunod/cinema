@@ -2,6 +2,7 @@
 // Finite timestamped source segment -> persistent native-plane FEL renderer.
 // No fixture-definition hashes, test variants, production route or publication.
 #include "fel_renderer.h"
+#include "base_dv_renderer.h"
 #include "nut_timing.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +17,8 @@
 #include <unistd.h>
 
 #define PAIR_WINDOW 16
+static bool base_only;
+static int source_profile;
 static int expected_w[2], expected_h[2], frame_cap, emitted;
 static bool debug_frames, initialized, window_mode, window_done, first_pair;
 static bool source_eof, discover_el;
@@ -125,7 +128,7 @@ static void open_movie_io(AVFormatContext *input, const char *source) {
   input->flags |= AVFMT_FLAG_CUSTOM_IO;
 }
 static void drop_pair(void) {
-  for (int k = 0; k < 2; k++) {
+  for (int k = 0; k < (base_only ? 1 : 2); k++) {
     av_frame_free(&layers[k].queue[0]);
     layers[k].count--;
     memmove(layers[k].queue, layers[k].queue + 1,
@@ -286,8 +289,9 @@ static void inspect_coded(AVPacket *packet) {
     }
     at += n;
   }
-  need(bl == 1 && el == 1 && rpu == 1,
-       "one BL/EL picture and fresh RPU per coded AU");
+  need(bl == 1 && rpu == 1 &&
+           (base_only ? (source_profile == 7 ? el <= 1 : el == 0) : el == 1),
+       "one required source picture and fresh RPU per coded AU");
   if (compare_window(packet->pts, window_start) >= 0 &&
       compare_window(packet->pts, window_end) < 0) {
     need(coded_count < (unsigned)frame_cap && coded_count < 64,
@@ -306,8 +310,9 @@ static void inspect_coded(AVPacket *packet) {
   }
 }
 static void render_pairs(void) {
-  while (layers[0].count && layers[1].count) {
-    AVFrame *bl = layers[0].queue[0], *el = layers[1].queue[0];
+  while (layers[0].count && (base_only || layers[1].count)) {
+    AVFrame *bl = layers[0].queue[0],
+            *el = base_only ? bl : layers[1].queue[0];
     need(bl->pts == el->pts && bl->duration == el->duration && bl->duration > 0,
          "unmatched or ambiguous BL/EL PTS/duration");
     need(last_pts == AV_NOPTS_VALUE || bl->pts > last_pts,
@@ -318,12 +323,15 @@ static void render_pairs(void) {
          "fresh decoder-attached RPU required; cached metadata insufficient");
     uint8_t nalu[4098] = {0x7c, 0x01};
     memcpy(nalu + 2, raw->data, raw->size);
+    struct base_mapping base_mapped;
+    if (base_only)
+      base_metadata(bl, nalu, raw->size + 2, source_profile, &base_mapped);
     if (window_mode) {
       need(++paired <= preroll_cap + frame_cap + 1,
            "bounded window decoded pair count");
       if (!first_pair) {
         need((bl->flags & AV_FRAME_FLAG_KEY) &&
-                 (el->flags & AV_FRAME_FLAG_KEY) &&
+                 (base_only || (el->flags & AV_FRAME_FLAG_KEY)) &&
                  compare_window(bl->pts, window_start) <= 0,
              "independent BL/EL random-access preroll required before window");
         first_pair = true;
@@ -331,8 +339,9 @@ static void render_pairs(void) {
       if (compare_window(bl->pts, window_start) < 0 ||
           compare_window(bl->pts, window_end) >= 0) {
         struct pl_dovi_metadata guarded;
-        map_parsed_rpu(nalu, raw->size + 2, &guarded, false,
-                       bl->width, bl->height);
+        if (!base_only)
+          map_parsed_rpu(nalu, raw->size + 2, &guarded, false,
+                         bl->width, bl->height);
         last_pts = bl->pts;
         if (compare_window(bl->pts, window_start) < 0)
           need(++preroll <= preroll_cap, "bounded preroll exhausted");
@@ -347,9 +356,14 @@ static void render_pairs(void) {
       }
     }
     need(emitted < frame_cap, "emitted window frame cap exhausted");
-    uint16_t *native[2] = {pack(bl), pack(el)};
+    bool diagnostic_hashes = debug_frames || dv_frame_hashes();
+    uint16_t *native[2] = {base_only && !diagnostic_hashes ? NULL : pack(bl),
+                           base_only ? NULL : pack(el)};
     if (!initialized) {
-      gpu_init(expected_w[0], expected_h[0], expected_w[1], expected_h[1]);
+      if (base_only)
+        base_gpu_init(expected_w[0], expected_h[0]);
+      else
+        gpu_init(expected_w[0], expected_h[0], expected_w[1], expected_h[1]);
       initialized = true;
     }
     char pts[64], duration[64], bl_hash[65], el_hash[65], rpu_hash[65];
@@ -363,12 +377,10 @@ static void render_pairs(void) {
     snprintf(duration, sizeof(duration), "%lld/%d",
              (long long)(bl->duration * source_time_base.num),
              source_time_base.den);
-    bool diagnostic_hashes = debug_frames || dv_frame_hashes();
     if (diagnostic_hashes) {
-      hash_bytes((uint8_t *)native[0], (size_t)bl->width * bl->height * 3,
-                 bl_hash);
-      hash_bytes((uint8_t *)native[1], (size_t)el->width * el->height * 3,
-                 el_hash);
+      hash_bytes((uint8_t *)native[0], (size_t)bl->width * bl->height * 3, bl_hash);
+      if (!base_only)
+        hash_bytes((uint8_t *)native[1], (size_t)el->width * el->height * 3, el_hash);
     }
     hash_bytes(nalu, raw->size + 2, rpu_hash);
     if (window_mode) {
@@ -382,18 +394,27 @@ static void render_pairs(void) {
       input->emitted = true;
     }
 
-    printf("{\"kind\":\"accepted_source_pair\",\"frame\":%d,\"pts\":\"%s\","
-           "\"duration\":\"%s\"", emitted, pts, duration);
-    if (diagnostic_hashes)
-      printf(",\"bl_sha256\":\"%s\",\"el_sha256\":\"%s\"", bl_hash, el_hash);
-    printf(",\"rpu_sha256\":\"%s\",\"bl_width\":%d,\"bl_height\":%d,\"el_"
-           "width\":%d,\"el_height\":%d}\n",
-           rpu_hash, bl->width, bl->height, el->width, el->height);
+    printf("{\"kind\":\"%s\",\"frame\":%d,\"pts\":\"%s\","
+           "\"duration\":\"%s\"", base_only ? "accepted_source_base" : "accepted_source_pair",
+           emitted, pts, duration);
+    if (diagnostic_hashes) {
+      printf(",\"bl_sha256\":\"%s\"", bl_hash);
+      if (!base_only) printf(",\"el_sha256\":\"%s\"", el_hash);
+    }
+    printf(",\"rpu_sha256\":\"%s\",\"bl_width\":%d,\"bl_height\":%d",
+           rpu_hash, bl->width, bl->height);
+    if (base_only)
+      printf(",\"profile\":%d,\"fel_contributed\":false}\n", source_profile);
+    else
+      printf(",\"el_width\":%d,\"el_height\":%d}\n", el->width, el->height);
     output_pts = bl->pts;
     output_duration = bl->duration;
-    gpu_render(native, nalu, raw->size + 2, emitted, pts, duration,
-               chroma(bl->chroma_location), chroma(el->chroma_location),
-               write_rgb, NULL, debug_frames);
+    if (base_only)
+      base_gpu_render(bl, &base_mapped, emitted, pts, duration, write_rgb, diagnostic_hashes);
+    else
+      gpu_render(native, nalu, raw->size + 2, emitted, pts, duration,
+                 chroma(bl->chroma_location), chroma(el->chroma_location),
+                 write_rgb, NULL, debug_frames);
     char rpu_path[64];
     int rpu_length =
         snprintf(rpu_path, sizeof(rpu_path), "rpus/frame-%03d.nal", emitted);
@@ -503,12 +524,14 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
   av_packet_free(&out);
 }
 int main(int argc, char **argv) {
-  need(argc == 11 || argc == 12 || argc == 15,
+  need(argc == 11 || argc == 12 || argc == 15 ||
+           (argc == 16 && !strcmp(argv[15], "base-rpu")),
        "usage: segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX "
        "MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START "
-       "END MAX_PREROLL]]");
+       "END MAX_PREROLL [base-rpu]]]");
   bool streaming = argc >= 12;
-  window_mode = argc == 15;
+  base_only = argc == 16;
+  window_mode = argc >= 15;
   if (window_mode) {
     window_start = rational(argv[12]);
     window_end = rational(argv[13]);
@@ -532,6 +555,8 @@ int main(int argc, char **argv) {
   need((expected_w[1] == 0) == (expected_h[1] == 0),
        "enhancement discovery requires both dimensions zero");
   need(!discover_el || window_mode, "enhancement discovery requires window mode");
+  need(!base_only || (expected_w[1] == 0 && expected_h[1] == 0),
+       "base-only mode has no declared EL");
   debug_frames = number(argv[9], 0, 1) != 0;
   // argv[10] reserves an explicit output policy; never interpreted as a display
   // target.
@@ -594,6 +619,23 @@ int main(int argc, char **argv) {
        "selected absolute HEVC video stream");
   AVStream *stream = input->streams[stream_index];
   source_time_base = stream->time_base;
+  if (base_only) {
+    const AVPacketSideData *config = av_packet_side_data_get(
+        stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data,
+        AV_PKT_DATA_DOVI_CONF);
+    need(config && config->size >= sizeof(AVDOVIDecoderConfigurationRecord),
+         "declared source Dolby Vision configuration");
+    const AVDOVIDecoderConfigurationRecord *cfg = (const void *)config->data;
+    source_profile = cfg->dv_profile;
+    need(cfg->dv_version_major == 1 && cfg->bl_present_flag &&
+             cfg->rpu_present_flag && cfg->dv_md_compression == 0 &&
+             ((source_profile == 5 && !cfg->el_present_flag &&
+               cfg->dv_bl_signal_compatibility_id == 0) ||
+              (source_profile == 8 && !cfg->el_present_flag &&
+               cfg->dv_bl_signal_compatibility_id == 1) ||
+              (source_profile == 7 && cfg->dv_bl_signal_compatibility_id == 6)),
+         "supported base-only DV configuration");
+  }
   if (window_mode)
     need(stream->codecpar->extradata_size >= 23 &&
              stream->codecpar->extradata[0] == 1 &&
@@ -616,7 +658,8 @@ int main(int argc, char **argv) {
   if (streaming)
     open_nut(argv[11]);
   layers[0] = open_layer(stream, 0);
-  layers[1] = open_layer(stream, 1);
+  if (!base_only)
+    layers[1] = open_layer(stream, 1);
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "demux packet");
   int result;
@@ -631,7 +674,7 @@ int main(int argc, char **argv) {
       if (window_mode)
         inspect_coded(packet);
       send_layer(&layers[0], packet);
-      if (!window_done)
+      if (!window_done && !base_only)
         send_layer(&layers[1], packet);
     }
     av_packet_unref(packet);
@@ -641,7 +684,7 @@ int main(int argc, char **argv) {
   need(!movie_io.exhausted, "window source read budget exhausted");
   source_eof = result == AVERROR_EOF;
   need(window_done || source_eof, "complete bounded source read");
-  for (int k = 0; !window_done && k < 2; k++) {
+  for (int k = 0; !window_done && k < (base_only ? 1 : 2); k++) {
     need(avcodec_send_packet(layers[k].decoder, NULL) >= 0, "decoder drain");
     receive(&layers[k]);
   }
@@ -684,8 +727,11 @@ int main(int argc, char **argv) {
   }
   need((!rgb_output || fclose(rgb_output) == 0) && fclose(timing_output) == 0,
        "close completed outputs");
-  gpu_close();
-  for (int k = 0; k < 2; k++) {
+  if (base_only)
+    base_gpu_close();
+  else
+    gpu_close();
+  for (int k = 0; k < (base_only ? 1 : 2); k++) {
     for (int i = 0; i < layers[k].count; i++)
       av_frame_free(&layers[k].queue[i]);
     av_bsf_free(&layers[k].split);
@@ -720,6 +766,11 @@ int main(int argc, char **argv) {
          "16,\"gpu_contexts\":1,\"output_policy\":\"bt2020-pq-master-clip\","
          "\"production_qualified\":false}\n",
          emitted);
+  if (base_only)
+    printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
+           "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"
+           "\"fel_contributed\":false,\"creative_trims_applied\":false,"
+           "\"production_qualified\":false}\n", source_profile, emitted);
   need(fflush(stdout) == 0, "observations flush");
   return 0;
 }

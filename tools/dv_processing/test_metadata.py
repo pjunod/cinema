@@ -16,6 +16,16 @@ class MetadataAdmission(unittest.TestCase):
                             str(binary)], check=True, timeout=30)
             subprocess.run([str(binary)], check=True, timeout=10)
 
+    def test_finite_rgb48_rounding(self):
+        source = Path(__file__).with_name("test_rgb48.c")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "rgb48-rounding"
+            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-fno-math-errno",
+                            "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            str(source), "-lm", "-o", str(binary)],
+                           check=True, timeout=30)
+            subprocess.run([str(binary)], check=True, timeout=15)
+
 
 if __name__ == "__main__":
     unittest.main()
