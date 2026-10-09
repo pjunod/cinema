@@ -1645,3 +1645,35 @@ allowlist entries were independently verified for size and hash; the archive
 was reopened and its member compared byte-for-byte. Failed configure and
 preflight attempts remain separate records. Full producer linking, matching
 parser, package audit and physical normal-API acceptance remain outstanding.
+
+## 36. Active font identity survives an inactive-rule change
+
+The exact `e9fdc02a6c89626d72d7f5fb13d9bca0e14b0fd8` release build
+passes in 1,870.295 seconds; immutable executable and matching arm64 debug
+symbols are captured by 1,871.106 seconds. The UUID is
+`FEA9CF14-F1F7-3890-BDCE-073C387D197B`; the signed daemon SHA-256 is
+`dcd3776303e181e7ab1dcbe8aff9c746efd1cde0189c6519b9465fe8901e2586`.
+The FFmpeg, FFprobe and Wasm parser bytes remain identical to the earlier
+qualified native package. This is an ad-hoc signed candidate, not a
+notarization, installation or distribution receipt.
+
+The ordinary API case deliberately changes inactive Fontconfig inventory
+from zero to 44 entries after startup. Its 23 ordered active rows and font
+listing remain identical. A fresh Source profile created after that change
+has the same font digest as startup:
+`f77ef0de8e1688423aa6236c6b2033ddf3fcfacd3c2bfa90fcdd863e9ba7a92d`.
+The actual producer selects `vt_scale_sdr` with prepared GPU text and passes
+25 independent source-position cue checks, including blank boundaries and
+nonzero entry. Hold, resume and seek return HTTP 200; the executed deletion
+assertion requires 204. Parser identity has no warning and shutdown exits
+zero. The 86.630-second owned run finishes with no owned processes and the
+controlled prefix restored. This qualifies the actual identity repair;
+it does not claim performance or client display acceptance.
+
+[Active-font release and API evidence](evidence/macos-video-20261008/font-active-e9fd-evidence.tar.gz)
+contains one neutral JSON record, 2813 compressed bytes, SHA-256
+`9aa5be6a4db9d40a3efbf9e25c356da95995115e85e2650a565becf115562697`. All 15 private raw
+inputs were independently verified for size and hash, and the archived
+member was reopened and compared byte-for-byte. Earlier `2139fa9c` raw graph
+and caption proofs retain their original source identities and are not
+replayed or relabelled. No unit tests execute during this qualification.

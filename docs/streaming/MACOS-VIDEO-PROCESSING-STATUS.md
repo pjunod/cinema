@@ -22,8 +22,8 @@ This separate effort began at reviewed combined source
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Bitmap API, all eight complete-graph raw comparisons and final text API pass; inactive font-rule identity correction committed as `e9fdc02a` | Qualify the repaired release with changing inactive rules and measure performance |
-| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls and full SDK generation pass; exact `e9fdc02a` Linux check/Clippy pass | Shipping package, amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
+| F1 GPU subtitle compositing | Native builder | Bitmap API, all eight complete-graph raw comparisons and final text API pass; inactive font-rule identity repair passes on the signed `e9fdc02a` release | Measure performance and preserve final qualification through integration |
+| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; full Bookworm FFmpeg and matching static parser builds pass; exact `e9fdc02a` Linux check/Clippy pass | Shipping package, amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on the final `2139fa9c` signed bundle, including caption payload/timing checks and clean owned shutdown | Preserve this evidence through final integration; broader DVR and client presentation qualification remain tracked separately |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
@@ -38,11 +38,13 @@ owner; independent lanes run concurrently with the isolated SDK build.
 Unit execution and main landing remain with the designated merge coordinator.
 No final review or implementation completion is claimed for F1–F3 yet.
 
-**Latest checkpoint:** the integration head is `e9fdc02a6c89626d72d7f5fb13d9bca0e14b0fd8`.
-Its font-identity repair passes pinned Rust 1.97.1 all-target compilation
+**Latest checkpoint:** integration source is `354bd87e5f4356ae677bc16c67672985dd58f261`.
+The `e9fdc02a` font-identity repair passes pinned Rust 1.97.1 all-target compilation
 and the normal commit hook (catalog, formatting, Clippy and 86 embedded
-JavaScript checks). The new release build is in progress. Exact-source Linux check and Clippy
-also pass in a 192.074-second phase. No unit suite has run; final review has not started.
+JavaScript checks). The repaired release build and focused ordinary-API
+qualification both pass. Exact-source Linux check and Clippy also pass in
+a 192.074-second phase. Subsequent changes affect build packaging and
+documentation. No unit suite has run; final review has not started.
 
 The earlier `2139fa9c` release continuation finishes in 1,991.254 seconds,
 with executable and matching arm64 debug symbols captured within 1,992.202
@@ -62,11 +64,14 @@ font digests, native graph selection, and cue/control/parser/shutdown checks.
 
 The committed application repair hashes only ordered active configuration
 rows under a new identity domain. It retains font, tool and active-file
-checks. Its focused release qualification will deliberately change inactive
-rule availability between startup and Source capture and require native
-text delivery with identical consumed-font identity. Performance remains
-separate: a first admission declined a competing daemon, so no timing child
-ran and no performance claim is made.
+checks. Its focused release qualification passes in 86.630 seconds:
+inactive rules change from zero to 44, a fresh Source profile retains the
+startup digest, and native GPU text delivery passes all 25 cue and lifecycle
+assertions. Performance remains separate: three admissions declined competing
+processes before starting any timing child. The latest refusal found an
+active Clippy compiler with normal system memory pressure and about 21 GB
+reclaimable memory. Benchmark contention, rather than memory exhaustion,
+prevents an uncontaminated timing claim.
 
 The earlier `2cd6000b3` Mac release completed in 1,590.286 seconds with its
 owned process group fully reaped. Matching executable and debug symbols are
@@ -127,13 +132,18 @@ compiler stage already declares Clang. After a complete inventory audit,
 package dependencies, Perl's API provider, exact package deltas and six
 tool identities pass verification. Configuration then passes in 16.692
 seconds with all 57 official options and the complete patch set retained.
-The full compile will use normal Make output within the existing 8 MiB log
+The full compile uses normal Make output within the existing 8 MiB log
 bound; forced verbose commands are unnecessary because actual configuration
 and command evidence are retained separately. Runtime base parity
 and SDK development closure are separate requirements.
-Full linking, matching parser and final package audit remain required; SDK
-generation alone is not a shipping build. No global installation or network
-fallback substitutes for dependencies.
+The full producer compiles successfully in a 475-second phase on `354bd87e`,
+with all features retained and no OOM under the fixed container limits.
+Installation also passes. The matching sealed parser passes in 170.238
+seconds: it is static, enables AC-4, and uses the same source and patch set.
+Final package auditing is checking the actual redistributed static system
+libraries and their source records. Compilation alone is not shipping
+acceptance. No global installation or network fallback substitutes for
+dependencies.
 
 Final Linux hardware acceptance also requires an actual amd64 daemon;
 ARM Linux type/lint checks alone cannot supply that executable. A warm
@@ -141,9 +151,9 @@ build-cache candidate and bounded build are prepared. Automatic approval
 review rejected transferring the 54.2 MB committed-source archive to the
 build node; explicit user approval for that payload and destination is
 pending. Nothing from that archive has transferred or started. The
-independent SDK diagnosis continues on its existing inputs. The repaired native
-font-identity API check, performance measurements, shipping Linux runtime
-qualification, final adversarial review and merge handoff remain outstanding.
+independent package and hardware preparation continue on their existing
+inputs. Performance measurements, shipping Linux runtime qualification,
+final adversarial review and merge handoff remain outstanding.
 The designated merge coordinator owns unit execution and main landing.
 
 **Complete subtitle graphs:** all eight frozen SDR/PQ, text/bitmap and
