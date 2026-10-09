@@ -1,6 +1,28 @@
 use super::*;
 
 impl TranscodeManager {
+    pub(crate) async fn dv_effective_report(
+        &self,
+        session_id: &str,
+    ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
+        #[cfg(target_os = "linux")]
+        {
+            let facts = self.vod.hls_facts(session_id).await?;
+            let encoding = facts.encoding?;
+            let runtime = encoding.dv_runtime.as_ref()?;
+            let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) =
+                &encoding.dv_processing
+            else {
+                return None;
+            };
+            runtime.effective_report(plan, session_id)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = session_id;
+            None
+        }
+    }
     #[cfg(test)]
     pub(crate) fn test_hold_source_software_capacity(&self) -> Option<crate::admission::SwPermit> {
         self.admissions

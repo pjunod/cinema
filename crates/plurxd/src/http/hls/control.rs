@@ -1609,7 +1609,7 @@ async fn control_inner_observed(
             );
         }
     };
-    let start = match control_start_response(&route) {
+    let mut start = match control_start_response(&route) {
         Some(start) => start,
         None => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
@@ -1624,6 +1624,7 @@ async fn control_inner_observed(
             );
         }
     };
+    start.effective_processing = state.transcode.dv_effective_report(&route.session_id).await;
     let recipe = match serde_json::from_str::<RemoteStartRequest>(&route.recipe_json) {
         Ok(recipe) => recipe,
         Err(_) => {
@@ -2349,7 +2350,7 @@ async fn control_local_with_observation(
             );
         }
     };
-    let start = match control_start_response(route) {
+    let mut start = match control_start_response(route) {
         Some(start) => start,
         None => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
@@ -2364,6 +2365,7 @@ async fn control_local_with_observation(
             );
         }
     };
+    start.effective_processing = state.transcode.dv_effective_report(&route.session_id).await;
     let recipe = match serde_json::from_str::<RemoteStartRequest>(&route.recipe_json) {
         Ok(recipe) => recipe,
         Err(_) => {

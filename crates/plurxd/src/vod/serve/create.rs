@@ -476,7 +476,14 @@ impl VodServe {
                 preserve_dolby_vision,
                 convert_dolby_vision,
             } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
-            _ if prepared.encoding.is_some() => (true, false, false),
+            _ if prepared.encoding.is_some() => (
+                true,
+                prepared
+                    .encoding
+                    .as_ref()
+                    .is_some_and(|encoding| encoding.preserves_processed_dv()),
+                false,
+            ),
             _ => {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_recipe_unresolved",
@@ -2218,7 +2225,14 @@ impl VodServe {
                 preserve_dolby_vision,
                 convert_dolby_vision,
             } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
-            _ if prepared.encoding.is_some() => (true, false, false),
+            _ if prepared.encoding.is_some() => (
+                true,
+                prepared
+                    .encoding
+                    .as_ref()
+                    .is_some_and(|encoding| encoding.preserves_processed_dv()),
+                false,
+            ),
             _ => {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_recipe_unresolved",

@@ -1070,11 +1070,40 @@ impl TranscodeManager {
                 "invalid finite bitrate policy",
             ));
         }
+        let planning = self.vod_preparation_snapshot(req, file).await?;
+        let dv_processing = Self::vod_dv_processing_from_snapshot(&planning, req)?;
+        #[cfg(target_os = "linux")]
+        let dv_tools = if matches!(
+            &dv_processing,
+            plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
+                plurx_core::transcode::dv_processing::DvFallbackReason::ProductionUnqualified
+            )
+        ) && req.candidate_context.is_none()
+        {
+            match crate::vodencode::dv_runtime::ToolSet::capture().await {
+                Ok(tools) => tools,
+                Err(reason) => {
+                    tracing::warn!(target: "plurxd::transcode", %reason, "DV backend unavailable; retaining ordinary delivery");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let copy_attempt = matches!(req.kind, SessionKind::Copy { .. })
+            && req.subtitle_burn.is_none()
+            && dv_tools.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let copy_attempt = false;
         if matches!(req.kind, SessionKind::Copy { .. }) {
             match req.subtitle_burn {
-                None => {
+                None if !copy_attempt => {
                     validate_finite_copy_rate(req, file)?;
                     return Ok(None);
+                }
+                None => {
+                    validate_finite_copy_rate(req, file)?;
                 }
                 // A copy whose burn track the store holds as having no cues
                 // has nothing to burn: it stays the copy it would have been,
@@ -1097,8 +1126,6 @@ impl TranscodeManager {
                 Some(_) => {}
             }
         }
-        let planning = self.vod_preparation_snapshot(req, file).await?;
-        let dv_processing = Self::vod_dv_processing_from_snapshot(&planning, req)?;
         tracing::debug!(
             target: "plurxd::transcode",
             file_id = file.id,
@@ -1106,6 +1133,7 @@ impl TranscodeManager {
             selection = ?dv_processing,
             "worker selected DV processing or retained existing delivery"
         );
+        let result = async {
         let note_phase = |phase: &'static str, started: std::time::Instant| {
             tracing::debug!(
                 target: "plurxd::transcode",
@@ -1633,10 +1661,85 @@ impl TranscodeManager {
                 "the encoder differs from the frozen Mac processing plan; check compatibility again",
             ));
         }
+        #[cfg(target_os = "linux")]
+        let (plan, options, resources, dv_processing, dv_runtime) = {
+            let mut retained = (plan, options, resources, dv_processing, None);
+            if let Some(tools) = dv_tools {
+                let attempt = async {
+                    use crate::vodencode::dv_runtime::{RuntimeRecipe, failure_episode_key, episode_failed};
+                    use plurx_core::transcode::dv_processing::{DvDestination, DvSelection};
+                    let destination = if matches!(req.kind, SessionKind::Copy { convert_dolby_vision: true, .. }) {
+                        DvDestination::Profile81
+                    } else { DvDestination::Hdr10 };
+                    let preferences = Self::vod_dv_preferences_from_snapshot(&planning);
+                    let failure_episode = failure_episode_key(&req.playback_id, &source_object_version,
+                        &tools, preferences, destination)?;
+                    if episode_failed(&failure_episode) {
+                        return Err("DV processing previously failed for this playback/source/settings/backend".into());
+                    }
+                    let document: serde_json::Value = serde_json::from_str(&held_probe).map_err(|e| e.to_string())?;
+                    let stream = document.get("streams").and_then(serde_json::Value::as_array)
+                        .and_then(|streams| streams.iter().find(|stream| stream.get("index")
+                            .and_then(serde_json::Value::as_u64) == Some(u64::from(retained.0.decode().input_video_stream()))))
+                        .ok_or("held video stream unavailable")?;
+                    let clock = stream.get("time_base").and_then(serde_json::Value::as_str)
+                        .and_then(|clock| clock.split_once('/')).ok_or("held source has no rational time base")?;
+                    let source_tick = (clock.0.parse::<u32>().map_err(|e| e.to_string())?,
+                        clock.1.parse::<u32>().map_err(|e| e.to_string())?);
+                    let dimension = |name| stream.get(name).and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok()).ok_or("held native raster unavailable");
+                    let native_bl = (dimension("width")?, dimension("height")?);
+                    let source = Arc::new(source);
+                    let preparation_budget = self.vod_settings(req).await?
+                        .ok_or("DV processing requires the VOD preparation budget")?.block_budget;
+                    let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
+                        source_tick, native_bl, preferences,
+                        destination, runtime_cache: self.runtime_cache.clone(), prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
+                        published_receipt: std::sync::Mutex::new(None) };
+                    let mut processed_options = retained.1.clone();
+                    processed_options.pipeline = self.live_lookup_options(self.rate_control_snapshot(),
+                        Encoder::Software, file, target_height, 0.0, req.audio_index, None, Some(1),
+                        OutputGrade::Hdr10).pipeline;
+                    processed_options.software_threads = Some(1);
+                    let held = runtime.source.handle.try_clone().map(Arc::new).map_err(|e| e.to_string())?;
+                    let processed_plan = self.resolve_vod_movie_plan(file, &processed_options, Encoder::Software, held).await?;
+                    let processed_resources = TranscodeResourceEstimate { hardware_slot: true,
+                        cpu_threads: if processed_plan.options().input_has_audio { 7 } else { 5 }, decoder_threads: Some(1) };
+                    let bundle = crate::vodencode::try_admit_frozen_bundle(&self.admissions,
+                        self.max_hw_sessions().await, self.software_budget().await, &processed_resources,
+                        Some(1), crate::admission::Priority::Live, None)
+                        .map_err(|_| "DV graph resource admission unavailable")?;
+                    let segment_plan = grid.plan(file.duration_ms.ok_or("held source duration unavailable")?, 0);
+                    let at = ((req.start_seconds.max(0.0) * f64::from(grid.numerator)) as u64
+                        / grid.segment_ticks()).min(segment_plan.entries.len().saturating_sub(1) as u64) as usize;
+                    let entry = segment_plan.entries.get(at).ok_or("no requested source interval")?;
+                    let (verified, selected) = runtime.execute(file, &processed_plan, &processed_options, grid,
+                        entry, &executable.path, crate::dv_segment::SegmentAdmission::Owned(bundle),
+                        Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None).await?;
+                    runtime.prepared.lock().map_err(|_| "DV prepared window lock poisoned")?
+                        .replace((entry.index, verified));
+                    Ok::<_, String>((processed_plan, processed_options, processed_resources,
+                        DvSelection::Selected(Box::new(selected)), Some(Arc::new(runtime))))
+                }.await;
+                match attempt {
+                    Ok(selected) => retained = selected,
+                    Err(reason) => {
+                        retained.3 = plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
+                            plurx_core::transcode::dv_processing::DvFallbackReason::BackendFailure);
+                        tracing::warn!(target: "plurxd::transcode", %reason,
+                            "DV window refused; retaining ordinary delivery");
+                    }
+                }
+            }
+            if copy_attempt && retained.4.is_none() { return Ok(None); }
+            retained
+        };
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             shared_audio,
             source_object_version,
             dv_processing,
+            #[cfg(target_os = "linux")]
+            dv_runtime,
             plan,
             resources,
             options,
@@ -1673,6 +1776,18 @@ impl TranscodeManager {
             handoff_claim: std::sync::Mutex::new(None),
             hooks: Box::new(crate::vodencode::NoopEncodingHooks),
         })))
+        }.await;
+        if copy_attempt {
+            match result {
+                Err(reason) => {
+                    tracing::warn!(target: "plurxd::transcode", %reason, "DV copy processing refused; retaining source fallback");
+                    Ok(None)
+                }
+                value => value,
+            }
+        } else {
+            result
+        }
     }
 
     async fn prepare_vod_companion(

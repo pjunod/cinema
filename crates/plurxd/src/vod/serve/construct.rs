@@ -177,7 +177,7 @@ impl VodServe {
             cancelled_preparation_epoch: AtomicU64::new(0),
             plan,
             identity: Mutex::new(IdentityState::default()),
-            slot: ProducerSlot::new(),
+            slot: Arc::new(ProducerSlot::new()),
             source_owners: SourceRenditionOwners::default(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             readers: Mutex::new(HashMap::new()),

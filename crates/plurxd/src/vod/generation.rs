@@ -84,6 +84,164 @@ pub(super) async fn spawn_generation(
         },
         None => None,
     };
+    #[cfg(target_os = "linux")]
+    if let Some((encoding, runtime)) = recipe.encoding.as_ref().and_then(|encoding| {
+        encoding
+            .dv_runtime
+            .as_ref()
+            .map(|runtime| (encoding, runtime))
+    }) {
+        // A completed prior interval grants no evidence for this new producer.
+        runtime.clear_published_window();
+        if let Some(authority) = &source_authority {
+            if let Err(cause) = authority.validate_before_spawn() {
+                runtime.refuse_episode();
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    cause,
+                );
+                return;
+            }
+        }
+        let prepared = {
+            let mut prepared = runtime.prepared.lock().expect("DV prepared window");
+            if prepared.as_ref().is_some_and(|(index, _)| *index == at) {
+                prepared.take().map(|(_, window)| window)
+            } else {
+                None
+            }
+        };
+        let verified = if let Some(prepared) = prepared {
+            drop(permit);
+            rendition
+                .source_owners
+                .registered(&source_dispatch, &prepared.registration);
+            drop(source_dispatch);
+            if !runtime.source.unchanged() || !runtime.tools.is_current().await {
+                Err("DV source/backend changed before prepared publication".to_owned())
+            } else {
+                Ok(prepared)
+            }
+        } else {
+            let Some(worker) = permit else {
+                runtime.refuse_episode();
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    "DV graph has no retained admission".into(),
+                );
+                return;
+            };
+            let owners = Arc::clone(rendition);
+            let hook = Box::new(move |registration: &crate::prodrun::ProducerRegistration| {
+                owners
+                    .source_owners
+                    .registered(&source_dispatch, registration);
+                drop(source_dispatch);
+            });
+            runtime
+                .execute(
+                    &recipe.file,
+                    &encoding.plan,
+                    &encoding.options,
+                    encoding.grid,
+                    entry,
+                    &encoding.executable.path,
+                    crate::dv_segment::SegmentAdmission::Retained(worker),
+                    Arc::clone(&rendition.slot),
+                    tokio_util::sync::CancellationToken::new(),
+                    Some(hook),
+                )
+                .await
+                .and_then(|(window, actual)| match &encoding.dv_processing {
+                    plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
+                        if actual.semantic_digest() == frozen.semantic_digest() =>
+                    {
+                        Ok(window)
+                    }
+                    _ => Err("completed DV graph differs from frozen rendition".into()),
+                })
+        };
+        let verified = match verified {
+            Ok(window) => window,
+            Err(cause) => {
+                runtime.refuse_episode();
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    format!("DV window refused before publication: {cause}"),
+                );
+                return;
+            }
+        };
+        if let Some(authority) = &source_authority {
+            if let Err(cause) = authority.validate_before_spawn() {
+                runtime.refuse_episode();
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    cause,
+                );
+                return;
+            }
+        }
+        if rendition.closed.load(Relaxed)
+            || rendition.failure().is_some()
+            || !recipe_engine_is_current(recipe).await
+        {
+            return;
+        }
+        shared
+            .pool
+            .metrics_handle()
+            .count_producer_generation(VodProducerKind::Encoded);
+        let epoch = rendition.gen_epoch.load(Relaxed);
+        let retirement = tokio_util::sync::CancellationToken::new();
+        let done = retirement.clone().drop_guard();
+        let watch_rendition = Arc::clone(rendition);
+        let watch_retirement = retirement.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = watch_retirement.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                        if watch_rendition.closed.load(Relaxed)
+                            || watch_rendition.gen_epoch.load(Relaxed) != epoch {
+                            watch_retirement.cancel();
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let receipt = verified.receipt;
+        let encoded_payloads = verified.encoded_payloads;
+        let (outcome, completed) = run_generation(
+            Arc::clone(shared),
+            Arc::clone(rendition),
+            Box::new(std::io::Cursor::new(verified.bytes)),
+            at,
+            epoch,
+            retirement,
+        )
+        .await;
+        if let Some(sink) = completed {
+            vodgen::Sink::completed_output(&sink).await;
+            if let Some(receipt) = receipt {
+                runtime.published_window(receipt, &encoded_payloads);
+            }
+        }
+        if let Some(outcome) = outcome {
+            on_generation_end(shared, rendition, outcome, epoch).await;
+        }
+        drop(done);
+        return;
+    }
     let attested = attested_source_setup(rendition);
     let source_current = if rendition.key.starts_with("source-") {
         let Some(held) = rendition
@@ -280,7 +438,7 @@ pub(super) async fn spawn_generation(
                 let outcome = run_generation(
                     Arc::clone(&shared),
                     Arc::clone(&rendition),
-                    stdout,
+                    Box::new(stdout),
                     at,
                     epoch,
                     registration.retirement(),
@@ -548,7 +706,7 @@ fn rendition_key_field(at: u32) -> String {
 async fn run_generation(
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
-    stdout: tokio::process::ChildStdout,
+    stdout: Box<dyn AsyncRead + Send + Unpin>,
     at: u32,
     epoch: u64,
     retirement: tokio_util::sync::CancellationToken,
@@ -794,7 +952,16 @@ async fn on_generation_end(
                 let manifest = rendition.manifest.lock().await;
                 !manifest.is_empty() && manifest.next_gap(0).is_none()
             };
-            if !finished && shared.pool.blocked_on(&rendition.key).is_some() {
+            #[cfg(target_os = "linux")]
+            let planned_window = rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .is_some_and(|encoding| encoding.dv_runtime.is_some())
+                && produced_through.is_some();
+            #[cfg(not(target_os = "linux"))]
+            let planned_window = false;
+            if !finished && !planned_window && shared.pool.blocked_on(&rendition.key).is_some() {
                 // The producer died on its own with somebody mid-wait: the
                 // typed refusal is the truth (plan §2.3 outcome 3).
                 record_failure(

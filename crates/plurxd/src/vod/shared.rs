@@ -770,7 +770,7 @@ impl Shared {
             retained_offer: StdMutex::new(None),
             cancelled_preparation_epoch: AtomicU64::new(0),
             identity: Mutex::new(identity_state),
-            slot: ProducerSlot::new(),
+            slot: Arc::new(ProducerSlot::new()),
             source_owners: SourceRenditionOwners::default(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             readers: Mutex::new(HashMap::new()),

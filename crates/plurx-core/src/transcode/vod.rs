@@ -1170,6 +1170,140 @@ pub fn vod_pipe_args_with_reorder(
     args
 }
 
+/// Encode a reconstructed RGB48 NUT window once, preserving the ordinary VOD
+/// soundtrack lattice and output codec contract. The caller independently
+/// verifies one source picture per output-grid frame before publishing bytes.
+/// No fps, clone padding or source video decoder may alter that association.
+pub fn vod_reconstructed_pipe_args(
+    source: &MediaFile,
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
+    grid: VodFrameGrid,
+    duration_seconds: f64,
+    source_fd: &str,
+    audio_fd: &str,
+) -> Result<Vec<String>, &'static str> {
+    if plan.encoder() != super::Encoder::Software
+        || plan.output_contract().output_grade() != super::OutputGrade::Hdr10
+        || plan.output_contract().output_codec() != "hevc"
+        || plan.options().subtitle_burn.is_some()
+        || plan.options().video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
+        || grid.frames_per_segment > 64
+    {
+        return Err("unsupported reconstructed VOD recipe");
+    }
+    let (width, height) = super::output_size(source, plan.options().target_height)
+        .ok_or("reconstructed output raster unavailable")?;
+    let mut args =
+        vod_pipe_args_with_reorder(source, plan, execution, grid, duration_seconds, false);
+    if args.iter().any(|arg| arg == "-filter_complex") {
+        return Err("unsupported reconstructed filter graph");
+    }
+    let input = args
+        .iter()
+        .position(|arg| arg == "-i")
+        .ok_or("reconstructed video input unavailable")?;
+    // Replace all ordinary source-decoder options as a scope, rather than
+    // leaving a hardware decoder or source seek applied to the RGB pipe.
+    args.splice(
+        0..input + 2,
+        [
+            "-hide_banner".into(),
+            "-nostdin".into(),
+            "-copyts".into(),
+            "-filter_threads".into(),
+            "1".into(),
+            "-threads".into(),
+            "1".into(),
+            "-i".into(),
+            source_fd.into(),
+        ],
+    );
+    if plan.options().input_has_audio {
+        let input = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| *arg == "-i")
+            .nth(1)
+            .map(|(i, _)| i)
+            .ok_or("reconstructed audio input unavailable")?;
+        args[input + 1] = audio_fd.into();
+        args.splice(input..input, ["-threads".into(), "1".into()]);
+    }
+    let last_input = args
+        .iter()
+        .rposition(|arg| arg == "-i")
+        .ok_or("reconstructed input unavailable")?
+        + 2;
+    let mut index = last_input;
+    while index + 1 < args.len() {
+        if matches!(
+            args[index].as_str(),
+            "-threads"
+                | "-threads:v"
+                | "-threads:a"
+                | "-filter_threads"
+                | "-filter_complex_threads"
+        ) {
+            args.drain(index..index + 2);
+        } else {
+            index += 1;
+        }
+    }
+    for index in 0..args.len().saturating_sub(1) {
+        if args[index] == "-map" && args[index + 1].starts_with("0:") {
+            args[index + 1] = "0:v:0".into();
+        }
+    }
+    let target = execution.start_seconds.max(0.0);
+    let anchor = vod_audio_anchor(target) as f64 / f64::from(VOD_AUDIO_RATE);
+    let first_frame =
+        (target * f64::from(grid.numerator) / f64::from(grid.denominator)).round() as u64;
+    let filter = format!(
+        "zscale=matrixin=gbr:rangein=full:primariesin=bt2020:transferin=smpte2084:matrix=bt2020nc:range=limited:primaries=bt2020:transfer=smpte2084:w={width}:h={height}:dither=none,format=yuv420p10le,settb=expr=1/{},setpts=({}+N)*{}-{anchor:.9}/TB",
+        grid.numerator, first_frame, grid.denominator,
+    );
+    if let Some(index) = args.iter().position(|arg| arg == "-vf") {
+        args[index + 1] = filter;
+    } else {
+        let at = args.len().saturating_sub(1);
+        args.splice(at..at, ["-vf".into(), filter]);
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "-x265-params") {
+        let mut parameters: Vec<_> = args[index + 1]
+            .split(':')
+            .filter(|item| {
+                !item.starts_with("pools=")
+                    && !item.starts_with("frame-threads=")
+                    && !item.starts_with("wpp=")
+            })
+            .map(str::to_owned)
+            .collect();
+        parameters.extend([
+            "pools=none".into(),
+            "frame-threads=1".into(),
+            "wpp=0".into(),
+        ]);
+        args[index + 1] = parameters.join(":");
+    } else {
+        let at = args.len().saturating_sub(1);
+        args.splice(
+            at..at,
+            [
+                "-x265-params".into(),
+                "pools=none:frame-threads=1:wpp=0".into(),
+            ],
+        );
+    }
+    let at = args.len().saturating_sub(1);
+    args.splice(at..at, ["-threads:v".into(), "1".into()]);
+    if plan.options().input_has_audio {
+        let at = args.len().saturating_sub(1);
+        args.splice(at..at, ["-threads:a".into(), "1".into()]);
+    }
+    Ok(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1315,6 +1449,67 @@ mod tests {
             VodFrameGrid::new(24, 1).expect("grid"),
             12.0,
         )
+    }
+
+    #[test]
+    fn reconstructed_window_encoder_keeps_one_to_one_video_and_audio_scope() {
+        let (source, ordinary, execution, facts, capabilities) = encoded_recipe_fixture(true);
+        let mut media = ordinary.options().clone();
+        media.input_has_audio = true;
+        media.audio_index = Some(0);
+        media.audio_offset_ms = -175;
+        let plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(crate::transcode::Encoder::Software, media),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("audio HDR10 recipe");
+        let args = vod_reconstructed_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+        )
+        .expect("reconstructed recipe");
+        assert_eq!(
+            args.windows(2)
+                .filter(|p| p[0] == "-i")
+                .map(|p| p[1].as_str())
+                .collect::<Vec<_>>(),
+            ["/dev/fd/3", "/dev/fd/4"]
+        );
+        assert!(args.windows(2).any(|p| p == ["-map", "0:v:0"]));
+        assert!(args.windows(2).any(|p| p == ["-c:v", "libx265"]));
+        assert!(args.windows(2).any(|p| p == ["-threads:a", "1"]));
+        let filter = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter")
+            + 1];
+        assert!(!filter.contains("fps=") && !filter.contains("tpad=") && !filter.contains("trim="));
+        assert!(filter.contains("matrixin=gbr") && filter.contains("format=yuv420p10le"));
+        assert!(args
+            .windows(2)
+            .any(|p| p[0] == "-af" && p[1].contains("atrim=start_sample=")));
+        let (source, sdr, execution, _, _) = encoded_recipe_fixture(false);
+        assert!(vod_reconstructed_pipe_args(
+            &source,
+            &sdr,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4"
+        )
+        .is_err());
     }
 
     #[test]
