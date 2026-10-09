@@ -3679,6 +3679,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn production_window_future_keeps_copy_buffers_off_the_poll_stack() {
+        // Construct the real decoder and range-preparing owner futures without
+        // polling them: this checks their production state layout without IO.
+        // The inline 64 KiB copy buffer made nested debug poll frames exceed a
+        // 2 MiB worker stack. Leave ample room for bounded metadata and handles,
+        // while refusing even one such buffer embedded in future state.
+        const FUTURE_BUDGET: usize = 64 * 1024;
+        let dir = Path::new("unpolled-window-cache");
+        let tmp = dir.join("unpolled-window.vtt");
+        let file = media_file(PathBuf::from("unpolled-source.mkv"));
+        let extraction = extract_vtt_window(&tmp, &file, 0, 0, 200);
+        let access = crate::subtitle_source::StoreAccess::off();
+        let dir_owned = dir.to_owned();
+        let (_sender, cancel) = tokio::sync::oneshot::channel();
+        let owned = ensure_window_owned(
+            tmp.clone(),
+            dir,
+            &file,
+            0,
+            ExtractionLimits::default(),
+            cancel,
+            move |tmp, file, ordinal| async move {
+                crate::subtitle_ranges::prepare(&access, &dir_owned, &tmp, &file, ordinal, 0, 200)
+                    .await
+            },
+        );
+        let extraction_bytes = std::mem::size_of_val(&extraction);
+        let owned_bytes = std::mem::size_of_val(&owned);
+        println!(
+            "production window future bytes: extraction={extraction_bytes}, owner={owned_bytes}"
+        );
+        assert!(
+            extraction_bytes < FUTURE_BUDGET,
+            "decoder future holds {extraction_bytes} bytes, budget {FUTURE_BUDGET}"
+        );
+        assert!(
+            owned_bytes < FUTURE_BUDGET,
+            "range-preparing window owner holds {owned_bytes} bytes, budget {FUTURE_BUDGET}"
+        );
+    }
+
     /// The midpoint rule declines a window because the whole-track warm reads
     /// the same bytes and publishes the authoritative answer instead. That
     /// reason is about the warm being alive: once it has failed there is

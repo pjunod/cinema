@@ -251,25 +251,14 @@ mod cached_owner_delivery_tests {
                 .expect("cached caption fixture")
                 .is_none()
         );
-        let stop = tokio_util::sync::CancellationToken::new();
-        let server = {
-            let stop = stop.clone();
-            let app = axum::Router::new()
-                .route(
-                    crate::media_sessions::RELAY_PATH,
-                    axum::routing::post(super::super::super::internal_media_sessions::relay),
-                )
-                .with_state(owner.state.clone());
-            let listener = tokio::net::TcpListener::bind(source_config.server.bind)
-                .await
-                .expect("cached caption fixture");
-            tokio::spawn(async move {
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(stop.cancelled_owned())
-                    .await
-                    .expect("cached caption fixture");
-            })
-        };
+        // Startup owns this listener through activation. Install the relay on
+        // that same socket, as production does, instead of rebinding its port.
+        *startup.router.write().expect("cached caption fixture") = axum::Router::new()
+            .route(
+                crate::media_sessions::RELAY_PATH,
+                axum::routing::post(super::super::super::internal_media_sessions::relay),
+            )
+            .with_state(owner.state.clone());
         leader
             .heartbeat()
             .await
@@ -332,8 +321,7 @@ mod cached_owner_delivery_tests {
         })
         .catch_unwind()
         .await;
-        stop.cancel();
-        server.await.expect("cached caption fixture");
+        startup.stop_and_drain().await;
         let drain = tokio::spawn(async move { learner_client.shutdown().await }).await;
         if let Ok(result) = drain {
             result.expect("cached caption fixture");

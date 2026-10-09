@@ -434,3 +434,24 @@ test("episode preparation ignores the unbound player after an early startup fail
     '\nthis.tick=prepareNextEpisodeIfNearEnd;',ctx);
   assert.doesNotThrow(()=>ctx.tick({fileId:null,started:false},{paused:true}));
 });
+
+test("folded subtitle availability includes the selected generated track",()=>{
+  const ctx=vm.createContext({
+    watchFolds:()=>({subs:false}),esc:value=>String(value),langName:value=>value,
+    watchFoldButton:()=>'<button class="watch-fold"></button>',
+  });
+  vm.runInContext(shippedFunction("detail/watch-browser.js","watchTrackRow")+
+    '\nthis.row=watchTrackRow;',ctx);
+  const generated={index:0,language:"English",title:"Machine transcription (whisper.cpp)"};
+  const label=(track,on)=>`<span class="trk${on?" on":""}">${track.title}</span>`;
+  const off=on=>`<span class="trk${on?" on":""}">Off</span>`;
+  for(const selected of [0,-1]){
+    const html=ctx.row("subs",[generated],selected,label,off);
+    assert.match(html,/<b>1<\/b> available/);
+    assert.doesNotMatch(html,/<b>0<\/b> available/);
+  }
+  const another={index:1,language:"French",title:"French"};
+  const html=ctx.row("subs",[generated,another],0,label,off);
+  assert.match(html,/trk on[^]*?Machine transcription/);
+  assert.match(html,/<b>2<\/b> available · French/);
+});
