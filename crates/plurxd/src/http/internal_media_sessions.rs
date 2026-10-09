@@ -582,13 +582,17 @@ pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
+    let owner = crate::transcode::PreparedVodOwner {
+        node_id: state.node_id.clone(),
+        source_authority: Some(std::sync::Arc::new(state.clone())),
+    };
     if state
         .transcode
         .vod_prepare_first_before(
             &route.recipe_json,
             &request.session_id,
             user_id,
-            &state.node_id,
+            owner,
             adoption,
             deadline.into(),
         )

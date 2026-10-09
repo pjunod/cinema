@@ -2216,13 +2216,17 @@ pub(super) async fn stage_prepared_successor_with_prime(
                         .session_adoption_token(&preparation.session_id)
                     {
                         Some(adoption) => {
+                            let owner = crate::transcode::PreparedVodOwner {
+                                node_id: state.node_id.clone(),
+                                source_authority: Some(std::sync::Arc::new(state.clone())),
+                            };
                             state
                                 .transcode
                                 .vod_prepare_first_before(
                                     &preparation.recipe_json,
                                     &preparation.session_id,
                                     local_user_id,
-                                    &state.node_id,
+                                    owner,
                                     adoption,
                                     prime_deadline,
                                 )

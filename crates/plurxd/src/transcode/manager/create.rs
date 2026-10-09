@@ -1,6 +1,6 @@
 enum VodRecipeAttachment {
     Recovery { speculative: bool },
-    FirstPreparation,
+    FirstPreparation(PreparedVodOwner),
 }
 
 /// Cancellation after actual capture still retires only that exact private owner.
@@ -2529,7 +2529,7 @@ impl TranscodeManager {
         recipe_json: &'a str,
         session_id: &'a str,
         user_id: i64,
-        owner_node_id: &'a str,
+        owner: PreparedVodOwner,
         adoption: SessionAdoptionToken,
         deadline: Instant,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
@@ -2555,7 +2555,7 @@ impl TranscodeManager {
                 let now = crate::media_sessions::unix_ms();
                 if route.session_id != session_id
                     || route.principal.local_user_id() != Some(user_id)
-                    || route.owner_node_id != owner_node_id
+                    || route.owner_node_id != owner.node_id
                     // prepare_media_session mints epoch one; takeover is recovery,
                     // never a first-capture reservation under this private entry.
                     || route.owner_epoch != 1
@@ -2659,7 +2659,7 @@ impl TranscodeManager {
                             adoption,
                             deadline,
                             if pending {
-                                VodRecipeAttachment::FirstPreparation
+                                VodRecipeAttachment::FirstPreparation(owner.clone())
                             } else {
                                 VodRecipeAttachment::Recovery { speculative: true }
                             },
@@ -2771,10 +2771,11 @@ impl TranscodeManager {
         deadline: Instant,
         purpose: VodRecipeAttachment,
     ) -> bool {
-        let (speculative, first_capture) = match purpose {
-            VodRecipeAttachment::Recovery { speculative } => (speculative, false),
-            VodRecipeAttachment::FirstPreparation => (true, true),
+        let (speculative, first_owner) = match purpose {
+            VodRecipeAttachment::Recovery { speculative } => (speculative, None),
+            VodRecipeAttachment::FirstPreparation(owner) => (true, Some(owner)),
         };
+        let first_capture = first_owner.is_some();
         if Instant::now() >= deadline {
             return false;
         }
@@ -2802,7 +2803,32 @@ impl TranscodeManager {
             {
                 return false;
             }
-            let req = remote.request;
+            // Only the first unattached pending attempt evaluates current source
+            // authority. Replay/recovery never refresh an immutable choice.
+            let eligible = if let Some(owner) = first_owner.as_ref() {
+                if let Some(state) = owner
+                    .source_authority
+                    .as_ref()
+                    .filter(|state| state.node_id == owner.node_id)
+                {
+                    crate::media_pool::prepared_vod_owner(
+                        state,
+                        &remote,
+                        tokio::time::Instant::from_std(deadline),
+                    )
+                    .await
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let mut req = remote.request;
+            let fresh_reuse = first_owner.as_ref().is_some_and(|owner| {
+                req.candidate_context.as_mut().is_some_and(|context| {
+                    Self::bind_prepared_candidate_owner(context, &owner.node_id, eligible.as_ref())
+                })
+            });
             if req.presentation != Presentation::Vod {
                 return false;
             }
@@ -2874,7 +2900,7 @@ impl TranscodeManager {
                     crate::vodserve::VodRecipeRequest {
                         companion,
                         measured_candidate,
-                        retained_capture: if first_capture {
+                        retained_capture: if fresh_reuse {
                             crate::vodserve::RetainedOutputCapture::New
                         } else {
                             crate::vodserve::RetainedOutputCapture::Restore(
@@ -3637,7 +3663,10 @@ mod retained_recovery_tests {
                         &recipe_json,
                         id,
                         user.id,
-                        "node",
+                        PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
                         manager.session_adoption_token(id).expect("repeat adoption"),
                         deadline
                     )
@@ -3666,7 +3695,10 @@ mod retained_recovery_tests {
                         &changed_recipe,
                         id,
                         user.id,
-                        "node",
+                        PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
                         manager
                             .session_adoption_token(id)
                             .expect("changed request adoption"),
@@ -3689,7 +3721,10 @@ mod retained_recovery_tests {
                         &changed_receipt,
                         id,
                         user.id,
-                        "node",
+                        PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
                         manager
                             .session_adoption_token(id)
                             .expect("changed receipt adoption"),
@@ -3705,7 +3740,10 @@ mod retained_recovery_tests {
                         &recipe_json,
                         id,
                         user.id,
-                        "foreign",
+                        PreparedVodOwner {
+                            node_id: "foreign".into(),
+                            source_authority: None
+                        },
                         manager
                             .session_adoption_token(id)
                             .expect("foreign adoption"),
@@ -3753,7 +3791,10 @@ mod retained_recovery_tests {
                         &recipe_json,
                         id,
                         user.id,
-                        "node",
+                        PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
                         manager
                             .session_adoption_token(id)
                             .expect("published adoption"),
