@@ -193,7 +193,8 @@ class PrivateAttachmentCase(unittest.TestCase):
                 assert path == '/issues/1/assets/123'
                 return self.item
         api = API()
-        with patch.dict('os.environ', GITHUB_SERVER_URL='https://forge.lan'):
+        with patch.dict('os.environ', GITHUB_SERVER_URL='https://forge.lan'), \
+                patch.object(retention, 'comment_evidence_bytes', return_value=raw):
             self.assertEqual(retention.attachment_bytes(api, 1, 123, identifier, digest), raw)
             for key, value in [('id', 124), ('uuid', 'wrong'), ('type', 'external'),
                 ('name', 'other.json'), ('size', 1),
@@ -204,6 +205,67 @@ class PrivateAttachmentCase(unittest.TestCase):
                 with self.subTest(key=key), self.assertRaises(receipts.ReceiptError):
                     retention.attachment_bytes(api, 1, 123, identifier, digest)
                 api.item = before
+
+    def chunks(self):
+        import gzip
+        raw = b'{"private": "source-bound evidence"}'
+        identifier = '01234567-89ab-cdef-0123-456789abcdef'
+        digest = retention.digest(raw)
+        packed = base64.b64encode(gzip.compress(raw, mtime=0)).decode()
+        split = len(packed) // 2
+        rows = []
+        for index, part in enumerate((packed[:split], packed[split:])):
+            claim = {'version': 1, 'repository': 1, 'pr': 1,
+                'attachment_id': 123, 'attachment_uuid': identifier,
+                'sha256': digest, 'index': index, 'count': 2, 'gzip_base64': part}
+            rows.append({'id': index + 1, 'user': {'id': 7, 'login': 'writer'},
+                'body': 'Promotion-Unit-Evidence-Chunk: ' + json.dumps(claim)})
+        class API:
+            def get(self, path):
+                assert path == ''
+                return {'id': 1}
+            def pages(self, path):
+                assert path == '/issues/1/comments'
+                return self.comments
+        api = API()
+        api.comments = rows
+        return api, raw, identifier, digest
+
+    def test_private_comment_chunks_preserve_exact_bytes_and_writer(self):
+        api, raw, identifier, digest = self.chunks()
+        api.comments.reverse()
+        with patch.object(receipts, 'verify_attestor') as authenticate:
+            self.assertEqual(retention.comment_evidence_bytes(api, 1, 123, identifier, digest), raw)
+            authenticate.assert_called_once_with(api, {'repository': 1}, {'id': 7, 'login': 'writer'})
+
+    def test_missing_duplicate_wrong_bound_or_tampered_chunks_refuse(self):
+        def alter(rows, key, value):
+            claim = json.loads(rows[0]['body'].split(': ', 1)[1])
+            claim[key] = value
+            rows[0]['body'] = 'Promotion-Unit-Evidence-Chunk: ' + json.dumps(claim)
+        mutations = [lambda rows: rows.pop(), lambda rows: rows.append(copy.deepcopy(rows[0])),
+            lambda rows: alter(rows, 'count', 3), lambda rows: alter(rows, 'count', 129),
+            lambda rows: alter(rows, 'index', True), lambda rows: alter(rows, 'attachment_id', 124),
+            lambda rows: alter(rows, 'attachment_uuid', 'wrong'),
+            lambda rows: alter(rows, 'sha256', '0' * 64),
+            lambda rows: alter(rows, 'gzip_base64', '!not-base64!'),
+            lambda rows: alter(rows, 'unknown', 1),
+            lambda rows: alter(rows, 'gzip_base64', 'A' * 60001)]
+        for mutate in mutations:
+            api, raw, identifier, digest = self.chunks()
+            mutate(api.comments)
+            with self.subTest(mutation=mutate), patch.object(receipts, 'verify_attestor'), \
+                    self.assertRaises((receipts.ReceiptError, ValueError)):
+                retention.comment_evidence_bytes(api, 1, 123, identifier, digest)
+
+    def test_each_comment_writer_is_authenticated_without_content_download(self):
+        api, raw, identifier, digest = self.chunks()
+        api.comments[1]['user'] = {'id': 8, 'login': 'unknown'}
+        def authenticate(api, claim, user):
+            receipts.require(user['id'] == 7, 'Untrusted evidence chunk writer')
+        with patch.object(receipts, 'verify_attestor', side_effect=authenticate), \
+                self.assertRaisesRegex(receipts.ReceiptError, 'Untrusted'):
+            retention.comment_evidence_bytes(api, 1, 123, identifier, digest)
 
     def test_compressed_logs_keep_exact_original_digest_and_bounds(self):
         import gzip
