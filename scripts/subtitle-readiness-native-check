@@ -66,6 +66,8 @@ def main():
         action="store_true",
         help="serve the synthetic fixture for an isolated Android instrumentation run",
     )
+    parser.add_argument("--engine", choices=("avplayer", "webkit"), default="avplayer")
+    parser.add_argument("--browser", help="optional WebKit executable")
     args = parser.parse_args()
     source = (
         args.source_root / "clients/apple/Sources/PlaybackControlReporter.swift"
@@ -134,10 +136,12 @@ def main():
             ],
             check=True,
         )
-        return exercise(root, serve=args.serve)
+        return exercise(
+            root, serve=args.serve, engine=args.engine, browser=args.browser
+        )
 
 
-def exercise(root, serve=False):
+def exercise(root, serve=False, engine="avplayer", browser=None):
     master = """#EXTM3U
     #EXT-X-VERSION:7
     #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",AUTOSELECT=YES,DEFAULT=YES,URI="subs.m3u8"
@@ -195,7 +199,7 @@ def exercise(root, serve=False):
                 )
             else:
                 f = root / path
-                if not f.is_file():
+                if not f.resolve().is_relative_to(root.resolve()) or not f.is_file():
                     self.send_error(404)
                     return
                 body = f.read_bytes()
@@ -221,6 +225,12 @@ def exercise(root, serve=False):
             server.shutdown()
             server.server_close()
             return 0
+    if engine == "webkit":
+        try:
+            return exercise_webkit(server.server_port, requests, browser, ready)
+        finally:
+            server.shutdown()
+            server.server_close()
     try:
         result = subprocess.run(
             [
@@ -252,6 +262,72 @@ def exercise(root, serve=False):
     )
     if result.stderr:
         print(result.stderr)
+    return 0 if passed else 1
+
+
+def exercise_webkit(port, requests, executable, ready):
+    """Native HLS in WebKit, including an actually selected empty rendition."""
+    from playwright.sync_api import sync_playwright
+
+    base = f"http://127.0.0.1:{port}"
+    with sync_playwright() as pw:
+        browser = pw.webkit.launch(
+            **({"executable_path": executable} if executable else {})
+        )
+        page = browser.new_page()
+        page.route(
+            base + "/",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body='<video id="video" muted autoplay controls></video>',
+            ),
+        )
+        print("WebKit: loading fixture", flush=True)
+        page.goto(base + "/")
+        page.add_script_tag(
+            content=(
+                ROOT / "crates/plurxd/src/web/player/directed-change.js"
+            ).read_text()
+        )
+        page.evaluate("""() => {
+            window.PLAYER={sessionId:'native-fixture',curSub:0,
+                subs:[{index:0,native:true}],controlIntentGeneration:1};
+            window.originalVideo=document.getElementById('video');
+            originalVideo.src='/master.m3u8'; originalVideo.play();
+        }""")
+        page.wait_for_function("originalVideo.textTracks.length > 0", timeout=20_000)
+        page.evaluate("""() => {
+            window.observedCues=[];
+            const track=originalVideo.textTracks[0];
+            track.mode='showing';
+            track.addEventListener('cuechange',()=>{
+                for(const cue of track.activeCues||[]) observedCues.push(cue.text);
+            });
+        }""")
+        page.wait_for_function("originalVideo.currentTime > 6", timeout=20_000)
+        before = page.evaluate("originalVideo.textTracks[0].cues.length")
+        print(f"WebKit: selected empty rendition, {before} cues", flush=True)
+        ready.set()
+        directed = page.evaluate("""() => subtitleReadinessRetryTransition(PLAYER,
+            {subtitle_readiness:'ready'}) && retryReadyNativeSubtitle(PLAYER)""")
+        page.wait_for_function("originalVideo.currentTime > 20", timeout=25_000)
+        result = page.evaluate("""() => ({time:originalVideo.currentTime,
+            sameElement:originalVideo===document.getElementById('video'),
+            error:originalVideo.error, cues:observedCues})""")
+        print(json.dumps(result), flush=True)
+        browser.close()
+    passed = (
+        before == 0
+        and directed
+        and result["sameElement"]
+        and result["error"] is None
+        and "cue-18" in result["cues"]
+        and any(r["empty"] for r in requests)
+        and any(not r["empty"] for r in requests)
+    )
+    print(json.dumps({"before": before, "result": result, "requests": requests}))
+    print("PASS" if passed else "FAIL", "native WebKit first-ready recovery")
     return 0 if passed else 1
 
 

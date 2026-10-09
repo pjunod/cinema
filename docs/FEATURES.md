@@ -372,6 +372,15 @@ the physical Apple/Android device matrix remains a release acceptance step.
   matches for missing configured languages. Each source revision can hold
   eight downloaded tracks of at most 256 KiB each. Provider quotas still
   apply. See [operation and setup](OPERATIONS.md#download-missing-subtitles).
+- **Generate missing subtitles offline.** Administrators can choose **Generate
+  subtitles** on a local title's detail page. Configure the optional worker in
+  **Settings → Developer** with an installed whisper.cpp executable and model,
+  a spoken language and an optional missing-language sweep interval. Activity
+  shows queued/running work and owns Stop. Generated WebVTT is labelled as
+  machine-generated and appears in the ordinary subtitle picker on all
+  clients; no media-library file is modified. CPU execution is bounded and
+  models are never downloaded by the job. See
+  [offline transcription](OPERATIONS.md#generate-subtitles-offline).
 - **Track facts are ready before playback.** Every file in the native item-detail
   response carries its complete audio/subtitle lists plus `playback_defaults`:
   the exact audio and subtitle indices the shared server policy would select,

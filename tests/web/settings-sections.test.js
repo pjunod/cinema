@@ -608,7 +608,7 @@ function developerPanels(){
       // The main-merge defects build (2026-10-04): complete-output
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
-      shippedSource("subtitleNotReadyCard"),
+      shippedSource("subtitleTranscriptionCard"),
       shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
       // The fifth time: #517 put the automatic playback-ranges card at the
@@ -697,7 +697,6 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     prepared_quality_handoff: true,
     automatic_decoder_recovery: true,
     vod_live_recovery: true,
-    subtitle_not_ready_503: false,
     pgs_overlay: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
@@ -713,7 +712,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill"])
+  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "pgsoverlay", "subsrc", "subcluster", "subbackfill"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Parallel playback ranges are automatic: the card explains them and reads
   // peer reachability as advisory, and offers no switch of its own.
@@ -1804,6 +1803,43 @@ test("standalone Developer omits cluster controls while preserving local feature
   assert.match(clustered,/Cluster media placement|Portable cluster backup/);
   assert.match(clustered,/TOG:subcluster\|[^|]*\|[^|]*\|checked=true/,
     "hiding an inapplicable control never changes its saved value");
+});
+
+test("transcription readiness never overrides enable or disables Save", async () => {
+  const form=new Function("esc",`${shippedSource("subtitleTranscriptionForm")} return subtitleTranscriptionForm;`)(String);
+  const missing={enabled:true,command:"whisper-cli",model_path:"",language:"en",interval_mins:0,
+    readiness:{ready:false,command_available:false,model_available:false,reason:"Install a local model."}};
+  const html=form(missing);
+  assert.match(html,/id="st-enabled" type="checkbox" checked/);
+  assert.doesNotMatch(html,/disabled/);
+  assert.match(html,/Worker readiness:<\/b> Not ready/);
+  const nodes={"subtitle-transcription-form":{isConnected:true,innerHTML:""},"st-status":{isConnected:true,textContent:""},
+    "st-enabled":{checked:true},"st-command":{value:"whisper-cli"},"st-model":{value:""},"st-language":{value:"en"},"st-interval":{value:"0"}};
+  let request;
+  const save=new Function("document","api","subtitleTranscriptionForm",`${shippedSource("saveSubtitleTranscription")} return saveSubtitleTranscription;`)(
+    {getElementById:id=>nodes[id]},async(path,options)=>{request={path,...options};return missing;},form);
+  await save({isConnected:true,disabled:false});
+  assert.equal(request.path,"/subtitle-transcription");
+  assert.equal(request.body.enabled,true);
+  assert.equal(request.body.interval_mins,0);
+  assert.equal(request.body.model_path,"");
+  assert.match(nodes["st-status"].textContent,/Saved/);
+});
+
+test("transcription queue refusal is not displayed as successful work", async () => {
+  const panel={isConnected:true,textContent:"",innerHTML:""},button={isConnected:true,disabled:false};
+  let outcome="queue_full";
+  const generate=new Function("document","api",`${shippedSource("generateSubtitles")} return generateSubtitles;`)(
+    {getElementById:()=>panel},async()=>({outcome,job_id:"job-a"}));
+  await generate("42",button);
+  assert.match(panel.textContent,/queue is full/);
+  assert.equal(panel.innerHTML,"");
+  assert.equal(button.disabled,false);
+  outcome="existing";
+  await generate("42",button);
+  assert.match(panel.innerHTML,/already queued or running/);
+  assert.match(panel.innerHTML,/#\/activity/);
+  assert.equal(button.disabled,false);
 });
 
 main().then(() => {
