@@ -869,6 +869,7 @@ async fn output_preparation(
             count_of(JobKind::EncodedOutputPrepare, JobState::Running),
         ),
     };
+    let storage = state.transcode.preparation_storage_diagnostics().await;
     let idle = state.transcode.pretranscode_worker_idle();
     DeveloperEnableItem {
         id: "output_preparation",
@@ -905,6 +906,12 @@ async fn output_preparation(
                         "cache.max_gb is 0: preparations would have nowhere to publish".to_owned()
                     }
                 },
+            },
+            DeveloperRequirement {
+                id: "output_storage_ownership",
+                title: "Private preparation storage and cleanup",
+                status: if storage.inventory_complete { RequirementStatus::Met } else { RequirementStatus::Unavailable },
+                evidence: format!("Private media: {} bytes. Pending cleanup: {} owners, {} bytes, oldest {} seconds, failure {}. Cold/unknown cache: {} bytes. Startup inventory complete: {}. Completion keeps storage capacity until cleanup settles.", storage.private_media_bytes, storage.pending_cleanup_count, storage.pending_cleanup_bytes, storage.oldest_cleanup_seconds, storage.last_failure_class, storage.cold_unknown_bytes, storage.inventory_complete),
             },
             DeveloperRequirement {
                 id: "output_jobs",

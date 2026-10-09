@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "host": "lab3",
+  "scope": "isolated_durable_offline_owner_anonymous_numeric_receipt",
+  "status": "measured",
+  "cleanup": {
+    "container_removed": true,
+    "network_removed": true,
+    "private_data_removed": true,
+    "anonymous_image_volumes_removed": 4,
+    "anonymous_volumes_verified_empty": true
+  },
+  "events": [
+    {
+      "ready": false,
+      "preparing": true,
+      "elapsed_seconds": 0.37776555004529655
+    },
+    {
+      "ready": true,
+      "preparing": false,
+      "elapsed_seconds": 132.20780267589726
+    }
+  ],
+  "package": {
+    "actual_bytes": 17612297,
+    "duration_ms": 62020,
+    "progress": 1.0
+  },
+  "package_ready": true,
+  "settings": {
+    "offline_enabled": true,
+    "content_aware_encoding": true,
+    "transcode_software_pool_threads": 2,
+    "vod_index_mins": 0
+  },
+  "accepted_package_retained_vbr": true,
+  "durable_reports": [
+    {
+      "measured": true,
+      "source_identity_matches_excerpt": true,
+      "context": {
+        "version": 1,
+        "recipe_version": 4,
+        "width": 852,
+        "height": 480,
+        "bitrate": 2000,
+        "threads": 2
+      },
+      "windows": [
+        [
+          {
+            "bytes": 458370.0,
+            "seconds": 3.698276839,
+            "mean": 96.02971357446805,
+            "p10": 92.459482
+          },
+          {
+            "bytes": 477745.0,
+            "seconds": 3.7037570410000002,
+            "mean": 96.45694321276594,
+            "p10": 95.362913
+          },
+          {
+            "bytes": 236143.0,
+            "seconds": 3.5956559820000003,
+            "mean": 91.48680636170212,
+            "p10": 89.49312
+          },
+          {
+            "bytes": 124578.0,
+            "seconds": 3.418080117,
+            "mean": 81.78042091489363,
+            "p10": 77.721937
+          }
+        ],
+        [
+          {
+            "bytes": 365217.0,
+            "seconds": 3.295862408,
+            "mean": 96.05391653191488,
+            "p10": 94.475011
+          },
+          {
+            "bytes": 151411.0,
+            "seconds": 3.355064945,
+            "mean": 94.71465640425531,
+            "p10": 93.766916
+          },
+          {
+            "bytes": 72018.0,
+            "seconds": 3.717345637,
+            "mean": 91.55974142553194,
+            "p10": 90.198454
+          },
+          {
+            "bytes": 37575.0,
+            "seconds": 3.713978087,
+            "mean": 85.02694502127659,
+            "p10": 83.190267
+          }
+        ],
+        [
+          {
+            "bytes": 374971.0,
+            "seconds": 3.690789735,
+            "mean": 96.12383229787235,
+            "p10": 94.47306
+          },
+          {
+            "bytes": 126735.0,
+            "seconds": 3.222214743,
+            "mean": 95.41946740425533,
+            "p10": 95.138735
+          },
+          {
+            "bytes": 55826.0,
+            "seconds": 0.459022376,
+            "mean": 92.5491745319149,
+            "p10": 92.113773
+          },
+          {
+            "bytes": 28593.0,
+            "seconds": 0.463902023,
+            "mean": 86.53885048936169,
+            "p10": 85.77274
+          }
+        ]
+      ],
+      "derived_decision": [
+        {
+          "quality": 18,
+          "accepted": false,
+          "reasons": [
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:mean"
+          ],
+          "byte_savings": 0.3693329817997961,
+          "encode_time_ratio": 0.9621998186716633
+        },
+        {
+          "quality": 23,
+          "accepted": false,
+          "reasons": [
+            "window_0:floor",
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:floor",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.696312568937006,
+          "encode_time_ratio": 0.7273819047457287
+        },
+        {
+          "quality": 28,
+          "accepted": false,
+          "reasons": [
+            "window_0:floor",
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:floor",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.8408537592673864,
+          "encode_time_ratio": 0.7109041379494683
+        }
+      ]
+    }
+  ],
+  "source_revision": "1088d7529401297bddced74bfa11c166457468d8",
+  "private_control_files_removed": true,
+  "binary_sha256": {
+    "plurxd": "6b124f7cd7b08da71d5637d280cdfd7d64740dee0a0f8a0a391f9e3acbdab496",
+    "ffmpeg": "90004301255382e1beb441a294fa8b75ac7fbb54678837f224d3458032e38787",
+    "vmaf-ffmpeg": "ae6815ebad4afcb8e2cd98f523e92fbc5702c80b89b482a190974f021ccc2c2d"
+  },
+  "derivation": "Decision recomputed from persisted anonymous numeric windows using the current production winner predicate; raw fingerprints, database and logs stayed source-local."
+}

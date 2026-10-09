@@ -5831,6 +5831,23 @@ source_anchor = "color = if (selected) Accent else OnBg"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
 test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
 
+[[fixes]]
+id = "apple.playback-buffer-limit-hold-wording"
+commits = ["f8f7e07ec34658b9590c95b24a0a71a191cfdcab"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "The server’s playback buffer limit has been reached."
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPlaybackBufferHoldsNameTheBufferLimit"
+
+[[fixes]]
+id = "web.playback-buffer-limit-hold-wording"
+commits = []
+supplements = "apple.playback-buffer-limit-hold-wording"
+source = "crates/plurxd/src/web/player/prepared-switch-measurement.js"
+source_anchor = "The server’s playback buffer limit has been reached."
+test = "tests/playback/web-control.test.js"
+test_anchor = "buffer capacity hold wording identifies the playback buffer for both scheduler codes"
+
 # Published Batch 03 repairs: source/test anchors, not execution receipts.
 [[fixes]]
 id = "android.compact-header-actions-wrap"
@@ -5847,3 +5864,57 @@ source = "clients/apple/Sources/LiveTvSettingsView.swift"
 source_anchor = "Cinema remotes · advisory enablement"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+
+[[fixes]]
+id = "android.dolby-vision-profile-badge-parity"
+commits = ["6990f8791d827652f3c1f1c6f8738e0aea771916"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "get() = if (state != FactState.Source && activeLabel != null)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "aConvertedProfileSevenTitleShowsBothHalvesLit"
+
+
+[[fixes]]
+id = "android.hls-copy-target-arrival"
+commits = ["2ef81d673527ffcda2bf619f494ba6cbfe580149"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "internal fun copyPrerollHasRenderedProgress("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "hlsCopyPrerollSettlesBeforeTheDestinationDeadline"
+
+[[fixes]]
+id = "android.temporary-serving-fence-control-retry"
+commits = []
+supplements = "android.hls-copy-target-arrival"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = 'code in setOf("control_unavailable", "serving_fenced")'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "temporaryServingFenceReplaysThenResumesFreshControl"
+
+
+[[fixes]]
+id = "apple.temporary-serving-fence-control-retry"
+commits = ["bf956ba589c37c96a8985b5e8a4ea6a058faa3cb"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = 'code == "control_unavailable" || code == "serving_fenced"'
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testARetryHonoursTheServersRetryAfter"
+
+
+[[fixes]]
+id = "android.serving-fence-retry-after-header"
+commits = ["92d9f4e4ff2e99203f7b414f7e8296ae91b49978"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+source_anchor = 'failure(response.code, response.body?.string().orEmpty(), json, response.header("Retry-After"))'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlTransportTest.kt"
+test_anchor = "headerOnlyServingFenceCarriesTheServersDelay"
+
+[[fixes]]
+id = "apple.serving-fence-retry-after-header"
+commits = []
+supplements = "android.serving-fence-retry-after-header"
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = 'retryAfterHeader: response.value(forHTTPHeaderField: "Retry-After")'
+test = "clients/apple/Tests/PlaybackControlTransportTests.swift"
+test_anchor = "testHeaderOnlyServingFenceCarriesTheServersDelay"

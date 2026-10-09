@@ -522,6 +522,73 @@ class PlaybackControlRefusalTest {
 
 class PlaybackControlFailureTest {
     @Test
+    fun temporaryServingFenceReplaysThenResumesFreshControl() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlTransportException(
+            status = 503, code = "serving_fenced", retryAfterMs = 4_000,
+        )))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        harness.current = snapshot(position = 2_000)
+        advanceTimeBy(3_999)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+        assertFalse(subject.isStopped())
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals(2, harness.requests.size)
+        assertEquals(harness.requests[0], harness.requests[1])
+        advanceTimeBy(5_001)
+        runCurrent()
+        assertEquals(2L, harness.requests[2].sequence)
+        assertEquals(2_000L, harness.requests[2].positionMs)
+        subject.stop()
+    }
+
+    @Test
+    fun temporaryServingFenceCanEndWithADefinitiveTerminal() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlTransportException(status = 503, code = "serving_fenced")))
+        harness.enqueue(Result.failure(ControlTransportException(status = 410, code = "session_ended")))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1_001)
+        runCurrent()
+        assertEquals(2, harness.requests.size)
+        assertEquals(harness.requests[0], harness.requests[1])
+        assertTrue(subject.isStopped())
+    }
+
+    @Test
+    fun closeCancelsTheServingFenceRetry() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlTransportException(
+            status = 503, code = "serving_fenced", retryAfterMs = 4_000,
+        )))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        subject.stop()
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+        assertTrue(subject.isStopped())
+    }
+
+    @Test
+    fun anUnknown503StillStopsControlReporting() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlTransportException(status = 503, code = "unknown_refusal")))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1_001)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+        assertTrue(subject.isStopped())
+    }
+
+    @Test
     fun `a retryable control failure replays the exact request`() = runTest {
         val harness = Harness(this)
         harness.enqueue(

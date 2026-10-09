@@ -1,6 +1,10 @@
 package tv.plurx.app.player
 
 import kotlinx.serialization.json.Json
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -41,6 +45,40 @@ class PlaybackControlTransportTest {
         assertEquals(4_000, value.retryAfterMs)
     }
 
+    private fun headerFailure(header: String, body: String = """{"code":"serving_fenced","message":"this node has lost quorum serving authority"}""") =
+        Response.Builder()
+            .request(Request.Builder().url("https://media.example/api/v1/hls/session-1/control").build())
+            .protocol(Protocol.HTTP_1_1).code(503).message("Service Unavailable")
+            .header("rEtRy-AfTeR", header).body(body.toResponseBody()).build().use {
+                PlaybackControlTransport.failure(it, json)
+            }
+
+    @Test
+    fun headerOnlyServingFenceCarriesTheServersDelay() {
+        val value = headerFailure("1")
+        assertEquals(503, value.status)
+        assertEquals("serving_fenced", value.code)
+        assertEquals(1_000L, value.retryAfterMs)
+        assertEquals(1_000L, headerFailure(" 1 ", "not json").retryAfterMs)
+    }
+
+    @Test
+    fun headerAndBodyCannotShortenEitherValidDelay() {
+        assertEquals(4_000L, headerFailure("1", """{"retry_after_ms":4000}""").retryAfterMs)
+        assertEquals(4_000L, headerFailure("4", """{"retry_after_ms":1000}""").retryAfterMs)
+        assertEquals(1_000L, headerFailure("1", """{"retry_after_ms":999999}""").retryAfterMs)
+    }
+
+    @Test
+    fun malformedOrOverBudgetHeadersPreserveTheLegacyBody() {
+        listOf("", "-1", "+1", "1.5", "soon", "61", "9999999999999999999999").forEach { header ->
+            assertNull(headerFailure(header).retryAfterMs, "header was '$header'")
+            assertEquals(4_000L, headerFailure(header, """{"retry_after_ms":4000}""").retryAfterMs)
+        }
+        assertEquals(60_000L, headerFailure("60").retryAfterMs)
+        assertEquals(0L, headerFailure("0").retryAfterMs)
+    }
+
     @Test
     fun `an owner change carries the new owner`() {
         val value = failure(
@@ -68,7 +106,7 @@ class PlaybackControlTransportTest {
 
     @Test
     fun `the classifications the reporter depends on round-trip`() {
-        // These four are the whole retryable set. If a rename on the server
+        // These are the typed outcomes used by the retry owner. If a rename on the server
         // ever breaks one, this is where it shows up rather than in a client
         // that quietly stopped reporting.
         assertEquals("owner_transition", failure(425, """{"code":"owner_transition"}""").code)
@@ -80,6 +118,7 @@ class PlaybackControlTransportTest {
             "control_unavailable",
             failure(503, """{"code":"control_unavailable"}""").code,
         )
+        assertEquals("serving_fenced", failure(503, """{"code":"serving_fenced"}""").code)
         assertEquals("owner_changed", failure(409, """{"code":"owner_changed"}""").code)
     }
 }

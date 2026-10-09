@@ -1,0 +1,16 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'org.plurx.qualification.video'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'org.plurx.qualification.video'
+        minSdk 28
+        targetSdk 36
+        versionCode 1
+        versionName '1'
+    }
+}
+dependencies {
+    implementation 'androidx.media3:media3-exoplayer:1.10.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.10.1'
+}

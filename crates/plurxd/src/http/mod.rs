@@ -10849,10 +10849,39 @@ mod tests {
                         | "free_space"
                         | "chapter_thumbs_cache_space"
                         | "output_node_idle"
+                        | "output_storage_ownership"
                         | "retention_same_filesystem"
                 )
             })
             .collect::<Vec<_>>();
+        // Startup inventory may settle between the two readiness requests.
+        // Its status must report the same snapshot as its evidence; this
+        // empty fixture owns no preparation media or pending cleanup.
+        let ownership = items
+            .iter()
+            .find(|item| item["id"] == "output_preparation")
+            .expect("output preparation card")["requirements"]
+            .as_array()
+            .expect("output preparation requirements")
+            .iter()
+            .find(|row| row["id"] == "output_storage_ownership")
+            .expect("private storage ownership row");
+        let evidence = ownership["evidence"].as_str().expect("storage evidence");
+        let inventory_complete = evidence.contains("Startup inventory complete: true.");
+        assert_eq!(
+            ownership["status"],
+            if inventory_complete {
+                "met"
+            } else {
+                "unavailable"
+            },
+            "inventory status and evidence must describe the same snapshot"
+        );
+        assert_eq!(
+            evidence,
+            format!("Private media: 0 bytes. Pending cleanup: 0 owners, 0 bytes, oldest 0 seconds, failure none. Cold/unknown cache: 0 bytes. Startup inventory complete: {inventory_complete}. Completion keeps storage capacity until cleanup settles."),
+            "the empty fixture must report its actual owned storage"
+        );
         // The free-space row reads this host's disk, so it is either.
         for id in ["stored_source_self_test", "stored_source_free_space"] {
             assert!(

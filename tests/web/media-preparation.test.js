@@ -97,7 +97,7 @@ function nextEpisodeHarness(){
     "/items/10":{children:[{id:"1",kind:"episode"},{id:"2",kind:"episode"}]}};
   Object.assign(ctx,{AbortController,setTimeout,clearTimeout,now:0,position:75,
     performance:{now:()=>ctx.now},localStorage:{getItem:k=>settings.get(k),setItem:(k,v)=>settings.set(k,v)},
-    PLAYER:{fileId:"101",meta:{kind:"episode"}},ITEM_FOR_FILE:{"101":"1"},WATCH:null,
+    PLAYER:{fileId:"101",wantsPlayback:true,meta:{kind:"episode"}},ITEM_FOR_FILE:{"101":"1"},WATCH:null,
     playerMeta:it=>({kind:it.kind}),pbTotalSec:()=>100,pbPosSec:()=>ctx.position,
     playbackOwnsAttachedMedia:()=>true,libsCached:async()=>[],
     syncPlayerNextTrack:()=>{},toast:()=>{},api:async(path)=>{reads.push(path);assert.ok(data[path],path);return data[path];},
@@ -166,4 +166,48 @@ test("next episode preparation skips distant paused seeking and non-episode play
     h=>{h.ctx.PLAYER.libraryChannel={};},h=>h.ctx.setAutoNext(false)]){
     const h=nextEpisodeHarness();change(h);h.warm();assert.equal(h.reads.length,0);
   }
+});
+
+
+test("close seek cancellation tick cannot recreate next episode preparation",async()=>{
+  const {ctx,reads,warm}=nextEpisodeHarness();
+  warm();const original=ctx.PLAYER.nextEpisodePreparation;
+  await original.promise;
+  // Execute the real close -> cancelPendingSeek -> pbTick ordering. Stop at
+  // timer teardown, after the synchronous admission edge but before UI cleanup.
+  const noop=()=>{},stopped=new Error("after close seek cancellation");
+  Object.assign(ctx,{WATCH_CLOSE_PROMISE:null,WATCH_GENERATION:1,
+    watchDetach:()=>{ctx.WATCH=null;},PLAY_OPEN_GATE:{invalidate:noop},play:{},
+    reportProgress:()=>Promise.resolve(),retirePlaybackPredecessor:noop,
+    exitPresentationModes:noop,clearPlayerMediaSession:noop,
+    supersedePlaybackControlIntent:p=>{ctx.cancelNextEpisodePreparation(p);p.controlIntentGeneration=1;},
+    finishPlaybackSeekTelemetry:noop,releaseSession:noop,
+    clearPendingSeekTimer:noop,pbTick:warm,stopPlayerTimers:()=>{throw stopped;}});
+  const video={paused:false,seeking:false,classList:{remove:noop},style:{}};
+  ctx.document.getElementById=()=>video;
+  function shipped(file,name){
+    const source=fs.readFileSync(`crates/plurxd/src/web/player/${file}`,"utf8");
+    const at=source.indexOf(`function ${name}(`);assert.ok(at>=0);
+    return source.slice(at,source.indexOf("\n}",at)+2);
+  }
+  vm.runInContext(shipped("transport.js","cancelPendingSeek"),ctx);
+  vm.runInContext(shipped("stats.js","closePlayer"),ctx);
+  assert.throws(()=>ctx.closePlayer(),error=>error===stopped);
+  assert.equal(ctx.PLAYER.wantsPlayback,false);
+  assert.equal(ctx.PLAYER.nextEpisodePreparation,null);
+  assert.equal(reads.length,3,"close admitted a new metadata owner");
+});
+
+test("stopped playback intent rejects late successor metadata",async()=>{
+  const {ctx,warm}=nextEpisodeHarness();let finish,signal;
+  ctx.api=(_path,options)=>{signal=options.signal;return new Promise(r=>finish=r);};
+  warm();const state=ctx.PLAYER.nextEpisodePreparation;
+  ctx.PLAYER.wantsPlayback=false;
+  assert.equal(ctx.nextEpisodePreparationCurrent(ctx.PLAYER,state),false);
+  warm();
+  assert.equal(signal.aborted,true);
+  finish({item:{kind:"episode"}});
+  await state.promise;
+  assert.equal(state.page,null);
+  assert.equal(ctx.PLAYER.nextEpisodePreparation,null);
 });

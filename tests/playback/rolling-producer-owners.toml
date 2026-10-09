@@ -1,3 +1,13 @@
+# PR #947 inherited census reconciliation (source-only base 079960dae):
+# vod/tests/chunk_03.rs additions in 142d9f4e07 and b38387a133 implement
+# retirement_releases_background_admission_with_publication_locks_held and
+# completed_output_survives_retirement_and_manifest_contention. Their finite
+# sleep children are kill-on-drop, ChildJob-attached, ProducerSlot-registered
+# with the background permit, and explicitly writer-settled and confirmed-reaped.
+# These fixtures account for one existing key gate, two method/OS spawn,
+# Command and kill-on-drop sites, and five bounded timeout observations.
+# No inherited production owner or pattern/scope/equality exception is added.
+
 version = 1
 source = "crates/plurxd/src/transcode.rs"
 module_roots = [
@@ -1808,7 +1818,10 @@ pattern = "rendition_build_gate"
 # cancelled preparation termination and settled private artifact exposure.
 # Neither creates a new build owner or scheduler.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 30
+# PR #947 after integrating main 1088d7529: base 30; repair delta +2.
+# Cleanup and conservative cold revalidation take the existing exact-key gate;
+# neither creates a competing build owner.
+expected_occurrences = 32
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -1845,7 +1858,9 @@ expected_occurrences = 40
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
 pattern = "spawn_cancellation_independent"
-expected_occurrences = 5
+# PR #947 after integrating main 1088d7529: base 5; repair delta +1.
+# One bounded inventory batch retains scan ownership when its caller cancels.
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-bounded-vod-head-regeneration"
@@ -1930,6 +1945,9 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# PR947 unit follow-up: one joined test-only blocking worker owns each
+# simulated boot runtime; runtime destruction settles its detached writers
+# before the helper returns its SQLite handle for inspection or restart.
 # PR913: +2 joined source_actor monitor-failure fixture tasks, no detached owner.
 # Shared H2 drain: the accepted driver moves to JoinSet.spawn; two finite
 # regression drivers are explicitly stopped and joined (+1 net).
@@ -2792,7 +2810,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
 # #904: the Mac parser blocking worker retains source/admission guards until
 # joined; one joined Live source-classification fixture observes its owned child.
-expected_occurrences = 902
+# PR #947 after integrating main 1088d7529: base 902; repair delta +5.
+# One exact-owner cleanup attempt plus four finite, joined or aborted/joined
+# regression tasks retain their original owners.
+expected_occurrences = 908
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -2996,7 +3017,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
 # #904: EpochClock owns its Builder-spawned epoch thread; Drop stops, unparks
 # and joins it before releasing the parser engine. This creates no OS child.
-expected_occurrences = 63
+# PR #947 after integrating main 1088d7529: base 63; repair delta +1.
+# One release-triggered runtime task retains the exact cleanup registry;
+# it starts no media producer.
+expected_occurrences = 64
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3018,6 +3042,9 @@ expected_occurrences = 13
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# PR947 unit follow-up: the inventory-cancellation regression replaces
+# scheduler-turn counting with one five-second completion deadline and one
+# twenty-millisecond condition poll; all ownership/accounting assertions stay.
 # Backup passive catch-up: 1618 -> 1622, exactly +4 in backup.rs.
 # The existing publication sleep becomes sleep_until (no count delta).
 # One new timeout_at bounds local metrics, the single trigger and publication
@@ -4261,7 +4288,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
 # #904: one parser stop deadline, three Live executable identity bounds and
 # one P5 unlink bound. Deadlines never replace worker or child settlement.
-expected_occurrences = 1622
+# PR #947 after integrating main 1088d7529: base 1622; repair delta +12.
+# Three production bounds retain detached inventory/cleanup/reap ownership;
+# nine finite fixture observation bounds/polls add no independent scheduler.
+expected_occurrences = 1636
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4299,6 +4329,9 @@ expected_occurrences = 5
 
 [[module_structures]]
 id = "process-command-construction"
+# PR947 unit follow-up: one finite synchronous test-only FFmpeg remux of
+# existing CC0 Main10 HDR10/P5 controls makes the declared DV fixture truthful;
+# testfixtures::run waits and reaps it before exact box/profile/RPU assertions.
 # Main PR915: +2 VOD fixture children (sleep and true), owned by the real
 # registered ChildJob and settled writers before their admission is released.
 # Durable queue adds two test-only shell children, in background_jobs.rs and
@@ -4652,7 +4685,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # #904: one corpus pre-probe and five P5 probe/decode/encode commands use
 # bounded child ownership; one Live classification fixture owns and reaps its
 # shell. The existing Live producer command site is only refactored in place.
-expected_occurrences = 245
+# PR #947 after integrating main 1088d7529: base 245; repair delta +2.
+# Two finite FFmpeg foreground fixtures run synchronously through the existing
+# fixture collector.
+expected_occurrences = 248
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5244,7 +5280,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
 # #904: the broad .spawn() matcher also counts the EpochClock thread above;
 # it remains retained and joined by Drop, not an unowned child launch.
-expected_occurrences = 733
+# PR #947 after integrating main 1088d7529: base 733; repair delta +1.
+# The same release-triggered runtime task above launches no OS child.
+expected_occurrences = 734
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5513,7 +5551,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
 # #904: one Live classification fixture waits for its owned shell child,
 # verifies settlement and classifies the actual decoder-refusal exit.
-expected_occurrences = 320
+# PR #947 after integrating main 1088d7529: base 320; repair delta +3.
+# Two waits join the existing ReapOperation; one fault hook waits the actual
+# registered child.
+expected_occurrences = 323
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -5713,6 +5754,8 @@ pattern = "kill_on_drop\\s*\\("
 # finite reordered-VOD decode fixture. Their enclosing owners also await reap.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
+# PR #947 after integrating main 1088d7529: base 101; repair delta +0.
+# No repair delta; preserve current main's already reconciled fixture owners.
 expected_occurrences = 101
 # Promotion union: final count is measured after architectural conflict resolution.
 

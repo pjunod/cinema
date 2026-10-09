@@ -264,6 +264,12 @@ async fn prepared_copy_issued_body_survives_later_successful_foreground_attachme
     prepared_copy_consumer(3).await;
 }
 
+#[tokio::test]
+async fn completed_copy_preparation_does_not_spill_into_live_playback() {
+    prepared_copy_consumer(4).await;
+}
+
+#[allow(clippy::disallowed_methods)]
 async fn prepared_copy_consumer(control: u8) {
     use plurx_core::store::background_jobs::*;
     let base = crate::test_tempdir().expect("prepared copy consumer");
@@ -283,8 +289,27 @@ async fn prepared_copy_consumer(control: u8) {
     }).await.expect("item");
     assert_eq!(store.upsert_file(item, &file.path.to_string_lossy(), file.size, file.mtime,
         &plurx_core::domain::ProbeResult::default()).await.expect("source row"), file.id);
-    create(&serve, &file, "incumbent", "original", &settings()).await;
-    drop(fetch(&serve, "incumbent", &segment_name(0)).await);
+    let mut playback_settings = settings();
+    let mut owed = None;
+    let viewer_pause = (control == 4).then(|| serve.shared.test_hooks().ordinary_materialize.arm("owed foreground media"));
+    let mut viewer_held = None;
+    if control == 4 {
+        playback_settings.working_set_bytes = 1 << 20;
+        let short_path = base.path().join("ordinary-short.mkv");
+        testfixtures::run(std::process::Command::new(testfixtures::ffmpeg())
+            .args(["-v", "error", "-y", "-i"]).arg(&file.path)
+            .args(["-t", "4", "-c", "copy"]).arg(&short_path));
+        let mut ordinary = media_file_at(short_path, 4000); ordinary.id = 42;
+        let (_, index) = store_with_index(&ordinary).await;
+        store.put_fragment_index(ordinary.id, &index).await.expect("ordinary title index");
+        let pause = viewer_pause.as_ref().expect("foreground barrier owner");
+        create(&serve, &ordinary, "incumbent", "original", &playback_settings).await;
+        viewer_held = Some(pause.reached().await);
+        owed = Some({ let serve = Arc::clone(&serve); tokio::spawn(async move { fetch(&serve, "incumbent", &segment_name(1)).await }) });
+    } else {
+        create(&serve, &file, "incumbent", "original", &playback_settings).await;
+        drop(fetch(&serve, "incumbent", &segment_name(0)).await);
+    }
     let incumbent = serve.shared.sessions.lock().await.get("incumbent").expect("incumbent")
         .rendition.clone().expect("partial rendition");
     let incoming = request("prepared", 0.0);
@@ -326,12 +351,100 @@ async fn prepared_copy_consumer(control: u8) {
         Arc::clone(&store), Arc::new(CopyPreparationAuthority), job.token.expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
     ).expect("active owner");
-    let prepared = tokio::time::timeout(Duration::from_secs(15), serve.prepare_copy_output(
+    if (10..=15).contains(&control) {
+        let hooks = serve.shared.test_hooks();
+        let pause = match control {
+            10 => hooks.private_marker.arm("constructor before marker"),
+            11 => hooks.rendition_installed.arm("constructor installed"),
+            12 => hooks.preparation_snapshot.arm("construction before fence snapshot"),
+            13 | 15 => hooks.private_materialize.arm("owned publication before write"),
+            _ => hooks.private_registration.arm("owned child before registration"),
+        };
+        let task = { let serve = Arc::clone(&serve); let incoming = incoming.clone(); let file = file.clone(); let object = object.clone(); let fence = active.fence();
+            tokio::spawn(async move { serve.prepare_copy_output((&incoming).into(), &file, &settings(), &object, 64 << 20, fence, Instant::now() + Duration::from_secs(15), crate::admission::Admissions::new(),
+                (Arc::new(crate::ffmpeg::EncodedExecutable::capture().await.expect("executable")), crate::ffmpeg::EncodedEngine::capture(None).await.expect("engine")), || true).await }) };
+        let mut held = Some(pause.reached().await);
+        let private_source = serve.shared.renditions.lock().await.values().find(|rendition| rendition.private_storage.is_some()).cloned();
+        let reap_fault = Arc::new(PrivateWaitFailure { fail: AtomicBool::new(true), attempts: AtomicU64::new(0) });
+        if control == 15 {
+            let source = private_source.as_ref().expect("registered private producer");
+            assert!(!matches!(source.slot.belief().await, Producer::Absent { .. }));
+            source.slot.set_reap_hooks(reap_fault.clone()).await;
+            hooks.private_failures.lock().expect("unlink fault").insert(format!("unlink:{}", source.key));
+        }
+        task.abort(); assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        serve.shared.preparation_storage.maintain(&serve.shared).await;
+        assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 1, "constructor/writer/child still owns capacity");
+        { let ordinary = incumbent.manifest.lock().await;
+            let owned = if ordinary.is_admitted() { 0 } else { ordinary.materialized_bytes() };
+            assert_eq!(serve.shared.working_set.load(Relaxed), owned, "private teardown never adds to the incumbent's ordinary pressure");
+        }
+        if control == 15 {
+            let source = private_source.as_ref().expect("source");
+            // The publication pause holds the exact-key build gate. Let its
+            // already-owned write settle so cleanup can acquire the gate and
+            // exercise the registered child reaper with the wait fault set.
+            held.take().expect("publication pause").release();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while reap_fault.attempts.load(Acquire) < 2 {
+                    serve.shared.preparation_storage.maintain(&serve.shared).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.expect("real child.wait failures are retried by the owning reaper");
+            assert!(source.dir.path().join(super::preparation_storage::MARKER).exists());
+            let other_key = "9".repeat(64);
+            let other = private_storage_fixture(&serve, &other_key, 4096, 50 << 30).await;
+            other.release();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while base.path().join(&other_key).exists() {
+                    serve.shared.preparation_storage.maintain(&serve.shared).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.expect("independent cleanup progresses during reap failure");
+            assert!(!base.path().join(&other_key).exists(), "another cleanup progresses while this reaper fails");
+            reap_fault.fail.store(false, Release);
+        }
+        if let Some(held) = held { held.release(); }
+        if control == 15 {
+            serve.shared.preparation_storage.maintain(&serve.shared).await;
+            assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 1, "unlink fault remains owned after child reap clears");
+            hooks.private_failures.lock().expect("clear unlink").clear();
+        }
+        drain_private_cleanup(&serve).await;
+        assert_eq!(serve.shared.preparation_media.load(Relaxed), 0);
+        assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 0);
+        serve.end("incumbent", Terminal::Deleted).await; active.finish().await;
+        return;
+    }
+    if control == 6 {
+        let mut failures = serve.shared.test_hooks().private_failures.lock().expect("fault");
+        failures.insert("link_after_init".into()); failures.insert("unlink".into());
+    }
+    let prepared_result = tokio::time::timeout(Duration::from_secs(15), serve.prepare_copy_output(
         (&incoming).into(), &file, &settings(), &object, 64 << 20,
         active.fence(), Instant::now() + Duration::from_secs(15), crate::admission::Admissions::new(),
         (Arc::new(crate::ffmpeg::EncodedExecutable::capture().await.expect("executable")),
          crate::ffmpeg::EncodedEngine::capture(None).await.expect("engine")), || true,
-    )).await.expect("bounded preparation").expect("actual completed copy body");
+    )).await.expect("bounded preparation");
+    if control == 6 {
+        assert!(prepared_result.is_err(), "partial link failure is a refused preparation");
+        serve.shared.preparation_storage.maintain(&serve.shared).await;
+        let held_capacity = serve.shared.retained_artifacts.test_capacity_snapshot();
+        assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 1);
+        assert!(held_capacity.0 > 0 && held_capacity.1 > 0);
+        serve.shared.retained_artifacts.collect(base.path()).await;
+        assert_eq!(serve.shared.retained_artifacts.test_capacity_snapshot(), held_capacity, "failed partial artifact remains pinned while scratch unlink fails");
+        assert!(super::retained::RetainedArtifactRegistry::reserve_preparation(&serve.shared, 1, held_capacity.0 + held_capacity.1).await.is_none(), "cleanup failure cannot open a capacity-reuse gap");
+        serve.shared.test_hooks().private_failures.lock().expect("clear fault").clear();
+        drain_private_cleanup(&serve).await;
+        assert_eq!(serve.shared.preparation_media.load(Relaxed), 0);
+        serve.shared.retained_artifacts.collect(base.path()).await;
+        assert!(serve.shared.retained_artifacts.test_capacity_snapshot().0 < held_capacity.0, "the partial retained charge releases only after source settlement");
+        serve.end("incumbent", Terminal::Deleted).await; active.finish().await;
+        return;
+    }
+    let prepared = prepared_result.expect("actual completed copy body");
+    let wire_bytes = prepared.private_wire_bytes();
     let facts = prepared.private_facts();
     assert!(facts.valid());
     assert!(!serve.shared.retained_artifacts.test_has_artifact(&facts),
@@ -343,6 +456,7 @@ async fn prepared_copy_consumer(control: u8) {
             .expect("source incarnation change");
         assert!(!prepared.settle_and_expose(&intent).await.expect("changed source refusal"));
         assert!(!serve.shared.retained_artifacts.test_has_artifact(&facts));
+        drain_private_cleanup(&serve).await;
         assert_eq!(serve.shared.preparation_media.load(Relaxed), 0);
         assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 0);
         assert_ne!(store.background_job(&id).await.expect("job").expect("row").state, JobState::Succeeded);
@@ -354,6 +468,7 @@ async fn prepared_copy_consumer(control: u8) {
         create(&serve, &file, "new-foreground", "foreground", &settings()).await;
         assert!(!prepared.settle_and_expose(&intent).await.expect("yielded preparation"));
         assert!(!serve.shared.retained_artifacts.test_has_artifact(&facts));
+        drain_private_cleanup(&serve).await;
         assert_eq!(serve.shared.preparation_media.load(Relaxed), 0);
         assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 0);
         assert!(Arc::ptr_eq(serve.shared.sessions.lock().await.get("incumbent")
@@ -365,10 +480,46 @@ async fn prepared_copy_consumer(control: u8) {
         active.finish().await;
         return;
     }
+    let ordinary_before = if control == 4 { 0 } else { let manifest = incumbent.manifest.lock().await;
+        if manifest.is_admitted() { 0 } else { manifest.materialized_bytes() } };
+    let private_key = serve.shared.renditions.lock().await.values().find(|rendition| rendition.private_storage.is_some()).expect("private source rendition").key.clone();
+    if control == 5 || control == 7 { serve.shared.test_hooks().private_failures.lock().expect("fault").insert(if control == 7 { "store" } else { "unlink" }.into()); }
     assert!(prepared.settle_and_expose(&intent).await.expect("atomic settlement"));
+    if control == 5 || control == 7 {
+        serve.shared.preparation_storage.maintain(&serve.shared).await;
+        let blocked = serve.shared.retained_artifacts.test_capacity_snapshot();
+        assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 1);
+        assert!(blocked.0 > 0 && blocked.1 > 0, "retained body and residual scratch have distinct backed owners");
+        serve.shared.retained_artifacts.test_expire_artifact(&facts);
+        serve.shared.retained_artifacts.collect(base.path()).await;
+        assert!(serve.shared.retained_artifacts.test_has_artifact(&facts), "a truly expired artifact stays pinned while source cleanup is blocked");
+        assert_eq!(serve.shared.retained_artifacts.test_capacity_snapshot(), blocked, "GC cannot uncharge the cleanup pin");
+        assert!(super::retained::RetainedArtifactRegistry::reserve_preparation(&serve.shared, 1, blocked.0 + blocked.1).await.is_none(), "near-full retained budget cannot reuse pending cleanup capacity");
+        serve.shared.test_hooks().private_failures.lock().expect("clear fault").clear();
+    }
+    if control == 4 {
+        let ordinary_after = serve.shared.working_set.load(Relaxed);
+        assert_eq!(ordinary_after, ordinary_before, "settlement cannot turn full-title scratch into viewer pressure");
+        assert!(wire_bytes > playback_settings.working_set_bytes, "full-title preparation is larger than playback budget");
+        assert!(!owed.as_ref().expect("owed foreground segment").is_finished());
+        viewer_held.take().expect("foreground barrier").release();
+        drop(tokio::time::timeout(Duration::from_secs(5), owed.take().expect("foreground GET")).await.expect("in-budget viewer progresses").expect("foreground task"));
+        assert!(!matches!(*incumbent.capacity_hold.lock().expect("hold"), Some(crate::prodsched::Hold::WorkingSetFull { .. }) | Some(crate::prodsched::Hold::NoRoom { .. })));
+    }
     assert_eq!(store.background_job(&id).await.expect("job").expect("job row").state, JobState::Succeeded);
-    assert_eq!(serve.shared.preparation_media.load(Relaxed), 0, "live exclusion released exactly once");
+    drain_private_cleanup(&serve).await;
+    assert_eq!(serve.shared.preparation_media.load(Relaxed), 0, "private media retired exactly once");
     assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 0);
+    assert!(!store.forget_rendition_plan(&private_key).await.expect("private plan already retired"));
+    if control == 5 || control == 7 {
+        let before_gc = serve.shared.retained_artifacts.test_capacity_snapshot().0;
+        serve.shared.retained_artifacts.test_expire_artifact(&facts);
+        serve.shared.retained_artifacts.collect(base.path()).await;
+        assert!(!serve.shared.retained_artifacts.test_has_artifact(&facts));
+        assert!(serve.shared.retained_artifacts.test_capacity_snapshot().0 < before_gc);
+        serve.end("incumbent", Terminal::Deleted).await; active.finish().await;
+        return;
+    }
     serve.try_create(VodRecipeRequest { soundtrack: None, companion: None,
         request: &incoming, encoding: None, measured_candidate: None,
         retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
@@ -593,3 +744,45 @@ async fn output_prepare_rows_carry_a_deadline() {
     assert_ne!(d2_job_state(&store, &job.id).await, JobState::Queued,
         "an output preparation row nothing executes expires");
 }
+
+async fn drain_private_cleanup(serve: &Arc<VodServe>) {
+    let cleanup_deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < cleanup_deadline {
+        serve.shared.preparation_storage.maintain(&serve.shared).await;
+        if serve.shared.preparation_storage.diagnostics(&serve.shared).await.pending_cleanup_count == 0 { return; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("private cleanup did not settle");
+}
+
+#[tokio::test]
+async fn preparation_constructor_cancellation_before_marker_has_a_cleanup_owner() { prepared_copy_consumer(10).await; }
+#[tokio::test]
+async fn preparation_constructor_cancellation_after_installation_has_a_cleanup_owner() { prepared_copy_consumer(11).await; }
+#[tokio::test]
+async fn preparation_cancellation_during_fence_snapshot_has_a_cleanup_owner() { prepared_copy_consumer(12).await; }
+#[tokio::test]
+async fn preparation_publication_and_release_barrier_conserves_private_bytes() { prepared_copy_consumer(13).await; }
+#[tokio::test]
+async fn preparation_child_registration_barrier_retains_storage_until_confirmed_reap() { prepared_copy_consumer(14).await; }
+
+#[tokio::test]
+async fn prepared_copy_cleanup_failure_pins_retained_capacity_through_collection() { prepared_copy_consumer(5).await; }
+#[tokio::test]
+async fn preparation_partial_retained_assembly_failure_keeps_source_cleanup_owned() { prepared_copy_consumer(6).await; }
+
+#[tokio::test]
+async fn prepared_copy_cleanup_store_failure_keeps_marker_and_capacity_for_retry() { prepared_copy_consumer(7).await; }
+
+struct PrivateWaitFailure { fail: AtomicBool, attempts: AtomicU64 }
+impl crate::prodrun::ProducerReapHooks for PrivateWaitFailure {
+    fn wait<'a>(&'a self, child: &'a mut tokio::process::Child) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<std::process::ExitStatus>> + Send + 'a>> {
+        Box::pin(async move {
+            self.attempts.fetch_add(1, AcqRel);
+            if self.fail.load(Acquire) { Err(io::ErrorKind::Interrupted.into()) } else { child.wait().await }
+        })
+    }
+}
+
+#[tokio::test]
+async fn preparation_real_wait_and_unlink_failure_retries_preserve_capacity_and_cleanup_fairness() { prepared_copy_consumer(15).await; }

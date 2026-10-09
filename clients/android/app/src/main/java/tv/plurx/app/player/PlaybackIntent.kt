@@ -558,6 +558,23 @@ internal class PlaybackPlanReplacement(private var activeQuality: PlaybackQualit
     }
 }
 
+/** A copied progressive or HLS stream may begin at a preceding keyframe.
+ * Keep first-frame, generation, selection and later-output evidence together
+ * before allowing the film clock to prove arrival at the requested target. */
+internal fun copyPrerollHasRenderedProgress(
+    transport: PlaybackMediaTransport?,
+    pending: PlaybackIntent.PendingSeek,
+    firstFrame: Triple<Long, Long, Int>,
+    foreground: Boolean,
+    playing: Boolean,
+    selectionReady: Boolean,
+    renderedOutputCount: Int,
+): Boolean =
+    (transport == PlaybackMediaTransport.ProgressiveRemux || transport == PlaybackMediaTransport.HlsCopy) &&
+        firstFrame.first == pending.sequence &&
+        firstFrame.second in (pending.targetMs - 2_000L)..pending.targetMs &&
+        foreground && playing && selectionReady && renderedOutputCount > firstFrame.third
+
 /**
  * Deadline for a requested destination, independent of the departing clock.
  * One bounded recovery is allowed for each viewer command. Pause/background
