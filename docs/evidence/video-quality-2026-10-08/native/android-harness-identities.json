@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "initial_source_sha256": "f52d375188a8ee3ff54e99bf7dd330d21287c749b01f902998a2320b055099c0",
+  "attempt2_source_sha256": "8e9c4785d8fdf2e53661286abb7e0cc4c72803be3b86cddb0e73d7d9312a6a9c",
+  "attempt3_and_quiet_retry_source_sha256": "37bd365d04f1d0bacb022d7951d6ec59a89d67c2440bdd073d549ae29364aae7",
+  "initial_reconstruction": "Apply android-harness-epoch.patch in reverse to current ProbeActivity.java.",
+  "attempt2_reconstruction": "Read ProbeActivity.java at commit a920a6c2e.",
+  "criteria": "All established phases still require maximum video/player-clock delta <250ms, monotonic presentation and moving Surface pixels. The epoch fix changes initial admission only; no ongoing mismatch or reversal is dropped."
+}

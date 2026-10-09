@@ -55,7 +55,7 @@
       "--max-workers=2",
       ":app:assembleDebug"
     ],
-    "run": "Create an owned Android TV API36 AVD with explicit temporary path. Boot with -no-window -no-snapshot -gpu swiftshader -cores 2 -memory 2048. Install app-debug.apk after every temporary-disk boot. Use adb reverse for the owned loopback server. Launch org.plurx.qualification.video/.ProbeActivity with --es url and --es case. Poll run-as files/qualification.json until valid JSON with matching case, bounded to105s: exec-out status alone does not prove file existence. Force-stop between cases and delete only the previous receipt. Kill and delete only the owned AVD in finally."
+    "run": "Create an owned Android TV API36 AVD with explicit temporary path. Boot with -no-window -no-snapshot -gpu swiftshader -cores 2 -memory 2048. Install app-debug.apk after every temporary-disk boot. Use adb reverse for the owned loopback server. Force-stop and clear data only for org.plurx.qualification.video, then verify files/qualification.json is absent before every launch (install -r preserves old app data). Launch org.plurx.qualification.video/.ProbeActivity with --es url and --es case. Poll run-as files/qualification.json until valid JSON with matching case, bounded to105s: exec-out status alone does not prove file existence. Force-stop between cases and delete only the previous receipt. Kill and delete only the owned AVD in finally."
   },
   "cases": [
     "animation-bf0",
@@ -68,6 +68,8 @@
     "Initial Android offline dependency resolution lacked transitive annotations; using the application plugin combination plus public dependency fetch compiled successfully.",
     "Initial Android launcher treated exec-out status0 as proof of a file; its error text was not validJSON. No media verdict was obtained.",
     "Owned AVD temporary disk did not persist APK across reboot; subsequent launches install explicitly.",
-    "Initial live-action bf0 probe attributed one outgoing14.583s decoder callback to the new backward-seek epoch with playerclock3s. Retained failure identifies a harness boundary; only this case is retried after target-epoch establishment."
+    "Initial live-action bf0 probe attributed one outgoing14.583s decoder callback to the new backward-seek epoch with playerclock3s. Retained failure identifies a harness boundary; only this case is retried after target-epoch establishment.",
+    "The first Android epoch correction used target+100ms, which rejected valid later first frames under startup load. Only the failed case is retried using the existing250ms video/player-clock correspondence criterion to establish an epoch; later within-epoch reversal and clock checks stay unchanged.",
+    "Quiet attempt4 was invalid: install -r retained the previous same-case receipt, which was accepted before new playback. Clear only the isolated probe package data, verify files/qualification.json is absent, then launch and poll. Every observation equals attempt3; it is not a repeated playback failure."
   ]
 }

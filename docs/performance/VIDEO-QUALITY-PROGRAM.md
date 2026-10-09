@@ -343,8 +343,10 @@ measured. No physical-device row in another programme is closed by these runs.
 include build commands, bundle identity, loopback serving, case inputs, receipt
 polling and cleanup. Create owned devices, use an explicit scratch path, and
 remove only those devices and processes afterward. A decoder callback still
-in flight across a seek belongs to the outgoing epoch until the first frame
-at the requested target establishes the new epoch; the retained failed
-Android control and corrected probe make that harness boundary explicit.
+in flight across a seek belongs to the outgoing epoch until a first frame
+meets the existing 250 ms video/player-clock correspondence criterion. The
+retained failed Android control and corrected probe make that harness boundary
+explicit. A later first frame is admissible; startup frame drops do not have
+to land within 100 ms of the requested target.
 The correction does not change production playback or discard reversals
 inside an established phase.

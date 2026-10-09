@@ -305,3 +305,10 @@ inspection and receipt collection. No running container mounted them. The
 borrowed original failure bundle remains with its existing owner and retention
 policy. Private title bytes were never exported, and production media,
 settings, queues and services were untouched.
+
+A follow-up audit found the image-declared `/var/lib/plurx` volume survives
+container removal without `-v`. The same cleanup receipt records all sixteen
+volumes from these controls, matched by creation time to the reserved experiment
+windows. Each was empty and unreferenced before exact deletion. Other owners’
+volumes were excluded; no broad prune was used. Future isolated Docker captures
+must remove their anonymous volumes with `docker rm -fv`.

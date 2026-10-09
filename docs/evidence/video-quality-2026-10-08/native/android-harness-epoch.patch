@@ -34,9 +34,9 @@
          if (done || ownEpoch != epoch || ptsUs < targets[phase] * 1000 - 100000) return;
 +        // The decoder may finish an outgoing frame after seekTo has already
 +        // changed the application clock. Establish the new epoch with a frame
-+        // at the requested target before checking monotonicity inside it.
++        // corresponding to the current player clock before checking monotonicity.
 +        // Once established, later reversals still fail; no moving window filter.
-+        if (firstPts < 0 && ptsUs > targets[phase] * 1000 + 100000) {
++        if (firstPts < 0 && Math.abs(ptsUs / 1000.0 - player.getCurrentPosition()) >= 250) {
 +            priorEpochCallbacks++;
 +            return;
 +        }

@@ -142,5 +142,142 @@
   ],
   "running_mount_conflicts": false,
   "original_borrowed_capture_untouched": true,
-  "production_changes": false
+  "production_changes": false,
+  "anonymous_image_volumes": {
+    "at": "2026-10-09T02:28:59.492315+00:00",
+    "host": "lab6",
+    "scope": "16 exact anonymous image volumes from isolated HDR controls",
+    "ownership_basis": "one-for-one creation timestamps within the exclusively reserved HDR windows, matched to completed capture receipts; separate C2 window and older volumes excluded",
+    "volumes": [
+      {
+        "case": "stage-control",
+        "volume": "da52be27d5b60a0094d7930c9ea808df8e28a66e7198747f8fd7449dfdff6e44",
+        "created_at": "2026-10-09T01:40:09Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "qmax18-20m",
+        "volume": "797eeb17580501574f44fdb233be70874aed37d12107d12ac88db00bed4c167c",
+        "created_at": "2026-10-09T01:41:28Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "baseline-20m",
+        "volume": "dfadd299ad75df2f8f05789a51dc4ebfcb7572583e5a175a99a6436c782869b3",
+        "created_at": "2026-10-09T01:43:31Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "qmax24-20m",
+        "volume": "cfef6e7176c3a44a310dbfa1dc4b196e69f4aef81a7f690964f5012ef06c962b",
+        "created_at": "2026-10-09T01:44:21Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "real-diagnostic",
+        "volume": "615d615d0edbb26550b9135c36bf634fbf565cb2a58e6c1bec8d450cb655521e",
+        "created_at": "2026-10-09T01:45:17Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "chromatic",
+        "volume": "7df3a523bd713a7b122087c186bafd0b6b3458937cd1e5f870060ecf6c4a265b",
+        "created_at": "2026-10-09T01:49:00Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "real-1800",
+        "volume": "dff0839d004eb57338185b868722c1f5328cb7ecce1e9436126040fe124cc268",
+        "created_at": "2026-10-09T01:49:54Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "real-3600",
+        "volume": "5c7486912f01b62eda8d0e844a5c263d2d58c3b4c9361f1556d2d9a7116c1ed1",
+        "created_at": "2026-10-09T01:50:53Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "pressure8m",
+        "volume": "4f09fecd1c63c5efb8d681181ed88a4061c6d905015235c50ff801da70c1e32d",
+        "created_at": "2026-10-09T01:51:43Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "baseline8m",
+        "volume": "9a358947db3876dd84d899f557e4cd6b4a3637e871bbb2c73aca9878b6c91430",
+        "created_at": "2026-10-09T01:52:54Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "qmax18-8m",
+        "volume": "9c50f37f55c0bdd63bdb6d1ee4e649cc36c6a11440a96fe9c856f254057ee467",
+        "created_at": "2026-10-09T01:53:28Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "pressure2m",
+        "volume": "d2b6f68cc8e65e33528ef5033288be696e3f55fc9f93095b1a1dc6746e3e3b4f",
+        "created_at": "2026-10-09T01:58:51Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "effort1-sharp",
+        "volume": "8a1926bbf05f9c32db5ed0bb3fe5c6ba7107331bd962d9df8e3d423743769c1b",
+        "created_at": "2026-10-09T02:00:53Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "effort1-pressure2m",
+        "volume": "0b3adc15f0276963e7825bcacb3859ef52c6a6dc4a635f83c74b2c6dafaf3199",
+        "created_at": "2026-10-09T02:02:18Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "effort1-real1800",
+        "volume": "f3ce8d7d56bf9aa24444f701bfa422370f8ab1518e525b7096df7ea7b63f0973",
+        "created_at": "2026-10-09T02:03:12Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      },
+      {
+        "case": "effort1-real3600",
+        "volume": "740081abe76a460cdfdb6e59f28089108f6b0045d9ed88a45486af2378cff2bb",
+        "created_at": "2026-10-09T02:03:59Z",
+        "empty": true,
+        "referencing_containers": 0,
+        "removed": true
+      }
+    ],
+    "removed_count": 16
+  }
 }

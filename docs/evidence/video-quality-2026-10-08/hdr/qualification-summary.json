@@ -29,5 +29,5 @@
     "physical_display": "excluded from original autonomous calibration scope; not converted into a pass"
   },
   "external_parameter_reference": "https://ffmpeg.org/ffmpeg-codecs.html#VAAPI-encoders",
-  "cleanup": "All 23 exact owned remote roots removed after inspection and receipt collection, with no running mount conflicts. Borrowed original failure capture and production media untouched."
+  "cleanup": "All 23 exact owned remote roots removed after inspection and receipt collection, with no running mount conflicts. Borrowed original failure capture and production media untouched. Follow-up audit removed all 16 exact anonymous image volumes from these controls after confirming each empty and unreferenced."
 }

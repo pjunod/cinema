@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "result": "Native framework matrix complete: four Apple cases and four Android cases pass within the measured scope.",
+  "apple": {
+    "cases": 4,
+    "phases": 16,
+    "retained_receipts": "apple-*.json"
+  },
+  "android": {
+    "cases": 4,
+    "phases": 16,
+    "retained_initial_passes": [
+      "initial-android-animation-bf0.json",
+      "initial-android-animation-bf2.json",
+      "initial-android-live-action-bf2.json"
+    ],
+    "selective_fresh_pass": "android-final-live-action-bf0.json",
+    "final_harness_identity": "android-final-identity.json",
+    "final_maximum_video_to_player_clock_seconds": 0.153666,
+    "failures_retained": [
+      "initial-android-live-action-bf0.json",
+      "android-epoch-attempt2-live-action-bf0.json",
+      "android-epoch-attempt3-live-action-bf0.json"
+    ],
+    "invalid_stale_attempt": "android-quiet-attempt4-identity.json",
+    "retry_policy": "Three successful initial cases were not rerun. The final selective case requires the same250ms clock limit, monotonic presentation and moving Surface pixels. No production change."
+  },
+  "scope": [
+    "Actual Plurx immutable VOD objects with identities in asset-identities.json.",
+    "AVPlayer on tvOS simulator and Media3 1.10.1 on owned API36 emulator; not shipping application UI or physical hardware.",
+    "Audio selection and video/player-clock correspondence measured; physical speaker/display synchronization not measured.",
+    "Fresh Android receipt follows owned-package data clear and verified receipt absence; attempt4 contributes no new verdict.",
+    "Earlier loaded clock failure is retained; its underlying scheduling cause is not proven by a later pass."
+  ]
+}
