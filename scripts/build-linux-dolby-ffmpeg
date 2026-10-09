@@ -189,9 +189,13 @@ def build_step(root, step, jobs, seconds):
         cflags = " ".join("-I" + str(sdk / p) for p in
             ["sdk/include", "sdk/sysroot/usr/include", "sdk/sysroot/usr/include/x86_64-linux-gnu"])
         ldflags = sdk_link_flags(sdk)
+        # FFmpeg selects lower-case tool variables through its CLI/defaults;
+        # uppercase CC/CXX/PKG_CONFIG alone do not bind the verified tools.
         argv = [str(source / "configure"), *facts["preserved_configure"],
                 "--extra-cflags=" + cflags, "--extra-cxxflags=" + cflags,
-                "--extra-ldflags=" + env["LDFLAGS"] + " " + ldflags]
+                "--extra-ldflags=" + env["LDFLAGS"] + " " + ldflags,
+                "--cc=" + env["CC"], "--cxx=" + env["CXX"],
+                "--pkg-config=" + env["PKG_CONFIG"]]
     elif step == "compile":
         argv = ["/usr/bin/make", "-j" + str(jobs), "V=1"]
     else:

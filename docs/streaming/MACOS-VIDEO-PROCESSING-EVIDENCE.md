@@ -1488,7 +1488,29 @@ refuses collisions or changed source associations. A read-only inventory
 checks all 30 actual multiarch PCs: each has the required `/usr` prefix and
 each projection destination is absent. That inventory's SHA-256 is
 `29b3bd24b075d930785db517f3c9c879f462b24b520962b0dbbf50b22591f1e3`.
-Actual generation and configuration of this repair remain pending.
+Actual generation on `829bf9a9c6d9e4c5d5c441d65124ae17d2fcfb5d` passes
+in 91.92 seconds and produces all 514 declared outputs. Fribidi's actual
+327-byte header comes from its successful upstream Ninja target; its hash is
+`130eba40727bb2c7608fab839333443f938b9769cfcba2122c9caf83ab12c839`.
+Focused Fribidi and Opus preprocessing both pass with the production
+pkg-config invocation. The generated SDK manifest is
+`0cb35aca40bb55160ea7ded2131b37c317fc6369ff4c8af0031927eed39907cb`;
+the generator receipt is
+`8806f4c122e6554727a490df068e23ca8db33eeae277d4695c0bb8edb3ab8ca6`.
+The bounded phase completes cleanup with the container stopped and no OOM.
+Full producer configuration and linking remain separate requirements.
+
+Producer configuration on `829bf9a9` fails after 9.262 seconds. Fribidi and
+the earlier dependency probes pass, but FFmpeg invokes plain pkg-config;
+the uppercase `PKG_CONFIG` environment variable does not select its
+lower-case configure variable. Inspection of the pinned configure's scalar
+option parsing and defaults also finds that uppercase `CC` and `CXX` are
+ignored, although their defaults happen to select the same controlled GCC
+tools. The repair passes all three already verified tool commands through
+their explicit configure options. The official feature tokens, consumed
+LDFLAGS/runtime RPATH, SDK outputs and source authority remain unchanged.
+The failed container stops without an OOM and restores its network state.
+The next configure attempt can reuse the successful generated SDK.
 
 The shipping source also closes a separate integration gap: published and CI
 smoke images bypassed the local `make docker` seam. Both now have a shared
@@ -1537,12 +1559,32 @@ The earlier bounded timeout remains recorded; this successful continuation
 does not erase it. Later SDK-only helper changes have unchanged Rust and Mac
 package inputs and do not relabel this artifact's source identity.
 
-The signed bundle's final text API attempt does not pass. Runtime observation
+The signed bundle's first final text API attempt does not pass. Observation
 reports `sdr_text_burn` available, but normal creation selects CPU processing
-with `runtime_probe_failed`. Investigation must account for the font authority
-on the already captured source-evidence engine; the earlier repair only
-establishes the no-evidence capture path. A separate wrapper UID assertion
+with `runtime_probe_failed`. Initial investigation focuses on font authority
+on the captured source-evidence engine. A separate wrapper UID assertion
 interrupts its telemetry. The actual driver also records the native-plan
 failure, completes daemon shutdown, and leaves no owned driver or daemon;
 the build prefix is restored. These are distinct failures, not evidence of
 successful text delivery or an encoder failure.
+
+The follow-up passive capture identifies the changed input. The first font
+capture contains 23 active configuration lines. After the failing wrapper
+prematurely restores the build prefix, Source capture discovers 44 additional
+inactive available rules. Loaded rules, font listing and all 394 consumed
+font/rule object versions are unchanged. The identity nevertheless hashes
+the entire configuration listing, including inactive entries. Source capture
+already includes fonts; the earlier missing-font hypothesis is disproven.
+The corrective design retains active rule order, paths and content/version
+authority while excluding unconsumed inactive entries from that identity.
+The mismatch refusal itself remains required; no digest comparison is bypassed.
+
+The same final signed `2139fa9c` bundle separately passes all three F3
+file-VOD cases: public HEVC/AC-4 in 53.243 seconds, original caption-bearing
+MPEG-2 in 46.554 seconds, and the caption-free control in 43.421 seconds.
+Each uses the ordinary API and the same held-source producer path, then
+settles its owned processes. The HEVC case retains the strict caption and
+software-reference observer; the MPEG-2 case uses only the previously
+approved first-frame padding correction. The caption-free case retains its
+zero-caption expectation. These successful caption cases do not establish
+native text routing, performance, DVR delivery or client presentation.

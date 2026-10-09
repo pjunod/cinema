@@ -24,7 +24,7 @@ This separate effort began at reviewed combined source
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | Bitmap API and all eight complete-graph raw comparisons pass; final text API exposes a remaining native-route failure | Trace captured font authority, repair the cause, prove text release API delivery and measure performance |
 | F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; 28 Intel diagnostic controls, current Linux check/Clippy and full SDK generation pass | Shipping package, amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
-| F3 caption-bearing VOD VideoToolbox | Dolby builder | Parser and clock repairs integrated; three normal API delivery cases pass, with the MPEG-2 initial-padding oracle corrected on retained bytes; separate release API run initializes the parser and shuts down cleanly | Final combined-source validation; physical client caption presentation remains unqualified |
+| F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on the final `2139fa9c` signed bundle, including caption payload/timing checks and clean owned shutdown | Preserve this evidence through final integration; broader DVR and client presentation qualification remain tracked separately |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
 integration and shared package helpers; Dolby owns `0003`, caption delivery
@@ -51,11 +51,14 @@ and the compiler target is released. The earlier 1,800-second timeout is
 retained as a separate failed attempt. Final bundle assembly and API checks
 now use this captured executable. The text case reports compositor
 availability but selects CPU processing with `runtime_probe_failed`.
-Investigation is tracing the existing source-evidence engine's font identity;
-the earlier no-evidence capture-order repair does not establish this path.
-No final text delivery pass is claimed. A separate measurement-wrapper UID
-assertion also failed; its child and daemon are now absent and the owned
-build prefix is restored. Both failures are retained independently.
+The source-evidence engine already captures fonts. A measurement-wrapper UID
+assertion restored the build prefix before its child finished, exposing 44
+inactive Fontconfig rules. The identity hashes the full listing even though
+only the 23 loaded rules are consumed, so unused configuration changes the
+digest and correctly triggers the existing mismatch refusal. The wrapper
+now settles its child before restoration. An application repair will bind
+the identity to ordered loaded configuration while preserving active-rule,
+font and tool checks. No final text delivery pass is claimed yet.
 
 The earlier `2cd6000b3` Mac release completed in 1,590.286 seconds with its
 owned process group fully reaped. Matching executable and debug symbols are
@@ -88,7 +91,14 @@ generates Fribidi's declared header and projects unchanged authenticated
 Debian metadata to the standard prefix-relative lookup depth. All 30 source
 metadata files have the required `/usr` prefix and no destination collisions;
 their original paths and source associations remain recorded. Fresh
-generation and producer configuration must validate the repaired outputs.
+generation now passes on `829bf9a9` in 91.92 seconds, producing all 514
+declared outputs. The two repaired Fribidi/Opus preprocessing checks also
+pass against the actual generated SDK. Full producer configuration passes
+those dependency stages, then reveals that uppercase `PKG_CONFIG` does not
+select FFmpeg's lower-case configure tool variable. The repair supplies
+verified GCC/G++ and the intended pkg-config command through configure's
+actual command-line options. It reuses the successful generated SDK; no
+metadata or feature change is needed.
 Full linking, matching parser and final package audit remain required; SDK
 generation alone is not a shipping build. No global installation or network
 fallback substitutes for dependencies.

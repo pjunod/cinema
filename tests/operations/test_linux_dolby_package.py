@@ -2,6 +2,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -88,9 +89,45 @@ Version needs section '.gnu.version_r' contains 1 entry:
                      "environment_recipe_sha256": module.sha(root / "source/Dockerfile.in"),
                      "executed_steps": {}}
             (root / "build-state.json").write_text(json.dumps(facts))
-            calls = []
+            calls, selected_tools = [], []
+            # Pinned Jellyfin configure (source 87bedce..., commit 253db2...)
+            # initializes lower-case defaults, parses CMDLINE_SET tool options,
+            # then applies set_default. These actual option-assignment/default
+            # fragments reproduce that consumer; unrelated feature parsing is
+            # outside this focused fixture. Upper-case tool env is not read.
+            tool_parser = r"""
+set_default(){
+    for opt; do
+        eval : \${$opt:=\$${opt}_default}
+    done
+}
+cc_default="gcc"
+cxx_default="g++"
+pkg_config_default=pkg-config
+for opt do
+    optval="${opt#*=}"
+    case "$opt" in
+        --cc=*|--cxx=*|--pkg-config=*)
+            optname="${opt%%=*}"
+            optname="${optname#--}"
+            optname=$(echo "$optname" | sed 's/-/_/g')
+            eval $optname='$optval'
+        ;;
+    esac
+done
+set_default cc cxx pkg_config
+printf '%s\n' "$cc" "$cxx" "$pkg_config"
+"""
+            expected_tools = []
             def capture(argv, cwd, environment, log, deadline):
                 calls.append(argv)
+                expected_tools.extend(environment[name] for name in ["CC", "CXX", "PKG_CONFIG"])
+                baseline = subprocess.check_output(["/bin/sh", "-c", tool_parser],
+                    env=environment, text=True, timeout=10).splitlines()
+                assert baseline == ["gcc", "g++", "pkg-config"]
+                selected_tools.extend(subprocess.check_output(
+                    ["/bin/sh", "-c", tool_parser, "configure", *argv[1:]],
+                    env=environment, text=True, timeout=10).splitlines())
                 return {"argv": argv, "status": 0}
             helper = SimpleNamespace(verified_staging=lambda path: {"sdk_digest": "a" * 64,
                 "generator_tool_versions": {name: {"sha256": "e" * 64} for name in
@@ -103,6 +140,7 @@ Version needs section '.gnu.version_r' contains 1 entry:
                     patch.object(module, "sha", side_effect=tool_or_file_sha):
                 result = module.build_step(root, "configure", 2, 10)
             self.assertEqual(calls[0][1:1 + len(flags)], flags)
+            self.assertEqual(selected_tools, expected_tools)
             self.assertEqual(result["state"], "configured")
             self.assertFalse((root / "provenance/linux-dolby-package.json").exists())
 
