@@ -167,11 +167,15 @@ async fn cancelled_inventory_waiter_cannot_drop_legacy_or_marked_directory_owner
         waiter.abort(); let _ = waiter.await;
         assert!(!serve.shared.retained_artifacts.cold_ready());
         held.release();
-        for _ in 0..100 {
-            serve.shared.preparation_storage.reconcile(&serve.shared).await;
-            if serve.shared.retained_artifacts.cold_ready() { break; }
-            tokio::task::yield_now().await;
-        }
+        // The cancelled waiter leaves its owner completing filesystem I/O;
+        // retry reconciliation may return while that owner holds the mutex.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                serve.shared.preparation_storage.reconcile(&serve.shared).await;
+                if serve.shared.retained_artifacts.cold_ready() { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("detached inventory owner settles after waiter cancellation");
         assert!(serve.shared.retained_artifacts.cold_ready());
         if marked { drain_private_cleanup(&serve).await; assert!(!path.exists()); }
         else { assert_eq!(serve.shared.retained_artifacts.cold_capacity(), 19); assert!(path.exists()); }
