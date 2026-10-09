@@ -1,6 +1,6 @@
 # Dolby Vision processing — implementation evidence and remaining work
 
-**Status:** open — serving integration and Linux packaging under qualification ·
+**Status:** built for supported bounded routes; broader reference and hardware acceptance open ·
 **Updated:** 2026-10-09 · **Integration:** `effort/dv-hdr-processing`
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
@@ -25,7 +25,8 @@ regression trailers. These are integration checks, not product qualification.
 Sol 6.1 sessions provide renderer, CPU/authoring and offline measurement work,
 with independent adversarial review. Settings and generation-bound client
 presentation are implemented; normal serving integration and the installed Linux
-helper bundle are completing qualification. The [M1 contract](DV_HDR_M1_CONTRACTS.md)
+helper bundle have bounded local serving evidence in §22. Current-head qualification
+and promotion receipts are recorded on [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968). The [M1 contract](DV_HDR_M1_CONTRACTS.md)
 initially introduced only additive core types, validation and pure/test-only
 selection; code review approved that bounded Rust diff. On its effort base `03fa9d2`,
 25 focused tests, six compatibility regressions, core all-target checking and
@@ -44,11 +45,11 @@ DV-off validation. Current playback keeps its compatible fallback.
 |---|---|---|
 | M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association, bounded VFR/seek/epochs and affine P8.1 authoring retained with replay recipes | Broader timing and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
 | M1 typed contracts | Merged in #933: 25 focused and six compatibility tests passed; registry intentionally empty in that first slice | Final serving qualification in M2/M3 |
-| M2 processing and lifecycle | Partial: bounded P7/FEL and base-only helpers; owned adapter merged in #946 | Normal playback integration, retained admission and served output evidence |
-| M3 routing and cache identity | Merged in #964: first-window and generation paths, ownership, publication receipts and ordinary-reopen exclusion pass focused checks; native HTTP acceptance pending | Effective operation receipts, later-window fallback, base selection, audio and hardware encoding |
-| M4 settings and HDR10-E badge | Settings #937, report presentation #941 and accepted-control adoption/clearing #955 are merged. #960 describes supported processing and fallback without making readiness a gate | Actual served-generation report and fallback acceptance |
+| M2 processing and lifecycle | Built for supported bounded P7/FEL and base/RPU routes; owned adapter #946 and actual HTTP evidence in §22 | Broader metadata/reference scope and physical hardware acceptance |
+| M3 routing and cache identity | Built: #964 and follow-ups cover first-window/generation paths, ownership and publication; §22 records actual reports, nonzero windows, seek, AAC and fresh compatible reopen | Exact late-metadata refusal diagnostic remains unproven; physical playback and hardware capacity remain open |
+| M4 settings and HDR10-E badge | Built: settings #937, presentation #941 and accepted-control adoption/clearing #955; §22 verifies actual served-generation reports and compatible fallback. #960 keeps readiness advisory | Physical client/display acceptance; both preferences remain default-off while broader acceptance is open |
 | M5 quality and performance | Matched 24-picture software-decode/NVENC comparison recorded in §16; sustained throughput unresolved | Held-out corpus, matched bitrate, physical playback and full graph performance; current 4K helper is slower than realtime |
-| M6 release qualification | Portable Linux helper packaging merged in #963; ARM64/AMD64 loader and manifest checks passed. Full-suite qualification has not started | Final native serving checks, frozen-tree qualification and main promotion |
+| M6 release qualification | Portable Linux bundle #963 and follow-ups passed ARM64/AMD64 loader/manifest checks; §22 records bounded serving evidence | Exact-head unit, gate and promotion results are retained on [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968); those receipts, not this source ledger, determine qualification |
 
 ## 3. Run the bounded offline comparison
 
@@ -826,3 +827,25 @@ The full-unit campaign and promotion result are recorded on PR #968 against
 its final integrated head; the earlier serving source does not certify later
 main changes. Both optional features remain default-off in Developer settings
 with the broader reference, hardware and metadata limits still visible.
+
+
+## 23. Qualification evidence stays bound to its source
+
+Promotion [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968) retains the
+actual full-unit outcomes, source identities and gate receipts. The first
+Android JVM run passed 1,092 tests with no failures or skips; its combined
+command then failed lint on a pre-existing restricted Activity key API. The
+public Window.Callback correction preserves observation, dispatch and event
+consumption. Only the affected 29 tests and lint ran again, and passed. The
+original failed command receipt is preserved unchanged alongside the passing
+unit outcomes and focused repair. Windows was explicitly waived.
+
+The first remote campaign stopped in corrective-history preflight, before any
+of the remaining unit suites ran: three client fixes needed source/test anchor
+rows. A separate local Linux compile passed but warnings-denied Clippy found
+six Linux-only DV runtime lint errors. Their correction keeps the same runtime
+behavior: a callback type alias, standard divisibility predicates and narrowly
+justified argument-count annotations. These failures remain recorded; they
+are not successful qualification claims. Subsequent commands and final gate
+results belong to the promotion record, so this document need not change the
+source being qualified just to announce its result.

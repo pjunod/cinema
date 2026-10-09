@@ -9,6 +9,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(target_os = "linux")]
+type RegistrationHook = Box<dyn FnOnce(&crate::prodrun::ProducerRegistration) + Send>;
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Artifact {
@@ -283,6 +286,10 @@ impl PrivateWindow {
     /// The encoder maps original source pictures to the generation-local
     /// AAC preroll lattice. Original keys and the global grid remain in
     /// `observed`; final sample validation checks the explicit local origin.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "final validation binds independent source, output, timing and audio facts"
+    )]
     pub(crate) async fn finalize(
         self,
         observed: ObservedWindow,
@@ -572,7 +579,7 @@ impl RuntimeRecipe {
         admission: crate::dv_segment::SegmentAdmission,
         producer: Arc<crate::prodrun::ProducerSlot>,
         cancel: tokio_util::sync::CancellationToken,
-        registration_hook: Option<Box<dyn FnOnce(&crate::prodrun::ProducerRegistration) + Send>>,
+        registration_hook: Option<RegistrationHook>,
     ) -> Result<
         (
             VerifiedWindow,
@@ -595,8 +602,12 @@ impl RuntimeRecipe {
                 .map_err(|_| "window picture count overflow")?;
             if frames == 0
                 || frames > 64
-                || entry.duration_ticks % u64::from(grid.denominator) != 0
-                || entry.start_ticks % u64::from(grid.denominator) != 0
+                || !entry
+                    .duration_ticks
+                    .is_multiple_of(u64::from(grid.denominator))
+                || !entry
+                    .start_ticks
+                    .is_multiple_of(u64::from(grid.denominator))
                 || !self.source.unchanged()
                 || !self.tools.is_current().await
             {
@@ -829,7 +840,7 @@ impl RuntimeRecipe {
 #[cfg(target_os = "linux")]
 pub(crate) async fn run_private_window(
     mut request: crate::dv_segment::StreamingSegmentRequest,
-    registration_hook: Option<Box<dyn FnOnce(&crate::prodrun::ProducerRegistration) + Send>>,
+    registration_hook: Option<RegistrationHook>,
 ) -> Result<PrivateWindow, String> {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
@@ -1045,6 +1056,10 @@ impl PrivateWindow {
     /// Validate the complete coded-input set independently of the emitted set.
     /// Raw RPUs are read through the held private directory and parsed again;
     /// JSON can describe observations but cannot replace those actual bytes.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "observation independently binds source window, producer epoch and output grid"
+    )]
     pub(crate) fn observe(
         &self,
         window: &crate::dv_segment::SegmentWindow,
