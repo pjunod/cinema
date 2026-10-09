@@ -197,7 +197,7 @@ def build_step(root, step, jobs, seconds):
                 "--cc=" + env["CC"], "--cxx=" + env["CXX"],
                 "--pkg-config=" + env["PKG_CONFIG"]]
     elif step == "compile":
-        argv = ["/usr/bin/make", "-j" + str(jobs), "V=1"]
+        argv = ["/usr/bin/make", "-j" + str(jobs)]
     else:
         argv = ["/usr/bin/make", "DESTDIR=" + str(root / "installed"), "install"]
     try:

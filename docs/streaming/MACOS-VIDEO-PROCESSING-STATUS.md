@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** follow-up implementation active; prior contribution landed · **Updated:** 2026-10-08 · **Owner:** managing agent with
+**Status:** follow-up implementation active; prior contribution landed · **Updated:** 2026-10-09 · **Owner:** managing agent with
 three GPT-6.1 Sol builders · **Integration:** `effort/video-processing-followups`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
@@ -122,8 +122,14 @@ adds the pinned authentic development package to the existing Docker compiler
 base, with no SDK role or output change. Its isolated installation passes
 and the next configure passes those dependency probes. It then identifies a
 missing `clang` executable in the diagnostic container. The shipping Docker
-compiler stage already declares Clang; the builder is restoring its authentic
-package dependency closure after auditing the full declared compiler base. Runtime base parity
+compiler stage already declares Clang. After a complete inventory audit,
+27 authenticated packages restore the declared compiler base; versioned
+package dependencies, Perl's API provider, exact package deltas and six
+tool identities pass verification. Configuration then passes in 16.692
+seconds with all 57 official options and the complete patch set retained.
+The full compile will use normal Make output within the existing 8 MiB log
+bound; forced verbose commands are unnecessary because actual configuration
+and command evidence are retained separately. Runtime base parity
 and SDK development closure are separate requirements.
 Full linking, matching parser and final package audit remain required; SDK
 generation alone is not a shipping build. No global installation or network
