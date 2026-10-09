@@ -11,7 +11,7 @@ mkdir -p "$work/tools" "$work/generator/src" "$work/tags"
 cp "$source_dir/../"*.c "$source_dir/../"*.h "$source_dir/../build.sh" "$work/tools/"
 cp "$source_dir/"*.c "$source_dir/"*.py "$source_dir/"*.mkv "$work/"
 cp "$source_dir/generator/Cargo.toml" "$source_dir/generator/Cargo.lock" "$work/generator/"
-cp "$source_dir/generator/src/main.rs" "$work/generator/src/"
+cp "$source_dir/generator/src/"*.rs "$work/generator/src/"
 cp "$source_dir/tags/"*.nal "$work/tags/"
 docker run --rm --cpus 2 --memory 2g \
   --mount "type=bind,src=$work,dst=/work" \

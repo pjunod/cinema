@@ -6,8 +6,12 @@ use dolby_vision::rpu::{
     },
 };
 use std::{fs, path::PathBuf};
+mod base_profiles;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(std::env::args().nth(1).ok_or("root")?);
+    if std::env::args().nth(2).as_deref() == Some("base") {
+        return base_profiles::generate(&root);
+    }
     if std::env::args().nth(2).as_deref() == Some("parse") {
         let dir = root.join("adapted");
         for entry in fs::read_dir(&dir)? {

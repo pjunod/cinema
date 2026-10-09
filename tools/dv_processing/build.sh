@@ -9,7 +9,7 @@ dovi_prefix=$3
 output_dir=$4
 mkdir -p "$output_dir"
 : "${CC:=cc}"
-: "${CFLAGS:=-O2}"
+: "${CFLAGS:=-O2 -fno-math-errno}"
 # pkg-config deliberately expands these compiler/linker argument lists. The
 # dependency installations and CFLAGS are trusted build inputs, never playback requests.
 ffmpeg_flags=$(PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --static --cflags --libs libavformat libavcodec libavutil)

@@ -43,10 +43,10 @@ DV-off validation. Current playback keeps its compatible fallback.
 |---|---|---|
 | M0 backend and reference spike | Partial: bounded comparator, structured/parsed GPU controls, CPU reconstruction, encoded-layer association, bounded VFR/seek/epochs and affine P8.1 authoring retained with replay recipes | Broader timing and metadata-reuse acceptance, general metadata adaptation, independent reference limits and full graph resource evidence |
 | M1 typed contracts | Merged in #933: 25 focused and six compatibility tests passed; production registry empty | Runtime integration and qualification in M2/M3 |
-| M2 processing and lifecycle | In progress: combined bounded P7/FEL to timestamped HDR10 helper | Persistent bounded-segment graph, producer ownership/admission and output evidence |
-| M3 routing and cache identity | Not started | Effective operation receipts and fallback generation handling |
+| M2 processing and lifecycle | Partial: bounded P7/FEL and base-only helpers; owned adapter merged in #946 | Normal playback integration, retained admission and served output evidence |
+| M3 routing and cache identity | In progress on `codex/dv-runtime-route`; first-window and generation paths wired, not yet accepted | Effective operation receipts, later-window fallback, base selection, audio and hardware encoding |
 | M4 settings and HDR10-E badge | Settings merged in #937: two default-off preferences persist independently with advisory Developer cards; receipt-backed web/Apple/Android presentation built and reviewed | Effective-generation reporting, runtime integration and route qualification |
-| M5 quality and performance | Not started; M0 supplies the measurement foundation | Held-out corpus, matched bitrate, physical playback and full graph performance |
+| M5 quality and performance | Initial raw-window measurements; matched comparisons in progress | Held-out corpus, matched bitrate, physical playback and full graph performance; current 4K helper is slower than realtime |
 | M6 release qualification | Not started | Exact-tree gates and separate acceptance for each proposed route |
 
 ## 3. Run the bounded offline comparison
@@ -446,3 +446,23 @@ seconds with diagnostic scans disabled, still including startup and five preroll
 pairs and excluding encoding. This remains too slow for realtime 4K playback;
 it is not a steady-state or matched base-versus-FEL benchmark. Actual Vulkan
 device and driver UUIDs, versions and IDs now accompany the runtime trace.
+
+
+## 15. Base-only processing helper
+
+The separate base mode applies the public libplacebo Dolby mapper to supported
+fresh P5, P8.1 and P7 inputs. Its source/timing/RPU observations identify one
+decoded layer and explicitly report no FEL contribution. Thirteen focused
+controls cover polynomial and MMR mapping, omitted FEL, metadata refusals,
+window limits and diagnostic mode. The [helper guide](DV_PROCESSING_TOOLS.md)
+contains the exact replay command and supported envelope. Production selection
+and effective-report projection remain part of the open routing integration.
+
+The independent scalar comparison did not meet its original four-RGB48-code
+tolerance: P5 reached six codes and the P8 affine/piecewise cases reached 27.
+A later same-encode comparison found identical P5 YUV and at most one chroma
+code of difference for P8; that diagnostic does not replace the failed bound or
+establish a general quality improvement. Shared finite RGB48 packing preserves
+the previous expression across 1,830,864 inputs and four rounding modes.
+Decoder counts remain one thread per layer. Increased-thread experiments are
+not production resource settings or evidence of realtime playback.

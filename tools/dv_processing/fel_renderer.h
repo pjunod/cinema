@@ -11,6 +11,7 @@
 
 #include "nlq_clipping.h"
 #include "dv_trace.h"
+#include "rgb48.h"
 
 #include <libdovi/rpu_parser.h>
 #include <libplacebo/filters.h>
@@ -239,8 +240,7 @@ static void save_rgb48le(const char *name, const float *rgba) {
   require(output != NULL, "packed RGB allocation");
   for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
     for (int component = 0; component < 3; component++) {
-      float value = fminf(1, fmaxf(0, rgba[4 * pixel + component]));
-      uint16_t code = (uint16_t)lrintf(value * 65535);
+      uint16_t code = dv_pack_finite_rgb48(rgba[4 * pixel + component]);
       size_t offset = (size_t)(3 * pixel + component) * 2;
       output[offset] = (uint8_t)code;
       output[offset + 1] = (uint8_t)(code >> 8);
@@ -445,8 +445,7 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
     for (int c = 0; c < 4; c++)
       require(isfinite(output[4 * pixel + c]), "finite rendered RGBA");
     for (int c = 0; c < 3; c++) {
-      uint16_t code =
-          (uint16_t)lrintf(fminf(1, fmaxf(0, output[4 * pixel + c])) * 65535);
+      uint16_t code = dv_pack_finite_rgb48(output[4 * pixel + c]);
       packed[6 * pixel + 2 * c] = (uint8_t)code;
       packed[6 * pixel + 2 * c + 1] = (uint8_t)(code >> 8);
     }

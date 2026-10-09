@@ -95,8 +95,14 @@ static void timing(const char *key, int64_t value, AVRational time_base)
 
 int main(int argc, char **argv)
 {
-    require(argc == 6, "usage: mux_layers BL.mkv EL.mkv RPU-dir OUT.mkv normal|missing-el|swapped-el|swapped-rpu|missing-rpu");
+    require(argc == 6 || argc == 7, "usage: mux_layers BL.mkv EL.mkv RPU-dir OUT.mkv normal|missing-el|swapped-el|swapped-rpu|missing-rpu [base5|base8]");
     const char *mode = argv[5];
+    int base_profile = 0;
+    if (argc == 7) {
+        require(!strcmp(argv[6], "base5") || !strcmp(argv[6], "base8"),
+                "base fixture profile5 or8");
+        base_profile = !strcmp(argv[6], "base5") ? 5 : 8;
+    }
     require(!strcmp(mode,"normal") || !strcmp(mode,"missing-el") || !strcmp(mode,"swapped-rpu") || !strcmp(mode,"swapped-el") || !strcmp(mode,"missing-rpu"), "known control mode");
     struct input bl = open_input(argv[1]), el = open_input(argv[2]);
     AVFormatContext *output = NULL;
@@ -113,15 +119,18 @@ int main(int argc, char **argv)
     AVDOVIDecoderConfigurationRecord *cfg = (void *)configuration->data;
     memset(cfg, 0, sizeof(*cfg));
     cfg->dv_version_major = 1;
-    cfg->dv_profile = 7;
+    cfg->dv_profile = base_profile ? base_profile : 7;
     cfg->dv_level = 1;
-    cfg->rpu_present_flag = cfg->el_present_flag = cfg->bl_present_flag = 1;
-    cfg->dv_bl_signal_compatibility_id = 6;
-    AVPacketSideData *enhancement_configuration = av_packet_side_data_new(&par->coded_side_data,
-        &par->nb_coded_side_data, AV_PKT_DATA_HEVC_CONF, el.stream->codecpar->extradata_size, 0);
-    require(enhancement_configuration != NULL, "EL HEVC configuration");
-    memcpy(enhancement_configuration->data, el.stream->codecpar->extradata,
-           el.stream->codecpar->extradata_size);
+    cfg->rpu_present_flag = cfg->bl_present_flag = 1;
+    cfg->el_present_flag = !base_profile;
+    cfg->dv_bl_signal_compatibility_id = base_profile == 5 ? 0 : base_profile == 8 ? 1 : 6;
+    if (!base_profile) {
+        AVPacketSideData *enhancement_configuration = av_packet_side_data_new(&par->coded_side_data,
+            &par->nb_coded_side_data, AV_PKT_DATA_HEVC_CONF, el.stream->codecpar->extradata_size, 0);
+        require(enhancement_configuration != NULL, "EL HEVC configuration");
+        memcpy(enhancement_configuration->data, el.stream->codecpar->extradata,
+               el.stream->codecpar->extradata_size);
+    }
     require(avio_open(&output->pb, argv[4], AVIO_FLAG_WRITE) >= 0, "output file");
     require(avformat_write_header(output, NULL) >= 0, "container header");
     for (int i = 0; i < COUNT; i++) {
@@ -165,7 +174,7 @@ int main(int argc, char **argv)
         require(av_packet_copy_props(combined,base) >= 0, "preserve packet properties");
         memcpy(combined->data,base->data,base->size);
         int used = base->size;
-        bool omitted = !strcmp(mode,"missing-el") && source == 2;
+        bool omitted = base_profile || (!strcmp(mode,"missing-el") && source == 2);
         if (!omitted)
             used += append_wrapped(combined->data + used,enhancement);
         bool rpu_omitted = !strcmp(mode,"missing-rpu") && source == 2;

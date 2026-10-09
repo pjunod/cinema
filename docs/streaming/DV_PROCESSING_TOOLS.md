@@ -45,7 +45,7 @@ builds with `-std=c11 -Wall -Wextra -Werror`. At runtime the dynamic loader must
 find the exact libplacebo build and Vulkan driver; the controls used explicit
 `LD_LIBRARY_PATH`, `VK_ICD_FILENAMES` and a private `XDG_RUNTIME_DIR`.
 
-The helper build defaults to `CFLAGS=-O2`; callers may supply their own compiler
+The helper build defaults to `CFLAGS="-O2 -fno-math-errno"`; callers may supply their own compiler
 flags for diagnostics. Do not use fast-math flags: finite-value checks and exact
 rounding are part of the processing contract.
 
@@ -233,3 +233,43 @@ API/driver versions, vendor/device IDs and device type from the actual physical
 device. The worker binds this observation separately from helper/library hashes;
 a configured GPU name or an available driver is insufficient. Diagnostic digest
 mode must preserve every output byte and all required source/timing observations.
+
+## Base-only Dolby Vision processing
+
+Append `base-rpu` to the window invocation and supply zero for both EL dimensions
+to process one decoded base layer. This mode accepts the supported fresh
+P5/compatibility-0, P8/compatibility-1 and P7/compatibility-6 inputs, using the
+public libplacebo AVFrame uploader and Dolby metadata mapper. Polynomial and
+MMR reshaping and the source RPU color transform are applied once. There is no
+EL decode or residual contribution; the corresponding observations explicitly
+report no FEL/NLQ. Unsupported metadata, reuse, profiles and timing still refuse.
+
+The `accepted_source_base` event binds each decoded base picture to its actual
+RPU, profile, source geometry and timestamp. `base_processing_complete` records
+one decoded layer. This is a separate operation set for the daemon selector;
+a FEL receipt must never be reused for base-only processing.
+
+Thirteen focused controls cover five mapping families, P7 with omitted FEL,
+unsupported or missing metadata, frame bounds, declared EL refusal and explicit
+diagnostic mode. Replay them with the same dependency prefixes:
+
+```sh
+sh tools/dv_processing/controls/replay_base.sh \
+  /absolute/new-base-controls /absolute/dependency-root /absolute/dovi-source
+python3 tools/dv_processing/test_metadata.py
+```
+
+The generator uses the pinned Rust 1.97.1 toolchain and public dependencies; the
+replay reuses the tiny encoded fixtures and compiles the actual helper. A separate
+scalar RGB48 comparison exceeds its declared four-code tolerance: P5 reaches six codes
+and the two P8 controls reach 27. That failure is retained. A later comparison
+after the same Main10 encode finds identical P5 YUV and at most one chroma code
+of difference for P8; this diagnostic does not turn the earlier bound into a
+pass or establish general visual improvement.
+
+Finite RGB48 packing now shares one conversion function. It preserves the
+previous clamping and rounding, including signed-zero behavior. Its focused
+regression compares the actual shared function with the previous expression
+over 1,830,864 finite inputs and four rounding modes. Decoder thread counts
+remain one per layer; the separately measured four-thread experiment requires
+explicitly increased worker admission and is not a production default.
