@@ -263,3 +263,24 @@ compilation, the iOS reporter test build and tvOS compilation passed on the
 corrected implementation. The isolated simulator used for those cases was
 removed after the successful run. The review found no other actionable issue
 and confirmed that the repairs use the existing arrival/retry owners.
+
+
+### Fast-lane timeout continuation
+
+Run 4579 passed all 389 validation and 871 operations methods, emitted a
+completed 1,260-pass framed journal, then hit the ten-minute preflight ceiling
+before final uploads and Node execution. No assertion failed. The receipt
+adapter previously accepted failed-job artifact journals but required
+whole-job success for the same completed log journal. Its framed path now
+preserves terminal-job positives, retaining the success requirement for
+unframed legacy logs. Node zero-execution is independently proved from the
+immutable mandatory-upload barrier, both published starts and terminal log;
+no Node pass or final journal is invented. The preflight budget now allows
+fifteen minutes. Fresh qualification retains applicable passes and executes
+only changed or unfinished checks; this does not waive the final gate.
+
+Targeted disposition reviewed the continuation boundary and rejected both a
+literal mismatch and noncanonical YAML control-key bypasses. The proof now
+admits only the canonical immutable upload/Node step shapes and preserves
+all-skipped histories. Its three new/changed focused regressions passed; the
+original 1,260 individual Python successes will retain their own attribution.

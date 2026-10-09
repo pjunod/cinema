@@ -469,6 +469,97 @@ def require_missing_journal_safe(prior, jobs, scope):
             f"Missing final journal for prior attempt {prior['id']}; preserve possibly passed IDs")
 
 
+
+def recover_missing_final_before_node(api, scope, prior, jobs, workflow):
+    """Account a terminal Python-phase interruption, granting no Node outcomes.
+
+    The successful Python-final upload is a mandatory predecessor of Node.
+    Its absence is useful only with the immutable step order, both published
+    start markers, a completed framed Python journal, and the terminal log.
+    Generic Python continuation separately authenticates its positive records.
+    """
+    from validation import main_unit_receipts as main
+    rid, commit = prior['id'], prior['commit_sha']
+    if jobs and all(terminal_status(job) == 'skipped' for job in jobs):
+        return False  # The existing skipped-history validator authenticates it.
+    matches = [job for job in jobs if job['name'] == main.JOB]
+    require(len(matches) == 1, "Ambiguous interrupted preflight")
+    job = matches[0]
+    if terminal_status(job) not in ('failure', 'cancelled') or job.get('task_id') == 0:
+        return False
+    event = bind_event(prior, scope)
+    require(job['run_id'] == rid and job['repo_id'] == scope['repository']
+            and job['attempt'] == 1 and type(job.get('task_id')) is int
+            and job['task_id'] > 0, "Interrupted preflight identity/attempt mismatch")
+    local_workflow = main.source(commit, '.github/workflows/main-fast-lane.yml')
+    require(workflow == local_workflow, "Interrupted workflow/source mismatch")
+    blocks = list(re.finditer(r'(?m)^  ([A-Za-z0-9_]+):\s*$', workflow.decode()))
+    selected = [i for i, block in enumerate(blocks) if block.group(1) == 'preflight']
+    require(len(selected) == 1, "Ambiguous interrupted workflow job")
+    i = selected[0]
+    block = workflow.decode()[blocks[i].end():blocks[i + 1].start() if i + 1 < len(blocks) else len(workflow.decode())]
+    steps = re.split(r'(?m)(?=^      - )', block)[1:]
+    executor = 'run: python3 -m validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations'
+    positions = [i for i, step in enumerate(steps) if executor in step]
+    require(len(positions) == 1 and positions[0] + 2 < len(steps), "Missing Python/Node upload barrier")
+    upload, node = steps[positions[0] + 1:positions[0] + 3]
+    # Admit the canonical step shapes, not substring matches on YAML keys.
+    # Alternative/duplicate control keys or merges must never bypass the upload.
+    expected_upload = """      - name: Preserve main Python success journal even on unit failure
+        if: always() && steps.receipts.outcome == 'success'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}
+          path: .main-python-unit-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90"""
+    expected_node = """      - name: Check the shared player input contract
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.main_preflight_adoption node"""
+    require(upload.rstrip() == expected_upload and node.rstrip() == expected_node,
+            "Node is not behind the mandatory successful Python upload")
+    raw = api.bytes(f"/actions/jobs/{job['id']}/logs")
+    lines = main.log_lines(raw)
+    snapshots = main.read_snapshots(lines)
+    require(set(snapshots) == {'start', 'final'}, "Interrupted Python journal is incomplete")
+    python_scope = dict(scope, branch=event['pull_request']['head']['ref'],
+                        base='main', workflow=main.WORKFLOW)
+    for phase in ('start', 'final'):
+        main.receipts.validate_journal(snapshots[phase], python_scope, rid, commit, completed=phase == 'final')
+    require(snapshots['start']['complete'] is False
+            and all(snapshots['final']['passes'].get(test) == value
+                    for test, value in snapshots['start']['passes'].items()), "Interrupted journal inheritance mismatch")
+    python_key = main.key(python_scope)
+    adoption_key = f"main-preflight-v1-r{scope['repository']}-pr{scope['pr']}"
+    for name in (python_key, adoption_key):
+        require(not any(a['run_id'] == rid for a in api.pages('/actions/artifacts', {'name': name})),
+                "Interrupted preflight has a final artifact")
+        markers = api.pages('/actions/artifacts', {'name': name + f'-start-{rid}'})
+        require(len(markers) == 1 and markers[0]['run_id'] == rid and not markers[0]['expired']
+                and markers[0]['name'] == name + f'-start-{rid}',
+                "Interrupted preflight start marker unavailable")
+        start = artifact_json(api.bytes(f"/actions/artifacts/{markers[0]['id']}/zip"))
+        if name == python_key:
+            require(start == snapshots['start'], "Python artifact/log start mismatch")
+        else:
+            validate_journal(start, scope, prior, job, environment())
+            require(start['producer_blob'] == git('rev-parse', commit + ':validation/main_preflight_adoption.py')
+                    and start['manifest_blob'] == git('rev-parse', commit + ':' + str(MANIFEST)),
+                    "Interrupted adoption start producer mismatch")
+        require(lines.count(f"Artifact {name}-start-{rid} has been successfully uploaded!") == 1,
+                "Interrupted preflight prepare/start publication unavailable")
+        require(not any(f'Artifact {name} has been successfully uploaded!' in line for line in lines),
+                "Final upload completed; Node execution needs its own evidence")
+    end = lines.index('MAIN-UNIT-END final')
+    require(sum(commit in line for line in lines[:end]) >= 2
+            and any('triggered by event: pull_request' in line for line in lines[:end])
+            and any('context deadline exceeded' in line for line in lines[end + 1:])
+            and not any(line.startswith('Main preflight outcome ') for line in lines)
+            and not any('MAIN-UNIT-' in line for line in lines[end + 1:]),
+            "Interrupted terminal log does not prove the Python-phase timeout")
+    return True
+
 def recover_preunit4294(api, scope, prior, jobs):
     """One authenticated early refusal; import neither outcomes nor a journal."""
     return recover_preunit(api, scope, prior, jobs, PREUNIT4294,
@@ -635,6 +726,9 @@ def prepare(output_key="receipt_key"):
             from validation.main_prepare_refusal_recovery import recover
             if recover(api, scope, prior, jobs):
                 authenticated_runs.add(prior['id'])
+                continue
+            if recover_missing_final_before_node(api, scope, prior, jobs, workflow):
+                authenticated_runs.add(prior["id"])
                 continue
             require_missing_journal_safe(prior, jobs, scope)
             authenticated_runs.add(prior["id"])
