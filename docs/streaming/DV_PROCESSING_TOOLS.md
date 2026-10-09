@@ -28,8 +28,9 @@ Do not mix system FFmpeg headers with these static libraries. Reuse the existing
 source-only dependency build described in the
 [combined controls guide](DV_HDR_COMBINED_CONTROLS.md); enable the additional
 NUT/MOV/MP4 components above before installing that FFmpeg prefix. Retained
-prefixes were used for this change; a clean dependency bootstrap or production
-container installation has not been qualified.
+prefixes were used for the controls. The separate Docker helper stages below
+now provide the clean pinned dependency build and installed bundle. Packaging
+checks do not establish real-film quality, Vulkan device acceptance or speed.
 
 ```sh
 sh tools/dv_processing/build.sh \
@@ -48,6 +49,45 @@ find the exact libplacebo build and Vulkan driver; the controls used explicit
 The helper build defaults to `CFLAGS="-O2 -fno-math-errno"`; callers may supply their own compiler
 flags for diagnostics. Do not use fast-math flags: finite-value checks and exact
 rounding are part of the processing contract.
+
+## Build the installed Linux bundle
+
+The [Dockerfile](../../Dockerfile) keeps `dv-processing-dependencies` separate from helper source
+and daemon builds. It uses the source pins above, Rust 1.97.1, Debian snapshot
+`20260928T000000Z`, and hash-pinned Python build tools. The
+[`build-dependencies.sh`](../../tools/dv_processing/build-dependencies.sh) and
+[`build-bundle.sh`](../../tools/dv_processing/build-bundle.sh) scripts also run
+on Linux with those dependencies installed. Build jobs are bounded to 1–4,
+with a default of 2.
+
+```bash
+# Check only the helper bundle on either shipped Linux architecture.
+docker build --platform linux/arm64 --target dv-processing-helper-check .
+docker build --platform linux/amd64 --target dv-processing-helper-check .
+```
+
+**How to read it:** the manifest check must report schema 1, libplacebo API 374
+and positive FFmpeg ABI majors. Every helper must load and exit with its
+usage status, and Mesa provider definitions must be installed. This headless
+check runs no GPU rendering, media encode or daemon
+suite. The normal `runtime-assets` stage installs the same bundle at
+`/usr/lib/plurx/dv-processing`. Jellyfin FFmpeg 8 remains the production encoder.
+
+The bundle has a private libplacebo directory and an exact source, tool,
+parser and library hash manifest. Only renderer subprocesses receive its
+`LD_LIBRARY_PATH`; ordinary Vulkan ICD discovery remains unchanged. The snapshot installs the portable Mesa Vulkan providers; no selected GPU or
+machine-specific ICD override is baked into the bundle.
+
+`sources/` retains the public dependency archives, libdovi header and locked
+Cargo dependencies, static FFmpeg libraries, helper source and build scripts.
+`licenses/` retains the upstream and linked Rust crate notices. To rebuild the
+bundle from its accompanying source directory, install the documented Linux
+build dependencies and hash-pinned `build-requirements.txt`, then set
+`PLURX_DV_BUILD_INPUTS` to the absolute `sources/build-inputs` directory before
+running `build-dependencies.sh` with a new absolute prefix. Run
+`build-bundle.sh` with that prefix and a new absolute output directory. The
+scripts verify every downloaded archive or header; a mismatch refuses the
+build.
 
 ## Streaming interface
 

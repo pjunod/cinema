@@ -36,7 +36,7 @@ the counts and the full list to one another.
 remux, transcode, frame grabs, and DVR capture. There are 105 such call
 sites — 69 under `crates/plurxd/src/` and 36 under
 `crates/plurx-core/src/` — and every one of them is a `Command::new(...)`.
-There are no `libav*` bindings, no `ffmpeg-sys`/`ffmpeg-next` crate, no
+The Rust daemon and core have no `libav*` bindings, no `ffmpeg-sys`/`ffmpeg-next` crate, no
 `dlopen`/`libloading` of a media library, and neither `build.rs` links
 anything (they stamp version strings). The single `#[link]` attribute in the
 tree is `ntdll` in `crates/plurx-core/src/process_control.rs`.
@@ -749,6 +749,17 @@ and AVFoundation only, and the EPUB reader they embed
 (`reader.js`, `offline-reader.js`) is first-party.
 [XcodeGen](https://github.com/yonaskolb/XcodeGen) (MIT) generates the project
 at build time and ships in nothing.
+
+The Linux DV bundle additionally ships separate native helper executables,
+not native libraries linked into `plurxd`. Those helpers statically link the
+pinned FFmpeg decode/mux libraries (LGPL-2.1-or-later configuration, without
+GPL or nonfree components) and libdovi (MIT), and load a private libplacebo
+(LGPL-2.1-or-later) build. The Vulkan loader, glslang/SPIRV and xxhash retain
+their upstream licenses. The bundle's `licenses/` directory carries their
+license texts and the fetched Rust dependency notices; `sources/` carries
+public dependency archives, the C header, locked Cargo resolution, helper
+source, static FFmpeg libraries and the rebuild scripts. See
+[the helper build boundary](docs/streaming/DV_PROCESSING_TOOLS.md).
 
 ---
 
