@@ -1,16 +1,18 @@
-# macOS video processing review — three execution contracts corrected
+# macOS video processing — independent reviews and dispositions
 
-**Status:** review complete; author corrections applied, not independently
-re-approved · **Reviewed:** 2026-10-07 · **Original verdict:** request changes ·
-**Reviewer:** independent Codex agent `macos_adversarial_review` ·
-**Source inspected:** `890bca0fc186d00f7b10a379cd7dd2f1a37dc37c`.
+**Status:** continuation implementation review active · **Updated:** 2026-10-08.
 
-Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
-[implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This records
-one adversarial documentation/source review requested by Paul. It is not
-an Opus review, a runtime qualification receipt or an implementation result.
-The original reviewer did not edit files. The author applied the corrections
-below after receiving the findings; there was no second approval pass.
+Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md),
+[implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md) and
+[execution status](MACOS-VIDEO-PROCESSING-STATUS.md). Sections 1–6 retain the
+original 2026-10-07 proposal review and its author dispositions. Section 7
+records the final continuation implementation review. Neither is an Opus
+review or a hardware qualification receipt.
+
+The original proposal review inspected `890bca0fc186d00f7b10a379cd7dd2f1a37dc37c`.
+Its verdict was request changes; author corrections were not independently
+re-approved at that stage. Implementation reviews identify their own source
+candidates and must not be inferred from that documentation review.
 
 ## 1. Reviewed inputs and verdict
 
@@ -176,3 +178,136 @@ The author corrections are documentation changes, not proof that their future
 implementation works. The original verdict remains request changes on the
 original draft; this record reports the fixes without claiming independent
 approval of the revised text.
+
+## 7. Continuation implementation review — PR #904
+
+**Candidate:** `2979112df3d9ae9e45e8a4d174977f56aaeb10cd` ·
+**Base:** `c746b6c9b` · **State:** all findings repaired and independently
+accepted, including terminal registration `54c3a3fe8`; no unit execution.
+
+The combined candidate includes all three continuation builders. Independent
+read-only reviewers cover parser/package security, immutable playback and
+Dolby contracts, then Live/client/output integration. Confirmed defects return
+to the owning Sol builder; corrected source is independently re-reviewed.
+After acceptance, the designated merge coordinator owns the fast lane and
+main merge. Missing physical-device or calibrated-display evidence remains
+visible in the status page and is not treated as a source-code defect.
+
+### 7.1 Parser and package security
+
+Reviewer `macos_final_review_security` requests two localized P2 corrections:
+
+| ID | Concrete failure | Architectural repair | Disposition |
+|---|---|---|---|
+| A1 | Package assembly validates the parser receipt but accepts replaced regular FFmpeg/FFprobe binaries alongside stale native source, dependency and capability provenance. | Validate pinned native source identity and both executable hashes in the existing pre-copy and staged-copy validator. | Repaired in `9acf814a8`; independently accepted by the security reviewer. |
+| A2 | Failed WASM parser initialization occurs after setting the snapshot immutable flag but before its cleanup owner exists; temporary-file removal fails and leaks an immutable snapshot. | Establish the existing snapshot cleanup owner before the fallible parser construction, retaining ownership on every error path. | Repaired in `9acf814a8`; independently accepted by the security reviewer. |
+
+The reviewer also inspected held-descriptor confinement, cancellation and
+admission ownership, JIT/cache identity, Wasmtime import/resource bounds,
+live signing inspection, sibling resolution, dSYM identity/copy checks,
+native build/patch provenance, dependency source offers and regression
+definitions. No additional concrete blocker was found in that scope.
+Cargo-deny policy validation remains distinct from the retained dependency
+license metadata audit. No review agent ran tests or compilation.
+
+### 7.2 Immutable playback and Dolby contracts
+
+Reviewer `macos_final_review_contracts` completed the core review with two
+P2 corrections:
+
+| ID | Concrete failure | Architectural repair | Disposition |
+|---|---|---|---|
+| B1 | The runtime P5 observer checks ordinary FFprobe metadata and gray output; a selected graph's stale or shuffled metadata or incorrect colored output could pass those independent checks. | Observe the actual selected graph's pre-renderer PTS-to-Dolby-metadata association and every frame's colored patches, with stale/shuffled/missing metadata and color-corruption negative controls. | Repaired in `a0a3734b`; independently accepted by the contracts reviewer. |
+| B2 | The strict decoder requires current RPU metadata, but its upstream extraction only recognizes an RPU in the literal final NAL position. Valid trailing EOS/EOB can hide a present RPU from that guard. | Reproduce with a bounded legal trailing-NAL fixture, then locate the last non-EOS/EOB NAL within the access unit while retaining strict absence/malformed refusal. | Reproduced with exact strict flags: baseline 24 frames/exit 0; EOS, EOB and both yield 21 frames/exit 183. Native repair `184c937d` and runtime registration `54c3a3fe8` independently accepted. |
+
+B1 is a qualification-authority defect, not evidence that the current GPU
+misrenders. Tiny per-frame peak changes identify metadata transport but do
+not establish observable per-frame pixel influence. The separate retained
+apply/no-apply experiment keeps that narrower scope.
+
+### 7.3 Live, clients and output negotiation
+
+Reviewer `macos_final_review_delivery` identified C1 (P2): Android publishes
+an HLS HEVC sample-entry claim but clears measured decoder profiles when
+Display-aware Auto is off. The server correctly requires those profiles,
+so ordinary HEVC Auto preference becomes dependent on an unrelated switch.
+The client must retain its measured HEVC profile/geometry/rate entries when
+emitting that transport claim, with a capability-document regression for
+the switch-off case. Server validation and unknown-capability refusal remain
+unchanged. The client-owner repair `0d6a466cd` is independently accepted.
+With Display-aware Auto off, actual measured HEVC profiles, geometry and
+cadence are retained only for a positive HLS transport claim. Unknown and
+unclaimed HEVC remain unknown or retain prior behavior, and other codecs
+are unchanged. App/test APK compilation and explicit JVM regression-source
+compilation pass; no tests ran.
+
+Scope A is independently approved after re-review of `9acf814a8`. Both
+pre-copy/staged native identity checks and cleanup ownership before every
+fallible immutable-snapshot initialization were verified by inspection.
+Associated regression definitions cover the reported failures. This approval
+is subject to the coordinator's final validation, not a claim that units ran.
+
+B1 is independently accepted at `a0a3734b`. The re-review confirms actual
+pre-mapper frame metadata, exact grouping/PTS and fail-closed missing/duplicate
+records, plus colored bounds that reject neutral, swapped and raw IPT
+interpretations. Existing child/output/time/cancellation bounds remain intact;
+there is no added subprocess or authority owner. The broad gain allowance is
+explicitly scoped to interpretation rather than precise tone-curve approval.
+
+B2's native correction is independently accepted at `184c937d`. The reviewer
+confirms the reverse scan skips only legal trailing EOS/EOB and retains RPU
+position, size/layer/temporal checks and strict metadata refusal. The original
+synthetic generator changes the final sample payload/size while preserving
+configuration and timestamps. Required-hardware and software receipts support
+the correction. Runtime registration of the three terminal positives is a
+separate narrow follow-on, independently accepted at `54c3a3fe8`. Twelve
+sources across five graph controls produce sixty checks, including all
+original strict-loss negatives. Fixture hashes match the independently
+accepted native controls. No acceptance shortcut, subprocess owner, larger
+corpus cap or longer aggregate deadline was introduced.
+
+### 7.4 Runtime-discovered shared executable resolver
+
+After the source review, normal AC-4 playback on `a2ee4a221` exposed a concrete
+scanner/held-parser mismatch. Paired probes on the identical input establish
+the cause: core scanning selected ambient FFprobe instead of the packaged
+Jellyfin companion. Source attestation correctly rejected the differing facts.
+
+Repair `4adb34c022fda0168dc9d766988ae9a258c0c53a` is independently accepted by
+`macos_final_review_security`. One resolver in the existing core process layer
+now serves scanner, local/book metadata extraction and daemon wrappers.
+Nonempty explicit overrides remain first; empty overrides select packaged
+macOS/Windows siblings or PATH, and Linux defaults remain PATH. The existing
+regular-target `is_file()` behavior is retained, including symlink following.
+No source-integrity or held-source confinement check changes. Both regression
+references resolve; compile and the normal hook pass, with no units run.
+Actual normal-API AC-4 acceptance on `7ecf13dd1` now passes with an
+explicit software encoder: six-channel catalog facts, source attestation,
+stereo 48 kHz served AAC, AVC video and cancellation. The public sample
+exposes an existing CPU-processing/VideoToolbox-encoding caption insertion
+failure; that negative remains recorded as the predeclared caption-bearing
+file-VOD limitation, without a blanket caption strip or route workaround.
+
+### 7.5 Runtime-discovered Live terminal classification race
+
+Actual source-format transition testing on `a2ee4a221` exposed a race between
+FFmpeg exit and its existing stderr observation. The child exited with 178
+after native filter reconfiguration; the owner recorded generic stream failure
+before the source-change flag settled, leaving cached source facts intact.
+
+Repair `4be9603bcfcaf3a93cf11008e0c358155772f128` is independently accepted
+by `macos_final_review_delivery`; reviewed file blob is
+`2779bc2fff70ae68cac61678616f76f7bc4827d2`. The existing session retains
+the same source-change flag through its existing child reap and bounded
+250-millisecond stderr join. Terminal classification then invalidates source
+facts and the retained transport and refines only unclassified `StreamFailed`.
+Warm restart settles the old reader before resetting its signal. Classified
+decoder/encoder causes, cancellation, fencing and timeouts remain intact.
+No additional reader, watchdog, sleep or retry owner is introduced.
+
+Regression source covers an already-exited child whose delayed stderr settles
+during cleanup, and classification precedence. Pinned all-target compilation
+and the normal hook pass; units remain coordinator-owned. Actual daemon
+source-switch confirmation now passes on final `1bf84609`: typed change
+counter, ended resume, fresh source facts and changed output cadence all
+match. EOF/reconnect also passes; evidence §27 retains the final receipt.

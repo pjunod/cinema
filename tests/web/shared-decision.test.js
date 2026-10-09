@@ -255,3 +255,20 @@ test("a shared prepared successor binds whole under the accepted login and the n
  assert.equal(h.requests.at(-1).url,'https://b.test'+base+'/hls/sessions');
  h.change();assert.throws(()=>h.successor(first,offer()),'an account change ends the accepted login');
 });
+
+function hlsHevcHarness(){
+ const source=fs.readFileSync(WEB+"player/decode-tiers.js","utf8");
+ const tiers=source.slice(source.indexOf("const HEVC_TIERS="),source.indexOf("// Fold a per-tier"));
+ const context=vm.createContext({});
+ vm.runInContext(tiers+fn("player/decode-tiers.js","hevcTierSummary")+fn("player/decode-tiers.js","hlsHevcSampleEntries")+"this.probe=hlsHevcSampleEntries;",context);
+ return context.probe;
+}
+test("HLS HEVC requires selected MSE transport and every claimed profile",async()=>{
+ const probe=hlsHevcHarness(), queries=[];
+ const injected={nativeHls:false,hlsJsSupported:true,mediaSource:{isTypeSupported:t=>t.includes("mp4a.40.2")},mediaCapabilities:{decodingInfo:async c=>{queries.push(c);return {supported:true};}}};
+ assert.deepEqual(Array.from(await probe([true,true,false,true,false],[false,false,false,true,false],injected)),["hvc1"]);
+ assert.ok(queries.every(c=>c.type==="media-source"));
+ assert.ok(queries.some(c=>c.video.transferFunction==="pq"));
+ for(const override of [{nativeHls:true},{hlsJsSupported:false},{mediaSource:{isTypeSupported:()=>false}},{mediaCapabilities:{decodingInfo:async()=>({supported:false})}}])
+  assert.deepEqual(Array.from(await probe([true,true,false,true,false],null,{...injected,...override})),[]);
+});

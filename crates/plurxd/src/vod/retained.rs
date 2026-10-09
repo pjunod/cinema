@@ -2359,6 +2359,7 @@ mod tests {
             id: candidate_id,
             recipe_digest: digest,
             route: CandidateRoute::Remux,
+            planned_codec: None,
             normalized_geometry: true,
             width: 1280,
             height: 720,

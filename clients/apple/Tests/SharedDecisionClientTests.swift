@@ -18,6 +18,20 @@ private final class DecisionHTTP: URLProtocol {
     override func stopLoading() { if blocked { Self.stopped?() } }
 }
 final class SharedDecisionClientTests: XCTestCase {
+    func testHlsHevcPackagingClaimIsIndependentAndPreservesExplicitEmpty() throws {
+        let unknown = Caps.capsDocument(hevc: true, av1: false, displayHDR: false, dolbyVision: false)
+        XCTAssertNil(unknown.hlsHevcSampleEntries)
+        let refused = Caps.capsDocument(hevc: true, av1: false, displayHDR: false, dolbyVision: false,
+                                       hlsHevcSampleEntries: [])
+        let accepted = Caps.capsDocument(hevc: false, av1: false, displayHDR: false, dolbyVision: false,
+                                        hlsHevcSampleEntries: ["hvc1"])
+        XCTAssertEqual(refused.hlsHevcSampleEntries, [])
+        XCTAssertEqual(accepted.hlsHevcSampleEntries, ["hvc1"])
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(refused)) as? [String: Any])
+        XCTAssertEqual(wire["hls_hevc_sample_entries"] as? [String], [])
+    }
+
     private let ref = SharedPlaybackReference(importId: "11111111-1111-4111-8111-111111111111", serverId: "22222222-2222-4222-8222-222222222222", catalogueEpoch: "33333333-3333-4333-8333-333333333333", libraryId: "9007199254740993", itemId: "9223372036854775807")
     private var base: String { "/api/v1/shared/imports/\(ref.importId)/files/" + String(repeating: "L", count: 236) }
     private var configuration: URLSessionConfiguration { let value = URLSessionConfiguration.ephemeral; value.protocolClasses = [DecisionHTTP.self]; return value }

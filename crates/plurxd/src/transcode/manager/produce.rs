@@ -1153,6 +1153,7 @@ impl TranscodeManager {
             None => self.resolve_movie_plan(file, &opts, encoder).await?,
         };
         opts.pipeline = plan.options().pipeline;
+        opts.strict_dolby = plan.options().strict_dolby.clone();
         let deadline =
             retain_production_budget_after_planning(deadline, planning_started.elapsed());
         let digest = self.digest().ok_or("no cache digest")?;

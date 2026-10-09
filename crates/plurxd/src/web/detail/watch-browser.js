@@ -236,8 +236,15 @@ function watchRenderPlaying(){
 function watchInspectEpisode(id){
   const e=WATCH?.episodes?.find(e=>exactWireId(e)===id);if(!e)return;
   const d=document.getElementById("watch-details");
-  d.innerHTML=`<button class="ghost" onclick="this.closest('dialog').close()">Close details</button><h2>${esc(e.title)}</h2><p>${esc(e.overview||"No synopsis available.")}</p><button data-watch-play="${esc(id)}">Play</button>`;
-  d.querySelector('[data-watch-play]').addEventListener('click',()=>{d.close();watchPlayEpisode(id);});watchRenderPlaying();d.showModal();
+  d.innerHTML=`<button class="ghost" data-remote-watch-close onclick="this.closest('dialog').close()">Close details</button><h2>${esc(e.title)}</h2><p>${esc(e.overview||"No synopsis available.")}</p><button data-watch-play="${esc(id)}">Play</button>`;
+  const opener=/** @type {HTMLElement|null} */(document.activeElement),w=WATCH,elements=/** @type {HTMLButtonElement[]} */([d.querySelector('[data-remote-watch-close]'),d.querySelector('[data-watch-play]')]);
+  const close=()=>{d.close();if(opener?.isConnected)opener.focus({preventScroll:true});else document.getElementById("pbplay")?.focus();};
+  elements[0].onclick=close;
+  elements[1].addEventListener('click',()=>{close();watchPlayEpisode(id);});watchRenderPlaying();d.showModal();
+  cinemaRemoteOwnPresentation(d,"player",()=>WATCH===w&&w.episodes?.includes(e),close,[
+    {id:"episode:close",element:elements[0],label:"Close details",activate:()=>{close();return "applied";}},
+    {id:"episode:play:"+id,element:elements[1],label:"Play episode",activate:()=>{close();watchPlayEpisode(id);return "applied";}}
+  ]);
 }
 // Chapters.
 //

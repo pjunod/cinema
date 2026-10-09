@@ -50,7 +50,7 @@ impl Shared {
                     continue;
                 }
                 Err(error) => {
-                    tracing::warn!(target:"plurxd::vodserve", %error, "encoded cache ownership unreadable; cleanup deferred");
+                    tracing::warn!(target: "plurxd::vodserve",  %error, "encoded cache ownership unreadable; cleanup deferred");
                     break;
                 }
             }

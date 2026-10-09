@@ -74,6 +74,62 @@ final class SharedPlaybackControlTests: XCTestCase {
         let plan = try SharedPlaybackPlan(subject: subject, decision: try decision(method: copy == true ? "remux" : "transcode"), caps: caps, request: request)
         return (playback, plan, client)
     }
+    func testRejectedInitialRemoteStartAllowsFreshRequestAndExpiredRetryNeverDispatches() async throws {
+        let (_, original, _) = try await started()
+        let controller = SharedPlayerController(testConfiguration: configuration)
+        var requestIDs: [String] = []
+        ControlHTTP.answer = { request in
+            if let json = try JSONSerialization.jsonObject(with: self.body(request)) as? [String: Any],
+               let id = json["request_id"] as? String { requestIDs.append(id) }
+            return (503, Data())
+        }
+        let rejected = await controller.startRemote(original, permit: { true })
+        XCTAssertEqual(rejected, .unavailable)
+        XCTAssertTrue(controller.remoteStartAvailable)
+        XCTAssertTrue(controller.remoteRetryRequiresPreparation)
+        XCTAssertNil(controller.playback)
+        let fresh = try SharedPlaybackPlan.make(subject: original.subject, decision: original.decision, caps: original.caps, quality: .original)
+        XCTAssertNotEqual(fresh.request.requestId, original.request.requestId)
+        let count = requestIDs.count
+        let expired = await controller.startRemote(fresh, permit: { false })
+        XCTAssertEqual(expired, .unavailable)
+        XCTAssertEqual(requestIDs.count, count)
+        XCTAssertTrue(controller.remoteStartAvailable)
+        let retried = await controller.startRemote(fresh, permit: { true })
+        XCTAssertEqual(retried, .unavailable)
+        XCTAssertEqual(requestIDs, [original.request.requestId!, fresh.request.requestId!])
+        let first = controller.beginStop()
+        XCTAssertFalse(controller.playing)
+        XCTAssertTrue(controller.remoteStopAvailable)
+        await first.value
+        await controller.beginStop().value
+    }
+
+    func testLocalStopExitRemainsUsableWhileOwnedCleanupOutlivesCommandDeadline() async {
+        var release: CheckedContinuation<Void, Never>?
+        var cleanupFinished = false
+        let controller = SharedPlayerController(testConfiguration: configuration, beforeStopCleanup: {
+            await withCheckedContinuation { release = $0 }
+            cleanupFinished = true
+        })
+        let first = controller.beginStop()
+        XCTAssertFalse(controller.playing)
+        XCTAssertTrue(controller.remoteStopAvailable)
+        XCTAssertFalse(cleanupFinished)
+        // Suspension stands for cleanup beyond the remote result deadline;
+        // repeated exit and caller cancellation cannot create/cancel cleanup.
+        let waiter = Task { await controller.beginStop().value }
+        waiter.cancel()
+        while release == nil { await Task.yield() }
+        XCTAssertTrue(controller.remoteStopAvailable)
+        XCTAssertFalse(cleanupFinished)
+        release?.resume()
+        await first.value
+        await waiter.value
+        XCTAssertTrue(cleanupFinished)
+        XCTAssertTrue(controller.remoteStopAvailable)
+    }
+
     private func channel(_ playback: SharedStartedPlayback) throws -> SharedControlChannel {
         var capabilities = Caps.controlCapabilities(); capabilities.dualPlayerPreparation = false
         return try SharedControlChannel(playback: playback, clientInstanceId: instance, capabilities: capabilities)

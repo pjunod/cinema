@@ -366,8 +366,8 @@ Forgejo API merging must pass `MergeMessageField`.
 | Adversarial plan review | [Review](../reviews/PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md): F1–F3 resolved in §§3.1–3.3; final independent verdict approved to build. |
 | GPT-6.1 Sol build chat | Claimed 2026-10-08 in the build chat; pinned Rust 1.97.1 all-target daemon baseline check passed against `079960dae`. User authorizes implementation, reviews, fixes, PR/gates and merge to main. |
 | Implementation review | [Actual diff review](../reviews/PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md): F1–F7 corrected; approved at `4b8ae6f02`, no remaining findings. |
-| Unit/compile evidence | Pinned daemon all-target check passed during development. Original-tree settlement regression failed with exactly 1,595,580 bytes of spill and passed after repair. Web warning suite: 40 tests passed; iOS/tvOS builds and two tvOS warning XCTest passed. Docs/index/build/infra checks: 50 passed after correcting the existing Android README build claim from 150 to declared 152. Final focused lifecycle suite: 21 passed. Tracked hook: catalog, formatting, workspace all-target denied-warning Clippy and all 77 served JavaScript syntax checks passed. Native broad units reported font-environment failures and stalled executable fixtures; remaining broad units run after merge on pinned Linux/FFmpeg 6. |
-| Main gate and merge | [PR #947](http://forge.lan:3000/noirr/plurx/pulls/947), draft before ready gate; current candidate must pass required gate. Never call red, missing or superseded checks green. |
+| Unit/compile evidence | Pinned daemon all-target check passed during development. Original-tree settlement regression failed with exactly 1,595,580 bytes of spill and passed after repair. Web warning suite: 40 tests passed; iOS/tvOS builds and two tvOS warning XCTest passed. Docs/index/build/infra checks: 50 passed after correcting the existing Android README build claim from 150 to declared 152. Final focused lifecycle suite: 21 passed. Tracked hook: catalog, formatting, workspace all-target denied-warning Clippy and all 77 served JavaScript syntax checks passed. Native broad units reported font-environment failures and stalled executable fixtures; remaining broad units run after merge on the full workflow's pinned Linux/Rust 1.97.1/Jellyfin FFmpeg 8 surface. |
+| Main gate and merge | [PR #947](http://forge.lan:3000/noirr/plurx/pulls/947) is ready. Run 4529 passed every component check but its final current-base fence failed when main advanced from `079960dae` to `1088d7529`. Integrating that base requires fresh exact-candidate proofs and a new gate. Never call red, missing or superseded checks green. |
 | Deployment/device acceptance | No fix deployed. Recovery restart succeeded; actual movie playback and a background completion during playback remain to observe. |
 
 If main moves, integrate it and rerun affected proofs on the exact intended
@@ -422,3 +422,20 @@ it is not skipped or waived. This changes validation order, not production
 rollout authorization. The investigator reports a second user-triggered service
 restart at `2026-10-08T23:58:22Z`; read-only settings still showed preparation
 off. Neither recovery restart deployed this repair.
+
+### 7.4 Current-main integration
+
+The qualified Batch 03 promotion advanced main to `1088d7529` during the
+platform compile checks. Integration preserves its remote-control and Mac
+video work, the new `planned_codec` fixture field, and both sets of client
+regression anchors. Main already claims Apple build 218, so this repair
+reclaims build 219 with its issue #944 note; existing build notes on main
+keep their original claims. Android documentation now follows main's
+declared build 154 and continues to distinguish merged repairs from pending
+rollout and physical acceptance.
+
+The same independent reviewer recalculated the ownership census against
+the combined source. Every current-main count matched its source, and the
+repair's deltas remained exactly the previously reviewed additions. Compiler,
+focused regression, policy and Apple proofs must describe this combined tree
+before it is pushed for the fresh gate.

@@ -7991,6 +7991,7 @@ mod tests {
                 id: candidate_id,
                 recipe_digest,
                 route: plurx_core::playback::candidate::CandidateRoute::Encode,
+                planned_codec: None,
                 normalized_geometry: true,
                 width: 1920,
                 height: 1080,

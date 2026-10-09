@@ -43,8 +43,9 @@ warnings, catalog lint and all 77 served JavaScript syntax checks.
 repair to main and preserves the named regression anchors. The required
 main gate remains separate from this review approval. The user requested
 watching and repairing the remaining broad units after merge. Native host
-font contracts and a stalled executable-fixture run are rerun on the pinned
-Linux/FFmpeg 6 surface; no failed test is hidden or waived. Deployment and
+font contracts and a stalled executable-fixture run are rerun on the full
+workflow's pinned Linux/Rust 1.97.1/Jellyfin FFmpeg 8 surface; no failed test
+is hidden or waived. Deployment and
 physical Apple TV acceptance remain unclaimed.
 
 ## Ownership census reconciliation
@@ -65,3 +66,12 @@ three reap/wait observations. These are the F1–F7 owners already reviewed.
 The census patterns, scopes and exact equality assertions remain unchanged.
 The failed preflight receipts are retained as runs 4523 and 4525; their
 bookkeeping corrections do not waive either the gate or a runtime test.
+
+After main advanced to `1088d7529`, the same reviewer reconciled the combined
+tree against actual current-main source. Base counts were 30 gates, 5
+cancellation-independent owners, 902 namespaced spawns, 63 method spawns,
+1,622 time constructors, 245 command constructors, 733 launch methods,
+320 lifecycle methods and 101 kill-on-drop calls. The combined counts are
+32, 6, 907, 64, 1,634, 247, 734, 323 and 101 respectively. These are the
+same reviewed repair deltas. Current-main reasons, patterns, scopes and
+strict equality checks are preserved.

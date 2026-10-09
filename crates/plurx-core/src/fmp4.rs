@@ -2363,10 +2363,11 @@ pub fn replace_dolby_file_type_brand(bytes: &mut [u8]) -> bool {
     changed
 }
 
-/// Whether the HEVC decoder configuration carries VPS, SPS, and PPS arrays.
+/// Whether the HEVC decoder configuration carries complete VPS, SPS, and PPS arrays.
 ///
 /// The minimal legal hvcC record carries none. It is parseable, but it cannot
-/// satisfy an `hvc1`/`dvh1` sample entry until promotion supplies all three.
+/// satisfy an `hvc1`/`dvh1` sample entry until promotion supplies all three,
+/// each with its mandatory `array_completeness` flag.
 pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
     let Some(video) = init.video() else {
         return Ok(false);
@@ -2382,8 +2383,7 @@ pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
         let Some(location) = location else {
             return Ok(false);
         };
-        let present = hvcc_nal_array_types(&init.bytes[location.payload])?;
-        if !(32u8..=34).all(|kind| present.contains(&kind)) {
+        if !hvcc_parameter_set_arrays_complete(&init.bytes[location.payload])? {
             return Ok(false);
         }
     }
@@ -2395,7 +2395,8 @@ pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
 /// `hev1`/`dvhe` may carry parameter sets in-band, so an empty or partial
 /// hvcC remains a valid description for those entries. `hvc1`/`dvh1` make the
 /// opposite promise: every required parameter set is out of band, and the
-/// init is not publishable until hvcC contains VPS, SPS, and PPS. This ruling
+/// init is not publishable until hvcC contains VPS, SPS, and PPS arrays whose
+/// `array_completeness` flags are all set. This ruling
 /// comes from the emitted init itself rather than probe metadata, which may be
 /// absent or stale.
 pub fn validate_hevc_sample_entries(init: &Init) -> Result<HevcSampleEntryLayout, Fmp4Error> {
@@ -2421,8 +2422,7 @@ pub fn validate_hevc_sample_entries(init: &Init) -> Result<HevcSampleEntryLayout
         if location.parameter_sets_in_band {
             continue;
         }
-        let present = hvcc_nal_array_types(&init.bytes[location.payload])?;
-        if !(32u8..=34).all(|kind| present.contains(&kind)) {
+        if !hvcc_parameter_set_arrays_complete(&init.bytes[location.payload])? {
             return Err(Fmp4Error::Unsupported(
                 "an out-of-band HEVC decoder configuration has no complete VPS/SPS/PPS set".into(),
             ));
@@ -3605,16 +3605,32 @@ fn hvcc_hdr10_sei_types(record: &[u8]) -> Result<Vec<u16>, Fmp4Error> {
 }
 
 fn hvcc_nal_array_types(record: &[u8]) -> Result<Vec<u8>, Fmp4Error> {
+    hvcc_nal_arrays(record).map(|(present, _)| present)
+}
+
+fn hvcc_parameter_set_arrays_complete(record: &[u8]) -> Result<bool, Fmp4Error> {
+    let (present, complete) = hvcc_nal_arrays(record)?;
+    Ok(complete && (32u8..=34).all(|kind| present.contains(&kind)))
+}
+
+/// Parse the same bounded array table for presence and out-of-band completeness.
+/// Presence-only promotion must not manufacture a completeness claim for an
+/// existing array; hvc1/dvh1 publication requires every parameter-set array's flag.
+fn hvcc_nal_arrays(record: &[u8]) -> Result<(Vec<u8>, bool), Fmp4Error> {
     if record.len() < 23 {
         return malformed("hvcC too short for its NAL arrays");
     }
     let mut found = Vec::new();
+    let mut complete = true;
     let mut pos = 23usize;
     for _ in 0..record[22] {
         if pos + 3 > record.len() {
             return malformed("hvcC NAL array header runs past the record");
         }
         let array_type = record[pos] & 0x3f;
+        if matches!(array_type, 32..=34) && record[pos] & 0x80 == 0 {
+            complete = false;
+        }
         let count = u16::from_be_bytes([record[pos + 1], record[pos + 2]]) as usize;
         pos += 3;
         for _ in 0..count {
@@ -3638,7 +3654,7 @@ fn hvcc_nal_array_types(record: &[u8]) -> Result<Vec<u8>, Fmp4Error> {
     if pos != record.len() {
         return malformed("hvcC has trailing bytes after its NAL arrays");
     }
-    Ok(found)
+    Ok((found, complete))
 }
 
 fn grow_box(bytes: &mut [u8], at: BoxAt, delta: usize) -> Result<(), Fmp4Error> {
@@ -7744,6 +7760,37 @@ mod tests {
         assert!(matches!(
             reader.next_unit().expect("re-parsing enriched init"),
             Some(Unit::Init(_))
+        ));
+    }
+
+    #[test]
+    fn hevc_array_completeness_is_distinct_from_parameter_set_presence() {
+        let mut record = vec![0u8; 23];
+        record[22] = 3;
+        for kind in 32u8..=34 {
+            record.extend_from_slice(&[0x80 | kind, 0, 1, 0, 2, kind << 1, 1]);
+        }
+        assert!(hvcc_parameter_set_arrays_complete(&record).expect("complete table"));
+        for array in 0..3 {
+            let mut partial = record.clone();
+            partial[23 + array * 7] &= 0x7f;
+            assert_eq!(
+                hvcc_nal_array_types(&partial).expect("present arrays"),
+                vec![32, 33, 34]
+            );
+            assert!(!hvcc_parameter_set_arrays_complete(&partial).expect("partial array"));
+            // A complete duplicate does not erase another array's explicit
+            // declaration that more parameter sets may remain in-band.
+            partial[22] += 1;
+            let at = 23 + array * 7;
+            let mut duplicate = record[at..at + 7].to_vec();
+            partial.append(&mut duplicate);
+            assert!(!hvcc_parameter_set_arrays_complete(&partial).expect("mixed duplicates"));
+        }
+        record.pop();
+        assert!(matches!(
+            hvcc_parameter_set_arrays_complete(&record),
+            Err(Fmp4Error::Malformed(_))
         ));
     }
 

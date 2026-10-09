@@ -124,7 +124,7 @@ pub fn schema_guard() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{SqliteStore, SQLITE_SCHEMA_VERSION};
+    use crate::store::SqliteStore;
     #[test]
     fn sharing_ingress_custody_migration_preserves_unresolved_debt_without_route_cascade() {
         let connection = rusqlite::Connection::open_in_memory().expect("database");
@@ -145,7 +145,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .expect("atomic current marker"),
-            SQLITE_SCHEMA_VERSION
+            105, // One atomic step from the exact v104 predecessor.
         );
         let incarnation = uuid::Uuid::new_v4().to_string();
         let json = "{\"version\":1,\"sealed\":true,\"slots\":[{\"closed_confirmation\":null}],\"highwater\":[]}";

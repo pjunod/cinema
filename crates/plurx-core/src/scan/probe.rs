@@ -17,13 +17,8 @@ use crate::domain::{
 };
 use crate::error::ProbeError;
 
-/// The ffprobe binary name; overridable via `PLURX_FFPROBE` for jellyfin-ffmpeg
-/// or a pinned path.
 fn ffprobe_bin() -> String {
-    std::env::var("PLURX_FFPROBE")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "ffprobe".to_owned())
+    crate::process::media_tool_bin("ffprobe", std::env::var("PLURX_FFPROBE").ok())
 }
 
 /// Exact parser/reporter identity used by portable leaf work.
@@ -887,11 +882,50 @@ fn detect_hdr_format(stream: &Value) -> Option<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::process::resolve_media_tool;
     use serde_json::json;
     use std::collections::HashMap;
     use std::io::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
+
+    #[test]
+    fn packaged_scanner_and_producer_share_tool_resolution() {
+        let package = tempfile::tempdir().expect("package");
+        #[cfg(windows)]
+        let name = "ffprobe.exe";
+        #[cfg(not(windows))]
+        let name = "ffprobe";
+        let binary = package.path().join(name);
+        std::fs::write(&binary, b"pinned packaged probe").expect("artifact");
+        let bundled = binary.to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_media_tool(None, "ffprobe", Some(package.path())),
+            bundled
+        );
+        assert_eq!(
+            resolve_media_tool(Some(String::new()), "ffprobe", Some(package.path())),
+            bundled
+        );
+        assert_eq!(
+            resolve_media_tool(
+                Some("/operator/ffprobe".into()),
+                "ffprobe",
+                Some(package.path())
+            ),
+            "/operator/ffprobe"
+        );
+        assert_eq!(
+            resolve_media_tool(None, "ffmpeg", Some(package.path())),
+            "ffmpeg"
+        );
+        assert_eq!(resolve_media_tool(None, "ffprobe", None), "ffprobe");
+        std::fs::remove_file(binary).expect("remove companion");
+        assert_eq!(
+            resolve_media_tool(None, "ffprobe", Some(package.path())),
+            "ffprobe"
+        );
+    }
 
     #[derive(Clone, Copy)]
     pub(crate) enum FixtureMode {

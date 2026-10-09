@@ -132,7 +132,7 @@ impl StorageRegistry {
                 Ok(root) => inventory.root = Some(root),
                 Err(error) => {
                     inventory.blocked = true;
-                    tracing::warn!(target:"plurxd::vodserve",%error,"private storage inventory blocked");
+                    tracing::warn!(target: "plurxd::vodserve", %error,"private storage inventory blocked");
                     return;
                 }
             }
@@ -274,7 +274,7 @@ impl StorageRegistry {
             inventory.done && !inventory.blocked && cold.is_some(),
         );
         if inventory.blocked {
-            tracing::warn!(target:"plurxd::vodserve","managed cache inventory incomplete; preparation admission closed");
+            tracing::warn!(target: "plurxd::vodserve", "managed cache inventory incomplete; preparation admission closed");
         }
     }
 
@@ -420,7 +420,7 @@ impl StorageRegistry {
                         if let Err(failure) = result {
                             record.failure = failure;
                             record.failures = record.failures.saturating_add(1);
-                            tracing::warn!(target:"plurxd::vodserve", failure, "private preparation cleanup remains capacity-backed");
+                            tracing::warn!(target: "plurxd::vodserve",  failure, "private preparation cleanup remains capacity-backed");
                         }
                         record.next = Instant::now() + Duration::from_secs(if record.failures <= 1 { 1 } else { (1u64 << record.failures.min(6)).min(60) });
                     },

@@ -158,6 +158,46 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Receiver and all grants revoke in the same boundary.
+    SqliteTransactionSite {
+        module: "remote.rs",
+        method: "revoke_remote_receiver",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // Cleanup bounds and reference validity fence transport admission.
+    SqliteTransactionSite {
+        module: "invitations.rs",
+        method: "start_invitation_transport",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Validate a retained reference before queueing and clearing it together.
+    SqliteTransactionSite {
+        module: "invitations.rs",
+        method: "queue_invitation_reference",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Reject invalid references before queueing and clearing consent state.
+    SqliteTransactionSite {
+        module: "invitations.rs",
+        method: "queue_invitation_cleanup",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Event and cooldown writes follow the conditional admission result.
+    SqliteTransactionSite {
+        module: "invitations.rs",
+        method: "admit_invitation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
     // Capsule shape and rows must share one read snapshot; no authority is
     // inferred from missing optional objects.
     SqliteTransactionSite {
@@ -1117,6 +1157,8 @@ mod tests {
         ),
         ("dvr.rs", include_str!("sqlite/dvr.rs")),
         ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
+        ("remote.rs", include_str!("sqlite/remote.rs")),
+        ("invitations.rs", include_str!("sqlite/invitations.rs")),
         (
             "jellyfin_identity.rs",
             include_str!("sqlite/jellyfin_identity.rs"),
@@ -1352,7 +1394,9 @@ mod tests {
         // whether the receipt is settled for this owner.
         // Sharing adds three coherent capsule read snapshots and one verbatim
         // guarded transaction, each measured in sqlite/sharing.rs.
-        assert_eq!(methods.len(), 108);
+        // Cinema adds one paired receiver/grant revoke and four guarded
+        // invitation admission/cleanup boundaries, registered above.
+        assert_eq!(methods.len(), 113);
     }
 
     #[test]

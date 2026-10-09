@@ -1962,7 +1962,8 @@ class DisplayAwareAutoEvidenceTest {
             java.io.File("src/main/java/tv/plurx/app/player/Controller.kt"),
             java.io.File("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
         ).firstOrNull(java.io.File::isFile)?.readText() ?: error("Controller.kt source not found")
-        val resume = source.substringAfter("private fun setViewerPlaybackRequested(requested: Boolean) {")
+        assertTrue(source.contains("private fun setViewerPlaybackRequested(requested: Boolean) = writeViewerPlaybackRequested(requested, remoteOwned = false)"))
+        val resume = source.substringAfter("private fun writeViewerPlaybackRequested(requested: Boolean, remoteOwned: Boolean) {")
             .substringBefore("private fun reopenAfterPausedRetirement(")
         assertTrue(resume.contains("writeViewerDelegate(edge.delegatePlayWhenReady)"))
         assertFalse(resume.contains("scope.launch"), "the viewer writer starts no optional work of its own")

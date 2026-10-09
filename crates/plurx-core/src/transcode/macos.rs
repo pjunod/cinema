@@ -2,7 +2,7 @@
 //! Runtime probes populate this context; the existing decoder resolver owns
 //! selection. Availability is compatibility evidence, not a benchmark score.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -117,13 +117,83 @@ impl MacosProcessingIdentity {
     }
 }
 
+/// Complete independently observed graph tuples. Components do not imply
+/// support for another color, subtitle or cadence combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacosProcessingGraph {
+    SdrScale,
+    Hdr10Metal,
+    HlgMetal,
+    SdrTextBurn,
+    Hdr10TextBurn,
+    HlgTextBurn,
+    SdrBitmapBurn,
+    Hdr10BitmapBurn,
+    HlgBitmapBurn,
+    SdrBwdifFrame,
+    SdrBwdifField,
+    HevcSdr,
+    HevcHdr10,
+    HevcSdrHost,
+    HevcHdr10Host,
+    LiveSdrUploadScale,
+    LiveSdrUploadBwdifFrame,
+    LiveSdrUploadBwdifField,
+    P5SoftwareCpu,
+    P5VtTonemapx,
+    P5VtMetal,
+    P5SoftwareMetal,
+}
+
+impl MacosProcessingGraph {
+    /// Exact software-decode upload initialization, shared by runtime probes
+    /// and the existing LiveTV plan owner. It does not claim hardware decode.
+    pub fn live_upload_init_args(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::LiveSdrUploadScale
+            | Self::LiveSdrUploadBwdifFrame
+            | Self::LiveSdrUploadBwdifField => Some(&[
+                "-init_hw_device",
+                "videotoolbox=plurx_live_vt",
+                "-filter_hw_device",
+                "plurx_live_vt",
+            ]),
+            _ => None,
+        }
+    }
+
+    /// Project the already-selected exact LiveTV graph into its filter recipe.
+    /// Eligibility and source/output binding remain in LiveTvTranscodePlan.
+    pub fn live_upload_filter(self, width: u32, height: u32) -> Option<String> {
+        if width < 2 || height < 2 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return None;
+        }
+        let deinterlace = match self {
+            Self::LiveSdrUploadScale => "",
+            Self::LiveSdrUploadBwdifFrame => {
+                ",bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced"
+            }
+            Self::LiveSdrUploadBwdifField => {
+                ",bwdif_videotoolbox=mode=send_field:parity=auto:deint=interlaced"
+            }
+            _ => return None,
+        };
+        let scale =
+            Pipeline::VtScaleSdr.filters(Some(i64::from(width)), i64::from(height), None)?;
+        Some(format!("format=nv12,hwupload{deinterlace},{scale}"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacosProcessingContext {
     enabled: bool,
+    hevc_output_enabled: bool,
     identity: MacosProcessingIdentity,
     sdr_scale: MacosProcessingAvailability,
     hdr10_metal: MacosProcessingAvailability,
     excluded_pipelines: BTreeSet<Pipeline>,
+    graphs: BTreeMap<MacosProcessingGraph, MacosProcessingAvailability>,
 }
 
 impl MacosProcessingContext {
@@ -135,10 +205,56 @@ impl MacosProcessingContext {
     ) -> Self {
         Self {
             enabled,
+            hevc_output_enabled: false,
             identity,
             sdr_scale,
             hdr10_metal,
             excluded_pipelines: BTreeSet::new(),
+            graphs: BTreeMap::new(),
+        }
+    }
+
+    /// Independent saved output preference; runtime compatibility never
+    /// changes this value or the processing preference.
+    #[must_use]
+    pub fn with_hevc_output_enabled(mut self, enabled: bool) -> Self {
+        self.hevc_output_enabled = enabled;
+        self
+    }
+
+    pub fn hevc_output_enabled(&self) -> bool {
+        self.hevc_output_enabled
+    }
+
+    /// Runtime evidence for one complete extension tuple. No offline
+    /// qualification receipt or operator preference enters this observation.
+    #[must_use]
+    pub fn with_graph(
+        mut self,
+        graph: MacosProcessingGraph,
+        availability: MacosProcessingAvailability,
+    ) -> Self {
+        self.graphs.insert(graph, availability);
+        self
+    }
+
+    pub fn observed_graphs(
+        &self,
+    ) -> impl Iterator<Item = (MacosProcessingGraph, MacosProcessingAvailability)> + '_ {
+        self.graphs
+            .iter()
+            .map(|(graph, availability)| (*graph, *availability))
+    }
+
+    pub fn graph(&self, graph: MacosProcessingGraph) -> MacosProcessingAvailability {
+        match graph {
+            MacosProcessingGraph::SdrScale => self.sdr_scale,
+            MacosProcessingGraph::Hdr10Metal => self.hdr10_metal,
+            _ => self
+                .graphs
+                .get(&graph)
+                .copied()
+                .unwrap_or(MacosProcessingAvailability::Unavailable),
         }
     }
 
@@ -194,5 +310,20 @@ impl MacosProcessingSelection {
             Self::RecoveryRestriction => "recovery_restriction",
             Self::CapabilityFallback => "capability_fallback",
         }
+    }
+}
+
+/// Captured provenance for selected strict Profile5 routes and their retries.
+/// Construction belongs to the semantic resolver; callers can only retain it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrictDolbyPolicy {
+    identity: MacosProcessingIdentity,
+}
+impl StrictDolbyPolicy {
+    pub(crate) fn new(identity: MacosProcessingIdentity) -> Self {
+        Self { identity }
+    }
+    pub fn identity(&self) -> &MacosProcessingIdentity {
+        &self.identity
     }
 }

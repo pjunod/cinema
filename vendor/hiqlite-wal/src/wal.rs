@@ -63,6 +63,28 @@ impl Drop for WalFile {
 }
 
 impl WalFile {
+    #[cfg(unix)]
+    fn same_stage_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        before.is_file()
+            && after.is_file()
+            && (
+                before.dev(),
+                before.ino(),
+                before.uid(),
+                before.nlink(),
+                before.len(),
+                before.mode(),
+            ) == (
+                after.dev(),
+                after.ino(),
+                after.uid(),
+                after.nlink(),
+                after.len(),
+                after.mode(),
+            )
+    }
+
     /// Does NOT check the file header's integrity. This is done inside a `WalFileSet`.
     ///
     /// Iterates over the complete data and makes sure, that the expected start and end log IDs
@@ -669,6 +691,147 @@ impl WalFile {
         Ok(())
     }
 
+    /// A sealed suffix is published as a new inode, never by shrinking a mapped inode.
+    /// The caller holds the exclusive layout guard. Old private reader mappings may still
+    /// exist between requests, so this replacement is deliberately Unix-only.
+    #[cfg(unix)]
+    fn reclaim_sealed_prefix(
+        &mut self,
+        before_publish: impl FnOnce() -> Result<(), Error>,
+        after_publish: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let Some(start) = self.data_start else {
+            return Ok(());
+        };
+        let end = self
+            .data_end
+            .ok_or_else(|| Error::Integrity("missing WAL end".into()))?;
+        let header_len = self.offset_logs() as u32;
+        if start <= header_len {
+            return Ok(());
+        }
+        let mut offset = start;
+        for id in self.id_from..=self.id_until {
+            let record = self.read_record(offset)?;
+            if record.log_id != id || record.crc != crc!(record.data) {
+                return Err(Error::Integrity("invalid retained WAL suffix".into()));
+            }
+            offset = offset
+                .checked_add(record.len() + 1)
+                .ok_or_else(|| Error::Integrity("retained WAL offset overflow".into()))?;
+        }
+        if offset.checked_sub(1) != Some(end) {
+            return Err(Error::Integrity("retained WAL end mismatch".into()));
+        }
+        // Own the bounded suffix before taking the publication's mutable borrow.
+        let suffix = self.read_bytes(start, offset)?.to_vec();
+        let mut replacement = self.clone_no_mmap();
+        replacement.data_start = Some(header_len);
+        replacement.data_end = Some(header_len + end - start);
+        replacement.len_max = header_len + offset - start;
+        replacement.renew_incarnation();
+        let mut header = Vec::with_capacity(header_len as usize);
+        replacement.build_header(&mut header)?;
+        let directory = self
+            .path
+            .rsplit_once('/')
+            .ok_or(Error::InvalidPath("WAL parent"))?
+            .0
+            .to_owned();
+        // One fixed, non-WAL stage bounds crash residue to one file for the entire set.
+        // Recovery validates canonical files and exact stage ownership before removing
+        // an interrupted stage. Only the stage created by this call is cleaned here.
+        let stage_path = format!("{directory}/.sealed-front-reclaim.stage");
+        let canonical = fs::symlink_metadata(&self.path)?;
+        if !canonical.is_file() || canonical.nlink() != 1 {
+            return Err(Error::Integrity(
+                "unowned canonical WAL replacement target".into(),
+            ));
+        }
+        // Apply the canonical restriction at creation, before any retained payload.
+        // Restore exact permissions before writing if the current umask is narrower.
+        let mut stage = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(canonical.mode() & 0o7777)
+            .open(&stage_path)?;
+        let mut published = false;
+        let result = (|| {
+            stage.set_permissions(canonical.permissions())?;
+            stage.write_all(&header)?;
+            stage.write_all(&suffix)?;
+            stage.sync_all()?;
+            before_publish()?;
+            if !Self::same_stage_identity(&stage.metadata()?, &fs::symlink_metadata(&stage_path)?) {
+                return Err(Error::Integrity(
+                    "created WAL stage changed before publication".into(),
+                ));
+            }
+            fs::rename(&stage_path, &self.path)?;
+            published = true;
+            // Publication is irreversible. Install its exact descriptor before any
+            // subsequent fallible operation, including the directory durability fence.
+            self.mmap = None;
+            self.mmap_mut = None;
+            *self = replacement;
+            after_publish()?;
+            File::open(&directory)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() && !published {
+            // Do not unlink a replacement entry, including one created after rename.
+            match fs::symlink_metadata(&stage_path) {
+                Ok(path) => {
+                    if !Self::same_stage_identity(&stage.metadata()?, &path) {
+                        return Err(Error::Integrity(
+                            "created WAL stage identity lost during cleanup".into(),
+                        ));
+                    }
+                    fs::remove_file(&stage_path)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        drop(stage);
+        result
+    }
+
+    /// A compact sealed file can become the append target after truncation or restart.
+    /// Growing is safe for old mappings; renew identity so readers acquire its new extent.
+    fn restore_active_capacity(&mut self, wal_size: u32) -> Result<(), Error> {
+        self.restore_active_capacity_with(wal_size, || Ok(()))
+    }
+
+    fn restore_active_capacity_with(
+        &mut self,
+        wal_size: u32,
+        after_unmap: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        if self.len_max >= wal_size {
+            return Ok(());
+        }
+        if self.mmap_mut.is_some() {
+            let mut header = Vec::with_capacity(32);
+            self.update_header(&mut header)?;
+            self.flush()?;
+        }
+        let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        let mut header = Vec::with_capacity(32);
+        self.build_header(&mut header)?;
+        file.write_all(&header)?;
+        self.mmap = None;
+        self.mmap_mut = None;
+        after_unmap()?;
+        file.set_len(u64::from(wal_size))?;
+        self.len_max = wal_size;
+        self.renew_incarnation();
+        file.sync_all()?;
+        self.mmap_mut()?;
+        Ok(())
+    }
+
     #[inline]
     pub fn new(
         wal_no: u64,
@@ -834,6 +997,128 @@ pub struct WalFileSet {
 }
 
 impl WalFileSet {
+    /// Called only during startup under the WAL owner lock or under the writer's
+    /// exclusive layout guard, before changing any canonical pathname. A stage is
+    /// disposable even if incomplete, but only after the complete canonical view,
+    /// its namespace, owner and held inode have been checked. Unknown files refuse.
+    #[cfg(unix)]
+    pub(crate) fn cleanup_reclaim_stage(&self, wal_size: u32) -> Result<(), Error> {
+        use std::os::unix::fs::MetadataExt;
+        let path = format!("{}/.sealed-front-reclaim.stage", self.base_path);
+        let before = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let directory = fs::symlink_metadata(&self.base_path)?;
+        if !directory.is_dir()
+            || !before.is_file()
+            || before.nlink() != 1
+            || before.uid() != directory.uid()
+            || before.len() > u64::from(wal_size)
+        {
+            return Err(Error::Integrity(
+                "unowned or unbounded WAL reclaim stage".into(),
+            ));
+        }
+        let stage = File::open(&path)?;
+        let held = stage.metadata()?;
+        if !WalFile::same_stage_identity(&before, &held) {
+            return Err(Error::Integrity(
+                "WAL reclaim stage changed during open".into(),
+            ));
+        }
+        if self.files.is_empty() {
+            return Err(Error::Integrity(
+                "cannot authenticate stage without canonical WAL".into(),
+            ));
+        }
+        // `read` historically skips unreadable WAL headers. Never let that hide a
+        // damaged canonical segment when deciding that a stage is disposable.
+        let mut canonical_count = 0;
+        for entry in fs::read_dir(&self.base_path)? {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".wal"))
+            {
+                canonical_count += 1;
+                let path = entry.path();
+                if !self
+                    .files
+                    .iter()
+                    .any(|file| std::path::Path::new(&file.path) == path.as_path())
+                {
+                    return Err(Error::Integrity(
+                        "unknown canonical WAL during stage recovery".into(),
+                    ));
+                }
+            }
+        }
+        if canonical_count != self.files.len() || self.files[0].data_start.is_none() {
+            return Err(Error::Integrity(
+                "incomplete canonical WAL view during stage recovery".into(),
+            ));
+        }
+        let mut previous = None;
+        for file in &self.files {
+            let metadata = fs::symlink_metadata(&file.path)?;
+            if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != directory.uid() {
+                return Err(Error::Integrity(
+                    "unowned canonical WAL during stage recovery".into(),
+                ));
+            }
+            let mut canonical = WalFile::read_from_file(file.path.clone())?;
+            if canonical.id_from > canonical.id_until
+                || canonical.data_start.is_some() != canonical.data_end.is_some()
+            {
+                return Err(Error::Integrity(
+                    "invalid canonical WAL during stage recovery".into(),
+                ));
+            }
+            if let Some((number, until)) = previous
+                && (canonical.wal_no != number + 1
+                    || (canonical.id_from != 0 && canonical.id_from != until + 1))
+            {
+                return Err(Error::Integrity(
+                    "canonical WAL gap during stage recovery".into(),
+                ));
+            }
+            previous = Some((canonical.wal_no, canonical.id_until));
+            if let Some(mut offset) = canonical.data_start {
+                if offset < canonical.offset_logs() as u32 {
+                    return Err(Error::Integrity(
+                        "canonical WAL header overlaps records".into(),
+                    ));
+                }
+                canonical.mmap()?;
+                for id in canonical.id_from..=canonical.id_until {
+                    let record = canonical.read_record(offset)?;
+                    if record.log_id != id || record.crc != crc!(record.data) {
+                        return Err(Error::Integrity("canonical WAL CRC or ID mismatch".into()));
+                    }
+                    offset = offset
+                        .checked_add(record.len() + 1)
+                        .ok_or_else(|| Error::Integrity("canonical WAL offset overflow".into()))?;
+                }
+                if offset.checked_sub(1) != canonical.data_end || offset > canonical.len_max {
+                    return Err(Error::Integrity("canonical WAL end mismatch".into()));
+                }
+            }
+            File::open(&file.path)?.sync_all()?;
+        }
+        let after = fs::symlink_metadata(&path)?;
+        if !WalFile::same_stage_identity(&held, &after) {
+            return Err(Error::Integrity(
+                "WAL reclaim stage changed before cleanup".into(),
+            ));
+        }
+        fs::remove_file(&path)?;
+        File::open(&self.base_path)?.sync_all()?;
+        Ok(())
+    }
+
     #[inline]
     pub fn active(&mut self) -> &mut WalFile {
         debug_assert!(self.active.is_some());
@@ -844,6 +1129,12 @@ impl WalFileSet {
             self.active.unwrap()
         );
         self.files.get_mut(self.active.unwrap()).unwrap()
+    }
+
+    pub(crate) fn writable_head_ready(&self, wal_size: u32) -> bool {
+        self.active
+            .and_then(|index| self.files.get(index))
+            .is_some_and(|file| file.len_max >= wal_size && file.mmap_mut.is_some())
     }
 
     /// Adds a new `Header` at the end and creates a file for it.
@@ -1025,11 +1316,13 @@ impl WalFileSet {
             files.len() - 1
         };
 
-        Ok(Self {
+        let mut set = Self {
             active: Some(active),
             base_path,
             files,
-        })
+        };
+        set.active().restore_active_capacity(wal_size)?;
+        Ok(set)
     }
 
     /// Rolls a new WAL file and "closes" the current one. Removes any memory-mapping and flushes
@@ -1039,6 +1332,7 @@ impl WalFileSet {
     pub fn roll_over(&mut self, wal_size: u32, buf: &mut Vec<u8>) -> Result<(), Error> {
         debug_assert!(buf.is_empty());
         debug_assert!(!self.files.is_empty());
+
         debug_assert!(self.files.back().unwrap().mmap_mut.is_some());
 
         let last_id = {
@@ -1058,6 +1352,23 @@ impl WalFileSet {
         active.id_from = last_id + 1;
         active.id_until = last_id + 1;
 
+        // Purge can advance the only active file without shrinking its append
+        // capacity. Once normal rollover seals it, reclaim that obsolete prefix
+        // now rather than waiting for another snapshot/purge cycle.
+        #[cfg(unix)]
+        {
+            let front = self.files.front().unwrap();
+            if front
+                .data_start
+                .is_some_and(|start| start > front.offset_logs() as u32)
+            {
+                self.cleanup_reclaim_stage(wal_size)?;
+                let front = self.files.front_mut().unwrap();
+                front.mmap()?;
+                front.reclaim_sealed_prefix(|| Ok(()), || Ok(()))?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1075,67 +1386,90 @@ impl WalFileSet {
         debug_assert!(buf_logs.is_empty());
         debug_assert!(!self.files.is_empty());
 
+        #[cfg(unix)]
+        self.cleanup_reclaim_stage(wal_size)?;
+
         let purge_front = Some(id_from) <= self.files.front().map(|f| f.id_from);
         let truncate_back = Some(id_until) >= self.files.back().map(|f| f.id_until);
         let mut memo: Option<LogReadMemo> = None;
 
-        if purge_front {
-            while !self.files.is_empty() && self.files.front().unwrap().id_until < id_until {
-                let file = self.files.pop_front().unwrap();
-                fs::remove_file(&file.path)?;
-            }
-            if self.files.is_empty() {
-                self.add_file(wal_size, buf)?;
-                self.files.front_mut().unwrap().mmap_mut()?;
-            }
-
-            let front = self.files.front_mut().unwrap();
-            if front.id_from < id_until && front.data_end.is_some() {
-                debug_assert!(
-                    front.id_until >= id_until,
-                    "id_until: {id_until}, front: {front:?}"
-                );
-                if front.mmap_mut.is_none() {
-                    front.mmap_mut()?;
+        let shifted = (|| {
+            if purge_front {
+                while !self.files.is_empty() && self.files.front().unwrap().id_until < id_until {
+                    fs::remove_file(&self.files.front().unwrap().path)?;
+                    self.files.pop_front();
                 }
-                let offset = front.read_logs(id_until, id_until, &mut memo, buf_logs)?;
-                front.id_from = id_until;
-                front.data_start = Some(offset);
-            }
-        } else if truncate_back {
-            while !self.files.is_empty() && self.files.back().unwrap().id_from > id_from {
-                let file = self.files.pop_back().unwrap();
-                fs::remove_file(&file.path)?;
-            }
-            if self.files.is_empty() {
-                self.add_file(wal_size, buf)?;
-                self.files.front_mut().unwrap().mmap_mut()?;
-            }
+                if self.files.is_empty() {
+                    self.add_file(wal_size, buf)?;
+                    self.files.front_mut().unwrap().mmap_mut()?;
+                }
 
-            let back = self.files.back_mut().unwrap();
-            if back.id_from == id_from {
-                if back.data_start.is_some() {
+                let sealed_front = self.files.len() > 1;
+                let front = self.files.front_mut().unwrap();
+                if front.id_from < id_until && front.data_end.is_some() {
+                    debug_assert!(
+                        front.id_until >= id_until,
+                        "id_until: {id_until}, front: {front:?}"
+                    );
+                    if front.mmap_mut.is_none() {
+                        front.mmap_mut()?;
+                    }
+                    let offset = front.read_logs(id_until, id_until, &mut memo, buf_logs)?;
+                    front.id_from = id_until;
+                    front.data_start = Some(offset);
+                }
+                #[cfg(unix)]
+                if sealed_front {
+                    // A previous pre-publication error may already have advanced the
+                    // logical start, so retry reclaim even when this purge is a no-op.
+                    front.reclaim_sealed_prefix(|| Ok(()), || Ok(()))?;
+                }
+                #[cfg(not(unix))]
+                let _ = sealed_front;
+            } else if truncate_back {
+                while !self.files.is_empty() && self.files.back().unwrap().id_from > id_from {
+                    fs::remove_file(&self.files.back().unwrap().path)?;
+                    self.files.pop_back();
+                }
+                if self.files.is_empty() {
+                    self.add_file(wal_size, buf)?;
+                    self.files.front_mut().unwrap().mmap_mut()?;
+                }
+
+                let back = self.files.back_mut().unwrap();
+                if back.id_from == id_from {
+                    if back.data_start.is_some() {
+                        back.renew_incarnation();
+                    }
+                    back.id_until = id_from;
+                    back.data_start = None;
+                    back.data_end = None;
+                } else if back.id_until >= id_from {
+                    if back.mmap_mut.is_none() {
+                        back.mmap_mut()?;
+                    }
+                    // offset always goes forwards
+                    let offset = back.read_logs(id_from, id_from, &mut memo, buf_logs)?;
                     back.renew_incarnation();
+                    back.id_until = id_from - 1;
+                    // data_end is inclusive
+                    back.data_end = Some(offset - 1);
                 }
-                back.id_until = id_from;
-                back.data_start = None;
-                back.data_end = None;
-            } else if back.id_until >= id_from {
-                if back.mmap_mut.is_none() {
-                    back.mmap_mut()?;
-                }
-                // offset always goes forwards
-                let offset = back.read_logs(id_from, id_from, &mut memo, buf_logs)?;
-                back.renew_incarnation();
-                back.id_until = id_from - 1;
-                // data_end is inclusive
-                back.data_end = Some(offset - 1);
             }
-        }
 
-        self.active = Some(self.files.len() - 1);
-
-        Ok(())
+            Ok(())
+        })();
+        self.active = self.files.len().checked_sub(1);
+        let restored = if self.active.is_some() {
+            self.active()
+                .restore_active_capacity(wal_size)
+                .and_then(|()| self.active().mmap_mut())
+        } else {
+            Err(Error::Integrity(
+                "empty WAL layout after removal failure".into(),
+            ))
+        };
+        shifted.and(restored)
     }
 }
 
@@ -1146,6 +1480,446 @@ mod tests {
 
     static PATH: &str = "test_data";
     static MB2: u32 = 2 * 1024 * 1024;
+
+    #[cfg(unix)]
+    fn sealed_reclaim_fixture(name: &str) -> Result<WalFileSet, Error> {
+        let path = format!(
+            "{PATH}/{name}-{}-{}",
+            std::process::id(),
+            next_wal_incarnation()
+        );
+        fs::create_dir_all(&path)?;
+        let mut set = WalFileSet::read(path, 16 * 1024 * 1024)?;
+        set.active().mmap_mut()?;
+        let mut header = Vec::new();
+        for id in 1..=700 {
+            header.clear();
+            if id == 377 {
+                set.roll_over(16 * 1024 * 1024, &mut header)?;
+                header.clear();
+            }
+            set.active()
+                .append_log(id, format!("retained-{id}").as_bytes(), &mut header)?;
+        }
+        header.clear();
+        set.active().update_header(&mut header)?;
+        set.active().flush()?;
+        Ok(set)
+    }
+
+    #[cfg(unix)]
+    fn retained_records(set: &mut WalFileSet) -> Result<Vec<(u64, Vec<u8>)>, Error> {
+        let mut records = Vec::new();
+        for file in &mut set.files {
+            file.mmap()?;
+            let mut part = Vec::new();
+            file.read_logs(file.id_from, file.id_until, &mut None, &mut part)?;
+            records.extend(part);
+        }
+        Ok(records)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_purge_is_reclaimed_when_rollover_seals_front() -> Result<(), Error> {
+        let path = format!(
+            "{PATH}/active-purge-rollover-{}-{}",
+            std::process::id(),
+            next_wal_incarnation()
+        );
+        fs::create_dir_all(&path)?;
+        let mut writer = WalFileSet::read(path.clone(), 16 * 1024 * 1024)?;
+        writer.active().mmap_mut()?;
+        for id in 1..=376 {
+            writer
+                .active()
+                .append_log(id, format!("retained-{id}").as_bytes(), &mut Vec::new())?;
+        }
+        let mut reader = writer.clone_no_map();
+        reader.active().mmap()?;
+        let old_incarnation = reader.active().incarnation;
+        let mut memo = None;
+        reader
+            .active()
+            .read_logs(1, 186, &mut memo, &mut Vec::new())?;
+        writer.shift_delete_logs(0, 187, 16 * 1024 * 1024, &mut Vec::new(), &mut Vec::new())?;
+        assert_eq!(writer.files.len(), 1);
+        assert_eq!(writer.active().incarnation, old_incarnation);
+        assert_eq!(fs::metadata(&writer.active().path)?.len(), 16 * 1024 * 1024);
+        writer.roll_over(16 * 1024 * 1024, &mut Vec::new())?;
+        assert_eq!(writer.files.len(), 2);
+        assert_ne!(writer.files[0].incarnation, old_incarnation);
+        assert_eq!(
+            (writer.files[0].id_from, writer.files[0].id_until),
+            (187, 376)
+        );
+        assert_eq!(writer.files[0].data_start, Some(32));
+        assert!(fs::metadata(&writer.files[0].path)?.len() < 16 * 1024 * 1024);
+        assert_eq!(fs::metadata(&writer.active().path)?.len(), 16 * 1024 * 1024);
+        for id in 377..=700 {
+            writer
+                .active()
+                .append_log(id, format!("retained-{id}").as_bytes(), &mut Vec::new())?;
+        }
+        writer.active().update_header(&mut Vec::new())?;
+        writer.active().flush()?;
+        reader.refresh_from_no_mmap(&writer);
+        assert!(reader.files[0].mmap.is_none());
+        reader.files[0].mmap()?;
+        reader.files[0].read_logs(187, 376, &mut memo, &mut Vec::new())?;
+        let expected: Vec<_> = (187..=700)
+            .map(|id| (id, format!("retained-{id}").into_bytes()))
+            .collect();
+        assert_eq!(retained_records(&mut reader)?, expected);
+        let mut reopened = WalFileSet::read(path.clone(), 16 * 1024 * 1024)?;
+        assert_eq!(retained_records(&mut reopened)?, expected);
+        drop(reopened);
+        drop(reader);
+        drop(writer);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_front_reclaim_preserves_all_514_records_and_warmed_reader() -> Result<(), Error> {
+        let mut writer = sealed_reclaim_fixture("sealed-front-records")?;
+        let path = writer.base_path.clone();
+        let unchanged = writer.files[0].incarnation;
+        writer.shift_delete_logs(0, 1, 16 * 1024 * 1024, &mut Vec::new(), &mut Vec::new())?;
+        assert_eq!(writer.files[0].incarnation, unchanged);
+        assert_eq!(fs::metadata(&writer.files[0].path)?.len(), 16 * 1024 * 1024);
+        let mut reader = writer.clone_no_map();
+        reader.files[0].mmap()?;
+        reader.files[1].mmap()?;
+        let old_front = reader.files[0].incarnation;
+        let successor = reader.files[1].incarnation;
+        let mut memo = None;
+        reader.files[0].read_logs(1, 186, &mut memo, &mut Vec::new())?;
+        let mut header = Vec::new();
+        writer.shift_delete_logs(0, 187, 16 * 1024 * 1024, &mut header, &mut Vec::new())?;
+        assert_eq!(writer.files[0].id_from, 187);
+        assert_eq!(writer.files[0].id_until, 376);
+        assert_eq!(
+            fs::metadata(&writer.files[0].path)?.len(),
+            u64::from(writer.files[0].data_end.unwrap()) + 1
+        );
+        assert!(writer.files[0].len_max < 16 * 1024 * 1024);
+        assert_eq!(fs::metadata(&writer.files[1].path)?.len(), 16 * 1024 * 1024);
+        reader.refresh_from_no_mmap(&writer);
+        assert_ne!(reader.files[0].incarnation, old_front);
+        assert_eq!(reader.files[1].incarnation, successor);
+        assert!(reader.files[0].mmap.is_none());
+        assert!(reader.files[1].mmap.is_some());
+        reader.files[0].mmap()?;
+        let mut front_records = Vec::new();
+        reader.files[0].read_logs(187, 376, &mut memo, &mut front_records)?;
+        assert_eq!(front_records.len(), 190);
+        let expected: Vec<_> = (187..=700)
+            .map(|id| (id, format!("retained-{id}").into_bytes()))
+            .collect();
+        assert_eq!(retained_records(&mut reader)?, expected);
+        let mut reopened = WalFileSet::read(path.clone(), 16 * 1024 * 1024)?;
+        assert_eq!(retained_records(&mut reopened)?, expected);
+        drop(reopened);
+        drop(reader);
+        drop(writer);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_front_publication_errors_preserve_old_or_new_complete_view() -> Result<(), Error> {
+        let mut writer = sealed_reclaim_fixture("sealed-front-errors")?;
+        let path = writer.base_path.clone();
+        let mut reader = writer.clone_no_map();
+        let front = &mut writer.files[0];
+        front.mmap()?;
+        let offset = front.read_logs(187, 187, &mut None, &mut Vec::new())?;
+        front.id_from = 187;
+        front.data_start = Some(offset);
+        let old_incarnation = front.incarnation;
+        assert!(
+            front
+                .reclaim_sealed_prefix(
+                    || Err(Error::Generic("before publication".into())),
+                    || Ok(())
+                )
+                .is_err()
+        );
+        assert_eq!(front.incarnation, old_incarnation);
+        assert_eq!(fs::metadata(&front.path)?.len(), 16 * 1024 * 1024);
+        let before = WalFile::read_from_file(front.path.clone())?;
+        assert_eq!((before.id_from, before.id_until), (1, 376));
+        assert!(!std::path::Path::new(&format!("{path}/.sealed-front-reclaim.stage")).exists());
+        assert!(
+            front
+                .reclaim_sealed_prefix(
+                    || Ok(()),
+                    || Err(Error::Generic("after publication".into()))
+                )
+                .is_err()
+        );
+        assert_ne!(front.incarnation, old_incarnation);
+        reader.refresh_from_no_mmap(&writer);
+        let expected: Vec<_> = (187..=700)
+            .map(|id| (id, format!("retained-{id}").into_bytes()))
+            .collect();
+        assert_eq!(retained_records(&mut reader)?, expected);
+        let mut reopened = WalFileSet::read(path.clone(), 16 * 1024 * 1024)?;
+        assert_eq!(retained_records(&mut reopened)?, expected);
+        drop(reopened);
+        drop(reader);
+        drop(writer);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_sealed_stage_is_cleaned_only_with_valid_canonical_view() -> Result<(), Error> {
+        let mut writer = sealed_reclaim_fixture("sealed-front-stage")?;
+        let path = writer.base_path.clone();
+        let stage_path = format!("{path}/.sealed-front-reclaim.stage");
+        // Simulate a valid persisted append whose header has not caught up yet.
+        writer
+            .active()
+            .append_log(701, b"recovered-tail", &mut Vec::new())?;
+        writer.active().flush()?;
+        writer.active().mmap_mut = None;
+        fs::write(&stage_path, b"partial header")?;
+        let mut reopened = WalFileSet::read(path.clone(), 16 * 1024 * 1024)?;
+        reopened.check_integrity(&mut Vec::new(), true)?;
+        reopened.cleanup_reclaim_stage(16 * 1024 * 1024)?;
+        assert!(!std::path::Path::new(&stage_path).exists());
+        assert_eq!(retained_records(&mut reopened)?.len(), 701);
+        fs::write(&stage_path, b"partial header")?;
+        let foreign_link = format!("{path}/stage-extra-link");
+        fs::hard_link(&stage_path, &foreign_link)?;
+        assert!(writer.cleanup_reclaim_stage(16 * 1024 * 1024).is_err());
+        assert!(std::path::Path::new(&stage_path).exists());
+        fs::remove_file(&foreign_link)?;
+        // Invalid canonical records must refuse cleanup even for an owned stage.
+        let mut corrupt = OpenOptions::new().write(true).open(&writer.files[0].path)?;
+        use std::io::{Seek, SeekFrom};
+        corrupt.seek(SeekFrom::Start(32 + 8))?;
+        corrupt.write_all(&[0, 0, 0, 0])?;
+        corrupt.sync_all()?;
+        assert!(writer.cleanup_reclaim_stage(16 * 1024 * 1024).is_err());
+        assert!(std::path::Path::new(&stage_path).exists());
+        drop(corrupt);
+        drop(reopened);
+        drop(writer);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_front_promoted_active_restores_capacity_and_reopens() -> Result<(), Error> {
+        let mut writer = sealed_reclaim_fixture("sealed-front-active")?;
+        let path = writer.base_path.clone();
+        writer.shift_delete_logs(0, 187, 16 * 1024 * 1024, &mut Vec::new(), &mut Vec::new())?;
+        let mut reader = writer.clone_no_map();
+        reader.files[0].mmap()?;
+        let compact_incarnation = reader.files[0].incarnation;
+        writer.shift_delete_logs(
+            200,
+            u64::MAX,
+            16 * 1024 * 1024,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )?;
+        assert_eq!(writer.files.len(), 1);
+        assert_eq!(writer.active().len_max, 16 * 1024 * 1024);
+        assert_eq!(fs::metadata(&writer.active().path)?.len(), 16 * 1024 * 1024);
+        reader.refresh_from_no_mmap(&writer);
+        assert_ne!(reader.active().incarnation, compact_incarnation);
+        assert!(reader.active().mmap.is_none());
+        writer
+            .active()
+            .append_log(200, b"new-tail", &mut Vec::new())?;
+        writer.active().update_header(&mut Vec::new())?;
+        writer.active().flush()?;
+        drop(writer);
+        drop(reader);
+        let mut reopened = WalFileSet::read(path.clone(), 16 * 1024 * 1024)?;
+        assert_eq!(reopened.active().len_max, 16 * 1024 * 1024);
+        assert_eq!(
+            retained_records(&mut reopened)?.last(),
+            Some(&(200, b"new-tail".to_vec()))
+        );
+        drop(reopened);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_compact_last_restores_capacity_and_active_purge_never_shrinks() -> Result<(), Error>
+    {
+        let mut writer = sealed_reclaim_fixture("sealed-front-restart")?;
+        let path = writer.base_path.clone();
+        writer.shift_delete_logs(0, 187, 16 * 1024 * 1024, &mut Vec::new(), &mut Vec::new())?;
+        let successor = writer.files.pop_back().unwrap();
+        fs::remove_file(&successor.path)?;
+        drop(successor);
+        drop(writer);
+        let mut reopened = WalFileSet::read(path.clone(), 16 * 1024 * 1024)?;
+        assert_eq!(reopened.active().len_max, 16 * 1024 * 1024);
+        let incarnation = reopened.active().incarnation;
+        reopened.shift_delete_logs(0, 188, 16 * 1024 * 1024, &mut Vec::new(), &mut Vec::new())?;
+        assert_eq!(reopened.active().len_max, 16 * 1024 * 1024);
+        assert_eq!(reopened.active().incarnation, incarnation);
+        drop(reopened);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_id_full_purge_recreates_empty_writable_generation() -> Result<(), Error> {
+        let mut writer = sealed_reclaim_fixture("sealed-front-empty-active")?;
+        let path = writer.base_path.clone();
+        writer.shift_delete_logs(0, 187, 16 * 1024 * 1024, &mut Vec::new(), &mut Vec::new())?;
+        let compact_incarnation = writer.files[0].incarnation;
+        assert_eq!(writer.files.len(), 2);
+        writer.shift_delete_logs(
+            187,
+            u64::MAX,
+            16 * 1024 * 1024,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )?;
+        assert_eq!(writer.files.len(), 1);
+        assert_eq!(writer.active().wal_no, 1);
+        assert_ne!(writer.active().incarnation, compact_incarnation);
+        assert_eq!(writer.active().len_max, 16 * 1024 * 1024);
+        assert!(writer.active().data_start.is_none());
+        let header = WalFile::read_from_file(writer.active().path.clone())?;
+        assert!(header.data_start.is_none());
+        assert!(header.data_end.is_none());
+        writer
+            .active()
+            .append_log(187, b"replacement-first", &mut Vec::new())?;
+        writer.active().flush()?;
+        drop(writer);
+        let mut reopened = WalFileSet::read(path.clone(), 16 * 1024 * 1024)?;
+        assert_eq!(
+            retained_records(&mut reopened)?,
+            vec![(187, b"replacement-first".to_vec())]
+        );
+        drop(reopened);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_restoration_error_is_not_a_writable_writer_head() -> Result<(), Error> {
+        let mut writer = sealed_reclaim_fixture("sealed-front-restore-error")?;
+        let path = writer.base_path.clone();
+        writer.shift_delete_logs(0, 187, 16 * 1024 * 1024, &mut Vec::new(), &mut Vec::new())?;
+        let successor = writer.files.pop_back().unwrap();
+        fs::remove_file(&successor.path)?;
+        drop(successor);
+        writer.active = Some(0);
+        let mut reader = writer.clone_no_map();
+        reader.active().mmap()?;
+        assert!(
+            writer
+                .active()
+                .restore_active_capacity_with(16 * 1024 * 1024, || Err(Error::Generic(
+                    "resize failed after unmap".into()
+                )))
+                .is_err()
+        );
+        // This is the exact readiness predicate used by Remove after its typed
+        // error acknowledgement to leave the loop before Vote/Sync/Shutdown.
+        assert!(!writer.writable_head_ready(16 * 1024 * 1024));
+        reader.refresh_from_no_mmap(&writer);
+        assert_eq!(retained_records(&mut reader)?.len(), 190);
+        drop(reader);
+        drop(writer);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_cleanup_preserves_replaced_entry_and_canonical_permissions() -> Result<(), Error> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mut writer = sealed_reclaim_fixture("sealed-front-stage-identity")?;
+        let path = writer.base_path.clone();
+        let stage_path = format!("{path}/.sealed-front-reclaim.stage");
+        let detached = format!("{path}/detached-owned-stage");
+        let front = &mut writer.files[0];
+        fs::set_permissions(&front.path, fs::Permissions::from_mode(0o600))?;
+        front.mmap()?;
+        let offset = front.read_logs(187, 187, &mut None, &mut Vec::new())?;
+        front.id_from = 187;
+        front.data_start = Some(offset);
+        assert!(
+            front
+                .reclaim_sealed_prefix(
+                    || {
+                        assert_eq!(fs::metadata(&stage_path)?.mode() & 0o7777, 0o600);
+                        fs::rename(&stage_path, &detached)?;
+                        fs::write(&stage_path, b"replacement-must-survive")?;
+                        Err(Error::Generic(
+                            "before publication with replaced stage".into(),
+                        ))
+                    },
+                    || Ok(())
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(&stage_path)?, b"replacement-must-survive");
+        // Exact test-owned entries are removed explicitly, not by failed reclaim.
+        fs::remove_file(&stage_path)?;
+        fs::remove_file(&detached)?;
+        assert!(
+            front
+                .reclaim_sealed_prefix(
+                    || {
+                        assert_eq!(fs::metadata(&stage_path)?.mode() & 0o7777, 0o600);
+                        Ok(())
+                    },
+                    || {
+                        fs::write(&stage_path, b"post-rename-entry-must-survive")?;
+                        Err(Error::Generic(
+                            "after publication with new stage entry".into(),
+                        ))
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(fs::metadata(&front.path)?.mode() & 0o7777, 0o600);
+        assert_eq!(fs::read(&stage_path)?, b"post-rename-entry-must-survive");
+        let admitted = fs::metadata(&stage_path)?;
+        fs::set_permissions(
+            &stage_path,
+            fs::Permissions::from_mode((admitted.mode() & 0o777) ^ 0o200),
+        )?;
+        assert!(!WalFile::same_stage_identity(
+            &admitted,
+            &fs::metadata(&stage_path)?
+        ));
+        fs::set_permissions(&stage_path, fs::Permissions::from_mode(0o600))?;
+        let admitted = fs::metadata(&stage_path)?;
+        OpenOptions::new()
+            .write(true)
+            .open(&stage_path)?
+            .set_len(0)?;
+        assert!(!WalFile::same_stage_identity(
+            &admitted,
+            &fs::metadata(&stage_path)?
+        ));
+        drop(writer);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
 
     #[test]
     fn append_read_logs() -> Result<(), Error> {

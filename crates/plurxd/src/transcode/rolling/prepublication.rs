@@ -189,6 +189,7 @@ pub(super) fn decode_restricted_options(
     }
     let mut retry_opts = opts.clone();
     retry_opts.pipeline = alternate.options().pipeline;
+    retry_opts.strict_dolby = alternate.options().strict_dolby.clone();
     if retry_opts.pipeline.output_grade() != opts.pipeline.output_grade() {
         return Err("the decode-restricted alternate changed the frozen color contract".to_owned());
     }
