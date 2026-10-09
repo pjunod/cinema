@@ -41,9 +41,10 @@ No final review or implementation completion is claimed for F1–F3 yet.
 **Latest checkpoint:** the actual main landing and private `gperf` bootstrap
 repair are committed together as `2139fa9c4c0aff8a0503d72f53b8eaaa9d54630f`.
 Its normal hook passes: catalog, Rust formatting, workspace Clippy and 86
-embedded JavaScript checks. No unit suite was run. Three independent lanes
-are proceeding against this source: the native release build, Linux
-check/Clippy and the isolated Bookworm SDK generator.
+embedded JavaScript checks. Linux check and Clippy also pass on this source.
+No unit suite was run. The native release build continues; the SDK work
+advances on the helper-only successor `4481f8e9`, whose Rust and Mac package
+inputs are verified unchanged.
 
 The earlier `2cd6000b3` Mac release completed in 1,590.286 seconds with its
 owned process group fully reaped. Matching executable and debug symbols are
@@ -58,11 +59,15 @@ The SDK generator has passed the genuine FreeType metadata target and
 Vulkan-Headers export consumed by Vulkan-Loader. Its next missing input was
 Fontconfig's `gperf` bootstrap program. The committed repair supplies an
 authenticated Bookworm binary, copyright and source offer through the
-private tool owner. Static staging now passes. The actual generator then
-refused a raw-lock versus staged-record representation mismatch before
-running upstream projects. A narrow normalization repair preserves the
-existing archive, module and license checks; its execution is pending.
-No global installation or network fallback substitutes for dependencies.
+private tool owner. After a recorded raw-lock versus staged-record refusal,
+`4481f8e9` normalizes the comparison without weakening archive, module or
+license checks. The full actual SDK generator now passes in 92.66 seconds.
+Producer preparation passes. Configuration exposed a missing link-time
+search path for dependencies of SDK shared libraries; the repair adds
+verified SDK `rpath-link` paths while preserving deployment RPATH and all
+features. Its execution, linking, matching parser and final package audit
+remain required; SDK generation alone is not a shipping build. No global
+installation or network fallback substitutes for dependencies.
 
 Final Linux hardware acceptance also requires an actual amd64 daemon;
 ARM Linux type/lint checks alone cannot supply that executable. A warm

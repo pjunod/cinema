@@ -136,6 +136,16 @@ def prepare(archive, sdk, root):
     return facts
 
 
+def sdk_link_flags(sdk):
+    # -L selects direct libraries. GNU ld needs a separate, link-time-only
+    # search for those libraries' DT_NEEDED objects; deployment RPATH stays
+    # at the official Jellyfin prefix rather than this private build tree.
+    direct = [sdk / "sdk/lib", sdk / "sdk/sysroot/usr/lib/x86_64-linux-gnu"]
+    transitive = [*direct, sdk / "sdk/sysroot/lib/x86_64-linux-gnu"]
+    return " ".join([*("-L" + str(path) for path in direct),
+                     *("-Wl,-rpath-link," + str(path) for path in transitive)])
+
+
 def build_step(root, step, jobs, seconds):
     host()
     if not 1 <= jobs <= 2 or not 1 <= seconds <= 600:
@@ -178,8 +188,7 @@ def build_step(root, step, jobs, seconds):
     if step == "configure":
         cflags = " ".join("-I" + str(sdk / p) for p in
             ["sdk/include", "sdk/sysroot/usr/include", "sdk/sysroot/usr/include/x86_64-linux-gnu"])
-        ldflags = " ".join("-L" + str(sdk / p) for p in
-            ["sdk/lib", "sdk/sysroot/usr/lib/x86_64-linux-gnu"])
+        ldflags = sdk_link_flags(sdk)
         argv = [str(source / "configure"), *facts["preserved_configure"],
                 "--extra-cflags=" + cflags, "--extra-cxxflags=" + cflags,
                 "--extra-ldflags=" + env["LDFLAGS"] + " " + ldflags]

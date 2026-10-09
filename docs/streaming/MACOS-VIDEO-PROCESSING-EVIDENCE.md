@@ -1437,7 +1437,30 @@ same function owns the exact tool-role inventory; `gperf` claims remain
 exact. The 0.291-second failure has no OOM; the owned container is stopped
 and network state restored. Its terminal receipt is
 `48291b910d032146571334b54e6b6accb1758432915c0a780fd80da77b6595b2`.
-Actual execution of this representation repair is still pending.
+The repaired generator on `4481f8e90240674f96a8d1ea3041cb18a5525d7d`
+passes in 92.66 seconds, producing 513 outputs across all 25 upstream
+projects. Source, module and bootstrap checks pass before and after execution.
+Its actual SDK manifest is
+`a5fa50c8473a6d565e9fa1245a80d49fb409f610e287837e77704a98698af2ed`.
+The container stops with no OOM and its network state is restored. This is
+generator evidence; producer linking and the shipping package remain open.
+
+Producer preparation then verifies the full generated SDK and official
+source patches. Configuration preserves all 57 feature tokens but fails a
+real GNU linker probe: `libchromaprint.so` needs `libfftw3f.so.3`, which is
+present in the SDK but is not found through direct-library `-L` flags.
+The repair adds link-time-only `-rpath-link` directories from the verified
+SDK, including its system-library roots. It preserves the official runtime
+RPATH and does not fabricate pkg-config files or disable a codec. The audit
+covers all 180 SDK ELF paths and their dependency search order; final runtime
+closure still must account for 14 named Bookworm system dependencies.
+
+The configure attempt fails after 12.96 seconds without an OOM. Its owned
+container stops and network state is restored. The terminal receipt is
+`19cc1d2d6aad163c944b87ff3ddbd5e3ce30e36c6c2cbfa344a14edfb1d8eaa4`;
+the source/search evidence is
+`d9c8a21a9067bd272158d0c3c63f33611b6eddedde57715fdb2d663678605ed5`.
+Execution of the link-time search repair remains pending.
 
 The shipping source also closes a separate integration gap: published and CI
 smoke images bypassed the local `make docker` seam. Both now have a shared

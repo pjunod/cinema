@@ -172,3 +172,42 @@ def test_package_export_observes_official_configuration_and_reuses_only_matched_
     assert 'FROM scratch AS linux-dolby-package-export' in stage
     assert 'COPY --from=linux-dolby-package-build /work/linux-dolby/package /package' in stage
     assert 'cargo' not in stage and 'rust:' not in stage
+
+
+def test_sdk_link_search_resolves_real_transitive_elf_without_runtime_build_paths():
+    import shlex
+    import shutil
+    import subprocess
+    import sys
+    if not sys.platform.startswith("linux") or not shutil.which("gcc") or not shutil.which("readelf"):
+        raise unittest.SkipTest("requires the GNU Linux linker and readelf")
+    module = recipe()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        sdk = root / "prepared-sdk"
+        libraries = sdk / "sdk/lib"
+        libraries.mkdir(parents=True)
+        (root / "leaf.c").write_text("int leaf(void) { return 42; }\n")
+        (root / "consumer.c").write_text("extern int leaf(void); int consumer(void) { return leaf(); }\n")
+        (root / "main.c").write_text("extern int consumer(void); int main(void) { return consumer(); }\n")
+        def command(argv):
+            return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+        leaf = libraries / "libplurx_sdk_leaf.so.1"
+        result = command(["gcc", "-shared", "-fPIC", str(root / "leaf.c"),
+                          "-Wl,-soname,libplurx_sdk_leaf.so.1", "-o", str(leaf)])
+        assert result.returncode == 0, result.stderr
+        shutil.copyfile(leaf, libraries / "libplurx_sdk_leaf.so")
+        result = command(["gcc", "-shared", "-fPIC", str(root / "consumer.c"),
+                          "-L" + str(libraries), "-lplurx_sdk_leaf", "-o", str(libraries / "libplurx_sdk_consumer.so")])
+        assert result.returncode == 0, result.stderr
+        direct = ["gcc", str(root / "main.c"), "-L" + str(libraries), "-lplurx_sdk_consumer", "-o", str(root / "direct")]
+        assert command(direct).returncode != 0
+        executable = root / "linked"
+        result = command(["gcc", str(root / "main.c"), "-Wl,--disable-new-dtags",
+                          "-Wl,-rpath=/usr/lib/jellyfin-ffmpeg/lib",
+                          *shlex.split(module.sdk_link_flags(sdk)), "-lplurx_sdk_consumer", "-o", str(executable)])
+        assert result.returncode == 0, result.stderr
+        dynamic = command(["readelf", "-d", str(executable)])
+        assert dynamic.returncode == 0, dynamic.stderr
+        assert "RPATH" in dynamic.stdout and "/usr/lib/jellyfin-ffmpeg/lib" in dynamic.stdout
+        assert str(sdk) not in dynamic.stdout
