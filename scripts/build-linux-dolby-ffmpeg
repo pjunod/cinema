@@ -175,8 +175,8 @@ def build_step(root, step, jobs, seconds):
            "CC": "/usr/bin/gcc", "CXX": "/usr/bin/g++",
            "PKG_CONFIG": "/usr/bin/pkg-config --define-prefix",
            "PKG_CONFIG_LIBDIR": os.pathsep.join(str(sdk / p) for p in
-               ["sdk/lib/pkgconfig", "sdk/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig",
-                "sdk/sysroot/usr/lib/pkgconfig", "sdk/sysroot/usr/share/pkgconfig"])}
+               ["sdk/lib/pkgconfig", "sdk/sysroot/usr/lib/pkgconfig",
+                "sdk/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig", "sdk/sysroot/usr/share/pkgconfig"])}
     deadline = time.monotonic() + seconds
     source = root / "source"
     if sha(source / "Dockerfile.in") != facts["environment_recipe_sha256"]:

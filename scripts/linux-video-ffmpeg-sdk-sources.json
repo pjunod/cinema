@@ -2789,6 +2789,16 @@
               "-Dtests=false",
               "--wrap-mode=nofallback"
             ]
+          },
+          {
+            "cwd": "build",
+            "argv": [
+              "ninja",
+              "-j{jobs}",
+              "-C",
+              "{build}",
+              "gen.tab/fribidi-unicode-version.h"
+            ]
           }
         ],
         "outputs": {
@@ -2903,6 +2913,10 @@
           "lib/pkgconfig/fribidi.pc": {
             "root": "build",
             "path": "meson-private/fribidi.pc"
+          },
+          "include/fribidi/fribidi-unicode-version.h": {
+            "root": "build",
+            "path": "gen.tab/fribidi-unicode-version.h"
           }
         },
         "depends_on": []

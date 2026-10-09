@@ -349,12 +349,55 @@ def stage_distribution_packages(lock, sdk, provenance, archive_directory):
             raise ValueError("every consumed binary role needs its authentic distributed copyright")
         row["copyright_sha256"] = digest((sysroot / copyright_path).read_bytes())
         row["unresolved_archive_aliases"] = {name: target for name, target in unresolved.items() if name in row["archive_aliases"]}
+    projections = project_distribution_pkgconfig(sysroot, all_files, file_roles, records)
     inventory = {str(path.relative_to(sysroot)): {"sha256": digest(path.read_bytes()), "bytes": path.stat().st_size}
                  for path in sorted(sysroot.rglob("*")) if path.is_file()} if sysroot.exists() else {}
     return {"roles": records, "sysroot_members": inventory, "unresolved_relative_links":
             {name: target for name, target in unresolved.items() if not target.startswith("/")},
             "unresolved_absolute_aliases": {name: target for name, target in unresolved.items() if target.startswith("/")},
-            "materialized_archive_aliases": alias_witness}, supplied
+            "materialized_archive_aliases": alias_witness, "pkg_config_projections": projections}, supplied
+
+
+def project_distribution_pkgconfig(sysroot, all_files, file_roles, records):
+    """Expose original Debian PCs at the prefix-relative pkg-config depth.
+
+    pkgconf --define-prefix derives a prefix two directories above a PC. A
+    Debian multiarch lib/<triplet>/pkgconfig location otherwise adds lib to
+    /usr. Keep every original byte/member and record the layout projection;
+    generated private SDK PCs remain in their independent SDK prefix.
+    """
+    projections = {}
+    for name, contents in sorted(all_files.items()):
+        if not re.fullmatch(r"usr/lib/x86_64-linux-gnu/pkgconfig/[^/]+\.pc", name):
+            continue
+        if re.search(rb"(?m)^prefix=/usr\s*$", contents) is None:
+            raise ValueError("distribution pkg-config projection requires authentic /usr prefix")
+        target_name = "usr/lib/pkgconfig/" + Path(name).name
+        target = sysroot / target_name
+        if target.exists() or target.is_symlink():
+            raise ValueError("distribution pkg-config projection must not replace an existing member")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+        target.chmod(0o444)
+        projections[target_name] = {"source_member": name, "sha256": digest(contents),
+            "bytes": len(contents), "source_roles": {role: records[role]["archive_sha256"]
+                for role in sorted(file_roles[name])}}
+    return projections
+
+
+def validate_distribution_pkgconfig_projections(distribution):
+    for target, row in distribution.get("pkg_config_projections", {}).items():
+        source = row["source_member"]
+        if not re.fullmatch(r"usr/lib/x86_64-linux-gnu/pkgconfig/[^/]+\.pc", source) or target != "usr/lib/pkgconfig/" + Path(source).name:
+            raise ValueError("invalid distribution pkg-config projection layout")
+        expected = {"sha256": row["sha256"], "bytes": row["bytes"]}
+        inventory = distribution["sysroot_members"]
+        if inventory.get(source) != expected or inventory.get(target) != expected or not row["source_roles"]:
+            raise ValueError("distribution pkg-config projection differs from authentic member bytes")
+        for role, archive in row["source_roles"].items():
+            original = distribution["roles"][role]
+            if original["archive_sha256"] != archive or original["consumed"].get(source) != {**expected, "kind": "pkg-config"}:
+                raise ValueError("distribution pkg-config projection source association changed")
 
 
 def normalized_source_tree(data, source_root):
@@ -918,6 +961,7 @@ def verified_staging(root):
     validate_build_tool_claims(lock.get("build_tools", {}), facts.get("build_tools", {}))
     verify_build_tools(root, facts.get("build_tools", {}))
     distribution = facts.get("distribution_inputs", {})
+    validate_distribution_pkgconfig_projections(distribution)
     for role, row in distribution.get("roles", {}).items():
         base = root / "provenance/distribution-sources" / role
         checked_bytes(base / "original-package.deb", row["archive_sha256"])
@@ -1027,7 +1071,7 @@ def generate(root, jobs, seconds):
     execution.mkdir()  # Existing/failed attempts are never silently overwritten.
     deadline = time.monotonic() + seconds
     environment = {"PATH": "/usr/bin:/bin", "HOME": str(execution), "TMPDIR": str(execution),
-                   "LC_ALL": "C", "PKG_CONFIG_LIBDIR": os.pathsep.join(str(root / p) for p in ["sdk/lib/pkgconfig", "sdk/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig", "sdk/sysroot/usr/lib/pkgconfig", "sdk/sysroot/usr/share/pkgconfig"]),
+                   "LC_ALL": "C", "PKG_CONFIG_LIBDIR": os.pathsep.join(str(root / p) for p in ["sdk/lib/pkgconfig", "sdk/sysroot/usr/lib/pkgconfig", "sdk/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig", "sdk/sysroot/usr/share/pkgconfig"]),
                    "PKG_CONFIG": "/usr/bin/pkg-config --define-prefix",
                    "CFLAGS": " ".join("-I" + str(root / p) for p in ["sdk/include", "sdk/sysroot/usr/include", "sdk/sysroot/usr/include/x86_64-linux-gnu"]),
                    "LDFLAGS": " ".join("-L" + str(root / p) for p in ["sdk/lib", "sdk/sysroot/usr/lib/x86_64-linux-gnu"]), "CC": "/usr/bin/gcc", "CXX": "/usr/bin/g++"}

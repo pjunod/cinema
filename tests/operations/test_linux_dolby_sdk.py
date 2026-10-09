@@ -4,6 +4,9 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 import tarfile
 
@@ -80,6 +83,47 @@ class LinuxDolbySdkCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "credential-free"):
             module.stage_sources(lock, tmp_path / "sdk", tmp_path / "other-provenance", ["--enable-libfoo"], recipe)
 
+
+    def test_distribution_multiarch_pc_projection_keeps_authentic_bytes_and_private_prefix(self):
+        module = helper()
+        sdk = self.tmp_path / "sdk"
+        sysroot = sdk / "sysroot"
+        source_name = "usr/lib/x86_64-linux-gnu/pkgconfig/opus.pc"
+        # Synthetic contract fixture with the same installed /usr layout as
+        # authenticated Debian metadata; this is not a source-offer claim.
+        contents = b"prefix=/usr\nincludedir=${prefix}/include\nName: Opus\nDescription: test\nVersion: 1.3.1\nCflags: -I${includedir}/opus\n"
+        original = sysroot / source_name
+        original.parent.mkdir(parents=True)
+        original.write_bytes(contents)
+        consumed = {"sha256": module.digest(contents), "bytes": len(contents), "kind": "pkg-config"}
+        records = {"libopus-dev": {"archive_sha256": "a" * 64, "consumed": {source_name: consumed}}}
+        projected = module.project_distribution_pkgconfig(sysroot, {source_name: contents}, {source_name: ["libopus-dev"]}, records)
+        destination = "usr/lib/pkgconfig/opus.pc"
+        assert original.read_bytes() == (sysroot / destination).read_bytes() == contents
+        inventory = {name: {"sha256": module.digest(contents), "bytes": len(contents)} for name in [source_name, destination]}
+        facts = {"pkg_config_projections": projected, "sysroot_members": inventory, "roles": records}
+        module.validate_distribution_pkgconfig_projections(facts)
+        private_pc = sdk / "lib/pkgconfig/private.pc"
+        private_pc.parent.mkdir(parents=True)
+        private_pc.write_text("prefix=/original/private\nName: Private\nDescription: test\nVersion: 1\nCflags: -I${prefix}/include/private\n")
+        tool = shutil.which("pkg-config")
+        with self.subTest("actual pkg-config relocation"):
+            if tool is None:
+                self.skipTest("pkg-config unavailable; structural projection checks remain independent")
+            environment = {"PATH": os.environ.get("PATH", ""), "PKG_CONFIG_LIBDIR": os.pathsep.join([str(private_pc.parent), str((sysroot / destination).parent)]), "PKG_CONFIG_PATH": ""}
+            result = subprocess.run([tool, "--define-prefix", "--cflags", "opus", "private"], env=environment, capture_output=True, text=True, timeout=10, check=True)
+            assert str(sysroot / "usr/include/opus") in result.stdout
+            assert str(sdk / "include/private") in result.stdout
+            assert str(sysroot / "usr/lib/include/opus") not in result.stdout
+        facts["sysroot_members"][destination] = {"sha256": "0" * 64, "bytes": len(contents)}
+        with self.assertRaisesRegex(ValueError, "authentic member bytes"):
+            module.validate_distribution_pkgconfig_projections(facts)
+        facts["sysroot_members"][destination] = dict(inventory[source_name])
+        projected[destination]["source_roles"]["libopus-dev"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "source association"):
+            module.validate_distribution_pkgconfig_projections(facts)
+        with self.assertRaisesRegex(ValueError, "must not replace"):
+            module.project_distribution_pkgconfig(sysroot, {source_name: contents}, {source_name: ["libopus-dev"]}, records)
 
     def test_actual_project_outputs_are_required_and_imported_libraries_cannot_be_replaced(self):
         module = helper()

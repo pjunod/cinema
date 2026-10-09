@@ -1460,7 +1460,35 @@ container stops and network state is restored. The terminal receipt is
 `19cc1d2d6aad163c944b87ff3ddbd5e3ce30e36c6c2cbfa344a14edfb1d8eaa4`;
 the source/search evidence is
 `d9c8a21a9067bd272158d0c3c63f33611b6eddedde57715fdb2d663678605ed5`.
-Execution of the link-time search repair remains pending.
+The next configure attempt on `b8bfc491` passes the previously failing
+Chromaprint dependency search and the FDK, Fontconfig and FreeType probes.
+It fails after 10.13 seconds on Fribidi's missing generated public header,
+`fribidi-unicode-version.h`. The genuine upstream target consumes its pinned
+Unicode data; generating and exporting that declared output is required.
+The terminal receipt is
+`9a71f4bf42201dc51d73bbe9be8b262fbc5d091edb0bf3953f475f151b972195`.
+
+A serial compiler-preprocessor audit then checks 38 enabled public-header
+groups. Thirty-six pass; Fribidi and Opus fail. The first Opus probe omitted
+the producer's `--define-prefix` and is retained as an invalid diagnostic.
+A focused Opus retry with that actual producer option also fails: the
+multiarch pkg-config location produces a prefix ending in `usr/lib`, so its
+include path becomes `usr/lib/include/opus`. The authentic header is present
+under `usr/include/opus`. This establishes a metadata relocation defect,
+not a missing codec or justification for invented dependency metadata.
+Both diagnosis containers stop without an OOM and restore their network and
+resource configuration. They perform preprocessing, not linking or unit
+execution. The consolidated source repair runs Fribidi's actual Ninja target
+and exports its generated header. It retains every authenticated Debian PC
+at its original path and projects identical bytes into `usr/lib/pkgconfig`,
+where `--define-prefix` computes the correct `/usr` root. Generated private
+SDK metadata keeps its separate prefix and lookup precedence. Every
+projection records its source member, archive role, hash and size, and
+refuses collisions or changed source associations. A read-only inventory
+checks all 30 actual multiarch PCs: each has the required `/usr` prefix and
+each projection destination is absent. That inventory's SHA-256 is
+`29b3bd24b075d930785db517f3c9c879f462b24b520962b0dbbf50b22591f1e3`.
+Actual generation and configuration of this repair remain pending.
 
 The shipping source also closes a separate integration gap: published and CI
 smoke images bypassed the local `make docker` seam. Both now have a shared
@@ -1469,3 +1497,52 @@ selects the architecture-specific runtime while excluding build-tool stages.
 The assets-only publication path does not require daemon Rust compilation.
 No successful export, image build or physical-backend qualification is claimed
 from source or syntax checks alone.
+
+## 34. Complete subtitle graph correctness and final release — 2026-10-08
+
+All eight frozen complete-graph comparisons pass: SDR and PQ sources, ASS
+and PGS subtitles, and 2560×1440 and 3840×2160 output. Every workload has
+120 equal frame timestamps, zero CPU/GPU pixel difference on both planes,
+and exact blank-frame equality with the no-burn reference. These results
+use the unchanged qualified native FFmpeg package, not a substitute encoder.
+They establish correctness; timing and final daemon API acceptance remain
+separate requirements.
+
+The PGS diagnostic observes a blank heartbeat and active subtitle at the
+same 250 ms boundary, followed by a 749.999 ms heartbeat and 750 ms clear.
+The pinned scheduler converts those events to the main 24 fps clock and
+consumes one queued next event per input. For this exact fixture that makes
+frames 7–18 active. Reassessment of retained per-frame hashes passes with
+that independently derived mapping. The original blank-interval failure
+and a diagnostic regex that accidentally included secondary timestamps
+remain negative records. Neither pixel tolerance nor application behavior
+changed to accommodate them.
+
+The combined ledger binds the separate successful executions to identical
+source, cue, font, package and plan hashes. It does not describe them as one
+execution. Its SHA-256 is
+`86e3cb0239742d2714d9702bae3137ad1fac30fb3da2b5f76e4cada4e003669b`;
+the retained-frame oracle reassessment is
+`63a55a8d3a845aabb05bd47617b6fc0b5d7fbcb408e56566f8540b683deb2bc8`.
+
+The exact `2139fa9c4c0aff8a0503d72f53b8eaaa9d54630f` native release
+continuation passes in 1,991.254 seconds using pinned Rust 1.97.1, one job
+and the unchanged release profile. Its owned process group is absent;
+capture of the executable and matching arm64 debug symbols finishes in
+1,992.202 seconds. The unsigned executable hash is
+`d172ebdcf197ce810706251df4ae6b783f450856439164816a9729020e8ee604`,
+with UUID `C8F25B24-9B5C-33FF-96A7-2A052E434C20`. The build/capture receipt is
+`e7ebdf83d983ee33f5e9878cd7e4ebddbf4ff7e3529dcbe9cbe89a5291469620`.
+The earlier bounded timeout remains recorded; this successful continuation
+does not erase it. Later SDK-only helper changes have unchanged Rust and Mac
+package inputs and do not relabel this artifact's source identity.
+
+The signed bundle's final text API attempt does not pass. Runtime observation
+reports `sdr_text_burn` available, but normal creation selects CPU processing
+with `runtime_probe_failed`. Investigation must account for the font authority
+on the already captured source-evidence engine; the earlier repair only
+establishes the no-evidence capture path. A separate wrapper UID assertion
+interrupts its telemetry. The actual driver also records the native-plan
+failure, completes daemon shutdown, and leaves no owned driver or daemon;
+the build prefix is restored. These are distinct failures, not evidence of
+successful text delivery or an encoder failure.
