@@ -543,9 +543,11 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 ## performance/ — where the seconds go
 
-[Video quality programme](performance/VIDEO-QUALITY-PROGRAM.md) — approved calibration and performance build order; [execution ledger](performance/VIDEO-QUALITY-STATUS.md) — parallel ownership, actual measurements, merges and remaining evidence. **Built; qualification limits in the ledger.**
+[Video quality programme](performance/VIDEO-QUALITY-PROGRAM.md) — approved calibration and performance build order; [execution ledger](performance/VIDEO-QUALITY-STATUS.md) — parallel ownership, actual measurements, merges and remaining evidence. **Built; remaining acceptance resumed October 8 in three parallel lanes.**
 
 [Video quality batch qualification](evidence/video-quality-2026-10-03/) — final review corrections, native content analysis, packaged scorer, Developer settings, isolated VAAPI output and retained per-check fast-lane receipts. **Qualified; landing and cleanup in PR #766.**
+
+[Video quality acceptance follow-up](evidence/video-quality-2026-10-08/) — retained source-local title scoring, actual Plurx browser/native playback, HDR cause isolation and matched latency controls. **In progress; scope and decisions in the [execution ledger](performance/VIDEO-QUALITY-STATUS.md).**
 
 Two rounds of performance work, each with its plan, review, and response.
 

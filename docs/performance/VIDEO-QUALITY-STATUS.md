@@ -1,12 +1,46 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** implementation and qualification complete; [PR #766](http://forge.lan:3000/noirr/plurx/pulls/766) records landing and cleanup · **Updated:** 2026-10-03
+**Status:** implementation merged; remaining acceptance in progress
+· **Updated:** 2026-10-08 · **Resume base:** `1088d7529`
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
 unverified, not a pass. Dates use America/New_York unless a receipt states UTC.
 
-## Current execution — consolidated batch
+## Remaining acceptance — resumed on October 8
+
+[PR #766](http://forge.lan:3000/noirr/plurx/pulls/766) landed the implementation
+and its required checks as `342521018`. That did not complete every performance
+and image acceptance goal. Paul resumed the remaining work with parallel
+sessions on October 8. The coordinator uses `codex/video-qualification-followup`
+in a fresh independent clone; the owner's checkout is not used.
+[Draft PR #956](http://forge.lan:3000/noirr/plurx/pulls/956) collects the logical
+commits; final review and the fast lane are still pending.
+
+| Lane / exclusive ownership | Work being completed | Current evidence and next step |
+|---|---|---|
+| Encoding: encoding qualification harnesses and receipts | Real-title C2 sample and whole-clip quality/size/time comparison; B-frame compression and actual web/Apple/Android delivery, seek/restart and A/V correspondence. | Three genuinely tagged SDR titles retain baseline: candidates either lose quality or increase bytes. Actual Plurx HLS passes Chrome seek/restart and all 16 AVPlayer simulator phases. B-frames show no consistent quality/size win on two open films; retain the default. Android has three passing cases and one selectively retried probe-epoch correction pending. An isolated real-title durable-owner job is running on idle lab3 against an existing shared source mount; private pixels stay on the source node. Untagged films remain C2 eligibility negatives. |
+| HDR: captured-image diagnostic harnesses and receipts | Explain the retained sharp-edge failure, then measure broader authored color/highlight/shadow cases with the shipping graph. | Decode, planar/P010 conversion and GPU transfer are byte-exact; independent decoders agree. Quantization/reconstruction causes the sharp-edge error. A quantizer limit improves the image but violates a constrained bitrate budget, so it is rejected. Authored chromatic tone-map inspection is complete; retain the tone-map policy. The bitrate-preserving effort control also trades away quality on real windows and is rejected. Calibration is complete; the original sharp-edge criterion remains failed, and broader graph image/client acceptance is not claimed. |
+| Latency: isolated playback measurement harnesses and receipts | Matched actual-frame episode transitions, startup phase distributions and delivery coordination/resource comparisons. | All 16 natural episode-transition cells completed without media errors or stalls; the close/cancel boundary is being traced. Matched source-probe and delivery controls are running. Shared-host load is recorded; no idle-host throughput claim is made. Older runway-policy evidence is not repurposed. |
+| Coordinator: this ledger, programme, docs index and backlog | Integrate logical commits, final review, scoped fast lane, merge and cleanup. | Pinned Rust 1.97.1 core check and current daemon/exporter builds passed on the resume base. Native AVPlayer and Media3 harnesses compile. Final receipt integration, review and fast lane follow the measurement lanes. |
+
+The [programme](VIDEO-QUALITY-PROGRAM.md#8-integration-evidence-and-limits)
+remains the acceptance contract. Its original autonomous captured-image scope
+explicitly excludes physical display calibration. Wider S-11/Dolby and
+hardware-family programmes retain their own acceptance; synthetic or desktop
+results will not close their physical-device rows. No threshold is weakened,
+no existing failed capture is erased, and no new watchdog or feature gate is
+introduced. Each receipt identifies its exact source, tool, client, control,
+resource bounds and limitations.
+
+The previously authorized batch workflow remains: one review when this batch
+is merge-ready, then required checks with successful results retained and only
+failed checks retried. Qualification measurements are the work being done now;
+unit suites are not repeatedly run during development. Source changes retain
+pinned compile checks and normal hooks. Tracked records use neutral
+infrastructure names; private media and fleet configuration stay out of Git.
+
+## October 3 execution — merged consolidated batch
 
 Paul authorized replacing per-task testing/effort gates with one larger
 merge-ready PR, one final adversarial review, review fixes, and then fast-lane
