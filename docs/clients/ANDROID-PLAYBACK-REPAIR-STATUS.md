@@ -284,3 +284,9 @@ literal mismatch and noncanonical YAML control-key bypasses. The proof now
 admits only the canonical immutable upload/Node step shapes and preserves
 all-skipped histories. Its three new/changed focused regressions passed; the
 original 1,260 individual Python successes will retain their own attribution.
+
+Original-run API verification confirms the completed 1,260-pass journal and
+the interrupted Node boundary. Publication proof binds the actual upload
+artifact ID; Python fixture output before the completed frame is not mistaken
+for a subsequent Node phase. Only the affected boundary regression reran
+after those original-log mismatches, and passed.

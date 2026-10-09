@@ -517,7 +517,8 @@ def recover_missing_final_before_node(api, scope, prior, jobs, workflow):
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.main_preflight_adoption node"""
-    require(upload.rstrip() == expected_upload and node.rstrip() == expected_node,
+    require(upload.rstrip() == expected_upload and node.rstrip() == expected_node
+            and sum('python3 -m validation.main_preflight_adoption node' in step for step in steps) == 1,
             "Node is not behind the mandatory successful Python upload")
     raw = api.bytes(f"/actions/jobs/{job['id']}/logs")
     lines = main.log_lines(raw)
@@ -547,7 +548,9 @@ def recover_missing_final_before_node(api, scope, prior, jobs, workflow):
             require(start['producer_blob'] == git('rev-parse', commit + ':validation/main_preflight_adoption.py')
                     and start['manifest_blob'] == git('rev-parse', commit + ':' + str(MANIFEST)),
                     "Interrupted adoption start producer mismatch")
-        require(lines.count(f"Artifact {name}-start-{rid} has been successfully uploaded!") == 1,
+        publication = re.escape(f"Artifact {name}-start-{rid} has been successfully uploaded!")
+        suffix = rf"(?: Final size is [1-9][0-9]* bytes\. Artifact ID is {markers[0]['id']})?"
+        require(sum(bool(re.fullmatch(publication + suffix, line)) for line in lines) == 1,
                 "Interrupted preflight prepare/start publication unavailable")
         require(not any(f'Artifact {name} has been successfully uploaded!' in line for line in lines),
                 "Final upload completed; Node execution needs its own evidence")
@@ -555,7 +558,7 @@ def recover_missing_final_before_node(api, scope, prior, jobs, workflow):
     require(sum(commit in line for line in lines[:end]) >= 2
             and any('triggered by event: pull_request' in line for line in lines[:end])
             and any('context deadline exceeded' in line for line in lines[end + 1:])
-            and not any(line.startswith('Main preflight outcome ') for line in lines)
+            and not any(line.startswith('Main preflight outcome ') for line in lines[end + 1:])
             and not any('MAIN-UNIT-' in line for line in lines[end + 1:]),
             "Interrupted terminal log does not prove the Python-phase timeout")
     return True

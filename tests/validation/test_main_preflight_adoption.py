@@ -40,7 +40,10 @@ class MainPreflightAdoptionCase(unittest.TestCase):
             print(commit, commit, 'triggered by event: pull_request', sep='\n')
             main.emit_snapshot(python_start, 'start')
             for name in (py_key, node_key):
-                print(f'Artifact {name}-start-{rid} has been successfully uploaded!')
+                artifact_id = 1 if name == py_key else 2
+                print(f'Artifact {name}-start-{rid} has been successfully uploaded! Final size is 352 bytes. Artifact ID is {artifact_id}')
+            # Python fixture tests can print synthetic outcome examples.
+            print('Main preflight outcome {\"id\": \"validation:synthetic\", \"record\": {\"run\": 12}}')
             main.emit_snapshot(dict(python_start, complete=True), 'final')
             print('this step has been cancelled: context deadline exceeded')
         raw = output.getvalue().encode()
@@ -67,6 +70,7 @@ class MainPreflightAdoptionCase(unittest.TestCase):
             writer.assert_not_called()
             # Missing records alone cannot prove zero execution.
             for changed in (raw.replace(b'MAIN-UNIT-END final', b'truncated'),
+                            raw.replace(b'Artifact ID is 1', b'Artifact ID is 99'),
                             raw + f'Artifact {py_key} has been successfully uploaded!\n'.encode(),
                             raw + b'Main preflight outcome {}\n',
                             raw.replace(b'context deadline exceeded', b'unknown failure')):
