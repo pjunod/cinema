@@ -12,8 +12,6 @@ import subprocess
 import zlib
 import xml.etree.ElementTree as ET
 import urllib.parse
-import urllib.request
-import urllib.error
 from validation import python_unit_receipts as r
 
 LANES = {'rust', 'apple', 'android_jvm', 'android_device'}
@@ -287,6 +285,48 @@ def validate(document, candidate, source=git_bytes, differences=changed):
     return adopted
 
 
+def comment_evidence_bytes(api, pr, attachment_id, attachment_uuid, expected_digest):
+    """Read private, writer-authenticated chunks through the runner's issue API."""
+    repository = r.positive(api.get('')['id'])
+    binding = {'version': 1, 'repository': repository, 'pr': pr,
+               'attachment_id': attachment_id, 'attachment_uuid': attachment_uuid,
+               'sha256': expected_digest}
+    chunks = {}
+    count = None
+    writers = set()
+    for comment in api.pages(f'/issues/{pr}/comments'):
+        lines = [line.removeprefix('Promotion-Unit-Evidence-Chunk: ')
+                 for line in comment['body'].splitlines()
+                 if line.startswith('Promotion-Unit-Evidence-Chunk: ')]
+        if not lines:
+            continue
+        r.require(len(lines) == 1, 'Ambiguous private evidence chunk comment')
+        claim = r.bounded_json(lines[0].encode())
+        if any(claim.get(key) != value for key, value in binding.items()):
+            continue
+        r.require(len(comment['body'].encode()) <= 65536
+                  and set(claim) == set(binding) | {'index', 'count', 'gzip_base64'},
+                  'Unknown or oversized private evidence chunk fields')
+        writer = (r.positive(comment['user']['id']), comment['user']['login'])
+        if writer not in writers:
+            r.verify_attestor(api, {'repository': repository}, comment['user'])
+            writers.add(writer)
+        index, total, packed = claim['index'], claim['count'], claim['gzip_base64']
+        r.require(type(total) is int and 0 < total <= 128
+                  and type(index) is int and 0 <= index < total
+                  and isinstance(packed, str) and 0 < len(packed) <= 60000
+                  and (count is None or count == total) and index not in chunks,
+                  'Duplicate, conflicting or invalid private evidence chunk')
+        count = total
+        chunks[index] = packed
+        r.require(sum(len(value) for value in chunks.values()) <= r.MAX_BYTES,
+                  'Private evidence encoded payload oversized')
+    r.require(count is not None and set(chunks) == set(range(count)),
+              'Private evidence comment chunks missing or incomplete')
+    packed = ''.join(chunks[index] for index in range(count))
+    return decoded_log({'gzip_base64': packed, 'sha256': expected_digest}).encode('utf-8')
+
+
 def attachment_bytes(api, pr, attachment_id, attachment_uuid, expected_digest):
     r.require(re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', attachment_uuid),
               'Invalid private attachment UUID')
@@ -304,12 +344,7 @@ def attachment_bytes(api, pr, attachment_id, attachment_uuid, expected_digest):
               and not url.username and not url.password and not url.query and not url.fragment
               and url.path == server.path.rstrip('/') + '/attachments/' + attachment_uuid,
               'Private evidence download origin or UUID mismatch')
-    request = urllib.request.Request(url.geturl(), headers={'Authorization': 'token ' + api.token})
-    try:
-        with api.opener.open(request, timeout=15) as response:
-            raw = response.read(r.MAX_BYTES + 1)
-    except urllib.error.HTTPError as error:
-        raise r.ReceiptHTTPError(error.code, '/attachments/' + attachment_uuid) from None
+    raw = comment_evidence_bytes(api, pr, attachment_id, attachment_uuid, expected_digest)
     r.require(len(raw) == item['size'], 'Private evidence attachment truncated or oversized')
     return raw
 
