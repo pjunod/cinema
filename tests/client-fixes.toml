@@ -5847,3 +5847,21 @@ source = "clients/apple/Sources/LiveTvSettingsView.swift"
 source_anchor = "Cinema remotes · advisory enablement"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+
+[[fixes]]
+id = "android.hls-copy-target-arrival"
+commits = ["2ef81d673527ffcda2bf619f494ba6cbfe580149"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "internal fun copyPrerollHasRenderedProgress("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "hlsCopyPrerollSettlesBeforeTheDestinationDeadline"
+
+[[fixes]]
+id = "android.temporary-serving-fence-control-retry"
+commits = []
+supplements = "android.hls-copy-target-arrival"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = 'code in setOf("control_unavailable", "serving_fenced")'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "temporaryServingFenceReplaysThenResumesFreshControl"
