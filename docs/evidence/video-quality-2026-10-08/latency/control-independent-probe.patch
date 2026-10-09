@@ -1,0 +1,29 @@
+--- a/crates/plurxd/src/decode_facts.rs
++++ b/crates/plurxd/src/decode_facts.rs
+@@ -3743,10 +3743,10 @@
+         cancelled: Option<&tokio_util::sync::CancellationToken>,
+     ) -> Result<DecodeFacts, DecodeFactError> {
+         let selected_stream = prepared.key.selected_stream;
+-        source.seed = Some(FreshFactSeed {
+-            facts: prepared.facts,
+-            key: prepared.key,
+-        });
++        // Measurement-only counterfactual: independent verification/planning
++        // owners cannot share the just-collected document or cache entry.
++        source.seed = None;
++        let _verification_facts = prepared.facts;
+         self.get_or_probe(probe, source, catalog, selected_stream, budget, cancelled)
+             .await
+     }
+@@ -3965,6 +3965,11 @@
+         );
+         source_outcome?;
+         collected.key = Some(key.clone());
++        // The old verification owner did not populate the decoder cache.
++        // Decoder observations still populate it, preserving warm-start hits.
++        if source.projection == ProbeProjection::SourceDocument {
++            return Ok((collected, DecodeFactLookupResult::MissCollected));
++        }
+         let mut entries = self.entries.lock().await;
+         let Ok(facts) = &collected.facts else {
+             // Source verification succeeded; preserve the decoder's typed

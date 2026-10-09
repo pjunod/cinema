@@ -1,0 +1,1866 @@
+[
+  {
+    "asset": "animation-bf0",
+    "init_sha256": "dfa4217588fbb9252f6e89c63056bce5ccd6b97945a1ff1ade6c615023b7bb92",
+    "segments": 32,
+    "streams": [
+      {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 852,
+        "height": 480,
+        "has_b_frames": 0,
+        "time_base": "1/30",
+        "start_time": "0.000000",
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "VideoHandler",
+          "encoder": "Lavc63.1.101 libx264"
+        }
+      },
+      {
+        "index": 1,
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "time_base": "1/48000",
+        "start_time": "0.000000",
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "SoundHandler"
+        }
+      }
+    ],
+    "video_packets": 1906,
+    "audio_packets": 2979,
+    "unique_pts": 1906,
+    "nonzero_cto_packets": 0,
+    "video_pts_steps": [
+      1
+    ],
+    "audio_gap_count": 0,
+    "strict_decode_exit": 0,
+    "decode_errors": "",
+    "truns": [
+      {
+        "segment": "001.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "001.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "002.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "002.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "003.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "003.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "004.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "004.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "005.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "005.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "006.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "006.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "007.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "007.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "008.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "008.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "009.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "009.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "010.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "010.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "011.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "011.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "012.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "012.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "013.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "013.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "014.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "014.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "015.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "015.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "016.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "016.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "017.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "017.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "018.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "018.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "019.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "019.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "020.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "020.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "021.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "021.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "022.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "022.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "023.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "023.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "024.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "024.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "025.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "025.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "026.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "026.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "027.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "027.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "028.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "028.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "029.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "029.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "030.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "030.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "031.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 60
+      },
+      {
+        "segment": "031.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "032.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 46
+      },
+      {
+        "segment": "032.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 72
+      }
+    ],
+    "media_bytes": 16535673
+  },
+  {
+    "asset": "animation-bf2",
+    "init_sha256": "62bafdcb8105da0452c883755d9ecda20c4e5820c47ae0f554fb2df9b412c98a",
+    "segments": 32,
+    "streams": [
+      {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 852,
+        "height": 480,
+        "has_b_frames": 2,
+        "time_base": "1/30",
+        "start_time": "0.033333",
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "VideoHandler",
+          "encoder": "Lavc63.1.101 libx264"
+        }
+      },
+      {
+        "index": 1,
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "time_base": "1/48000",
+        "start_time": "0.000000",
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "SoundHandler"
+        }
+      }
+    ],
+    "video_packets": 1906,
+    "audio_packets": 2979,
+    "unique_pts": 1906,
+    "nonzero_cto_packets": 771,
+    "video_pts_steps": [
+      1
+    ],
+    "audio_gap_count": 0,
+    "strict_decode_exit": 0,
+    "decode_errors": "",
+    "truns": [
+      {
+        "segment": "001.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "001.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "002.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "002.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "003.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "003.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "004.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "004.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "005.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "005.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "006.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "006.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "007.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "007.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "008.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "008.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "009.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "009.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "010.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "010.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "011.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "011.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "012.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "012.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "013.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "013.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "014.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "014.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "015.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "015.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "016.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "016.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "017.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "017.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "018.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "018.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "019.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "019.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "020.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "020.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "021.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "021.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "022.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "022.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "023.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "023.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "024.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "024.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "025.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "025.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "026.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "026.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "027.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "027.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "028.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "028.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "029.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "029.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "030.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "030.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "031.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 60
+      },
+      {
+        "segment": "031.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "032.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 46
+      },
+      {
+        "segment": "032.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 72
+      }
+    ],
+    "media_bytes": 16668144
+  },
+  {
+    "asset": "live-action-bf0",
+    "init_sha256": "4bb446dd340dbbd1342127f33d042f3a33b38c22abd219a90cc97b9b61f6f97f",
+    "segments": 31,
+    "streams": [
+      {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 1150,
+        "height": 480,
+        "has_b_frames": 0,
+        "time_base": "1/24",
+        "start_time": "0.000000",
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "VideoHandler",
+          "encoder": "Lavc63.1.101 libx264"
+        }
+      },
+      {
+        "index": 1,
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "time_base": "1/48000",
+        "start_time": "0.000000",
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "SoundHandler"
+        }
+      }
+    ],
+    "video_packets": 1453,
+    "audio_packets": 2838,
+    "unique_pts": 1453,
+    "nonzero_cto_packets": 0,
+    "video_pts_steps": [
+      1
+    ],
+    "audio_gap_count": 0,
+    "strict_decode_exit": 0,
+    "decode_errors": "",
+    "truns": [
+      {
+        "segment": "001.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "001.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "002.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "002.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "003.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "003.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "004.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "004.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "005.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "005.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "006.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "006.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "007.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "007.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "008.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "008.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "009.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "009.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "010.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "010.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "011.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "011.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "012.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "012.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "013.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "013.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "014.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "014.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "015.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "015.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "016.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "016.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "017.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "017.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "018.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "018.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "019.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "019.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "020.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "020.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "021.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "021.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "022.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "022.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "023.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "023.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "024.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "024.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "025.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "025.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "026.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "026.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "027.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "027.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "028.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "028.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "029.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "029.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "030.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 48
+      },
+      {
+        "segment": "030.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "031.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 13
+      },
+      {
+        "segment": "031.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 25
+      }
+    ],
+    "media_bytes": 16731419
+  },
+  {
+    "asset": "live-action-bf2",
+    "init_sha256": "53dbde027d709c7271a655b9cc403b3552797d711241a16dc4a68e336e1df2cc",
+    "segments": 31,
+    "streams": [
+      {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 1150,
+        "height": 480,
+        "has_b_frames": 2,
+        "time_base": "1/24",
+        "start_time": "0.041667",
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "VideoHandler",
+          "encoder": "Lavc63.1.101 libx264"
+        }
+      },
+      {
+        "index": 1,
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "time_base": "1/48000",
+        "start_time": "0.000000",
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "SoundHandler"
+        }
+      }
+    ],
+    "video_packets": 1453,
+    "audio_packets": 2838,
+    "unique_pts": 1453,
+    "nonzero_cto_packets": 518,
+    "video_pts_steps": [
+      1
+    ],
+    "audio_gap_count": 0,
+    "strict_decode_exit": 0,
+    "decode_errors": "",
+    "truns": [
+      {
+        "segment": "001.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "001.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "002.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "002.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "003.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "003.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "004.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "004.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "005.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "005.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "006.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "006.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "007.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "007.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "008.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "008.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "009.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "009.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "010.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "010.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "011.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "011.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "012.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "012.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "013.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "013.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "014.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "014.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "015.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "015.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "016.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "016.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "017.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "017.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "018.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "018.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "019.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "019.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "020.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "020.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "021.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "021.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "022.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "022.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "023.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "023.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "024.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "024.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "025.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "025.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "026.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "026.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "027.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "027.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "028.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "028.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 93
+      },
+      {
+        "segment": "029.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "029.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "030.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 48
+      },
+      {
+        "segment": "030.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 94
+      },
+      {
+        "segment": "031.m4s",
+        "version": 1,
+        "flags": 3841,
+        "samples": 13
+      },
+      {
+        "segment": "031.m4s",
+        "version": 0,
+        "flags": 1793,
+        "samples": 25
+      }
+    ],
+    "media_bytes": 16698343
+  }
+]

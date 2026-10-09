@@ -1,0 +1,88 @@
+{
+  "scope": "agent inspection of four synthetic BT2020 chromatic contact sheets; not physical display calibration",
+  "date": "2026-10-08",
+  "images": {
+    "hlg-contact.png": "86ee806c155efd5f4a0c0cf57e6e6405abf02df070b74cfcec81770085783536",
+    "pq-absent-contact.png": "81653ee287876ca9ba9494a676223c0c245c6b0e93dd88c40b4edb8112f5e9b5",
+    "pq-4000-contact.png": "52143f7006b1541daf78524379d0d7a9c913d3e6d6e603745667dd93bda22e09",
+    "pq-1000-contact.png": "81653ee287876ca9ba9494a676223c0c245c6b0e93dd88c40b4edb8112f5e9b5"
+  },
+  "inspection": "All eight swatches remain spatially aligned across three frame times. Neutral patches stay neutral; warm proxy retains orange/pink orientation. No frame corruption or temporal flicker is visible. Out-of-BT709 saturated primaries clip in all variants; these sheets do not prove a perceptually optimized gamut map. Current 4000nit mapping compresses mid exposure relative to historical and reduces the historical luma maximum254 to236; the ditheredPQoutputs have onecode above nominal235 whereas their no-dither versions peak235. Current/no-dither show expected fine quantization variation, not a claimed real-scene preference.",
+  "frame_luma_ranges": {
+    "pq-absent": {
+      "historical": {
+        "luma_min": 17,
+        "luma_max": 235,
+        "frames": 8
+      },
+      "current": {
+        "luma_min": 17,
+        "luma_max": 236,
+        "frames": 8
+      },
+      "current-no-dither": {
+        "luma_min": 17,
+        "luma_max": 235,
+        "frames": 8
+      }
+    },
+    "pq-1000": {
+      "historical": {
+        "luma_min": 17,
+        "luma_max": 235,
+        "frames": 8
+      },
+      "current": {
+        "luma_min": 17,
+        "luma_max": 236,
+        "frames": 8
+      },
+      "current-no-dither": {
+        "luma_min": 17,
+        "luma_max": 235,
+        "frames": 8
+      }
+    },
+    "pq-4000": {
+      "historical": {
+        "luma_min": 19,
+        "luma_max": 254,
+        "frames": 8
+      },
+      "current": {
+        "luma_min": 18,
+        "luma_max": 236,
+        "frames": 8
+      },
+      "current-no-dither": {
+        "luma_min": 18,
+        "luma_max": 235,
+        "frames": 8
+      }
+    },
+    "hlg": {
+      "historical": {
+        "luma_min": 17,
+        "luma_max": 235,
+        "frames": 8
+      },
+      "current": {
+        "luma_min": 16,
+        "luma_max": 235,
+        "frames": 8
+      },
+      "current-no-dither": {
+        "luma_min": 17,
+        "luma_max": 235,
+        "frames": 8
+      }
+    }
+  },
+  "limits": [
+    "warm proxy is not real skin",
+    "historical renderer is not correctness groundtruth",
+    "no physical panel or artistic-grade acceptance",
+    "still frames do not measure motion quality"
+  ],
+  "metadata_boundary": "PQ1000/PQ4000 variants retain Content light level SEI. Production removes this after the measured filter helper. Visual comparison and BT709 color-tag checks remain valid; full SDR metadata cleanup was not exercised by this harness."
+}

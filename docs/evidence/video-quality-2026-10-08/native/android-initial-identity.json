@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "source_commit": "1088d7529401297bddced74bfa11c166457468d8",
+  "runtime": "Media3 1.10.1 / Android TV API36 emulator arm64-v8a",
+  "emulator_gpu": "swiftshader",
+  "cpu_cores": 2,
+  "memory_mib": 2048,
+  "apk_sha256": "8dcc2d481a004d44be9e2b7f0d629d32f1b2611e51c9488f4641c72c7b07104f",
+  "result": "three cases passed; live-action bf0 failed because the probe misattributed an outgoing decoder callback across a backward seek",
+  "scope": "Actual Media3 native decode and moving Surface pixels. Physical display/audio sync and shipping application UI were not measured.",
+  "cleanup": "Owned emulator stopped after matrix; owned AVD retained only for selective failed-case retry. Owned Apple simulator shut down and deleted after all four cases passed."
+}
