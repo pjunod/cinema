@@ -9381,3 +9381,76 @@ explicit ignored version override, not installed yet. Future480/720 continuous
 and outside-family1080 prepared checks are separate and bind actual family,
 recipes, source and current control revision. All41 regression references
 must resolve before push; final adversarial/Fable/ready handoff remain open.
+
+### 10.297 · Android continuous settlement and acquisition failures remain separate
+
+Frozen server3201f925c has one measured Android1080-to720 continuous switch,
+not a whole-series receipt. UI13 stops on the observed connection screen before
+login or playback. Fresh `am start -W` and just-in-time view inspection locate
+the actual manual-connection action. UI14 then reaches an initial1080 frame,
+but480 is outside its observed720/1080 continuous family; no quality tap occurs.
+UI15 selects the actual720 row and settles in13.623 seconds. Its new presented
+transaction67eb4df9-dd95-42e3-ad70-91d592267b0e has revision2, matching latest
+revision2, target720 and accepted frame tick912. The initial frame and revision1
+are excluded. This is SDK/UI/protocol evidence, not physical pixels or audio.
+All27 safe receipt files independently match their SHA256 and length manifest.
+Owned daemon, proxy, reverse, private control and runtime close; the app stops.
+Signout was not observed after four known navigation actions and is not claimed.
+
+The short Firefox geometry preflight on that server fails. Both trusted
+fullscreen transitions and actual native Mute work; the requested native
+Unmute menu does not match and the exact failed menu labels were not retained.
+Among1963 optical samples,25 are unknown, none conflict, and11 acquisition
+intervals exceed the unchanged12.5-millisecond bound; maximum20.582797ms.
+Twenty-one unknowns are startup samples. Four occur during fullscreen exit:
+only one original sixteen-pixel band has a valid counter, insufficient for the
+required four spaced rows. Retain every sample and these failed verdicts.
+Processing/request/XGetImage timings are measured; scheduler causality is not.
+Exact owned daemon/display processes and sockets close. The old WebDriver
+profile path was not recorded, so its absence remains unmeasured.
+
+The integrated optical search translates the existing four spaced rows across
+bounded intermediate vertical positions in one synchronous XGetImage. It never
+accepts one band or four consecutive pixels as the four-row pattern. All valid
+windows and fixed ROIs must agree; conflicts fail and no valid window remains
+unknown. Seven regression references are authored and statically resolved,
+not executed. The normal hook passes. Next preflight adds a fixed one-second
+settled baseline before acquisition, finite actual chrome-menu observations,
+and explicit owned profile provenance; captured transition samples remain.
+
+Android automatic accepted-presentation journaling and read-only network/frame
+probes are integrated. Auto records only the actual accepted current revision
+and candidate. A body observation requires upstream EOF, immutable media
+authorization and the current owner; transfer close is not EOF. Its duration
+starts after response headers, before reading the body. Unknown status, cache,
+pacing, timing and decoder counters remain unknown. Absolute counters are
+attachment-owned and guarded reporting uses the existing cadence without
+changing playback policy or deadlines. APK156 source compilation and its
+normal pinned hook pass, and the signed APK assembles with SHA256
+`de71f37a5d0244c2a3f88ca21dc08884acc02564f8ade20177f95e37033637ef`.
+It has not been installed or run. The two probe regressions and two Auto-journal
+regressions remain unexecuted. Source equivalence must be rebound to the next
+frozen parent before runtime.
+
+QA243 is installed in the owned phone bundle, with all83 production Swift
+inputs matching the parent at installation. No QA243 playback is claimed.
+Read-only seekable ranges, duration, seek-call/completion generations and
+hashed prepared wire/segment observations are ready for the next focused
+alignment attempt. The first-preparation durable seal repair is still local:
+a static audit catches SQL placeholder first-appearance ordering before push.
+Both backend parameter lists and the shared SQL are being corrected together,
+with predicates unchanged. The storage agent owns the sole compiler slot;
+no unit execution, final adversarial review, Fable release or ready merge
+handoff has occurred.
+
+The correction is now committed and integrated as0d7307123. Actual Hiqlite
+all-target source check passes58.97 seconds, Hiqlite Clippy passes97 seconds,
+and the normal one-job pinned hook passes109-second workspace Clippy,
+catalog3166, formatting and77 served JavaScript syntax checks. The actual
+replicated SQL validator regression is authored but not run. Owner-local
+hashed capture events follow successful durable sealing while holding the
+actual owner; caller-ready events follow an independent durable readiness
+check. Their local sequence/monotonic brackets supply diagnostic ordering,
+not publication authority or native presentation proof. Both recipe objects
+are validated before diagnostic serialization. The next parent hook and
+exact-source Linux build precede runtime admission.
