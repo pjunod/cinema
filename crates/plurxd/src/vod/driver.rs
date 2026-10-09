@@ -498,12 +498,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             seconds_per_segment: rendition.seconds_per_segment,
             ahead_held: rendition.ahead_hold.load(Acquire),
             working_set: WorkingSet {
-                used_bytes: {
-                    let total = shared.working_set.load(Relaxed);
-                    total
-                        .checked_sub(shared.preparation_media.load(Relaxed))
-                        .unwrap_or(total)
-                },
+                used_bytes: shared.working_set.load(Relaxed),
                 budget_bytes: rendition.working_set_budget,
                 held: matches!(
                     belief,
@@ -814,7 +809,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 drop(_dependency_guard);
                 match sweep {
                     Ok(freed) => {
-                        sub_saturating(&shared.working_set, freed.bytes);
+                        rendition.free_unadmitted(shared, freed.bytes);
                         if let Some(error) = freed.error {
                             tracing::warn!(
                                 target: "plurxd::vodserve",

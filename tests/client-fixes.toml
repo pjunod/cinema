@@ -5832,15 +5832,32 @@ test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanel
 test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
 
 # PR920 baseline correction: the Android status now names the real Gradle
-# build 152. The source anchor follows the current build 154 after integration;
+# build 152. The source anchor follows the current build 156 after integration;
 # this maps the documentation correction, not a new playback claim.
 [[fixes]]
 id = "android.build-152-baseline-claim"
 commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
 source = "clients/android/README.md"
-source_anchor = "> Status: **v0.3.0**, build `154`"
+source_anchor = "> Status: **v0.3.0**, build `156`"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
+
+[[fixes]]
+id = "apple.playback-buffer-limit-hold-wording"
+commits = ["f8f7e07ec34658b9590c95b24a0a71a191cfdcab"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "The server’s playback buffer limit has been reached."
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPlaybackBufferHoldsNameTheBufferLimit"
+
+[[fixes]]
+id = "web.playback-buffer-limit-hold-wording"
+commits = []
+supplements = "apple.playback-buffer-limit-hold-wording"
+source = "crates/plurxd/src/web/player/prepared-switch-measurement.js"
+source_anchor = "The server’s playback buffer limit has been reached."
+test = "tests/playback/web-control.test.js"
+test_anchor = "buffer capacity hold wording identifies the playback buffer for both scheduler codes"
 
 # Published Batch 03 repairs: source/test anchors, not execution receipts.
 [[fixes]]
@@ -5858,3 +5875,12 @@ source = "clients/apple/Sources/LiveTvSettingsView.swift"
 source_anchor = "Cinema remotes · advisory enablement"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+
+[[fixes]]
+id = "android.dolby-vision-profile-badge-parity"
+commits = ["6990f8791d827652f3c1f1c6f8738e0aea771916"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "get() = if (state != FactState.Source && activeLabel != null)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "aConvertedProfileSevenTitleShowsBothHalvesLit"

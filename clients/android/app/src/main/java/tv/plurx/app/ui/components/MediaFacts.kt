@@ -96,7 +96,7 @@ internal fun MediaFactChip(fact: MediaFact, modifier: Modifier = Modifier) {
 
 /** The arrow rides inside the one chip — never a second chip beside it. */
 internal val MediaFact.chipText: String
-    get() = if (state == FactState.Downgraded && activeLabel != null) "$label → $activeLabel" else label
+    get() = if (state != FactState.Source && activeLabel != null) "$label → $activeLabel" else label
 
 /**
  * @param delivered `delivered_dynamic_range` from the decision, overridden by
@@ -142,7 +142,7 @@ private val MediaFact.brandColor: Color
     get() = when (kind) {
         MediaFactKind.Resolution -> Color(0xFF66A8FF)
         MediaFactKind.Video -> Color(0xFFABB6CA)
-        MediaFactKind.DynamicRange -> if (label.startsWith("DV")) {
+        MediaFactKind.DynamicRange -> if (label.startsWith("Dolby Vision")) {
             Color(0xFFE7B94D)
         } else {
             Color(0xFF62CBBE)
@@ -198,9 +198,11 @@ private fun dynamicRangeFact(
     val value = file?.hdr_format ?: file?.hdr ?: return null
     val source = sourceDynamicRange(file) ?: return null
     val (label, spoken) = if (source == DynamicRange.DOLBY_VISION) {
-        "DV" to "Dolby Vision"
+        val profile = sourceDolbyVisionProfile(file)
+        (profile?.let { "Dolby Vision P$it" } ?: "Dolby Vision") to
+            (profile?.let { "Dolby Vision Profile $it" } ?: "Dolby Vision")
     } else {
-        "HDR" to value
+        (if (value.equals("HDR10+", ignoreCase = true)) "HDR10+" else dynamicRangeLabel(source)) to value
     }
     if (delivered == null) return MediaFact(MediaFactKind.DynamicRange, label, spoken)
 
@@ -227,7 +229,7 @@ private fun dynamicRangeFact(
             return MediaFact(
                 kind = MediaFactKind.DynamicRange,
                 label = label,
-                accessibilityLabel = "$spoken, playing as $converted",
+                accessibilityLabel = "$spoken, playing as Dolby Vision Profile $deliveredDolbyVisionProfile",
                 state = FactState.Active,
                 activeLabel = converted,
             )
@@ -246,7 +248,7 @@ private fun dynamicRangeFact(
 
 /**
  * The arrow half for a Dolby Vision title whose profile changed on the way to
- * this device — `"Dolby Vision Profile 8"` — or null when nothing changed.
+ * this device — `"Dolby Vision P8"` — or null when nothing changed.
  *
  * Null on every one of: a non-Dolby-Vision source, a server that sent no
  * profile (absent means "no answer", not "not Dolby Vision"), a library row
@@ -255,11 +257,8 @@ private fun dynamicRangeFact(
  * preserved case: a device that genuinely decodes dual-layer gets the stream
  * untouched and there is nothing to announce.
  *
- * The arrow carries the number in every client, because that number is the
- * entire content of this state — `DV → DV` says nothing. The *source* half
- * stays a bare `DV` here, matching what this client has always shown and
- * unlike the web chip; that asymmetry is deliberate and predates this
- * (MEDIA-BADGES-PLAN §2.3).
+ * Both halves name Dolby Vision and its profile, just as the other clients
+ * retain the profile in their source and delivered badges.
  */
 private fun convertedDolbyVisionMark(
     file: MediaFileDto?,
@@ -270,16 +269,15 @@ private fun convertedDolbyVisionMark(
     val delivered = deliveredProfile ?: return null
     val onDisk = sourceDolbyVisionProfile(file) ?: return null
     if (onDisk == delivered) return null
-    return "Dolby Vision Profile $delivered"
+    return "Dolby Vision P$delivered"
 }
 
 /**
  * The profile the file itself carries: the column first, the prose second.
  *
  * The same order and the same fallback as the web chip's
- * `sourceDolbyVisionProfile`, deliberately. This number is never displayed
- * here — the source half stays a bare `DV` on this client — it exists only to
- * decide *whether* the delivered profile differs from the disk's. So if the
+ * `sourceDolbyVisionProfile`, deliberately. The number labels the source and
+ * decides whether the delivered profile differs from the disk's. So if the
  * two clients read it differently, the same file shows an arrow on one and
  * not the other, which is a worse answer than either rule alone.
  *

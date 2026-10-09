@@ -43,6 +43,17 @@ impl Shared {
                 }
                 continue;
             };
+            match super::preparation_storage::has_private_marker(&candidate.path).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    pending.pop_front();
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::vodserve",  %error, "encoded cache ownership unreadable; cleanup deferred");
+                    break;
+                }
+            }
             match self.store.quality_reserved_intervals(&candidate.key).await {
                 Ok(intervals) if intervals.is_empty() => {}
                 Ok(_) => {
@@ -302,6 +313,7 @@ impl Shared {
 
     /// Find or build the rendition for `key`, spawning its driver. `None`
     /// means the plan came out empty and the caller returns a typed refusal.
+    #[cfg(test)]
     pub(super) async fn attach_rendition(
         self: &Arc<Shared>,
         key: &str,
@@ -311,6 +323,32 @@ impl Shared {
         duration_ms: i64,
         settings: &VodSettings,
     ) -> Result<Option<RenditionAttachment>, String> {
+        self.attach_rendition_with_storage(
+            key,
+            identity,
+            index,
+            recipe,
+            duration_ms,
+            settings,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn attach_rendition_with_storage(
+        self: &Arc<Shared>,
+        key: &str,
+        identity: &SourceIdentity,
+        index: Option<FragmentIndex>,
+        recipe: Recipe,
+        duration_ms: i64,
+        settings: &VodSettings,
+        private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+    ) -> Result<Option<RenditionAttachment>, String> {
+        if let Some(storage) = private_storage.as_ref() {
+            storage.bind(key)?;
+        }
         let build_guard = self.rendition_build_gate(key).lock_owned().await;
         // Once exact-key admission succeeds, transfer the entire slow
         // Store/filesystem/head/build transaction to a detached owner before
@@ -332,6 +370,7 @@ impl Shared {
                     duration_ms,
                     settings,
                     build_guard,
+                    private_storage,
                 )
                 .await
         });
@@ -350,6 +389,7 @@ impl Shared {
         duration_ms: i64,
         settings: VodSettings,
         build_guard: tokio::sync::OwnedMutexGuard<()>,
+        private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         // Single-flight only this key. No Store, filesystem, process, manifest,
@@ -366,6 +406,10 @@ impl Shared {
                     }));
                 }
                 Some(existing) => {
+                    if let Some(storage) = existing.private_storage.as_ref() {
+                        storage.release();
+                        return Err("private incarnation requires storage cleanup".into());
+                    }
                     // A failed (or closed) handle cannot answer new readers.
                     // Publish closed first, but leave the exact handle in the
                     // map until its accounting facts have been collected. If
@@ -400,6 +444,9 @@ impl Shared {
                 if admitted {
                     sub_saturating(&self.completed_cache, claimed);
                 } else {
+                    if stale.private_storage.is_some() {
+                        return Err("private incarnation requires storage cleanup".into());
+                    }
                     sub_saturating(&self.working_set, claimed);
                 }
                 tracing::info!(
@@ -421,7 +468,14 @@ impl Shared {
         }
         let phase_started = Instant::now();
         let rendition = self
-            .build_rendition(key, index, recipe, plan, &settings)
+            .build_rendition_with_storage(
+                key,
+                index,
+                recipe,
+                plan,
+                &settings,
+                private_storage.clone(),
+            )
             .await?;
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
             phase = "build_rendition", elapsed_ms = phase_started.elapsed().as_millis(),
@@ -441,10 +495,16 @@ impl Shared {
             }
         };
         if installed {
-            if adopted_bytes > 0 {
+            if let Some(storage) = private_storage.as_ref() {
+                storage.installed(&rendition);
+            }
+            if adopted_bytes > 0 && private_storage.is_none() {
                 self.working_set.fetch_add(adopted_bytes, Relaxed);
             }
             let _driver = spawn_driver(Arc::clone(self), Arc::clone(&rendition));
+            if adopted_bytes > 0 && private_storage.is_none() {
+                self.preparation_storage.adopt(self, &rendition).await;
+            }
             self.hooks.get().after_rendition_installed().await;
         }
         // From this point cancellation leaves a registered, correctly
@@ -521,6 +581,7 @@ impl Shared {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn build_rendition(
         self: &Arc<Shared>,
         key: &str,
@@ -528,6 +589,20 @@ impl Shared {
         recipe: Recipe,
         plan: SegmentPlan,
         settings: &VodSettings,
+    ) -> Result<Arc<Rendition>, String> {
+        self.build_rendition_with_storage(key, index, recipe, plan, settings, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build_rendition_with_storage(
+        self: &Arc<Shared>,
+        key: &str,
+        index: Option<FragmentIndex>,
+        recipe: Recipe,
+        plan: SegmentPlan,
+        settings: &VodSettings,
+        private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
     ) -> Result<Arc<Rendition>, String> {
         let source = if key.starts_with("source-") {
             crate::fragment_index_cluster::open_source_playback_fence(
@@ -544,6 +619,19 @@ impl Shared {
         };
         let dir = RenditionDir::new(self.base.join(key));
         let mut existed = tokio::fs::metadata(dir.path()).await.is_ok();
+        if let Some(storage) = private_storage.as_ref() {
+            if existed {
+                return Err("private namespace already exists; cleanup required".into());
+            }
+            storage.create_marker(&dir).await?;
+        } else if super::preparation_storage::has_private_marker(dir.path())
+            .await
+            .map_err(|error| format!("checking private cache ownership: {error}"))?
+        {
+            return Err(
+                "private preparation scratch cannot be adopted as ordinary playback".into(),
+            );
+        }
         let protected = !self
             .store
             .quality_reserved_intervals(key)
@@ -765,6 +853,7 @@ impl Shared {
             materialize_budget: settings.materialize_budget,
             manifest: Mutex::new(manifest),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
+            private_storage,
             copy_preparation: StdMutex::new(None),
             preparation_epoch: AtomicU64::new(0),
             retained_offer: StdMutex::new(None),
@@ -810,7 +899,7 @@ impl Shared {
         rendition: &Rendition,
         manifest: &mut Manifest,
     ) {
-        if manifest.is_admitted() {
+        if rendition.private_storage.is_some() || manifest.is_admitted() {
             return;
         }
         let budgets = Budgets {
@@ -894,7 +983,10 @@ impl Shared {
         let Some(rendition) = rendition else {
             return;
         };
-        if rendition.preparation().is_some() {
+        if let Some(storage) = rendition.private_storage.as_ref() {
+            if rendition.preparation().is_none() {
+                storage.release();
+            }
             return;
         }
         if !rendition.readers.lock().await.is_empty() {

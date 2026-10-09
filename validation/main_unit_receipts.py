@@ -658,6 +658,12 @@ def restore(api, scope, current_run, applicability, bridge=None):
             require(prior['id'] not in indexed and recover_source_skew(api, scope, prior, source_jobs),
                     'Source-skew chain has unexpected final journal or unavailable proof')
             continue
+        if (prior['id'] != current_run and prior['id'] not in indexed
+                and scope['repository'] == 1 and scope['pr'] == 917):
+            from validation.main_source_skew4513 import recover_prepare_refusal_chain
+            source_jobs = api.pages(f"/actions/runs/{prior['id']}/jobs")
+            if recover_prepare_refusal_chain(api, scope, prior, source_jobs):
+                continue
         authenticate_run(scope, prior)
         rid = receipts.positive(prior['id'])
         if rid == current_run:

@@ -1014,8 +1014,9 @@ struct Shared {
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
     working_set: AtomicU64,
-    /// Only live reserved preparation media already included in working_set.
+    /// Private media, never ordinary playback pressure, until physical cleanup.
     preparation_media: AtomicU64,
+    preparation_storage: preparation_storage::StorageRegistry,
     /// Observes successful foreground graph attachments, not admission attempts.
     /// Lock order: this guard, private staged artifact, retained registry.
     /// No await while held; issued immutable artifacts are never revoked here.
@@ -1042,6 +1043,30 @@ struct Shared {
 /// is the struct and the set of await points, not scheduling. `Any` is a
 /// supertrait only so a test can reach the test hooks behind the registry.
 pub(crate) trait VodSharedHooks: std::any::Any + Send + Sync {
+    fn private_cleanup_failure(&self, _phase: &str) -> bool {
+        false
+    }
+    fn private_cleanup_failure_for(&self, phase: &str, _key: &str) -> bool {
+        self.private_cleanup_failure(phase)
+    }
+    fn before_ordinary_materialize(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn before_private_inventory_read(&self, _phase: &str) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn before_private_registration(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn before_private_marker(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn before_private_materialize(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn before_preparation_snapshot(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
     /// An exact terminal replay holds the session's cleanup and is about to
     /// join the session-owned detach fence.
     fn before_terminal_replay_join(&self) -> crate::seam_hooks::HookFuture<'_>;
@@ -1118,10 +1143,54 @@ pub(crate) struct VodSharedTestHooks {
     rendition_installed: crate::seam_hooks::PauseSlot,
     dormant_purge: crate::seam_hooks::PauseSlot,
     terminal_route_outcomes: StdMutex<HashMap<String, TerminalRouteTestOutcome>>,
+    ordinary_materialize: crate::seam_hooks::PauseSlot,
+    private_marker: crate::seam_hooks::PauseSlot,
+    private_registration: crate::seam_hooks::PauseSlot,
+    inventory_entry: crate::seam_hooks::PauseSlot,
+    inventory_marker: crate::seam_hooks::PauseSlot,
+    private_materialize: crate::seam_hooks::PauseSlot,
+    preparation_snapshot: crate::seam_hooks::PauseSlot,
+    private_failures: StdMutex<HashSet<String>>,
 }
 
 #[cfg(test)]
 impl VodSharedHooks for VodSharedTestHooks {
+    fn private_cleanup_failure_for(&self, phase: &str, key: &str) -> bool {
+        let failures = self.private_failures.lock().expect("private failures");
+        failures.contains(phase) || failures.contains(&format!("{phase}:{key}"))
+    }
+
+    fn before_ordinary_materialize(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.ordinary_materialize.hold()
+    }
+
+    fn before_private_registration(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.private_registration.hold()
+    }
+    fn before_private_inventory_read(&self, phase: &str) -> crate::seam_hooks::HookFuture<'_> {
+        match phase {
+            "entry" => self.inventory_entry.hold(),
+            "marker" => self.inventory_marker.hold(),
+            _ => Box::pin(crate::seam_hooks::HookReady),
+        }
+    }
+
+    fn private_cleanup_failure(&self, phase: &str) -> bool {
+        self.private_failures
+            .lock()
+            .expect("private failures")
+            .contains(phase)
+    }
+    fn before_private_marker(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.private_marker.hold()
+    }
+    fn before_private_materialize(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.private_materialize.hold()
+    }
+    fn before_preparation_snapshot(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.preparation_snapshot.hold()
+    }
+
     fn before_terminal_replay_join(&self) -> crate::seam_hooks::HookFuture<'_> {
         self.terminal_replay.hold()
     }
@@ -1237,6 +1306,8 @@ mod output_measurement;
 use output_measurement::PublishedOutputMeasurement;
 #[path = "vod/copy_preparation.rs"]
 mod copy_preparation;
+#[path = "vod/preparation_storage.rs"]
+pub(crate) mod preparation_storage;
 #[path = "vod/retained.rs"]
 pub(crate) mod retained;
 #[path = "vod/retained_manifest.rs"]

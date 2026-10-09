@@ -738,8 +738,8 @@ function holdReasonText(reason){
     bytes:"The server is pacing this stream.",
     global:"The server is busy.",
     ahead:"The stream is already far enough ahead.",
-    working_set:"The server is short of space.",
-    no_room:"The server is short of space."}[reason]||"Your place is saved.";
+    working_set:"The server’s playback buffer limit has been reached.",
+    no_room:"The server’s playback buffer limit has been reached."}[reason]||"Your place is saved.";
 }
 // Submit evidence, then wait — briefly — for the action it earns.
 //
