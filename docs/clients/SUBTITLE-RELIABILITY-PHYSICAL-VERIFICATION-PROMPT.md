@@ -1,5 +1,7 @@
 # Subtitle reliability — physical verification
 
+> Current work and corrected delivery status: [subtitle completion ledger](SUBTITLE-RELIABILITY-COMPLETION.md). This page retains its historical scope and evidence.
+
 **Status:** open · **Reconciled:** 2026-09-20
 
 **For:** a session with the physical devices. **Against:** Apple build 171,

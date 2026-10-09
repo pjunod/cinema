@@ -523,8 +523,14 @@ function subtitleReadinessMeansReady(delivery){
 // cannot turn into a subtitle request storm.
 function subtitleReadinessRetryTransition(state,delivery){
   const ready=subtitleReadinessMeansReady(delivery);
-  const retry=state.subtitleReadinessReady===false&&ready;
+  const intent=state.controlIntentGeneration||0;
+  const revision=delivery&&delivery.subtitle_revision||null;
+  // The empty segment can precede the first control exchange; a missed
+  // warming observation must not suppress recovery for the whole intent.
+  const retry=ready&&(state.subtitleReadinessReady!==true||state.subtitleReadinessIntent!==intent||state.subtitleReadinessRevision!==revision);
   state.subtitleReadinessReady=ready;
+  state.subtitleReadinessIntent=intent;
+  state.subtitleReadinessRevision=revision;
   return retry;
 }
 function nativeHlsSubtitleOrdinal(player,index){
@@ -548,22 +554,17 @@ function nativeHlsSubtitleOrdinal(player,index){
 // that rendition shows for the rest of the session.
 //
 // What does work — 0 cues to 1 in the same harness, with the session id, the
-// video element and the segment count all unchanged — is to stop asking hls.js
-// and read the whole-track sidecar instead. By the time readiness says
-// `ready` that sidecar is exactly what exists, and `/files/{id}/subs/{i}.vtt`
-// is a route this player already uses for offset sessions. The rendition is
-// switched off so its empty track cannot sit on top of the cues.
+// video element and the segment count all unchanged — is to read the whole-track
+// sidecar. Readiness can describe just a bounded window, so keep the native
+// rendition while the whole-track request waits. Only usable script cues can
+// take over from native text. This is also the route used by offset sessions.
 function retryReadyNativeSubtitle(player){
   if(!player||player.burnedSub!=null||player.curSub==null||player.curSub<0) return false;
   const ordinal=nativeHlsSubtitleOrdinal(player,player.curSub);
   if(ordinal<0) return false;
   if(player.hls){
-    try{ player.hls.subtitleTrack=-1; }catch(err){}
-    // Re-entering `setSub` would be the wrong move: it would take the
-    // rendition path again and land on the same cached empty fragment. Force
-    // the sidecar branch by clearing the marker `setSub` reads, then let it
-    // rebuild the script cue list at the session's own offset.
-    player._subOff=null;
+    // Build the script cue list at the session's own offset without entering
+    // setSub's native-rendition branch or clearing a still-usable rendition.
     applyReadySubtitleSidecar(player,player.curSub);
     return true;
   }
@@ -583,13 +584,24 @@ async function applyReadySubtitleSidecar(player,index){
   const video=document.getElementById("video");
   if(!video) return;
   const off=player.offset||0;
+  const intent=player.controlIntentGeneration||0;
+  const pending=player._subtitleSidecarRequest;
+  if(pending&&pending.index===index&&pending.off===off&&pending.intent===intent) return;
+  const request={index,off,intent};
+  player._subtitleSidecarRequest=request;
   let text;
   try{
     const r=await fetch(subUrl(index));
     if(!r.ok) throw new Error("HTTP "+r.status);
     text=await r.text();
-  }catch(err){ return; }              // still warming, or gone: leave it alone
-  if(PLAYER!==player||player.curSub!==index||(player.offset||0)!==off) return;
+  }catch(err){
+    if(PLAYER===player&&player._subtitleSidecarRequest===request) player.subtitleReadinessReady=false;
+    return;
+  }finally{
+    if(player._subtitleSidecarRequest===request) player._subtitleSidecarRequest=null;
+  }
+  if(PLAYER!==player||player.curSub!==index||(player.offset||0)!==off
+    ||(player.controlIntentGeneration||0)!==intent) return;
   if(!video._vsubs) video._vsubs=video.addTextTrack("subtitles","Subtitles");
   const track=video._vsubs;
   if(track.mode==="disabled") track.mode="hidden";
@@ -602,6 +614,9 @@ async function applyReadySubtitleSidecar(player,index){
     try{ track.addCue(new Cue(Math.max(0,c.start-off),en,c.text)); added++; }catch(err){}
   }
   if(!added) return;                  // nothing to show; do not claim otherwise
+  // Keep the native rendition alive while a whole-track request is pending.
+  // Window readiness does not imply that the whole track has finished.
+  if(player.hls){ try{ player.hls.subtitleTrack=-1; }catch(err){} }
   track.mode="showing";
   player._subOff=off;
 }

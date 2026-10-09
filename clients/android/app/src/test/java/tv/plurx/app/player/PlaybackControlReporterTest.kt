@@ -952,6 +952,17 @@ class PlaybackControlWireTest {
         }
         assertFalse(SubtitleReadinessDecision.meansReady(null))
 
+        val initial = SubtitleReadinessRetryState()
+        assertTrue(initial.record("ready", commitReady = false, intent = 1))
+        assertTrue(initial.record("ready", intent = 1), "first ready needs no observed warming")
+        assertFalse(initial.record("ready", intent = 1))
+        assertTrue(initial.record("ready", intent = 2), "new intent owns a new retry")
+        assertFalse(initial.record("ready", intent = 2))
+
+        assertTrue(initial.record("ready", intent = 2, revision = "window-200"))
+        assertFalse(initial.record("ready", intent = 2, revision = "window-200"))
+        assertTrue(initial.record("ready", intent = 2, revision = "whole"))
+
         val transition = SubtitleReadinessRetryState()
         assertFalse(transition.record(null))
         assertFalse(transition.record("warming"))

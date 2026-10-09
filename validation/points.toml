@@ -933,6 +933,7 @@ paths = [
   "scripts/playback-startup-trace",
   "scripts/web-hls-startup-browser-check",
   "scripts/subtitle-readiness-browser-check",
+  "scripts/subtitle-readiness-native-check",
   "scripts/player-input-fence",
   "scripts/playback-surface-fence",
   "crates/plurx-core/examples/init-promotion-probe.rs",

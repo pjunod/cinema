@@ -1442,6 +1442,17 @@ final class PlaybackControlReporterTests: XCTestCase {
         }
         XCTAssertFalse(SubtitleReadinessDecision.meansReady(nil))
 
+        let initial = SubtitleReadinessRetryState()
+        XCTAssertTrue(initial.record("ready", commitReady: false, intent: 1))
+        XCTAssertTrue(initial.record("ready", intent: 1), "first ready needs no observed warming")
+        XCTAssertFalse(initial.record("ready", intent: 1))
+        XCTAssertTrue(initial.record("ready", intent: 2), "new intent owns a new retry")
+        XCTAssertFalse(initial.record("ready", intent: 2))
+
+        XCTAssertTrue(initial.record("ready", intent: 2, revision: "window-200"))
+        XCTAssertFalse(initial.record("ready", intent: 2, revision: "window-200"))
+        XCTAssertTrue(initial.record("ready", intent: 2, revision: "whole"))
+
         let transition = SubtitleReadinessRetryState()
         XCTAssertFalse(transition.record(nil))
         XCTAssertFalse(transition.record("warming"))

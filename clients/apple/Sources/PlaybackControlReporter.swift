@@ -647,6 +647,7 @@ struct PreparedReplacementAction: Equatable {
 struct ControlDelivery: Codable, Equatable {
     /// Extensible relay value: only the exact value `ready` has client meaning.
     var subtitleReadiness: String?
+    var subtitleRevision: String? = nil
     /// How far the server has got with a preparation for the newest ask:
     /// `staging`, `offered`, or `none`.
     ///
@@ -667,13 +668,19 @@ enum SubtitleReadinessDecision {
 final class SubtitleReadinessRetryState: @unchecked Sendable {
     private let lock = NSLock()
     private var lastReady: Bool?
+    private var lastIntent: Int?
+    private var lastRevision: String?
 
-    func record(_ value: String?, commitReady: Bool = true) -> Bool {
+    func record(_ value: String?, commitReady: Bool = true, intent: Int = 0, revision: String? = nil) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         let ready = SubtitleReadinessDecision.meansReady(value)
-        defer { if !ready || commitReady { lastReady = ready } }
-        return lastReady == false && ready
+        defer {
+            if !ready || commitReady { lastReady = ready; lastIntent = intent; lastRevision = revision }
+        }
+        // Warming can finish between control exchanges. The first ready
+        // observation for this intent must repair any cached empty segments.
+        return ready && (lastReady != true || lastIntent != intent || lastRevision != revision)
     }
 }
 

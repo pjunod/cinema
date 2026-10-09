@@ -480,6 +480,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md](clients/SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md) | Seven findings and dispositions that shaped the v2 contract. | done |
 | [PARALLEL-SUBTITLE-RANGES-STATUS.md](clients/PARALLEL-SUBTITLE-RANGES-STATUS.md) | Distributed playback text windows: bounded-seek evidence, implementation and verification status. | open |
 | [SUBTITLE-CLUSTER-EXTRACTION-STATUS.md](clients/SUBTITLE-CLUSTER-EXTRACTION-STATUS.md) | Current K-09 milestone, review and merge qualification status; fleet evidence pending. | built |
+| [SUBTITLE-RELIABILITY-COMPLETION.md](clients/SUBTITLE-RELIABILITY-COMPLETION.md) | Current cross-client subtitle defects, measured engine recovery, and reconciled remaining subtitle work. | open |
 | [SUBTITLE-RELIABILITY-ASSESSMENT.md](clients/SUBTITLE-RELIABILITY-ASSESSMENT.md) | Why subtitles still fail on every client after the rework landed — three symptoms root-caused at `c9e4edf4`, with confidence labels. | done |
 | [SUBTITLE-RELIABILITY-HANDOFF.md](clients/SUBTITLE-RELIABILITY-HANDOFF.md) | The build order for the repairs: six milestones, exact contracts, non-goals, acceptance. | open |
 | [SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md](clients/SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | Eight cases for the session that has the devices — the hardware evidence none of this has yet. | open |

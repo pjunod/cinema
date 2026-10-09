@@ -747,6 +747,7 @@ data class ControlAction(
 @Serializable
 data class ControlDelivery(
     @SerialName("subtitle_readiness") val subtitleReadiness: String? = null,
+    @SerialName("subtitle_revision") val subtitleRevision: String? = null,
     /**
      * Where this server has got to on the viewer's last selection change:
      * `staging`, `offered` or `none`.
@@ -798,12 +799,15 @@ internal class SubtitleUnavailableNoticeState {
 
 internal class SubtitleReadinessRetryState {
     private var lastReady: Boolean? = null
+    private var lastIntent: Long? = null
+    private var lastRevision: String? = null
 
     @Synchronized
-    fun record(value: String?, commitReady: Boolean = true): Boolean {
+    fun record(value: String?, commitReady: Boolean = true, intent: Long = 0, revision: String? = null): Boolean {
         val ready = SubtitleReadinessDecision.meansReady(value)
-        val retry = lastReady == false && ready
-        if (!ready || commitReady) lastReady = ready
+        // Extraction can finish before the first control response.
+        val retry = ready && (lastReady != true || lastIntent != intent || lastRevision != revision)
+        if (!ready || commitReady) { lastReady = ready; lastIntent = intent; lastRevision = revision }
         return retry
     }
 }

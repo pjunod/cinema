@@ -22,8 +22,9 @@ cue, and each produced exactly ONE request for the segment:
 
 hls.js does not re-request a subtitle fragment it has already processed. So
 the shipped retry stops asking it and reads the whole-track sidecar instead —
-which is exactly what exists once readiness says `ready` — and this check
-drives the shipped `retryReadyNativeSubtitle` to prove it.
+while keeping native text until complete captions arrive. Window readiness
+alone does not promise a whole track. This check drives the shipped readiness
+transition and `retryReadyNativeSubtitle` together.
 
 VP9/Opus rather than H.264/AAC: a stock Playwright Chromium ships without the
 proprietary decoders, and a fixture the browser cannot decode would make this
@@ -131,6 +132,8 @@ def make_fixture(directory):
 
 
 class FixtureServer(ThreadingHTTPServer):
+    request_queue_size = 128
+
     def __init__(self, fixture):
         super().__init__(("127.0.0.1", 0), Handler)
         self.fixture = fixture
@@ -140,6 +143,8 @@ class FixtureServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *_args):
         pass
 
@@ -246,7 +251,11 @@ def main():
                 )
 
                 # The readiness edge, through the shipped function.
-                directed = page.evaluate("() => retryReadyNativeSubtitle(PLAYER)")
+                directed = page.evaluate("""() => {
+                    // No prior warming exchange: publication can win that race.
+                    if(!subtitleReadinessRetryTransition(PLAYER,{subtitle_readiness:'ready'})) return false;
+                    return retryReadyNativeSubtitle(PLAYER);
+                }""")
                 # A retry that cannot work times out here. That is a result,
                 # not a crash: report it the way every other failure is
                 # reported, because this script's whole job is to tell the

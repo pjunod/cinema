@@ -3338,13 +3338,19 @@ class Controller internal constructor(
                 return@launch
             }
             textSelectionArmed = false
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                .build()
-            kotlinx.coroutines.yield()
-            textSelectionArmed = true
-            applyTextSelection()
+            retryNativeTextRendition(
+                player,
+                isCurrent = {
+                    playbackControlBootstrapFence.isCurrent(claim, sessionId) &&
+                        playbackIntent.generation() == intentGeneration &&
+                        selectedSubtitle == index &&
+                        subtitleDelivery == SubtitleDelivery.NativeSession
+                },
+                restore = {
+                    textSelectionArmed = true
+                    applyTextSelection()
+                },
+            )
         }
     }
 

@@ -484,6 +484,9 @@ struct SessionWindow {
     /// a task that finishes after it was displaced cannot remove the slot that
     /// replaced it.
     id: u64,
+    /// Full source stamp, subtitle ordinal, anchor and span. A different
+    /// language at the same playhead must never join this extraction.
+    cache_key: PathBuf,
     /// The control sequence that justified this flight. `None` is a first play:
     /// the client has not settled anywhere yet, so there is no ordering fact to
     /// compare a later request against.
@@ -1313,19 +1316,35 @@ pub async fn sidecar_state_for_demand(
     SidecarState::Absent
 }
 
-pub(crate) async fn sidecar_state_for_demand_with_store(
+/// Observe availability and the exact representation that made it ready.
+/// This never starts work. Whole-track publication must be distinguishable
+/// from a ready window, or a player can retain empty future fragments forever.
+pub(crate) async fn readiness_revision_with_store(
     dir: &Path,
     file: &MediaFile,
     index: i64,
-    anchor_seconds: i64,
+    demand_seconds: i64,
     window_seconds: i64,
     stored: &crate::subtitle_source::StoreAccess,
-) -> SidecarState {
+) -> (SidecarState, Option<String>) {
     if sidecar_state_with_store(dir, file, index, stored).await == SidecarState::Ready {
-        SidecarState::Ready
-    } else {
-        sidecar_state_for_demand(dir, file, index, anchor_seconds, window_seconds).await
+        return (
+            SidecarState::Ready,
+            Some(vtt_name(file.id, index, file.size, file.mtime)),
+        );
     }
+    let state = sidecar_state_for_demand(dir, file, index, demand_seconds, window_seconds).await;
+    let revision = (state == SidecarState::Ready).then(|| {
+        vtt_window_name(
+            file.id,
+            index,
+            file.size,
+            file.mtime,
+            window_anchor_seconds(demand_seconds, window_seconds),
+            bounded_window_seconds(window_seconds),
+        )
+    });
+    (state, revision)
 }
 
 /// How much longer this track's failure memo stands, when one does.
@@ -2731,7 +2750,8 @@ where
         }
         match owners.live.get(session) {
             Some(live)
-                if live.anchor_seconds == anchor_seconds
+                if live.cache_key == cached
+                    && live.anchor_seconds == anchor_seconds
                     && live.window_seconds == window_seconds =>
             {
                 // The same destination this playback is already extracting.
@@ -2760,6 +2780,7 @@ where
             session.to_owned(),
             SessionWindow {
                 id,
+                cache_key: cached.clone(),
                 sequence,
                 anchor_seconds,
                 window_seconds,
@@ -3363,6 +3384,125 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn ready_window_to_whole_track_changes_revision_without_a_warming_edge() {
+        let dir = crate::test_tempdir().expect("readiness identity fixture");
+        let file = media_file(dir.path().join("source.mkv"));
+        let access = crate::subtitle_source::StoreAccess::off();
+        let observe =
+            |position| readiness_revision_with_store(dir.path(), &file, 0, position, 200, &access);
+        assert_eq!(observe(0).await, (SidecarState::Absent, None));
+        let vtt = b"WEBVTT\n\n00:00:01.000 --> 00:00:03.000\ncaption\n\n";
+        tokio::fs::write(vtt_window_path(dir.path(), &file, 0, 0, 200), vtt)
+            .await
+            .expect("window");
+        let first = observe(0).await;
+        assert_eq!(first.0, SidecarState::Ready);
+        assert_eq!(
+            first,
+            observe(100).await,
+            "cadence in the same window is stable"
+        );
+        tokio::fs::write(vtt_window_path(dir.path(), &file, 0, 200, 200), vtt)
+            .await
+            .expect("next window");
+        let next = observe(200).await;
+        assert_eq!(next.0, SidecarState::Ready);
+        assert_ne!(first.1, next.1);
+        tokio::fs::write(vtt_path(dir.path(), &file, 0), vtt)
+            .await
+            .expect("whole track");
+        let whole = observe(200).await;
+        assert_eq!(whole.0, SidecarState::Ready);
+        assert_ne!(
+            next.1, whole.1,
+            "a full track can repair previously empty buffered ranges"
+        );
+        assert_eq!(
+            whole,
+            observe(600).await,
+            "a whole track does not retry on every window"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_window_new_track_or_source_does_not_join_obsolete_extraction() {
+        let dir = crate::test_tempdir().expect("subtitle identity fixture");
+        let mut file = media_file(dir.path().join("source.mkv"));
+        file.container = Some("mkv".into());
+        file.duration_ms = Some(3_600_000);
+        file.subtitle_streams = vec![
+            plurx_core::domain::SubtitleStream {
+                codec: "subrip".into(),
+                ..Default::default()
+            },
+            plurx_core::domain::SubtitleStream {
+                codec: "subrip".into(),
+                ..Default::default()
+            },
+        ];
+        for replace_source in [false, true] {
+            let session = uuid::Uuid::new_v4().to_string();
+            assert!(
+                warm_vtt_window_with(
+                    &session,
+                    Some(1),
+                    dir.path(),
+                    &file,
+                    0,
+                    0,
+                    200,
+                    |_, _, _, _, _| std::future::pending::<Result<(), String>>()
+                )
+                .await
+            );
+            let old = vtt_window_path(dir.path(), &file, 0, 0, 200);
+            let index = if replace_source {
+                file.mtime += 1;
+                0
+            } else {
+                1
+            };
+            let new = vtt_window_path(dir.path(), &file, index, 0, 200);
+            assert!(
+                warm_vtt_window_with(
+                    &session,
+                    Some(2),
+                    dir.path(),
+                    &file,
+                    index,
+                    0,
+                    200,
+                    |tmp, _, _, _, _| async move {
+                        tokio::fs::write(
+                            tmp,
+                            b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nselected track\n\n",
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                    }
+                )
+                .await
+            );
+            let published = tokio::time::timeout(Duration::from_secs(2), async {
+                while !new.exists() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            release_session_window(&session).await;
+            assert!(
+                published.is_ok(),
+                "a changed track/source was incorrectly joined to the old window"
+            );
+            assert!(!old.exists(), "superseded extraction must not publish");
+            assert!(peak_window_flights_for_test(&session) <= 1);
+            tokio::fs::remove_file(new)
+                .await
+                .expect("remove fixture window");
+        }
+    }
 
     #[tokio::test]
     async fn downloaded_captions_rebuild_cache_without_embedded_streams_or_provider() {

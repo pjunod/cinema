@@ -406,6 +406,19 @@ async function main() {
     assert.equal(subtitleReadinessRetryTransition(isolated,delivery),false,
       "non-ready readiness never directs a retry");
   }
+  const firstReady={controlIntentGeneration:1};
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready"}),true,
+    "first ready repairs an empty fragment even when warming was never observed");
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready"}),false);
+  firstReady.controlIntentGeneration++;
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready"}),true,
+    "a new subtitle selection or seek cannot inherit the old intent's completed retry");
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready"}),false);
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready",subtitle_revision:"window-200"}),true,
+    "a newly ready window repairs prefetched empty fragments without an observed warming edge");
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready",subtitle_revision:"window-200"}),false);
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready",subtitle_revision:"whole"}),true,
+    "whole-track publication repairs gaps even while the current window was already ready");
   const readySidecarReads=[];
   const retryReadyNativeSubtitle=new PlaybackContextFunction("applyReadySubtitleSidecar",[
     shippedSource("nativeHlsSubtitleOrdinal"),
@@ -439,8 +452,8 @@ async function main() {
       &&retryReadyNativeSubtitle(nativePlayer)) retries++;
   }
   assert.equal(retries,1,"one readiness edge performs one directed retry");
-  assert.deepEqual(subtitleTrackWrites,[-1],
-    "the retry disables the cached empty HLS rendition");
+  assert.deepEqual(subtitleTrackWrites,[],
+    "the retry preserves native captions until the whole-track sidecar has arrived");
   assert.deepEqual(readySidecarReads,[{player:nativePlayer,index:7}],
     "the readiness edge requests the selected sidecar on the same player");
   assert.equal(nativePlayer.sessionId,"same-video-session",

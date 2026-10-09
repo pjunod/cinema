@@ -297,7 +297,9 @@ final class PlaybackControlSession {
                     }
                 }
                 if exchange.capture.hasSameIntent(as: latest.load()), subtitleReadiness.record(
-                    exchange.response?.delivery?.subtitleReadiness, commitReady: false
+                    exchange.response?.delivery?.subtitleReadiness, commitReady: false,
+                    intent: exchange.capture.intentGeneration,
+                    revision: exchange.response?.delivery?.subtitleRevision
                 ) {
                     scheduleSubtitleReady { [weak self] in
                         // A ready edge can wait for MainActor while a new
@@ -305,7 +307,9 @@ final class PlaybackControlSession {
                         // callback executes, not when it was enqueued.
                         guard self?.activeGeneration == generation,
                               exchange.capture.hasSameIntent(as: latest.load()),
-                              subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
+                              subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness,
+                                                       intent: exchange.capture.intentGeneration,
+                                                       revision: exchange.response?.delivery?.subtitleRevision)
                         else { return }
                         onSubtitleReady()
                     }
