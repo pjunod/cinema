@@ -3847,7 +3847,7 @@ async function main() {
     assert.equal(h.seeks.length, 0, "a hold reconnects nothing");
     assert.deepEqual(paced, [], "and arms no retry");
     assert.equal(h.loading.length, 1, "the viewer is told what is happening");
-    assert.equal(h.loading[0].detail, "The server is short of space.");
+    assert.equal(h.loading[0].detail, "The server’s playback buffer limit has been reached.");
     assert.deepEqual(h.loading[0].actions, ["retry", "close"], "and can act on it");
     assert.equal(h.loading[0].source, "control_hold",
       "a hold is a notice, not a screen: D1 arms wording, it does not tear down");
@@ -7889,4 +7889,10 @@ test("cached caption windows bound accumulated cue storage before mutating valid
   f.reply=async()=>subtitleWindowResponse(subtitleWindowVtt(2,5,"new intent"));
   await f.apply(f.player,0,"new-intent-window");
   assert.deepEqual(f.track.items.map(c=>c.text),["new intent"],"new intent retires retained storage");
+});
+test("buffer capacity hold wording identifies the playback buffer for both scheduler codes", () => {
+  const wording = new Function(`${shippedSource("holdReasonText")}\nreturn holdReasonText;`)();
+  for (const reason of ["working_set", "no_room"]) {
+    assert.equal(wording(reason), "The server’s playback buffer limit has been reached.");
+  }
 });

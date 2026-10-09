@@ -1,6 +1,6 @@
 # Apple PlayerController attempt and observation — nine epochs made explicit, one item observer, polls that keep their deadlines
 
-**Status:** open — 5.1–5.6 code on `main` since 2026-10-04 (#793); three of this plan's own `AttemptScopesTests` failed on the effort branch (§6.1, 2026-10-02) and the suite has not been recorded as run on `main`; physical acceptance open · **Executes:** A3, A4, A6, A7 and
+**Status:** open — 5.1–5.6 code on `main` since 2026-10-04 (#793); retained simulator outcomes apply to the Apple inputs at `1088d7529` (§6.1, 2026-10-09 UTC), not a fresh current-main invocation; physical acceptance open · **Executes:** A3, A4, A6, A7 and
 F-apple-3, F-apple-4, F-apple-6, F-apple-7, F-apple-9, F-apple-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -454,7 +454,38 @@ the lock-screen state ever disagreed with the app for more than a second.
 Rollout: TestFlight/fleet via [CLIENT-DEPLOY-PROMPT.md](CLIENT-DEPLOY-PROMPT.md)
 after each `apple-build-bump`; rollback is the previous build number.
 
-### 6.1 Status and remaining physical evidence (2026-10-02)
+### 6.1 Retained simulator evidence and remaining acceptance (2026-10-09 UTC)
+
+**Retained outcomes, verified offline on 2026-10-09 UTC.** The source-bound
+retention fragment records **2,828 applicable passes**, not 2,828 new runs:
+iPhone 948 (946 retained CI passes plus exactly two local retries), iPad 948
+and tvOS 932. The original iPhone two failures and the dated seven-failure
+account below remain negative history. Only
+`LiveTvTests/testAppleTvLiveNavigationIsReversibleAndReachesEverything` and
+`LiveTvTests/testEveryDeveloperCardThatStaysSaysWhatItWaitsOn` were retried.
+Every platform's retained outcomes includes all 11 `AttemptScopesTests`
+and all four `PlayerItemObserverTests` as passing, including the three
+historically failed fence subjects listed below.
+
+The iPhone donor was CI run4494/job45501 at `4d5801e2`; the two retries,
+iPad and tvOS records bind local source `7e38cadc`. The Apple and named
+attempt-census inputs are unchanged from `7e38cadc` to
+`1088d7529401297bddced74bfa11c166457468d8`. The shared rolling-producer
+census change in that interval concerns Rust backup constructors, not the
+named Apple inputs; it is not a claim that every shared fixture is equal.
+Receipts record M4 ARM64, Xcode27.0/27A266a, Debug, SDK27.0 and signing-disabled
+XCTest simulators, with separately named iPhone, iPad and tvOS destinations;
+simulator OS build was not separately recorded. Fragment SHA-256:
+`81fa0dd3573e691295f17888ba5a043af4e14bd7230db9cd3376338d744782c9`.
+
+This reconciles the missing retained unit-evidence narrative only. It is
+not a fresh `make apple-test` invocation on `1088d7529`, a current gate,
+installed-build provenance or physical acceptance. The hardware prompts,
+actual failed-segment URI observation and focus/jank measurement remain open.
+
+**Historical account, 2026-10-02 (preserved).** The following claims describe
+that older source and date; its main-run uncertainty is superseded only by
+the retained source-applicable evidence above.
 
 **Simulator suite, 2026-10-02.** `make apple-test`'s steps (xcodegen, then
 `build-for-testing` and `test-without-building` per platform) ran once on maca,
@@ -554,3 +585,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | 5.3-5.6 implementation, acceptance pending | [durable branch](http://forge.lan:3000/noirr/plurx/src/branch/codex/a02-restore-20260924) · `c5edddc84`, `5916edb83`, `ae31fcde6`, `c353d1349` | Live TV and Library Channels now consume the shared item stream with their own policies. Finite readiness observes status with its original 15 s deadline; prepared metadata observes status against the original 6 s open clock, with the 12 s runway bound preserved. The 2 s server response still drives recovery and panel telemetry, now through separate named functions. Now Playing is published from state changes and no longer from the periodic callback; finite, Live TV and channels share one current remote-command owner, including tvOS. `SWIFT_STRICT_CONCURRENCY: targeted` builds iOS and tvOS. Unique warnings observed across incremental target builds: `LiveTv.swift` 4 existing async `NSLock`, `DvrRecordings.swift` 2 missing Combine imports, and `PlayerController.swift` 1 deprecated tvOS display criteria; no new concurrency warning remains in the A-02 edits. No unit test or device acceptance is claimed yet. The seek-presentation 50 ms poll remains, while a separate 50 ms resume-sample default explains why the plan's literal `grep -c "milliseconds(50)" = 1` does not describe this tree. |
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | 5.4 remaining wakeups, acceptance pending | [durable branch](http://forge.lan:3000/noirr/plurx/src/branch/codex/a02-restore-20260924) | The control-answer bridge now wakes both bounded asks from exchange arrivals and viewer supersession, retaining the stall ask's original deadline, one-time extension and hard cap and the prepared ask's 12 s bound plus staging cadence. The seek video-output delegate wakes the existing 50 ms pixel-buffer poll but does not decide presentation. iOS/tvOS compile passed; the required tests wait for the ready PR's single adversarial review and fast lane. |
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Simulator suite and remaining evidence | `opus/client-evidence` into the architecture effort | iOS 742/735/7 and tvOS 726/719/7 (total/passed/failed) on maca, Xcode 27.0, at `6f6466ebc`; the same seven fail on both platforms and on rerun, three of them this plan's `AttemptScopesTests` (the census lacks the auto-quality fences). `PlayerItemObserverTests` pass. Physical items listed in §6.1. |
+| 2026-10-09 UTC | gpt-6.1-sol | agent:/root/ci_reconcile_sol61 | §6.1 retained simulator evidence reconciliation | [integration branch](http://forge.lan:3000/noirr/plurx/src/branch/codex/batch004-a02-evidence-docs) | Offline receipt audit verified 2,828 source-applicable passes (946 retained iPhone plus two retries, iPad948, tvOS932), including all11 AttemptScopes and four Observer subjects per platform. Named Apple inputs unchanged from7e38cadc to1088d7529. Preserved original failures; no test/build/device/CI invocation or physical acceptance in this documentation task. Independent source review cleared; documentation-only integration, with no unit-suite rerun. |
