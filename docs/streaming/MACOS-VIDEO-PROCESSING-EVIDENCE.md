@@ -1776,3 +1776,84 @@ contains one neutral JSON record, 1762 compressed bytes, SHA-256
 It records the successful phases, retained first-phase timeout, exact source
 identities, compiler commands and hashes of 14 underlying receipts/logs.
 The archived member was reopened and compared byte-for-byte.
+
+## 40. Merged Mac release and focused ordinary-API delivery
+
+The exact `c10f16f009a723c4fb579ead278bec8d233d283f` release build passes
+in 1736.431 seconds; capture finishes in 1737.326 seconds. Its unsigned
+executable SHA-256 is
+`8d83886720747b506b29dbe4129d99f1218a7b00de2376d6047d3f034d4ea1cb`.
+The executable and arm64 debug symbols share UUID
+`1FD2F940-E474-3130-9FD5-14733826FE25`. The signed candidate executable is
+`5f12aeb7b6cda3549d61dad7285648f0cb491bc6a0fccce639ed8ce30a06377a`.
+Native FFmpeg, probe and parser retain the previously qualified exact bytes;
+this is an ad-hoc signed candidate, not a notarization or deployment claim.
+
+The focused text case passes in 72.754 seconds. Its 25 independent cue
+observations include six visible-cue points and 19 blank points, all matching
+the oracle. Inactive Fontconfig inventory changes after startup while active
+font authority remains the same; the actual native text route, lifecycle,
+parser identity and zero shutdown exit pass. The original MPEG-2 caption
+case passes in 41.669 seconds using the unchanged corrected observer from
+§34. Payload/timing and picture checks remain intact. Both owned process
+groups are absent after settlement. These checks exercise the newly merged
+daemon/storage path; unchanged raw compositor and other caption controls
+retain their earlier component identities without a blanket replay.
+
+The first admitted timing campaign stops after 32.050 seconds when a foreign
+build process appears. Two complete workloads and one incomplete workload
+are retained. Because the foreign start time cannot be recovered, those
+measurements are not qualified as uncontaminated performance evidence. They
+will not be mixed into a later clean campaign. The release/API success does
+not depend on claiming a performance result.
+
+[Merged Mac release and API evidence](evidence/macos-video-20261008/final-c10-release-api-evidence.tar.gz)
+contains one neutral JSON record, 1562 compressed bytes, SHA-256
+`b91ab12de641acabcf2a10a2ab396a0b1e1bf2698aaf5595a37b539c1f12def3`.
+All nine raw inputs, 780580 bytes in total, were independently checked by
+size and hash. The archived member was reopened and compared byte-for-byte.
+No unit tests execute during this qualification.
+
+## 41. Complete subtitle performance campaign
+
+One uninterrupted campaign passes all eight complete graphs in 126.545
+seconds on the exact qualified native FFmpeg. Each workload produces 120
+encoded frames per sample. One CPU and one GPU warmup are excluded, followed
+by three alternating timed pairs: 16 excluded warmups and 48 timed children
+in total, with one child running at a time. All 64 encoded outputs have the
+expected frame count and matching timestamps. Earlier raw comparisons
+establish the separate pixel-correctness result.
+
+| Workload | CPU graph median, s | GPU graph median, s | Wall-time reduction | FFmpeg child CPU/frame reduction |
+|---|---:|---:|---:|---:|
+| SDR · 2560x1440 · ASS | 1.310 | 0.998 | 23.87% | 52.15% |
+| SDR · 2560x1440 · PGS | 1.188 | 0.841 | 29.21% | 72.69% |
+| SDR · 3840x2160 · ASS | 2.364 | 1.640 | 30.63% | 62.72% |
+| SDR · 3840x2160 · PGS | 1.764 | 1.534 | 13.02% | 81.73% |
+| HDR10 · 2560x1440 · ASS | 1.375 | 1.074 | 21.90% | 49.90% |
+| HDR10 · 2560x1440 · PGS | 1.381 | 0.951 | 31.14% | 69.64% |
+| HDR10 · 3840x2160 · ASS | 2.478 | 1.726 | 30.33% | 58.94% |
+| HDR10 · 3840x2160 · PGS | 2.076 | 1.544 | 25.61% | 81.37% |
+
+The original continuous guard observes no competing named work or critical
+resource event during this campaign. Every recorded memory-pressure sample
+is normal; minimum reclaimable memory is 18.12 GB and peak sampled owned RSS
+is 848 MB. The process exits zero with no owned descendants left. The four
+pre-start refusals and interrupted fifth campaign remain recorded, and no
+samples from them enter these medians.
+
+The result is 13.02–31.14% lower median wall time and 49.90–81.73% lower
+measured FFmpeg child CPU time per frame across this short eight-workload
+envelope. CPU measurement excludes external VideoToolbox services and GPU
+execution. This is not an energy, total-system CPU, physical-copy-count,
+long-duration capacity or client-presentation claim. It does not introduce
+threshold-based feature switching.
+
+[Complete subtitle performance evidence](evidence/macos-video-20261008/final-c10-subtitle-performance-evidence.tar.gz)
+contains one neutral JSON record, 5136 compressed bytes, SHA-256
+`e78b5a2d6a29413e2cf82221b9c2e4d0fb698ee46980226a59ba4fb2178809ec`.
+All six raw inputs, 641088 bytes, were independently checked by size and
+hash, and the archived member was reopened and compared byte-for-byte. The
+record binds the original driver, raw correctness ledger, actual source and
+native binary, every workload's medians and output checks, resource
+settlement, and the explicitly excluded interrupted campaign.

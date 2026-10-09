@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** follow-up implementation active; prior contribution landed · **Updated:** 2026-10-09 · **Owner:** managing agent with
+**Status:** Mac follow-ups qualified; Linux acceptance active; combined review/landing pending · **Updated:** 2026-10-09 · **Owner:** managing agent with
 three GPT-6.1 Sol builders · **Integration:** `effort/video-processing-followups`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
@@ -25,9 +25,9 @@ merged tree passes pinned all-target compilation and the normal tracked hook.
 
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
-| F1 GPU subtitle compositing | Native builder | Bitmap API, all eight complete-graph raw comparisons and final text API pass; inactive font-rule identity repair passes on the signed `e9fdc02a` release | Measure performance and preserve final qualification through integration |
+| F1 GPU subtitle compositing | Native builder | All eight raw graph comparisons, merged `c10f16f0` text API and one complete performance campaign pass; wall time is 13.02–31.14% lower and child CPU/frame 49.90–81.73% lower | Preserve exact evidence through combined review and landing |
 | F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; full Bookworm FFmpeg, matching static parser, package assembly, complete ELF audit and exact merged-source Linux checks pass | amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
-| F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on the final `2139fa9c` signed bundle, including caption payload/timing checks and clean owned shutdown | Preserve this evidence through final integration; broader DVR and client presentation qualification remain tracked separately |
+| F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on `2139fa9c`; the merged `c10f16f0` MPEG-2 case also passes unchanged caption/picture assertions and clean shutdown | Preserve evidence through combined review/landing; broader DVR and client presentation remain separate |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
 integration and shared package helpers; Dolby owns `0003`, caption delivery
@@ -39,7 +39,8 @@ Accepted earlier packages and evidence remain read-only. The pinned Rust
 1.97.1 native and Linux compiler lanes each have one job and an explicit
 owner; independent lanes run concurrently with the isolated SDK build.
 Unit execution and main landing remain with the designated merge coordinator.
-No final review or implementation completion is claimed for F1–F3 yet.
+F1 and file-VOD F3 are qualified for the combined final review. F2 acceptance
+is active. No final review or landing is claimed yet.
 
 **Latest checkpoint:** the producer/parser build evidence uses
 `354bd87e5f4356ae677bc16c67672985dd58f261`; subsequent packaging repairs
@@ -52,7 +53,11 @@ a 192.074-second phase. Subsequent changes repair build packaging and integrate 
 merged tree passes all-target compilation in 320.513 seconds. The first
 bounded phase expires during the commit hook; a warm hook-only continuation
 passes in 67.421 seconds without replaying the successful check. Its new
-Mac release and focused subtitle/caption API checks are underway. Exact-source
+Mac release passes in 1736.431 seconds, with matching executable/debug symbols.
+Its text and original MPEG-2 API checks pass in 72.754 and 41.669 seconds.
+The complete eight-workload timing campaign then passes in 126.545 seconds;
+see [evidence §40–41](MACOS-VIDEO-PROCESSING-EVIDENCE.md#40-merged-mac-release-and-focused-ordinary-api-delivery).
+Exact-source
 Linux check and Clippy pass in a 413.866-second phase. See
 [evidence §39](MACOS-VIDEO-PROCESSING-EVIDENCE.md#39-exact-merged-source-compilation).
 No unit suite has run; final review has not started.
@@ -78,11 +83,13 @@ rows under a new identity domain. It retains font, tool and active-file
 checks. Its focused release qualification passes in 86.630 seconds:
 inactive rules change from zero to 44, a fresh Source profile retains the
 startup digest, and native GPU text delivery passes all 25 cue and lifecycle
-assertions. Performance remains separate: four admissions declined competing
+assertions. Performance was still open at that checkpoint: four admissions declined competing
 processes before starting any timing child. The fourth found active Rust
 and Swift compilers, warning-level pressure and 16.34 GB reclaimable memory.
 These refusals establish contention; they do not establish memory
-exhaustion or supply an uncontaminated timing result.
+exhaustion. A fifth campaign later stops on new foreign build activity and
+is retained as unqualified. The sixth completes all eight workloads under
+the unchanged guard; only its 48 timed children enter the final medians.
 
 The earlier `2cd6000b3` Mac release completed in 1,590.286 seconds with its
 owned process group fully reaped. Matching executable and debug symbols are
@@ -180,7 +187,14 @@ that cause. The complete existing ELF audit then passes in 7.797 seconds
 on a byte-verified package copy, covering 121 runtime objects. Its capsule
 is `c2a07f88dcdbcfab086256711108a8860bacb8e619814b210a64bed9c7bc8695`.
 The original assembled package remains unchanged. The producer and parser
-builds are retained. Hardware/API qualification remains pending. No global
+builds are retained. The authentic shipping runtime image then builds and
+verifies all 125 package/executable/capsule hashes. Of 43 system providers,
+42 match the diagnostic base; the shipping snapshot has an older Expat
+package. Its 28 required symbol references and libc requirements pass, and
+the installed FFmpeg starts and lists filters successfully. The separate
+Python-only observer image retains the original shipping layers, every
+original package version and all 168 original provider/executable bytes.
+Hardware/API qualification remains pending. No global
 installation or network fallback substitutes for dependencies.
 
 Final Linux hardware acceptance also requires an actual amd64 daemon;
@@ -191,13 +205,20 @@ node. The refreshed merged-source packet is about 55.1 MB. Review also
 rejected the separate 0.2 MB Dockerfile/media-helper context needed to build
 the authentic shipping runtime image. The user then explicitly approved
 both transfers to the build node. Both exact transfers pass hash checks.
-The shipping runtime-image build is active; its actual build container has
-two CPUs, 2 GiB memory and no swap. The daemon build wrapper initially
-refuses an unused systemd slice because systemd synthesizes its loaded state;
-the wrapper is being corrected to check actual ownership and restrict
-cleanup to resources it created. No compiler ran in that refused attempt.
-The completed package audit is retained; physical admission preparation and
-Mac release qualification continue. Performance measurements, shipping Linux runtime qualification,
+The shipping runtime-image build completes under two CPUs, 2 GiB memory
+and no swap. The daemon wrapper first rejects a synthetic unused systemd
+slice, then proves that the default Docker builder ignores its requested
+process limits. Direct container execution fixes resource ownership; an
+empty private mountpoint and a separately installed public Rust 1.97.1
+toolchain complete the environment. None of those refused attempts compiles
+the daemon. The actual pinned release compiler then exceeds its 8 GiB limit
+during optimization. A 12 GiB retry reuses completed compilation with the
+same release settings and is active. The completed package audit and Mac
+qualification are retained. AMD qualification can proceed under fresh
+privileged device/activity/production-epoch checks; no repository rule
+requires another chat to grant permission. Intel staging separately awaits
+explicit approval after automatic review rejects the additional image
+transfer destination. No Intel transfer or GPU workload has begun. Performance measurements, shipping Linux runtime qualification,
 final adversarial review and merge handoff remain outstanding.
 The designated merge coordinator owns unit execution and main landing.
 
