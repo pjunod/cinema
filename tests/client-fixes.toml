@@ -5864,3 +5864,12 @@ source = "clients/apple/Sources/LiveTvSettingsView.swift"
 source_anchor = "Cinema remotes · advisory enablement"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+
+[[fixes]]
+id = "android.dolby-vision-profile-badge-parity"
+commits = ["6990f8791d827652f3c1f1c6f8738e0aea771916"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "get() = if (state != FactState.Source && activeLabel != null)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "aConvertedProfileSevenTitleShowsBothHalvesLit"
