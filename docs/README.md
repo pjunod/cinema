@@ -329,6 +329,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [DV_HDR_TIMELINE_CONTROLS.md](streaming/DV_HDR_TIMELINE_CONTROLS.md) | Reproduce bounded VFR, real seek/preroll and timestamp-epoch controls with stored-duration, lifecycle and failure-status evidence. | open |
 | [DV_HDR_RPU_REUSE_CONTROLS.md](streaming/DV_HDR_RPU_REUSE_CONTROLS.md) | Reviewed explicit mapping reuse, cache/reset refusals, input-bound execution and retained-prerequisite replay. | open |
 | [DV_HDR_COMBINED_CONTROLS.md](streaming/DV_HDR_COMBINED_CONTROLS.md) | Reviewed finite P7/FEL source-to-HDR10 chain, actual output/timing, numerical limits and remaining movie integration. | open |
+| [DV_PROCESSING_TOOLS.md](streaming/DV_PROCESSING_TOOLS.md) | Build and run the bounded streaming FEL reconstruction and P8.1 authoring helpers; remaining serving limits. | open |
 | [DV_HDR_NONIDENTITY_CONTROLS.md](streaming/DV_HDR_NONIDENTITY_CONTROLS.md) | Reproduce reviewed affine FEL reconstruction and P8.1 repeated-reshape controls, separate HDR10-base checks and exact replay provenance. | open |
 | [DV-DISK-CONVERSION-DIAGNOSIS.md](streaming/DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |
 | [QUEUE-REPAIR-VERIFICATION-PROMPT.md](streaming/QUEUE-REPAIR-VERIFICATION-PROMPT.md) | Did the fragment-index queue come back, and stay back? | open |
