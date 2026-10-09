@@ -2110,15 +2110,27 @@ pub(super) async fn receiver_media_actor(
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
+    let subtitle_complete = opened.subtitle_complete;
+    let subtitle_absent = opened.subtitle_absent;
     let stream = opened.body.into_data_stream().map(move |frame| {
         let _writer_ownership = &guard;
         frame
     });
     let mut builder = axum::http::Response::builder()
-        .status(StatusCode::OK)
+        .status(if subtitle_absent {
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::OK
+        })
         .header(axum::http::header::CONTENT_TYPE, opened.mime)
         .header(axum::http::header::CONTENT_LENGTH, opened.length)
         .header(axum::http::header::CACHE_CONTROL, "no-store");
+    if let Some(complete) = subtitle_complete {
+        builder = builder.header(
+            "x-plurx-subtitle-complete",
+            if complete { "true" } else { "false" },
+        );
+    }
     if let Some(etag) = opened.etag {
         builder = builder.header(axum::http::header::ETAG, etag);
     }

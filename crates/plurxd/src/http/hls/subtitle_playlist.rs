@@ -498,6 +498,16 @@ pub(super) async fn subtitle_vtt_local_before(
     segment: &str,
     publication_deadline: Instant,
 ) -> Result<Response, ApiError> {
+    if let Some(revision) = segment.strip_prefix("cached-") {
+        return cached_subtitle_revision_local_before(
+            state,
+            session,
+            index,
+            revision,
+            publication_deadline,
+        )
+        .await;
+    }
     subtitle_vtt_local_before_with_source(
         state,
         session,
@@ -505,6 +515,50 @@ pub(super) async fn subtitle_vtt_local_before(
         segment,
         publication_deadline,
         &ProductionSubtitleSegmentSource(state.subtitle_source_access()),
+    )
+    .await
+}
+
+/// Read only the published bytes of this exact session's frozen source. The
+/// ordinary media relay reaches the owner before this function runs.
+pub(super) async fn cached_subtitle_revision_local_before(
+    state: &AppState,
+    session: &str,
+    index: i64,
+    revision: &str,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    if !plurx_core::sharing_resources::valid_cached_subtitle_revision(revision) {
+        return Err(ApiError::BadRequest("invalid subtitle revision".into()));
+    }
+    let (_, file, owner) = session_file(state, session, deadline).await?;
+    let response = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        super::super::stream::subtitle_vtt_for_file_revision(state, &file, index, Some(revision)),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())??;
+    let name = format!("subs/{index}/cached-{revision}");
+    if response.status() != StatusCode::OK {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            "subtitle-segment",
+            Some(&name),
+            deadline,
+        )
+        .await?;
+        return Ok(response);
+    }
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media("subtitle-segment", Some(&name)),
+        true,
+        response,
+        deadline,
     )
     .await
 }

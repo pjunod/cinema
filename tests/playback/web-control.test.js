@@ -7804,13 +7804,13 @@ function subtitleWindowFixture(url="/api/v1/files/42/subs/0?token=viewer"){
     addCue(c){this.items.push(c);},removeCue(c){this.items.splice(this.items.indexOf(c),1);}};
   const video={currentTime:0,addTextTrack(kind,label){assert.equal(kind,"subtitles");assert.equal(label,"","hls native-selection polling must ignore the script track");return track;}};
   const writes=[],displays=[],reads=[];
-  const player={sessionId:"same-session",fileId:"42",offset:0,controlIntentGeneration:1,curSub:0,
+  const player={sessionId:"same-session",probeUrl:url.includes("/shared/")?"/api/v1/shared/playback/same-session/index.m3u8":"/api/v1/hls/same-session/index.m3u8",fileId:"42",offset:0,controlIntentGeneration:1,curSub:0,
     subs:[{index:0,native:true}],hls:{set subtitleTrack(v){writes.push(v);},set subtitleDisplay(v){displays.push(v);}}};
   const env={player,video,track,writes,displays,reads,url};
   const functions=new Function("env",`let PLAYER=env.player;
     const document={getElementById:()=>env.video};
     const window={VTTCue:class {constructor(startTime,endTime,text){Object.assign(this,{startTime,endTime,text});}}};
-    const fetch=url=>{env.reads.push(url);return env.reply(url);};const subUrl=()=>env.url;
+    const fetch=url=>{env.reads.push(url);return env.reply(url);};const subUrl=()=>env.url;const tok=url=>url;
     ${["vttTime","vttParse","nativeHlsSubtitleOrdinal","retryReadyNativeSubtitle",
       "applyReadySubtitleSidecar","applyReadySubtitleRevision"].map(shippedSource).join("\n")}
     return {apply:applyReadySubtitleRevision,retry:retryReadyNativeSubtitle,setPlayer:p=>PLAYER=p};`)(env);
@@ -7825,7 +7825,7 @@ test("cached subtitle windows render immediately, merge stable cues, and yield t
   for(const url of ["/api/v1/files/42/subs/0?token=viewer","/api/v1/shared/imports/import/files/locator/subs/0?token=viewer"]){
     const f=subtitleWindowFixture(url);
     await f.apply(f.player,0,"first-window");
-    assert.equal(f.reads[0],url+"&revision=first-window");
+    assert.equal(f.reads[0],f.player.probeUrl.replace("index.m3u8","subs/0/cached-first-window"));
     assert.equal(f.player.sessionId,"same-session");assert.equal(f.video._vsubs,f.track);
     assert.deepEqual(f.track.items.map(c=>c.text),["first"]);assert.deepEqual(f.writes,[],"partial cues keep native segment I/O selected");assert.deepEqual(f.displays,[false]);
     const first=f.track.items[0];
@@ -7894,5 +7894,28 @@ test("buffer capacity hold wording identifies the playback buffer for both sched
   const wording = new Function(`${shippedSource("holdReasonText")}\nreturn holdReasonText;`)();
   for (const reason of ["working_set", "no_room"]) {
     assert.equal(wording(reason), "The server’s playback buffer limit has been reached.");
+  }
+});
+
+
+test("cached captions follow the attached local or shared owner namespace and fence owner changes",async()=>{
+  for(const base of ["/api/v1/hls/worker-session/","/api/v1/shared/playback/receiver-session/"]){
+    const f=subtitleWindowFixture();
+    f.player.probeUrl=base+"index.m3u8?native=1";
+    f.player.controlReporter={bootstrap:{generation:"incarnation-a",control_epoch:1}};
+    const held=subtitleWindowHeld();f.reply=()=>held.promise;
+    const pending=f.apply(f.player,0,"f42-s0-5-1000-w0-200.vtt");
+    assert.deepEqual(f.reads,[base+"subs/0/cached-f42-s0-5-1000-w0-200.vtt"]);
+    f.player.controlReporter.bootstrap={generation:"incarnation-b",control_epoch:2};
+    const next=subtitleWindowHeld();f.reply=()=>next.promise;
+    const replacement=f.apply(f.player,0,"f42-s0-5-1000-w0-200.vtt");
+    assert.equal(f.reads.length,2,"an old owner in flight cannot block the new owner");
+    const active=f.player._subtitleSidecarRequest;
+    held.resolve(subtitleWindowResponse(subtitleWindowVtt(1,5,"stale")));
+    await pending;assert.equal(f.track.items.length,0);
+    assert.equal(f.player._subtitleSidecarRequest,active,"old cleanup cannot clear the current request");
+    next.resolve(subtitleWindowResponse(subtitleWindowVtt(1,5,"owner")));
+    await replacement;
+    assert.deepEqual(f.track.items.map(c=>c.text),["owner"]);
   }
 });

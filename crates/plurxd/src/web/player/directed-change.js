@@ -597,16 +597,25 @@ async function applyReadySubtitleRevision(player,index,revision){
   const session=player.sessionId;
   const context=player.fileContext;
   const fileId=player.fileId;
+  const bootstrap=player.controlReporter&&player.controlReporter.bootstrap;
+  const generation=bootstrap&&bootstrap.generation;
+  const epoch=bootstrap&&bootstrap.control_epoch;
   const pending=player._subtitleSidecarRequest;
   if(pending&&pending.index===index&&pending.off===off&&pending.intent===intent
-    &&pending.revision===revision&&pending.video===video&&pending.session===session) return;
-  const request={index,off,intent,revision,video,session};
+    &&pending.revision===revision&&pending.video===video&&pending.session===session
+    &&pending.generation===generation&&pending.epoch===epoch) return;
+  const request={index,off,intent,revision,video,session,generation,epoch};
   player._subtitleSidecarRequest=request;
   const serial=player._subtitleSidecarSerial=(player._subtitleSidecarSerial||0)+1;
   let text,complete;
   try{
-    const url=subUrl(index);
-    const r=await fetch(revision?url+(url.includes("?")?"&":"?")+"revision="+encodeURIComponent(revision):url);
+    // The attached playlist owns the media namespace (including receiver
+    // sessions). A file URL can point at an ingress with no worker cache.
+    const playlist=player.probeUrl;
+    const base=typeof playlist==="string"?playlist.split("?")[0].replace(/[^/]*$/,""):null;
+    if(revision&&(!base||!session||!/^[A-Za-z0-9.-]{1,192}$/.test(revision)||revision.includes(".."))) return;
+    const url=revision?tok(base+"subs/"+index+"/cached-"+revision):subUrl(index);
+    const r=await fetch(url);
     // A revision can disappear after observation. Empty or absent snapshots
     // spend this observation and preserve usable cues; cadence cannot retry it.
     if(r.status===204) return;
@@ -621,7 +630,9 @@ async function applyReadySubtitleRevision(player,index,revision){
   if(PLAYER!==player||document.getElementById("video")!==video||player.curSub!==index
     ||(player.offset||0)!==off||(player.controlIntentGeneration||0)!==intent
     ||player.sessionId!==session||player.fileContext!==context||player.fileId!==fileId
-    ||player._subtitleSidecarSerial!==serial) return;
+    ||player._subtitleSidecarSerial!==serial
+    ||(player.controlReporter&&player.controlReporter.bootstrap&&player.controlReporter.bootstrap.generation)!==generation
+    ||(player.controlReporter&&player.controlReporter.bootstrap&&player.controlReporter.bootstrap.control_epoch)!==epoch) return;
   const Cue=window.VTTCue||window.TextTrackCue;
   const cues=[];
   for(const c of vttParse(text)){

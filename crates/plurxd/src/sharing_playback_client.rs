@@ -879,12 +879,16 @@ pub(crate) struct SourcePeerResource {
     pub(crate) length: u64,
     pub(crate) mime: &'static str,
     pub(crate) etag: Option<String>,
+    pub(crate) subtitle_complete: Option<bool>,
+    pub(crate) subtitle_absent: bool,
 }
 struct SourceResourceHead {
     length: u64,
     mime: &'static str,
     etag: Option<String>,
     playlist: bool,
+    subtitle_complete: Option<bool>,
+    subtitle_absent: bool,
 }
 fn single_header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Result<&'a str, PeerError> {
     let mut values = headers.get_all(name).iter();
@@ -934,7 +938,26 @@ impl SourceResourceHead {
         let length = length_text
             .parse::<u64>()
             .map_err(|_| PeerError::InvalidResponse)?;
-        if length == 0 || length.to_string() != length_text {
+        let cached = resource.cached_subtitle_revision().is_some();
+        let (subtitle_complete, subtitle_absent) = if cached {
+            let complete = match single_header(headers, "x-plurx-subtitle-complete")? {
+                "true" => true,
+                "false" => false,
+                _ => return Err(PeerError::InvalidResponse),
+            };
+            let absent = match single_header(headers, "x-plurx-subtitle-absent")? {
+                "true" => true,
+                "false" => false,
+                _ => return Err(PeerError::InvalidResponse),
+            };
+            if absent != (length == 0) || absent && complete {
+                return Err(PeerError::InvalidResponse);
+            }
+            (Some(complete), absent)
+        } else {
+            (None, false)
+        };
+        if (!cached && length == 0) || length.to_string() != length_text {
             return Err(PeerError::InvalidResponse);
         }
         let (mime, maximum, playlist, file) = match resource.kind() {
@@ -972,6 +995,8 @@ impl SourceResourceHead {
             mime,
             etag,
             playlist,
+            subtitle_complete,
+            subtitle_absent,
         })
     }
 }
@@ -1065,6 +1090,8 @@ impl PeerConnection {
             length: head.length,
             mime: head.mime,
             etag: head.etag,
+            subtitle_complete: head.subtitle_complete,
+            subtitle_absent: head.subtitle_absent,
         })
     }
 }
@@ -1261,6 +1288,61 @@ mod resource_tests {
         }
         (session, known, resource, headers)
     }
+    #[test]
+    fn cached_caption_resource_keeps_complete_absent_and_exact_source_lineage() {
+        let (session, known, _, mut headers) = fixture();
+        let resource = plurx_core::sharing_resources::SharingHlsResource::parse(
+            "subs/0/cached-source-ready.vtt",
+        )
+        .expect("cached caption fixture");
+        headers.insert(
+            "cinemashare-resource",
+            resource.as_str().parse().expect("cached caption fixture"),
+        );
+        headers.insert(
+            "content-type",
+            "text/vtt".parse().expect("cached caption fixture"),
+        );
+        headers.remove("etag");
+        headers.insert(
+            "x-plurx-subtitle-complete",
+            "true".parse().expect("cached caption fixture"),
+        );
+        headers.insert(
+            "x-plurx-subtitle-absent",
+            "false".parse().expect("cached caption fixture"),
+        );
+        let ready = SourceResourceHead::parse(&headers, &session, &known, &resource)
+            .expect("cached caption fixture");
+        assert_eq!(ready.subtitle_complete, Some(true));
+        assert!(!ready.subtitle_absent);
+        headers.insert(
+            "content-length",
+            "0".parse().expect("cached caption fixture"),
+        );
+        headers.insert(
+            "x-plurx-subtitle-complete",
+            "false".parse().expect("cached caption fixture"),
+        );
+        headers.insert(
+            "x-plurx-subtitle-absent",
+            "true".parse().expect("cached caption fixture"),
+        );
+        assert!(
+            SourceResourceHead::parse(&headers, &session, &known, &resource)
+                .expect("cached caption fixture")
+                .subtitle_absent
+        );
+        headers.insert(
+            "cinemashare-session-id",
+            Uuid::new_v4()
+                .to_string()
+                .parse()
+                .expect("cached caption fixture"),
+        );
+        assert!(SourceResourceHead::parse(&headers, &session, &known, &resource).is_err());
+    }
+
     #[test]
     fn source_resource_echo_requires_exact_lineage_single_headers_and_closed_representation() {
         let (session, known, resource, headers) = fixture();

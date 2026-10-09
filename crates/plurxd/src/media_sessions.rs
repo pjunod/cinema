@@ -3914,6 +3914,7 @@ fn relay_response_with_limits_observed(
         header::CONTENT_DISPOSITION,
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
         HeaderName::from_static("x-plurx-producer-paced"),
+        HeaderName::from_static("x-plurx-subtitle-complete"),
     ] {
         if let Some(value) = response.headers().get(name.as_str()) {
             let name = HeaderName::from_bytes(name.as_str().as_bytes())
