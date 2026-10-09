@@ -533,6 +533,18 @@ function subtitleReadinessRetryTransition(state,delivery){
   state.subtitleReadinessRevision=revision;
   return retry;
 }
+// A failed caption is a caption notice. Exact unavailable observations spend
+// one notice per selection/seek intent without changing video or track state.
+function subtitleReadinessUnavailableNotice(player,delivery){
+  if(!player||!delivery||delivery.subtitle_readiness!=="unavailable"
+    ||player.burnedSub!=null||player.curSub==null||player.curSub<0
+    ||nativeHlsSubtitleOrdinal(player,player.curSub)<0) return false;
+  const intent=player.controlIntentGeneration||0;
+  if(player._subtitleUnavailableIntent===intent&&player._subtitleUnavailableIndex===player.curSub) return false;
+  player._subtitleUnavailableIntent=intent;
+  player._subtitleUnavailableIndex=player.curSub;
+  return true;
+}
 function nativeHlsSubtitleOrdinal(player,index){
   const native=(player&&player.subs||[]).filter(s=>s.native===true);
   return native.findIndex(s=>s.index===index);
@@ -553,19 +565,16 @@ function nativeHlsSubtitleOrdinal(player,index){
 // `WEBVTT` body the server published while the sidecar was warming is what
 // that rendition shows for the rest of the session.
 //
-// What does work — 0 cues to 1 in the same harness, with the session id, the
-// video element and the segment count all unchanged — is to read the whole-track
-// sidecar. Readiness can describe just a bounded window, so keep the native
-// rendition while the whole-track request waits. Only usable script cues can
-// take over from native text. This is also the route used by offset sessions.
-function retryReadyNativeSubtitle(player){
+// hls.js keeps already-processed empty fragments. Deliver the representation
+// the server has actually published through the existing file route instead.
+// Window cues share the whole track's absolute source timeline and accumulate
+// on this one script track; complete publication replaces that partial view.
+function retryReadyNativeSubtitle(player,delivery){
   if(!player||player.burnedSub!=null||player.curSub==null||player.curSub<0) return false;
   const ordinal=nativeHlsSubtitleOrdinal(player,player.curSub);
   if(ordinal<0) return false;
   if(player.hls){
-    // Build the script cue list at the session's own offset without entering
-    // setSub's native-rendition branch or clearing a still-usable rendition.
-    applyReadySubtitleSidecar(player,player.curSub);
+    applyReadySubtitleSidecar(player,player.curSub,delivery&&delivery.subtitle_revision);
     return true;
   }
   if(!player.sessionId) return false;
@@ -576,47 +585,86 @@ function retryReadyNativeSubtitle(player){
   track.mode="showing";
   return true;
 }
-// Fetch the whole-track sidecar and hand its cues to the one script text
-// track this player reuses. Shifted by the session's media origin for the
-// same reason `setSub` shifts it: a transcode's timeline starts at its own
-// offset, and sidecar cue times are absolute source time.
+// Kept as the legacy whole-track entry point for older peers without revisions.
 async function applyReadySubtitleSidecar(player,index){
+  return applyReadySubtitleRevision(player,index,arguments[2]||null);
+}
+async function applyReadySubtitleRevision(player,index,revision){
   const video=document.getElementById("video");
   if(!video) return;
   const off=player.offset||0;
   const intent=player.controlIntentGeneration||0;
+  const session=player.sessionId;
+  const context=player.fileContext;
+  const fileId=player.fileId;
   const pending=player._subtitleSidecarRequest;
-  if(pending&&pending.index===index&&pending.off===off&&pending.intent===intent) return;
-  const request={index,off,intent};
+  if(pending&&pending.index===index&&pending.off===off&&pending.intent===intent
+    &&pending.revision===revision&&pending.video===video&&pending.session===session) return;
+  const request={index,off,intent,revision,video,session};
   player._subtitleSidecarRequest=request;
-  let text;
+  const serial=player._subtitleSidecarSerial=(player._subtitleSidecarSerial||0)+1;
+  let text,complete;
   try{
-    const r=await fetch(subUrl(index));
+    const url=subUrl(index);
+    const r=await fetch(revision?url+(url.includes("?")?"&":"?")+"revision="+encodeURIComponent(revision):url);
+    // A revision can disappear after observation. Empty or absent snapshots
+    // spend this observation and preserve usable cues; cadence cannot retry it.
+    if(r.status===204) return;
     if(!r.ok) throw new Error("HTTP "+r.status);
+    complete=revision?r.headers.get("x-plurx-subtitle-complete")==="true":true;
     text=await r.text();
   }catch(err){
-    if(PLAYER===player&&player._subtitleSidecarRequest===request) player.subtitleReadinessReady=false;
     return;
   }finally{
     if(player._subtitleSidecarRequest===request) player._subtitleSidecarRequest=null;
   }
-  if(PLAYER!==player||player.curSub!==index||(player.offset||0)!==off
-    ||(player.controlIntentGeneration||0)!==intent) return;
-  if(!video._vsubs) video._vsubs=video.addTextTrack("subtitles","Subtitles");
-  const track=video._vsubs;
-  if(track.mode==="disabled") track.mode="hidden";
-  try{ while(track.cues&&track.cues.length) track.removeCue(track.cues[0]); }catch(err){}
+  if(PLAYER!==player||document.getElementById("video")!==video||player.curSub!==index
+    ||(player.offset||0)!==off||(player.controlIntentGeneration||0)!==intent
+    ||player.sessionId!==session||player.fileContext!==context||player.fileId!==fileId
+    ||player._subtitleSidecarSerial!==serial) return;
   const Cue=window.VTTCue||window.TextTrackCue;
-  let added=0;
+  const cues=[];
   for(const c of vttParse(text)){
     const en=c.end-off;
     if(en<=0) continue;
-    try{ track.addCue(new Cue(Math.max(0,c.start-off),en,c.text)); added++; }catch(err){}
+    try{ cues.push(new Cue(Math.max(0,c.start-off),en,c.text)); }catch(err){}
   }
-  if(!added) return;                  // nothing to show; do not claim otherwise
-  // Keep the native rendition alive while a whole-track request is pending.
-  // Window readiness does not imply that the whole track has finished.
-  if(player.hls){ try{ player.hls.subtitleTrack=-1; }catch(err){} }
+  if(!cues.length) return;
+  if(!video._vsubs) video._vsubs=video.addTextTrack("subtitles","");
+  const track=video._vsubs;
+  if(track.mode==="disabled") track.mode="hidden";
+  const same=video._subtitleCueOwner&&video._subtitleCueOwner.player===player
+    &&video._subtitleCueOwner.index===index&&video._subtitleCueOwner.off===off
+    &&video._subtitleCueOwner.intent===intent;
+  const existing=new Set();
+  const key=c=>JSON.stringify([c.startTime,c.endTime,c.text]);
+  const previous=Array.from(track.cues||[]),retained=[],fresh=[];
+  // A window never removes an active or future cue from another window.
+  // Expired cues retire as delivery advances, bounding the ordinary view.
+  for(const c of previous){
+    if(!complete&&same&&c.endTime>=Number(video.currentTime||0)-60){
+      retained.push(c);existing.add(key(c));
+    }
+  }
+  for(const cue of cues){
+    if(existing.has(key(cue))) continue;
+    fresh.push(cue);existing.add(key(cue));
+  }
+  // Also bound pathological overlapping long cues. Refuse a snapshot before
+  // mutating the track, so an over-budget publication preserves valid cues.
+  if(retained.length+fresh.length>65536
+    ||retained.concat(fresh).reduce((bytes,c)=>bytes+c.text.length*2,0)>16*1024*1024) return;
+  const keep=new Set(retained);
+  for(const c of previous){if(!keep.has(c)){try{track.removeCue(c);}catch(err){}}}
+  let added=0;
+  for(const cue of fresh){try{track.addCue(cue);added++;}catch(err){}}
+  if(!added&&!retained.length) return;
+  video._subtitleCueOwner={player,index,off,intent};
+  if(player.hls){
+    // Keep rendition I/O alive: it owns warming the next window. An empty
+    // script-track label excludes it from hls.js native-selection polling.
+    try{ if(complete) player.hls.subtitleTrack=-1; else player.hls.subtitleDisplay=false; }catch(err){}
+  }
   track.mode="showing";
   player._subOff=off;
 }
@@ -673,9 +721,9 @@ function startPlaybackControl(v,p,bootstrap){
           &&captured.intentGeneration===(p.controlIntentGeneration||0)){
           handlePreparedReplacementAction(p,response.action);
         }
-        if(captured.intentGeneration===(p.controlIntentGeneration||0)&&response&&response.delivery
-          &&subtitleReadinessRetryTransition(p,response.delivery)){
-          retryReadyNativeSubtitle(p);
+        if(captured.intentGeneration===(p.controlIntentGeneration||0)&&response&&response.delivery){
+          if(subtitleReadinessRetryTransition(p,response.delivery)) retryReadyNativeSubtitle(p,response.delivery);
+          if(subtitleReadinessUnavailableNotice(p,response.delivery)) toast("Couldn't load that subtitle track");
         }
         // A terminal verdict can arrive on any exchange, and the reporter
         // stops on it — correctly, since it owns no recovery. But a stall an

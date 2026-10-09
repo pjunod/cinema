@@ -1385,6 +1385,46 @@ pub(crate) async fn read_cached_vtt_with_store(
     read_cached_vtt(dir, file, index).await
 }
 
+/// Redeem one readiness revision against the current file and track identity.
+/// The revision is opaque to clients and never becomes a caller-selected path.
+/// Cache misses return immediately; this delivery read starts no extraction.
+pub(crate) async fn read_cached_revision(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    revision: &str,
+) -> Result<Option<(Vec<u8>, bool)>, String> {
+    let whole = vtt_name(file.id, index, file.size, file.mtime);
+    if revision == whole {
+        return read_cached_vtt(dir, file, index)
+            .await
+            .map(|bytes| bytes.map(|bytes| (bytes, true)));
+    }
+    let prefix = whole.trim_end_matches(".vtt").to_owned() + "-w";
+    let Some(window) = revision
+        .strip_prefix(&prefix)
+        .and_then(|v| v.strip_suffix(".vtt"))
+    else {
+        return Ok(None);
+    };
+    let Some((anchor, span)) = window.split_once('-') else {
+        return Ok(None);
+    };
+    let (Ok(anchor), Ok(span)) = (anchor.parse::<i64>(), span.parse::<i64>()) else {
+        return Ok(None);
+    };
+    if anchor < 0
+        || span != bounded_window_seconds(span)
+        || anchor != window_anchor_seconds(anchor, span)
+        || revision != vtt_window_name(file.id, index, file.size, file.mtime, anchor, span)
+    {
+        return Ok(None);
+    }
+    read_cached_window(dir, file, index, anchor, span)
+        .await
+        .map(|bytes| bytes.map(|bytes| (bytes, false)))
+}
+
 async fn read_vtt_path(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
     match plurx_core::fs_secure::read_bounded_regular(path, max_bytes).await {
         Ok(bytes) if !bytes.is_empty() => Ok(Some(bytes)),
@@ -3423,6 +3463,62 @@ mod tests {
             whole,
             observe(600).await,
             "a whole track does not retry on every window"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_readiness_revision_delivers_exact_window_without_whole_extraction() {
+        let dir = crate::test_tempdir().expect("revision fixture");
+        let file = media_file(dir.path().join("absent-source.mkv"));
+        let vtt = b"WEBVTT\n\n00:03:21.000 --> 00:03:23.000\nwindow caption\n\n";
+        let window = vtt_window_name(file.id, 0, file.size, file.mtime, 200, 200);
+        tokio::fs::write(vtt_window_path(dir.path(), &file, 0, 200, 200), vtt)
+            .await
+            .expect("window");
+        assert_eq!(
+            read_cached_revision(dir.path(), &file, 0, &window)
+                .await
+                .expect("read"),
+            Some((vtt.to_vec(), false))
+        );
+        let whole = vtt_name(file.id, 0, file.size, file.mtime);
+        assert!(read_cached_revision(dir.path(), &file, 0, &whole)
+            .await
+            .expect("read")
+            .is_none());
+        assert!(
+            !vtt_path(dir.path(), &file, 0).exists(),
+            "delivery never starts whole extraction"
+        );
+        for invalid in [
+            "../outside.vtt".to_owned(),
+            window.replace("-w200-", "-w201-"),
+            window.replace("-w200-", "-w0200-"),
+            vtt_window_name(file.id, 0, file.size, file.mtime, 200, 0),
+        ] {
+            assert!(read_cached_revision(dir.path(), &file, 0, &invalid)
+                .await
+                .expect("read")
+                .is_none());
+        }
+        assert!(read_cached_revision(dir.path(), &file, 1, &window)
+            .await
+            .expect("other track")
+            .is_none());
+        let mut replaced = file.clone();
+        replaced.mtime += 1;
+        assert!(read_cached_revision(dir.path(), &replaced, 0, &window)
+            .await
+            .expect("other source")
+            .is_none());
+        tokio::fs::write(vtt_path(dir.path(), &file, 0), vtt)
+            .await
+            .expect("whole");
+        assert_eq!(
+            read_cached_revision(dir.path(), &file, 0, &whole)
+                .await
+                .expect("whole read"),
+            Some((vtt.to_vec(), true))
         );
     }
 

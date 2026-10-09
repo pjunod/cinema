@@ -131,6 +131,7 @@ async function setSub(index){
   const nativeOrdinal=nativeHlsSubtitleOrdinal(me,index);
   if(me.sessionId&&nativeOrdinal>=0){
     if(me.hls){
+      me.hls.subtitleDisplay=true;
       me.hls.subtitleTrack=nativeOrdinal;
     }else if(v.textTracks&&v.textTracks[nativeOrdinal]){
       v.textTracks[nativeOrdinal].mode="showing";
@@ -158,7 +159,7 @@ async function setSub(index){
   if(PLAYER!==me || me.curSub!==index || (me.offset||0)!==off) return;  // switched away mid-fetch
   // One script track per <video>, reused: a script-created track can't be
   // removed, so re-adding one per seek would pile them up over a session.
-  if(!v._vsubs) v._vsubs=v.addTextTrack("subtitles","Subtitles");
+  if(!v._vsubs) v._vsubs=v.addTextTrack("subtitles","");
   const track=v._vsubs;
   // A disabled track reports `cues` as null, so the old cues would survive the
   // clear and stack up behind the new ones — wake it before emptying it.
