@@ -48,7 +48,7 @@ newer seek, replacement and teardown continue to fence delayed work.
 | `cargo test -p plurxd --bin plurxd --offline subtitle` | 178 passed |
 | Apple playback-control reporter/session XCTest on iPad simulator | 87 passed |
 | Android playback-control, subtitle-policy and acknowledgment JVM tests | 177 passed |
-| `node tests/playback/web-control.test.js` | 39 passed |
+| `node tests/playback/native-hls-startup.test.js` | 39 passed |
 | `scripts/subtitle-readiness-browser-check` with real Chrome/hls.js | zero cues before readiness; visible cue after; same video element and session |
 | `scripts/subtitle-readiness-native-check` with actual macOS AVPlayer | old source fails with zero cues; fixed source refetches and continues through cue 21 without replacing the item |
 | `SubtitleReadinessRenderingTest` on physical Pixel Fold, isolated application | old retry fails 2/5; acknowledged retry passes 10/10 |
@@ -56,7 +56,7 @@ newer seek, replacement and teardown continue to fence delayed work.
 | Physical iPhone 17 Pro Max, isolated AVPlayer probe | empty rendition → first-ready → continuing visible cues; Off hides cues; seek/reselect restores cue 20; same item and no error |
 | Physical Pixel Fold PGS Compose renderer | corrected isolated-test manifest; actual overlay rendering check passes |
 | Permanent subtitle 503, actual engines | AVPlayer stays at zero for 18 seconds; hls.js escalates to fatal `fragLoadError`; Media3 continues. Empty-200 controls continue without media errors |
-| Mac E2 analytic rendering corpus | 96 raw frames each in SDR, HDR10 and HLG; ASS anchor/fade/motion/gap and PGS color/alpha/palette/clear/EOF controls pass; seek/cancellation still being checked |
+| Mac E2 analytic rendering corpus | 96 raw frames each in SDR, HDR10 and HLG; ASS anchor/fade/motion/gap and PGS color/alpha/palette/clear/EOF controls pass; nine active/blank seeks and bounded text/bitmap cancellation pass; [retained receipt](SUBTITLE-MAC-COMPOSITION-EVIDENCE.md) |
 | Actual whisper.cpp 1.9.2 with local tiny.en model | held source/model descriptors and cleared environment produce valid timed WebVTT from synthetic speech on CPU |
 
 Reproduce the native fixture with `python3 scripts/subtitle-readiness-native-check`.
@@ -82,7 +82,7 @@ handoffs against actual titles. AVPlayer testing also showed that answering
 | [Online downloads](../features/SUBTITLE-DOWNLOADS-IMPLEMENTATION.md) | #498 landed as `0e2c3fd47`, implementation `843ed9bb5`; not an unbuilt feature | Provider configuration/quota smoke where configured; durable caption playback on clients |
 | [PGS startup and overlay](PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md) | Two-device startup bar passed September 24; broader corpus still open | Color/geometry/alpha, intervals, active-cue seeks and late data across clients |
 | [Mac E2 subtitle processing](../streaming/MACOS-VIDEO-PROCESSING-STATUS.md) | CPU composition after native processing is integrated; HLG text/bitmap checks exist | Reconcile E2 acceptance; GPU composition is conditional on measured benefit, not a required second renderer |
-| [Offline transcription](../performance/PERF2-PLAN.md#102-subtitles-on-demand--the-whisper-queue) | Implemented in `6fae0a350` and `8df243175`; separate from online downloads | Bounded offline command job, Stop/lease ownership, durable caption provenance, settings and tests |
+| [Offline transcription](../performance/PERF2-PLAN.md#102-subtitles-on-demand--the-whisper-queue) | Implemented in `6fae0a350`, `8df243175` and `718e35a47`; separate from online downloads | Bounded offline command job, Stop/lease ownership, durable caption provenance, settings and tests |
 | [Physical verification](SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | Historical cases remain useful; build numbers and PGS refusal expectations are stale | Record each current case separately; excluded hardware stays untested |
 
 ### Offline transcription implementation boundary
@@ -101,7 +101,10 @@ to 256 KiB. Queue admission allows at most 32 active transcription jobs;
 automatic discovery checks eight files per page. The existing eight-caption
 limit per source revision still applies. No model download or translation
 runs inside the daemon. Matching-language captions suppress automatic work;
-manual generation remains available for a better alternative.
+manual generation remains available for a better alternative. The worker selects
+matching spoken-language audio (default first, then lowest audio ordinal),
+falling back only to untagged audio. Known language mismatches are refused.
+The chosen ordinal is bound into job identity, provenance and publication.
 
 
 ## 4. Current coordination and next gate
@@ -123,11 +126,23 @@ in the independent clone, and it is no longer used. Cleanup remains tracked.
 |---|---|---|
 | Coordinator | Initial root-cause repair, integration, status, Developer UI, final review/gate | Initial repair committed as `46a15c280`; PR is draft |
 | Sol 6.1 · window delivery | Serve already-ready bounded WebVTT to browser recovery without waiting for whole extraction; local/shared parity | integrated as `25cbac3c7` (agent commit `979621d26`); final batched validation pending |
-| Sol 6.1 · offline transcription | Bounded command job, queue/Stop ownership and durable caption provenance | integrated as `6fae0a350` and `8df243175`; normal pinned hooks passed |
-| Sol 6.1 · acceptance | Reconcile PGS/Mac/download/cluster evidence, complete available-hardware cases and repair concrete gaps | unsafe-503 retirement/native notices integrated as `4f6a1d7e2`; physical checks passed; remaining Mac/cluster acceptance in progress |
+| Sol 6.1 · offline transcription | Bounded command job, queue/Stop ownership and durable caption provenance | integrated through `718e35a47`; matching audio ordinal bound to job/publication; normal pinned hooks passed |
+| Sol 6.1 · acceptance | Reconcile PGS/Mac/download/cluster evidence, complete available-hardware cases and repair concrete gaps | unsafe-503 retirement/native notices integrated as `4f6a1d7e2`; physical and bounded Mac composition checks passed; remaining replicated-store/app acceptance prepared |
 
-Next: finish UI fixture snapshots and Mac acceptance, then request the sole
+Next: finish UI fixture snapshots and the future-window browser fixture, then request the sole
 adversarial agent review. Named cluster and new worker regressions run after
 that review alongside the fast lane. The live online provider is unconfigured;
 no successful provider request is claimed.
 No production deployment or completion of the whole backlog is claimed yet.
+
+### Passing-test preservation
+
+Passing named unit tests are retained and must not be run again. The earlier
+39-pass web receipt is the native-HLS startup suite, not the complete control
+suite. Remaining checks exclude those names even when another suite imports
+them. New worker/window/failure-notice tests remain unexecuted until review.
+
+The current main fast lane unconditionally runs `make web-unit-check` in its
+web compile job, which conflicts with this batch's explicit no-repeat
+instruction. The PR remains draft while the validation route is resolved;
+no duplicate full web suite has been launched and no green gate is claimed.
