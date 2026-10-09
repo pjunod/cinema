@@ -32,6 +32,11 @@ const MAX_DURATION_MS: i64 = 4 * 60 * 60 * 1000;
 const MAX_WAV_BYTES: u64 = 4 * 60 * 60 * 16_000 * 2 + 4096;
 const MAX_MODEL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const WALL: Duration = Duration::from_secs(4 * 60 * 60);
+// Keep the container-relative film clock. Hard compensation inserts silence
+// for leading samples/gaps and drops overlaps; it never closes a gap by
+// retiming speech. The WAV byte ceiling includes all inserted silence.
+const PCM_CLOCK_FILTER: &str =
+    "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -221,7 +226,7 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
 }
 fn pipeline_digest(config: &Settings, command: &Path, model: &Model, audio_index: i64) -> String {
     hex::encode(Sha256::digest(format!(
-        "whisper.cpp-v2:audio-language-default-lowest-ordinal-v1:mono16k:threads2:{}:{}:{}:{}",
+        "whisper.cpp-v3:audio-language-default-lowest-ordinal-v1:copyts-start-at-zero:{PCM_CLOCK_FILTER}:decode-xerror-explode-stderr-empty:mono16k:threads2:{}:{}:{}:{}",
         command.display(),
         normalized_language(&config.language),
         model.digest,
@@ -443,7 +448,12 @@ async fn transcribe(
         "-nostdin",
         "-v",
         "error",
+        "-xerror",
+        "-err_detect",
+        "explode",
         "-y",
+        "-copyts",
+        "-start_at_zero",
         "-protocol_whitelist",
         "file,pipe",
         "-threads",
@@ -468,6 +478,8 @@ async fn transcribe(
             "-vn",
             "-sn",
             "-dn",
+            "-af",
+            PCM_CLOCK_FILTER,
             "-threads",
             "2",
             "-ac",
@@ -488,7 +500,10 @@ async fn transcribe(
     )
     .await
     .map_err(|_| StoreError::Task("transcription audio decode failed or interrupted".into()))?;
-    if !output.status.success() {
+    // Under -v error any diagnostic is an error, even if a demuxer/decoder
+    // tolerates partial corruption and exits zero. Never let that partial
+    // waveform become complete captions that suppress later discovery.
+    if !output.status.success() || output.stderr.iter().any(|byte| !byte.is_ascii_whitespace()) {
         return Err(StoreError::Task("transcription audio decode failed".into()));
     }
     let meta = tokio::fs::symlink_metadata(&wav)
@@ -1052,6 +1067,210 @@ mod tests {
                 .count(),
             0,
             "scratch is removed before returning"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transcription_pcm_preserves_nonzero_origin_delayed_audio_and_internal_gap() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("fixture");
+        let (mut file, model, _, whisper) = process_fixture(root.path()).await;
+        let decoder = crate::ffmpeg::ffmpeg_bin();
+        // Video defines container origin 7s. Audio starts at 7.4s, contains
+        // speech at film .4-.6s, a timestamp gap, then speech at 1.0-1.4s.
+        // Keep the discontinuity in packets rather than pre-inserting silence.
+        let mut generate = tokio::process::Command::new(&decoder);
+        generate
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=2:d=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=16000:duration=1",
+                "-filter:a",
+                "aselect=lt(t\\,0.2)+gte(t\\,0.6),asetpts=PTS+0.4/TB",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "ffv1",
+                "-c:a",
+                "pcm_s16le",
+                "-output_ts_offset",
+                "7",
+                "-t",
+                "2",
+            ])
+            .arg(&file.path);
+        let generated = plurx_core::process::bounded::output_command(
+            &mut generate,
+            Duration::from_secs(20),
+            256 * 1024,
+            plurx_core::process::ChildWork::background("transcription clock fixture"),
+        )
+        .await
+        .expect("required FFmpeg must be available for PCM timeline regression");
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let mut probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
+        probe
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=start_time:stream=codec_type,start_time",
+                "-of",
+                "json",
+            ])
+            .arg(&file.path);
+        let probed = plurx_core::process::bounded::output_command(
+            &mut probe,
+            Duration::from_secs(20),
+            256 * 1024,
+            plurx_core::process::ChildWork::background("transcription clock fixture probe"),
+        )
+        .await
+        .expect("required FFprobe must be available");
+        assert!(probed.status.success());
+        let facts: Value = serde_json::from_slice(&probed.stdout).expect("source clock facts");
+        assert_eq!(facts["format"]["start_time"], "7.000000");
+        let audio = facts["streams"]
+            .as_array()
+            .expect("streams")
+            .iter()
+            .find(|stream| stream["codec_type"] == "audio")
+            .expect("selected audio");
+        assert_eq!(
+            audio["start_time"], "7.400000",
+            "audio starts later than container origin"
+        );
+        let metadata = std::fs::metadata(&file.path).expect("generated source");
+        file.size = metadata.len() as i64;
+        file.mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        file.duration_ms = Some(2000);
+        let captured = root.path().join("consumed.wav");
+        std::fs::write(&whisper, format!(
+            "#!/bin/sh\nset -eu\nwhile [ \"$#\" -gt 0 ]; do\n case \"$1\" in\n --file) cp \"$2\" '{}'; shift;;\n --output-file) out=\"$2\"; shift;;\n esac\n shift\ndone\nprintf 'WEBVTT\\n\\n00:00:00.400 --> 00:00:01.400\\nSpeech on film time.\\n' > \"$out.vtt\"\n",
+            captured.display()
+        )).expect("adapter");
+        std::fs::set_permissions(&whisper, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let cancel = CancellationToken::new();
+        let vtt = plurx_core::process::bounded::cancellable(
+            cancel.clone(),
+            transcribe(
+                root.path(),
+                &file,
+                &Settings::default(),
+                &whisper,
+                &model,
+                &cancel,
+                &decoder,
+            ),
+        )
+        .await
+        .expect("transcription");
+        assert!(vtt.contains("00:00:00.400 --> 00:00:01.400"));
+        let bytes = std::fs::read(captured).expect("PCM consumed by adapter");
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        let mut cursor = 12;
+        let samples = loop {
+            let header = bytes.get(cursor..cursor + 8).expect("WAV chunk header");
+            let size = u32::from_le_bytes(header[4..8].try_into().expect("chunk size")) as usize;
+            let payload = bytes.get(cursor + 8..cursor + 8 + size).expect("WAV chunk");
+            if &header[..4] == b"data" {
+                break payload
+                    .chunks_exact(2)
+                    .map(|sample| i16::from_le_bytes(sample.try_into().expect("PCM sample")))
+                    .collect::<Vec<_>>();
+            }
+            cursor += 8 + size + (size & 1);
+        };
+        let peak = |start: usize, end: usize| {
+            samples[start..end]
+                .iter()
+                .map(|sample| i32::from(*sample).abs())
+                .max()
+                .expect("sample interval")
+        };
+        assert_eq!(samples.len(), 22_400, "PCM spans film zero through 1.4s");
+        assert_eq!(
+            peak(0, 5600),
+            0,
+            "leading silence preserves selected-audio delay"
+        );
+        assert!(
+            peak(7040, 8800) > 3000,
+            "first speech retains film .44-.55s"
+        );
+        assert_eq!(peak(11200, 15200), 0, "internal packet gap remains silence");
+        assert!(
+            peak(17600, 20800) > 3000,
+            "later speech remains at film 1.1-1.3s"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transcription_zero_exit_decode_error_refuses_inference_and_publication() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("fixture");
+        let (file, model, decoder, whisper) = process_fixture(root.path()).await;
+        std::fs::write(&decoder,
+            "#!/bin/sh\nset -eu\nfor last do :; done\nhead -c 128 /dev/zero > \"$last\"\nprintf 'Error while decoding stream: corrupt audio packet\\n' >&2\nexit 0\n"
+        ).expect("partial decoder");
+        let invoked = root.path().join("inference-started");
+        std::fs::write(
+            &whisper,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", invoked.display()),
+        )
+        .expect("adapter");
+        std::fs::set_permissions(&whisper, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let cancel = CancellationToken::new();
+        let error = plurx_core::process::bounded::cancellable(
+            cancel.clone(),
+            transcribe(
+                root.path(),
+                &file,
+                &Settings::default(),
+                &whisper,
+                &model,
+                &cancel,
+                decoder.to_str().expect("decoder"),
+            ),
+        )
+        .await
+        .expect_err("exit zero cannot authorize partial captions");
+        assert!(error.to_string().contains("audio decode failed"));
+        assert!(
+            !invoked.exists(),
+            "inference must never receive partial decoded audio"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path().join("subtitle-transcription"))
+                .expect("scratch root")
+                .count(),
+            0,
+            "scratch retires on refused decode"
         );
     }
 
