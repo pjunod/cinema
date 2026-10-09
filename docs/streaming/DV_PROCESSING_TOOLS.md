@@ -99,7 +99,12 @@ picture must match exactly one coded picture and its fresh RPU. The helper
 exports original timestamps and coded access-unit/RPU hashes. Full decoded
 BL/EL and RGB hashes are optional diagnostics: set `PLURX_DV_FRAME_HASHES=1`
 (or the existing 64×64 debug mode) to emit them. They do not provide an
-independent post-encode playback check, so production skips their pixel scans. A later paired PTS at or beyond `END` proves the requested boundary.
+independent post-encode playback check, so production skips their pixel scans.
+A later paired PTS at or beyond `END` proves the requested boundary. Its RPU
+belongs to a later window and is not interpreted for this one. Unsupported
+metadata there therefore refuses the later window, while the completed earlier
+window remains usable. Preroll and every emitted picture still require valid
+metadata and matching layer timestamps.
 Natural EOF requires the final observed picture to reach `END` and agree in both
 directions with the declared video extent within one source tick. Unknown or
 inconsistent extent refuses. These observations establish source membership;
@@ -205,6 +210,11 @@ unchanged encoded base and unchanged DV-disabled decoded pixels:
 sh tools/dv_processing/controls/replay.sh \
   /absolute/new-scratch /absolute/accepted-dependencies /absolute/pinned-dovi-source
 ```
+
+The same replay runs `run_window_boundary.py`: 48 valid pictures followed by
+18 pictures with an invalid active-area RPU. Both FEL and base-only processing
+must emit and decode all 48 pictures in `[0, 2)` and refuse `[2, 2.75)`. The
+boundary picture remains subject to paired timestamp and duration checks.
 
 The dependency root contains `ffmpeg-prefix`, `prefix`, `include` and `lib` as
 above. This focused ARM64 control recipe uses the retained image
