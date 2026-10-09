@@ -1,0 +1,346 @@
+{
+  "startup_cells": 24,
+  "result": "all startup cells passed; HLS setup rejected before serving measurements",
+  "cold_collection_counts": {},
+  "groups": [
+    {
+      "condition": "cold",
+      "variant": "current",
+      "n": 4,
+      "create_ms": {
+        "values": [
+          377.39345900001354,
+          354.21187500000815,
+          353.3617089999898,
+          364.8968750000058
+        ],
+        "median": 359.554375000007,
+        "min": 353.3617089999898,
+        "max": 377.39345900001354
+      },
+      "create_to_first_decoded_frame_ms": {
+        "values": [
+          531.0749170000199,
+          638.5007500000065,
+          525.3257919999887,
+          538.0383330000041
+        ],
+        "median": 534.556625000012,
+        "min": 525.3257919999887,
+        "max": 638.5007500000065
+      },
+      "collection_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "daemon_cpu_elapsed_ms": [
+        360.0,
+        350.0,
+        340.0,
+        350.0
+      ],
+      "tree_endpoint_rss_growth_bytes": [
+        107495424,
+        86130688,
+        83591168,
+        84574208
+      ],
+      "tree_endpoint_rss_bytes": [
+        204177408,
+        211271680,
+        211599360,
+        212926464
+      ]
+    },
+    {
+      "condition": "cold",
+      "variant": "control",
+      "n": 4,
+      "create_ms": {
+        "values": [
+          493.3447500000184,
+          469.32958299998427,
+          488.0410419999971,
+          493.17041700001573
+        ],
+        "median": 490.6057295000064,
+        "min": 469.32958299998427,
+        "max": 493.3447500000184
+      },
+      "create_to_first_decoded_frame_ms": {
+        "values": [
+          645.4978330000013,
+          642.0343329999887,
+          704.5349580000038,
+          671.53575000001
+        ],
+        "median": 658.5167915000056,
+        "min": 642.0343329999887,
+        "max": 704.5349580000038
+      },
+      "collection_counts": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "daemon_cpu_elapsed_ms": [
+        490.0,
+        460.0,
+        480.0,
+        480.0
+      ],
+      "tree_endpoint_rss_growth_bytes": [
+        94535680,
+        83886080,
+        83640320,
+        83935232
+      ],
+      "tree_endpoint_rss_bytes": [
+        701235200,
+        704299008,
+        704643072,
+        683671552
+      ]
+    },
+    {
+      "condition": "warm",
+      "variant": "current",
+      "n": 4,
+      "create_ms": {
+        "values": [
+          352.6928750000079,
+          353.77654099999927,
+          375.2734170000185,
+          373.6110420000041
+        ],
+        "median": 363.6937915000017,
+        "min": 352.6928750000079,
+        "max": 375.2734170000185
+      },
+      "create_to_first_decoded_frame_ms": {
+        "values": [
+          384.9182079999882,
+          385.6702079999959,
+          426.84375,
+          411.7892089999805
+        ],
+        "median": 398.7297084999882,
+        "min": 384.9182079999882,
+        "max": 426.84375
+      },
+      "collection_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "daemon_cpu_elapsed_ms": [
+        330.0,
+        340.0,
+        340.0,
+        340.0
+      ],
+      "tree_endpoint_rss_growth_bytes": [
+        58982400,
+        58851328,
+        58392576,
+        58753024
+      ],
+      "tree_endpoint_rss_bytes": [
+        182976512,
+        186515456,
+        186515456,
+        187809792
+      ]
+    },
+    {
+      "condition": "warm",
+      "variant": "control",
+      "n": 4,
+      "create_ms": {
+        "values": [
+          367.10150000001886,
+          379.67533300002106,
+          386.91083400000934,
+          360.77504199999385
+        ],
+        "median": 373.38841650001996,
+        "min": 360.77504199999385,
+        "max": 386.91083400000934
+      },
+      "create_to_first_decoded_frame_ms": {
+        "values": [
+          400.1932500000112,
+          411.74079100001836,
+          422.6167499999865,
+          392.02224999998
+        ],
+        "median": 405.96702050001477,
+        "min": 392.02224999998,
+        "max": 422.6167499999865
+      },
+      "collection_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "daemon_cpu_elapsed_ms": [
+        360.0,
+        360.0,
+        360.0,
+        350.0
+      ],
+      "tree_endpoint_rss_growth_bytes": [
+        58703872,
+        58261504,
+        58703872,
+        58408960
+      ],
+      "tree_endpoint_rss_bytes": [
+        678608896,
+        678756352,
+        679837696,
+        658259968
+      ]
+    },
+    {
+      "condition": "resume",
+      "variant": "current",
+      "n": 4,
+      "create_ms": {
+        "values": [
+          367.4997910000093,
+          354.2577920000185,
+          354.33995799999684,
+          358.7179999999935
+        ],
+        "median": 356.52897899999516,
+        "min": 354.2577920000185,
+        "max": 367.4997910000093
+      },
+      "create_to_first_decoded_frame_ms": {
+        "values": [
+          401.01866600001813,
+          386.5223340000084,
+          388.8394580000022,
+          392.7043330000015
+        ],
+        "median": 390.77189550000185,
+        "min": 386.5223340000084,
+        "max": 401.01866600001813
+      },
+      "collection_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "daemon_cpu_elapsed_ms": [
+        350.0,
+        330.0,
+        340.0,
+        360.0
+      ],
+      "tree_endpoint_rss_growth_bytes": [
+        58769408,
+        58392576,
+        58458112,
+        59392000
+      ],
+      "tree_endpoint_rss_bytes": [
+        183484416,
+        186269696,
+        186662912,
+        188530688
+      ]
+    },
+    {
+      "condition": "resume",
+      "variant": "control",
+      "n": 4,
+      "create_ms": {
+        "values": [
+          362.08762499998556,
+          373.61108299999614,
+          371.2224170000118,
+          363.11779099999694
+        ],
+        "median": 367.17010400000436,
+        "min": 362.08762499998556,
+        "max": 373.61108299999614
+      },
+      "create_to_first_decoded_frame_ms": {
+        "values": [
+          394.107915999979,
+          413.6244580000057,
+          405.4437920000055,
+          394.73858299999847
+        ],
+        "median": 400.091187500002,
+        "min": 394.107915999979,
+        "max": 413.6244580000057
+      },
+      "collection_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "daemon_cpu_elapsed_ms": [
+        350.0,
+        360.0,
+        350.0,
+        350.0
+      ],
+      "tree_endpoint_rss_growth_bytes": [
+        58425344,
+        58572800,
+        58327040,
+        58359808
+      ],
+      "tree_endpoint_rss_bytes": [
+        678690816,
+        679133184,
+        657997824,
+        658276352
+      ]
+    }
+  ],
+  "limits": [
+    "Shared host has unrelated workloads; paired observations are not idle capacity or statistically significant fleet estimates.",
+    "Isolated generated AVC/AAC, software x264, loopback and OS-cache-uncontrolled source.",
+    "Startup endpoint is first decoded video frame in common FFmpeg controller, not native UI/display.",
+    "Resource samples measure daemon process-tree endpoints/interval sample maximum, not allocator high water or retired-child CPU."
+  ],
+  "first_frame_scope": "create through successful one-frame FFmpeg null-output process completion; combined control and not a physical presentation clock",
+  "paired_api_delta_current_minus_control_ms": {
+    "cold": [
+      -115.95129100000486,
+      -115.11770799997612,
+      -134.67933300000732,
+      -128.2735420000099
+    ],
+    "warm": [
+      -14.408625000010943,
+      -25.898792000021785,
+      -11.637416999990819,
+      12.836000000010245
+    ],
+    "resume": [
+      5.412166000023717,
+      -19.353290999977617,
+      -16.882459000014933,
+      -4.399791000003461
+    ]
+  },
+  "resource_interpretation": [
+    "Both daemons quiesced after caption capability initialization before measurement; process census retains unrelated shared-host work.",
+    "Daemon CPU is cumulative process CPU difference, excluding retired children; endpoint tree RSS is not peak memory.",
+    "Control daemon retained a much larger initial RSS footprint after startup (about 579 MiB vs 92 MiB); absolute daemon RSS differences cannot be attributed to source-probe coalescing.",
+    "Counters establish one fewer cold parser collection; per-cell resource observations are bounded evidence, not a statistical memory-equivalence or fleet-capacity claim."
+  ]
+}

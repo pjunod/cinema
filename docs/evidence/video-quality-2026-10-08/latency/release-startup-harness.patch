@@ -1,0 +1,48 @@
+--- a/docs/evidence/video-quality-2026-10-08/latency/video-server-latency.cjs
++++ b/docs/evidence/video-quality-2026-10-08/latency/video-server-latency.cjs
+@@ -47,7 +47,6 @@
+   started_at: new Date().toISOString(),
+   kind: opt.case || "probe",
+   control_design: opt["control-design"] || "see artifact identity",
+-  hls_source: opt["hls-source"] || "encoded",
+   source: cp
+     .execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" })
+     .trim(),
+@@ -165,15 +164,15 @@
+   };
+   return dir;
+ }
+-async function create(s, file, start, sourceCopy = false) {
++async function create(s, file, start) {
+   const body = {
+     playback_id: crypto.randomUUID(),
+     request_id: crypto.randomUUID(),
+-    height: sourceCopy ? 540 : 360,
++    height: 360,
+     quality_auto: false,
+     start,
+-    copy: sourceCopy,
+-    aac: !sourceCopy,
++    copy: false,
++    aac: true,
+     presentation: "vod",
+     transport: "hlsjs",
+     block_budget_secs: 30,
+@@ -184,7 +183,7 @@
+     body,
+     timeout: 90000,
+   });
+-  if (!session.vod || !(sourceCopy ? /^(vod|copy)$/i : /software|x264/i).test(session.encoder))
++  if (!session.vod || !/software|x264/i.test(session.encoder))
+     throw Error("wrong delivered session " + JSON.stringify(session));
+   return session;
+ }
+@@ -331,7 +330,7 @@
+   }
+ }
+ async function warmObject(s, file, name) {
+-  const session = await create(s, file, 0, opt["hls-source"] === "copy");
++  const session = await create(s, file, 0);
+   let url = authUrl(s, session.playlist_url);
+   const playlists = [];
+   for (let depth = 0; depth < 4; depth++) {
