@@ -106,11 +106,11 @@ const SETTINGS_MANIFEST={
   metadata:{required:["settings"],secondary:["libs","developerReadiness"]},
   playback:{required:["settings"],secondary:["developerReadiness"]},
   livetv:{required:["settings"],secondary:["developerReadiness"]},
-  analysis:{required:["settings","analysis"],secondary:[]},
+  analysis:{required:["settings","analysis"],secondary:["developerReadiness"]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
   users:{required:["settings","users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
-  cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness"]},
+  cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
   sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},
   developer:{required:["settings"],secondary:["developerReadiness"]},
@@ -197,6 +197,12 @@ function patchSettingsSecondary(tab,key,value){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
+  if(tab==="cluster"&&key==="settings"){
+    // The settings cards under the board need the saved settings; the health
+    // board does not, so it never waits for them. Fill only their mount.
+    const mount=document.getElementById("cluster-settings");
+    if(mount) mount.outerHTML=clusterSettingsSection(SETTINGS_DATA);
+  }
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     // Patch only the evidence rows. Re-rendering the entire panel here could
     // overwrite an unsaved setting while diagnostics are still loading.
@@ -227,6 +233,10 @@ function patchSettingsSecondaryError(tab,key,error){
   }
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
+  }
+  if(tab==="cluster"&&key==="settings"){
+    const mount=document.getElementById("cluster-settings");
+    if(mount) mount.innerHTML=`<div class="hint">Cluster settings are unavailable: ${message}</div>`;
   }
   if(tab==="cluster"&&key==="clusterOps"){
     const mount=document.getElementById("cluster-operations");

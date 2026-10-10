@@ -1517,7 +1517,7 @@ async function main() {
   });
 
   await test("both readiness views render every row the server sends, and gate nothing", () => {
-    // The Developer enable sections are advisory by construction: they map the
+    // The Live TV readiness sections are advisory by construction: they map the
     // server's `checks` array, whatever is in it. A row the daemon adds later
     // appears without a web change, and no row can disable a control.
     const guideView = new Function("esc", `${shipped("liveTvGuideReadyView")} return liveTvGuideReadyView;`)(
@@ -1708,25 +1708,44 @@ async function main() {
       live_tv_output_height: 720, live_tv_max_output_height: 720 }]);
   });
 
-  await test("Developer enable saves even when readiness is unmet or unavailable", async () => {
+  await test("the Live TV on/off switch saves through the Live TV writer, whatever readiness says", async () => {
+    // Graduated from Developer to Settings → Live TV (2026-10-10). The switch
+    // goes through the same fenced writer as the tuner card, and nothing on
+    // the readiness mount reaches the request.
     for (const readiness of ["Not met", "Readiness unavailable"]) {
-      const writes = [], saved = { live_tv_enabled: true, live_tv_config_generation: 9 };
-      const nodes = { "dev-live-tv-enable": { checked: true },
-        "dev-live-tv-readiness": { textContent: readiness },
-        "dev-live-tv-error": { textContent: "", isConnected: true } };
-      let cached;
-      const save = new Function("SETTINGS", "document", "api", "cacheSettings", "toast", "setCardSaved", "AbortSignal",
+      const writes = [], replaced = [], saved = { live_tv_enabled: true, live_tv_config_generation: 9 };
+      const nodes = { "lt-enable": { checked: true }, "lt-enable-readiness": { textContent: readiness } };
+      const save = new Function("SETTINGS", "document", "liveTvSettingsWrite", "replaceLiveTvCard", "liveTvEnableCard",
         `${shipped("saveLiveTvEnable")} return saveLiveTvEnable;`)(
         { live_tv_config_generation: 8 }, { getElementById: id => nodes[id] },
-        async (route, request) => { writes.push([route, request.method, request.body]); return saved; },
-        value => { cached = value; }, () => {}, button => { button.disabled = false; }, AbortSignal);
-      const button = { disabled: false, isConnected: true };
-      await save(button);
-      assert.deepEqual(writes, [["/settings", "PUT", { live_tv_config_generation: 8, live_tv_enabled: true }]]);
-      assert.equal(cached, saved);
-      assert.equal(nodes["dev-live-tv-error"].textContent, "");
-      assert.equal(button.disabled, false);
+        async (body, button, errorId) => { writes.push([body, errorId]); return saved; },
+        (...args) => { replaced.push(args); }, value => `card:${value.live_tv_enabled}`);
+      assert.equal(await save({}), true);
+      assert.deepEqual(writes, [[{ live_tv_config_generation: 8, live_tv_enabled: true }, "lt-enable-error"]]);
+      assert.deepEqual(replaced, [["live-tv-enable", "card:true", "lt-enable"]]);
     }
+  });
+
+  await test("a refused Live TV switch save leaves the card as the operator left it", async () => {
+    const replaced = [];
+    const save = new Function("SETTINGS", "document", "liveTvSettingsWrite", "replaceLiveTvCard", "liveTvEnableCard",
+      `${shipped("saveLiveTvEnable")} return saveLiveTvEnable;`)(
+      { live_tv_config_generation: 8 }, { getElementById: () => ({ checked: false }) },
+      async () => false, (...args) => { replaced.push(args); }, () => "card");
+    assert.equal(await save({}), false);
+    assert.deepEqual(replaced, []);
+  });
+
+  await test("Settings → Live TV opens with the on/off switch and owns the deinterlace cadence", () => {
+    const panel = shipped("liveTvPanel");
+    const order = ["liveTvEnableCard(", "liveTvSettingsCard(", "liveTvDeinterlaceCard(", "liveTvGuideCard(", "dvrCard(", "libraryChannelsSettingsCard("]
+      .map(call => panel.indexOf(call));
+    assert.ok(order.every(index => index > 0), `every Live TV card is drawn: ${order}`);
+    assert.deepEqual([...order].sort((a, b) => a - b), order, "in the order the section reads");
+    for (const name of ["liveTvEnableCard", "liveTvDeinterlaceCard"]) {
+      assert.doesNotMatch(shipped(name), /devGraduation/, `${name} is a finished setting, not a Developer card`);
+    }
+    assert.doesNotMatch(shipped("liveTvSettingsCard"), /settings\/developer/, "the tuner card no longer sends the operator to Developer");
   });
 
   // ---- the shared guide cases, reproduced by the web renderer -------------

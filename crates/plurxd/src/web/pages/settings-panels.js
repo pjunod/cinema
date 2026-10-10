@@ -20,7 +20,7 @@ function settingsRouteTab(h){
   return m&&SET_TABS.some(x=>x[0]===m[1])?m[1]:null;
 }
 // A section route may name one element after it —
-// #/settings/developer/enable-subtitle-sources — so a link from another page
+// #/settings/maintenance/subsrccard — so a link from another page
 // lands on the card it means rather than the top of a long section.
 function settingsRouteAnchor(h){
   const m=/^#\/settings\/[a-z]+\/([a-z0-9-]+)$/.exec(h||"");
@@ -75,7 +75,7 @@ function settingsPanel(tab,d){
   if(tab==="metadata")     return metadataPanel(d.settings,d.developerReadiness);
   if(tab==="playback")     return playbackPanel(d.settings,d.developerReadiness);
   if(tab==="livetv")       return liveTvPanel(d.settings,d.developerReadiness);
-  if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
+  if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
   if(tab==="users")        return usersPanel(d.users,d.settings);
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
@@ -159,7 +159,7 @@ function maintenancePanel(settings,dv,readiness){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${subtitleStoredSourcesCard(settings,readiness)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
@@ -182,10 +182,10 @@ function precachePanel(settings){
 // and what its producer — the fragment-index pass keeping each PGS track it
 // reads — is doing now. Background work on real disks says here what it is,
 // why it chose the work, what it costs, whether it can run, and where to turn
-// it off. Read-only: the switch lives on Developer beside its readiness rows,
+// it off. Read-only: the switch is the next card, beside its readiness rows,
 // and the link lands on it.
 function subtitleStorePanel(settings){
-  const SUBSRC_SWITCH_LINK=`<a href="#/settings/developer/enable-subtitle-sources">Developer → Stored subtitle tracks</a>`;
+  const SUBSRC_SWITCH_LINK=`<a href="#/settings/maintenance/subsrccard">Keep and read stored PGS tracks</a>`;
   const d=settings.subtitle_store||{};
   const on=settings.subtitle_stored_sources!==false;
   const gate=d.gate||{open:true};
@@ -570,7 +570,7 @@ function presetOpts(pairs, cur, label){
   if(cur!=="" && !opts.some(([v])=>v===cur)) opts.unshift([cur, label?label(cur):cur]);
   return opts.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`).join("");
 }
-function analysisSettingsPanel(settings,snapshot){
+function analysisSettingsPanel(settings,snapshot,readiness){
   const card=setCard(`${cardHead("Index analysis","Foreground playback always wins: analysis only runs while the media worker is idle.")}
       ${togRow("an-enabled","Durable analysis queue and shared index cache","Manual Analyze and Retry actions use the queue; background analysis discovers eligible files on the cadence below. Pausing either keeps completed indexes; titles without one use Live HLS when live recovery is on in Playback.",settings.vod_index_cluster_cache)}
       <div class="setfields">
@@ -586,7 +586,7 @@ function analysisSettingsPanel(settings,snapshot){
       <div class="err" id="an-error"></div>
       ${setCardFoot("saveAnalysisSettings")}`);
   return `${setHead("Analysis","Content analysis verifies each source and builds the fragment index VOD HLS plays from.",`<a class="ghost sm" href="#/analysis" style="text-decoration:none">Open analysis workspace</a>`)}<div id="analysis-settings-summary">${analysisSummaryCard(snapshot||{enabled:false},"settings")}</div>
-    ${card}
+    ${card}${subtitleBackfillCard(settings,readiness)}
     <div class="card"><h2 class="section" style="margin-top:0">How a file becomes VOD HLS ready</h2>
       <div class="analysis-diag-grid"><b>1 · Verify</b><span>Read and hash the exact source without blocking playback.</span><b>2 · Index</b><span>Build a complete fragment timeline on an eligible media worker.</span><b>3 · Publish</b><span>Store the content-addressed artifact and mark the file VOD HLS ready.</span></div>
     </div>`;
@@ -634,8 +634,9 @@ function playbackPanel(settings,readiness){
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
   // Chapter thumbnails and both decoder controls graduated from Developer on
-  // 2026-09-28 (Paul's Developer lifecycle); each keeps its own Save.
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}${chapterThumbnailsCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
+  // 2026-09-28; quality switching, this browser's second player and the PGS
+  // overlay on 2026-10-10 (Paul's Developer lifecycle). Each keeps its own Save.
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
 }
 
 function searchSettingsCard(readiness){
@@ -661,4 +662,67 @@ function windowsServerCard(settings,readiness){
       <p class="devcheck-note">Advisory only. Unmet hardware rows mean software fallback, not a hidden gate.</p>
       </div></details>
       <div class="err" id="winerr" role="alert"></div>${setCardFoot("saveWindowsCompatibility")}`);
+}
+
+// Stored PGS tracks (Maintenance) and subtitle backfill (Analysis) graduated
+// from Developer on 2026-10-10.
+// Stored PGS tracks.
+//
+// Both halves of the subtitle-source store, behind one switch: the
+// fragment-index pass keeps every PGS track it reads, and the overlay and the
+// burn path read a kept track instead of demuxing the whole source again. On
+// by default. Off stops the pass keeping tracks and makes both paths ignore
+// what is stored, which is how a wrong stored artifact is taken out of service
+// without a redeploy. The startup self-test and cache probes are advisory
+// readings for the operator; they never override the saved switch.
+function subtitleStoredSourcesCard(s,readiness){
+  const enabled=s.subtitle_stored_sources!==false;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Keep and read stored PGS tracks","Keep each PGS track while a file is indexed, and serve the PGS overlay and burned PGS subtitles from it instead of reading the whole source again.",state)}
+      ${togRow("subsrc",`Use stored PGS tracks`,`Applies immediately to the next index pass, new overlay preparations and burned sessions. This checkbox is authoritative: nothing below turns it on or off.`,enabled)}
+      <div class="hint">On by default. Off stops the index pass keeping tracks and makes both consumers ignore the store and read the source as they always have.</div>
+      <details class="setdetails"><summary>What it needs</summary><div class="setdetails-body">
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_producer","Something fills the store","The fragment-index pass keeps each PGS track as it reads the file, with the tracks attempted and their verdicts since this process started.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_self_test","The startup self-test passed","At startup the configured ffmpeg runs the index argv with the tee over a tiny synthetic file with one corrupted track. Review its result before relying on stored tracks.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_local_cache","The cache is on a local filesystem","A stage on NFS, SMB or FUSE could stall the demuxer shared with the index pass.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_free_space","The cache has room for the stage","Keep at least 1 GiB or 2% free, whichever is larger; stages share the index cache disk.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_lookups","Lookups answered from the store","How many overlay and burn lookups this process served from a stored track, answered as having no cues, or passed through to extraction.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
+      </div></details>
+      <div class="err" id="subsrcerr" role="alert"></div>
+      ${setCardFoot("saveSubtitleStoredSources")}`,{id:"subsrccard"});
+}
+async function saveSubtitleStoredSources(btn){
+  const err=document.getElementById("subsrcerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{
+      subtitle_stored_sources:(/** @type {HTMLInputElement} */ (document.getElementById("subsrc"))).checked}});
+    cacheSettings(saved);
+    toast("Stored subtitle track setting saved"); if(btn) setCardSaved(btn);
+    const card=document.getElementById("subsrccard");
+    if(card) card.outerHTML=subtitleStoredSourcesCard(saved,DEVELOPER_READINESS);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+function subtitleBackfillCard(s,readiness){
+  const enabled=!!s.subtitle_backfill;
+  return setCard(`${cardHead("Backfill subtitle tracks","Use otherwise idle analysis capacity to prepare uncovered subtitle tracks.",`<span class="pill${enabled?" ok":""}">${enabled?"enabled":"off"}</span>`)}
+      ${togRow("subbackfill",`Backfill uncovered tracks`,`Enqueues at most eight files per discovery pass while workers are idle.`,enabled)}
+      <details class="setdetails"><summary>Current work and readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"subtitle_backfill","backfill_lease","Exclusive backfill lease","One node holds the cluster lease during each pass; no holder between passes is normal.")}
+      ${devReq(readiness,"subtitle_backfill","backfill_enqueued","Files enqueued here","Count of files this process has added to the analysis queue since startup.")}
+      ${devReq(readiness,"subtitle_backfill","backfill_remaining","Eligible files remaining","Files with an uncovered eligible subtitle ordinal, excluding active and cooling requests.")}
+      ${devReq(readiness,"subtitle_backfill","backfill_bytes","Estimated source bytes","Source sizes for those eligible files; actual output is much smaller.")}
+      <p class="devcheck-note">Advisory only. The switch remains available regardless of the reported status.</p>
+      </div></details><div class="err" id="subbackfillerr" role="alert"></div>${setCardFoot("saveSubtitleBackfill")}`,{id:"subbackfillcard"});
+}
+async function saveSubtitleBackfill(btn){
+  const err=document.getElementById("subbackfillerr");err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{subtitle_backfill:(/** @type {HTMLInputElement} */ (document.getElementById("subbackfill"))).checked}}));
+    const card=document.getElementById("subbackfillcard");if(card)card.outerHTML=subtitleBackfillCard(saved,DEVELOPER_READINESS);
+    toast("Subtitle backfill setting saved");if(btn)setCardSaved(btn);
+  }catch(error){err.textContent=error.message;if(btn)btn.disabled=false;}
 }

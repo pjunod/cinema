@@ -6505,7 +6505,7 @@ fn validate_start_config(
     config.validate_static()?;
     if !config.enabled {
         return Err(LiveTvError::Disabled(
-            "Live TV is disabled in Settings → Developer".into(),
+            "Live TV is disabled in Settings → Live TV".into(),
         ));
     }
     // The configuration is this node's own read (`from_snapshot` names the
