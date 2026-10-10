@@ -26,7 +26,7 @@ Sol 6.1 sessions provide renderer, CPU/authoring and offline measurement work,
 with independent adversarial review. Settings and generation-bound client
 presentation are implemented; normal serving integration and the installed Linux
 helper bundle have bounded local serving evidence in §22. Current-head qualification
-and promotion receipts are recorded on [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968). The [M1 contract](DV_HDR_M1_CONTRACTS.md)
+and promotion receipts are recorded on [PR #968](http://forge.lan:3000/noirr/plurx/pulls/968). The [M1 contract](DV_HDR_M1_CONTRACTS.md)
 initially introduced only additive core types, validation and pure/test-only
 selection; code review approved that bounded Rust diff. On its effort base `03fa9d2`,
 25 focused tests, six compatibility regressions, core all-target checking and
@@ -49,7 +49,7 @@ DV-off validation. Current playback keeps its compatible fallback.
 | M3 routing and cache identity | Built: #964 and follow-ups cover first-window/generation paths, ownership and publication; §22 records actual reports, nonzero windows, seek, AAC and fresh compatible reopen | Exact late-metadata refusal diagnostic remains unproven; physical playback and hardware capacity remain open |
 | M4 settings and HDR10-E badge | Built: settings #937, presentation #941 and accepted-control adoption/clearing #955; §22 verifies actual served-generation reports and compatible fallback. #960 keeps readiness advisory | Physical client/display acceptance; both preferences remain default-off while broader acceptance is open |
 | M5 quality and performance | Matched 24-picture software-decode/NVENC comparison recorded in §16; sustained throughput unresolved | Held-out corpus, matched bitrate, physical playback and full graph performance; current 4K helper is slower than realtime |
-| M6 release qualification | Portable Linux bundle #963 and follow-ups passed ARM64/AMD64 loader/manifest checks; §22 records bounded serving evidence | Exact-head unit, gate and promotion results are retained on [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968); those receipts, not this source ledger, determine qualification |
+| M6 release qualification | Portable Linux bundle #963 and follow-ups passed ARM64/AMD64 loader/manifest checks; §22 records bounded serving evidence | Exact-head unit, gate and promotion results are retained on [PR #968](http://forge.lan:3000/noirr/plurx/pulls/968); those receipts, not this source ledger, determine qualification |
 
 ## 3. Run the bounded offline comparison
 
@@ -831,7 +831,7 @@ with the broader reference, hardware and metadata limits still visible.
 
 ## 23. Qualification evidence stays bound to its source
 
-Promotion [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968) retains the
+Promotion [PR #968](http://forge.lan:3000/noirr/plurx/pulls/968) retains the
 actual full-unit outcomes, source identities and gate receipts. The first
 Android JVM run passed 1,092 tests with no failures or skips; its combined
 command then failed lint on a pre-existing restricted Activity key API. The
