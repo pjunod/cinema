@@ -63,12 +63,16 @@ struct ObserverInner {
     test: TestObservationControl,
 }
 
-/// Instance-owned scheduling only: no clock, directory, sample or publication
-/// is supplied by this seam. Production builds contain none of these fields.
+/// Instance-owned scheduling, plus one fixed skew on the two stamps this
+/// node writes when it ANSWERS a probe, so one process can present a stepped
+/// peer. No directory, sample or publication is supplied by this seam, and
+/// the node's own probes and decisions keep the real clock. Production
+/// builds contain none of these fields.
 #[cfg(all(test, feature = "cluster-integration-tests"))]
 #[derive(Default)]
 struct TestObservationControl {
     hold_periodic: std::sync::atomic::AtomicBool,
+    response_skew_ms: std::sync::atomic::AtomicI64,
     periodic: tokio::sync::Notify,
     before_round: Mutex<Option<Arc<TestObservationGate>>>,
     before_final_query: Mutex<Option<Arc<TestObservationGate>>>,
@@ -204,6 +208,22 @@ impl ClockObserver {
     }
 
     #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_skew_responses_ms(&self, skew_ms: i64) {
+        self.0
+            .test
+            .response_skew_ms
+            .store(skew_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_response_skew_ms(&self) -> i64 {
+        self.0
+            .test
+            .response_skew_ms
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
     pub(crate) fn test_demand_round(&self) {
         self.request_round().expect("live test owner");
     }
@@ -325,10 +345,14 @@ impl ClockObserver {
             || current.clock_generation != round.ticket.clock_generation
             || current.state_generation != round.ticket.state_generation
             || self.0.membership.clock_leadership_identity().as_ref() != Some(&barrier.leadership)
-            || guard.acquire().is_err()
         {
             return None;
         }
+        // Deliberately not `guard.acquire()`: answering a learner's probe is
+        // timing evidence, not an authority grant, and the leader's own
+        // acquisition state says nothing about its timestamps. Refusing here
+        // made a skewed learner see the leader as Unknown instead of
+        // measuring its own offset. Promotion is admitted separately.
         Some(round)
     }
 
@@ -539,7 +563,12 @@ impl Filter {
             } else if candidate.round_trip_us.max(CLOCK_RTT_QUANTIZATION_FLOOR_US)
                 > selected.round_trip_us.max(CLOCK_RTT_QUANTIZATION_FLOOR_US) * 4
             {
-                return PeerClockOffset::Unknown;
+                // A slow exchange's four timestamps still bound the true
+                // offset; queueing widens the interval, it does not falsify
+                // it. Publish the candidate's own wider interval for this
+                // round, but keep it out of the minimum-delay window so the
+                // older selected sample is never republished as authority.
+                return candidate.observation();
             }
         }
         self.0.push_back(candidate);
@@ -882,15 +911,51 @@ mod tests {
         let now = Instant::now();
         let mut filter = Filter::default();
         filter.observe(Sample::exchange(1000, 1000, 1000, 1000, now), now);
-        assert_eq!(
+        assert!(matches!(
             filter.observe(Sample::exchange(2000, 2000, 2000, 2010, now), now),
-            PeerClockOffset::Unknown
-        );
+            PeerClockOffset::Bounded { .. }
+        ));
+        assert_eq!(filter.0.len(), 1, "a slow sample never enters the window");
         let later = now + Duration::from_secs(26);
         assert!(matches!(
             filter.observe(Sample::exchange(3000, 3000, 3000, 3010, later), later),
             PeerClockOffset::Bounded { .. }
         ));
         assert_eq!(filter.0.len(), 1);
+    }
+
+    /// A loaded peer answers slowly: its round trip exceeds four times the
+    /// window minimum, yet its interval still intersects the selected one.
+    /// That is less precise evidence, not missing evidence, so the round is
+    /// Bounded by the candidate's own interval (never the old minimum's), and
+    /// the window is unchanged. A disjoint slow sample is still a step.
+    #[test]
+    fn slow_intersecting_exchange_is_bounded_by_its_own_interval() {
+        let start = Instant::now();
+        let mut filter = Filter::default();
+        filter.observe(Sample::exchange(1000, 1000, 1000, 1000, start), start);
+        let later = start + Duration::from_secs(10);
+        let slow = Sample::exchange(2000, 2005, 2005, 2010, later).expect("slow fixture");
+        assert_eq!(slow.round_trip_us, 10_000);
+        let PeerClockOffset::Bounded {
+            offset_us,
+            uncertainty_us,
+            observed_at,
+        } = filter.observe(Some(slow), later)
+        else {
+            panic!("an intersecting slow exchange is bounded, not Unknown");
+        };
+        assert_eq!(
+            (offset_us, uncertainty_us),
+            (slow.offset_us, slow.uncertainty_us)
+        );
+        assert!(uncertainty_us >= slow.round_trip_us / 2);
+        assert_eq!(observed_at, later);
+        assert_eq!(filter.0.len(), 1, "the minimum-delay window is unchanged");
+
+        let stepped = Sample::exchange(3000, 13005, 13005, 3010, later).expect("slow step fixture");
+        assert_eq!(filter.observe(Some(stepped), later), stepped.observation());
+        assert_eq!(filter.0.len(), 1, "a disjoint slow sample still resets");
+        assert_eq!(filter.0[0], stepped);
     }
 }

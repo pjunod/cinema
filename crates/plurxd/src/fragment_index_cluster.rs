@@ -1020,17 +1020,45 @@ fn scanner_identity_matches(metadata: &std::fs::Metadata, file: &MediaFile) -> R
 
 #[cfg(unix)]
 fn object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(format!(
+    crate::availability::StatObject::from_metadata(metadata)
+        .map(|object| stat_object_version(&object))
+        .ok_or_else(|| "this platform's stat names no source object".to_owned())
+}
+
+/// The one rendering of a stat-named source object, shared by the attesting
+/// paths and item detail's observation-based lookup.
+fn stat_object_version(object: &crate::availability::StatObject) -> String {
+    format!(
         "{ATTESTATION_REGIME}:{}:{}:{}:{}:{}:{}:{}",
-        metadata.dev(),
-        metadata.ino(),
-        metadata.size(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.ctime(),
-        metadata.ctime_nsec()
-    ))
+        object.dev,
+        object.ino,
+        object.size,
+        object.mtime,
+        object.mtime_nsec,
+        object.ctime,
+        object.ctime_nsec
+    )
+}
+
+/// What [`inspect_copy_source`] would answer, from a stat the caller already
+/// holds — item detail's bounded availability observation — so the detail
+/// page never stats a source mount a second time, outside that deadline.
+/// `None` when the stat no longer matches the scanner's size/mtime identity
+/// (the same refusal `inspect_source` makes), or where an object is named by
+/// an open handle rather than a stat (Windows).
+pub(crate) fn copy_object_version_from_stat(
+    file: &MediaFile,
+    stat: &crate::availability::SourceStat,
+) -> Option<String> {
+    if stat.len != file.size.max(0) as u64 || stat.modified_secs != file.mtime {
+        return None;
+    }
+    let version = stat_object_version(stat.object.as_ref()?);
+    Some(if is_hevc(file) {
+        format!("{FULL_COPY_PREFIX}{version}")
+    } else {
+        version
+    })
 }
 
 #[cfg(windows)]

@@ -79,6 +79,10 @@ const REQUEST_CLAIM_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_millis(100
 /// What a client is told to wait before re-posting a start that was refused
 /// because something it needs is still being produced.
 const SIDECAR_PENDING_RETRY_AFTER_SECS: u64 = 5;
+/// What a client is told to wait before re-posting a start whose source
+/// Dolby Vision pixel proof did not finish. The proof is not remembered, so
+/// the re-post measures again; one short window lets a loaded node settle.
+const SOURCE_PROOF_PENDING_RETRY_AFTER_SECS: u64 = 5;
 const PREDECESSOR_PROJECTION_FAST_WINDOW: Duration = Duration::from_secs(5);
 const PREDECESSOR_PROJECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 

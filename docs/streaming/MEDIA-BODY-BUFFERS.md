@@ -199,6 +199,26 @@ pass, whole-performance comparison, packet-rate result or qualification is
 claimed. Controlled acceptance remains open; keep the deadline, encoder
 defaults and independent 128 KiB read / 4 KiB proof unchanged.
 
+Since 2026-10-10 the expired deadline names the phase it caught instead of
+calling every expiry a producer failure. The clock and its budget are
+unchanged; at expiry the watchdog reads the rendition's state
+(`Rendition::materialize_verdict` in
+[vod/session.rs](../../crates/plurxd/src/vod/session.rs)) and records one
+verdict for the whole episode:
+
+| What the rendition was doing | Answer |
+|---|---|
+| Waiting for an encoder permit the pool refused; no producer ran for the entry | 503 `transcode_capacity_pending`, carrying the pool's refusal (priority, hardware and software use against their limits, live waiters, whether background work holds a permit) |
+| A producer ran and never delivered the entry | 502 `producer_failed`, naming where the producer started and its last delivered fragment |
+| The producer delivered the entry's fragment; publication did not finish | 502 `segment_publication_failed` |
+
+A frozen plan whose CPU floor exceeds the node's whole software budget (the
+`over_budget` refusal, which no release can satisfy) is now refused at create
+with `vod_transcode_unavailable` rather than parked on the deadline. Before
+this, a 2160p cell refused an encoder permit for 30 s produced the same 502 as
+a crashed encoder, which is why its failure record could not name a slow
+phase.
+
 ## 3. Change
 
 ### 3.1 M1 — `with_capacity(MEDIA_BODY_READ_BUFFER)` at four sites

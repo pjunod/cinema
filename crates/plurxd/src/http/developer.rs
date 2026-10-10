@@ -123,7 +123,7 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
     } else {
         format!(
             "; {learners} unobserved learner(s) reported but not required (no vote; \
-             a measured learner still counts, and promotion needs its own bound)"
+             a learner beyond the bound refuses only its own sessions and promotion)"
         )
     };
     let measured = peers.saturating_sub(learners);
@@ -162,7 +162,7 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
                 RequirementStatus::Unmet
             },
             format!(
-                "{} ms worst |offset| + uncertainty among bounded members; the limit is \
+                "{} ms worst |offset| + uncertainty among bounded voters; the limit is \
                  {CLOCK_OFFSET_REFUSAL_MS} ms",
                 value as f64 / 1_000.0
             ),

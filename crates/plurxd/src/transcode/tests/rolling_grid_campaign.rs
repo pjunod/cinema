@@ -215,11 +215,12 @@ async fn setup_owned_rolling_route(
     origin_ms: i64,
 ) -> plurx_core::domain::MediaSessionRoute {
     let now = crate::media_sessions::unix_ms();
-    let fingerprint = req.durable_intent_fingerprint(7);
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 };
+    let fingerprint = req.durable_intent_fingerprint(&principal);
     assert_eq!(
         store
             .claim_media_session_request(
-                7,
+                &principal,
                 generation,
                 &fingerprint,
                 &req.playback_id,
@@ -234,7 +235,7 @@ async fn setup_owned_rolling_route(
         }
     );
     assert!(store
-        .assign_media_session_request_owner(7, generation, generation, "rolling-lab", now)
+        .assign_media_session_request_owner(&principal, generation, generation, "rolling-lab", now)
         .await
         .expect("assign"));
     let activation = plurx_core::domain::MediaSessionActivation {
@@ -242,7 +243,7 @@ async fn setup_owned_rolling_route(
         expected_desired_revision: None,
         incarnation_id: generation.into(),
         session_id: session_id.into(),
-        user_id: 7,
+        principal,
         playback_id: req.playback_id.clone(),
         expected_predecessor_incarnation_id: None,
         fence_predecessor: false,
@@ -298,12 +299,16 @@ async fn owned_rolling_setup_claims_and_activates_durable_route() {
         1250,
     )
     .await;
-    assert_eq!(route.user_id, 7);
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 };
+    assert_eq!(route.principal, principal);
     assert_eq!(route.playback_id, req.playback_id);
     assert_eq!(route.incarnation_id, generation);
     assert_eq!(route.session_id, session_id);
     assert_eq!(route.owner_node_id, "rolling-lab");
-    assert_eq!(route.request_fingerprint, req.durable_intent_fingerprint(7));
+    assert_eq!(
+        route.request_fingerprint,
+        req.durable_intent_fingerprint(&principal)
+    );
     assert_eq!(route.publication_ready_at_ms, 0);
     assert_eq!(route.media_origin_ms, 1250);
     assert_eq!(route.response_json, response);
@@ -318,9 +323,9 @@ async fn owned_rolling_setup_claims_and_activates_durable_route() {
     assert_eq!(
         store
             .claim_media_session_request(
-                7,
+                &principal,
                 &generation,
-                &req.durable_intent_fingerprint(7),
+                &req.durable_intent_fingerprint(&principal),
                 &req.playback_id,
                 &generation,
                 now,

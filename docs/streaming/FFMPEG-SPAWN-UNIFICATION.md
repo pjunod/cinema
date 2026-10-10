@@ -2,7 +2,8 @@
 
 **Status:** open · M1/M2 merged (PR #415) · M3 PASS in the owned lab on lab3,
 2026-10-02, for VOD encode, VOD burn, VOD copy and progressive remux
-(§5.3.1); rolling HLS not measurable from library files on this build; the
+(§5.3.1); rolling HLS not measured (it starts from a library file only as
+the live-recovery fallback for a VOD refusal, and that run produced none); the
 media1 reading is still owed ·
 **Executes:** F-stream-13, the progress-line half of F-stream-12, and the
 "unify the spawn path (fixes the drift)" step of
@@ -381,9 +382,13 @@ here, per §3.2's last row).
 effort branch with the P-02 reproducibility continuation (`9ed98a30c`);
 sessions created over the API; children read from the host through `/proc`
 of every pid in the container's cgroup, once a second. Every library session
-took the encoded-VOD route: on this build a library file cannot start rolling
-HLS (any `presentation` other than `vod` answers 410
-`live_presentation_removed`), so **no rolling producer was measured**.
+took the encoded-VOD route. A client cannot ask for rolling HLS (any
+`presentation` other than `vod` answers 410 `live_presentation_removed`);
+the rolling engine starts from a library file only as the live-recovery
+fallback when VOD refuses a title it alone cannot build (S-05, corrected
+2026-10-10: this paragraph first said rolling could not start from library
+files at all). No session in this run was refused, so **no rolling producer
+was measured**.
 **Caveat:** an owned lab on lab3, not media1.
 
 | Child | `XDG_CACHE_HOME` | `AV_LOG_FORCE_NOCOLOR` | argv input | fd 3 / fd 4 |
