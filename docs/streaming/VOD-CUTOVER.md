@@ -43,15 +43,21 @@ exists to remove.
   an older client cannot enter live HLS by accident.
 - Any explicit value other than `vod` returns HTTP 410 with
   `code:"live_presentation_removed"`.
-- A successful HLS create always returns `vod:true`.
+- A successful HLS create returns `vod:true`, except when a VOD refusal falls
+  back to the retained rolling engine (below), which answers `vod:false`.
 - Web, Apple, and Android send `presentation:"vod"` and refuse a response that
   does not acknowledge VOD.
 - Cluster worker requests must name VOD, and ingress rejects a worker response
   with `vod:false` before publishing its route.
 
-The former live-start implementation is excluded from production builds. Its
-source and regression tests remain test-only so historical regression anchors
-continue to resolve without rewriting Git history.
+The former live-start implementation is compiled into every build (the
+`live-hls-recovery` Cargo feature that once gated it was removed in
+`39db86722`, 2026-08-26) and is reached only as the retained rolling engine: a
+VOD refusal that only VOD cannot build — `VOD_REFUSAL_CODES` in
+`crates/plurxd/src/transcode/live_recovery.rs` classifies every refusal code —
+falls back to it unless the request is VOD-only or Settings → Playback →
+Streaming turns live recovery off. A client still cannot ask for it: the 410
+above stands.
 
 ## Eligibility and refusals
 

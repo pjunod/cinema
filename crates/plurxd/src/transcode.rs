@@ -334,7 +334,8 @@ const RETENTION_HANDOFF_BATCH: usize = 32;
 /// running, why it chose that work, or that a switch existed to stop it. The
 /// count is exported as `plurx_live_hls_recovery_sessions_total{reason}` and
 /// read back by the Developer readiness route, which names the switch.
-static LIVE_RECOVERY_SESSIONS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static LIVE_RECOVERY_SESSIONS: [AtomicU64; LiveRecoveryReason::COUNT] =
+    [const { AtomicU64::new(0) }; LiveRecoveryReason::COUNT];
 
 // split: begin live-recovery
 #[path = "transcode/live_recovery.rs"]
@@ -343,7 +344,8 @@ pub(crate) use live_recovery::*;
 // split: end live-recovery
 
 /// The reason labels, in `live_recovery_snapshot()` order.
-pub(crate) const LIVE_RECOVERY_LABELS: [&str; 5] = LiveRecoveryReason::LABELS;
+pub(crate) const LIVE_RECOVERY_LABELS: [&str; LiveRecoveryReason::COUNT] =
+    LiveRecoveryReason::LABELS;
 
 static RETENTION_SWEEP_ID: AtomicU64 = AtomicU64::new(0);
 /// Default pace for an HLS session's input, as a multiple of realtime, and how

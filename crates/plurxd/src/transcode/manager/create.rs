@@ -629,9 +629,13 @@ impl TranscodeManager {
             // Read once here and handed down, so the fallback below decides
             // from the same snapshot the VOD attempt was admitted under.
             let vod_settings = self.vod_settings(req).await?;
-            let live_recovery_enabled = vod_settings
-                .as_ref()
-                .is_some_and(|settings| settings.live_recovery);
+            let live_recovery_enabled = match vod_settings.as_ref() {
+                Some(settings) => settings.live_recovery,
+                // VOD is switched off, so its settings snapshot is absent and
+                // the rolling engine is the only presentation left. It still
+                // answers to the operator's live-recovery switch.
+                None => self.live_hls_recovery_enabled().await?,
+            };
             let vod = self
                 .try_vod_session(
                     vod_settings,
@@ -662,10 +666,11 @@ impl TranscodeManager {
             match vod {
                 Ok(info) => info,
                 Err(error) => {
-                    // One list, not two. `from_refusal` is what decides both
-                    // whether a code may fall back and which reason it is
-                    // counted under, so adding a fifth code cannot produce
-                    // sessions the engine serves and nothing attributes.
+                    // One list, not two. `VOD_REFUSAL_CODES` (through
+                    // `from_refusal`) decides both whether a code may fall
+                    // back and which reason it is counted under, so a new
+                    // code cannot produce sessions the engine serves and
+                    // nothing attributes — nor fail playback unclassified.
                     let live_recovery_reason = vod_refusal(&error)
                         .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
                     if let Some(reason) = live_recovery_reason {
