@@ -9,6 +9,7 @@ pub(crate) const MANIFEST: &[u8] = include_bytes!("../../fixtures/macos-processi
 /// reads as "no Dolby support" when the decoder worked. Encoded positive
 /// probes therefore keep this raster, and the delivered pixels are projected
 /// to the independent 160x90 color oracle before they are compared.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) const SOURCE_RASTER: (u32, u32) = (320, 180);
 macro_rules! media {
     ($($name:literal),+ $(,)?) => { &[$(($name, include_bytes!(concat!("../../fixtures/macos-processing/strict_p5_", $name, ".mp4")) as &[u8])),+] };
@@ -967,6 +968,29 @@ mod tests {
              "[showinfo@plurx_p5_contract @ 0x1] rpu_type=2; vdr_rpu_profile=0; bl_bit_depth=10; disable_residual_flag=1\n".into(),
              format!("[showinfo@plurx_p5_contract @ 0x1] channel 0: channel 1: channel 2: color metadata: dm_metadata_id={dm}; source_max_pq={peak}; signal_eotf=65535; signal_color_space=2; signal_bit_depth=12\n")]
         }).collect()
+    }
+
+    #[test]
+    fn a_progress_record_spliced_onto_a_frame_record_hides_that_frame() {
+        // ffmpeg's progress meter ends its records with a bare carriage
+        // return, so with it on the next showinfo record joins a `frame=`
+        // line. The observer reads newline-terminated records, which is why
+        // every strict probe graph runs with `-nostats`.
+        let clean = String::from_utf8(trace_bytes(&selected_trace())).expect("UTF8 trace");
+        assert_eq!(
+            observe_selected_metadata(clean.as_bytes(), Pipeline::VtDoviMetal, true),
+            Ok(())
+        );
+        let spliced = clean.replacen(
+            "[showinfo@plurx_p5_contract @ 0x1] n: 7 ",
+            "frame=    7 fps=0.0 q=-0.0 size=       1KiB\r[showinfo@plurx_p5_contract @ 0x1] n: 7 ",
+            1,
+        );
+        assert_ne!(spliced, clean);
+        assert_eq!(
+            observe_selected_metadata(spliced.as_bytes(), Pipeline::VtDoviMetal, true),
+            Err(ProbeReason::OutputContractFailed)
+        );
     }
 
     fn trace_bytes(rows: &[[String; 3]]) -> Vec<u8> {
