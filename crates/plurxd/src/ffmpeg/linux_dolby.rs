@@ -719,6 +719,28 @@ fn observe_frozen_loader_paths(
     Ok(())
 }
 
+/// Global arguments of every strict-P5 probe graph. The observers read stderr
+/// as newline-terminated log records. ffmpeg's progress meter ends each of
+/// its records with a bare carriage return, so with it on the next showinfo
+/// record is spliced onto a `frame=` line and that frame disappears from the
+/// observer; every validation then fails as missing metadata. The macOS graph
+/// already runs with `-nostats`; the Linux graph uses the same contract.
+#[cfg(target_os = "linux")]
+const GRAPH_GLOBAL_ARGS: &[&str] = &[
+    "-nostdin",
+    "-hide_banner",
+    "-nostats",
+    "-loglevel",
+    "info",
+    "-xerror",
+    "-threads",
+    "2",
+    "-filter_threads",
+    "2",
+    "-protocol_whitelist",
+    "file,pipe",
+];
+
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 struct GraphCase<'a> {
@@ -767,19 +789,7 @@ async fn graph_command(
     command
         .envs(child_env.iter().map(|(key, value)| (key, value)))
         .env("LD_DEBUG", "libs");
-    command.args([
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "info",
-        "-xerror",
-        "-threads",
-        "2",
-        "-filter_threads",
-        "2",
-        "-protocol_whitelist",
-        "file,pipe",
-    ]);
+    command.args(GRAPH_GLOBAL_ARGS);
     command.args(
         StrictDolbyPolicy::linux_encoder_args_for_device(device, case.encoder)
             .ok_or("unsupported_encoder")?,
@@ -1515,6 +1525,22 @@ async fn qualify_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_graph_stderr_is_line_records_without_the_progress_meter() {
+        assert!(GRAPH_GLOBAL_ARGS.contains(&"-nostats"));
+        let level = GRAPH_GLOBAL_ARGS
+            .iter()
+            .position(|argument| *argument == "-loglevel")
+            .expect("explicit log level");
+        assert_eq!(
+            GRAPH_GLOBAL_ARGS[level + 1],
+            "info",
+            "showinfo records stay"
+        );
+        assert!(!GRAPH_GLOBAL_ARGS.contains(&"-stats"));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
