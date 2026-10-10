@@ -299,7 +299,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/keys/{id}" => 0,
 
         // Home projections.
-        "/api/v1/home/previews" | "/api/v1/hubs" | "/hubs/search" => 1,
+        "/api/v1/home/previews" | "/api/v1/hubs" | "/api/v1/features" | "/hubs/search" => 1,
 
         // Library management, catalogue pages and schedules.
         "/api/v1/libraries"
@@ -1495,6 +1495,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
+        .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
         .route(
             "/subtitle-transcription",
@@ -6366,6 +6367,103 @@ mod tests {
                 "a scan key reached {uri} with {status}: {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn features_tell_every_signed_in_viewer_which_sections_to_list() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(&app, get("/api/v1/features", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+        // A viewer cannot read /settings, which is why this projection exists.
+        assert_eq!(
+            call(&app, get("/api/v1/settings", Some(&viewer))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, off) = call(&app, get("/api/v1/features", Some(&viewer))).await;
+        assert_eq!(status, StatusCode::OK, "{off}");
+        assert_eq!(
+            off,
+            json!({"live_tv":false,"recordings":false,"shared_libraries":false,"library_channels":false})
+        );
+        let saved = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"sharing_enabled":true,"library_channels_enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(saved.0, StatusCode::OK, "{}", saved.1);
+        let (_, on) = call(&app, get("/api/v1/features", Some(&viewer))).await;
+        assert_eq!(on["shared_libraries"], true, "{on}");
+        assert_eq!(on["library_channels"], true, "{on}");
+        assert_eq!(on["live_tv"], false, "{on}");
+        assert_eq!(on["recordings"], false, "{on}");
+    }
+
+    #[test]
+    fn features_read_each_switch_with_the_settings_parser() {
+        use plurx_core::store::keys;
+        let snapshot = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            system::FeaturesDto::from_snapshot(&snapshot(&[]), "node-a"),
+            system::FeaturesDto {
+                live_tv: false,
+                recordings: false,
+                shared_libraries: false,
+                library_channels: false,
+            }
+        );
+        assert_eq!(
+            system::FeaturesDto::from_snapshot(
+                &snapshot(&[
+                    (keys::LIVE_TV_ENABLED, "1"),
+                    (keys::DVR_ENABLED, "true"),
+                    (keys::SHARING_ENABLED, "on"),
+                    (keys::LIBRARY_CHANNELS_ENABLED, "1"),
+                ]),
+                "node-a",
+            ),
+            system::FeaturesDto {
+                live_tv: true,
+                recordings: true,
+                shared_libraries: true,
+                library_channels: true,
+            }
+        );
+        // Each switch moves only its own section.
+        let dvr_only =
+            system::FeaturesDto::from_snapshot(&snapshot(&[(keys::DVR_ENABLED, "1")]), "node-a");
+        assert!(dvr_only.recordings && !dvr_only.live_tv);
+        assert!(!dvr_only.shared_libraries && !dvr_only.library_channels);
     }
 
     #[tokio::test]
