@@ -435,6 +435,19 @@ struct PreparedCommitRendezvous: Equatable {
     /// staging's `media_origin_ms`.
     let itemPositionMs: Int
 
+    /// Selection reconciliation and the first-frame proof after the swap
+    /// draw on the same overlap; this much of it is kept for them.
+    static let postSwapReserveMs = PreparedReplacementBounds.alignmentMs
+
+    /// How far ahead of the incumbent to put the switch point, in wall time.
+    /// It covers inspection and alignment, each bounded by `alignmentMs`, and
+    /// leaves the post-swap reserve of the overlap untouched. Nil when the
+    /// overlap that remains cannot afford a switch at all.
+    static func commitLeadWallMs(overlapRemainingMs: Int) -> Int? {
+        guard overlapRemainingMs > postSwapReserveMs + 1_000 else { return nil }
+        return min(PreparedReplacementBounds.alignmentMs * 2, overlapRemainingMs - postSwapReserveMs)
+    }
+
     /// Never behind the staged position: a successor asked to seek backwards
     /// from where it was primed would fetch media the switch does not need.
     static func plan(

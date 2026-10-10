@@ -11962,14 +11962,15 @@ extension PlayerController: PreparedSuccessorHost {
             return preparedCommitFailure(at: "surface")
         }
         let rendezvousRate = preferredRate
-        guard rendezvousRate.isFinite, rendezvousRate > 0,
-              preparedOverlapRemainingMs > 1_000 else {
-            return preparedCommitFailure(at: "rate-or-overlap")
-        }
         // Inspection and alignment can each consume their existing bounded
         // allowance. Pick one future instant before either suspension, rather
         // than inspecting one fragment then moving the rendezvous beyond it.
-        let leadWallMs = min(PreparedReplacementBounds.alignmentMs * 2, preparedOverlapRemainingMs - 1_000)
+        // The lead keeps the post-swap reserve of the overlap for selection
+        // reconciliation and the first-frame proof.
+        guard rendezvousRate.isFinite, rendezvousRate > 0,
+              let leadWallMs = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: preparedOverlapRemainingMs) else {
+            return preparedCommitFailure(at: "rate-or-overlap")
+        }
         let rendezvous = PreparedCommitRendezvous.plan(
             stagedFilmPositionMs: preparedFilmPositionMs,
             incumbentFilmPositionMs: realPositionMs(),
@@ -13399,15 +13400,31 @@ extension SharedPlayerController: PreparedSuccessorHost {
               player.currentItem != nil, let adoption = preparedAdoption,
               adoption.playback.start.response.sessionId == action.sessionId
         else { return .refused }
-        guard let cadence = await preparedDecodedFrameDuration(of: item, boundMs: PreparedReplacementBounds.alignmentMs,
-                targetItemSeconds: Double(currentPositionMs()) / 1000),
-              !closing, playing, preparedItem === item, preparedPlayer === successor else { return .refused }
+        // One future switch point, chosen before either bounded suspension,
+        // exactly as Local does: inspection and alignment can each take up to
+        // `alignmentMs`, and a point taken from the playhead after inspecting
+        // routinely lands in the next fragment, refusing a healthy handoff.
+        let rate = Double(player.rate)
+        guard rate.isFinite, rate > 0,
+              let leadWallMs = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: .max) else { return .refused }
         let rendezvous = PreparedCommitRendezvous.plan(stagedFilmPositionMs: preparedFilmPositionMs,
-                                                       incumbentFilmPositionMs: currentPositionMs(), mediaOriginMs: 0)
+                                                       incumbentFilmPositionMs: currentPositionMs(), mediaOriginMs: 0,
+                                                       leadMs: Int(min(16, rate) * Double(leadWallMs)))
+        guard let cadence = await preparedDecodedFrameDuration(of: item, boundMs: PreparedReplacementBounds.alignmentMs,
+                targetItemSeconds: Double(rendezvous.itemPositionMs) / 1000),
+              !closing, playing, preparedItem === item, preparedPlayer === successor else { return .refused }
         guard cadence.covers(itemPositionMs: rendezvous.itemPositionMs) else { return .refused }
         let frameDurationSeconds = cadence.frameDurationSeconds
         guard await alignPrepared(item, to: rendezvous.itemPositionMs), !closing,
               preparedItem === item, preparedPlayer === successor else {
+            discardPreparedSuccessor()
+            return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+        }
+        // The parked successor waits at the switch point for the incumbent,
+        // so the swap neither skips nor repeats film.
+        guard await awaitSharedRendezvous(rendezvous, frameDurationSeconds: frameDurationSeconds,
+                                          boundMs: leadWallMs + PreparedReplacementBounds.alignmentMs),
+              !closing, playing, preparedItem === item, preparedPlayer === successor else {
             discardPreparedSuccessor()
             return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
@@ -13423,6 +13440,21 @@ extension SharedPlayerController: PreparedSuccessorHost {
             return .switchedWithoutAFrame
         }
         return .committed(firstFrameUnixMs: frame)
+    }
+
+    /// Wait for the incumbent to reach the planned switch point. Arriving
+    /// within one frame is the meeting; passing it means the point was missed.
+    private func awaitSharedRendezvous(_ rendezvous: PreparedCommitRendezvous,
+                                       frameDurationSeconds: Double, boundMs: Int) async -> Bool {
+        let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < boundMs {
+            guard !Task.isCancelled, !closing, playing, player.rate > 0 else { return false }
+            let drift = Double(currentPositionMs()) - Double(rendezvous.filmPositionMs)
+            if abs(drift) <= frameDurationSeconds * 1_000 { return true }
+            if drift > 0 { return false }
+            try? await Task.sleep(nanoseconds: 8_000_000)
+        }
+        return false
     }
 
     /// The P0 reopen, run by the preparation once its settlement is sent.
