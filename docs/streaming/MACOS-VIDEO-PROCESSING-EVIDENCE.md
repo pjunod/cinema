@@ -2069,6 +2069,25 @@ All of these remain recorded.
 This is one AMD VA-API render node. It makes no Intel, NVIDIA, deployment,
 performance, concurrency or client-presentation claim.
 
+**Contracts the effort had left unrun.** Before handoff, the operations and
+validation suites ran locally on the candidate after a second merge of
+current `main` (`865a1ae93`). The effort itself had never run them, and five
+groups failed on the effort branch, independent of the merge:
+
+- The release Dockerfile renderer took the audited
+  `runtime-assets-dolby-amd64` stage for a second shipped runtime, because
+  it matched the substring `FROM runtime-assets AS runtime`. It now matches
+  the whole FROM declaration and accepts the one named Dolby package context
+  in its own render mode (`10c6f7f6`).
+- The Dockerfile contracts are updated for the trailing default-runtime
+  alias and the `scratch` export base.
+- The new admin reprobe route is documented in API.md.
+- The rolling-producer ownership census records the reviewed new task,
+  timer and process shapes.
+
+Both suites then pass: operations with 936 tests and validation with 393. No
+Rust unit suite ran.
+
 [Linux normal-API evidence](evidence/macos-video-20261008/linux-normal-api-p5-evidence.tar.gz)
 contains one neutral JSON record, 7357 compressed bytes, SHA-256
 `16c84bf98fb3c9cdb614e12f57424152ac6c1c08b074807f6cc726295564a5e5`.

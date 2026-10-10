@@ -31,6 +31,15 @@ cleared before recovery, so everything was rebuilt from the pushed branch
 - **Normal-API delivery passes** on the shipping image with VA-API hardware
   P5 decode and VA-API encode
   ([§43](MACOS-VIDEO-PROCESSING-EVIDENCE.md#43-daemon-probe-and-normal-api-strict-p5-delivery-on-the-shipping-image--2026-10-10)).
+- **Second merge and contract repairs.** Current `main` (`865a1ae93`) was
+  merged again. Local operations and validation suites then exposed contracts
+  the effort had never run:
+  - a substring runtime-stage match in the release renderer (`10c6f7f6`);
+  - Dockerfile contracts not updated for the audited stages;
+  - an undocumented admin route;
+  - an unreviewed ownership census.
+
+  All are repaired, and both suites pass.
 
 Remaining work, in order:
 
