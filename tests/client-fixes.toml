@@ -5879,7 +5879,7 @@ test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
 id = "android.build-152-baseline-claim"
 commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
 source = "clients/android/README.md"
-source_anchor = "> Status: **v0.3.0**, build `160`"
+source_anchor = "> Status: **v0.3.0**, build `161`"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
