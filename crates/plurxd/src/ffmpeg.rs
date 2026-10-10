@@ -3756,8 +3756,13 @@ const DOVI_RESHAPE_PROOF_RASTER: (u32, u32) = (1920, 1080);
 
 fn dovi_reshape_probe_args(encoder: Encoder) -> Vec<String> {
     let (width, height) = DOVI_RESHAPE_PROOF_RASTER;
+    // The production reshape chain itself, at the delivery raster, followed by
+    // the encoder's own upload: the proof cannot drift from what sessions run.
+    let reshape = Pipeline::DoviTonemapx
+        .filters(Some(i64::from(width)), i64::from(height), Some("dovi"))
+        .unwrap_or_default();
     let filter = format!(
-        "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=yuv420p:apply_dovi=1,scale={width}:{height},format=yuv420p{}",
+        "{reshape}{}",
         encoder
             .filter_suffix_for(OutputGrade::Sdr)
             .map(|s| format!(",{s}"))
@@ -4431,6 +4436,10 @@ mod tests {
             assert!(width >= 1280 && height >= 720, "{encoder:?}");
             assert!(args.contains(&format!("color=size={width}x{height}:rate=1:color=black")));
             let filter = &args[args.iter().position(|a| a == "-vf").expect("filter") + 1];
+            let production = Pipeline::DoviTonemapx
+                .filters(Some(i64::from(width)), i64::from(height), Some("dovi"))
+                .expect("production reshape chain");
+            assert!(filter.starts_with(&production), "{encoder:?}: {filter}");
             assert!(filter.contains(&format!("apply_dovi=1,scale={width}:{height},")));
             assert!(!args
                 .iter()
