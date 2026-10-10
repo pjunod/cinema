@@ -66,13 +66,35 @@ run_root() {
 # this user: Homebrew's bin on Apple Silicon is user-owned, /usr/local/bin is not.
 run_for_dir() {
   local dir=$1; shift
-  # Judge by the nearest ancestor that exists: `install -d /opt/x/bin` needs
-  # root when /opt is root-owned even though /opt/x is not there yet.
-  while [ ! -e "$dir" ] && [ "$dir" != / ]; do dir=$(dirname -- "$dir"); done
-  if [ -w "$dir" ]; then
+  if dir_writable "$dir"; then
     run "$@"
   else
     run_root "$@"
+  fi
+}
+
+# Judge by the nearest ancestor that exists: `install -d /opt/x/bin` needs
+# root when /opt is root-owned even though /opt/x is not there yet.
+dir_writable() {
+  local dir=$1
+  while [ ! -e "$dir" ] && [ "$dir" != / ]; do dir=$(dirname -- "$dir"); done
+  [ -w "$dir" ]
+}
+
+# True when replacing or removing the file $1 needs root: the file itself is
+# not writable, or its directory is not (a replace is a rename into it).
+file_needs_root() {
+  if [ -e "$1" ] && [ ! -w "$1" ]; then return 0; fi
+  ! dir_writable "$(dirname -- "$1")"
+}
+
+# `run_for_dir` for a command that replaces or removes the file $1 itself.
+run_for_file() {
+  local file=$1; shift
+  if file_needs_root "$file"; then
+    run_root "$@"
+  else
+    run "$@"
   fi
 }
 
@@ -282,6 +304,42 @@ linux_uninstall() {
 
 macos_agent_label=com.plurx.plurxd
 
+# The agent lives in the login user's GUI domain (`gui/<uid>`), so this half
+# of the installer must run as that user. Under sudo `id -u` is 0 and the
+# agent would be bootstrapped into `gui/0`, which launchd refuses ("125:
+# Domain does not support specified action"); macOS sudo also keeps HOME, so
+# the same run leaves root-owned files in the user's Library that every later
+# run then trips over. The steps that do need root ask for it themselves.
+macos_refuse_root() {
+  [ "$(id -u)" != 0 ] && return 0
+  die "run this as your login user, not as root or through sudo: the agent runs in that user's GUI session (launchd gui/<uid>), and the installer asks for sudo itself for the steps that need it"
+}
+
+# The agent runs as the login user, so everything it reads or writes in that
+# user's Library must belong to them. A path an earlier root run left behind
+# is handed back; anything already theirs is left alone.
+macos_claim() {
+  local path uid gid
+  uid=$(id -u); gid=$(id -g)
+  for path in "$@"; do
+    [ -e "$path" ] || continue
+    [ -z "$(find "$path" ! -user "$uid" -print 2>/dev/null | head -1)" ] && continue
+    run_root chown -R "$uid:$gid" "$path"
+    [ "$dry_run" = 1 ] || say "gave $path back to uid $uid (an earlier run as root left it root-owned)"
+  done
+}
+
+# Put the agent plist $1 in place at $2: mode 0644, owned by the login user,
+# through sudo only when the file or its directory is not writable.
+macos_place_plist() {
+  local src=$1 plist=$2
+  if file_needs_root "$plist"; then
+    run_root install -m 0644 -o "$(id -u)" -g "$(id -g)" "$src" "$plist"
+  else
+    run install -m 0644 "$src" "$plist"
+  fi
+}
+
 # The media engine on macOS is Jellyfin FFmpeg 8.1.3-1, the official portable
 # build: it carries the VideoToolbox, tone-mapping, AC-4 and Dolby Vision
 # pieces the macOS video path is built and qualified against. Homebrew's
@@ -393,11 +451,18 @@ plist_env_get() {
 # one thing an upgrade corrects is an engine that is not Jellyfin FFmpeg (a
 # Homebrew ffmpeg an older installer wrote, a path that no longer exists):
 # that is repointed at the pinned build. A Jellyfin build they chose stays.
+# Edits are made to a private copy and the copy is put in place once, so the
+# same path works whether or not the agent's file or directory needs root.
 macos_repoint_engine() {
-  local plist=$1 key value current
+  local plist=$1 key value current copy changed=0
+  if [ ! -r "$plist" ]; then
+    [ "$dry_run" = 1 ] && { say "would read $plist through sudo to check its engine"; return; }
+  fi
+  copy=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+  if [ -r "$plist" ]; then cat "$plist" > "$copy"; else sudo cat "$plist" > "$copy"; fi
   for key in PLURX_FFMPEG PLURX_FFPROBE; do
     if [ "$key" = PLURX_FFMPEG ]; then value=$macos_ffmpeg; else value=$macos_ffprobe; fi
-    current=$(plist_env_get "$plist" "$key")
+    current=$(plist_env_get "$copy" "$key")
     [ -n "$current" ] || continue
     if is_jellyfin_tool "$current"; then continue; fi
     if [ "$dry_run" = 1 ]; then
@@ -405,8 +470,8 @@ macos_repoint_engine() {
       continue
     fi
     if command -v plutil >/dev/null 2>&1; then
-      plutil -replace "EnvironmentVariables.$key" -string "$value" "$plist" \
-        || die "could not update $key in $plist"
+      plutil -replace "EnvironmentVariables.$key" -string "$value" "$copy" \
+        || { rm -f "$copy"; die "could not update $key in $plist"; }
     else
       local rewritten
       rewritten=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
@@ -414,10 +479,13 @@ macos_repoint_engine() {
         index($0, key) { found = 1; print; next }
         found && /<string>/ { sub(/<string>.*<\/string>/, "<string>" value "</string>"); found = 0 }
         { print }
-      ' "$plist" > "$rewritten" && mv "$rewritten" "$plist"
+      ' "$copy" > "$rewritten" && mv "$rewritten" "$copy"
     fi
+    changed=1
     say "repointed $key from $current (not Jellyfin FFmpeg) to $value"
   done
+  [ "$changed" = 1 ] && macos_place_plist "$copy" "$plist"
+  rm -f "$copy"
 }
 
 macos_render_plist() {
@@ -447,13 +515,16 @@ macos_install() {
   plist=$agents/$macos_agent_label.plist
   data="$HOME/Library/Application Support/plurx"
   uid=$(id -u)
+  macos_refuse_root
   resolve_binary
   macos_ensure_jellyfin_ffmpeg "$dir"
   # Boot a running agent out before its binary is replaced. A fresh install
   # has nothing to boot out and that is fine.
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   install_binary_to "$dir"
-  run mkdir -p "$agents" "$data" "$HOME/Library/Logs"
+  [ -d "$agents" ] || run_for_dir "$agents" mkdir -p "$agents"
+  macos_claim "$plist" "$data" "$HOME/Library/Logs/plurxd.log"
+  run mkdir -p "$data" "$HOME/Library/Logs"
   # The plist is rendered once. An existing one is the operator's (the
   # runbook has them plutil -replace tool paths in it), so an upgrade keeps it
   # and only repoints an engine that is not Jellyfin FFmpeg.
@@ -467,7 +538,8 @@ macos_install() {
     rendered=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
     macos_render_plist "$dir" "$rendered"
     if command -v plutil >/dev/null 2>&1; then plutil -lint "$rendered" >/dev/null || die "rendered plist is not valid: $rendered"; fi
-    mv "$rendered" "$plist"
+    macos_place_plist "$rendered" "$plist"
+    rm -f "$rendered"
     say "rendered $plist"
   fi
   run launchctl bootstrap "gui/$uid" "$plist"
@@ -484,8 +556,9 @@ macos_uninstall() {
   installed=$({ sed -n 's|.*<string>\(.*\)/plurxd</string>.*|\1|p' "$plist" 2>/dev/null || true; } | head -1 | sed -e 's/&amp;/\&/g' -e 's/&lt;/</g' -e 's/&gt;/>/g')
   dir=${installed:-$(bin_dir)}
   uid=$(id -u)
+  macos_refuse_root
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
-  run rm -f "$plist"
+  run_for_file "$plist" rm -f "$plist"
   run_for_dir "$dir" rm -f "$dir/plurxd"
   run_for_dir "$dir" rm -rf "$(dirname -- "$dir")/libexec/plurx"
   say "removed the agent, $dir/plurxd and its Jellyfin FFmpeg; kept ~/Library/Application Support/plurx"
