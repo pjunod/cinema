@@ -9,7 +9,15 @@ pub(super) const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
 
 /// Logical delivery facts are separate from the original salted execution.
 /// No process digest is stripped and no durable idempotency key is reused.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+///
+/// Equality is the delivery identity: every field that shapes the bytes or
+/// their meaning. `owner_node_id` is recorded but excluded. It names where a
+/// candidate's job was dispatched, which does not change one byte of the
+/// output. Recovery rebuilds the candidate context from the durable catalog,
+/// and that envelope carries no dispatch owner. Comparing it refused every
+/// sealed reused output after a restart or reap, so the session stalled
+/// instead of resurrecting.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct LogicalOutput {
     version: u32,
@@ -25,6 +33,40 @@ pub(super) struct LogicalOutput {
     candidate: Option<LogicalCandidate>,
     owner_node_id: Option<String>,
     production: Option<LogicalProduction>,
+}
+
+impl PartialEq for LogicalOutput {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructure so a new field cannot be added without deciding here
+        // whether it is part of the delivery identity.
+        let Self {
+            version,
+            file_id,
+            kind,
+            audio_index,
+            audio_offset_ms,
+            subtitle_burn,
+            hdr10,
+            copy_video_args,
+            audio_claim,
+            audio_delivery,
+            candidate,
+            owner_node_id: _,
+            production,
+        } = self;
+        *version == other.version
+            && *file_id == other.file_id
+            && *kind == other.kind
+            && *audio_index == other.audio_index
+            && *audio_offset_ms == other.audio_offset_ms
+            && *subtitle_burn == other.subtitle_burn
+            && *hdr10 == other.hdr10
+            && *copy_video_args == other.copy_video_args
+            && *audio_claim == other.audio_claim
+            && *audio_delivery == other.audio_delivery
+            && *candidate == other.candidate
+            && *production == other.production
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

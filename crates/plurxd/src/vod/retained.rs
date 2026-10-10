@@ -2751,6 +2751,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_reacquisition_ignores_the_dispatch_owner_of_the_sealed_tuple() {
+        // A first preparation seals with its bound dispatch owner, while
+        // recovery rebuilds the context from the durable catalog with no
+        // owner. The bytes are the same, so the restart must still restore.
+        let (temp, old, rendition, facts) = durable_fixture().await;
+        drop(old);
+        let sealed = rendition
+            .recipe
+            .retained_logical
+            .clone()
+            .expect("sealed logical tuple");
+        let mut recovered = serde_json::to_value(&sealed).expect("logical");
+        recovered["owner_node_id"] = match recovered["owner_node_id"] {
+            serde_json::Value::Null => serde_json::json!("node-that-dispatched"),
+            _ => serde_json::Value::Null,
+        };
+        let recovered: super::super::retained_manifest::LogicalOutput =
+            serde_json::from_value(recovered).expect("recovered logical");
+        let fresh = crate::vodserve::tests::bare_serve(temp.path());
+        fresh.shared.retained_artifacts.collect(temp.path()).await;
+        let artifact = fresh
+            .shared
+            .retained_artifacts
+            .reacquire_expected_for_request(
+                &facts,
+                &fresh.shared,
+                &rendition,
+                &Some(recovered.clone()),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("owner-independent durable restore");
+        assert_eq!(artifact.facts(), facts);
+        drop(artifact);
+        let mut different = serde_json::to_value(&recovered).expect("logical");
+        different["audio_offset_ms"] = serde_json::json!(250);
+        let different = serde_json::from_value(different).expect("different logical");
+        assert!(
+            fresh
+                .shared
+                .retained_artifacts
+                .reacquire_expected_for_request(
+                    &facts,
+                    &fresh.shared,
+                    &rendition,
+                    &Some(different),
+                    Duration::from_secs(5),
+                )
+                .await
+                .is_none(),
+            "a delivery field still refuses"
+        );
+    }
+
+    #[tokio::test]
     async fn durable_artifact_lazy_reacquisition_validates_bytes_without_startup_scan() {
         let (temp, old, rendition, facts) = durable_fixture().await;
         let directory = old
