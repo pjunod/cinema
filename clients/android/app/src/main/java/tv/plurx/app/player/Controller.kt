@@ -222,7 +222,7 @@ class Controller internal constructor(
                 if (autoDecodePressure.observe(pipeline, autoActiveCandidateId,
                         monotonicNowMs(), realPosition(), cumulativeDropped,
                         pipeline === player && establishedPlayback && presentationForeground && player.isPlaying &&
-                            playbackIntent.pendingSeek == null && directedChange == null &&
+                            playbackIntent.pendingSeek == null && !directedChangeOutstanding(directedChange) &&
                             player.bufferedPosition - player.currentPosition >= 10_000L)) {
                     val evidence = autoDecodePressure.evidence
                     scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
@@ -1895,12 +1895,20 @@ class Controller internal constructor(
     }
 
     /**
-     * The viewer's directed change, from the tap until it is honoured.
+     * The viewer's most recent directed change. It is in flight from the tap
+     * until it settles — committed, retained, reopened or superseded — and
+     * stays here afterwards only as the record of the last directed change.
      *
-     * Null when the last stream change was not one the viewer directed — a
-     * fallback recipe, a recovery reopen, a title start. A preparation that did
-     * not come from a directed change keeps the release-only behaviour it had:
-     * there is no rung waiting to be applied, so there is nothing to apply.
+     * Null when no stream change in this controller was one the viewer
+     * directed — a fallback recipe, a recovery reopen, a title start. A
+     * preparation that did not come from a directed change keeps the
+     * release-only behaviour it had: there is no rung waiting to be applied,
+     * so there is nothing to apply.
+     *
+     * Whether a change is still owed is [directedChangeOutstanding], never
+     * non-nullness: nothing clears this reference, so treating a settled
+     * change as pending held every Auto decision, recovery and link sample
+     * closed for the rest of the title after the viewer's first quality choice.
      */
     private var directedChange: DirectedChange? = null
 
@@ -3636,7 +3644,7 @@ class Controller internal constructor(
                 !stallGuard.isCurrent(observation) || player !== incumbent || sessionId != incumbentSession ||
                 autoActiveCandidateId != current.id || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
                 !player.playWhenReady || !presentationForeground || playbackIntent.pendingSeek != null ||
-                player.playbackState != Player.STATE_BUFFERING || preparedPlayer != null || directedChange != null ||
+                player.playbackState != Player.STATE_BUFFERING || preparedPlayer != null || directedChangeOutstanding(directedChange) ||
                 kotlin.math.abs(realPosition() - stalledPosition) >= 250L ||
                 latestAutoCompletedTransfer?.receipt != receipt ||
                 latestAutoCompletedTransfer?.completedAtMs != sample.completedAtMs ||
@@ -3705,7 +3713,8 @@ class Controller internal constructor(
             automatic = playbackIntent.desiredQuality == PlaybackQuality.Auto,
             playing = establishedPlayback && player.isPlaying && presentationForeground,
             seeking = playbackIntent.pendingSeek != null,
-            changePending = autoPreparing || autoBoundaryAttempt != null || preparedPlayer != null || directedChange != null,
+            changePending = autoPreparing || autoBoundaryAttempt != null || preparedPlayer != null ||
+                directedChangeOutstanding(directedChange),
             controlClosed = controlObservationIsClosed,
             producerState = sessionStatus?.producer_state.takeIf { sessionStatusAgeMs?.let { it <= 15_000L } == true },
         ))
@@ -3886,7 +3895,7 @@ class Controller internal constructor(
         if (negative) {
             if (autoLinkClaims[receipt]?.second != false || !establishedPlayback || !presentationForeground ||
                 !player.playWhenReady || player.playbackState != Player.STATE_BUFFERING ||
-                playbackIntent.pendingSeek != null || preparedPlayer != null || directedChange != null ||
+                playbackIntent.pendingSeek != null || preparedPlayer != null || directedChangeOutstanding(directedChange) ||
                 runway > 1500 || sample.observedMediaDurationMs?.let { duration > it } != true) return
         } else if (autoLinkClaims.containsKey(receipt)) return
         if (autoLinkClaims.size >= 32 && !autoLinkClaims.containsKey(receipt)) return
@@ -3908,7 +3917,7 @@ class Controller internal constructor(
         val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
         if (autoLinkClaims[receipt]?.second != false || !establishedPlayback || !presentationForeground ||
             !player.playWhenReady || player.playbackState != Player.STATE_BUFFERING ||
-            playbackIntent.pendingSeek != null || preparedPlayer != null || directedChange != null ||
+            playbackIntent.pendingSeek != null || preparedPlayer != null || directedChangeOutstanding(directedChange) ||
             runway > 1500 || duration <= media) return null
         val uri = android.net.Uri.parse(sample.segmentId)
         return PlaybackClientLog(level = "warn", event = "candidate_link_sample",
@@ -3949,7 +3958,7 @@ class Controller internal constructor(
         if (!Session.displayAwareAuto || !Session.autoAbr || Session.displayAwareAutoProtocol != "route-v1" ||
             autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
             !playbackIntent.playbackRequested || !establishedPlayback || !presentationForeground ||
-            autoPreparing || autoBoundaryAttempt != null || preparedPlayer != null || directedChange != null ||
+            autoPreparing || autoBoundaryAttempt != null || preparedPlayer != null || directedChangeOutstanding(directedChange) ||
             autoPresentationTarget == null ||
             !playbackControlBootstrapFence.isActive() || currentLinkReceipt() == null ||
             player.bufferedPosition - player.currentPosition < 10_000L ||
@@ -6152,6 +6161,11 @@ internal data class AutoTickState(
     val controlClosed: Boolean,
     val producerState: String?,
 )
+
+/** A directed change still owes the viewer an outcome. A settled change —
+ * committed, retained, reopened or superseded — is history, not a change in
+ * flight, and must not hold Auto or its recovery paths. */
+internal fun directedChangeOutstanding(change: DirectedChange?): Boolean = change?.isSettled == false
 
 /** Why display-aware Auto cannot decide on this tick, or null. A held producer
  * is not a reason: it is the ordinary paced steady state of a producer running
