@@ -278,254 +278,242 @@ class LinuxDolbySdkCase(unittest.TestCase):
                 module.verify_build_tools(root, tools)
 
 
-def test_debian_source_formats_require_descriptor_bound_archive_and_patch_identities():
-    module = helper()
-    def offer(format, patch_name):
-        objects = {"libpciaccess_0.17.orig.tar.gz": b"original", patch_name: b"patch"}
-        descriptor = "Format: " + format + "\nSource: libpciaccess\nVersion: 0.17-2\nChecksums-Sha256:\n"
-        descriptor += "".join(" " + hashlib.sha256(data).hexdigest() + " " + str(len(data)) + " " + name + "\n" for name, data in objects.items())
-        objects["libpciaccess_0.17-2.dsc"] = descriptor.encode()
-        return objects
-    facts = {"package": "libpciaccess", "version": "0.17-2"}
-    valid = offer("1.0", "libpciaccess_0.17-2.diff.gz")
-    assert module.validate_debian_source_offer(facts, valid) == "1.0"
-    quilt = offer("3.0 (quilt)", "libpciaccess_0.17-2.debian.tar.xz")
-    assert module.validate_debian_source_offer(facts, quilt) == "3.0 (quilt)"
-    for bad in [offer("3.0 (quilt)", "libpciaccess_0.17-2.diff.gz"), offer("1.0", "arbitrary.gz"), dict(valid, **{"libpciaccess_0.17-2.diff.gz": b"substitution"})]:
+    def test_debian_source_formats_require_descriptor_bound_archive_and_patch_identities(self):
+        module = helper()
+        def offer(format, patch_name):
+            objects = {"libpciaccess_0.17.orig.tar.gz": b"original", patch_name: b"patch"}
+            descriptor = "Format: " + format + "\nSource: libpciaccess\nVersion: 0.17-2\nChecksums-Sha256:\n"
+            descriptor += "".join(" " + hashlib.sha256(data).hexdigest() + " " + str(len(data)) + " " + name + "\n" for name, data in objects.items())
+            objects["libpciaccess_0.17-2.dsc"] = descriptor.encode()
+            return objects
+        facts = {"package": "libpciaccess", "version": "0.17-2"}
+        valid = offer("1.0", "libpciaccess_0.17-2.diff.gz")
+        assert module.validate_debian_source_offer(facts, valid) == "1.0"
+        quilt = offer("3.0 (quilt)", "libpciaccess_0.17-2.debian.tar.xz")
+        assert module.validate_debian_source_offer(facts, quilt) == "3.0 (quilt)"
+        for bad in [offer("3.0 (quilt)", "libpciaccess_0.17-2.diff.gz"), offer("1.0", "arbitrary.gz"), dict(valid, **{"libpciaccess_0.17-2.diff.gz": b"substitution"})]:
+            with unittest.TestCase().assertRaises(ValueError):
+                module.validate_debian_source_offer(facts, bad)
+        missing = dict(valid)
+        del missing["libpciaccess_0.17-2.diff.gz"]
         with unittest.TestCase().assertRaises(ValueError):
-            module.validate_debian_source_offer(facts, bad)
-    missing = dict(valid)
-    del missing["libpciaccess_0.17-2.diff.gz"]
-    with unittest.TestCase().assertRaises(ValueError):
-        module.validate_debian_source_offer(facts, missing)
+            module.validate_debian_source_offer(facts, missing)
 
 
-def test_fftw_float_pkgconfig_is_generated_by_its_upstream_make_target():
-    root = Path(__file__).resolve().parents[2]
-    lock = json.loads((root / "scripts/linux-video-ffmpeg-sdk-sources.json").read_text())
-    generator = lock["sources"]["fftw3"]["generator"]
-    assert generator["commands"][0]["argv"][0] == "./configure"
-    assert "--enable-single" in generator["commands"][0]["argv"]
-    assert generator["commands"][1] == {"cwd": "source", "argv": ["make", "-j{jobs}", "fftw3f.pc"]}
-    assert generator["outputs"]["lib/pkgconfig/fftw3f.pc"] == {"root": "source", "path": "fftw3f.pc"}
-    assert "--enable-threads" in generator["commands"][0]["argv"]
+    def test_fftw_float_pkgconfig_is_generated_by_its_upstream_make_target(self):
+        root = Path(__file__).resolve().parents[2]
+        lock = json.loads((root / "scripts/linux-video-ffmpeg-sdk-sources.json").read_text())
+        generator = lock["sources"]["fftw3"]["generator"]
+        assert generator["commands"][0]["argv"][0] == "./configure"
+        assert "--enable-single" in generator["commands"][0]["argv"]
+        assert generator["commands"][1] == {"cwd": "source", "argv": ["make", "-j{jobs}", "fftw3f.pc"]}
+        assert generator["outputs"]["lib/pkgconfig/fftw3f.pc"] == {"root": "source", "path": "fftw3f.pc"}
+        assert "--enable-threads" in generator["commands"][0]["argv"]
 
 
-def test_normalized_source_tree_preserves_bytes_executability_and_link_targets():
-    module = helper()
-    def archive(prefix, execute=True, link="main.py"):
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w") as output:
-            path = (prefix + "/" if prefix else "")
-            row = tarfile.TarInfo(path + "main.py")
-            row.mode = 0o755 if execute else 0o644
-            contents = b"source"
-            row.size = len(contents)
-            output.addfile(row, io.BytesIO(contents))
-            row = tarfile.TarInfo(path + "link")
-            row.type = tarfile.SYMTYPE
-            row.linkname = link
-            row.mode = 0o777
-            output.addfile(row)
-        return buffer.getvalue()
-    original = module.normalized_source_tree(archive(""), ".")
-    assert original == module.normalized_source_tree(archive("provider-prefix"), "provider-prefix")
-    assert original != module.normalized_source_tree(archive("", execute=False), ".")
-    assert original != module.normalized_source_tree(archive("", link="other.py"), ".")
-
-
-def test_submodule_composition_rejects_parent_gitlink_mismatch_and_existing_bytes():
-    module = helper()
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        archive = root / "module.tar"
-        with tarfile.open(archive, "w") as output:
-            for name, contents in {"dlg/LICENSE": b"Original license", "dlg/src/dlg/dlg.c": b"original source"}.items():
-                row = tarfile.TarInfo(name)
+    def test_normalized_source_tree_preserves_bytes_executability_and_link_targets(self):
+        module = helper()
+        def archive(prefix, execute=True, link="main.py"):
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w") as output:
+                path = (prefix + "/" if prefix else "")
+                row = tarfile.TarInfo(path + "main.py")
+                row.mode = 0o755 if execute else 0o644
+                contents = b"source"
                 row.size = len(contents)
                 output.addfile(row, io.BytesIO(contents))
-        tree = {"tree": [{"path": "subprojects/dlg", "mode": "160000", "type": "commit", "sha": "b" * 40}], "truncated": False}
-        proof = root / "tree.json"
-        proof.write_text(json.dumps(tree))
-        child = {"path": "subprojects/dlg", "repository_url": "https://github.com/nyorain/dlg.git", "url": "https://codeload.github.com/nyorain/dlg/tar.gz/" + "b" * 40, "commit": "b" * 40, "archive": archive.name, "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "source_root": "dlg", "license_members": ["dlg/LICENSE"]}
-        row = {"commit": "a" * 40, "generator": {"source_root": "."}, "submodules": [child], "submodule_tree_evidence": {"archive": proof.name, "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(), "parent_commit": "a" * 40, "url": "https://api.github.com/repos/freetype/freetype/git/trees/" + "a" * 40 + "?recursive=1"}}
-        parent = {".gitmodules": b'[submodule "dlg"]\n path = subprojects/dlg\n url = https://github.com/nyorain/dlg.git\n'}
-        offer = root / "offer"
-        records = module.stage_submodules(row, parent, offer, root)
-        project = root / "project"
-        project.mkdir()
-        module.compose_submodules(offer, project, root / "work", records)
-        assert (project / "subprojects/dlg/src/dlg/dlg.c").read_bytes() == b"original source"
-        assert not (project / ".git").exists()
-        with unittest.TestCase().assertRaisesRegex(ValueError, "existing parent bytes"):
-            module.compose_submodules(offer, project, root / "second-work", records)
-        child["commit"] = "c" * 40
-        with unittest.TestCase().assertRaisesRegex(ValueError, "parent gitlink"):
-            module.stage_submodules(row, parent, root / "mismatch", root)
+                row = tarfile.TarInfo(path + "link")
+                row.type = tarfile.SYMTYPE
+                row.linkname = link
+                row.mode = 0o777
+                output.addfile(row)
+            return buffer.getvalue()
+        original = module.normalized_source_tree(archive(""), ".")
+        assert original == module.normalized_source_tree(archive("provider-prefix"), "provider-prefix")
+        assert original != module.normalized_source_tree(archive("", execute=False), ".")
+        assert original != module.normalized_source_tree(archive("", link="other.py"), ".")
 
 
-def test_cold_source_urls_are_downloadable_archives_and_required_submodules_are_pinned():
-    root = Path(__file__).resolve().parents[2]
-    lock = json.loads((root / "scripts/linux-video-ffmpeg-sdk-sources.json").read_text())
-    for row in lock["sources"].values():
-        assert not row["url"].endswith(".git")
-        if row.get("historical_archive_equivalence"):
-            assert row["source_tree_sha256"] == row["historical_archive_equivalence"]["normalized_tree_sha256"]
-    assert {module["path"] for module in lock["sources"]["freetype"]["submodules"]} == {"subprojects/dlg"}
-    placebo = lock["sources"]["libplacebo"]
-    assert {module["path"] for module in placebo["submodules"]} == {"3rdparty/glad", "3rdparty/jinja", "3rdparty/markupsafe", "3rdparty/fast_float", "3rdparty/Vulkan-Headers"}
-    assert all("nuklear" not in module["path"] for module in placebo["submodules"])
+    def test_submodule_composition_rejects_parent_gitlink_mismatch_and_existing_bytes(self):
+        module = helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "module.tar"
+            with tarfile.open(archive, "w") as output:
+                for name, contents in {"dlg/LICENSE": b"Original license", "dlg/src/dlg/dlg.c": b"original source"}.items():
+                    row = tarfile.TarInfo(name)
+                    row.size = len(contents)
+                    output.addfile(row, io.BytesIO(contents))
+            tree = {"tree": [{"path": "subprojects/dlg", "mode": "160000", "type": "commit", "sha": "b" * 40}], "truncated": False}
+            proof = root / "tree.json"
+            proof.write_text(json.dumps(tree))
+            child = {"path": "subprojects/dlg", "repository_url": "https://github.com/nyorain/dlg.git", "url": "https://codeload.github.com/nyorain/dlg/tar.gz/" + "b" * 40, "commit": "b" * 40, "archive": archive.name, "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "source_root": "dlg", "license_members": ["dlg/LICENSE"]}
+            row = {"commit": "a" * 40, "generator": {"source_root": "."}, "submodules": [child], "submodule_tree_evidence": {"archive": proof.name, "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(), "parent_commit": "a" * 40, "url": "https://api.github.com/repos/freetype/freetype/git/trees/" + "a" * 40 + "?recursive=1"}}
+            parent = {".gitmodules": b'[submodule "dlg"]\n path = subprojects/dlg\n url = https://github.com/nyorain/dlg.git\n'}
+            offer = root / "offer"
+            records = module.stage_submodules(row, parent, offer, root)
+            project = root / "project"
+            project.mkdir()
+            module.compose_submodules(offer, project, root / "work", records)
+            assert (project / "subprojects/dlg/src/dlg/dlg.c").read_bytes() == b"original source"
+            assert not (project / ".git").exists()
+            with unittest.TestCase().assertRaisesRegex(ValueError, "existing parent bytes"):
+                module.compose_submodules(offer, project, root / "second-work", records)
+            child["commit"] = "c" * 40
+            with unittest.TestCase().assertRaisesRegex(ValueError, "parent gitlink"):
+                module.stage_submodules(row, parent, root / "mismatch", root)
 
 
-def test_isolated_cmake_install_cannot_redirect_into_sdk_or_host():
-    module = helper()
-    private = ["cmake", "--install", "{build}", "--prefix", "{build}/installed"]
-    generator = {
-        "source_root": ".", "commands": [{"cwd": "build", "argv": private}],
-        "outputs": {"share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake": {
-            "root": "build", "path": "installed/share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake"
-        }}
-    }
-    module.validate_generator(generator)
-    for prefix in ["{sdk}", "/usr", "/tmp/host-sdk", "{build}/../outside"]:
-        redirected = {**generator, "commands": [{"cwd": "build", "argv": private[:-1] + [prefix]}]}
+    def test_cold_source_urls_are_downloadable_archives_and_required_submodules_are_pinned(self):
+        root = Path(__file__).resolve().parents[2]
+        lock = json.loads((root / "scripts/linux-video-ffmpeg-sdk-sources.json").read_text())
+        for row in lock["sources"].values():
+            assert not row["url"].endswith(".git")
+            if row.get("historical_archive_equivalence"):
+                assert row["source_tree_sha256"] == row["historical_archive_equivalence"]["normalized_tree_sha256"]
+        assert {module["path"] for module in lock["sources"]["freetype"]["submodules"]} == {"subprojects/dlg"}
+        placebo = lock["sources"]["libplacebo"]
+        assert {module["path"] for module in placebo["submodules"]} == {"3rdparty/glad", "3rdparty/jinja", "3rdparty/markupsafe", "3rdparty/fast_float", "3rdparty/Vulkan-Headers"}
+        assert all("nuklear" not in module["path"] for module in placebo["submodules"])
+
+
+    def test_isolated_cmake_install_cannot_redirect_into_sdk_or_host(self):
+        module = helper()
+        private = ["cmake", "--install", "{build}", "--prefix", "{build}/installed"]
+        generator = {
+            "source_root": ".", "commands": [{"cwd": "build", "argv": private}],
+            "outputs": {"share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake": {
+                "root": "build", "path": "installed/share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake"
+            }}
+        }
+        module.validate_generator(generator)
+        for prefix in ["{sdk}", "/usr", "/tmp/host-sdk", "{build}/../outside"]:
+            redirected = {**generator, "commands": [{"cwd": "build", "argv": private[:-1] + [prefix]}]}
+            with unittest.TestCase().assertRaises(ValueError):
+                module.validate_generator(redirected)
+        for argv in [["make", "install"], ["cmake", "--install", "{source}", "--prefix", "{build}/installed"]]:
+            with unittest.TestCase().assertRaises(ValueError):
+                module.validate_generator({**generator, "commands": [{"cwd": "build", "argv": argv}]})
+
+
+    def test_cmake_exports_reject_build_paths_and_existing_sdk_bytes(self):
+        module = helper()
+        name = "share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            build, sdk = root / "build", root / "sdk"
+            origin = build / "installed" / name
+            origin.parent.mkdir(parents=True)
+            relative = b'set(_IMPORT_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../..")\n'
+            origin.write_bytes(relative)
+            selected = {"root": "build", "path": "installed/" + name}
+            result = module.publish_generated_output(sdk, name, build, selected)
+            assert (sdk / name).read_bytes() == relative
+            assert result["sha256"] == hashlib.sha256(relative).hexdigest()
+            origin.write_bytes(b"changed valid bytes\n")
+            with unittest.TestCase().assertRaises(ValueError):
+                module.publish_generated_output(sdk, name, build, selected)
+            assert (sdk / name).read_bytes() == relative
+            (sdk / name).unlink()
+            origin.write_bytes(('set(VulkanHeaders_DIR "' + str(build) + '/installed")\n').encode())
+            with unittest.TestCase().assertRaises(ValueError):
+                module.publish_generated_output(sdk, name, build, selected)
+            assert not (sdk / name).exists()
+
+
+    def test_bootstrap_package_rejects_changed_binary_wrong_abi_and_link_alias(self):
+        import struct
+        module = helper()
+        binary = bytearray(64)
+        binary[:6] = b"\x7fELF\x02\x01"
+        struct.pack_into("<H", binary, 18, 62)
+        binary = bytes(binary)
+        row = {"version": "3.1-1", "architecture": "amd64", "executable_member": "usr/bin/gperf",
+               "executable_sha256": hashlib.sha256(binary).hexdigest(),
+               "copyright_member": "usr/share/doc/gperf/copyright"}
+        regular = {"usr/bin/gperf": binary, "usr/share/doc/gperf/copyright": b"original license"}
+        control = b"Package: gperf\nVersion: 3.1-1\nArchitecture: amd64\n"
+        assert module.bootstrap_tool_components(regular, {}, control, row)["gperf"] == binary
         with unittest.TestCase().assertRaises(ValueError):
-            module.validate_generator(redirected)
-    for argv in [["make", "install"], ["cmake", "--install", "{source}", "--prefix", "{build}/installed"]]:
+            module.bootstrap_tool_components({**regular, "usr/bin/gperf": binary + b"changed"}, {}, control, row)
+        other = bytearray(binary)
+        struct.pack_into("<H", other, 18, 183)
+        wrong = bytes(other)
         with unittest.TestCase().assertRaises(ValueError):
-            module.validate_generator({**generator, "commands": [{"cwd": "build", "argv": argv}]})
-
-
-def test_cmake_exports_reject_build_paths_and_existing_sdk_bytes():
-    module = helper()
-    name = "share/cmake/VulkanHeaders/VulkanHeadersConfig.cmake"
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory).resolve()
-        build, sdk = root / "build", root / "sdk"
-        origin = build / "installed" / name
-        origin.parent.mkdir(parents=True)
-        relative = b'set(_IMPORT_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../..")\n'
-        origin.write_bytes(relative)
-        selected = {"root": "build", "path": "installed/" + name}
-        result = module.publish_generated_output(sdk, name, build, selected)
-        assert (sdk / name).read_bytes() == relative
-        assert result["sha256"] == hashlib.sha256(relative).hexdigest()
-        origin.write_bytes(b"changed valid bytes\n")
+            module.bootstrap_tool_components({**regular, "usr/bin/gperf": wrong}, {}, control,
+                                             {**row, "executable_sha256": hashlib.sha256(wrong).hexdigest()})
         with unittest.TestCase().assertRaises(ValueError):
-            module.publish_generated_output(sdk, name, build, selected)
-        assert (sdk / name).read_bytes() == relative
-        (sdk / name).unlink()
-        origin.write_bytes(('set(VulkanHeaders_DIR "' + str(build) + '/installed")\n').encode())
+            module.bootstrap_tool_components(regular, {"usr/bin/gperf": "/usr/bin/host-gperf"}, control, row)
         with unittest.TestCase().assertRaises(ValueError):
-            module.publish_generated_output(sdk, name, build, selected)
-        assert not (sdk / name).exists()
+            module.bootstrap_tool_components(regular, {}, control.replace(b"3.1-1", b"3.2-1"), row)
 
 
-def test_bootstrap_package_rejects_changed_binary_wrong_abi_and_link_alias():
-    import struct
-    module = helper()
-    binary = bytearray(64)
-    binary[:6] = b"\x7fELF\x02\x01"
-    struct.pack_into("<H", binary, 18, 62)
-    binary = bytes(binary)
-    row = {"version": "3.1-1", "architecture": "amd64", "executable_member": "usr/bin/gperf",
-           "executable_sha256": hashlib.sha256(binary).hexdigest(),
-           "copyright_member": "usr/share/doc/gperf/copyright"}
-    regular = {"usr/bin/gperf": binary, "usr/share/doc/gperf/copyright": b"original license"}
-    control = b"Package: gperf\nVersion: 3.1-1\nArchitecture: amd64\n"
-    assert module.bootstrap_tool_components(regular, {}, control, row)["gperf"] == binary
-    with unittest.TestCase().assertRaises(ValueError):
-        module.bootstrap_tool_components({**regular, "usr/bin/gperf": binary + b"changed"}, {}, control, row)
-    other = bytearray(binary)
-    struct.pack_into("<H", other, 18, 183)
-    wrong = bytes(other)
-    with unittest.TestCase().assertRaises(ValueError):
-        module.bootstrap_tool_components({**regular, "usr/bin/gperf": wrong}, {}, control,
-                                         {**row, "executable_sha256": hashlib.sha256(wrong).hexdigest()})
-    with unittest.TestCase().assertRaises(ValueError):
-        module.bootstrap_tool_components(regular, {"usr/bin/gperf": "/usr/bin/host-gperf"}, control, row)
-    with unittest.TestCase().assertRaises(ValueError):
-        module.bootstrap_tool_components(regular, {}, control.replace(b"3.1-1", b"3.2-1"), row)
-
-
-def test_private_bootstrap_fence_rejects_tool_license_and_source_offer_substitution():
-    import struct
-    module = helper()
-    binary = bytearray(64)
-    binary[:6] = b"\x7fELF\x02\x01"
-    struct.pack_into("<H", binary, 18, 62)
-    binary = bytes(binary)
-    package = b"authenticated package fixture"
-    control = b"Package: gperf\nVersion: 3.1-1\nArchitecture: amd64\n"
-    regular = {"usr/bin/gperf": binary, "usr/share/doc/gperf/copyright": b"original license"}
-    row = {"version": "3.1-1", "architecture": "amd64", "executable_member": "usr/bin/gperf",
-           "executable_sha256": hashlib.sha256(binary).hexdigest(),
-           "copyright_member": "usr/share/doc/gperf/copyright",
-           "archive_sha256": hashlib.sha256(package).hexdigest(),
-           "source_offer": "provenance/distribution-sources/gperf",
-           "launcher": "provenance/build-tools/gperf/gperf"}
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory).resolve()
-        base = root / "provenance/build-tools/gperf"
-        base.mkdir(parents=True)
-        offered = root / row["source_offer"] / "original-package.deb"
-        offered.parent.mkdir(parents=True)
-        offered.write_bytes(package)
-        contents = {"gperf": binary, "copyright": b"original license", "control": control,
-                    "original-package.deb": package}
-        for name, data in contents.items():
-            (base / name).write_bytes(data)
-        (base / "gperf").chmod(0o555)
-        row["files"] = {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}
-        # Mock only archive decoding; byte/hash/fence checks still inspect real files.
-        with patch.object(module, "package_members", return_value=((regular, {}), ({"control": control}, {}))):
-            module.verify_build_tools(root, {"gperf": row})
-            for name in ["gperf", "copyright"]:
-                path = base / name
-                path.chmod(0o644)
-                path.write_bytes(contents[name] + b"changed")
-                if name == "gperf":
-                    path.chmod(0o555)
+    def test_private_bootstrap_fence_rejects_tool_license_and_source_offer_substitution(self):
+        import struct
+        module = helper()
+        binary = bytearray(64)
+        binary[:6] = b"\x7fELF\x02\x01"
+        struct.pack_into("<H", binary, 18, 62)
+        binary = bytes(binary)
+        package = b"authenticated package fixture"
+        control = b"Package: gperf\nVersion: 3.1-1\nArchitecture: amd64\n"
+        regular = {"usr/bin/gperf": binary, "usr/share/doc/gperf/copyright": b"original license"}
+        row = {"version": "3.1-1", "architecture": "amd64", "executable_member": "usr/bin/gperf",
+               "executable_sha256": hashlib.sha256(binary).hexdigest(),
+               "copyright_member": "usr/share/doc/gperf/copyright",
+               "archive_sha256": hashlib.sha256(package).hexdigest(),
+               "source_offer": "provenance/distribution-sources/gperf",
+               "launcher": "provenance/build-tools/gperf/gperf"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            base = root / "provenance/build-tools/gperf"
+            base.mkdir(parents=True)
+            offered = root / row["source_offer"] / "original-package.deb"
+            offered.parent.mkdir(parents=True)
+            offered.write_bytes(package)
+            contents = {"gperf": binary, "copyright": b"original license", "control": control,
+                        "original-package.deb": package}
+            for name, data in contents.items():
+                (base / name).write_bytes(data)
+            (base / "gperf").chmod(0o555)
+            row["files"] = {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}
+            # Mock only archive decoding; byte/hash/fence checks still inspect real files.
+            with patch.object(module, "package_members", return_value=((regular, {}), ({"control": control}, {}))):
+                module.verify_build_tools(root, {"gperf": row})
+                for name in ["gperf", "copyright"]:
+                    path = base / name
+                    path.chmod(0o644)
+                    path.write_bytes(contents[name] + b"changed")
+                    if name == "gperf":
+                        path.chmod(0o555)
+                    with unittest.TestCase().assertRaises(ValueError):
+                        module.verify_build_tools(root, {"gperf": row})
+                    path.chmod(0o644)
+                    path.write_bytes(contents[name])
+                    if name == "gperf":
+                        path.chmod(0o555)
+                offered.write_bytes(package + b"changed")
                 with unittest.TestCase().assertRaises(ValueError):
                     module.verify_build_tools(root, {"gperf": row})
-                path.chmod(0o644)
-                path.write_bytes(contents[name])
-                if name == "gperf":
-                    path.chmod(0o555)
-            offered.write_bytes(package + b"changed")
+
+
+    def test_bootstrap_claims_normalize_staged_license_path_without_losing_source_identity(self):
+        module = helper()
+        declared = {"meson": {"version": "1.12.1", "url": "https://example.org/meson.tar.gz",
+                              "archive_sha256": "a" * 64, "archive": "meson-1.12.1.tar.gz",
+                              "consumed_by": "minimum supported upstream version",
+                              "license_member": "meson-1.12.1/COPYING"},
+                    "gperf": {"version": "3.1-1", "executable_sha256": "b" * 64}}
+        observed = {"meson": {"version": "1.12.1", "url": "https://example.org/meson.tar.gz",
+                              "archive_sha256": "a" * 64,
+                              "license_member": "source/meson-1.12.1/COPYING"},
+                    "gperf": dict(declared["gperf"])}
+        module.validate_build_tool_claims(declared, observed)
+        for key in ["version", "url", "archive_sha256", "license_member"]:
+            tampered = {**observed, "meson": {**observed["meson"], key: "substituted"}}
             with unittest.TestCase().assertRaises(ValueError):
-                module.verify_build_tools(root, {"gperf": row})
-
-
-def test_bootstrap_claims_normalize_staged_license_path_without_losing_source_identity():
-    module = helper()
-    declared = {"meson": {"version": "1.12.1", "url": "https://example.org/meson.tar.gz",
-                          "archive_sha256": "a" * 64, "archive": "meson-1.12.1.tar.gz",
-                          "consumed_by": "minimum supported upstream version",
-                          "license_member": "meson-1.12.1/COPYING"},
-                "gperf": {"version": "3.1-1", "executable_sha256": "b" * 64}}
-    observed = {"meson": {"version": "1.12.1", "url": "https://example.org/meson.tar.gz",
-                          "archive_sha256": "a" * 64,
-                          "license_member": "source/meson-1.12.1/COPYING"},
-                "gperf": dict(declared["gperf"])}
-    module.validate_build_tool_claims(declared, observed)
-    for key in ["version", "url", "archive_sha256", "license_member"]:
-        tampered = {**observed, "meson": {**observed["meson"], key: "substituted"}}
+                module.validate_build_tool_claims(declared, tampered)
         with unittest.TestCase().assertRaises(ValueError):
-            module.validate_build_tool_claims(declared, tampered)
-    with unittest.TestCase().assertRaises(ValueError):
-        module.validate_build_tool_claims(declared, {"meson": observed["meson"]})
-    with unittest.TestCase().assertRaises(ValueError):
-        module.validate_build_tool_claims(declared, {**observed, "gperf": {**observed["gperf"], "executable_sha256": "c" * 64}})
-
-
-def load_tests(loader, tests, pattern):
-    """Collect this module's plain `test_*` functions under unittest.
-
-    `make operations-check` runs `unittest discover`, which only collects
-    TestCase methods; without this hook the functions below never run.
-    """
-    for name, value in sorted(globals().items()):
-        if name.startswith("test_") and callable(value) and not isinstance(value, type):
-            tests.addTest(unittest.FunctionTestCase(value, description=name))
-    return tests
+            module.validate_build_tool_claims(declared, {"meson": observed["meson"]})
+        with unittest.TestCase().assertRaises(ValueError):
+            module.validate_build_tool_claims(declared, {**observed, "gperf": {**observed["gperf"], "executable_sha256": "c" * 64}})

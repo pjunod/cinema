@@ -219,101 +219,89 @@ printf '%s\n' "$cc" "$cxx" "$pkg_config"
             self.assertFalse((root / "provenance/linux-dolby-package.json").exists())
 
 
-def test_normal_docker_caller_requires_audited_amd64_package_and_keeps_arm_incumbent():
-    root = Path(__file__).resolve().parents[2]
-    make = (root / "Makefile").read_text()
-    docker = (root / "Dockerfile").read_text()
-    assert "PLURX_LINUX_DOLBY_PACKAGE" in make
-    assert "--step docker-build" in make
-    assert "--target runtime --platform linux/arm64" in make
-    assert "FROM runtime AS runtime-dolby-amd64" in docker
-    assert "--mount=from=linux-dolby-package" in docker
-    assert "--step install-shipping" in docker
+    def test_normal_docker_caller_requires_audited_amd64_package_and_keeps_arm_incumbent(self):
+        root = Path(__file__).resolve().parents[2]
+        make = (root / "Makefile").read_text()
+        docker = (root / "Dockerfile").read_text()
+        assert "PLURX_LINUX_DOLBY_PACKAGE" in make
+        assert "--step docker-build" in make
+        assert "--target runtime --platform linux/arm64" in make
+        assert "FROM runtime AS runtime-dolby-amd64" in docker
+        assert "--mount=from=linux-dolby-package" in docker
+        assert "--step install-shipping" in docker
 
 
-def test_docker_install_tools_are_temporary_and_build_identity_arguments_survive():
-    root = Path(__file__).resolve().parents[2]
-    docker = (root / "Dockerfile").read_text()
-    installer = docker.split("FROM runtime-assets AS linux-dolby-install", 1)[1].split("FROM runtime AS runtime-dolby-amd64", 1)[0]
-    final = docker.split("FROM runtime AS runtime-dolby-amd64", 1)[1].split("FROM runtime AS default-runtime", 1)[0]
-    assert installer.index("USER root") < installer.index("--step install-shipping")
-    assert "apt-get install -y --no-install-recommends python3" in installer
-    assert "COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg" in final
-    assert final.index("USER root") < final.index("COPY --from=") < final.index("USER plurx")
-    assert "python3" not in final
-    make = (root / "Makefile").read_text()
-    for option, variable in [("plurx-build-ref", "BUILD_REF"), ("plurx-build-sha", "BUILD_SHA"), ("source-date-epoch", "SOURCE_DATE_EPOCH")]:
-        assert '--' + option + ' "$(' + variable + ')"' in make
-    builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
-    assert '*build_arguments' in builder
-    assert 'argument + "=" + getattr(args, argument.lower())' in builder
+    def test_docker_install_tools_are_temporary_and_build_identity_arguments_survive(self):
+        root = Path(__file__).resolve().parents[2]
+        docker = (root / "Dockerfile").read_text()
+        installer = docker.split("FROM runtime-assets AS linux-dolby-install", 1)[1].split("FROM runtime AS runtime-dolby-amd64", 1)[0]
+        final = docker.split("FROM runtime AS runtime-dolby-amd64", 1)[1].split("FROM runtime AS default-runtime", 1)[0]
+        assert installer.index("USER root") < installer.index("--step install-shipping")
+        assert "apt-get install -y --no-install-recommends python3" in installer
+        assert "COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg" in final
+        assert final.index("USER root") < final.index("COPY --from=") < final.index("USER plurx")
+        assert "python3" not in final
+        make = (root / "Makefile").read_text()
+        for option, variable in [("plurx-build-ref", "BUILD_REF"), ("plurx-build-sha", "BUILD_SHA"), ("source-date-epoch", "SOURCE_DATE_EPOCH")]:
+            assert '--' + option + ' "$(' + variable + ')"' in make
+        builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
+        assert '*build_arguments' in builder
+        assert 'argument + "=" + getattr(args, argument.lower())' in builder
 
 
-def test_package_export_observes_official_configuration_and_reuses_only_matched_parser():
-    root = Path(__file__).resolve().parents[2]
-    builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
-    pipeline = builder.split("def package_pipeline", 1)[1].split("def main", 1)[0]
-    assert 'helper.package_members' in pipeline
-    assert 'official configuration reporter differs from authenticated package' in pipeline
-    assert '["/usr/lib/jellyfin-ffmpeg/ffmpeg", "-version"]' in pipeline
-    assert pipeline.index('helper.generate(') < pipeline.index('for step in ["configure", "compile", "install"]')
-    assert pipeline.index('validate_parser_union(') < pipeline.index('shutil.copy2(retained_binary')
-    assert pipeline.index('assemble(') < pipeline.index('return verify_closure(')
-    docker = (root / "Dockerfile").read_text()
-    stage = docker.split('FROM runtime-assets AS linux-dolby-package-build', 1)[1].split('FROM runtime-assets AS linux-dolby-install', 1)[0]
-    assert 'test "$TARGETARCH" = amd64' in stage
-    assert '--step pipeline' in stage
-    assert 'FROM scratch AS linux-dolby-package-export' in stage
-    assert 'COPY --from=linux-dolby-package-build /work/linux-dolby/package /package' in stage
-    assert 'cargo' not in stage and 'rust:' not in stage
+    def test_package_export_observes_official_configuration_and_reuses_only_matched_parser(self):
+        root = Path(__file__).resolve().parents[2]
+        builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
+        pipeline = builder.split("def package_pipeline", 1)[1].split("def main", 1)[0]
+        assert 'helper.package_members' in pipeline
+        assert 'official configuration reporter differs from authenticated package' in pipeline
+        assert '["/usr/lib/jellyfin-ffmpeg/ffmpeg", "-version"]' in pipeline
+        assert pipeline.index('helper.generate(') < pipeline.index('for step in ["configure", "compile", "install"]')
+        assert pipeline.index('validate_parser_union(') < pipeline.index('shutil.copy2(retained_binary')
+        assert pipeline.index('assemble(') < pipeline.index('return verify_closure(')
+        docker = (root / "Dockerfile").read_text()
+        stage = docker.split('FROM runtime-assets AS linux-dolby-package-build', 1)[1].split('FROM runtime-assets AS linux-dolby-install', 1)[0]
+        assert 'test "$TARGETARCH" = amd64' in stage
+        assert '--step pipeline' in stage
+        assert 'FROM scratch AS linux-dolby-package-export' in stage
+        assert 'COPY --from=linux-dolby-package-build /work/linux-dolby/package /package' in stage
+        assert 'cargo' not in stage and 'rust:' not in stage
 
 
-def test_sdk_link_search_resolves_real_transitive_elf_without_runtime_build_paths():
-    import shlex
-    import shutil
-    import subprocess
-    import sys
-    if not sys.platform.startswith("linux") or not shutil.which("gcc") or not shutil.which("readelf"):
-        raise unittest.SkipTest("requires the GNU Linux linker and readelf")
-    module = recipe()
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        sdk = root / "prepared-sdk"
-        libraries = sdk / "sdk/lib"
-        libraries.mkdir(parents=True)
-        (root / "leaf.c").write_text("int leaf(void) { return 42; }\n")
-        (root / "consumer.c").write_text("extern int leaf(void); int consumer(void) { return leaf(); }\n")
-        (root / "main.c").write_text("extern int consumer(void); int main(void) { return consumer(); }\n")
-        def command(argv):
-            return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
-        leaf = libraries / "libplurx_sdk_leaf.so.1"
-        result = command(["gcc", "-shared", "-fPIC", str(root / "leaf.c"),
-                          "-Wl,-soname,libplurx_sdk_leaf.so.1", "-o", str(leaf)])
-        assert result.returncode == 0, result.stderr
-        shutil.copyfile(leaf, libraries / "libplurx_sdk_leaf.so")
-        result = command(["gcc", "-shared", "-fPIC", str(root / "consumer.c"),
-                          "-L" + str(libraries), "-lplurx_sdk_leaf", "-o", str(libraries / "libplurx_sdk_consumer.so")])
-        assert result.returncode == 0, result.stderr
-        direct = ["gcc", str(root / "main.c"), "-L" + str(libraries), "-lplurx_sdk_consumer", "-o", str(root / "direct")]
-        assert command(direct).returncode != 0
-        executable = root / "linked"
-        result = command(["gcc", str(root / "main.c"), "-Wl,--disable-new-dtags",
-                          "-Wl,-rpath=/usr/lib/jellyfin-ffmpeg/lib",
-                          *shlex.split(module.sdk_link_flags(sdk)), "-lplurx_sdk_consumer", "-o", str(executable)])
-        assert result.returncode == 0, result.stderr
-        dynamic = command(["readelf", "-d", str(executable)])
-        assert dynamic.returncode == 0, dynamic.stderr
-        assert "RPATH" in dynamic.stdout and "/usr/lib/jellyfin-ffmpeg/lib" in dynamic.stdout
-        assert str(sdk) not in dynamic.stdout
-
-
-def load_tests(loader, tests, pattern):
-    """Collect this module's plain `test_*` functions under unittest.
-
-    `make operations-check` runs `unittest discover`, which only collects
-    TestCase methods; without this hook the functions below never run.
-    """
-    for name, value in sorted(globals().items()):
-        if name.startswith("test_") and callable(value) and not isinstance(value, type):
-            tests.addTest(unittest.FunctionTestCase(value, description=name))
-    return tests
+    def test_sdk_link_search_resolves_real_transitive_elf_without_runtime_build_paths(self):
+        import shlex
+        import shutil
+        import subprocess
+        import sys
+        if not sys.platform.startswith("linux") or not shutil.which("gcc") or not shutil.which("readelf"):
+            raise unittest.SkipTest("requires the GNU Linux linker and readelf")
+        module = recipe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sdk = root / "prepared-sdk"
+            libraries = sdk / "sdk/lib"
+            libraries.mkdir(parents=True)
+            (root / "leaf.c").write_text("int leaf(void) { return 42; }\n")
+            (root / "consumer.c").write_text("extern int leaf(void); int consumer(void) { return leaf(); }\n")
+            (root / "main.c").write_text("extern int consumer(void); int main(void) { return consumer(); }\n")
+            def command(argv):
+                return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+            leaf = libraries / "libplurx_sdk_leaf.so.1"
+            result = command(["gcc", "-shared", "-fPIC", str(root / "leaf.c"),
+                              "-Wl,-soname,libplurx_sdk_leaf.so.1", "-o", str(leaf)])
+            assert result.returncode == 0, result.stderr
+            shutil.copyfile(leaf, libraries / "libplurx_sdk_leaf.so")
+            result = command(["gcc", "-shared", "-fPIC", str(root / "consumer.c"),
+                              "-L" + str(libraries), "-lplurx_sdk_leaf", "-o", str(libraries / "libplurx_sdk_consumer.so")])
+            assert result.returncode == 0, result.stderr
+            direct = ["gcc", str(root / "main.c"), "-L" + str(libraries), "-lplurx_sdk_consumer", "-o", str(root / "direct")]
+            assert command(direct).returncode != 0
+            executable = root / "linked"
+            result = command(["gcc", str(root / "main.c"), "-Wl,--disable-new-dtags",
+                              "-Wl,-rpath=/usr/lib/jellyfin-ffmpeg/lib",
+                              *shlex.split(module.sdk_link_flags(sdk)), "-lplurx_sdk_consumer", "-o", str(executable)])
+            assert result.returncode == 0, result.stderr
+            dynamic = command(["readelf", "-d", str(executable)])
+            assert dynamic.returncode == 0, dynamic.stderr
+            assert "RPATH" in dynamic.stdout and "/usr/lib/jellyfin-ffmpeg/lib" in dynamic.stdout
+            assert str(sdk) not in dynamic.stdout
