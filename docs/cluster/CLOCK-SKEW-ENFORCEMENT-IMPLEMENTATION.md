@@ -287,8 +287,10 @@ and enforcement itself are untouched; their ruling is separate):
    a stopped learner no longer refuses takeover, the expiry scan and every
    membership change on every node (its OWN routes are still never contested;
    see the review entry below). Voters must still be bounded; a measured
-   learner above 2 s still refuses; fenced removal excuses only unobserved
-   *learner* survivors; and `promote_learner` plus the leader-side Raft
+   learner above 2 s refuses only its own routes and promotion (amended
+   2026-10-10: counting it cluster-wide let a ~9.7 s learner step refuse
+   every voter's expiry scan for ~16 minutes; design §3.3); fenced removal
+   excuses only unobserved *learner* survivors; and `promote_learner` plus the leader-side Raft
    `Promote` admission require the promoted learner's own bound
    (`admit_promotion_for` / `revalidate_promotion_for`). The role comes only
    from the exact applied directory. Focused tests:

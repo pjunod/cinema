@@ -522,12 +522,19 @@ not make the state `Incomplete`: it holds no vote, so a stopped learner must
 not refuse takeover, the expiry scan and every membership change on every
 node. The role is proved only from the exact applied peer directory bound to
 the membership watch; a roster without one treats every peer as a voter. A
-*measured* learner still contributes `|offset| + uncertainty` to the worst
-bound and refuses above 2 s, because a learner may own delegated media
-sessions whose leases takeover and the expiry scan spend. Promoting a learner
+*measured* learner's `|offset| + uncertainty` is likewise not part of the
+cluster-wide worst bound, which is over voters only: above 2 s it refuses
+the routes that learner owns (below) and its own promotion, nothing else.
+(Amended 2026-10-10, reversing the 2026-10-04 wording that counted it: a
+~9.7 s learner step made every voter's enforced expiry scan refuse for
+~16 minutes, so no node could fail a session over.) Promoting a learner
 makes its clock a voter's clock, so promotion additionally requires that
 learner's own fresh bounded observation (§3.5). A node that is itself a
 learner applies the same rule: every voter is its peer and must be bounded.
+The leader answers a committed learner's clock probe whatever its own
+acquisition state — a probe response is timing evidence, not an authority
+grant — so a skewed learner measures its own offset instead of seeing the
+leader as `Unknown`.
 
 The excuse is about votes, so it covers membership changes and the surviving
 set of a fenced removal, never a lease. A learner owns delegated media
@@ -647,10 +654,11 @@ Reasons, each row:
   protocol rollback. The exception never skips a fence, manufactures quorum,
   permits self-promotion, or turns a missing clock probe alone into proof that
   the target is unreachable.
-- **An unobserved learner refuses nothing but its own promotion and its own
-  leases.** The amended §3.3 rule applies to every row: coverage, takeover,
-  the expiry scan, membership acquisition and the surviving set of a fenced
-  removal excuse an unobserved learner and never an unobserved voter. Takeover
+- **An unobserved or out-of-bound learner refuses nothing but its own
+  promotion and its own leases.** The amended §3.3 rule applies to every row:
+  coverage, takeover, the expiry scan, membership acquisition and the
+  surviving set of a fenced removal excuse an unobserved learner and never an
+  unobserved voter, and the cluster-wide bound counts voters only. Takeover
   and the expiry scan still never contest a route that learner OWNS: its
   lease expiry is its own clock's, so the owner must be bounded too. Learner promotion (the
   application `promote_learner` and the leader-side Raft `Promote`

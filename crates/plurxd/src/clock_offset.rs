@@ -63,12 +63,16 @@ struct ObserverInner {
     test: TestObservationControl,
 }
 
-/// Instance-owned scheduling only: no clock, directory, sample or publication
-/// is supplied by this seam. Production builds contain none of these fields.
+/// Instance-owned scheduling, plus one fixed skew on the two stamps this
+/// node writes when it ANSWERS a probe, so one process can present a stepped
+/// peer. No directory, sample or publication is supplied by this seam, and
+/// the node's own probes and decisions keep the real clock. Production
+/// builds contain none of these fields.
 #[cfg(all(test, feature = "cluster-integration-tests"))]
 #[derive(Default)]
 struct TestObservationControl {
     hold_periodic: std::sync::atomic::AtomicBool,
+    response_skew_ms: std::sync::atomic::AtomicI64,
     periodic: tokio::sync::Notify,
     before_round: Mutex<Option<Arc<TestObservationGate>>>,
     before_final_query: Mutex<Option<Arc<TestObservationGate>>>,
@@ -204,6 +208,22 @@ impl ClockObserver {
     }
 
     #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_skew_responses_ms(&self, skew_ms: i64) {
+        self.0
+            .test
+            .response_skew_ms
+            .store(skew_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_response_skew_ms(&self) -> i64 {
+        self.0
+            .test
+            .response_skew_ms
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
     pub(crate) fn test_demand_round(&self) {
         self.request_round().expect("live test owner");
     }
@@ -325,10 +345,14 @@ impl ClockObserver {
             || current.clock_generation != round.ticket.clock_generation
             || current.state_generation != round.ticket.state_generation
             || self.0.membership.clock_leadership_identity().as_ref() != Some(&barrier.leadership)
-            || guard.acquire().is_err()
         {
             return None;
         }
+        // Deliberately not `guard.acquire()`: answering a learner's probe is
+        // timing evidence, not an authority grant, and the leader's own
+        // acquisition state says nothing about its timestamps. Refusing here
+        // made a skewed learner see the leader as Unknown instead of
+        // measuring its own offset. Promotion is admitted separately.
         Some(round)
     }
 

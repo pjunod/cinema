@@ -22,6 +22,7 @@ mod causal_tests {
     use super::*;
     use crate::clock_offset::ClockObserver;
     use futures_util::FutureExt;
+    use plurx_core::cluster::clock::{ClockDecision, ClockRefusal, PeerClockOffset};
     use plurx_core::cluster::membership::{
         decode_join_token, join_token_digest, ActivitySigningKey, ClusterPeer, ClusterRole,
         InternalPeerAuth, JoinSecrets, MembershipManager, RedeemJoinRequest,
@@ -295,10 +296,11 @@ mod causal_tests {
             );
             tokio::spawn(async move { startup.serve_normal(app, stop.cancelled()).await })
         };
+        let learner_observer = ClockObserver::new(learner.clone());
         let learner_app = clock_app(
             learner.clone(),
             learner_id.clone(),
-            ClockObserver::new(learner.clone()),
+            learner_observer.clone(),
         );
         let learner_listener = tokio::net::TcpListener::bind(learner_config.server.bind)
             .await
@@ -507,6 +509,43 @@ mod causal_tests {
                     .state_generation
             );
 
+            // 2026-10-10 incident: a stepped learner. With enforcement on,
+            // the leader measures it ~10 s ahead, yet its expiry scan still
+            // runs (the cluster-wide bound is over voters only), the
+            // learner's own routes are refused `Offset`, and the leader still
+            // answers the learner's probe with signed timing instead of 503.
+            let leader_guard = leader.clock_guard();
+            leader_guard.set_enforced(true);
+            learner_observer.test_skew_responses_ms(10_000);
+            observer.test_demand_round();
+            wait_rounds(&observer, 4).await;
+            let measured = leader_guard.snapshot().peers.get(&learner_id).cloned();
+            assert!(
+                matches!(
+                    measured,
+                    Some(PeerClockOffset::Bounded { offset_us, .. }) if offset_us > 9_000_000
+                ),
+                "the leader records the learner's offset, not Unknown: {measured:?}"
+            );
+            let page = leader_guard
+                .acquire_for(ClockDecision::ExpiryScan)
+                .expect("a skewed learner does not refuse the voter's expiry scan");
+            assert_eq!(
+                leader_guard.admit_owner_for(ClockDecision::ExpiryScan, &page, &learner_id),
+                Err(ClockRefusal::Offset),
+                "the skewed learner's own routes are not expired"
+            );
+            let skewed_auth = proof(&learner, &selected.identity.node_id);
+            verify_positive(
+                &learner,
+                &skewed_auth,
+                send(&client, origin, &skewed_auth).await,
+            )
+            .await;
+            assert_eq!(observer.test_audit().len(), 4);
+            learner_observer.test_skew_responses_ms(0);
+            leader_guard.set_enforced(false);
+
             let gate = observer.test_gate_final_query();
             let fenced_auth = proof(&learner, &selected.identity.node_id);
             let still_fresh = fenced_auth.clone();
@@ -522,7 +561,10 @@ mod causal_tests {
                 .clock_leadership_identity()
                 .expect("owned fixture invariant");
             let attempt = uuid::Uuid::new_v4().to_string();
-            assert_eq!(observer.test_final_query_results(), vec![true, true, true]);
+            assert_eq!(
+                observer.test_final_query_results(),
+                vec![true, true, true, true]
+            );
             let committed = leader_client.txn(vec![
                 ("INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) VALUES ($1,$2)".to_owned(),
                     hiqlite::params!(learner_id.as_str(), attempt.as_str())),
@@ -569,13 +611,13 @@ mod causal_tests {
             );
             assert_eq!(
                 observer.test_audit().len(),
-                3,
+                4,
                 "no timer or passing context replay"
             );
-            eprintln!("K06 actual signed handler: applied learner={}, leader term={}, full rounds=3, filter depths=1/2/1, nonce replay=401, final fenced response=503 unsigned; no membership reduction", token.raft_id, before.current_term);
+            eprintln!("K06 actual signed handler: applied learner={}, leader term={}, full rounds=4, filter depths=1/2/1/1, skewed learner=200 signed, nonce replay=401, final fenced response=503 unsigned; no membership reduction", token.raft_id, before.current_term);
             assert_eq!(
                 observer.test_final_query_results(),
-                vec![true, true, true, false],
+                vec![true, true, true, true, false],
                 "refusal reached the actual final query, not a timeout or prior branch"
             );
         };
@@ -653,6 +695,8 @@ async fn snapshot_for_membership(
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
     let received_unix_ms = crate::media_sessions::unix_ms();
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    let received_unix_ms = received_unix_ms + observer.test_response_skew_ms();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     let guard = membership.clock_guard();
     let clock_generation = guard.ticket().clock_generation;
@@ -704,6 +748,8 @@ async fn snapshot_for_membership(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let sent_unix_ms = crate::media_sessions::unix_ms();
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    let sent_unix_ms = sent_unix_ms + observer.test_response_skew_ms();
     let body = serde_json::to_vec(&ClockResponse {
         node_id: node_id.to_owned(),
         received_unix_ms,
