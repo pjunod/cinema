@@ -52,6 +52,23 @@ impl TranscodeManager {
             .unwrap_or(false)
     }
 
+    /// [`Self::cluster_index_available`] for a batch whose source object
+    /// versions the caller already observed (item detail). An unreadable
+    /// catalog answers "not present", as the single lookup does.
+    pub(crate) async fn cluster_index_availability(
+        &self,
+        lookups: &[(
+            &plurx_core::domain::MediaFile,
+            plurx_core::transcode::CopyVideoOptions,
+            String,
+        )],
+    ) -> Vec<bool> {
+        self.vod
+            .cluster_index_availability(lookups)
+            .await
+            .unwrap_or_else(|_| vec![false; lookups.len()])
+    }
+
     /// Number of active HLS sessions across the public VOD registry and the
     /// test-only historical live registry (for /metrics and activity).
     pub async fn active_sessions(&self) -> usize {
