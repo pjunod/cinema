@@ -6173,3 +6173,27 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousEnroll
 source_anchor = "internal fun continuousLinkRate(row: JsonObject): Long? = row.number(\"sustained_bps\") ?: row.number(\"peak_bps\")"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
 test_anchor = "continuousAutoCostsAreTheDeclaredLinkRateNotThePublicationCeiling"
+
+[[fixes]]
+id = "android.continuous-presented-rung-over-session-candidate"
+commits = ["52f63b8bb8a3e5924ffeb2f540ba5286e4f07b9a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean): String? ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "aContinuousMemberKeepsThePresentedRungOverTheSessionCandidate"
+
+[[fixes]]
+id = "android.display-upgrade-largest-affordable-rung"
+commits = ["115bf7de65e42a75ea057d810cc32a64f6b298d3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "}.minByOrNull { it.width.toLong() * it.height } ?: candidates.maxByOrNull { it.width.toLong() * it.height }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "aLadderBelowTheDisplayClimbsToItsLargestAffordableRung"
+
+[[fixes]]
+id = "apple.display-upgrade-largest-affordable-rung"
+commits = ["115bf7de65e42a75ea057d810cc32a64f6b298d3"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "}.min { area($0) < area($1) } ?? candidates.max { area($0) < area($1) }"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testALadderBelowTheDisplayClimbsToItsLargestAffordableRung"
