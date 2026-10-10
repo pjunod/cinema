@@ -35,6 +35,10 @@ interface PlurxApi {
     @GET("me")
     suspend fun me(): User
 
+    /** Signed-in only: which optional sections (Live TV, DVR, sharing, Library channels) are on. */
+    @GET("features")
+    suspend fun features(): Features
+
     @GET("libraries")
     suspend fun libraries(): List<Library>
 
