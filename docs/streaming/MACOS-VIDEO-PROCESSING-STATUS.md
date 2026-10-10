@@ -1,7 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups qualified; Linux acceptance active; combined review/landing pending · **Updated:** 2026-10-09 · **Owner:** managing agent with
-three GPT-6.1 Sol builders · **Integration:** `effort/video-processing-followups`.
+**Status:** Mac follow-ups qualified; AMD raw strict-P5 qualified; corrected amd64 daemon/API and Intel pending; combined review/landing pending · **Updated:** 2026-10-10 · **Owner:** Claude (continuing the managed effort after the 2026-10-09 session ended) · **Integration:** `effort/video-processing-followups`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -11,6 +10,40 @@ A plan or compiled change is not hardware qualification. The
 measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
+
+**Checkpoint 2026-10-10.** The previous session ended on quota with the
+probe-raster correction, three documentation edits and the AMD rerun
+uncommitted on the workstation. That workstation's temporary directory was
+cleared before recovery, so only the pushed branch `862fc208` and the
+retained AMD-node evidence survived. Everything lost was rebuilt from those
+two sources:
+
+- The correction is re-implemented with focused regressions. Encoded tiny
+  positive probes on Linux keep the corpus raster `SOURCE_RASTER` (320×180);
+  `observe_encoded` checks the encoded raster exactly; pixels are still
+  projected to the 160×90 oracle. Raw negatives stay 160×90 and UHD stays
+  1920×1080, with no device-specific size.
+- The collector was rebuilt with the same raster rule. Its first window
+  passed all 12 tiny software controls and then exposed a collector-only UHD
+  timestamp-origin check stricter than the product's `observe_uhd_output`.
+  Mirroring the product contract, the corrected window passes all 32 raw
+  controls in 20.59 seconds, with production untouched.
+- The shipping image record is rebuilt from the 57 retained raw files.
+
+Pinned Rust 1.97.1 check and Clippy with denied warnings pass on the
+corrected tree. See [evidence §42](MACOS-VIDEO-PROCESSING-EVIDENCE.md#42-shipping-linux-image-and-amd-raw-strict-p5-qualification--2026-100910).
+Remaining work, in order:
+
+1. Build the corrected amd64 daemon incrementally from the retained warm
+   target.
+2. Run normal Linux API acceptance.
+3. Run the Intel window once its transfer is explicitly approved.
+4. Freeze the candidate, reconcile `main`, and run the combined adversarial
+   review.
+5. Run the fast lane once and merge.
+
+On 2026-10-10 the user directed this session to own the fast lane and
+merge. That supersedes the earlier hand-off to a separate merge coordinator.
 
 On 2026-10-08 the user explicitly promoted GPU subtitle compositing,
 non-Mac Profile 5 hardware decoding and the caption-bearing file-VOD
@@ -26,7 +59,7 @@ merged tree passes pinned all-target compilation and the normal tracked hook.
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | All eight raw graph comparisons, merged `c10f16f0` text API and one complete performance campaign pass; wall time is 13.02–31.14% lower and child CPU/frame 49.90–81.73% lower | Preserve exact evidence through combined review and landing |
-| F2 non-Mac P5 hardware decoding | Route builder | Neutral provenance integrated; full Bookworm FFmpeg, matching static parser, package assembly, complete ELF audit and exact merged-source Linux checks pass | amd64 daemon, runtime driver/graph observation and real encoder/size/rate envelope |
+| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | Package, shipping image and observer verified. AMD exposed a probe-raster defect (160×90 aligned to 160×96, under the encoder's 128-row minimum); encoded tiny probes now keep the 320×180 source raster. The corrected AMD raw window passes all 32 controls | Corrected amd64 daemon, normal Linux API acceptance, Intel window (transfer approval pending) |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on `2139fa9c`; the merged `c10f16f0` MPEG-2 case also passes unchanged caption/picture assertions and clean shutdown | Preserve evidence through combined review/landing; broader DVR and client presentation remain separate |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
@@ -213,7 +246,8 @@ empty private mountpoint and a separately installed public Rust 1.97.1
 toolchain complete the environment. None of those refused attempts compiles
 the daemon. The actual pinned release compiler then exceeds its 8 GiB limit
 during optimization. A 12 GiB retry reuses completed compilation with the
-same release settings and is active. The completed package audit and Mac
+same release settings and passed in 1143.461 seconds (`plurxd` SHA-256
+`aaa439561af09a0dbc7e2ae1d96252f1e9aff6baaa70266fde922e7d017018ef`). The completed package audit and Mac
 qualification are retained. AMD qualification can proceed under fresh
 privileged device/activity/production-epoch checks; no repository rule
 requires another chat to grant permission. Intel staging separately awaits
@@ -570,7 +604,7 @@ The coordinator has returned a separate earlier-batch HEVC publication
 failure for priority repair. Its hvcC parser discards `array_completeness`
 and accepts presence-only VPS/SPS/PPS arrays where `hvc1` requires complete
 ones. The narrow repair preserves the distinct `hev1`/`dvhe` contract and
-is published as [PR #938](http://192.168.4.7:3000/noirr/plurx/pulls/938),
+is published as [PR #938](http://forge.lan:3000/noirr/plurx/pulls/938),
 head `21af407bdacdbde1a39682d9d11bff1a75045182`. Its one adversarial review
 found no actionable issues. Pinned all-target compilation and the normal
 commit hook passed on the preceding base; the reviewed patch and both full

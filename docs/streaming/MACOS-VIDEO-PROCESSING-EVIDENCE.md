@@ -1857,3 +1857,105 @@ hash, and the archived member was reopened and compared byte-for-byte. The
 record binds the original driver, raw correctness ledger, actual source and
 native binary, every workload's medians and output checks, resource
 settlement, and the explicitly excluded interrupted campaign.
+
+## 42. Shipping Linux image and AMD raw strict-P5 qualification — 2026-10-09/10
+
+**Shipping image.** The authentic amd64 shipping media image
+`sha256:4a3164fbfce2f4f9da67d6434af56754dbce70f402e2010e2b1cfa3d56e36497`
+carries the audited package capsule
+`c2a07f88dcdbcfab086256711108a8860bacb8e619814b210a64bed9c7bc8695`
+(Jellyfin `v8.1.3-1`, source `253db2a7b0a8045c54ce68ce33d7f601229b1822`,
+matching static parser). A separate qualification observer,
+`sha256:11308ed37ec5a7a84db334a288a1ebd8c48dd2051f2c101ef0d71642b36c58a2`,
+adds only a Python runtime. Its preservation receipt passes: the original
+ten root-filesystem layers are an exact prefix, and all 314 original package
+versions are unchanged. The observer is a measuring instrument; the shipping
+image is what production would run.
+
+**First AMD attempts.** Two bounded windows on the AMD VA-API render node
+(`radeonsi`, vendor `0x1002`, device `0x15bf`) recorded failures before any
+qualification:
+
+1. The collector could not create its output directory as the unprivileged
+   container user. No graph ran. The rerun maps the owned output directory
+   to that user.
+2. The rerun's first discovery graph decoded and observed current-frame
+   Dolby metadata. Then the encoder refused to open:
+   `Hardware does not support encoding at size 160x96 (constraints: width
+   128-4096 height 128-4096)`. The tiny positive controls downscaled the
+   320×180 corpus to 160×90, VA-API aligned that to 160×96, and AMD's H.264
+   encoder has a 128-row minimum. The decoder worked. A probe raster the
+   encoder cannot accept was being reported as missing Dolby support.
+
+**Root cause and correction.** The 160×90 raster belongs to the
+independent color oracle, not to the encoded stream. Encoded tiny positive
+probes on Linux now keep the corpus source raster `SOURCE_RASTER` (320×180,
+the manifest's `source_shape`). This applies to every software, VA-API and
+QSV path, with no device-specific size. Inspection still decodes the
+delivered stream and projects it to 160×90 before the gray-ramp,
+neutral-chroma, timestamp and color-patch checks. `observe_encoded` checks
+the encoded stream's declared raster exactly and never rewrites it to fit.
+The macOS `observe` wrapper keeps its exact 160×90 contract. The changes:
+
+- Raw negative controls stay 160×90 and never open an encoder.
+- UHD positive output stays 1920×1080.
+- Metadata, timing, pixel tolerances and negative assertions are unchanged.
+
+Regressions: `crates/plurxd/src/macos_video/p5.rs::tests::encoded_raster_is_checked_exactly_while_pixels_keep_the_oracle_projection`,
+`crates/plurxd/src/macos_video/p5.rs::tests::source_raster_is_the_manifest_source_shape`
+and `crates/plurxd/src/ffmpeg/linux_dolby.rs::tests::encoded_tiny_probes_keep_source_raster_on_every_backend`.
+
+**Collector correction exposed a second, collector-only defect.** With the
+source raster, all 12 tiny software-decode controls passed. The UHD positive
+then failed only the collector's timestamp check. The VA-API H.264 output used
+the ordinary VOD B-frame policy, so the fragmented MP4 began at one frame
+(0.041667 s). The collector demanded an exact zero origin. The product
+contract, `observe_uhd_output`, accepts a presentation offset of at most two
+frames with exact cadence. The collector now mirrors that product contract.
+Tiny controls keep `-bf 0` and an exact zero origin.
+
+**Corrected AMD window passes.** Collector SHA-256
+`f0203b91cb9af54b73ac5e508e4b1e5effa61c8048aec71ad3b600a59e11e3c5` passes all
+32 raw controls in 20.59 seconds. That is 14 software-decode and 14 VA-API-decode
+strict cases, covering:
+
+- fresh and variable metadata;
+- missing, malformed and omitted-color metadata at first, mid-stream and seek-start;
+- three terminal-NAL variants;
+- UHD fresh and missing-mid-stream;
+- four raw-plane comparisons.
+
+All cases encode through `h264_vaapi`. Negative controls exit non-zero within
+their frame bounds with the required Dolby-state refusal. Software and VA-API
+decode planes are byte-identical for both the fresh and variable fixtures.
+Selected opaque VA-API frames and the actual `radeonsi` driver are bound to
+the capsule hashes.
+
+The window ran under the following limits and checks:
+
+- Limits: two CPUs, 2 GiB memory, no swap, no network, all capabilities dropped.
+- Admission found no device holders, 0% GPU busy and the production container
+  running.
+- Production was sampled every two seconds: no foreign GPU holder appeared,
+  the production epoch was unchanged, and peak GPU busy was 3%.
+- The owned container was removed afterward.
+
+This is raw shipping-graph evidence. It is not an API, availability,
+performance or production claim, and it says nothing about Intel, NVIDIA or
+other AMD devices.
+
+[Shipping image evidence](evidence/macos-video-20261008/shipping-linux-image-evidence.tar.gz)
+contains one neutral JSON record, 4156 compressed bytes, SHA-256
+`e196c21199f6c3aad707e431e408a32f9b89c700fb475f22b188d8b82245f745`. It
+records the preservation receipt, both image archive hashes and a size/hash
+inventory of 57 retained raw files. Credential and builder-state directories
+are excluded. This record was rebuilt on 2026-10-10 from those retained raw
+files, because the original workstation archive (SHA-256 `5e1efe39…`) was lost
+with its temporary directory.
+[AMD raw qualification evidence](evidence/macos-video-20261008/amd-raw-p5-qualification-evidence.tar.gz)
+contains one neutral JSON record, 7995 compressed bytes, SHA-256
+`38a086d12521e3de0feab924b30e7e7b983982b1e5222655963e0ac73b2cf3f6`.
+It records all four windows with their dispositions, per-run results,
+window/admission facts and a size/hash inventory of every retained
+observation. Each archived member was reopened and compared byte-for-byte.
+No unit suite ran.
