@@ -180,6 +180,18 @@ impl LinuxDolbyReport {
         }
     }
 
+    /// No hardware graph passed. The per-graph refusals stay on the report;
+    /// without a context the planner never selects a strict Linux graph.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn refused(generation: u64, graphs: Vec<Value>) -> Self {
+        Self {
+            generation,
+            reason: "hardware_graph_unobserved",
+            context: None,
+            graphs,
+        }
+    }
+
     pub(crate) fn initial() -> Self {
         Self::unavailable(
             0,
@@ -741,6 +753,15 @@ const GRAPH_GLOBAL_ARGS: &[&str] = &[
     "file,pipe",
 ];
 
+/// One refused candidate graph, as the operator report shows it. Discovery
+/// and validation refusals keep their own reason so a node that observes no
+/// hardware graph says why each candidate failed.
+#[cfg(target_os = "linux")]
+fn graph_refusal(case: GraphCase<'_>, stage: &str, reason: &str) -> Value {
+    json!({"decoder": format!("{:?}", case.decoder), "encoder": format!("{:?}", case.encoder),
+           "stage": stage, "reason": reason})
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 struct GraphCase<'a> {
@@ -1227,6 +1248,7 @@ async fn qualify_generation(
     objects.extend(kernel.objects);
     let mut discovered = Vec::new();
     let mut closure_digests = Vec::new();
+    let mut refusals = Vec::new();
     for decoder in [DecodeBackend::Software, DecodeBackend::Vaapi] {
         for encoder in [Encoder::Software, Encoder::Vaapi, Encoder::Qsv] {
             if cancel.is_cancelled() {
@@ -1257,11 +1279,21 @@ async fn qualify_generation(
                 Err(reason) if cancel.is_cancelled() || tokio::time::Instant::now() >= deadline => {
                     return Err(reason)
                 }
-                _ => continue,
+                Ok(_) => {
+                    refusals.push(graph_refusal(case, "discovery", "graph_failed"));
+                    continue;
+                }
+                Err(reason) => {
+                    refusals.push(graph_refusal(case, "discovery", reason));
+                    continue;
+                }
             };
             let output = match outcome.output {
                 Ok(output) => output,
-                Err(_) => continue,
+                Err(_) => {
+                    refusals.push(graph_refusal(case, "discovery", "graph_output_unbounded"));
+                    continue;
+                }
             };
             let closure = match capture_loaded_closure(
                 &output.stderr,
@@ -1270,7 +1302,10 @@ async fn qualify_generation(
             .await
             {
                 Ok(closure) => closure,
-                Err(_) => continue,
+                Err(reason) => {
+                    refusals.push(graph_refusal(case, "discovery", reason));
+                    continue;
+                }
             };
             if decoder == DecodeBackend::Vaapi || encoder != Encoder::Software {
                 let paths: Vec<_> = closure.initialized.iter().cloned().collect();
@@ -1315,7 +1350,7 @@ async fn qualify_generation(
         .iter()
         .any(|(case, _)| case.decoder == DecodeBackend::Vaapi)
     {
-        return Err("hardware_graph_unobserved");
+        return Ok(LinuxDolbyReport::refused(generation, refusals));
     }
     closure_digests.sort();
     let binding =
@@ -1365,10 +1400,14 @@ async fn qualify_generation(
         )
         .await?;
         let output = outcome.output.map_err(|_| "graph_failed")?;
-        let accepted = outcome.status.success()
-            && observe_frozen_loader_paths(&output.stderr, &initialized, true).is_ok()
-            && observe_selected_frames(&output.stderr, case).is_ok();
-        let result = if accepted {
+        let result = if !outcome.status.success() {
+            Err("graph_failed")
+        } else if let Err(reason) = observe_frozen_loader_paths(&output.stderr, &initialized, true)
+        {
+            Err(reason)
+        } else if let Err(reason) = observe_selected_frames(&output.stderr, case) {
+            Err(reason)
+        } else {
             inspect_output(
                 &package,
                 &media,
@@ -1379,14 +1418,12 @@ async fn qualify_generation(
                 cancel,
             )
             .await
-        } else {
-            Err("output_contract_failed")
         };
         if !package.producer.is_current().await {
             return Err("implementation_changed");
         }
-        if result.is_err() {
-            graphs.push(json!({"decoder": format!("{:?}", case.decoder), "encoder": format!("{:?}", case.encoder), "reason": "output_contract_failed"}));
+        if let Err(reason) = result {
+            graphs.push(graph_refusal(case, "validation", reason));
             continue;
         }
         // Effective metadata loss must stop this exact decoder/renderer graph;
@@ -1509,8 +1546,10 @@ async fn qualify_generation(
         );
         graphs.push(json!({"decoder": format!("{:?}", case.decoder), "encoder": format!("{:?}", case.encoder), "reason": "observed", "source_max": [3840,2160,24], "output_max": [1920,1080]}));
     }
+    refusals.extend(graphs);
+    let graphs = refusals;
     if !hardware_accepted {
-        return Err("hardware_graph_unobserved");
+        return Ok(LinuxDolbyReport::refused(generation, graphs));
     }
     Ok(LinuxDolbyReport {
         generation,
@@ -1540,6 +1579,39 @@ mod tests {
             "showinfo records stay"
         );
         assert!(!GRAPH_GLOBAL_ARGS.contains(&"-stats"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refused_hardware_report_keeps_each_graph_reason_and_no_context() {
+        use plurx_core::transcode::{DecodeBackend, Encoder};
+        let case = GraphCase {
+            bytes: UHD_MEDIA[0].1,
+            decoder: DecodeBackend::Vaapi,
+            encoder: Encoder::Vaapi,
+            uhd24: true,
+            negative: false,
+            seek_seconds: 0,
+        };
+        let report = LinuxDolbyReport::refused(
+            4,
+            vec![
+                graph_refusal(case, "discovery", "graph_failed"),
+                graph_refusal(case, "validation", "selected_metadata_failed"),
+            ],
+        );
+        assert!(report.context().is_none());
+        let document = report.diagnostics();
+        assert_eq!(document["availability"], "unavailable");
+        assert_eq!(document["reason"], "hardware_graph_unobserved");
+        assert_eq!(document["generation"], 4);
+        assert_eq!(
+            document["graphs"],
+            json!([
+                {"decoder": "Vaapi", "encoder": "Vaapi", "stage": "discovery", "reason": "graph_failed"},
+                {"decoder": "Vaapi", "encoder": "Vaapi", "stage": "validation", "reason": "selected_metadata_failed"},
+            ])
+        );
     }
 
     #[cfg(target_os = "linux")]
