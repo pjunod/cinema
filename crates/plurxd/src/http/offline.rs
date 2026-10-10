@@ -399,6 +399,19 @@ pub async fn create(
         )
         .await
         .map_err(|message| {
+            // A Profile 5 pixel proof that did not finish learned nothing
+            // about the source and remembered nothing, so the next request
+            // measures again: the same retryable `startup_timeout` a session
+            // start answers. Only a refuted proof (or an unsupported build)
+            // is the permanent `unsupported_media` refusal.
+            if crate::transcode::is_source_proof_pending_error(&message) {
+                return ApiError::TypedRetry {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "startup_timeout",
+                    message,
+                    retry_after_seconds: super::hls::SOURCE_PROOF_PENDING_RETRY_AFTER_SECS,
+                };
+            }
             typed(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "unsupported_media",
@@ -1680,6 +1693,10 @@ mod tests {
     }
 
     async fn fixture() -> Fixture {
+        fixture_with_system(crate::state::SystemInfo::default()).await
+    }
+
+    async fn fixture_with_system(system: crate::state::SystemInfo) -> Fixture {
         let root = crate::test_tempdir().expect("root");
         let source = root.path().join("movie.mkv");
         std::fs::write(&source, b"offline HTTP fixture").expect("source");
@@ -1783,7 +1800,7 @@ mod tests {
             dirs,
             "test-node".into(),
             Default::default(),
-            Default::default(),
+            system,
             Arc::new(crate::logbuf::LogBuffer::new(16)),
         );
         let file = state
@@ -1852,6 +1869,139 @@ mod tests {
             .await,
         )
         .await
+    }
+
+    /// A probed Dolby Vision Profile 5 source: no compatible base, so an
+    /// encoded package needs the per-source pixel proof.
+    async fn insert_profile5(fixture: &Fixture) -> i64 {
+        let item = fixture
+            .state
+            .store
+            .insert_item(&NewItem {
+                library_id: fixture.library_id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Profile 5".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("profile 5 item");
+        fixture
+            .state
+            .store
+            .upsert_file(
+                item,
+                &format!("/media/profile5-{item}.mkv"),
+                1,
+                1,
+                &ProbeResult {
+                    duration_ms: Some(90_000),
+                    container: Some("matroska".into()),
+                    video_codec: Some("hevc".into()),
+                    width: Some(3840),
+                    height: Some(2160),
+                    bit_depth: Some(10),
+                    hdr: Some("dolby_vision".into()),
+                    hdr_format: Some("Dolby Vision · Profile 5".into()),
+                    audio_streams: vec![AudioStream {
+                        index: 0,
+                        codec: "aac".into(),
+                        channels: Some(2),
+                        language: Some("eng".into()),
+                        default: true,
+                        ..Default::default()
+                    }],
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("profile 5 file")
+    }
+
+    /// A Profile 5 pixel proof that did not finish is "try again", not the
+    /// permanent `unsupported_media` refusal: nothing was learned about the
+    /// source, nothing is remembered and no package is created, so the next
+    /// request measures again. A refuted proof stays `unsupported_media`.
+    #[tokio::test]
+    async fn offline_request_with_an_unfinished_profile5_proof_is_retryable_and_creates_nothing() {
+        use std::sync::atomic::Ordering;
+
+        let fixture = fixture_with_system(crate::state::SystemInfo {
+            dovi_reshape: true,
+            ..Default::default()
+        })
+        .await;
+        let file_id = insert_profile5(&fixture).await;
+        let hooks = fixture.state.transcode.test_hooks();
+        let profile5 = |proof| {
+            hooks
+                .dovi_pixel_proof_script
+                .lock()
+                .expect("script")
+                .push_back(proof);
+            CreatePackage {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                height: 720,
+                audio_index: Some(0),
+                subtitle_index: None,
+            }
+        };
+
+        let body = profile5(crate::ffmpeg::DoviPixelProof::Inconclusive(
+            "Dolby Vision pixel probe timed out".into(),
+        ));
+        let response = match create(
+            AuthUser(fixture.user.clone()),
+            State(fixture.state.clone()),
+            AxPath(file_id),
+            Json(body),
+        )
+        .await
+        {
+            Ok(_) => panic!("an unfinished proof must not create a package"),
+            Err(error) => error.into_response(),
+        };
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("5")
+        );
+        let (code, body) = json_response(response).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["code"], "startup_timeout", "{body}");
+        assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .offline_package_stats("test-node", now_unix())
+                .await
+                .expect("offline package stats"),
+            plurx_core::domain::OfflinePackageStats::default(),
+            "an unfinished proof persisted work"
+        );
+
+        // Nothing was remembered: the next request measures again, and a
+        // refuted proof is the permanent refusal.
+        let body = profile5(crate::ffmpeg::DoviPixelProof::Refuted);
+        let (code, body) = create_response(&fixture, file_id, body).await;
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["code"], "unsupported_media", "{body}");
+        assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .offline_package_stats("test-node", now_unix())
+                .await
+                .expect("offline package stats"),
+            plurx_core::domain::OfflinePackageStats::default()
+        );
     }
 
     async fn insert_unprobed(fixture: &Fixture, duration_ms: Option<i64>) -> i64 {
