@@ -5127,7 +5127,7 @@ fn linux_strict_context_for_encoder(driver_digest: char, encoder: Encoder) -> Li
 
 #[test]
 fn linux_strict_qsv_encoder_is_derived_from_the_observed_decode_device() {
-    let input = facts(macos_p5_stream());
+    let input = macos_p5_facts(macos_p5_stream());
     let caps = capabilities(vec![exact_capability(
         DecodeBackend::Vaapi,
         &input,
@@ -5174,7 +5174,7 @@ fn linux_strict_qsv_encoder_is_derived_from_the_observed_decode_device() {
 
 #[test]
 fn linux_strict_p5_selects_native_vaapi_without_lifting_other_dolby_software_routes() {
-    let input = facts(macos_p5_stream());
+    let input = macos_p5_facts(macos_p5_stream());
     let caps = capabilities(vec![exact_capability(
         DecodeBackend::Vaapi,
         &input,
@@ -5229,7 +5229,7 @@ fn linux_strict_p5_selects_native_vaapi_without_lifting_other_dolby_software_rou
     for profile in [7, 8] {
         let mut stream = macos_p5_stream();
         stream["side_data_list"][0]["dv_profile"] = json!(profile);
-        let other = facts(stream);
+        let other = macos_p5_facts(stream);
         let incumbent = resolve(
             Encoder::Software,
             Pipeline::DoviTonemapx,
@@ -5245,7 +5245,7 @@ fn linux_strict_p5_selects_native_vaapi_without_lifting_other_dolby_software_rou
 
 #[test]
 fn linux_strict_p5_recovery_retains_package_and_rejects_changed_driver_or_unobserved_envelope() {
-    let input = facts(macos_p5_stream());
+    let input = macos_p5_facts(macos_p5_stream());
     let caps = capabilities(vec![exact_capability(
         DecodeBackend::Vaapi,
         &input,
