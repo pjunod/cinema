@@ -201,6 +201,8 @@ mod causal_tests {
                 protocol_min,
                 protocol_max,
                 live_tv_v1: true,
+                sharing:
+                    plurx_core::cluster::membership::SharingJoinCapabilities::for_current_binary(),
             })
             .await
             .expect("real authorized staged identity");
