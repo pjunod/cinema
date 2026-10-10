@@ -384,7 +384,7 @@ impl DvrTransport {
             return false;
         }
         self.seats
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |seats| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |seats| {
                 (seats & SEATS_RETIRED == 0).then_some(seats + 1)
             })
             .is_ok()
@@ -394,7 +394,7 @@ impl DvrTransport {
     pub(crate) fn release_seat(&self) {
         let _ = self
             .seats
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |seats| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |seats| {
                 (seats & !SEATS_RETIRED > 0).then(|| seats - 1)
             });
         self.consumers_changed.notify_waiters();
@@ -1044,7 +1044,7 @@ fn reserve_queue_bytes(queued: &AtomicU64, bytes: usize, limit: u64) -> bool {
         return false;
     };
     queued
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(bytes).filter(|next| *next <= limit)
         })
         .is_ok()

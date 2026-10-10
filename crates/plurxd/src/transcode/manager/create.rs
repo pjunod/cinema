@@ -36,7 +36,7 @@ fn trace_prepared_capture(
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     static START: OnceLock<Instant> = OnceLock::new();
     let sequence = SEQUENCE
-        .fetch_update(Relaxed, Relaxed, |value| Some(value.saturating_add(1)))
+        .try_update(Relaxed, Relaxed, |value| Some(value.saturating_add(1)))
         .expect("saturating sequence always updates");
     let monotonic_us = START
         .get_or_init(Instant::now)

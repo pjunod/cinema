@@ -15,11 +15,24 @@ static NEXT_WAL_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
 #[inline]
 fn next_wal_incarnation() -> u64 {
-    NEXT_WAL_INCARNATION
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |incarnation| {
-            incarnation.checked_add(1)
-        })
-        .expect("process-local WAL incarnation space exhausted")
+    // An explicit compare-exchange loop rather than `fetch_update` (deprecated
+    // from Rust 1.99) or `try_update` (stable only from 1.95): this crate
+    // declares rust-version 1.88, and row 3 is meant to go upstream as is.
+    let mut incarnation = NEXT_WAL_INCARNATION.load(Ordering::Relaxed);
+    loop {
+        let next = incarnation
+            .checked_add(1)
+            .expect("process-local WAL incarnation space exhausted");
+        match NEXT_WAL_INCARNATION.compare_exchange_weak(
+            incarnation,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(previous) => return previous,
+            Err(current) => incarnation = current,
+        }
+    }
 }
 
 #[derive(Debug)]
