@@ -5,16 +5,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import tv.plurx.app.ui.PREPARED_REPLACEMENT_GRADUATION
-import tv.plurx.app.ui.RELEASE_PROFILE_GRADUATION
 
 /**
- * Where Android draws the server's Live TV settings. The web moved the tuner,
- * guide, recording and Library channel cards from Developer to Settings → Live
- * TV; Paul's Developer rule is that a finished setting does not wait in
- * Developer. These tests pin both halves: the Live TV screen draws the four
- * cards and their saves, and the Developer screen draws none of them and says
- * what each card it keeps is waiting on.
+ * Where Android draws the server's Live TV settings. The web moved the Live TV
+ * enable switch and the tuner, guide, recording and Library channel cards from
+ * Developer to Settings → Live TV; Paul's Developer rule is that a finished
+ * setting does not wait in Developer. These tests pin both halves: the Live TV
+ * screen draws the five cards and their saves, enable first, and the Developer
+ * screen draws none of them and says what the one card it keeps is waiting on.
  */
 class LiveTvSettingsPlacementTest {
     private fun source(path: String): String = listOf(
@@ -44,6 +42,7 @@ class LiveTvSettingsPlacementTest {
 
     /** Every edit a moved card makes, and the read only the guide card makes. */
     private val movedCalls = mapOf(
+        LiveTvSettingsCard.EnableLiveTv to listOf("LiveTvSettingsChange.Enabled(", "refreshPrerequisites", "state.prerequisites?.let"),
         LiveTvSettingsCard.HdHomeRun to listOf("LiveTvSettingsChange.Configure(", "checkSavedConfiguration", "readiness?.checks"),
         LiveTvSettingsCard.ProgrammeGuide to listOf("refreshGuideReadiness", "guideReadiness?.let"),
         LiveTvSettingsCard.Recording to listOf("LiveTvSettingsChange.DvrEnabled(", "\"Enable recording\""),
@@ -51,11 +50,14 @@ class LiveTvSettingsPlacementTest {
     )
 
     @Test
-    fun liveTvSettingsOwnTheFourCardsTheWebMovedInTheWebsOrder() {
+    fun liveTvSettingsOwnTheFiveCardsTheWebMovedInTheWebsOrder() {
         assertEquals(
-            listOf("HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"),
+            listOf("Enable Live TV", "HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"),
             LiveTvSettingsPlacement.liveTvSettings.map { it.title },
         )
+        // The switch is a finished setting now: its title no longer calls it
+        // advisory enablement, and it is the first thing the screen draws.
+        assertEquals(LiveTvSettingsCard.EnableLiveTv, LiveTvSettingsPlacement.liveTvSettings.first())
         assertTrue(
             "a card cannot be drawn on both screens",
             LiveTvSettingsPlacement.liveTvSettings.none { it in LiveTvSettingsPlacement.developer },
@@ -82,7 +84,7 @@ class LiveTvSettingsPlacementTest {
     @Test
     fun developerNoLongerListsTheMovedCardsAndKeepsOnlyWhatIsWaiting() {
         assertEquals(
-            listOf(LiveTvSettingsCard.DisplayCadence, LiveTvSettingsCard.EnableLiveTv),
+            listOf(LiveTvSettingsCard.DisplayCadence),
             LiveTvSettingsPlacement.developer,
         )
         val developer = source("livetv/LiveTvDeveloperScreen.kt")
@@ -91,39 +93,48 @@ class LiveTvSettingsPlacementTest {
                 assertFalse("Developer must not draw ${card.title} ($call)", developer.contains(call))
             }
         }
-        // The two cards that stay are the ones whose evidence is still owed,
-        // and each says what it waits on — the web's `devGraduation` line.
-        assertTrue(developer.contains("LiveTvSettingsChange.Enabled("))
+        // The card that stays is the one whose evidence is still owed, and it
+        // says what it waits on — the web's `devGraduation` line. The enable
+        // switch graduated, so it is neither drawn here nor waiting here.
+        assertFalse(developer.contains("EnableLiveTvCard"))
         assertTrue(developer.contains("LiveTvSettingsChange.DisplayModeMatch("))
-        assertTrue(developer.contains("LiveTvSettingsPlacement.ENABLE_LIVE_TV_GRADUATION"))
         assertTrue(developer.contains("LiveTvSettingsPlacement.DISPLAY_CADENCE_GRADUATION"))
-        assertTrue(LiveTvSettingsPlacement.ENABLE_LIVE_TV_GRADUATION.startsWith("Leaves Developer when: "))
-        assertTrue(LiveTvSettingsPlacement.ENABLE_LIVE_TV_GRADUATION.contains(" Then: the switch moves to Settings → Live TV"))
         assertTrue(LiveTvSettingsPlacement.DISPLAY_CADENCE_GRADUATION.startsWith("Leaves Developer when: "))
         assertTrue(LiveTvSettingsPlacement.DISPLAY_CADENCE_GRADUATION.contains(" Then: "))
         LiveTvSettingsPlacement.developer.forEach { card ->
             assertTrue(developer.contains("LiveTvSettingsCard.${card.name} -> ${drawnBy.getValue(card)}(state)"))
         }
-        // The guide is not drawn here, so it is not read here either; the
-        // enable card's prerequisites are drawn only here, so only here read.
+        // Neither the guide nor the enable card is drawn here, so neither is
+        // read here; Settings → Live TV draws both, so it reads both.
         assertTrue(developer.contains("rememberLiveTvAdminState(origin, LiveTvAdminSurface.Developer)"))
         assertFalse(LiveTvAdminSurface.Developer.readsGuide)
-        assertTrue(LiveTvAdminSurface.Developer.readsEnablePrerequisites)
+        assertFalse(LiveTvAdminSurface.Developer.readsEnablePrerequisites)
         assertTrue(LiveTvAdminSurface.LiveTvSettings.readsGuide)
-        assertFalse(LiveTvAdminSurface.LiveTvSettings.readsEnablePrerequisites)
+        assertTrue(LiveTvAdminSurface.LiveTvSettings.readsEnablePrerequisites)
+        // The Live TV screen's own copy sends nobody to Developer for the switch.
+        assertFalse(source("livetv/LiveTvSettingsScreen.kt").contains("Settings → Developer"))
+        assertFalse(LiveTvAdminSurface.LiveTvSettings.readyMessage.contains("Developer"))
+        assertFalse(LiveTvAdminSurface.LiveTvSettings.needsAttentionMessage.contains("Developer"))
+        assertEquals(
+            "Live TV is disabled. An administrator can enable it in Settings → Live TV.",
+            liveTvKnownMessage("live_tv_disabled"),
+        )
     }
 
     /**
      * Paul's rule for an enable section: say what is needed to turn it on
      * safely and whether each part is met right now — advisory, never a gate.
      * The web's Enable Live TV card draws `/live-tv/readiness` beside its
-     * toggle; so does the native Developer card, and nothing it draws reaches
-     * the button.
+     * toggle; so does the native Settings → Live TV card, and nothing it draws
+     * reaches the button.
      */
     @Test
-    fun theDeveloperEnableCardDrawsEveryPrerequisiteRowAndGatesNothing() {
-        val developer = source("livetv/LiveTvDeveloperScreen.kt")
-        val card = cardBody(developer, "EnableLiveTvCard")
+    fun theLiveTvEnableCardDrawsEveryPrerequisiteRowAndGatesNothing() {
+        val screen = source("livetv/LiveTvSettingsScreen.kt")
+        val card = cardBody(screen, "EnableLiveTvCard")
+        // A graduated card carries no "Leaves Developer when" line.
+        assertFalse(card.contains("GRADUATION"))
+        assertFalse(card.contains("Leaves Developer"))
         assertTrue(card.contains("state.prerequisites?.let { prerequisites ->"))
         assertTrue(
             "every row the server sends, never a hand-written subset",
@@ -151,16 +162,28 @@ class LiveTvSettingsPlacementTest {
         assertTrue("Settings must have a Live TV section", liveTv.length < settings.length)
         assertTrue(liveTv.contains("PreferenceAction(\"Tuner, guide, recording and Library channels\", onClick = onOpenLiveTvSettings)"))
         val developer = settings.substringAfter("SettingsSection(\"Developer\"").substringBefore("SettingsSection(\"About\"")
+        assertTrue("Settings must have a Developer section", developer.length < settings.length)
         assertFalse("the Developer entry no longer promises HDHomeRun setup", developer.contains("HDHomeRun"))
-        // The one Developer entry drawn on Settings itself says what it waits on too.
-        assertTrue(developer.contains("PreparedReplacementEnable("))
-        assertTrue(settings.contains("            PREPARED_REPLACEMENT_GRADUATION,\n"))
-        assertTrue(PREPARED_REPLACEMENT_GRADUATION.startsWith("Leaves Developer when: "))
-        // Every other entry drawn in Settings' Developer section has its line too.
-        assertTrue(developer.contains("Text(\"Release startup profile\""))
-        assertTrue(developer.contains("Text(RELEASE_PROFILE_GRADUATION,"))
-        assertTrue(RELEASE_PROFILE_GRADUATION.startsWith("Leaves Developer when: "))
-        assertTrue(RELEASE_PROFILE_GRADUATION.contains(" Then: "))
+        assertFalse("Enable Live TV graduated to Settings → Live TV", developer.contains("Enable Live TV"))
+        // Prepared replacement graduated to Settings → Playback with its switch
+        // and advisory rows, and no longer says what it waits on.
+        assertFalse(developer.contains("PreparedReplacementEnable("))
+        val playback = settings.substringAfter("SettingsSection(\n                \"Playback\",")
+            .substringBefore("val appearance: @Composable () -> Unit")
+        assertTrue("Settings must have a Playback section", playback.length < settings.length)
+        assertTrue(playback.contains("PreparedReplacementEnable("))
+        assertTrue(playback.contains("onEnabled = vm::setPreparedReplacement"))
+        // Nothing left on Settings itself waits in Developer, so no entry here
+        // carries a graduation line.
+        assertFalse(settings.contains("_GRADUATION"))
+        assertFalse(cardBody(settings, "PreparedReplacementEnable").contains("Leaves Developer"))
+        // The Release startup profile status has no switch, so it is a build
+        // fact in About rather than a Developer entry.
+        assertFalse(developer.contains("Release startup profile"))
+        val about = settings.substringAfter("SettingsSection(\"About\", null)")
+        assertTrue("Settings must have an About section", about.length < settings.length)
+        assertTrue(about.contains("Release startup profile"))
+        assertTrue(about.contains("Text(profileStatus"))
         val activity = source("MainActivity.kt")
         assertTrue(activity.contains("onOpenLiveTvSettings = { nav.navigate(\"live-tv-settings\") }"))
         assertTrue(activity.contains("composable(\"live-tv-settings\")"))

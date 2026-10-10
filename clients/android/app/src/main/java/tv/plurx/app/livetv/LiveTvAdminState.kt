@@ -25,7 +25,7 @@ import tv.plurx.app.data.Session
 enum class LiveTvAdminSurface(
     /** Only Settings → Live TV draws the guide, so only it reads the guide. */
     val readsGuide: Boolean,
-    /** Only Developer draws the enable card, so only it reads its prerequisites. */
+    /** Only Settings → Live TV draws the enable card, so only it reads its prerequisites. */
     val readsEnablePrerequisites: Boolean,
     val loadedMessage: String,
     val readyMessage: String,
@@ -33,17 +33,17 @@ enum class LiveTvAdminSurface(
 ) {
     LiveTvSettings(
         readsGuide = true,
-        readsEnablePrerequisites = false,
-        loadedMessage = "Settings loaded. Save the configuration, then check it.",
-        readyMessage = "The saved configuration is ready. Live TV is switched on or off in Settings → Developer.",
-        needsAttentionMessage = "Some checks need attention. They are advisory and never block the switch in Settings → Developer.",
+        readsEnablePrerequisites = true,
+        loadedMessage = "Settings loaded. The prerequisites are advisory; enabling is a separate action. Save the configuration, then check it.",
+        readyMessage = "The saved configuration is ready. Live TV is switched on or off under Enable Live TV on this screen (Settings → Live TV).",
+        needsAttentionMessage = "Some checks need attention. They are advisory and never block the Enable Live TV switch on this screen (Settings → Live TV).",
     ),
     Developer(
         readsGuide = false,
-        readsEnablePrerequisites = true,
-        loadedMessage = "Settings loaded. The prerequisites are advisory; enabling is a separate action.",
-        readyMessage = "Ready. Enable is a separate action.",
-        needsAttentionMessage = "Some prerequisites need attention. They never prevent enabling.",
+        readsEnablePrerequisites = false,
+        loadedMessage = "Settings loaded. The readiness rows are advisory and never change a switch.",
+        readyMessage = "Ready. Every switch here is a separate action.",
+        needsAttentionMessage = "Some requirements need attention. They never block a switch.",
     ),
 }
 
