@@ -2032,14 +2032,14 @@
 
         let media = crate::test_tempdir().expect("media dir");
         let src = media.path().join("clip.mp4");
-        write_real_video(&src, 60);
+        write_real_video(&src, 180);
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file_with_probe_at(
             &store,
             &src.to_string_lossy(),
             plurx_core::domain::ProbeResult {
-                duration_ms: Some(60_000),
+                duration_ms: Some(180_000),
                 container: Some("mp4".into()),
                 video_codec: Some("h264".into()),
                 width: Some(160),
@@ -2062,13 +2062,21 @@
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
-        // Burst then crawl. The burst gives the session something to be ahead
-        // *with* straight away; the realtime pace afterwards keeps it alive for
-        // the rest of the test, because an unpaced copy of a short clip
-        // finishes before there is anything left to suspend.
+        // Burst then crawl, sized so this legacy (no-demand) viewer earns its
+        // first snapshot from the burst instead of at ENDLIST. The legacy
+        // publication clock wants `ROLLING_INITIAL_RUNWAY_MS` (48 s) ahead of
+        // the wall clock since bootstrap; at a 1x crawl the producer never
+        // gains on that clock, so the runway has to come from the burst. A
+        // 50 s burst closes the 6 s copy segment past 48 s at once; the next
+        // segments then close at 1x, 6 s apart, so the served window (capped
+        // at 48 s until a fetch) stays a full publication batch ahead of the
+        // staged frontier for about twelve seconds -- the window in which the
+        // assertions below run. A larger burst stages a complete next batch
+        // immediately and is held by the publication clock, correctly. The
+        // 180 s clip keeps ENDLIST out of the test entirely.
         store.put_setting(keys::HLS_READRATE, "1").await.expect("s");
         store
-            .put_setting(keys::HLS_BURST_SECS, "20")
+            .put_setting(keys::HLS_BURST_SECS, "50")
             .await
             .expect("s");
         store
@@ -2152,6 +2160,33 @@
             );
         }
         if burst_honoured {
+            // Wait on the thing the rest of this branch reads: the first
+            // served snapshot. Encoder progress is not publication, and a
+            // playlist request issued before the snapshot exists would spend
+            // the whole playlist wait budget racing it.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while session.publication.lock().await.served.is_none() {
+                    assert!(
+                        !session.failed.load(Acquire),
+                        "the session failed before its first snapshot: {:?}",
+                        session.failure_reason()
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the burst earns the legacy viewer's first snapshot");
+            assert!(
+                !session
+                    .publication
+                    .lock()
+                    .await
+                    .served
+                    .as_ref()
+                    .expect("served snapshot")
+                    .end_list,
+                "the first snapshot came from the burst, not from ENDLIST"
+            );
             assert!(
                 session
                     .ahead()
@@ -2167,7 +2202,7 @@
             let (playlist_bytes, playlist_owner) =
                 match mgr.playlist_with_owner(&info.session_id).await {
                     Ok(publication) => publication,
-                    Err(_) => panic!("playlist publication failed"),
+                    Err(error) => panic!("playlist publication failed: {:?}", error.error),
                 };
             let playlist = std::str::from_utf8(&playlist_bytes).expect("UTF-8 playlist");
             let newest = playlist

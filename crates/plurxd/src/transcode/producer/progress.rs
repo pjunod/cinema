@@ -38,7 +38,9 @@ pub struct Progress {
     /// ffmpeg keeps emitting blocks, it just stops advancing.
     pub(super) moved_at_ms: AtomicI64,
     /// Baseline for the recent-rate delta: wall clock and output time at the
-    /// last usable sample, or [`SAMPLE_UNSET`] before there is one.
+    /// last usable sample, or [`SAMPLE_UNSET`] before there is one. A sample
+    /// too close to it to measure leaves it in place; a sample that spans a
+    /// suspend replaces it.
     pub(super) sample_wall_ms: AtomicI64,
     pub(super) sample_out_ms: AtomicI64,
     /// Smoothed recent rate x1000; `-1` until two usable samples exist.
@@ -121,7 +123,13 @@ impl Progress {
     }
 
     pub(super) fn note_out_time(&self, ms: i64) {
-        let now = self.started.elapsed().as_millis() as i64;
+        self.note_out_time_at(self.started.elapsed().as_millis() as i64, ms);
+    }
+
+    /// [`Self::note_out_time`] at an explicit reading of the attempt's wall
+    /// clock, so the sampler's baseline rules can be tested as a sequence
+    /// without sleeping between blocks.
+    pub(super) fn note_out_time_at(&self, now: i64, ms: i64) {
         if self.out_time_ms.swap(ms, Relaxed) == ms {
             return; // a repeated timestamp is not progress
         }
@@ -132,9 +140,21 @@ impl Progress {
         // hides a slowdown behind a fast start and reads as nonsense across a
         // suspend -- and it is the recent number that predicts whether the
         // viewer's reserve is about to drain.
-        let last_wall = self.sample_wall_ms.swap(now, Relaxed);
-        let last_out = self.sample_out_ms.swap(ms, Relaxed);
-        if last_wall == SAMPLE_UNSET || last_out == SAMPLE_UNSET {
+        let last_wall = self.sample_wall_ms.load(Relaxed);
+        let last_out = self.sample_out_ms.load(Relaxed);
+        let have_baseline = last_wall != SAMPLE_UNSET && last_out != SAMPLE_UNSET;
+        if have_baseline && now - last_wall < RECENT_SAMPLE_MIN_MS {
+            // Too close to the baseline to measure, so the baseline stays.
+            // The content this block reports is real: moving the baseline
+            // past it would drop that content from every later sample, and a
+            // late block followed by its catch-up block would read as a
+            // producer slower than it is -- low enough to fail a healthy
+            // 1.0x session's capacity check.
+            return;
+        }
+        self.sample_wall_ms.store(now, Relaxed);
+        self.sample_out_ms.store(ms, Relaxed);
+        if !have_baseline {
             return; // the first sample only establishes a baseline
         }
         let prev = self.recent_milli.load(Relaxed);
