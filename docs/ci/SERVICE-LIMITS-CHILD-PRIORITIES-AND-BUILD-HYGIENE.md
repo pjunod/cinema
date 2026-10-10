@@ -555,6 +555,15 @@ child: an unprivileged daemon cannot lower a running child's `nice` (that
 needs `CAP_SYS_NICE`), so a joined flight is not promoted. The first caller
 decides; a start that finds nothing running starts it at realtime.
 
+The Profile 5 pixel proof is such a flight, one per source key
+(`transcode/dovi_proofs.rs`), and only a verdict is memoized: both probes
+ran and the pixels differed (proved) or did not (refuted, the honest
+`unsupported_build`). A proof that timed out, could not start or exited
+non-zero is handed to every caller waiting on it as a transient
+`startup_timeout` refusal and then forgotten, so the next start measures
+again. Until 2026-10-10 that failure was memoized as "not Dolby Vision" for
+the life of the process.
+
 **The `pre_exec`.** `process::priority::apply_policy` registers one closure
 that makes raw syscalls on values computed before the fork: `getpriority` /
 `setpriority`, `ioprio_set`, and `open` / `write` / `close` of

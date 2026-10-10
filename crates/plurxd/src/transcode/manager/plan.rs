@@ -899,8 +899,11 @@ impl TranscodeManager {
     }
 
     /// `class` is the caller's: the per-source proof runs two 30-second
-    /// FFmpeg probes and memoizes its answer, so a session start that is
-    /// waiting on it must not run them at the background class.
+    /// FFmpeg probes and memoizes its verdict, so a session start that is
+    /// waiting on it must not run them at the background class. A proof that
+    /// did not finish is not a verdict: it is not memoized and the start is
+    /// refused as transient ([`source_proof_pending_error`]), so the next
+    /// start measures again.
     async fn require_dovi_renderer(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -913,26 +916,27 @@ impl TranscodeManager {
             ));
         }
         if required {
-            let key = Self::dovi_proof_key(file);
-            let cached = self
+            let proof = self
                 .dovi_proofs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&key)
-                .copied();
-            let proved = match cached {
-                Some(proved) => proved,
-                None => {
-                    let proved = crate::ffmpeg::dovi_reshape_changes_pixels(file, class).await;
-                    self.dovi_proofs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(key, proved);
-                    proved
+                .prove(Self::dovi_proof_key(file), || {
+                    let scripted = self.hooks.get().scripted_dovi_pixel_proof(file);
+                    let file = file.clone();
+                    async move {
+                        match scripted {
+                            Some(proof) => proof,
+                            None => crate::ffmpeg::dovi_reshape_changes_pixels(&file, class).await,
+                        }
+                    }
+                })
+                .await;
+            match proof {
+                crate::ffmpeg::DoviPixelProof::Proved => {}
+                crate::ffmpeg::DoviPixelProof::Refuted => {
+                    return Err(unsupported_build_error("this source did not prove that Dolby Vision RPU application changes pixels through the production renderer"));
                 }
-            };
-            if !proved {
-                return Err(unsupported_build_error("this source did not prove that Dolby Vision RPU application changes pixels through the production renderer"));
+                crate::ffmpeg::DoviPixelProof::Inconclusive(reason) => {
+                    return Err(source_proof_pending_error(reason));
+                }
             }
         }
         Ok(required)

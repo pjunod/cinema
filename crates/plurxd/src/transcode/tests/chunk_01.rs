@@ -3369,8 +3369,6 @@ async fn profile5_requires_the_probed_software_renderer_pair() {
         .with_dovi_reshape(true);
     manager
         .dovi_proofs
-        .lock()
-        .expect("proof cache")
         .insert(TranscodeManager::dovi_proof_key(&file), true);
     let encoder = manager
         .encoder_for_file(&file, crate::process_control::ChildClass::Background)
@@ -3391,6 +3389,109 @@ async fn profile5_requires_the_probed_software_renderer_pair() {
     assert_eq!(opts.pipeline, Pipeline::DoviTonemapx);
     assert_eq!(opts.tone_map, ToneMap::Tonemapx);
     assert_eq!(manager.auto_height_for_file(Some(&file), None).await, 720);
+}
+
+/// P-02: a Profile 5 pixel proof that did not finish is not a verdict. The
+/// first start's probes fail (the source path does not exist, so ffmpeg
+/// exits non-zero or cannot start at all); that start is refused as
+/// transient, nothing is remembered, and the next start proves and proceeds.
+/// Before the fix the failure was memoized as "not Dolby Vision" and every
+/// later start of the title answered `unsupported_build` until restart.
+#[tokio::test]
+async fn an_unfinished_profile5_pixel_proof_is_transient_and_not_remembered() {
+    use plurx_core::store::SqliteStore;
+    use std::sync::atomic::Ordering;
+
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dovi_reshape(true);
+    let file = profile5_file();
+    assert!(!file.path.exists(), "the stand-in source must be unreadable");
+    let key = TranscodeManager::dovi_proof_key(&file);
+    let hooks = manager.test_hooks();
+
+    let error = manager
+        .encoder_for_file(&file, crate::process_control::ChildClass::Background)
+        .await
+        .expect_err("an unfinished proof must not start the encode");
+    assert!(
+        is_source_proof_pending_error(&error) && is_start_infrastructure_error(&error),
+        "an unfinished proof is the transient start class: {error}"
+    );
+    assert!(unsupported_build_reason(&error).is_none(), "{error}");
+    assert_eq!(manager.dovi_proofs.verdict(&key), None, "nothing remembered");
+    assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 1);
+
+    hooks
+        .dovi_pixel_proof_script
+        .lock()
+        .expect("script")
+        .push_back(crate::ffmpeg::DoviPixelProof::Proved);
+    let encoder = manager
+        .encoder_for_file(&file, crate::process_control::ChildClass::Background)
+        .await
+        .expect("the second start proves and proceeds");
+    assert_eq!(encoder, Encoder::Software);
+    assert_eq!(manager.dovi_proofs.verdict(&key), Some(true));
+    assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 2);
+    manager
+        .encoder_for_file(&file, crate::process_control::ChildClass::Background)
+        .await
+        .expect("the verdict is remembered");
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        2,
+        "a remembered verdict runs no probe"
+    );
+
+    // A refuted proof is a verdict: remembered, and the honest 501.
+    let mut refuted = profile5_file();
+    refuted.mtime = 2;
+    hooks
+        .dovi_pixel_proof_script
+        .lock()
+        .expect("script")
+        .push_back(crate::ffmpeg::DoviPixelProof::Refuted);
+    let error = manager
+        .encoder_for_file(&refuted, crate::process_control::ChildClass::Background)
+        .await
+        .expect_err("a refuted proof refuses");
+    assert!(unsupported_build_reason(&error).is_some(), "{error}");
+    assert_eq!(
+        manager
+            .dovi_proofs
+            .verdict(&TranscodeManager::dovi_proof_key(&refuted)),
+        Some(false)
+    );
+}
+
+/// The pure mapping: only two successful probes are a verdict.
+#[test]
+fn dovi_pixel_verdict_never_turns_a_probe_error_into_a_verdict() {
+    use crate::ffmpeg::{dovi_pixel_verdict, DoviPixelProof};
+    let frames = |hash: &str| Ok(vec![hash.to_owned()]);
+    assert_eq!(dovi_pixel_verdict(frames("a"), frames("b")), DoviPixelProof::Proved);
+    assert_eq!(dovi_pixel_verdict(frames("a"), frames("a")), DoviPixelProof::Refuted);
+    for (enabled, disabled) in [
+        (Err("Dolby Vision pixel probe timed out".to_owned()), frames("a")),
+        (frames("a"), Err("starting Dolby Vision pixel probe: ENOENT".to_owned())),
+        (
+            Err("Dolby Vision pixel probe exited 1".to_owned()),
+            Err("Dolby Vision pixel probe timed out".to_owned()),
+        ),
+    ] {
+        let proof = dovi_pixel_verdict(enabled, disabled);
+        assert!(matches!(proof, DoviPixelProof::Inconclusive(_)), "{proof:?}");
+        assert_eq!(proof.verdict(), None);
+    }
+    assert_eq!(DoviPixelProof::Proved.verdict(), Some(true));
+    assert_eq!(DoviPixelProof::Refuted.verdict(), Some(false));
 }
 
 /// The grade predicate and the renderer predicate answer the same
@@ -3622,8 +3723,6 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
     .with_dovi_passthrough(true);
     manager
         .dovi_proofs
-        .lock()
-        .expect("proof cache")
         .insert(TranscodeManager::dovi_proof_key(&file), true);
 
     // Everything proved, and asked for.

@@ -2200,6 +2200,7 @@ impl TranscodeManager {
                     if vod_refusal(&error).is_some()
                         || is_serving_fence_error(&error)
                         || is_retryable_capacity_error(&error)
+                        || is_start_infrastructure_error(&error)
                         || unsupported_build_reason(&error).is_some()
                     {
                         error
