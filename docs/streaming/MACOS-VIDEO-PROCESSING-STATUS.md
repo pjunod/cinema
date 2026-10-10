@@ -41,11 +41,14 @@ cleared before recovery, so everything was rebuilt from the pushed branch
 
   All are repaired, and both suites pass.
 
+- **Combined adversarial review done.** All three major and five minor
+  findings are addressed
+  ([§44](MACOS-VIDEO-PROCESSING-EVIDENCE.md#44-combined-adversarial-review-and-its-dispositions--2026-10-10)).
+
 Remaining work, in order:
 
-1. Run the combined adversarial review and address its findings.
-2. Run the fast lane once (rerunning only failures), then merge.
-3. Clean up.
+1. Run the fast lane once on PR #980 (rerunning only failures), then merge.
+2. Clean up.
 
 Intel qualification waits for the owner's explicit approval to copy the
 observer image to the Intel node. It stays open and is not inferred from

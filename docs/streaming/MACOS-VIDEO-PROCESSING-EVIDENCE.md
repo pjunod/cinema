@@ -2089,15 +2089,66 @@ Both suites then pass: operations with 936 tests and validation with 393. No
 Rust unit suite ran.
 
 [Linux normal-API evidence](evidence/macos-video-20261008/linux-normal-api-p5-evidence.tar.gz)
-contains one neutral JSON record, 7357 compressed bytes, SHA-256
-`16c84bf98fb3c9cdb614e12f57424152ac6c1c08b074807f6cc726295564a5e5`.
+contains one neutral JSON record, 8583 compressed bytes, SHA-256
+`4cd99bf560669b5dfbe1dcb96bc68aef778407dd0638470e45d3e5efe6b04584`.
 It records:
 
-- the four daemon builds with artifact hashes and refused attempts;
-- the five API windows, with observations, strict producer argv and ffmpeg
+- the five daemon builds with artifact hashes and refused attempts, including
+  the frozen candidate in §44;
+- the six API windows, with observations, strict producer argv and ffmpeg
   timelines;
 - the six-graph discovery replication;
 - both findings above.
 
 The archived member was reopened and compared byte-for-byte. No unit suite
 ran.
+
+## 44. Combined adversarial review and its dispositions — 2026-10-10
+
+One independent adversarial review read the complete PR #980 diff against
+`main`. It reported three major and five minor findings, and all were
+addressed before the fast lane.
+
+1. **Major: strict recovery was refused while a reprobe was pending.**
+   `select_linux_strict_p5` kept a plan's captured observation while no
+   current Linux report existed, but `authorize_strict_p5` demanded a current
+   one. Authorization now matches selection (`c3f91dd3`). Building the three
+   Linux strict tests on catalogue-bound facts showed they had never passed
+   (`058bc925`); they now pass, and the recovery test fails without the fix.
+2. **Major: 16 plain test functions never ran.** These are module-level
+   tests in three operations files, which `unittest discover` does not
+   collect. A `load_tests` hook now collects them, and all pass (`fd009de1`).
+3. **Major: a failed control ended the whole probe generation.** One
+   failing control discarded every refusal row and stopped later candidates
+   from being qualified. It now refuses only its own candidate (`e4a76971`).
+4. **Minor: every VOD start re-hashed both media tools.** The capture cache
+   held one attestation, so the reporter and encoder captures evicted each
+   other. It now holds one per path (`11b7392c`).
+5. **Minor: `SOURCE_RASTER` was compiled where it is unused.** It is now
+   compiled only where it is used (`ee85ac7c`).
+6. **Minor: release stage bounds still used text matches.** Both bounds now
+   come from the FROM parser, and names compare without case (`2c5a15c5`).
+7. **Minor: two new regressions could not fail on the behaviour they name.**
+   The observer now has an executed carriage-return splice test (`ee85ac7c`).
+   The pairing proof is now built from the production reshape chain
+   (`1df27269`).
+8. **Minor, plausible: the reconstructed DV soundtrack ignored the frozen
+   held origin**, which the recipe digest already claims. It now uses that
+   origin (`e32d2c2d`).
+
+Pinned Rust 1.97.1 workspace Clippy with denied warnings passes after the
+fixes. So do `decoder_selection` (98 tests), the focused `linux_dolby`, `p5`,
+`ffmpeg` and `dv_segment` tests (33 tests), the reconstructed VOD tests, and
+the complete operations and validation suites.
+
+**Frozen candidate requalified.** The final tree `2c5a15c5` builds in
+1361.3 seconds (`plurxd` SHA-256
+`e9191b68e548c62523565cc0fddbd578bd36a248d73ef6c99dd06b69c83a134b`, debug
+`.dwp` `76dd228a9708f88ad275a4b586a852adbfd46f50cbf0f338d210c4747754ed2e`).
+On the shipping image, its probe admits the same four observed graphs and
+again refuses both QSV candidates with their reasons. Normal-API delivery
+returns encoder `VA-API`. The strict graph runs with VA-API decode and
+encode, and all 24 decoded frames pass. The first object arrives in 1.48
+seconds, shutdown exits 0, and the window takes 129.5 seconds with
+production unchanged. The window is recorded in the §43 evidence record.
+
