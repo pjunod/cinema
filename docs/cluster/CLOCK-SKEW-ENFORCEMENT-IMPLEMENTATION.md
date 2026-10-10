@@ -293,7 +293,8 @@ and enforcement itself are untouched; their ruling is separate):
    learner above 2 s refuses only its own routes and promotion (amended
    2026-10-10: counting it cluster-wide let a ~9.7 s learner step refuse
    every voter's expiry scan for ~16 minutes; design §3.3); fenced removal
-   excuses only unobserved *learner* survivors; and `promote_learner` plus the leader-side Raft
+   is gated only by surviving *voters*, so a learner survivor, unobserved or
+   out of bound, never refuses it (2026-10-10); and `promote_learner` plus the leader-side Raft
    `Promote` admission require the promoted learner's own bound
    (`admit_promotion_for` / `revalidate_promotion_for`). The role comes only
    from the exact applied directory. Focused tests:

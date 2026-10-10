@@ -541,7 +541,10 @@ grant — so a skewed learner measures its own offset instead of seeing the
 leader as `Unknown`.
 
 The excuse is about votes, so it covers membership changes and the surviving
-set of a fenced removal, never a lease. A learner owns delegated media
+set of a fenced removal, never a lease. In a fenced removal only surviving
+voters' bounds gate it: a surviving learner is excused whether unobserved or
+measured out of bound, so a stepped learner never blocks removing a dead voter
+(amended 2026-10-10); removing that learner itself is unaffected. A learner owns delegated media
 sessions, and their lease expiry was written by its clock, so takeover and the
 expiry scan also require the route's **owner** to be bounded
 (`ClusterClockGuard::owner_policy`, through `acquire_owned_for_owner` for a
