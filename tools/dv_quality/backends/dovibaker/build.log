@@ -1,0 +1,81 @@
+Linux a4e3732a890e 7.0.12-linuxkit #1 SMP PREEMPT Fri Aug 14 16:27:59 UTC 2026 x86_64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
+g++ (Debian 12.2.0-14+deb12u1) 12.2.0
+Copyright (C) 2022 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+cmake version 3.31.6
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded tap v1.0.1
+  Downloaded bitvec_helpers v3.1.5
+  Downloaded funty v2.0.0
+  Downloaded radium v0.7.0
+  Downloaded crc v3.2.1
+  Downloaded crc-catalog v2.4.0
+  Downloaded tinyvec v1.6.0
+  Downloaded wyz v0.5.1
+  Downloaded bitstream-io v2.4.1
+  Downloaded anyhow v1.0.86
+  Downloaded bitvec v1.0.1
+  Downloaded libc v0.2.155
+   Compiling radium v0.7.0
+   Compiling tap v1.0.1
+   Compiling anyhow v1.0.86
+   Compiling libc v0.2.155
+   Compiling wyz v0.5.1
+   Compiling funty v2.0.0
+   Compiling crc-catalog v2.4.0
+   Compiling bitstream-io v2.4.1
+   Compiling bitvec_helpers v3.1.5
+   Compiling bitvec v1.0.1
+   Compiling crc v3.2.1
+   Compiling tinyvec v1.6.0
+   Compiling dolby_vision v3.3.1 (/work/src/dovi_tool/dolby_vision)
+    Finished `release` profile [optimized] target(s) in 18.43s
+-- The CXX compiler identification is GNU 12.2.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Build type - Release
+-- Found Git: /usr/bin/git (found version "2.39.5")
+fatal: not a git repository (or any of the parent directories): .git
+-- Configuring done (1.3s)
+-- Generating done (0.1s)
+-- Build files have been written to: /work/build
+[  9%] Building CXX object CMakeFiles/graphengine.dir/timecube/graphengine/graphengine/cpuinfo.cpp.o
+[  9%] Building CXX object CMakeFiles/graphengine.dir/timecube/graphengine/graphengine/graph.cpp.o
+[ 14%] Building CXX object CMakeFiles/graphengine.dir/timecube/graphengine/graphengine/node.cpp.o
+[ 19%] Building CXX object CMakeFiles/graphengine.dir/timecube/graphengine/graphengine/x86/cpuinfo_x86.cpp.o
+[ 23%] Linking CXX static library libgraphengine.a
+[ 23%] Built target graphengine
+[ 33%] Building CXX object CMakeFiles/timecube.dir/timecube/timecube/cube.cpp.o
+[ 33%] Building CXX object CMakeFiles/timecube.dir/timecube/timecube/lut.cpp.o
+[ 38%] Building CXX object CMakeFiles/timecube.dir/timecube/timecube/timecube.cpp.o
+[ 42%] Building CXX object CMakeFiles/timecube.dir/timecube/timecube/x86/lut_x86.cpp.o
+[ 47%] Building CXX object CMakeFiles/timecube.dir/timecube/timecube/x86/lut_sse41.cpp.o
+[ 52%] Building CXX object CMakeFiles/timecube.dir/timecube/timecube/x86/lut_avx2.cpp.o
+[ 57%] Building CXX object CMakeFiles/timecube.dir/timecube/timecube/x86/lut_avx512.cpp.o
+[ 61%] Linking CXX static library libtimecube.a
+[ 61%] Built target timecube
+[ 66%] Building CXX object CMakeFiles/DoViBaker.dir/DoViBaker/AvisynthEntry.cpp.o
+[ 71%] Building CXX object CMakeFiles/DoViBaker.dir/DoViBaker/DoViBaker.cpp.o
+/work/src/DoViBaker/DoViBaker/AvisynthEntry.cpp: In function ‘AVSValue Create_RealDoViBaker(PClip, PClip, const char*, uint16_t, float, float, bool, bool, bool, const AVSValue*, IScriptEnvironment*)’:
+/work/src/DoViBaker/DoViBaker/AvisynthEntry.cpp:75:1: warning: control reaches end of non-void function [-Wreturn-type]
+   75 | }
+      | ^
+[ 76%] Building CXX object CMakeFiles/DoViBaker.dir/DoViBaker/DoViCubes.cpp.o
+[ 80%] Building CXX object CMakeFiles/DoViBaker.dir/DoViBaker/DoViEetf.cpp.o
+[ 85%] Building CXX object CMakeFiles/DoViBaker.dir/DoViBaker/DoViProcessor.cpp.o
+[ 90%] Building CXX object CMakeFiles/DoViBaker.dir/DoViBaker/DoViStatsFileLoader.cpp.o
+[ 95%] Building CXX object CMakeFiles/DoViBaker.dir/DoViBaker/DoViTonemap.cpp.o
+[100%] Linking CXX shared library libdovibaker..so
+[100%] Built target DoViBaker
+8c356c63b8dbeda35f3213df0716d9fd45ae607c2dd7d04bb974aaeda67f42ae  /work/deps/lib/libdovi.a
+6123e3214af77e624fc9b56998b6016c1113fba85d55562edee3d5376a6990a5  /work/build/libdovibaker..so

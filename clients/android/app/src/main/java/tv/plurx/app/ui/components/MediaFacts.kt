@@ -110,9 +110,11 @@ internal fun playerMediaFacts(
     delivered: String? = null,
     rendered: String? = null,
     deliveredDolbyVisionProfile: Int? = null,
+    effectiveProcessing: tv.plurx.app.data.EffectiveProcessingReport? = null,
+    activeGeneration: String? = null,
 ): List<MediaFact> = buildList {
     resolutionFact(file)?.let(::add)
-    dynamicRangeFact(file, delivered, rendered, deliveredDolbyVisionProfile)?.let(::add)
+    dynamicRangeFact(file, delivered, rendered, deliveredDolbyVisionProfile, effectiveProcessing, activeGeneration)?.let(::add)
     audio?.let { audioFact(it.codec, it.channels, it.title) }?.let(::add)
 }
 
@@ -190,6 +192,8 @@ private fun dynamicRangeFact(
     delivered: String? = null,
     rendered: String? = null,
     deliveredDolbyVisionProfile: Int? = null,
+    effectiveProcessing: tv.plurx.app.data.EffectiveProcessingReport? = null,
+    activeGeneration: String? = null,
 ): MediaFact? {
     val value = file?.hdr_format ?: file?.hdr ?: return null
     val source = sourceDynamicRange(file) ?: return null
@@ -203,6 +207,12 @@ private fun dynamicRangeFact(
     if (delivered == null) return MediaFact(MediaFactKind.DynamicRange, label, spoken)
 
     val onScreen = rendered ?: delivered
+    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == DynamicRange.HDR10) {
+        return MediaFact(MediaFactKind.DynamicRange,
+            if (source == DynamicRange.HDR10) "HDR10-E" else label, effectiveProcessing.detail,
+            if (source == DynamicRange.HDR10) FactState.Active else FactState.Downgraded,
+            if (source == DynamicRange.HDR10) null else "HDR10-E")
+    }
     if (onScreen == source) {
         // Same grade — but possibly not the same profile. A Profile 7 disc
         // remux reaching a device that takes 8 is converted on the fly: every

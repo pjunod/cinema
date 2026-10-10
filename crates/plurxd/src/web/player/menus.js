@@ -45,9 +45,11 @@ function setupTrackMenus(){
   const cc=document.getElementById("pbsubs"); if(cc) cc.style.display=has?"":"none";
   pbSyncSubIcon();
 }
-// Light the CC button while a subtitle track is showing.
+// Project subtitle selection immediately, including while the picture is paused.
 function pbSyncSubIcon(){ const cc=document.getElementById("pbsubs");
-  if(cc) cc.classList.toggle("on", !!(PLAYER&&PLAYER.curSub>=0)); }
+  if(cc) cc.classList.toggle("on", !!(PLAYER&&PLAYER.curSub>=0));
+  if(typeof watchRenderLedger==="function") watchRenderLedger();
+}
 // `low` = opened from the bottom transport, so the menu anchors above that
 // button instead of jumping to the top-right corner of the screen.
 function closeMenu(restoreFocus=true){

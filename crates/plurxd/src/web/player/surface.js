@@ -134,6 +134,7 @@ function stopPlayerForExhaustion(){
   stopPlayerTimers();
 }
 function retireHlsTerminalAttempt(p){
+  clearEffectiveProcessing(p);
   if(!p) return;
   const mediaAttachment=p.mediaAttachment||null;
   const episode=p.hlsStartup;

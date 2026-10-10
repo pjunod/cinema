@@ -39,6 +39,15 @@ impl SourceNativeTracks {
     pub(super) fn probe(&self) -> &str {
         &self.probe
     }
+    pub(super) fn revision(&self, index: u16) -> Option<String> {
+        self.track(index).map(|_| {
+            format!(
+                "source-{}-{}-{index}.vtt",
+                self.assignment.binding().incarnation_id(),
+                self.assignment.dispatch_generation()
+            )
+        })
+    }
     pub(super) fn track(&self, index: u16) -> Option<&[u8]> {
         self.tracks.get(&index).map(Vec::as_slice)
     }

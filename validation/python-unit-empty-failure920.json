@@ -1,0 +1,196 @@
+{
+  "cases": [
+    {
+      "artifacts": {
+        "final": {
+          "id": 1943,
+          "sha256": "1d88472f2e295b0eb3560a1b19457fc946571471a1773d2312a1ee8c094f0c95",
+          "size": 332
+        },
+        "start": {
+          "id": 1942,
+          "sha256": "7ea20433d3a8c1419c2fc145a7be4a162b6651d93b50554ca9ae119cc2e8dc46",
+          "size": 332
+        }
+      },
+      "commit": "6c61f99628fd2d1f10c7379d0e33ce61230fe252",
+      "job": 45570,
+      "jobs": [
+        {
+          "attempt": 1,
+          "id": 45569,
+          "name": "effort validation scope",
+          "repo_id": 1,
+          "run_id": 4501,
+          "status": "success",
+          "task_id": 17016
+        },
+        {
+          "attempt": 1,
+          "id": 45570,
+          "name": "Python unit receipts",
+          "repo_id": 1,
+          "run_id": 4501,
+          "status": "failure",
+          "task_id": 17017
+        },
+        {
+          "attempt": 1,
+          "id": 45571,
+          "name": "effort Rust compile",
+          "repo_id": 1,
+          "run_id": 4501,
+          "status": "skipped",
+          "task_id": 17022
+        },
+        {
+          "attempt": 1,
+          "id": 45572,
+          "name": "effort Windows compile",
+          "repo_id": 1,
+          "run_id": 4501,
+          "status": "skipped",
+          "task_id": 17025
+        },
+        {
+          "attempt": 1,
+          "id": 45573,
+          "name": "effort web static contracts",
+          "repo_id": 1,
+          "run_id": 4501,
+          "status": "skipped",
+          "task_id": 17023
+        },
+        {
+          "attempt": 1,
+          "id": 45574,
+          "name": "effort Apple compile",
+          "repo_id": 1,
+          "run_id": 4501,
+          "status": "cancelled",
+          "task_id": 0
+        },
+        {
+          "attempt": 1,
+          "id": 45575,
+          "name": "effort Android compile",
+          "repo_id": 1,
+          "run_id": 4501,
+          "status": "skipped",
+          "task_id": 17024
+        },
+        {
+          "attempt": 1,
+          "id": 45576,
+          "name": "Effort development gate",
+          "repo_id": 1,
+          "run_id": 4501,
+          "status": "cancelled",
+          "task_id": 0
+        }
+      ],
+      "log_bytes": 136408,
+      "log_sha256": "391411e3fb306d334c86b6ca7ff60fc0b6be3764787d524746755ca43dd858f9",
+      "run": 4501,
+      "source_hashes": {
+        ".github/workflows/effort-ci.yml": "b7c05851a042afa2da9a39bcd3e4057ea4ee0d02f37bb304b6044237cf303e5d",
+        "validation/python_unit_receipts.py": "8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258"
+      },
+      "task": 17017
+    },
+    {
+      "commit": "bfc10ea19d94b29af6558379d42afbe7419982d4",
+      "job": 45578,
+      "jobs": [
+        {
+          "attempt": 1,
+          "id": 45577,
+          "name": "effort validation scope",
+          "repo_id": 1,
+          "run_id": 4502,
+          "status": "success",
+          "task_id": 17021
+        },
+        {
+          "attempt": 1,
+          "id": 45578,
+          "name": "Python unit receipts",
+          "repo_id": 1,
+          "run_id": 4502,
+          "status": "failure",
+          "task_id": 17026
+        },
+        {
+          "attempt": 1,
+          "id": 45579,
+          "name": "effort Rust compile",
+          "repo_id": 1,
+          "run_id": 4502,
+          "status": "skipped",
+          "task_id": 17030
+        },
+        {
+          "attempt": 1,
+          "id": 45580,
+          "name": "effort Windows compile",
+          "repo_id": 1,
+          "run_id": 4502,
+          "status": "skipped",
+          "task_id": 17028
+        },
+        {
+          "attempt": 1,
+          "id": 45581,
+          "name": "effort web static contracts",
+          "repo_id": 1,
+          "run_id": 4502,
+          "status": "skipped",
+          "task_id": 17029
+        },
+        {
+          "attempt": 1,
+          "id": 45582,
+          "name": "effort Apple compile",
+          "repo_id": 1,
+          "run_id": 4502,
+          "status": "cancelled",
+          "task_id": 0
+        },
+        {
+          "attempt": 1,
+          "id": 45583,
+          "name": "effort Android compile",
+          "repo_id": 1,
+          "run_id": 4502,
+          "status": "skipped",
+          "task_id": 17027
+        },
+        {
+          "attempt": 1,
+          "id": 45584,
+          "name": "Effort development gate",
+          "repo_id": 1,
+          "run_id": 4502,
+          "status": "cancelled",
+          "task_id": 0
+        }
+      ],
+      "log_bytes": 132899,
+      "log_sha256": "772c63d2187cd42d13274f09389f4b715ae35654397466f408e9c2f0b135d159",
+      "run": 4502,
+      "source_hashes": {
+        ".github/workflows/effort-ci.yml": "b7c05851a042afa2da9a39bcd3e4057ea4ee0d02f37bb304b6044237cf303e5d",
+        "validation/python_unit_receipts.py": "8b0f9cfb68465095d80fb493e0e833812c3084284d3391758ff1e86bcc73b258"
+      },
+      "task": 17026
+    }
+  ],
+  "provenance": "Original authenticated API evidence retained; cancelled only unassigned downstream jobs after terminal preflight failures. Zero Python units or imported successes.",
+  "scope": {
+    "base": "effort/dv-hdr-processing",
+    "branch": "codex/dv-m0-harness",
+    "pr": 920,
+    "repository": 1
+  },
+  "version": 1
+}

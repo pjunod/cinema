@@ -423,6 +423,7 @@ class PlaybackControlSession(
         linkReceipt: () -> String? = { null },
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
+        onProcessingGeneration: (String?, tv.plurx.app.data.EffectiveProcessingReport?) -> Unit = { _, _ -> },
         /** The server has given up on the selected track, not merely not got to it. */
         onSubtitleUnavailable: () -> Unit = {},
         onPrepare: (ControlAction) -> Unit = {},
@@ -481,6 +482,10 @@ class PlaybackControlSession(
                 // exchange that has already come back with nothing.
                 synchronized(answerLock) {
                     if (generation == answerGeneration) {
+                        if (exchange.capture.hasSameIntent(latest.get())) {
+                            onProcessingGeneration(if (exchange.response == null) null else exchange.request.generation,
+                                tv.plurx.app.data.EffectiveProcessingReport.fromJson(exchange.response?.effectiveProcessing))
+                        }
                         answersSeen += 1
                         if (exchange.failure == "transport:409:owner_changed") {
                             ownerChangesSeen += 1
@@ -503,12 +508,23 @@ class PlaybackControlSession(
                 // viewer nothing leaves them watching a track that is selected
                 // and will never fill in.
                 if (exchange.capture.hasSameIntent(latest.get()) &&
-                    subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness)
+                    subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness,
+                        commitUnavailable = false, intent = exchange.capture.intentGeneration)
                 ) {
-                    onSubtitleUnavailable()
+                    dispatchSubtitleReady {
+                        synchronized(verdictLock) {
+                            if (generation == verdictGeneration &&
+                                exchange.intentGeneration == verdictIntentGeneration &&
+                                exchange.capture.hasSameIntent(latest.get()) &&
+                                subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness,
+                                    intent = exchange.capture.intentGeneration)) onSubtitleUnavailable()
+                        }
+                    }
                 }
                 if (exchange.capture.hasSameIntent(latest.get()) && subtitleReadiness.record(
                         exchange.response?.delivery?.subtitleReadiness, commitReady = false,
+                        intent = exchange.capture.intentGeneration,
+                        revision = exchange.response?.delivery?.subtitleRevision,
                     )) {
                     dispatchSubtitleReady {
                         // The callback can be queued while begin/end replaces
@@ -518,7 +534,9 @@ class PlaybackControlSession(
                             if (generation == verdictGeneration &&
                                 exchange.capture.owner == PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration) &&
                                 exchange.intentGeneration == verdictIntentGeneration &&
-                                subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
+                                subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness,
+                                    intent = exchange.capture.intentGeneration,
+                                    revision = exchange.response?.delivery?.subtitleRevision)
                             ) {
                                 onSubtitleReady()
                             }

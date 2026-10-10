@@ -28,6 +28,27 @@
 use super::{Encoder, OutputGrade};
 use crate::domain::ScanType;
 
+/// The independently reconstructed renderer's exact input, never source HDR.
+/// This contract does not participate in ordinary pipeline negotiation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconstructedPqInput {
+    Rgb48Bt2020Pq,
+}
+impl ReconstructedPqInput {
+    pub fn pixel_format(self) -> &'static str {
+        "rgb48le"
+    }
+    pub fn transfer(self) -> &'static str {
+        "smpte2084"
+    }
+    pub fn primaries(self) -> &'static str {
+        "bt2020"
+    }
+    pub(super) fn pairs_with(self, encoder: Encoder) -> bool {
+        matches!(encoder, Encoder::Software | Encoder::Nvenc)
+    }
+}
+
 /// The video path for one session, from decoded frames to the encoder's input.
 ///
 /// The legacy probe walks [`CANDIDATES`] from most to least preferred; Apple

@@ -485,6 +485,7 @@ async fn save_candidate(
         source_size: file.size,
         source_mtime: file.mtime,
         provider_file_id: candidate.file_id,
+        transcription: None,
         language: candidate.language.clone(),
         title: format!("OpenSubtitles · {}", candidate.release),
         forced: candidate.forced,

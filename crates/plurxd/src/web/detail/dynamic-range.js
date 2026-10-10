@@ -101,8 +101,38 @@ function dynamicRangeBadge(f, delivered, displayHdr, deliveredDvProfile){
 // `dynamicRangeBadge` three of its four arguments between them. Dropping one
 // silently degrades the chip to the state it had before that argument existed,
 // which is a correct-looking badge for the wrong delivery.
+function effectiveHdrProcessing(report,generation,delivered){
+  if(!report||report.hdr10_enhanced!==true||typeof report.fel_contributed!=='boolean'
+    ||delivered!=='hdr10'||typeof generation!=='string'||report.generation!==generation
+    ||!/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(generation)
+    ||!Array.isArray(report.applied_operations)||!report.applied_operations.length
+    ||report.applied_operations.length>16
+    ||!report.applied_operations.every(op=>typeof op==='string'&&op.length>0&&op.length<=64)) return null;
+  return report;
+}
+function effectiveProcessingDetail(report){
+  const names={PolynomialReshape:'RPU polynomial mapping',MmrReshape:'RPU MMR mapping',
+    RpuColorConversion:'RPU color conversion',TargetMapping:'target mapping',CreativeTrimApplication:'creative trims'};
+  const metadata=report.applied_operations.map(op=>names[op]).filter(Boolean).join(', ');
+  return `Dolby Vision–enhanced HDR10 · FEL used: ${report.fel_contributed?'yes':'no'}${metadata?` · Applied: ${metadata}`:''}`;
+}
+function clearEffectiveProcessing(p){
+  if(!p) return;
+  const changed=!!p.effectiveProcessing;
+  p.effectiveProcessing=null;
+  if(changed&&typeof PLAYER!=='undefined'&&p===PLAYER&&typeof renderPlayerInfo==='function') renderPlayerInfo();
+}
 function playerRangeBadge(f){
-  return dynamicRangeBadge(f, PLAYER.deliveredRange, displayIsHdr(), PLAYER.deliveredDvProfile);
+  const badge=dynamicRangeBadge(f, PLAYER.deliveredRange, displayIsHdr(), PLAYER.deliveredDvProfile);
+  const generation=PLAYER.controlReporter?.bootstrap?.generation;
+  const report=effectiveHdrProcessing(PLAYER.effectiveProcessing,generation,PLAYER.deliveredRange);
+  if(!report) return badge;
+  const source=sourceDynamicRange(f),same=source==='hdr10';
+  const detail=effectiveProcessingDetail(report);
+  const base=same?'HDR10-E':badge?.base||'HDR10-E';
+  return {...(badge||{cls:'hdr',source,rendered:null,off:false}),base,
+    text:same||!badge?'HDR10-E':`${base} → HDR10-E`,arrow:same||!badge?null:'HDR10-E',
+    full:`${detail} · display output unverified`,aria:detail,panel:detail};
 }
 function premiumAudio(f){ const cs=(f.audio_streams||[]).map(a=>(a.codec||'').toLowerCase());
   if(cs.some(c=>c.includes('truehd'))) return 'TrueHD';

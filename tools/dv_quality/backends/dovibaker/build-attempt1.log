@@ -1,0 +1,83 @@
+Linux ab923e707ec3 7.0.12-linuxkit #1 SMP PREEMPT Fri Aug 14 16:27:59 UTC 2026 x86_64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
+g++ (Debian 12.2.0-14+deb12u1) 12.2.0
+Copyright (C) 2022 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [34.8 kB]
+Get:4 http://deb.debian.org/debian bookworm/main amd64 Packages [8790 kB]
+Get:5 http://deb.debian.org/debian bookworm-updates/main amd64 Packages [6924 B]
+Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [349 kB]
+Fetched 9388 kB in 2s (6076 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+pkg-config is already the newest version (1.8.1-1).
+pkg-config set to manually installed.
+The following additional packages will be installed:
+  libpython3.11-minimal libpython3.11-stdlib python3-pip-whl
+  python3-setuptools-whl python3.11 python3.11-minimal python3.11-venv
+Suggested packages:
+  python3.11-doc binfmt-support
+The following NEW packages will be installed:
+  python3-pip-whl python3-setuptools-whl python3-venv python3.11-venv
+The following packages will be upgraded:
+  libpython3.11-minimal libpython3.11-stdlib python3.11 python3.11-minimal
+4 upgraded, 4 newly installed, 0 to remove and 35 not upgraded.
+Need to get 8086 kB of archives.
+After this operation, 3171 kB of additional disk space will be used.
+Get:1 http://deb.debian.org/debian-security bookworm-security/main amd64 python3.11 amd64 3.11.2-6+deb12u9 [575 kB]
+Get:2 http://deb.debian.org/debian-security bookworm-security/main amd64 libpython3.11-stdlib amd64 3.11.2-6+deb12u9 [1798 kB]
+Get:3 http://deb.debian.org/debian-security bookworm-security/main amd64 python3.11-minimal amd64 3.11.2-6+deb12u9 [2055 kB]
+Get:4 http://deb.debian.org/debian-security bookworm-security/main amd64 libpython3.11-minimal amd64 3.11.2-6+deb12u9 [821 kB]
+Get:5 http://deb.debian.org/debian bookworm/main amd64 python3-pip-whl all 23.0.1+dfsg-1 [1717 kB]
+Get:6 http://deb.debian.org/debian bookworm/main amd64 python3-setuptools-whl all 66.1.1-1+deb12u2 [1112 kB]
+Get:7 http://deb.debian.org/debian-security bookworm-security/main amd64 python3.11-venv amd64 3.11.2-6+deb12u9 [5896 B]
+Get:8 http://deb.debian.org/debian bookworm/main amd64 python3-venv amd64 3.11.2-1+b1 [1200 B]
+debconf: delaying package configuration, since apt-utils is not installed
+Fetched 8086 kB in 0s (35.0 MB/s)
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 23256 files and directories currently installed.)
+Preparing to unpack .../0-python3.11_3.11.2-6+deb12u9_amd64.deb ...
+Unpacking python3.11 (3.11.2-6+deb12u9) over (3.11.2-6+deb12u8) ...
+Preparing to unpack .../1-libpython3.11-stdlib_3.11.2-6+deb12u9_amd64.deb ...
+Unpacking libpython3.11-stdlib:amd64 (3.11.2-6+deb12u9) over (3.11.2-6+deb12u8) ...
+Preparing to unpack .../2-python3.11-minimal_3.11.2-6+deb12u9_amd64.deb ...
+Unpacking python3.11-minimal (3.11.2-6+deb12u9) over (3.11.2-6+deb12u8) ...
+Preparing to unpack .../3-libpython3.11-minimal_3.11.2-6+deb12u9_amd64.deb ...
+Unpacking libpython3.11-minimal:amd64 (3.11.2-6+deb12u9) over (3.11.2-6+deb12u8) ...
+Selecting previously unselected package python3-pip-whl.
+Preparing to unpack .../4-python3-pip-whl_23.0.1+dfsg-1_all.deb ...
+Unpacking python3-pip-whl (23.0.1+dfsg-1) ...
+Selecting previously unselected package python3-setuptools-whl.
+Preparing to unpack .../5-python3-setuptools-whl_66.1.1-1+deb12u2_all.deb ...
+Unpacking python3-setuptools-whl (66.1.1-1+deb12u2) ...
+Selecting previously unselected package python3.11-venv.
+Preparing to unpack .../6-python3.11-venv_3.11.2-6+deb12u9_amd64.deb ...
+Unpacking python3.11-venv (3.11.2-6+deb12u9) ...
+Selecting previously unselected package python3-venv.
+Preparing to unpack .../7-python3-venv_3.11.2-1+b1_amd64.deb ...
+Unpacking python3-venv (3.11.2-1+b1) ...
+Setting up python3-setuptools-whl (66.1.1-1+deb12u2) ...
+Setting up python3-pip-whl (23.0.1+dfsg-1) ...
+Setting up libpython3.11-minimal:amd64 (3.11.2-6+deb12u9) ...
+Setting up python3.11-minimal (3.11.2-6+deb12u9) ...
+Setting up libpython3.11-stdlib:amd64 (3.11.2-6+deb12u9) ...
+Setting up python3.11 (3.11.2-6+deb12u9) ...
+Setting up python3.11-venv (3.11.2-6+deb12u9) ...
+Setting up python3-venv (3.11.2-1+b1) ...
+Collecting cmake==3.31.6
+  Downloading cmake-3.31.6-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (27.8 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 27.8/27.8 MB 44.1 MB/s eta 0:00:00
+Installing collected packages: cmake
+Successfully installed cmake-3.31.6
+cmake version 3.31.6
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+    Updating crates.io index
+error: cannot create the lock file /work/src/dovi_tool/dolby_vision/Cargo.lock because --locked was passed to prevent this
+help: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.

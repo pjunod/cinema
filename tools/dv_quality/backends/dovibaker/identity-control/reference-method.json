@@ -1,0 +1,13 @@
+{
+  "kind": "independent",
+  "scope": "analytic-control",
+  "producer": "identity_reference.py using Python Decimal exact decimal arithmetic",
+  "method": "Closed-form declared identity BL+signed residual control, independent from executing renderer functions. Output quantization is nearest-even full-range PQ*65535. Does not validate original DV equation, metadata parsing, timing, decoding, chroma resampling, P8.1 compatibility, or creative trims.",
+  "input_definition_sha256": "acdac69cb66b88e688771abab7fb0f5741cf3b5274bc49a11827d54937d82ec3",
+  "script_sha256": "30b2244baf4c4b7af0f8fca7241a99f56b751830d33f57bb491b421cd99d7b52",
+  "output_format": "rgb48le",
+  "artifacts": {
+    "nonzero-reference.rgb48le": "5f67e787496e6acfed94b24777dbac0d3d67ddc3e7aff76448a68a1711ea8a31",
+    "base-reference.rgb48le": "6c5d9ebb0bcadbb0ffe4388b3f04d1765de13de6e003a3210cbfc42c4aa6a4f9"
+  }
+}

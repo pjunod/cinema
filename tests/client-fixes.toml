@@ -1,6 +1,47 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "subtitles.available-count-includes-selection"
+commits = ["884614df1b58c2878c30c758d21adbeb973f60c9"]
+source = "crates/plurxd/src/web/detail/watch-browser.js"
+source_anchor = "<b>${tracks.length}</b> available"
+test = "tests/web/file-context.test.js"
+test_anchor = "folded subtitle availability includes the selected generated track"
+
+[[fixes]]
+id = "subtitles.paused-selection-projects-immediately"
+commits = ["a27ba45498ae716419f5f3461d3d817c803227eb"]
+source = "crates/plurxd/src/web/player/menus.js"
+source_anchor = 'if(typeof watchRenderLedger==="function") watchRenderLedger();'
+test = "tests/playback/web-control.test.js"
+test_anchor = "paused subtitle selection projects ordinal zero and Off immediately"
+
+# Subtitle batch source/test anchors; retained execution evidence is separate.
+[[fixes]]
+id = "subtitles.acknowledged-native-reselection"
+commits = ["46a15c2800b850b4ac00dbbc7d973b6d922cfad4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/NativeSubtitleRetry.kt"
+source_anchor = "suspendCancellableCoroutine<Unit>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/NativeSubtitleRetryTest.kt"
+test_anchor = "reselectWaitsForPlaybackThreadAcknowledgement"
+
+[[fixes]]
+id = "subtitles.explicit-offline-generation-refusal"
+commits = ["96cc3fce06934f1eb30a04e40f8519bf57662f56"]
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = "async function generateSubtitles(fileId,button)"
+test = "tests/web/settings-sections.test.js"
+test_anchor = "transcription queue refusal is not displayed as successful work"
+
+[[fixes]]
+id = "subtitles.unavailable-notice-preserves-video"
+commits = ["4f6a1d7e2ba2b1a681b554c18ffb798a7ad82b4a"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "guard value == \"unavailable\", toldIntent != intent else { return false }"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testUnavailableSubtitleNotifiesOncePerIntentWithoutConsumingReadyRetry"
+
 # Reviewed Mac completion client changes: source/test anchors, not execution receipts.
 [[fixes]]
 id = "android.hls-hevc-retains-measured-envelope"
@@ -5831,6 +5872,17 @@ source_anchor = "color = if (selected) Accent else OnBg"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
 test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
 
+# PR920 baseline correction: the Android status now names the real Gradle
+# build 152. The source anchor follows the current build 159 after integration;
+# this maps the documentation correction, not a new playback claim.
+[[fixes]]
+id = "android.build-152-baseline-claim"
+commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
+source = "clients/android/README.md"
+source_anchor = "> Status: **v0.3.0**, build `159`"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "test_repository_build_claims_match_release_inputs"
+
 [[fixes]]
 id = "apple.playback-buffer-limit-hold-wording"
 commits = ["f8f7e07ec34658b9590c95b24a0a71a191cfdcab"]
@@ -5918,3 +5970,28 @@ source = "clients/apple/Sources/PlaybackControlSession.swift"
 source_anchor = 'retryAfterHeader: response.value(forHTTPHeaderField: "Retry-After")'
 test = "clients/apple/Tests/PlaybackControlTransportTests.swift"
 test_anchor = "testHeaderOnlyServingFenceCarriesTheServersDelay"
+
+# DV effort corrective client anchors: source/test witnesses, not execution receipts.
+[[fixes]]
+id = "android.physical-key-public-window-callback"
+commits = ["696b37ff3e4cf664fab6fb98a71706f02ac297ab"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = "return nativeWindowCallback.dispatchKeyEvent(event)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "dedicatedPhysicalPlayPauseStopRetireCreditsAndPreservePhysicalScrub"
+
+[[fixes]]
+id = "web.accepted-control-processing-report"
+commits = ["0ebcd0cd318f307a3e81ab8bb2635cb6443bfb3d"]
+source = "crates/plurxd/src/web/player/directed-change.js"
+source_anchor = "p.effectiveProcessing=processing;"
+test = "tests/web/dv-processing-badge.test.js"
+test_anchor = "accepted current controls adopt late processing and omission clears the same generation"
+
+[[fixes]]
+id = "android.generation-bound-hdr10-enhancement"
+commits = ["e3970c07d6bceb36caf9d82bbc86a74223ff079d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "effectiveProcessing?.matches(activeGeneration, delivered) == true"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "hdr10EnhancedRequiresCurrentReportAndKeepsFelDetailSeparate"

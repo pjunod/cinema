@@ -1,0 +1,73 @@
+{
+  "scope": "analytic-control",
+  "width": 64,
+  "height": 64,
+  "frame_count": 4,
+  "frame_rate": "24/1",
+  "time_base": "1/24",
+  "frames": [
+    {
+      "index": 0,
+      "pts": 0,
+      "duration": 1,
+      "source_rgb48le_sha256": "2aee0bb600ede3e668150dfbc81bffd75cf0c4cbb77ff8e59d4fd19709fdb1ba",
+      "rpu_path": "adapted-rpu-frame0.nal",
+      "rpu_sha256": "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+      "synthetic_l1": {
+        "min_pq": 0,
+        "max_pq": 4095,
+        "avg_pq": 2048
+      }
+    },
+    {
+      "index": 1,
+      "pts": 1,
+      "duration": 1,
+      "source_rgb48le_sha256": "7be0433553879ff87f3f16f92e30ab9ee35219c6d19e5bd073fa83388679cb72",
+      "rpu_path": "adapted-rpu-frame1.nal",
+      "rpu_sha256": "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+      "synthetic_l1": {
+        "min_pq": 0,
+        "max_pq": 4094,
+        "avg_pq": 2047
+      }
+    },
+    {
+      "index": 2,
+      "pts": 2,
+      "duration": 1,
+      "source_rgb48le_sha256": "f70fedece7ab84de426ce9afcd8e422a1201d9a161046d2244f326d00fc141c3",
+      "rpu_path": "adapted-rpu-frame2.nal",
+      "rpu_sha256": "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+      "synthetic_l1": {
+        "min_pq": 0,
+        "max_pq": 4093,
+        "avg_pq": 2046
+      }
+    },
+    {
+      "index": 3,
+      "pts": 3,
+      "duration": 1,
+      "source_rgb48le_sha256": "c4e99e85c205fb485aad0c70c9a35ddcb939677223846c45afc4da7c36166905",
+      "rpu_path": "adapted-rpu-frame3.nal",
+      "rpu_sha256": "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c",
+      "synthetic_l1": {
+        "min_pq": 0,
+        "max_pq": 4092,
+        "avg_pq": 2045
+      }
+    }
+  ],
+  "format": "RGB48LE",
+  "range": "full",
+  "primaries": "BT2020",
+  "transfer": "ST2084",
+  "source_method": "Exact nearest4x replication of cyclically permuted declared CPU analytic reconstruction; no picture reference",
+  "frame_sampling": "source_x=(x//4+frame)%16; source_y=(y//4+3*frame)%16",
+  "rpu_pairing": "Distinct bounded synthetic L1 values by frame; identity mapping/no residual; bframes0,keyint24,scenecut0",
+  "metadata_semantics": "Synthetic identity tags; not image analysis or artistic metadata authoring",
+  "timestamp_limit": "Synthetic manifest PTS only; elementary HEVC has no actual PTS; container/reordered pairing unproven",
+  "independent_dv_reference": null,
+  "p81_conformance": null
+}

@@ -721,6 +721,17 @@ pub struct ClientTransportRecord {
     pub client_timestamp_ms: Option<i64>,
 }
 
+fn deserialize_optional_client_file_id<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct FileId(
+        #[serde(deserialize_with = "super::reading::deserialize_i64_number_or_text")] i64,
+    );
+    Option::<FileId>::deserialize(deserializer).map(|id| id.map(|id| id.0))
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
@@ -738,7 +749,9 @@ pub struct ClientLog {
     pub code: Option<i64>,
     /// Title being played, for cross-referencing with the library.
     pub title: Option<String>,
-    /// File id being played.
+    /// File id being played. Native clients use numbers; web route IDs use
+    /// exact decimal strings to preserve the full signed 64-bit range.
+    #[serde(default, deserialize_with = "deserialize_optional_client_file_id")]
     pub file_id: Option<i64>,
     /// Source video codec the decision picked, e.g. "hevc" — the usual Safari culprit.
     pub vcodec: Option<String>,
@@ -2104,6 +2117,9 @@ pub struct SettingsDto {
     /// Convert Dolby Vision Profile 7 to 8.1 rather than delivering HDR10.
     /// On by default; this was `PLURX_DV_CONVERT`.
     pub dolby_vision_convert: bool,
+    /// Requested preferences, default off; neither reports effective processing.
+    pub dolby_vision_hdr_processing: bool,
+    pub dolby_vision_fel_reencode: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -2134,10 +2150,6 @@ pub struct SettingsDto {
     /// Forward subtitle materialization span. Absent storage resolves to the
     /// bounded 200-second server default.
     pub subtitle_window_secs: i64,
-    /// Answer a subtitle segment whose sidecar extraction has failed with
-    /// `503` + `Retry-After` rather than an empty track. Off by default; the
-    /// Developer tab's readiness rows are advisory and never override it.
-    pub subtitle_not_ready_503: bool,
     /// Let the PGS overlay and burn paths read a track the subtitle-source
     /// store kept instead of the whole source. On by default; off makes both
     /// ignore the store entirely.
@@ -2597,6 +2609,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::DV_CONVERT).as_deref(),
             true,
         ),
+        dolby_vision_hdr_processing: plurx_core::store::stored_switch(
+            setting(keys::DV_HDR_PROCESSING).as_deref(),
+            false,
+        ),
+        dolby_vision_fel_reencode: plurx_core::store::stored_switch(
+            setting(keys::DV_FEL_REENCODE).as_deref(),
+            false,
+        ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -2619,10 +2639,6 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         analysis_backoff_base_secs,
         analysis_backoff_max_secs,
         subtitle_window_secs,
-        subtitle_not_ready_503: plurx_core::store::stored_switch(
-            setting(keys::SUBTITLE_NOT_READY_503).as_deref(),
-            false,
-        ),
         subtitle_stored_sources: plurx_core::store::stored_switch(
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
             true,
@@ -2888,6 +2904,8 @@ pub struct UpdateSettings {
     pub playback_sdr_master_codecs: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
+    pub dolby_vision_hdr_processing: Option<bool>,
+    pub dolby_vision_fel_reencode: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -2901,7 +2919,6 @@ pub struct UpdateSettings {
     pub analysis_backoff_base_secs: Option<i64>,
     pub analysis_backoff_max_secs: Option<i64>,
     pub subtitle_window_secs: Option<i64>,
-    pub subtitle_not_ready_503: Option<bool>,
     pub subtitle_stored_sources: Option<bool>,
     pub subtitle_cluster_sources: Option<bool>,
     pub subtitle_backfill: Option<bool>,
@@ -3062,6 +3079,8 @@ impl UpdateSettings {
             || self.playback_sdr_master_codecs.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
+            || self.dolby_vision_hdr_processing.is_some()
+            || self.dolby_vision_fel_reencode.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
             || self.vod_materialize_budget_secs.is_some()
@@ -3074,7 +3093,6 @@ impl UpdateSettings {
             || self.analysis_backoff_base_secs.is_some()
             || self.analysis_backoff_max_secs.is_some()
             || self.subtitle_window_secs.is_some()
-            || self.subtitle_not_ready_503.is_some()
             || self.subtitle_stored_sources.is_some()
             || self.subtitle_cluster_sources.is_some()
             || self.subtitle_backfill.is_some()
@@ -3780,12 +3798,6 @@ pub async fn update_settings(
             .put_setting(keys::SUBTITLE_WINDOW_SECS, &seconds.to_string())
             .await?;
     }
-    if let Some(on) = req.subtitle_not_ready_503 {
-        state
-            .store
-            .put_setting(keys::SUBTITLE_NOT_READY_503, if on { "1" } else { "0" })
-            .await?;
-    }
     if let Some(on) = req.subtitle_stored_sources {
         state
             .store
@@ -4096,6 +4108,20 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::DV_CONVERT, if on { "1" } else { "0" })
+            .await?;
+    }
+    // Persist requested preferences even while backend qualification is missing.
+    // Runtime routing remains unchanged until a qualified implementation lands.
+    if let Some(on) = req.dolby_vision_hdr_processing {
+        state
+            .store
+            .put_setting(keys::DV_HDR_PROCESSING, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_fel_reencode {
+        state
+            .store
+            .put_setting(keys::DV_FEL_REENCODE, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(output) = live_tv_deinterlace_output {
@@ -6123,6 +6149,40 @@ pub(crate) async fn metrics(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_log_file_id_accepts_exact_decimal_text_and_legacy_numbers() {
+        for (value, expected) in [
+            (serde_json::json!(4), Some(4)),
+            (serde_json::json!("4"), Some(4)),
+            (
+                serde_json::json!("9007199254740993"),
+                Some(9_007_199_254_740_993),
+            ),
+            (serde_json::json!(i64::MAX.to_string()), Some(i64::MAX)),
+            (serde_json::Value::Null, None),
+        ] {
+            let report: super::ClientLog =
+                serde_json::from_value(serde_json::json!({"event":"ttff","file_id":value}))
+                    .expect("compatible file ID");
+            assert_eq!(report.file_id, expected);
+        }
+        let absent: super::ClientLog =
+            serde_json::from_value(serde_json::json!({"event":"ttff"})).expect("absent file ID");
+        assert_eq!(absent.file_id, None);
+        for invalid in [
+            serde_json::json!(4.5),
+            serde_json::json!("4.5"),
+            serde_json::json!("9223372036854775808"),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            assert!(serde_json::from_value::<super::ClientLog>(
+                serde_json::json!({"file_id":invalid})
+            )
+            .is_err());
+        }
+    }
+
     use std::time::{Duration, Instant};
 
     use super::*;

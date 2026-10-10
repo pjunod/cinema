@@ -1,6 +1,15 @@
 use super::*;
 
 impl TranscodeManager {
+    pub(crate) async fn dv_effective_report(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
+        self.vod
+            .dv_effective_report(session_id, incarnation_id)
+            .await
+    }
     #[cfg(test)]
     pub(crate) fn test_hold_source_software_capacity(&self) -> Option<crate::admission::SwPermit> {
         self.admissions
@@ -12,7 +21,14 @@ impl TranscodeManager {
         if let Some(recovered) = self.vod.recovered_start(session_id).await {
             // An idempotent replay of a VOD create: repeat the persisted
             // answer, field for field, from the session record.
+            let processed_encoding = self
+                .vod
+                .hls_facts(&recovered.start.session_id)
+                .await
+                .and_then(|facts| facts.encoding)
+                .filter(|encoding| encoding.preserves_processed_dv());
             return Some(StartInfo {
+                processed_dv_profile: processed_encoding.as_ref().map(|_| 8),
                 retained_output: self
                     .vod
                     .hls_facts(&recovered.start.session_id)
@@ -30,8 +46,14 @@ impl TranscodeManager {
                 media_origin_seconds: 0.0,
                 target_height: recovered.target_height,
                 kind: recovered.kind,
-                encoder: "vod",
-                grade: OutputGrade::Sdr,
+                encoder: processed_encoding
+                    .as_ref()
+                    .map_or("vod", |encoding| encoding.delivered_encoder_label()),
+                grade: if processed_encoding.is_some() {
+                    OutputGrade::Hdr10
+                } else {
+                    OutputGrade::Sdr
+                },
                 vod: true,
                 control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             });
@@ -49,6 +71,7 @@ impl TranscodeManager {
             .and_then(|f| f.duration_ms);
         let encoder = *session.encoder_label.lock().await;
         Some(StartInfo {
+            processed_dv_profile: None,
             retained_output: None,
             audio_delivery: session.audio_delivery.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

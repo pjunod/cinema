@@ -609,14 +609,12 @@ pub(crate) async fn readiness(
             )
             .await,
             subtitle_backfill(&state, subtitle_backfill_on).await,
-            subtitle_not_ready_503(plurx_core::store::stored_switch(
-                settings
-                    .get(plurx_core::store::keys::SUBTITLE_NOT_READY_503)
-                    .map(String::as_str),
-                false,
-            )),
             chapter_thumbnails(&state).await,
             dolby_vision_convert(convert_on),
+            dolby_vision_hdr_processing(plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::DV_HDR_PROCESSING).map(String::as_str), false)),
+            dolby_vision_fel_reencode(plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::DV_FEL_REENCODE).map(String::as_str), false)),
             source_probe_comparison().await,
             output_preparation(&state, &settings).await,
             rolling_retention(&state, &settings).await,
@@ -1689,6 +1687,78 @@ fn dolby_vision_convert(enabled: bool) -> DeveloperEnableItem {
     }
 }
 
+// Readiness describes missing evidence, never permission or effective processing.
+fn dolby_vision_hdr_processing(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "dolby_vision_hdr_processing",
+        title: "Process Dolby Vision for HDR output",
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_hdr_processing"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "dv_hdr_backend_reference",
+                title: "Qualified backend and reference",
+                status: RequirementStatus::Unmet,
+                evidence: "Dolby Vision processing for HDR10 is not yet available on playback workers. Your preference is saved; compatible playback remains available.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_encoder_matrix",
+                title: "Production encoder matrix",
+                status: RequirementStatus::Unobservable,
+                evidence: "Processing still needs testing with the encoders used by playback workers.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_bitrate_quality",
+                title: "Quality at delivery bitrates",
+                status: RequirementStatus::Unobservable,
+                evidence: "Independent quality comparisons at delivery bitrates are still pending.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_physical_playback",
+                title: "Physical playback validation",
+                status: RequirementStatus::Unobservable,
+                evidence: "Startup, seeking, fallback and sustained playback still need testing on supported devices. Your saved preference remains authoritative.".into(),
+            },
+        ],
+    }
+}
+
+// Readiness describes missing evidence, never permission or effective processing.
+fn dolby_vision_fel_reencode(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "dolby_vision_fel_reencode",
+        title: "Preserve FEL when converting to Profile 8.1",
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_fel_reencode"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "dv_fel_backend_reference",
+                title: "Qualified backend and reference",
+                status: RequirementStatus::Unmet,
+                evidence: "FEL-preserving Profile 8.1 conversion is not yet available on playback workers. Your preference is saved; permitted conversion keeps its existing fallback.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_encoder_matrix",
+                title: "Production encoder matrix",
+                status: RequirementStatus::Unobservable,
+                evidence: "Processing still needs testing with the encoders used by playback workers.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_bitrate_quality",
+                title: "Quality at delivery bitrates",
+                status: RequirementStatus::Unobservable,
+                evidence: "Independent quality comparisons at delivery bitrates are still pending.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_physical_playback",
+                title: "Physical playback validation",
+                status: RequirementStatus::Unobservable,
+                evidence: "Startup, seeking, fallback and sustained playback still need testing on supported devices. Your saved preference remains authoritative.".into(),
+            },
+        ],
+    }
+}
+
 /// Image subtitles served as an overlay rather than hidden or burned in.
 ///
 /// This was `PLURX_PGS_OVERLAY`, a boot-time environment read that decided
@@ -2517,59 +2587,6 @@ fn human_bytes(bytes: u64) -> String {
 /// Refusing a subtitle segment whose sidecar has failed, instead of serving a
 /// syntactically valid empty track.
 ///
-/// Every row is an engine observation, and not one of them is consulted by
-/// the settings write. The honest answer for all three is `Unobservable`
-/// today, and saying so is the point: the measurement is *"does this engine
-/// keep playing video through a subtitle 503"*, which is a fact about
-/// AVPlayer, Media3 and hls.js running on real devices, not a fact a server
-/// process can read off itself. An operator who has run the physical
-/// verification may turn this on over three grey rows.
-fn subtitle_not_ready_503(enabled: bool) -> DeveloperEnableItem {
-    let engine = |id: &'static str, title: &'static str, detail: String| DeveloperRequirement {
-        id,
-        title,
-        status: RequirementStatus::Unobservable,
-        evidence: detail,
-    };
-
-    DeveloperEnableItem {
-        id: "subtitle_not_ready_503",
-        title: "Refuse a subtitle segment whose extraction failed",
-        enabled: Some(enabled),
-        setting: Some("subtitle_not_ready_503"),
-        requirements: vec![
-            engine(
-                "avplayer_survives_subtitle_refusal",
-                "AVPlayer keeps the picture through a subtitle 503",
-                "AVPlayer allows a subtitle segment roughly two seconds and blocks the muxed \
-                 video while it waits, so a refusal on that request is the one with a picture \
-                 riding on it. Whether it drops the legible selection and plays on, or stalls \
-                 the video, is a measurement on an Apple TV and an iPad — not something this \
-                 process can read. Off until it is taken."
-                    .to_owned(),
-            ),
-            engine(
-                "media3_survives_subtitle_refusal",
-                "Media3 keeps the picture through a subtitle 503",
-                "ExoPlayer's HLS text renderer may surface a 4xx/5xx on a subtitle rendition as \
-                 a fatal source error rather than a text-track error. The distinction decides \
-                 whether an Android viewer loses their subtitles or their film, and it is a \
-                 measurement on a device."
-                    .to_owned(),
-            ),
-            engine(
-                "hlsjs_survives_subtitle_refusal",
-                "hls.js keeps the picture through a subtitle 503",
-                "hls.js retries subtitle fragments on its own schedule and escalates to a fatal \
-                 network error after its retry budget. Whether the bundled 1.6.19 build treats a \
-                 503 with `Retry-After` on a subtitle rendition as recoverable is a browser \
-                 measurement."
-                    .to_owned(),
-            ),
-        ],
-    }
-}
-
 /// Recording from the tuner to a disk. Every row here is a fact this process
 /// read just now, and not one of them is consulted by the settings write:
 /// `dvr_enabled` is a plain switch, and an operator who can see the deployment

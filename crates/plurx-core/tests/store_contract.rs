@@ -30844,6 +30844,7 @@ async fn downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_write
             source_size: original.size,
             source_mtime: original.mtime,
             provider_file_id: 123,
+            transcription: None,
             language: "en".into(),
             title: "OpenSubtitles · Example".into(),
             hearing_impaired: true,

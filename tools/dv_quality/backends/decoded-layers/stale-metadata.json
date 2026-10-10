@@ -1,0 +1,46 @@
+{
+  "scope": "deliberately missing fresh RPU; not legitimate use-prev behavior",
+  "bl_frame": {
+    "kind": "decoded_frame",
+    "layer": "bl",
+    "display_emission": 2,
+    "pts": "83/1000",
+    "best_effort_pts": "83/1000",
+    "pkt_dts": "83/1000",
+    "duration": "41/1000",
+    "picture_type": "B",
+    "decoder_rpu_present": false,
+    "decoder_metadata_present": true,
+    "l1_min": 0,
+    "l1_max": 4092,
+    "l1_average": 2045
+  },
+  "el_frame": {
+    "kind": "decoded_frame",
+    "layer": "el",
+    "display_emission": 2,
+    "pts": "83/1000",
+    "best_effort_pts": "83/1000",
+    "pkt_dts": "83/1000",
+    "duration": "41/1000",
+    "picture_type": "B",
+    "decoder_rpu_present": false,
+    "decoder_metadata_present": false,
+    "l1_min": -1,
+    "l1_max": -1,
+    "l1_average": -1
+  },
+  "coded_arrival": 2,
+  "display_emission": 2,
+  "expected_source_l1": {
+    "max": 4093,
+    "average": 2046
+  },
+  "prior_coded_packet_pts": "125/1000",
+  "decode_trace_sha256": "2f9ac9a97e59985f521e9179219bfda191b1b9e567706cc56176ed1393ee1dd2",
+  "compound_container_sha256": "8b58b3d3a9f8296201c2d097a9616e7ad13e1d0eb7f138e61dbed400ab36c149",
+  "bl_picture_sha256": "e255dff9f0e9ee0259adff4c00ef7259e5bc4cdf590c59582cfbaeadb510dbc6",
+  "el_picture_sha256": "2aab2dd0bd04c1386a52216b4034bc196d71df11da4b92b131a7c5ecb9a6782a",
+  "expected_fresh_rpu_sha256": "617ca0734eeb46897fe546b10e85e77d7d724c93f2a2fb505362fa185e445957",
+  "raw_rpu_artifact_absent": true
+}

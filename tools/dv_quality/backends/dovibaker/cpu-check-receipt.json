@@ -1,0 +1,44 @@
+{
+  "schema": "m0-baker-cpu-output-check-v1",
+  "scope": "analytic-control; direct CPU processor, no HEVC/physicalDV/P8.1 conformance",
+  "result": "pass",
+  "controls": {
+    "nonzero": {
+      "max_code_error": 0,
+      "actual_sha256": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d",
+      "reference_sha256": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d"
+    },
+    "zero": {
+      "max_code_error": 0,
+      "actual_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+      "reference_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23"
+    },
+    "disabled": {
+      "max_code_error": 0,
+      "actual_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+      "reference_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23"
+    },
+    "bounded": {
+      "max_code_error": 0,
+      "actual_sha256": "0c032192c773ae2c945029edf4e1d44c82445e75641b0df4e086c2181b813891",
+      "reference_sha256": "0c032192c773ae2c945029edf4e1d44c82445e75641b0df4e086c2181b813891"
+    },
+    "adapted-base": {
+      "max_code_error": 0,
+      "actual_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+      "reference_sha256": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23"
+    }
+  },
+  "negative_exit_codes": {
+    "missing_el": 67,
+    "truncated_rpu": 67
+  },
+  "matrix_restriction": {
+    "accepted_mutated_rpu": true,
+    "output_unchanged": true,
+    "classification": "unsupported proof: rgb_to_lms changes ignored"
+  },
+  "independent_dv_reference": null,
+  "p81_conformance": null,
+  "reference_fidelity_improvement": null
+}

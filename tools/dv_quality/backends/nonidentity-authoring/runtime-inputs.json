@@ -1,0 +1,8 @@
+{
+  "cpu_image": "sha256:46f56803b5908f91a626ad2bad328a42b9a53cbf09aec6bb5743a294fcbca98a",
+  "gpu_image": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+  "dependencies_verified": true,
+  "provenance": "Exact reviewed source/header/library snapshot hashes with matching pinned-source build receipt fields; actual caller-supplied image IDs/platform checked, not runtime attestation",
+  "cpu_prerequisite_receipt_sha256": "d9f2345c8a93ae7ecacef60ab36839c7b47ae676b7c8534e1f738fd25e46a472",
+  "gpu_prerequisite_receipt_sha256": "ce791d8b5ce6222ed5bd50a9193f7126d6a2e617b8a501533671ebeeffdf6c1a"
+}

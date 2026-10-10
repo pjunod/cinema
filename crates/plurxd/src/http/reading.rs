@@ -35,7 +35,7 @@ pub struct PutReadingRequest {
 /// Existing native clients send JSON numbers; the web reader sends the exact
 /// decimal route spelling because JavaScript numbers cannot represent the
 /// full signed 64-bit identifier range.
-fn deserialize_i64_number_or_text<'de, D>(deserializer: D) -> Result<i64, D::Error>
+pub(super) fn deserialize_i64_number_or_text<'de, D>(deserializer: D) -> Result<i64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

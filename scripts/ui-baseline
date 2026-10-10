@@ -806,8 +806,11 @@ class SelfHost:
         # "Indexed", while slower hosts render "Index pending" from the exact
         # same database. Focused API and web-policy tests cover both states;
         # this structural golden needs one reproducible one.
+        # Developer renders the shipped remote-management card. Enable its
+        # server API only in this disposable fixture, so listing an empty
+        # account is a valid 200 response rather than a disabled-feature 503.
         api(self.base_url, "/settings", self.token, "PUT",
-            {"vod_index_mins": 0})
+            {"vod_index_mins": 0, "cinema_remote_control": True})
         libs = []
         for name, kind, share in LIBRARIES:
             library = api(self.base_url, "/libraries", self.token, "POST", {

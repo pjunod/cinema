@@ -1,0 +1,441 @@
+{
+  "decode": {
+    "argv": [
+      "/work/decode_layers",
+      "/work/source.mkv",
+      "/work/b2-normal/frames"
+    ],
+    "program_sha256": "3cfbf869259a6cfc901898cddce78acd71610d6fade901247288d43f8e93d501",
+    "input_sha256": {
+      "source.mkv": "f3d70fa8e07d7fce7d233bb910858904cab0483409d748f52ae8d851333c31cb"
+    },
+    "cwd": "/work",
+    "environment": {
+      "LD_LIBRARY_PATH": null,
+      "VK_ICD_FILENAMES": null,
+      "XDG_RUNTIME_DIR": null,
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "e488e3cfed0325b765ea9a5a733497e7400d1b19999c090168edf097b747b537",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "output_sha256": {
+      "b2-normal/frames/bl-frame-005.rpu.nal": "fc580fa753c45d3db2f2881ded2cf09f07dee2fe94ff329baec50941f35a3eb6",
+      "b2-normal/frames/el-frame-003.yuv420p10le": "f0af7a8b49cd16f80fc03dc31aa5d0e8fe42101f9b09268f1a919c804c3444dd",
+      "b2-normal/frames/bl-frame-004.rpu.nal": "1ff2f693ab5f49bddd25287108e75378a1bca7922505ea96e92083605353299e",
+      "b2-normal/frames/bl-frame-003.yuv420p10le": "d4ac91b058fedcf06feb54fb19ef1f048286b0aef2fe3566fa26d02364e9939e",
+      "b2-normal/frames/bl-frame-000.yuv420p10le": "82c8e7a131e26ee8140e43dcbd758c7597fc4ed602e94a1e710a2ea1cadafcef",
+      "b2-normal/frames/el-frame-000.yuv420p10le": "6e7dd1d8991d3f20d276a07506c56295d0086445caa595f6dc41ff5868242e94",
+      "b2-normal/frames/el-frame-005.yuv420p10le": "4298647f45ca773faec717d4dec735ee0f4dc0c6ee6140d9bb2608ec1d558279",
+      "b2-normal/frames/bl-frame-005.yuv420p10le": "3dc0eae3f41f181a176885a5259da60d0015bcdb0977e84eae1601b38973ef86",
+      "b2-normal/frames/bl-frame-002.rpu.nal": "617ca0734eeb46897fe546b10e85e77d7d724c93f2a2fb505362fa185e445957",
+      "b2-normal/frames/bl-frame-002.yuv420p10le": "e255dff9f0e9ee0259adff4c00ef7259e5bc4cdf590c59582cfbaeadb510dbc6",
+      "b2-normal/frames/el-frame-002.yuv420p10le": "2aab2dd0bd04c1386a52216b4034bc196d71df11da4b92b131a7c5ecb9a6782a",
+      "b2-normal/frames/bl-frame-003.rpu.nal": "9e476cfaf711e8535b92dd998ddd2dc9cfed5f358bcaa765ee6e30989f303fa8",
+      "b2-normal/frames/bl-frame-004.yuv420p10le": "d8db2c495c21be386887658e03fa6b449a30cf3f79baff546c822377d4c188d4",
+      "b2-normal/frames/el-frame-004.yuv420p10le": "c85659cff2553b669b5cbc5bf583e435ba346c6d88738888963994532ed36ea5",
+      "b2-normal/frames/bl-frame-001.rpu.nal": "dc67507b8cb1bf1d12a36f17a58f5aabafef5c377295566879942eef645e63f6",
+      "b2-normal/frames/el-frame-001.yuv420p10le": "40e7509e471dd29538f5e30d966a9451cf619774470e78e8cc524e82b52b793b",
+      "b2-normal/frames/bl-frame-000.rpu.nal": "5b7946f0b2670a4bafbc32219497eb26f9f90bc5a3bfe50cfa94184e454febc5",
+      "b2-normal/frames/bl-frame-001.yuv420p10le": "d68ac06a2f12aef3d73d2a2790da750f8a72a7202b39e0c933b02e394cb5ac6a"
+    }
+  },
+  "mux-rgb": {
+    "argv": [
+      "/work/mux_rgb",
+      "/work/rgb48le.bin",
+      "/work/timing.tsv",
+      "/work/reconstructed.nut"
+    ],
+    "program_sha256": "6bb418e2e438f4847690c5e5ec61b3b333e7aecae8e177b867744415278c0490",
+    "input_sha256": {
+      "rgb48le.bin": "cda0b0d5e2eac53bb024a9906fccc8ce10ab287d485aa49cd6f1ea7476344293",
+      "timing.tsv": "2e50d75385ebcb9955cca948704546536dd7fb840309bf5a965728fe63c76614"
+    },
+    "cwd": "/work",
+    "environment": {
+      "LD_LIBRARY_PATH": null,
+      "VK_ICD_FILENAMES": null,
+      "XDG_RUNTIME_DIR": null,
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "output_sha256": {
+      "reconstructed.nut": "0a575dd9d3f2b80d03eefcd6ad65abfea1c0e53d7fb12873479306c410535351"
+    }
+  },
+  "encode": {
+    "argv": [
+      "/usr/bin/ffmpeg",
+      "-nostdin",
+      "-hide_banner",
+      "-n",
+      "-copyts",
+      "-i",
+      "/work/reconstructed.nut",
+      "-an",
+      "-vf",
+      "zscale=matrixin=gbr:primariesin=2020:transferin=smpte2084:rangein=full:matrix=2020_ncl:primaries=2020:transfer=smpte2084:range=limited:chromal=center:filter=point,format=yuv420p10le",
+      "-fps_mode",
+      "passthrough",
+      "-enc_time_base",
+      "1/1000",
+      "-r",
+      "24",
+      "-c:v",
+      "libx265",
+      "-profile:v",
+      "main10",
+      "-preset",
+      "ultrafast",
+      "-x265-params",
+      "qp=0:bframes=0:keyint=24:scenecut=0:repeat-headers=1:chromaloc=1:colorprim=9:transfer=16:colormatrix=9:master-display=G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(100000000,50):pools=1:frame-threads=1",
+      "-color_primaries",
+      "bt2020",
+      "-color_trc",
+      "smpte2084",
+      "-colorspace",
+      "bt2020nc",
+      "-color_range",
+      "tv",
+      "/work/hdr10.mkv"
+    ],
+    "program_sha256": "249e6abb898538aeae5165a6cee0748b73f4791afb02e088d19bc5321dfe2a4e",
+    "input_sha256": {
+      "reconstructed.nut": "0a575dd9d3f2b80d03eefcd6ad65abfea1c0e53d7fb12873479306c410535351"
+    },
+    "cwd": "/work",
+    "environment": {
+      "LD_LIBRARY_PATH": null,
+      "VK_ICD_FILENAMES": null,
+      "XDG_RUNTIME_DIR": null,
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "40ff4d7698c279fb982565cf3e27adb93997f1cc97e016df69077c64884d5a5d",
+    "output_sha256": {
+      "hdr10.mkv": "4c5a4608f08756316ae629a8a14a2981efa363d0cc06c4221e3d773fe6655f29"
+    }
+  },
+  "probe": {
+    "argv": [
+      "/usr/bin/ffprobe",
+      "-v",
+      "error",
+      "-show_streams",
+      "-show_packets",
+      "-show_frames",
+      "-of",
+      "json",
+      "/work/hdr10.mkv"
+    ],
+    "program_sha256": "5f47ad172b221b4e5bfaacfd9dd0aab092d02d83dd990a331ad8d62ac47817f1",
+    "input_sha256": {
+      "hdr10.mkv": "4c5a4608f08756316ae629a8a14a2981efa363d0cc06c4221e3d773fe6655f29"
+    },
+    "cwd": "/work",
+    "environment": {
+      "LD_LIBRARY_PATH": null,
+      "VK_ICD_FILENAMES": null,
+      "XDG_RUNTIME_DIR": null,
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "10d76d57989072c01d24eccf4d3f305fb8e136a658c29261354e6414891f2126",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "output_sha256": {}
+  },
+  "decode-output": {
+    "argv": [
+      "/usr/bin/ffmpeg",
+      "-nostdin",
+      "-hide_banner",
+      "-n",
+      "-i",
+      "/work/hdr10.mkv",
+      "-map",
+      "0:v:0",
+      "-fps_mode",
+      "passthrough",
+      "-pix_fmt",
+      "yuv420p10le",
+      "-f",
+      "rawvideo",
+      "/work/decoded.yuv420p10le"
+    ],
+    "program_sha256": "249e6abb898538aeae5165a6cee0748b73f4791afb02e088d19bc5321dfe2a4e",
+    "input_sha256": {
+      "hdr10.mkv": "4c5a4608f08756316ae629a8a14a2981efa363d0cc06c4221e3d773fe6655f29"
+    },
+    "cwd": "/work",
+    "environment": {
+      "LD_LIBRARY_PATH": null,
+      "VK_ICD_FILENAMES": null,
+      "XDG_RUNTIME_DIR": null,
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "b7c00ef81552abddaeab142099794be20a801fd8075864c76075eb3495abd35d",
+    "output_sha256": {
+      "decoded.yuv420p10le": "715a64d19c848c8804b28490e4330f5dd8441a07caae2cfea11213daee22e412"
+    }
+  },
+  "decode-output-rgb": {
+    "argv": [
+      "/usr/bin/ffmpeg",
+      "-nostdin",
+      "-hide_banner",
+      "-n",
+      "-i",
+      "/work/hdr10.mkv",
+      "-map",
+      "0:v:0",
+      "-fps_mode",
+      "passthrough",
+      "-vf",
+      "zscale=matrixin=2020_ncl:primariesin=2020:transferin=smpte2084:rangein=limited:chromalin=center:matrix=gbr:primaries=2020:transfer=smpte2084:range=full:filter=point:chromal=center:dither=none,format=gbrp16le",
+      "-pix_fmt",
+      "rgb48le",
+      "-f",
+      "rawvideo",
+      "/work/decoded.rgb48le"
+    ],
+    "program_sha256": "249e6abb898538aeae5165a6cee0748b73f4791afb02e088d19bc5321dfe2a4e",
+    "input_sha256": {
+      "hdr10.mkv": "4c5a4608f08756316ae629a8a14a2981efa363d0cc06c4221e3d773fe6655f29"
+    },
+    "cwd": "/work",
+    "environment": {
+      "LD_LIBRARY_PATH": null,
+      "VK_ICD_FILENAMES": null,
+      "XDG_RUNTIME_DIR": null,
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "4fde1109cec4c7e009d2ec93fb5a6c743a937018899f16335d6119fcf5a12a63",
+    "output_sha256": {
+      "decoded.rgb48le": "d5076b5e6ec7737f553752b1ad0d59da4a5cd65dd54834d5f52a2e05abfad5af"
+    }
+  },
+  "render-0": {
+    "argv": [
+      "/work/fel_export",
+      "/work/b2-normal/frames/bl-frame-000.rpu.nal",
+      "/work/b2-normal/frames/bl-frame-000.yuv420p10le",
+      "/work/b2-normal/frames/el-frame-000.yuv420p10le",
+      "0/1000",
+      "41/1000"
+    ],
+    "program_sha256": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+    "input_sha256": {
+      "b2-normal/frames/bl-frame-000.rpu.nal": "5b7946f0b2670a4bafbc32219497eb26f9f90bc5a3bfe50cfa94184e454febc5",
+      "b2-normal/frames/bl-frame-000.yuv420p10le": "82c8e7a131e26ee8140e43dcbd758c7597fc4ed602e94a1e710a2ea1cadafcef",
+      "b2-normal/frames/el-frame-000.yuv420p10le": "6e7dd1d8991d3f20d276a07506c56295d0086445caa595f6dc41ff5868242e94"
+    },
+    "cwd": "/work/render-0",
+    "environment": {
+      "LD_LIBRARY_PATH": "/work/prefix/lib/aarch64-linux-gnu",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.aarch64.json",
+      "XDG_RUNTIME_DIR": "/work/runtime",
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "947d4e671d4bb0df985d49cb5c492cdda6585323eee5dbaf740d6692e8da71a3",
+    "stderr_sha256": "169b877415ef69f305fc7b9f7ccebe2941874b63fad8461d73233b834a5b91a2",
+    "output_sha256": {
+      "render-0/outputs/nonzero-rendered.rgba32f": "313bc51b2faff8b232e82d820772385d7ff7d8bd62d9bfb8d50d800ede0bc49f",
+      "render-0/outputs/nonzero-rendered.rgb48le": "259c3213cbf33d2be1a54bdb44f04e0da568389c0d3c0276426991d34ab5ca7b",
+      "render-0/outputs/nonzero-reconstruction.rgba32f": "313bc51b2faff8b232e82d820772385d7ff7d8bd62d9bfb8d50d800ede0bc49f",
+      "render-0/outputs/nonzero-reconstruction.rgb48le": "259c3213cbf33d2be1a54bdb44f04e0da568389c0d3c0276426991d34ab5ca7b",
+      "render-0/outputs/nonzero-el.rgba32f": "b5e3934b844029d564cd377fb25adc712de41a9bd81c53b13882aef55e7889fb",
+      "render-0/outputs/nonzero-el.rgb48le": "1832a22a78e13f1044c68aa6c1d3a8ab0a1e4c1171fd39d25c7d33648dda222b",
+      "render-0/outputs/nonzero-bl.rgb48le": "9586097aaf3febe3c31f5a737426239392c2e36e776805041ad4e4eb4e016c50",
+      "render-0/outputs/nonzero-bl.rgba32f": "0693a75537c6980b92415f605ed100c6f3df292e2b323497ccccd6c28a70fe07"
+    }
+  },
+  "render-1": {
+    "argv": [
+      "/work/fel_export",
+      "/work/b2-normal/frames/bl-frame-001.rpu.nal",
+      "/work/b2-normal/frames/bl-frame-001.yuv420p10le",
+      "/work/b2-normal/frames/el-frame-001.yuv420p10le",
+      "42/1000",
+      "41/1000"
+    ],
+    "program_sha256": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+    "input_sha256": {
+      "b2-normal/frames/bl-frame-001.rpu.nal": "dc67507b8cb1bf1d12a36f17a58f5aabafef5c377295566879942eef645e63f6",
+      "b2-normal/frames/bl-frame-001.yuv420p10le": "d68ac06a2f12aef3d73d2a2790da750f8a72a7202b39e0c933b02e394cb5ac6a",
+      "b2-normal/frames/el-frame-001.yuv420p10le": "40e7509e471dd29538f5e30d966a9451cf619774470e78e8cc524e82b52b793b"
+    },
+    "cwd": "/work/render-1",
+    "environment": {
+      "LD_LIBRARY_PATH": "/work/prefix/lib/aarch64-linux-gnu",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.aarch64.json",
+      "XDG_RUNTIME_DIR": "/work/runtime",
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "a009b4863a8c5dcdf79106492019ed58505eb28e5f19a8d3948705ce3aa9a1c8",
+    "stderr_sha256": "54b18cb064071d8f89f1b12229bd1e078a6dcfdb0c2e7613b4a77df4139cb40b",
+    "output_sha256": {
+      "render-1/outputs/nonzero-rendered.rgba32f": "00b89963e236cdfbcf60129adfd5bd476305b9ca02ae2cc3f4b7a5b04678bead",
+      "render-1/outputs/nonzero-rendered.rgb48le": "4970bd12eebaba0086c9b3e8f52e8e40806a3ebc4be07d78eef2753cd01e332c",
+      "render-1/outputs/nonzero-reconstruction.rgba32f": "00b89963e236cdfbcf60129adfd5bd476305b9ca02ae2cc3f4b7a5b04678bead",
+      "render-1/outputs/nonzero-reconstruction.rgb48le": "4970bd12eebaba0086c9b3e8f52e8e40806a3ebc4be07d78eef2753cd01e332c",
+      "render-1/outputs/nonzero-el.rgba32f": "b14d87b031f7f2e8becaadbec81ce5e7d1a8e61be4a0aa9c5267300fda871688",
+      "render-1/outputs/nonzero-el.rgb48le": "0c54af1e9a4d206f505a42c5b7a3cd2048d4b5b5b03b0d4fb0eedfaa5ddf8d13",
+      "render-1/outputs/nonzero-bl.rgb48le": "6e8cd2af348d470fcfd574efad0f2d466282f2e9a718708f72eb78ec27c31f36",
+      "render-1/outputs/nonzero-bl.rgba32f": "337a6836723140a6211462b539205fd0124ae354f0d96cc562ea3af34d821c48"
+    }
+  },
+  "render-2": {
+    "argv": [
+      "/work/fel_export",
+      "/work/b2-normal/frames/bl-frame-002.rpu.nal",
+      "/work/b2-normal/frames/bl-frame-002.yuv420p10le",
+      "/work/b2-normal/frames/el-frame-002.yuv420p10le",
+      "83/1000",
+      "41/1000"
+    ],
+    "program_sha256": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+    "input_sha256": {
+      "b2-normal/frames/bl-frame-002.rpu.nal": "617ca0734eeb46897fe546b10e85e77d7d724c93f2a2fb505362fa185e445957",
+      "b2-normal/frames/bl-frame-002.yuv420p10le": "e255dff9f0e9ee0259adff4c00ef7259e5bc4cdf590c59582cfbaeadb510dbc6",
+      "b2-normal/frames/el-frame-002.yuv420p10le": "2aab2dd0bd04c1386a52216b4034bc196d71df11da4b92b131a7c5ecb9a6782a"
+    },
+    "cwd": "/work/render-2",
+    "environment": {
+      "LD_LIBRARY_PATH": "/work/prefix/lib/aarch64-linux-gnu",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.aarch64.json",
+      "XDG_RUNTIME_DIR": "/work/runtime",
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "7d21a7c2c76b8d3050927d9ba08d64f181c0fbfa3c5e52b997cc8683bc079bbb",
+    "stderr_sha256": "4bc9774262ecab962fd820029f84626c93dfe961f769790fa10761b8ebb1c208",
+    "output_sha256": {
+      "render-2/outputs/nonzero-rendered.rgba32f": "4afccaa21541f5572b29c7ad0db7ea71e164060114905c97e2cef825b3d6a14f",
+      "render-2/outputs/nonzero-rendered.rgb48le": "6ec37daaab3b7e5f512cdae99e49d9c1d93503758378a7c157d319604e400190",
+      "render-2/outputs/nonzero-reconstruction.rgba32f": "4afccaa21541f5572b29c7ad0db7ea71e164060114905c97e2cef825b3d6a14f",
+      "render-2/outputs/nonzero-reconstruction.rgb48le": "6ec37daaab3b7e5f512cdae99e49d9c1d93503758378a7c157d319604e400190",
+      "render-2/outputs/nonzero-el.rgba32f": "533354c0dbb7e1a972cb11a7752f807b0278ad59bcf2b6dc650423d4737f47a2",
+      "render-2/outputs/nonzero-el.rgb48le": "8ad190d8a81a7c36d6e0f754967251efc70790ceeabc0bb090853a657b7c5817",
+      "render-2/outputs/nonzero-bl.rgb48le": "f5ad13c8dfebd32b1b783651885c502a49a86749014abffdb2cf7aa1925a756d",
+      "render-2/outputs/nonzero-bl.rgba32f": "d6ea6b18f7f502bfd1ad4ebb48068c86b9cadbd578ac64a552d0ef917b1ce3fd"
+    }
+  },
+  "render-3": {
+    "argv": [
+      "/work/fel_export",
+      "/work/b2-normal/frames/bl-frame-003.rpu.nal",
+      "/work/b2-normal/frames/bl-frame-003.yuv420p10le",
+      "/work/b2-normal/frames/el-frame-003.yuv420p10le",
+      "125/1000",
+      "41/1000"
+    ],
+    "program_sha256": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+    "input_sha256": {
+      "b2-normal/frames/bl-frame-003.rpu.nal": "9e476cfaf711e8535b92dd998ddd2dc9cfed5f358bcaa765ee6e30989f303fa8",
+      "b2-normal/frames/bl-frame-003.yuv420p10le": "d4ac91b058fedcf06feb54fb19ef1f048286b0aef2fe3566fa26d02364e9939e",
+      "b2-normal/frames/el-frame-003.yuv420p10le": "f0af7a8b49cd16f80fc03dc31aa5d0e8fe42101f9b09268f1a919c804c3444dd"
+    },
+    "cwd": "/work/render-3",
+    "environment": {
+      "LD_LIBRARY_PATH": "/work/prefix/lib/aarch64-linux-gnu",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.aarch64.json",
+      "XDG_RUNTIME_DIR": "/work/runtime",
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "5039d10de53f0720b6fb600f951e6bd0c197ddeacdee53a2b4bede1e34277958",
+    "stderr_sha256": "cf97db69d369e60e8b04c7442dc784a8c52dc5dfcfd5fc3cfb573b6021d456e8",
+    "output_sha256": {
+      "render-3/outputs/nonzero-rendered.rgba32f": "0d7e58e991198d277331580f230f47efee47c88f857157427510439aeaad8764",
+      "render-3/outputs/nonzero-rendered.rgb48le": "e1780b4968dc89b284ba873384b8af9ee914829528dabb5a8c85cb518d3cee2f",
+      "render-3/outputs/nonzero-reconstruction.rgba32f": "0d7e58e991198d277331580f230f47efee47c88f857157427510439aeaad8764",
+      "render-3/outputs/nonzero-reconstruction.rgb48le": "e1780b4968dc89b284ba873384b8af9ee914829528dabb5a8c85cb518d3cee2f",
+      "render-3/outputs/nonzero-el.rgba32f": "67405fb45229c76a192b7287c08ae1886e7f8ca7c42f559a7cee5c605b7c2926",
+      "render-3/outputs/nonzero-el.rgb48le": "4a9f3c6c79e953db73fce25a7d4a40d987c1956c75fa2009ff76143c7f9a4361",
+      "render-3/outputs/nonzero-bl.rgb48le": "5e36d41d982698423330fd223d1428bdf1d5d04a70230478d5989b01884c65fd",
+      "render-3/outputs/nonzero-bl.rgba32f": "f12ef3391fc6f514372852dafbfc7c107b71f1b36c71d951f6f6dd8510740c5b"
+    }
+  },
+  "render-4": {
+    "argv": [
+      "/work/fel_export",
+      "/work/b2-normal/frames/bl-frame-004.rpu.nal",
+      "/work/b2-normal/frames/bl-frame-004.yuv420p10le",
+      "/work/b2-normal/frames/el-frame-004.yuv420p10le",
+      "167/1000",
+      "41/1000"
+    ],
+    "program_sha256": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+    "input_sha256": {
+      "b2-normal/frames/bl-frame-004.rpu.nal": "1ff2f693ab5f49bddd25287108e75378a1bca7922505ea96e92083605353299e",
+      "b2-normal/frames/bl-frame-004.yuv420p10le": "d8db2c495c21be386887658e03fa6b449a30cf3f79baff546c822377d4c188d4",
+      "b2-normal/frames/el-frame-004.yuv420p10le": "c85659cff2553b669b5cbc5bf583e435ba346c6d88738888963994532ed36ea5"
+    },
+    "cwd": "/work/render-4",
+    "environment": {
+      "LD_LIBRARY_PATH": "/work/prefix/lib/aarch64-linux-gnu",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.aarch64.json",
+      "XDG_RUNTIME_DIR": "/work/runtime",
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "2f45661600819abdc311d37efee58516c946720c6d4c011ac446bcfd130668e2",
+    "stderr_sha256": "f2a6b6738d731c6097bc3a36beff25986a29cc5b8c7d66396d647601e4036433",
+    "output_sha256": {
+      "render-4/outputs/nonzero-rendered.rgba32f": "a97074ea91f0376791b29a7611e226fea3b7f150065f88b42e4ab980387bd0e0",
+      "render-4/outputs/nonzero-rendered.rgb48le": "9864b67fcd28620b507ecd789db5bc69818722fcb885daca1da03070cadec17c",
+      "render-4/outputs/nonzero-reconstruction.rgba32f": "a97074ea91f0376791b29a7611e226fea3b7f150065f88b42e4ab980387bd0e0",
+      "render-4/outputs/nonzero-reconstruction.rgb48le": "9864b67fcd28620b507ecd789db5bc69818722fcb885daca1da03070cadec17c",
+      "render-4/outputs/nonzero-el.rgba32f": "1ee1466b48acf315e3bdd838915b8fc14b14c80526b4d389f289683b35953c76",
+      "render-4/outputs/nonzero-el.rgb48le": "51ac546cf2a1c90da104b4b4b58a20ee1bd971d8d72544dc95711e4925977809",
+      "render-4/outputs/nonzero-bl.rgb48le": "09a0b1cb2a2b0137503e3c125fa4a8f7835624016379af15734e6811026a892f",
+      "render-4/outputs/nonzero-bl.rgba32f": "0c7c4a8b894df442ab0a54a220326be891021f460530b8893442438c88c6625f"
+    }
+  },
+  "render-5": {
+    "argv": [
+      "/work/fel_export",
+      "/work/b2-normal/frames/bl-frame-005.rpu.nal",
+      "/work/b2-normal/frames/bl-frame-005.yuv420p10le",
+      "/work/b2-normal/frames/el-frame-005.yuv420p10le",
+      "208/1000",
+      "41/1000"
+    ],
+    "program_sha256": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+    "input_sha256": {
+      "b2-normal/frames/bl-frame-005.rpu.nal": "fc580fa753c45d3db2f2881ded2cf09f07dee2fe94ff329baec50941f35a3eb6",
+      "b2-normal/frames/bl-frame-005.yuv420p10le": "3dc0eae3f41f181a176885a5259da60d0015bcdb0977e84eae1601b38973ef86",
+      "b2-normal/frames/el-frame-005.yuv420p10le": "4298647f45ca773faec717d4dec735ee0f4dc0c6ee6140d9bb2608ec1d558279"
+    },
+    "cwd": "/work/render-5",
+    "environment": {
+      "LD_LIBRARY_PATH": "/work/prefix/lib/aarch64-linux-gnu",
+      "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.aarch64.json",
+      "XDG_RUNTIME_DIR": "/work/runtime",
+      "LC_ALL": "C"
+    },
+    "exit": 0,
+    "stdout_sha256": "46bff44a4f199476c0ef89d9960d0b868a334a4a12a28626b757d6e8e0244184",
+    "stderr_sha256": "b119eb81cf0f060df0c5c26dca492ad71f48825d8dfbc3962f70f7b39c41f053",
+    "output_sha256": {
+      "render-5/outputs/nonzero-rendered.rgba32f": "2c2fda29688be387be2a1f44c795b966d73bfba75fac7ad9731b18deb319fd09",
+      "render-5/outputs/nonzero-rendered.rgb48le": "d3a3ca458e7785f3913088ca4b19fea92a9e32572b1bc1fd737b9bbd33aaf35b",
+      "render-5/outputs/nonzero-reconstruction.rgba32f": "2c2fda29688be387be2a1f44c795b966d73bfba75fac7ad9731b18deb319fd09",
+      "render-5/outputs/nonzero-reconstruction.rgb48le": "d3a3ca458e7785f3913088ca4b19fea92a9e32572b1bc1fd737b9bbd33aaf35b",
+      "render-5/outputs/nonzero-el.rgba32f": "1d9f4d4b6ae7558ac884c84ae304b694b5f5a89fd3ce9a8e9b4003d79377ab3e",
+      "render-5/outputs/nonzero-el.rgb48le": "e2567aa4e6fdcd2515d31349e755d9d9bb7e4d6a8cc7132a7d35ab89e505917c",
+      "render-5/outputs/nonzero-bl.rgb48le": "1523b9ec119cc1e355e03c257a6335a9f72d83e68537cbbe3ace37857e8cf1e8",
+      "render-5/outputs/nonzero-bl.rgba32f": "4c3561c0774478a67ac01950d7389c174efce8ad6c8d0b20f0d031f9eebf562e"
+    }
+  }
+}

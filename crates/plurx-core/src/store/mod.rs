@@ -226,6 +226,7 @@ pub mod background_jobs_subtitle;
 #[cfg(test)]
 mod background_jobs_tests;
 pub mod background_jobs_transcode;
+pub mod background_jobs_transcription;
 pub mod classification_schedule;
 pub mod offline_claim;
 pub mod offline_expiry;
@@ -2093,16 +2094,6 @@ pub mod keys {
     /// Forward subtitle materialization span. The settings API constrains this
     /// to 30–900 seconds and absent means the 200-second default.
     pub const SUBTITLE_WINDOW_SECS: &str = "playback.subtitle_window_secs";
-    /// Answer a subtitle segment whose sidecar has failed with `503` +
-    /// `Retry-After`, instead of a syntactically valid but empty track.
-    ///
-    /// Off by default, and the reason is measurement rather than caution:
-    /// AVPlayer gives a subtitle segment roughly two seconds and blocks the
-    /// muxed video while it waits, so how each engine reacts to a refusal on
-    /// that request — keeps playing video, or stalls the picture — has to be
-    /// observed per engine before this can flip. The Developer tab reports
-    /// what has been observed, advisory only; it never blocks the switch.
-    pub const SUBTITLE_NOT_READY_503: &str = "playback.subtitle_not_ready_503";
     /// Let the two PGS consumers — the overlay's stage and the burn sidecar —
     /// read a track the subtitle-source store kept, instead of demuxing the
     /// whole source. On when absent. Off makes both ignore the store entirely,
@@ -2189,6 +2180,12 @@ pub mod keys {
     /// for the same reason as the overlay above: an operator turning off work
     /// their GPU is doing should be able to find the switch, and see it is off.
     pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
+    /// Opt-in preference for qualified DV rendering to HDR output. Missing is
+    /// off. Saving the preference does not establish a worker capability.
+    pub const DV_HDR_PROCESSING: &str = "playback.dolby_vision_hdr_processing";
+    /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
+    /// Missing is off; this never overrides the separate DV_CONVERT permission.
+    pub const DV_FEL_REENCODE: &str = "playback.dolby_vision_fel_reencode";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite

@@ -1,0 +1,30 @@
+{
+  "scope": "analytic-control; standard matrix, no trims",
+  "declared_max_compression_yuv_code_error": 4,
+  "chroma_sample_location": "center; explicit point sampling",
+  "profile": "Main 10",
+  "source_to_yuv_max_code_error_vs_bt2020_ncl": 0,
+  "compression_yuv_max_code_error": 2,
+  "hdr10_decode_vs_analytic_inverse_ncl_max_rgb_code_error": 1,
+  "hdr10_decode_vs_reconstructed_max_rgb_code_error": 245,
+  "registered_arithmetic_rgb_bound_codes": 1065,
+  "bound_selection_timing": "Registered before CPU reconstruction, encode and GPU render; analytic mechanism control only, no picture quality qualification",
+  "bound_derivation": "ceil(65535*5*(1/876+1.8814/896))+2; conversion allowance1 + compression cap4",
+  "hdr10_decode_unchanged_after_rpu_insertion": true,
+  "p81_conformance": null,
+  "independent_dv_picture_reference": null,
+  "dv_enabled_render": null,
+  "result": "pass",
+  "verified_hdr10_tags": {
+    "profile": "Main 10",
+    "width": 64,
+    "height": 64,
+    "pix_fmt": "yuv420p10le",
+    "color_range": "tv",
+    "color_space": "bt2020nc",
+    "color_primaries": "bt2020",
+    "color_transfer": "smpte2084",
+    "chroma_location": "center"
+  },
+  "verified_frame_count": 4
+}

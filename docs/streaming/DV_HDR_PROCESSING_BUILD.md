@@ -50,10 +50,15 @@ Follow the current workflow amendments in the canonical documents, including
 Forgejo as the authoritative remote, normal hooks, local focused regressions,
 and required effort/promotion evidence. Main-bound PRs start as draft, receive
 one adversarial review with findings addressed, then enter the ready lane.
-Dispatch `Effort development gate` manually before merging each task; it is
-`workflow_dispatch` only and does not run merely because a task PR exists.
-Require a green run for the candidate. Its compile checks do not replace
-focused local unit evidence or final promotion qualification.
+For this effort, the user clarified on 2026-10-08: run focused regressions
+and affected compilation on individual task branches, and run full suites
+once on the completed effort branch. Do not dispatch the existing broad
+`Effort development gate` per task; its Python receipts are scoped to a PR
+and would repeat the whole Python suite on each new task. Record focused
+commands and outcomes in each PR. Freeze the completed candidate before the
+single full-suite run. Windows validation is waived for this effort. These
+user instructions supersede the normal per-task gate requirement; global CI
+policy is unchanged. See the [current ledger](DV_HDR_PROCESSING_STATUS.md).
 Do not use CI as a compiler. User-visible corrective commits use `fix(` or
 `perf(` and carry real `Regression-Test: <path>::<test>` lines into the landing
 message, including API merges. Do not invent regression names before tests
@@ -269,10 +274,14 @@ No new per-title modal or permission flow is required for fallback.
 ## 7. M5 — reproducible quality and performance harness
 
 Implement the benchmark design in proposal section 5 as an offline tool, not
-a per-playback quality scan. **Proposed** executable location:
-`tools/dv_quality/` with a manifest-driven `run.py`; these files do not exist
-yet. The tool validates inputs, produces immutable run directories, and refuses
-a reference-fidelity score if no independent reference is declared.
+a per-playback quality scan. M0 now supplies the bounded
+[manifest-driven comparator](../../tools/dv_quality/run.py) in
+`tools/dv_quality/`; its [implementation ledger](DV_HDR_PROCESSING_STATUS.md)
+records the tiny-frame limits and executable workflow. It validates inputs,
+retains input snapshots and leaves reference-error fields null unless an
+independent reference is declared. M5 still needs full-raster streaming,
+encoded-output adapters, SSIM, scene/corpus analysis and rate comparisons;
+the M0 comparator is not the completed benchmark.
 
 Each manifest records fixture digest/license/provenance, profile and metadata
 levels, BL/EL/RPU association, expected residual behavior, reference origin,

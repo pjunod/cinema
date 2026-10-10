@@ -1496,6 +1496,10 @@ pub fn router(state: AppState) -> Router {
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))
+        .route(
+            "/subtitle-transcription",
+            get(crate::subtitle_transcription::settings),
+        )
         .route("/subtitle-provider", get(subtitle_downloads::settings))
         // Advisory only. The Developer section lists what must be true
         // before each switch is safe; this is the other half — what this
@@ -1666,6 +1670,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/users/{id}/devices/{prefix}",
             delete(users::revoke_user_device),
+        )
+        .route(
+            "/subtitle-transcription",
+            put(crate::subtitle_transcription::update_settings),
+        )
+        .route(
+            "/files/{id}/subtitles/transcribe",
+            post(crate::subtitle_transcription::enqueue),
         )
         .route("/settings", put(system::update_settings))
         .route(
@@ -10780,9 +10792,10 @@ mod tests {
                 "subtitle_stored_sources",
                 "subtitle_cluster_sources",
                 "subtitle_backfill",
-                "subtitle_not_ready_503",
                 "chapter_thumbnails",
                 "dolby_vision_convert",
+                "dolby_vision_hdr_processing",
+                "dolby_vision_fel_reencode",
                 "source_probe_comparison",
                 "output_preparation",
                 "rolling_retention",
@@ -11315,6 +11328,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn retired_subtitle_transport_refusal_is_absent_from_settings_and_readiness() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting("playback.subtitle_not_ready_503", "1")
+            .await
+            .expect("retain old choice without deleting operator data");
+        let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert!(settings.get("subtitle_not_ready_503").is_none());
+        let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        assert!(!readiness["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["id"] == "subtitle_not_ready_503"));
+    }
+
     /// Both new switches answer from the store on the next request, and the
     /// settings page and the readiness route agree with the server about what
     /// the stored string means.
@@ -11332,13 +11364,11 @@ mod tests {
         let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(settings["pgs_overlay"], serde_json::json!(false));
         assert_eq!(settings["dolby_vision_convert"], serde_json::json!(true));
-        assert_eq!(settings["subtitle_not_ready_503"], serde_json::json!(false));
         assert!(!state
             .pgs_overlay_enabled()
             .await
             .expect("read the overlay switch"));
         assert!(state.transcode.dv_convert_enabled().await);
-        assert!(!state.subtitle_not_ready_503().await);
 
         // Both keys set on every row, because a leftover from the previous
         // one would make this pass by accident.
@@ -11353,17 +11383,6 @@ mod tests {
             state
                 .store
                 .put_setting(plurx_core::store::keys::PGS_OVERLAY, overlay_value)
-                .await
-                .expect("store a hand-written value");
-            // The subtitle refusal is read in the same three places and takes
-            // the same default-off spelling, so it rides the same rows rather
-            // than getting a census of its own.
-            state
-                .store
-                .put_setting(
-                    plurx_core::store::keys::SUBTITLE_NOT_READY_503,
-                    overlay_value,
-                )
                 .await
                 .expect("store a hand-written value");
             state
@@ -11393,9 +11412,6 @@ mod tests {
                     settings["dolby_vision_convert"].clone(),
                     reported("pgs_overlay"),
                     reported("dolby_vision_convert"),
-                    state.subtitle_not_ready_503().await,
-                    settings["subtitle_not_ready_503"].clone(),
-                    reported("subtitle_not_ready_503"),
                 ),
                 (
                     overlay,
@@ -11404,12 +11420,201 @@ mod tests {
                     serde_json::json!(convert),
                     serde_json::json!(overlay),
                     serde_json::json!(convert),
-                    overlay,
-                    serde_json::json!(overlay),
-                    serde_json::json!(overlay),
                 ),
                 "{stored}: the server, the settings page and the readiness route must \
                  not disagree about one stored string"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion_override() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let fields = [
+            (
+                "dolby_vision_hdr_processing",
+                plurx_core::store::keys::DV_HDR_PROCESSING,
+            ),
+            (
+                "dolby_vision_fel_reencode",
+                plurx_core::store::keys::DV_FEL_REENCODE,
+            ),
+        ];
+        let (_, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        for (field, key) in fields {
+            assert_eq!(initial[field], false);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(key)
+                    .await
+                    .expect("read persisted preference"),
+                None
+            );
+        }
+        assert_eq!(initial["dolby_vision_convert"], true);
+        // Each new preference can be on or off with either conversion permission.
+        // Missing backend evidence never changes the saved choices or permission.
+        for convert in [false, true] {
+            for hdr in [false, true] {
+                for fel in [false, true] {
+                    let (status, saved) = call(
+                        &app,
+                        put(
+                            "/api/v1/settings",
+                            Some(&admin),
+                            json!({
+                                "dolby_vision_convert": convert,
+                                "dolby_vision_hdr_processing": hdr,
+                                "dolby_vision_fel_reencode": fel,
+                            }),
+                        ),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK, "{saved}");
+                    let (_, read) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+                    let (_, readiness) =
+                        call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+                    for ((field, key), want) in fields.into_iter().zip([hdr, fel]) {
+                        assert_eq!(saved[field], want);
+                        assert_eq!(read[field], want);
+                        assert_eq!(
+                            state
+                                .store
+                                .get_setting(key)
+                                .await
+                                .expect("read persisted preference")
+                                .as_deref(),
+                            Some(if want { "1" } else { "0" })
+                        );
+                        let item = readiness["items"]
+                            .as_array()
+                            .expect("readiness items")
+                            .iter()
+                            .find(|item| item["id"] == field)
+                            .expect("preference readiness item");
+                        assert_eq!(item["enabled"], want);
+                        assert_eq!(item["setting"], field);
+                        let requirements = item["requirements"]
+                            .as_array()
+                            .expect("readiness requirements");
+                        assert_eq!(requirements.len(), 4);
+                        assert_eq!(requirements[0]["status"], "unmet");
+                        assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    }
+                    assert_eq!(read["dolby_vision_convert"], convert);
+                    assert_eq!(state.transcode.dv_convert_enabled().await, convert);
+                }
+            }
+        }
+        // Partial settings writes preserve the independent choices, and use the
+        // same handwritten switch parsing as the administrative readiness view.
+        for (raw, want) in [(" TRUE ", true), ("off", false), ("nonsense", false)] {
+            for (field, key) in fields {
+                state
+                    .store
+                    .put_setting(key, raw)
+                    .await
+                    .expect("write handwritten preference");
+                let (_, read) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+                let (_, readiness) =
+                    call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+                assert_eq!(read[field], want);
+                let item = readiness["items"]
+                    .as_array()
+                    .expect("readiness items")
+                    .iter()
+                    .find(|item| item["id"] == field)
+                    .expect("preference readiness item");
+                assert_eq!(item["enabled"], want);
+            }
+        }
+        call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "dolby_vision_hdr_processing": true, "dolby_vision_fel_reencode": false,
+                }),
+            ),
+        )
+        .await;
+        let (status, partial) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"dolby_vision_fel_reencode": true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(partial["dolby_vision_hdr_processing"], true);
+        assert_eq!(partial["dolby_vision_fel_reencode"], true);
+        assert_eq!(partial["dolby_vision_convert"], true);
+    }
+
+    #[tokio::test]
+    async fn dv_processing_preferences_are_admin_settings_and_never_mix_with_live_tv_cas() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        for (field, key) in [
+            (
+                "dolby_vision_hdr_processing",
+                plurx_core::store::keys::DV_HDR_PROCESSING,
+            ),
+            (
+                "dolby_vision_fel_reencode",
+                plurx_core::store::keys::DV_FEL_REENCODE,
+            ),
+        ] {
+            assert_eq!(
+                call(&app, put("/api/v1/settings", None, json!({field: true})))
+                    .await
+                    .0,
+                StatusCode::UNAUTHORIZED
+            );
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({
+                        field: true, "live_tv_enabled": false, "live_tv_config_generation": 0,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(key)
+                    .await
+                    .expect("read persisted preference"),
+                None
+            );
+            let (status, _) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({
+                        field: true, "auth_token_idle_days": 0,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(key)
+                    .await
+                    .expect("read persisted preference"),
+                None
             );
         }
     }
