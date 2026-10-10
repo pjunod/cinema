@@ -469,9 +469,25 @@ function liveTvApplySavedCaption(tracks){
     ||tracks.find(({track})=>saved.language&&track.language===saved.language);
   if(match) match.track.mode="showing";
 }
+// The saved pick is offered once per track per attach, when the track is
+// added, and never on a mode change: captions turned off any other way (the
+// native CC menu in iOS Safari fullscreen) fire the same `change` with
+// nothing showing, and re-applying the pick there would turn them straight
+// back on. hls.js reuses a track left by an earlier attach and announces it
+// with an `addtrack` it dispatches on the media element, so each attach
+// starts with nothing offered (`liveTvCaptionsAttaching`).
+let LIVE_TV_CAPTIONS_OFFERED=new WeakSet();
+function liveTvCaptionsAttaching(){ LIVE_TV_CAPTIONS_OFFERED=new WeakSet(); }
+function liveTvCaptionTrackAdded(event){
+  const track=event&&event.track;
+  if(track&&(track.kind==="captions"||track.kind==="subtitles")&&!LIVE_TV_CAPTIONS_OFFERED.has(track)){
+    LIVE_TV_CAPTIONS_OFFERED.add(track);
+    liveTvApplySavedCaption(liveTvCaptionTracks());
+  }
+  liveTvRefreshCaptionControls();
+}
 function liveTvRefreshCaptionControls(){
   const tracks=liveTvCaptionTracks();
-  liveTvApplySavedCaption(tracks);
   const signature=JSON.stringify(tracks.map(({track,index})=>[index,track.kind,track.label,track.language]));
   const showing=tracks.find(({track})=>track.mode==="showing");
   for(const select of document.querySelectorAll("[data-live-tv-captions]")){
@@ -1257,7 +1273,9 @@ function liveTvWireHost(){
     video.addEventListener("leavepictureinpicture",()=>liveTvPaint());
     video.addEventListener("enterpictureinpicture",()=>liveTvPaint());
     video.addEventListener("loadedmetadata",liveTvRefreshCaptionControls);
-    video.textTracks?.addEventListener?.("addtrack",liveTvRefreshCaptionControls);
+    video.textTracks?.addEventListener?.("addtrack",liveTvCaptionTrackAdded);
+    // hls.js announces a reused captions track on the element itself.
+    video.addEventListener("addtrack",liveTvCaptionTrackAdded);
     video.textTracks?.addEventListener?.("removetrack",liveTvRefreshCaptionControls);
     video.textTracks?.addEventListener?.("change",liveTvRefreshCaptionControls);
     liveTvRefreshCaptionControls();
