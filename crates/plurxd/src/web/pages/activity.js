@@ -53,9 +53,19 @@ function activityBlockedScans(d){
   return (d.scans||[]).filter(sc=>sc.status?.running&&sc.status?.phase==="queued"&&sc.status?.error);
 }
 function activityBlockedScansHtml(d){
-  const blocked=activityBlockedScans(d);
-  if(!blocked.length)return "";
-  return `<section class="system-attention" data-activity-blocked-scans><h2>${blocked.length===1?"A library scan can’t start":`${blocked.length} library scans can’t start`}</h2>${blocked.map(sc=>`<p><b>${esc(sc.library)}</b><br>${esc(sc.status.error)}</p>`).join("")}${ME?.is_admin?'<div class="row"><a class="ghost sm" href="#/settings/libraries">Review library locations</a></div>':""}</section>`;
+  const blocked=activityBlockedScans(d),n=blocked.length;
+  if(!n)return "";
+  // In a cluster the root check is the answering node's own: a member that can
+  // read the folders may still run the scan, so the heading says whose
+  // observation this is instead of promising it will never start.
+  const clustered=activityIsClustered(d);
+  const heading=clustered
+    ?(n===1?"This node can’t read a queued library":`This node can’t read ${n} queued libraries`)
+    :(n===1?"A library scan can’t start":`${n} library scans can’t start`);
+  const action=ME?.is_admin
+    ?'<div class="row"><a class="ghost sm" href="#/settings/libraries">Review library locations</a></div>'
+    :'<p class="muted">Ask an administrator to check the library locations.</p>';
+  return `<section class="system-attention" data-activity-blocked-scans><h2>${heading}</h2>${clustered?'<p class="muted">Another node that can read these folders can still run the scan.</p>':""}${blocked.map(sc=>`<p><b>${esc(sc.library)}</b><br>${esc(sc.status.error)}</p>`).join("")}${action}</section>`;
 }
 function setActivityTab(tab){
   ACTIVITY_VIEW.tab=tab==="jobs"&&ME?.is_admin?"jobs":"status";
