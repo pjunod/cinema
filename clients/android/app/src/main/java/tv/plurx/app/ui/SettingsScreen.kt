@@ -243,7 +243,7 @@ fun SettingsScreen(
                 "Live TV",
                 "Tuner, programme guide, recording and Library channels for this server. Administrator access is required.",
             ) {
-                PreferenceAction("Tuner, guide, recording and Library channels", onClick = onOpenLiveTvSettings)
+                PreferenceAction("On/off, tuner, guide, recording and Library channels", onClick = onOpenLiveTvSettings)
             }
 
             SettingsSection("Sharing", "Shared libraries and Source status.") {

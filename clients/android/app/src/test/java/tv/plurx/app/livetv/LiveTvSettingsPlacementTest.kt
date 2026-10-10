@@ -152,6 +152,12 @@ class LiveTvSettingsPlacementTest {
         assertTrue(state.contains("if (surface.readsEnablePrerequisites) readPrerequisites(client)"))
         assertTrue(state.contains("prerequisites = client.currentReadiness()"))
         assertTrue(source("livetv/LiveTvApi.kt").contains("request(url(\"live-tv\", \"readiness\"), authenticated = true)"))
+        // The switch now shares a screen with the tuner form: pressing it must
+        // not throw away an unsaved tuner edit, as the web's card does not.
+        val write = state.substringAfter("fun write(change: LiveTvSettingsChange)").substringBefore("fun refreshDeveloperReadiness")
+        assertTrue(write.contains("if (change !is LiveTvSettingsChange.Configure && dirty) Triple(ipv4, sessions, height) else null"))
+        assertTrue(write.indexOf("val draft =") < write.indexOf("apply(result)"))
+        assertTrue(write.contains("ipv4 = draftIpv4; sessions = draftSessions; height = draftHeight"))
     }
 
     @Test
@@ -160,7 +166,7 @@ class LiveTvSettingsPlacementTest {
         val liveTv = settings.substringAfter("SettingsSection(\n                \"Live TV\",")
             .substringBefore("SettingsSection(\"Account\"")
         assertTrue("Settings must have a Live TV section", liveTv.length < settings.length)
-        assertTrue(liveTv.contains("PreferenceAction(\"Tuner, guide, recording and Library channels\", onClick = onOpenLiveTvSettings)"))
+        assertTrue(liveTv.contains("PreferenceAction(\"On/off, tuner, guide, recording and Library channels\", onClick = onOpenLiveTvSettings)"))
         val developer = settings.substringAfter("SettingsSection(\"Developer\"").substringBefore("SettingsSection(\"About\"")
         assertTrue("Settings must have a Developer section", developer.length < settings.length)
         assertFalse("the Developer entry no longer promises HDHomeRun setup", developer.contains("HDHomeRun"))

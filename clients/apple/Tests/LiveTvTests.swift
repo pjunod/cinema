@@ -681,6 +681,14 @@ final class LiveTvTests: XCTestCase {
         XCTAssertFalse(settings.contains("Settings → Developer"))
         XCTAssertFalse(LiveTvAdminModel.readyMessage.contains("Developer"))
         XCTAssertFalse(LiveTvAdminModel.needsAttentionMessage.contains("Developer"))
+        // The switch now shares a screen with the tuner form: pressing it must
+        // not throw away an unsaved tuner edit, as the web's card does not.
+        XCTAssertTrue(model.contains("if case .configure = change { keepsDraft = false }"))
+        XCTAssertTrue(model.contains("var keepsDraft = dirty\n"))
+        let write = try XCTUnwrap(model.components(separatedBy: "func write(_ change: LiveTvSettingsChange)").last)
+        let draftAt = try XCTUnwrap(write.range(of: "let draft = (ipv4: ipv4"))
+        let applyAt = try XCTUnwrap(write.range(of: "apply(settings)"))
+        XCTAssertLessThan(draftAt.lowerBound, applyAt.lowerBound, "the draft is read before the snapshot replaces it")
         XCTAssertEqual(LiveTvFailure(code: "live_tv_disabled").errorDescription,
                        "Live TV is off. An administrator can enable it in Settings → Live TV.")
         let api = try Self.appleSource("LiveTv.swift")
@@ -832,7 +840,7 @@ final class LiveTvTests: XCTestCase {
     /// row that pushes the screen, on iOS and tvOS alike.
     func testSettingsReachesLiveTvSettingsLikeDeveloper() throws {
         let settings = try Self.appleSource("SettingsView.swift")
-        let link = "NavigationLink(\"Tuner, guide, recording and Library channels\") { LiveTvSettingsView() }"
+        let link = "NavigationLink(\"On/off, tuner, guide, recording and Library channels\") { LiveTvSettingsView() }"
         XCTAssertEqual(settings.components(separatedBy: link).count - 1, 1)
         let section = try XCTUnwrap(settings.range(of: link))
         let before = settings[..<section.lowerBound]

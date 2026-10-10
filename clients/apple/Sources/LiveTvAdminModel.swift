@@ -88,7 +88,19 @@ final class LiveTvAdminModel: ObservableObject {
             do {
                 let settings = try await api.update(change, generation: saved.liveTvConfigGeneration)
                 guard revision == expected else { return }
+                // The tuner form is a draft the operator owns until they save
+                // it. A switch on the same screen (enable, recording, Library
+                // channels) answers with the whole snapshot; take its saved
+                // values but leave an unsaved tuner edit where it was.
+                var keepsDraft = dirty
+                if case .configure = change { keepsDraft = false }
+                let draft = (ipv4: ipv4, sessions: sessions, height: height)
                 apply(settings)
+                if keepsDraft {
+                    ipv4 = draft.ipv4
+                    sessions = draft.sessions
+                    height = draft.height
+                }
                 await loadGuideReadiness()
                 await loadPrerequisites()
                 message = "Saved. Recording is \(settings.dvrEnabled ? "enabled" : "disabled"); Library channels are \(settings.libraryChannelsEnabled ? "enabled" : "disabled"); Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."

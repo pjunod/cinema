@@ -126,7 +126,15 @@ class LiveTvAdminState internal constructor(
         scope.launch {
             try {
                 val result = client.save(previous, change)
+                // The tuner form is a draft the operator owns until they save
+                // it. A switch on the same screen (enable, recording, Library
+                // channels) answers with the whole snapshot; take its saved
+                // values but leave an unsaved tuner edit where it was.
+                val draft = if (change !is LiveTvSettingsChange.Configure && dirty) Triple(ipv4, sessions, height) else null
                 apply(result)
+                draft?.let { (draftIpv4, draftSessions, draftHeight) ->
+                    ipv4 = draftIpv4; sessions = draftSessions; height = draftHeight
+                }
                 if (surface.readsEnablePrerequisites) readPrerequisites(client)
                 message = "Saved. Recording is ${if (result.dvr_enabled) "enabled" else "disabled"}; Library channels are ${if (result.library_channels_enabled) "enabled" else "disabled"}; Live TV is ${if (result.live_tv_enabled) "enabled" else "disabled"}."
             } catch (error: Exception) {

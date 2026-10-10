@@ -203,7 +203,7 @@ struct SettingsView: View {
                     }
                 }
                 #endif
-                NavigationLink("Tuner, guide, recording and Library channels") { LiveTvSettingsView() }
+                NavigationLink("On/off, tuner, guide, recording and Library channels") { LiveTvSettingsView() }
             } header: {
                 Text("Live TV")
             } footer: {
