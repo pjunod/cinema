@@ -9670,3 +9670,94 @@ formatting and86served scripts). No units execute. Main's new planned_codec
 field controls VideoToolbox execution; prepared owner binding therefore also
 requires exact codec equality. The existing restored-source refusal fixture
 adds a codec mismatch with otherwise unchanged candidate identity/digest.
+
+
+### 10.303 Takeover, main integration and Auto after a viewer choice (2026-10-10)
+
+A new session took over from the 10.302 handoff. Its lab differs: the
+operator Mac is reachable only through a Linux VM, so Mac-native runs (owned
+emulator, physical Apple devices, Safari) are not driven from here. Android
+runs move to physical devices over wireless debugging from lab3. Apple builds
+and simulators move to the macOS CI runner.
+
+**Main integration.** Merged `main` `c96142ac5` (136 commits) into the branch
+as `55db341a7`. Conflicts were in `create.rs` `StartInfo` (the single
+post-attachment `response_facts` snapshot is kept, plus main's
+`processed_dv_profile`), in `web-control.test.js` (both sides appended
+independent tests, so both are kept) and in the client versions: Android
+versionCode **160** (main took 159), Apple stays at 227. On lab3, the pinned
+1.97.1 toolchain passes workspace all-target `cargo check` and
+`make precommit-check` (catalog 3432 files, fmt, Clippy `-D warnings`, served
+scripts). Both release and capability-probe APKs build and the unit-test
+sources compile. No tests ran.
+
+**Root cause: Android Auto never decided again after a viewer quality
+choice.** `Controller.directedChange` keeps the viewer's last directed
+change, and nothing ever clears the reference. `DirectedChange.isSettled`
+records when the change is over. Six sites nevertheless tested
+`directedChange != null` as "a change is in flight": the display-aware Auto
+tick gate, decode-pressure observation, stall-link recovery, both negative
+link-sample paths and the original-boundary re-plan. After the first
+quality choice on a title, including choosing Auto itself, the tick gate
+reported `change_pending` for the rest of the title. Auto made no decision,
+answered no link cliff and answered no decode pressure. UI30 (10.302) shows
+exactly this sequence: `manual`, then `change_pending` once Auto was entered,
+then no change while an applied cliff waited 60 s.
+
+The fix is `991289a62`. The six sites ask `directedChangeOutstanding()`,
+which is `isSettled == false`. A reopen in flight is still held by its own
+pending seek, and a prepared successor by `preparedPlayer`, exactly as
+before. Regression:
+`AutoDecisionGateTest::onlyAnUnsettledDirectedChangeHoldsAuto`.
+
+**Physical Android TV verification.** Hardware: Google TV Streamer, API 34.
+The capability-probe build of `991289a62` is a separate package, so the
+viewer's installed app was not touched. It played the 1800-second clock
+fixture from an owned lab daemon on lab3 behind the shaping device proxy,
+with display-aware Auto enabled. The sequence was manual 720p, then Auto:
+
+| Device time | Gate / event |
+|---|---|
+| 14:54:17 | `auto gate manual` (720p chosen; committed `via=continuous quality=720`) |
+| 14:55:58 | `auto gate change_pending` (Auto chosen) |
+| 14:56:05 | `quality_switch via=continuous quality=Auto` |
+| 14:56:08 | `auto gate open` |
+
+The second sequence was manual 480p, then Auto. The gate went to `manual`,
+then `change_pending` at 15:06:33, then committed `quality=Auto`, then
+`open` at 15:06:43. Auto then prepared and presented its own candidate
+(`change_pending` at 15:07:03, `continuous_auto_presented` at 15:07:10,
+`open` at 15:07:13). Before the fix, every one of these stayed at
+`change_pending`.
+
+This is a scoped hardware pass of the gate root cause only. It is not
+the 20-transition series. One lab-induced failure is preserved: restarting
+the shaping proxy refused connections for about three seconds, and the
+player ended with `ERROR_CODE_IO_NETWORK_CONNECTION_FAILED`. That is an
+expected terminal network failure, not a switch failure, and a proxy
+restart is not a valid way to change a shaping stage mid-run.
+
+On the unshaped link, Auto twice stepped 720p→480p about 35 s after start
+with no link cliff. Neither a link sample nor a decode cause was reported, so
+the remaining downgrade path is producer pressure. Software x264 on a loaded
+shared host is plausible, but it was not measured, and it is recorded here
+as unexplained.
+
+**A9 optical failure is an instrument outage, not a held picture.** The A9
+geometry preflight (zero quality changes) failed on an upper hold of
+125.6 ms. Its only wide sampling gap (packet 2591, 74.4 ms) has 3.7 ms of
+processing CPU and 69.9 ms wall time between processing completion and the
+next request, with 0.22 ms CPU. The acquisition process was off-CPU, so the
+cause is not the A8 `search_video` cost. Every lower hold bound is at most
+59.3 ms. The other four gaps are 12.7–13.9 ms: X server acquisition spikes
+of 4–5 ms plus about 4 ms of in-loop processing exceed the 12.5 ms budget
+by design.
+
+**Acceptance scope, pending Paul's ruling.** §8.3 measures *switch-induced*
+gaps. 10.228 found every switch boundary optically clean, and every
+whole-window failure since (10.244, A8, A9) lies in steady playback away
+from any switch. This session treats those as lab display/capture
+limitations rather than switch failures. It does not relax any limit. It
+also recommends that #844's repairs land on `main` through the normal
+review, fast-lane and merge sequence, with the per-platform campaigns
+continuing against `main` afterwards. Both points await Paul's ruling.
