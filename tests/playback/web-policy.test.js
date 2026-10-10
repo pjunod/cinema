@@ -7045,6 +7045,22 @@ test("severe route pressure skips intermediate rungs despite voluntary budget",(
   assert.equal(result.emergency,true);
 });
 
+test("link pressure takes the cheapest costed rung when no lower rung fits the link",()=>{
+  const f=routeQualityFixture();
+  const decide=candidates=>policy.decideCandidateTransition({state:{},
+    sample:{...f.sample,cause:"link",stalled:true,runway_ms:1000,transfer:{...f.transfer,bytes:1000000}},
+    candidates,currentId:f.high.id,target:f.target,aspect:16/9});
+  // 8 Mb/s fits neither 1440p (18.16) nor 1080p (12): holding 2160p (30)
+  // keeps the largest deficit, so the cheapest costed rung is taken.
+  const result=decide([f.low,f.middle,f.high]);
+  assert.equal(result.candidate.id,f.low.id);
+  assert.equal(result.emergency,true);
+  assert.equal(decide([{...f.low,peak_bps:null,average_bps:null},f.high]).candidate,null,
+    "an uncosted rung is never chosen for a link cause");
+  assert.equal(decide([{...f.low,peak_bps:31000000,average_bps:31000000},f.high]).candidate,null,
+    "a lower rung that costs more than the current one is no recovery");
+});
+
 test("mild route pressure survives ordinary HLS refills but only moves while draining",()=>{
   const f=routeQualityFixture();
   const args={state:{previousRunwayMs:61000},candidates:[f.low,f.middle,f.high],

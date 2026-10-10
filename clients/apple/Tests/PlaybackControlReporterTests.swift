@@ -1809,11 +1809,26 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertFalse(autoDisplayFits(width: 1_800, height: 1_080, neededWidth: 2_000, neededHeight: 1_125))
     }
 
-    func testColdOriginalCanRecoverToUnprovedCompatibleEncodeWithinLinkBudget() {
+    func testLinkPressureTakesTheCheapestCostedRungWhenNoLowerRungFits() {
+        let current = candidate(1_080, peak: 12_000_000)
+        let ladder = [current, candidate(720, peak: 6_000_000), candidate(480, peak: 3_000_000), candidate(360, peak: nil)]
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [], linkCeiling: 7_000_000)?.height, 720)
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [], linkCeiling: 4_000_000)?.height, 480)
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [], linkCeiling: 2_000_000)?.height, 480)
+        XCTAssertNil(autoRecoveryCandidate([current, candidate(360, peak: nil)], current: current, rejected: [], linkCeiling: 2_000_000))
+        XCTAssertEqual(autoRecoveryCandidate([current, candidate(720, peak: 6_000_000), candidate(360, peak: nil)],
+                                             current: current, rejected: [])?.height, 720)
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [], linkCeiling: 2_000_000,
+                                             currentCost: 12_000_000)?.height, 480)
+        XCTAssertNil(autoRecoveryCandidate([current, candidate(720, peak: 9_000_000)], current: current, rejected: [],
+                                           linkCeiling: 2_000_000, currentCost: 6_000_000))
+    }
+
+    func testColdOriginalRecoversToUnprovedCompatibleEncodeUnderLinkPressure() {
         let original = candidate(2_160, route: "remux", peak: nil)
         let lower = candidate(1_080)
         XCTAssertEqual(autoRecoveryCandidate([original, lower], current: original, rejected: [], linkCeiling: 4_000_000)?.height, 1_080)
-        XCTAssertNil(autoRecoveryCandidate([lower], current: original, rejected: [], linkCeiling: 2_000_000))
+        XCTAssertEqual(autoRecoveryCandidate([lower], current: original, rejected: [], linkCeiling: 2_000_000)?.height, 1_080)
         XCTAssertNil(autoRecoveryCandidate([lower], current: original, rejected: [lower.id]))
         XCTAssertFalse(lower.sustainable)
         let hdrOriginal = candidate(2_160, route: "remux", peak: nil, grade: "hdr10")

@@ -3637,7 +3637,7 @@ class Controller internal constructor(
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
         val next = autoRecoveryCandidate(policyCatalog, current, autoDecoderRejected,
-            link.takeIf { severe || mild }) ?: return
+            link.takeIf { severe || mild }, currentCost = downsideCost) ?: return
         if (!producer) {
             val incumbent = player
             val incumbentSession = sessionId ?: return
@@ -3792,7 +3792,7 @@ class Controller internal constructor(
         val chosen = if (pressure) {
             autoUpgradeSinceMs = null
             autoRecoveryCandidate(eligible, current, autoDecoderRejected,
-                link.takeIf { severe || autoMildSamples >= 2 })
+                link.takeIf { severe || autoMildSamples >= 2 }, currentCost = downsideCost)
         } else {
             val fitting = eligible.filter { candidate -> link?.let { bps ->
                 candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } ?: autoCatalog.firstOrNull {
@@ -5912,14 +5912,25 @@ interface PlanLike {
     val deliveredDolbyVisionProfile: Int?
 }
 
+/**
+ * The lower rung a recovery moves to. Under link pressure the link has already
+ * proved it cannot carry [current]: the largest lower rung whose cost fits
+ * [linkCeiling] is the answer. When none fits, the cheapest costed lower rung
+ * is the smallest deficit, provided it costs less than [current]
+ * ([currentCost]); otherwise holding is no worse. An uncosted rung is never
+ * chosen for link pressure.
+ */
 internal fun autoRecoveryCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
     current: tv.plurx.app.data.QualityCandidate, rejected: Set<String>, linkCeiling: Double? = null,
-    decoderRecovery: Boolean = false): tv.plurx.app.data.QualityCandidate? =
-    candidates.filter { it.hasValidIdentity && it.decoder_compatible && it.id !in rejected &&
+    decoderRecovery: Boolean = false, currentCost: Double? = null): tv.plurx.app.data.QualityCandidate? {
+    val lower = candidates.filter { it.hasValidIdentity && it.decoder_compatible && it.id !in rejected &&
         (decoderRecovery || it.route != "encode" || it.grade == current.grade) &&
-        it.width.toLong() * it.height < current.width.toLong() * current.height &&
-        (linkCeiling == null || it.peak_bps?.let { peak -> peak > 0 && peak <= linkCeiling } == true)
-    }.maxByOrNull { it.width.toLong() * it.height }
+        it.width.toLong() * it.height < current.width.toLong() * current.height }
+    if (linkCeiling == null) return lower.maxByOrNull { it.width.toLong() * it.height }
+    val costed = lower.filter { (it.peak_bps ?: 0L) > 0L }
+    return costed.filter { it.peak_bps!! <= linkCeiling }.maxByOrNull { it.width.toLong() * it.height }
+        ?: costed.minByOrNull { it.peak_bps!! }?.takeIf { cheapest -> currentCost == null || cheapest.peak_bps!! < currentCost }
+}
 
 internal fun autoPreferredDisplayCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
     neededWidth: Double, neededHeight: Double): tv.plurx.app.data.QualityCandidate? =

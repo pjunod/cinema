@@ -327,14 +327,28 @@ func autoTrialMayCommit(requestedId: String?, offeredId: String?, requestedTarge
         automatic && presenting && !seeking
 }
 
+/// The lower rung a recovery moves to. Under link pressure the link has
+/// already proved it cannot carry `current`: the largest lower rung whose cost
+/// fits `linkCeiling` is the answer. When none fits, the cheapest costed lower
+/// rung is the smallest deficit, provided it costs less than `current`
+/// (`currentCost`); otherwise holding is no worse. An uncosted rung is never
+/// chosen for link pressure.
 func autoRecoveryCandidate(_ candidates: [QualityCandidate], current: QualityCandidate,
-                           rejected: Set<String>, linkCeiling: Double? = nil, decoderRecovery: Bool = false) -> QualityCandidate? {
-    candidates.filter { candidate in
+                           rejected: Set<String>, linkCeiling: Double? = nil, decoderRecovery: Bool = false,
+                           currentCost: Double? = nil) -> QualityCandidate? {
+    let area = { (candidate: QualityCandidate) in Int64(candidate.width) * Int64(candidate.height) }
+    let lower = candidates.filter { candidate in
         candidate.hasValidIdentity && candidate.decoderCompatible && !rejected.contains(candidate.id) &&
             (decoderRecovery || candidate.route != "encode" || candidate.grade == current.grade) &&
-            Int64(candidate.width) * Int64(candidate.height) < Int64(current.width) * Int64(current.height) &&
-            (linkCeiling.map { ceiling in candidate.peakBps.map { $0 > 0 && Double($0) <= ceiling } == true } ?? true)
-    }.max { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
+            area(candidate) < area(current)
+    }
+    guard let ceiling = linkCeiling else { return lower.max { area($0) < area($1) } }
+    let costed = lower.filter { ($0.peakBps ?? 0) > 0 }
+    if let fitting = costed.filter({ Double($0.peakBps!) <= ceiling }).max(by: { area($0) < area($1) }) {
+        return fitting
+    }
+    guard let cheapest = costed.min(by: { $0.peakBps! < $1.peakBps! }) else { return nil }
+    return currentCost.map { Double(cheapest.peakBps!) < $0 } ?? true ? cheapest : nil
 }
 
 func autoPreferredDisplayCandidate(_ candidates: [QualityCandidate], neededWidth: Double, neededHeight: Double) -> QualityCandidate? {
@@ -11270,7 +11284,7 @@ extension PlayerController {
         autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
         guard severe || (autoSwitchTimes.count < 6 && (autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true)) else { return }
         let next = autoRecoveryCandidate(candidates, current: current, rejected: autoDecoderRejected,
-            linkCeiling: severe || mild ? link : nil)
+            linkCeiling: severe || mild ? link : nil, currentCost: downsideCost)
         if let next {
             if !producer {
                 guard let deadline, let sample = latestAutoCompletedTransfer,
@@ -11473,7 +11487,7 @@ extension PlayerController {
         let chosen: QualityCandidate?
         if pressure {
             chosen = autoRecoveryCandidate(eligible, current: current, rejected: autoDecoderRejected,
-                linkCeiling: severe || autoMildSamples >= 2 ? link : nil)
+                linkCeiling: severe || autoMildSamples >= 2 ? link : nil, currentCost: downsideCost)
             autoUpgradeSinceMs = nil
         } else {
             let fitting = eligible.filter { candidate in

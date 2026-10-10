@@ -146,7 +146,9 @@ class ContinuousVideoSelectionTest {
         assertEquals(raw[0], bound[0].copy(peak_bps = raw[0].peak_bps))
         assertEquals(6_160_000L, raw[0].peak_bps)
         assertEquals(raw[0].id, autoRecoveryCandidate(raw, raw[1], emptySet(), 10_000_000.0)?.id)
-        assertNull(autoRecoveryCandidate(bound, bound[1], emptySet(), 10_000_000.0))
+        // No rung fits a 10 Mb/s link at these ceilings; the cheapest costed
+        // rung is still a smaller deficit than holding 1080p.
+        assertEquals(bound[0].id, autoRecoveryCandidate(bound, bound[1], emptySet(), 10_000_000.0)?.id)
         assertEquals(raw[0].id, autoRecoveryCandidate(bound, bound[1], emptySet(), 20_000_000.0)?.id)
         assertSame(raw, continuousQualityBoundCatalog(raw, null))
         val unrelated = candidate(144, 1_000_000)

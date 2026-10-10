@@ -2128,11 +2128,29 @@ class DisplayAwareAutoEvidenceTest {
         assertFalse(autoDisplayFits(1_800, 1_080, 2_000.0, 1_125.0))
     }
 
-    @Test fun coldOriginalCanRecoverToUnprovedCompatibleEncodeWithinLinkBudget() {
+    @Test fun linkPressureTakesTheCheapestCostedRungWhenNoLowerRungFits() {
+        val current = candidate(1_080, peak = 12_000_000L)
+        val r720 = candidate(720, peak = 6_000_000L)
+        val r480 = candidate(480, peak = 3_000_000L)
+        val r360 = candidate(360, peak = null)
+        val ladder = listOf(current, r720, r480, r360)
+        assertEquals(r720, autoRecoveryCandidate(ladder, current, emptySet(), 7_000_000.0))
+        assertEquals(r480, autoRecoveryCandidate(ladder, current, emptySet(), 4_000_000.0))
+        assertEquals(r480, autoRecoveryCandidate(ladder, current, emptySet(), 2_000_000.0))
+        assertNull(autoRecoveryCandidate(listOf(current, r360), current, emptySet(), 2_000_000.0))
+        assertEquals(r720, autoRecoveryCandidate(listOf(current, r720, r360), current, emptySet()))
+        // A lower rung that costs more than the current one (a retained encode
+        // above a low-rate original) is no recovery.
+        assertEquals(r480, autoRecoveryCandidate(ladder, current, emptySet(), 2_000_000.0, currentCost = 12_000_000.0))
+        assertNull(autoRecoveryCandidate(listOf(current, candidate(720, peak = 9_000_000L)), current, emptySet(),
+            2_000_000.0, currentCost = 6_000_000.0))
+    }
+
+    @Test fun coldOriginalRecoversToUnprovedCompatibleEncodeUnderLinkPressure() {
         val original = candidate(2_160, "remux", null)
         val lower = candidate(1_080)
         assertEquals(lower, autoRecoveryCandidate(listOf(original, lower), original, emptySet(), 4_000_000.0))
-        assertNull(autoRecoveryCandidate(listOf(lower), original, emptySet(), 2_000_000.0))
+        assertEquals(lower, autoRecoveryCandidate(listOf(lower), original, emptySet(), 2_000_000.0))
         assertNull(autoRecoveryCandidate(listOf(lower), original, setOf(lower.id)))
         assertFalse(lower.sustainable)
         val hdrOriginal = original.copy(grade = "hdr10")
