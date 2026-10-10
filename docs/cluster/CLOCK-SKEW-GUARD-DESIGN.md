@@ -19,7 +19,10 @@ retain the release/evidence boundaries. Measurement is assigned to
 unclaimed pending measurement fleet evidence. Paul clarified on 2026-09-30
 that switches apply only where manual on/off is meaningful, rather than to
 every unfinished feature. K-06 therefore retains the accepted no-switch
-design, read-only Developer facts and separate releases. Runtime work is now
+design, read-only Developer facts and separate releases. (Since 2026-10-04
+`main` has the switch anyway — Settings → Developer *Cluster clock guard*,
+`cluster.clock_guard_enforced`, default off, with advisory readiness rows;
+see the §3.8 note.) Runtime work is now
 authorized; production rollout and clock-step drills remain separate actions.
 
 Read §2 first: every wall-clock comparison that decides ownership is listed
@@ -94,8 +97,9 @@ Keep §5.5's one-hour idle and 60-second actual network-load observation,
 complete roster/uncertainty/continuity/authority-cost facts, 250 ms local and
 2,000 ms relative bounds, and original failed/missing receipts unchanged.
 The later 24-hour enforcing observation and explicitly approved disposable
-clock-step drill remain final acceptance. There is no enablement switch or
-gate, and this ruling authorizes no deployment, lab launch or clock step.
+clock-step drill remain final acceptance. There was no enablement switch or
+gate at this ruling (one exists now; §3.8 note), and this ruling authorizes
+no deployment, lab launch or clock step.
 
 **2026-10-01 private preparation extension:** coordinator `agent:/root`
 prepares E1 consumer source on `codex/k06-consumer-preparation-20261001`,
@@ -379,8 +383,14 @@ the recorded point and uncertainty still use the measured round trip. It
 prevents a valid zero-millisecond sample from making every later positive
 sample fail `candidate > 4 * minimum`; a `0 ms` then `1 ms` LAN observation is
 accepted. A candidate whose floored `round_trip` exceeds four times the
-floored window minimum is unusable for that round rather than silently
-leaving an old sample authoritative.
+floored window minimum never enters the window and never leaves an old
+sample authoritative: if its interval intersects the selected sample's, the
+round publishes the candidate's own (wider) interval, because the four
+timestamps bound the true offset whatever the queueing delay; if it does not
+intersect, the step reset below applies. (Amended 2026-10-10: publishing
+`Unknown` here made every round with a CPU-loaded peer Unknown, so enforced
+expiry scans on every voter refused although each exchange bounded the
+offset.)
 
 Before every comparison, discard entries whose monotonic `observed_at` age is
 greater than `CLOCK_OBSERVATION_MAX_AGE = 25 s`, even if every candidate since
@@ -388,8 +398,9 @@ the selected sample was rejected. Expiry is time-based, not accepted-sample-
 count-based: a zero-delay minimum cannot remain in an eight-entry window
 forever by rejecting the observations that would evict it. If pruning empties
 the window, the current otherwise-usable candidate starts a new one. A
-rejected current round still publishes `Unknown`; expiry prevents poisoning
-later rounds rather than converting a rejected sample into success.
+rejected current round (no usable exchange) still publishes `Unknown`;
+expiry prevents poisoning later rounds rather than converting a rejected
+sample into success.
 
 A minimum-delay window must not hide a clock step for 80 seconds. Before a
 usable candidate enters the window, compare its conservative interval with
@@ -515,12 +526,19 @@ not make the state `Incomplete`: it holds no vote, so a stopped learner must
 not refuse takeover, the expiry scan and every membership change on every
 node. The role is proved only from the exact applied peer directory bound to
 the membership watch; a roster without one treats every peer as a voter. A
-*measured* learner still contributes `|offset| + uncertainty` to the worst
-bound and refuses above 2 s, because a learner may own delegated media
-sessions whose leases takeover and the expiry scan spend. Promoting a learner
+*measured* learner's `|offset| + uncertainty` is likewise not part of the
+cluster-wide worst bound, which is over voters only: above 2 s it refuses
+the routes that learner owns (below) and its own promotion, nothing else.
+(Amended 2026-10-10, reversing the 2026-10-04 wording that counted it: a
+~9.7 s learner step made every voter's enforced expiry scan refuse for
+~16 minutes, so no node could fail a session over.) Promoting a learner
 makes its clock a voter's clock, so promotion additionally requires that
 learner's own fresh bounded observation (§3.5). A node that is itself a
 learner applies the same rule: every voter is its peer and must be bounded.
+The leader answers a committed learner's clock probe whatever its own
+acquisition state — a probe response is timing evidence, not an authority
+grant — so a skewed learner measures its own offset instead of seeing the
+leader as `Unknown`.
 
 The excuse is about votes, so it covers membership changes and the surviving
 set of a fenced removal, never a lease. A learner owns delegated media
@@ -640,10 +658,11 @@ Reasons, each row:
   protocol rollback. The exception never skips a fence, manufactures quorum,
   permits self-promotion, or turns a missing clock probe alone into proof that
   the target is unreachable.
-- **An unobserved learner refuses nothing but its own promotion and its own
-  leases.** The amended §3.3 rule applies to every row: coverage, takeover,
-  the expiry scan, membership acquisition and the surviving set of a fenced
-  removal excuse an unobserved learner and never an unobserved voter. Takeover
+- **An unobserved or out-of-bound learner refuses nothing but its own
+  promotion and its own leases.** The amended §3.3 rule applies to every row:
+  coverage, takeover, the expiry scan, membership acquisition and the
+  surviving set of a fenced removal excuse an unobserved learner and never an
+  unobserved voter, and the cluster-wide bound counts voters only. Takeover
   and the expiry scan still never contest a route that learner OWNS: its
   lease expiry is its own clock's, so the owner must be bounded too. Learner promotion (the
   application `promote_learner` and the leader-side Raft `Promote`
@@ -826,8 +845,9 @@ Each is an assessment disposition; each says how this plan honours it.
   in microseconds so half-millisecond results are exact; decisions
   compare `|offset| + uncertainty`, and a sample whose round trip exceeds the
   transport deadline becomes `Unknown`. The delay ratio has a 1 ms
-  quantization floor, and selected entries expire by monotonic age even when
-  later candidates are rejected.
+  quantization floor; a slow intersecting sample is published with its own
+  interval but kept out of the window; and selected entries expire by
+  monotonic age even when later candidates are kept out.
 - **Relative agreement is not local-clock continuity.** A fixed
   wall/monotonic anchor detects local and common-mode steps synchronously at
   dangerous decisions. Generation revalidation closes awaits between the
@@ -896,6 +916,7 @@ interval).
 | above bound | `1000,3510,3512,1022` | `+2500 ms` | `11 ms` | upper `2511 ms`, refuse |
 | crosses bound | `1000,3100,3102,2202` | `+1500 ms` | `601 ms` | upper `2101 ms`, refuse |
 | quantized LAN | `1000,1000,1000,1000`, then `2000,2000,2000,2001` | `0 ms`, then `-0.5 ms` | `1 ms`, then `1.5 ms` | both bounded; `0 ms` minimum accepts `1 ms` RTT |
+| slow, intersecting | `1000,1000,1000,1000`, then `2000,2005,2005,2010` | `0 ms`, then `0 ms` | `1 ms`, then `6 ms` | both bounded; the 10 ms sample publishes its own interval and stays out of the window |
 | responder step | any `t3 < t2` | n/a | n/a | `Unknown` |
 | excessive RTT | network RTT `2001 ms` | n/a | n/a | `Unknown` |
 

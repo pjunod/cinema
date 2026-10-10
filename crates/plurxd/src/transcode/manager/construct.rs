@@ -122,7 +122,7 @@ impl TranscodeManager {
             hdr10_passthrough: false,
             hdr10_passthrough_qsv: false,
             hdr10_passthrough_vaapi: false,
-            dovi_proofs: std::sync::Mutex::new(HashMap::new()),
+            dovi_proofs: DoviProofs::default(),
             cached_limits: std::sync::RwLock::new(None),
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
             output_enqueue: OutputEnqueueQueue::new(),
@@ -813,12 +813,7 @@ impl TranscodeManager {
             if !self.dovi_reshape {
                 return Err("incapable");
             }
-            let proof = self
-                .dovi_proofs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&Self::dovi_proof_key(file))
-                .copied();
+            let proof = self.dovi_proofs.verdict(&Self::dovi_proof_key(file));
             if proof != Some(true) {
                 // The authoritative live path may create this proof for the
                 // selected node. Diagnostics fan-out must never be what opens

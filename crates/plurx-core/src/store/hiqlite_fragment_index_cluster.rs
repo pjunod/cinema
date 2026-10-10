@@ -1486,6 +1486,16 @@ impl From<&mut Row<'_>> for ArtifactRow {
     }
 }
 
+/// An artifact row paired with the logical key that resolved to it.
+struct LogicalArtifactRow(String, ClusterFragmentIndexArtifact);
+
+impl From<&mut Row<'_>> for LogicalArtifactRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let logical = row.get("logical_cache_key");
+        Self(logical, ArtifactRow::from(row).0)
+    }
+}
+
 struct LocationRow(ClusterFragmentIndexLocation);
 
 impl From<&mut Row<'_>> for LocationRow {
@@ -3544,6 +3554,76 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .map(|row| row.0))
+    }
+
+    async fn cluster_fragment_index_availability(
+        &self,
+        node_id: &str,
+        probes: &[crate::store::ClusterIndexAvailabilityProbe],
+    ) -> Result<Vec<bool>, StoreError> {
+        use crate::store::fragment_index_cluster::{
+            check_cluster_index_availability_batch, cluster_index_availability_answers,
+            cluster_index_availability_keys,
+        };
+        check_cluster_index_availability_batch(probes)?;
+        if probes.is_empty() {
+            return Ok(Vec::new());
+        }
+        crate::store::record_http_cluster_index_availability_call();
+        let file_ids: Vec<i64> = probes.iter().map(|probe| probe.file_id).collect();
+        let versions: Vec<&str> = probes
+            .iter()
+            .map(|probe| probe.object_version.as_str())
+            .collect();
+        let file_ids = serde_json::to_string(&file_ids).map_err(database_error)?;
+        let versions = serde_json::to_string(&versions).map_err(database_error)?;
+        let attested: Vec<FragmentIndexSourceObservation> = self
+            .client()
+            .query_consistent_map::<SourceRow, _>(
+                "SELECT node_id, file_id, object_version, source_size, source_mtime,
+                        source_sha256, observed_at_ms
+                   FROM cluster_fragment_index_sources
+                  WHERE node_id = $1
+                    AND file_id IN (SELECT CAST(value AS INTEGER) FROM json_each($2))
+                    AND object_version IN (SELECT value FROM json_each($3))",
+                params!(node_id, file_ids, versions),
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.0)
+            .collect();
+        let keyed = cluster_index_availability_keys(probes, &attested);
+        let keys: Vec<&str> = keyed
+            .iter()
+            .flatten()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        if keys.is_empty() {
+            return Ok(vec![false; probes.len()]);
+        }
+        let keys = serde_json::to_string(&keys).map_err(database_error)?;
+        let artifacts: Vec<(String, ClusterFragmentIndexArtifact)> = self
+            .client()
+            .query_consistent_map::<LogicalArtifactRow, _>(
+                "SELECT k.value AS logical_cache_key, a.cache_key, a.file_id, a.source_size,
+                        a.source_mtime, a.source_sha256, a.pipeline_sha256, a.blob_sha256,
+                        a.bytes, a.built_by_node_id, a.built_at_ms
+                   FROM json_each($1) k
+                   JOIN cluster_fragment_index_artifacts a
+                     ON a.cache_key = COALESCE((
+                          SELECT h.generation_cache_key
+                            FROM cluster_fragment_index_heads h
+                           WHERE h.logical_cache_key = k.value
+                        ), k.value)",
+                params!(keys),
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.0, row.1))
+            .collect();
+        Ok(cluster_index_availability_answers(
+            probes, &keyed, &artifacts,
+        ))
     }
 
     async fn enqueue_cluster_fragment_index(
