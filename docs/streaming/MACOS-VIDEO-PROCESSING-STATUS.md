@@ -156,6 +156,7 @@ compiler load to avoid contaminating measurements.
 | Scale HDR at 10-bit precision before the Metal mapper | Original graph performed tone mapping on four times as many pixels as the production CPU comparator | Revised full comparison and temporal/visual acceptance |
 | Fix stale MDCV/CLL only on the shared CPU + zscale HDR-to-SDR chain | That route reproduced incorrect residual HDR signaling; `tonemapx` already removes it, so unrelated Dolby/Metal paths need no change | Separate corrective commit and focused regression review |
 | Version identity only for routes changed by consumed-HDR metadata cleanup | This root-cause fix changes legacy output bytes; preserving their previous cache key would be incorrect | Verify unaffected SDR and HDR-preserving hashes remain stable |
+| PQ through Metal takes the CPU chain's operator (Hable, max-channel, desat 0), and the HDR10 Metal graphs require the boot tone-map probe's CPU parity (2026-10-10) | The smoke contract (ordered patches, black-to-peak spread, neutral greys) passes any monotone curve. On an Apple M4 node's probe fixture the BT.2390/ITP spelling measured Y/U/V 148.5/125.4/112.5 against the CPU's 119.0/135.5/137.9 — outside the 24-level gate every GPU graph meets — and the CPU operator's terms 108.7/135.0/136.7 at about 2.2× the CPU chain. The curve terms enter plan identity (`renderer_tone_map_terms`), so BT.2390 renditions are not reused. HLG keeps BT.2390/ITP under its reference-white check | The house tone-map operator ruling (R2) |
 
 ## 4. Validation and handoff ledger
 
