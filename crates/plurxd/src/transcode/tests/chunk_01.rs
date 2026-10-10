@@ -3471,6 +3471,68 @@ async fn an_unfinished_profile5_pixel_proof_is_transient_and_not_remembered() {
     );
 }
 
+/// The advertised ladder's ceiling runs ahead of the session start inside
+/// one create. It reads the remembered pixel verdict and never opens the
+/// proof: it used to run both 30-second probes at the background class, and
+/// once an unfinished proof stopped being memoized the start then ran them a
+/// second time at realtime — up to four probes inside one create, past the
+/// clients' create deadline.
+#[tokio::test]
+async fn the_ladder_ceiling_never_starts_a_dovi_pixel_proof() {
+    use plurx_core::store::SqliteStore;
+    use std::sync::atomic::Ordering;
+
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dovi_reshape(true);
+    let file = profile5_file();
+    let key = TranscodeManager::dovi_proof_key(&file);
+    let hooks = manager.test_hooks();
+
+    let unproven = manager
+        .capability_height_ceiling_for_request(Some(&file), false)
+        .await;
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        0,
+        "the ceiling must not open the pixel proof"
+    );
+    assert_eq!(manager.dovi_proofs.verdict(&key), None);
+
+    // No verdict yet answers what the reshape reaches once proved, the only
+    // outcome in which a rung is served.
+    manager.dovi_proofs.insert(key.clone(), true);
+    assert_eq!(
+        manager
+            .capability_height_ceiling_for_request(Some(&file), false)
+            .await,
+        unproven
+    );
+    assert_eq!(
+        manager.dovi_reshape_encoder_advisory(&file).await,
+        manager
+            .encoder_for_file(&file, crate::process_control::ChildClass::Realtime)
+            .await
+            .expect("proved")
+    );
+    let mut refuted = profile5_file();
+    refuted.mtime = 2;
+    manager
+        .dovi_proofs
+        .insert(TranscodeManager::dovi_proof_key(&refuted), false);
+    assert_eq!(
+        manager.dovi_reshape_encoder_advisory(&refuted).await,
+        Encoder::Software
+    );
+    assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 0);
+}
+
 /// The pure mapping: only two successful probes are a verdict.
 #[test]
 fn dovi_pixel_verdict_never_turns_a_probe_error_into_a_verdict() {

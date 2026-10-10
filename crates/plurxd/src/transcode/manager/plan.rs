@@ -900,10 +900,13 @@ impl TranscodeManager {
 
     /// `class` is the caller's: the per-source proof runs two 30-second
     /// FFmpeg probes and memoizes its verdict, so a session start that is
-    /// waiting on it must not run them at the background class. A proof that
+    /// waiting on it must not run them at the background class — nor wait on
+    /// a background caller's proof ([`DoviProofs::prove`]). A proof that
     /// did not finish is not a verdict: it is not memoized and the start is
     /// refused as transient ([`source_proof_pending_error`]), so the next
-    /// start measures again.
+    /// start measures again. Only callers that need the verdict to do the
+    /// work call this; an advisory answer reads the remembered verdict
+    /// ([`Self::dovi_reshape_encoder_advisory`]).
     async fn require_dovi_renderer(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -918,7 +921,7 @@ impl TranscodeManager {
         if required {
             let proof = self
                 .dovi_proofs
-                .prove(Self::dovi_proof_key(file), || {
+                .prove(Self::dovi_proof_key(file), class, || {
                     let scripted = self.hooks.get().scripted_dovi_pixel_proof(file);
                     let file = file.clone();
                     async move {
@@ -1335,24 +1338,58 @@ impl TranscodeManager {
         class: crate::process_control::ChildClass,
     ) -> Result<Encoder, String> {
         if self.require_dovi_renderer(file, class).await? {
-            // Software decode is forced by the pipeline itself
-            // (`requires_software_decode`) — that is what preserves the RPU
-            // AVFrame side data the tonemapx graph consumes. The ENCODER is
-            // free to be the node's real one, provided that exact pairing has
-            // been proved at boot; an unproved pairing falls back to software
-            // rather than failing in front of a viewer. Pinning it to x264
-            // used to cap 4K Dolby Vision at 720p for every non-DV client.
-            let preferred = self.encoder_for_preference(requested);
-            if preferred != Encoder::Software
-                && crate::ffmpeg::has_dovi_reshape_with(preferred).await
-            {
-                Ok(preferred)
-            } else {
-                Ok(Encoder::Software)
-            }
+            Ok(self.dovi_reshape_encoder(requested).await)
         } else {
             Ok(self.encoder_for_preference(requested))
         }
+    }
+
+    /// The encoder a Profile 5 reshape runs on once its source is proved.
+    ///
+    /// Software decode is forced by the pipeline itself
+    /// (`requires_software_decode`) — that is what preserves the RPU AVFrame
+    /// side data the tonemapx graph consumes. The ENCODER is free to be the
+    /// node's real one, provided that exact pairing has been proved at boot;
+    /// an unproved pairing falls back to software rather than failing in
+    /// front of a viewer. Pinning it to x264 used to cap 4K Dolby Vision at
+    /// 720p for every non-DV client.
+    async fn dovi_reshape_encoder(&self, requested: &str) -> Encoder {
+        let preferred = self.encoder_for_preference(requested);
+        if preferred != Encoder::Software && crate::ffmpeg::has_dovi_reshape_with(preferred).await {
+            preferred
+        } else {
+            Encoder::Software
+        }
+    }
+
+    /// The encoder a Profile 5 reshape of `file` would reach, for an answer
+    /// that only describes it (the advertised ladder's ceiling). It reads the
+    /// remembered pixel verdict and never starts a proof: the proof is two
+    /// 30-second probes, and an advisory caller ahead of a session start used
+    /// to run them at the background class inside the viewer's create.
+    ///
+    /// No verdict yet reports the encoder the reshape reaches once proved —
+    /// the only outcome in which any rung is served (a refuted source is
+    /// refused outright at the start, whatever the ladder said). A refuted
+    /// source, or a node without the renderer, reports software, which is
+    /// what the probing path answered for either.
+    pub(super) async fn dovi_reshape_encoder_advisory(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Encoder {
+        if !self.dovi_reshape
+            || self.dovi_proofs.verdict(&Self::dovi_proof_key(file)) == Some(false)
+        {
+            return Encoder::Software;
+        }
+        let requested = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        self.dovi_reshape_encoder(&requested).await
     }
 
     #[allow(clippy::too_many_arguments)]

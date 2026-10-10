@@ -564,6 +564,14 @@ non-zero is handed to every caller waiting on it as a transient
 again. Until 2026-10-10 that failure was memoized as "not Dolby Vision" for
 the life of the process.
 
+Unlike the extractions above, the pixel proof's flights are keyed by class
+as well as source: a caller joins only a flight at least as urgent as
+itself, so a session start never waits on a background proof (the one most
+likely to time out on a loaded node) and opens its own realtime flight
+instead; a verdict from either is shared. The advertised ladder's ceiling
+(`capability_height_ceiling_for_request`), which runs ahead of the start in
+the same create, reads the remembered verdict and never opens a proof.
+
 **The `pre_exec`.** `process::priority::apply_policy` registers one closure
 that makes raw syscalls on values computed before the fork: `getpriority` /
 `setpriority`, `ioprio_set`, and `open` / `write` / `close` of
