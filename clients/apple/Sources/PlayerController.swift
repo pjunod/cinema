@@ -2654,6 +2654,8 @@ final class PlayerController: ObservableObject {
     @Published private(set) var selectedQualityIsOriginal = false
     @Published private(set) var qualityChangeRetained = false
     private var manualQualityRetention = ManualQualityRetention()
+    private var playbackControlOrigin: String?
+    private var pendingPreparedControl: (actionId: String, sessionId: String, bootstrap: ControlBootstrap, origin: String)?
     private weak var unprovenPreparedItem: AVPlayerItem?
     @Published private(set) var encoder: String?
     /// The dynamic range of the bytes this playback is actually receiving —
@@ -5202,13 +5204,15 @@ final class PlayerController: ObservableObject {
     /// exchanges, and it is affordable for a reason the stall ask's is not:
     /// the incumbent is still playing the whole time.
     private func offerPreparedQualityChange(boundary: AutoBoundaryAttempt? = nil) async -> Bool {
+        let reporting = await playbackControl.isActivelyReporting
         guard Caps.controlCapabilities().dualPlayerPreparation,
               preparedReplacement.shouldAskForPreparation,
               // A paused viewer's change cannot be committed — no rate means
               // no new frame to prove the switch — so it is not worth a wait.
               wantsPlayback,
-              await playbackControl.isActivelyReporting
+              reporting
         else {
+            noteSurfaceLogOnly("prepared_offer_unavailable:capable=\(Caps.controlCapabilities().dualPlayerPreparation):active=\(preparedReplacement.hasActivePreparation):playing=\(wantsPlayback):reporting=\(reporting):seek_pending=\(seekState.pendingMs != nil)")
             retainControlSequence(await playbackControl.reportIntent())
             return false
         }
@@ -5253,6 +5257,7 @@ final class PlayerController: ObservableObject {
                 prepared, filmPositionMs: positionForPlaybackIntent()
             ).ownsTheChange
         case .reopen(let reason):
+            noteSurfaceLogOnly("prepared_offer_ended:reason=\(Self.preparedOfferOutcome(reason)):seek_pending=\(seekState.pendingMs != nil)")
             Caps.PreparedHandoffTelemetry.shared.note(
                 outcome: Self.preparedOfferOutcome(reason)
             )
@@ -5441,6 +5446,8 @@ final class PlayerController: ObservableObject {
         let wasStarted = started
         manualQualityRetention.clear()
         qualityChangeRetained = false
+        pendingPreparedControl = nil
+        playbackControlOrigin = nil
         unprovenPreparedItem = nil
         started = false
         lifecycleGeneration &+= 1
@@ -9079,6 +9086,11 @@ final class PlayerController: ObservableObject {
         #if os(iOS)
         if offlineId != nil { return }
         #endif
+        #if os(tvOS)
+        let audio = AVAudioSession.sharedInstance()
+        let rate = audio.sampleRate.isFinite && (0...384_000).contains(audio.sampleRate) ? Int(audio.sampleRate) : 0
+        noteSurfaceLogOnly("audio_route_at_item_failure:outputs=\(audio.currentRoute.outputs.count):sample_rate=\(rate)")
+        #endif
         let itemError = item.error as NSError?
         let detail = lastItemFailureDetail?.item === item
             ? lastItemFailureDetail?.detail
@@ -10874,11 +10886,18 @@ extension PlayerController {
             decision?.measuredCandidateOutputs = hls.measuredCandidateOutputs
             autoActiveCandidateId = hls.qualityCandidateId
         }
+        pendingPreparedControl = nil
+        playbackControlOrigin = nil
         guard let bootstrap = hls.control, bootstrap.isValid else {
             playbackControl.end()
             playbackControlSummary = nil
             return
         }
+        startPlaybackControl(bootstrap: bootstrap, session: hls.sessionId, origin: origin)
+    }
+
+    private func startPlaybackControl(bootstrap: ControlBootstrap, session: String, origin: String) {
+        playbackControlOrigin = origin
         // The override describes the session that just ended. Carrying it into
         // the replacement would make its very first exchange — a session that
         // has rendered nothing yet — report a wedge that belongs to another.
@@ -10893,7 +10912,7 @@ extension PlayerController {
             ),
             observe: { [weak self] in self?.playbackControlObservation() },
             linkReceipt: { [weak self] in
-                guard let self, self.sessionId == hls.sessionId else { return nil }
+                guard let self, self.sessionId == session else { return nil }
                 return self.currentLinkReceipt()
             },
             onSubtitleReady: { [weak self] in
@@ -10924,7 +10943,16 @@ extension PlayerController {
                 )
             },
             onAcknowledgementDelivered: { [weak self] acknowledgement in
-                self?.preparedReplacement.acknowledgementDelivered(acknowledgement)
+                guard let self else { return }
+                self.preparedReplacement.acknowledgementDelivered(acknowledgement)
+                guard acknowledgement.state == .committed,
+                      let next = self.pendingPreparedControl, next.actionId == acknowledgement.actionId,
+                      self.started, self.sessionId == next.sessionId else { return }
+                self.pendingPreparedControl = nil
+                // The predecessor carried the durable commit. Only its
+                // accepted exchange authorizes the successor control owner.
+                self.startPlaybackControl(bootstrap: next.bootstrap, session: next.sessionId, origin: next.origin)
+                self.noteSurfaceLogOnly("prepared_control_rebound:committed=true")
             },
             onEffectiveSelection: { [weak self] effective in
                 guard let self, self.model?.displayAwareAutoProtocol == "route-v1" else { return }
@@ -11673,6 +11701,15 @@ extension PlayerController: PreparedSuccessorHost {
             autoPreparing = false
             autoUpgradeSinceMs = nil
         }
+        if reason == .failed {
+            let itemError = preparedSuccessorErrorDetail(preparedItem?.error as NSError?)
+            let phase = String(describing: preparedReplacement.phase)
+            let readiness = preparedReplacement.readinessRemainingMs().map(String.init) ?? "unknown"
+            noteSurfaceLogOnly(
+                "prepared_successor_failure:stage=\(phase):item=\(itemError)"
+                    + ":ready_ms=\(readiness):overlap_ms=\(preparedOverlapRemainingMs)"
+            )
+        }
         noteSurfaceLogOnly(
             "prepared_successor_abandoned:\(reason == .failed ? "failed" : "aborted")"
         )
@@ -11874,7 +11911,7 @@ extension PlayerController: PreparedSuccessorHost {
         let stagedFilmLocalVOD = autoStagedObservation.map {
             autoStagedObservationCurrent($0) && $0.intervals != nil && action.mediaOriginMs == 0
         } ?? false
-        if automaticTrial && !autoTrialAllowsExposure(action) { return .failedWithoutReopen }
+        if automaticTrial && !autoTrialAllowsExposure(action) { return preparedCommitFailure(at: "automatic-exposure") }
         guard autoStagedProductionAllowsCommit(action) else { return .refused }
         guard autoStagedOriginalAllowsCommit(action) else { return .refused }
         guard started,
@@ -11905,6 +11942,9 @@ extension PlayerController: PreparedSuccessorHost {
         // The incumbent remains visible and audible while its seek lands and
         // its decoded output is checked, then advances to that same instant.
         // All waits consume the pipeline's original physical overlap budget.
+        // The coordinator records a failed outcome before disposing this
+        // staging. Early disposal here erases the item's typed error and
+        // original overlap budget before that failure journal can read them.
         let layerReady = await awaitBoundedValue(
             boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),
             pollMs: PreparedReplacementBounds.pollMs,
@@ -11919,27 +11959,35 @@ extension PlayerController: PreparedSuccessorHost {
         )
         guard layerReady == true, preparedPlayer === successor,
               preparedCommitStillOwned(commitAttempt), wantsPlayback else {
-            discardPreparedSuccessor()
-            return .failedWithoutReopen
-        }
-        guard let frameDurationSeconds = await awaitPreparedFrameDuration(of: item),
-              preparedItem === item, preparedPlayer === successor,
-              preparedCommitStillOwned(commitAttempt), wantsPlayback else {
-            discardPreparedSuccessor()
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "surface")
         }
         let rendezvousRate = preferredRate
+        // Inspection and alignment can each consume their existing bounded
+        // allowance. Pick one future instant before either suspension, rather
+        // than inspecting one fragment then moving the rendezvous beyond it.
+        // The lead keeps the post-swap reserve of the overlap for selection
+        // reconciliation and the first-frame proof.
         guard rendezvousRate.isFinite, rendezvousRate > 0,
-              preparedOverlapRemainingMs > 1_000 else {
-            discardPreparedSuccessor()
-            return .failedWithoutReopen
+              let leadWallMs = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: preparedOverlapRemainingMs) else {
+            return preparedCommitFailure(at: "rate-or-overlap")
         }
         let rendezvous = PreparedCommitRendezvous.plan(
             stagedFilmPositionMs: preparedFilmPositionMs,
             incumbentFilmPositionMs: realPositionMs(),
             mediaOriginMs: action.mediaOriginMs,
-            leadMs: Int(min(16, Double(rendezvousRate)) * 1_000)
+            leadMs: Int(min(16, Double(rendezvousRate)) * Double(leadWallMs))
         )
+        guard let cadence = await awaitPreparedFrameDuration(of: item,
+                targetItemSeconds: Double(rendezvous.itemPositionMs) / 1000),
+              preparedItem === item, preparedPlayer === successor,
+              preparedCommitStillOwned(commitAttempt), wantsPlayback,
+              preferredRate == rendezvousRate else {
+            return preparedCommitFailure(at: "frame-duration")
+        }
+        let frameDurationSeconds = cadence.frameDurationSeconds
+        guard cadence.covers(itemPositionMs: rendezvous.itemPositionMs) else {
+            return preparedCommitFailure(at: "cadence-interval")
+        }
         // Bounded, because an unbounded one does not degrade the way it looks
         // as though it would. The incumbent does keep playing — but the
         // readiness monitor has already been dropped two statements above, so
@@ -11951,16 +11999,14 @@ extension PlayerController: PreparedSuccessorHost {
         // the viewer's tap produces nothing at all, because the prepared path
         // already claimed it and suppressed the in-place reopen.
         guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs) else {
-            discardPreparedSuccessor()
-            return automaticTrial ? .failedWithoutReopen : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+            return automaticTrial ? preparedCommitFailure(at: "seek") : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
         guard let alignedOutput = preparedVideoOutput,
               await awaitPreparedDecodedAlignment(
                 item: item, successor: successor, output: alignedOutput,
                 rendezvous: rendezvous, frameDurationSeconds: frameDurationSeconds, commit: commitAttempt
               ) else {
-            discardPreparedSuccessor()
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "decoded-alignment")
         }
 
         guard await awaitPreparedRendezvous(
@@ -11968,25 +12014,22 @@ extension PlayerController: PreparedSuccessorHost {
             frameDurationSeconds: frameDurationSeconds, rate: rendezvousRate,
             commit: commitAttempt
         ) else {
-            discardPreparedSuccessor()
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "rendezvous", deltaMs: realPositionMs() - rendezvous.filmPositionMs)
         }
 
         // The staging can be taken away under that await — the player ending,
         // the app backgrounding. `.switching` stops anything else *opening*
         // one, but it does not stop the pipeline being freed, and handing a
         // released item to the incumbent would be worse than refusing.
-        guard preparedCommitStillOwned(commitAttempt), wantsPlayback else { return .failedWithoutReopen }
+        guard preparedCommitStillOwned(commitAttempt), wantsPlayback else { return preparedCommitFailure(at: "ownership") }
         guard preparedItem === item, preparedPlayer === successor,
               started, player.currentItem != nil,
               !automaticTrial || autoTrialAllowsExposure(action)
         else {
-            discardPreparedSuccessor()
-            return automaticTrial ? .failedWithoutReopen : .refused
+            return automaticTrial ? preparedCommitFailure(at: "staging") : .refused
         }
         guard Double(abs(realPositionMs() - rendezvous.filmPositionMs)) <= frameDurationSeconds * 1_000 else {
-            discardPreparedSuccessor()
-            return .failedWithoutReopen
+            return preparedCommitFailure(at: "boundary", deltaMs: realPositionMs() - rendezvous.filmPositionMs)
         }
         let incumbentPlayer = player
         let incumbentVolume = incumbentPlayer.volume
@@ -12032,7 +12075,8 @@ extension PlayerController: PreparedSuccessorHost {
         // own first frame able to satisfy it at all.
         let boundaryMs = rendezvous.filmPositionMs
         let incumbent = player.currentItem
-        let incumbentState = (sessionId: sessionId, baseMs: baseMs, path: activeMediaPath,
+        let incumbentState = (sessionId: sessionId, candidateId: autoActiveCandidateId,
+            baseMs: baseMs, path: activeMediaPath,
             authenticated: activeMediaAuthenticated, height: sessionHeight, direct: isDirectPlayback,
             vod: isVOD, directTimeline: usesDirectTimeline,
             status: sessionStatus, diagnostic: diagnosticSessionStatus, observedAt: diagnosticSessionStatusObservedAt)
@@ -12058,13 +12102,12 @@ extension PlayerController: PreparedSuccessorHost {
         pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         stallObservation.reset()
-        // The prepared player and its original display layer now own exposure.
-        installItemObserver(for: item)
         preparedSwitch.note(commitAtMs: PlaybackControlSession.monotonicMs())
         // The successor is a full session in every respect but its pointer, so
         // everything keyed on "which session am I playing" moves with it.
         if autoPreparing { autoExposed = true }
         sessionId = action.sessionId
+        autoActiveCandidateId = action.effectiveSelection.candidateId
         baseMs = action.mediaOriginMs
         isVOD = stagedFilmLocalVOD
         usesDirectTimeline = stagedFilmLocalVOD
@@ -12074,6 +12117,10 @@ extension PlayerController: PreparedSuccessorHost {
             sessionHeight = action.effectiveSelection.height
         }
         isDirectPlayback = false
+        // Metrics capture their installed session/candidate once. Bind every
+        // successor, including manual-to-Auto, before installing observation;
+        // a voluntary proposal is not required for a truthful item identity.
+        installItemObserver(for: item)
         // The viewer's audio and subtitle choices are per-ITEM state, and this
         // is a different item. `open`, `loadOffline`, a seek and a node
         // failover all reconcile them onto the item they attach; the commit
@@ -12126,6 +12173,7 @@ extension PlayerController: PreparedSuccessorHost {
                 player.isMuted = latestMuted
                 unprovenPreparedItem = nil
                 sessionId = incumbentState.sessionId
+                autoActiveCandidateId = incumbentState.candidateId
                 baseMs = incumbentState.baseMs
                 activeMediaPath = incumbentState.path
                 activeMediaAuthenticated = incumbentState.authenticated
@@ -12177,11 +12225,30 @@ extension PlayerController: PreparedSuccessorHost {
             player.allowsExternalPlayback = incumbentPlayer.allowsExternalPlayback
         }
         if !automaticTrial, preparedCommitStillOwned(commitAttempt) {
+            if let pin = manualQualityRetention.finishCommitted(viewerEpoch: viewerActionEpoch, firstFrameUnixMs: firstFrameUnixMs),
+               !pin.carryingSeek, seekState.generation == pin.seekGeneration {
+                // The quality tap pinned a progress destination; it did not
+                // ask to seek there. A frame-proved moving handoff settles
+                // that pin, or the next tap still advertises a stale seek.
+                seekState.clear()
+                currentMs = realPositionMs()
+            }
             manualQualityRetention.clear()
             qualityChangeRetained = false
             recipeRevision.didAttach(recipeRevision.desired)
         }
+        if let bootstrap = action.control, let origin = playbackControlOrigin {
+            pendingPreparedControl = (action.actionId, action.sessionId, bootstrap, origin)
+        }
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
+    }
+
+    /// Retain a finite checkpoint when AVFoundation reports no item error.
+    /// Only fixed call-site labels and relative film-clock drift are logged.
+    private func preparedCommitFailure(at checkpoint: String, deltaMs: Int? = nil) -> PreparedCommitOutcome {
+        let drift = deltaMs.map(String.init) ?? "unknown"
+        noteSurfaceLogOnly("prepared_commit_failed:checkpoint=\(checkpoint):delta_ms=\(drift)")
+        return .failedWithoutReopen
     }
 
     /// Asset track loading may ignore task cancellation. Return at the original
@@ -12247,8 +12314,10 @@ extension PlayerController: PreparedSuccessorHost {
 
     /// Load cadence from the actual successor track, within the original
     /// overlap. Unknown cadence retains the incumbent rather than inventing fps.
-    private func awaitPreparedFrameDuration(of item: AVPlayerItem) async -> Double? {
-        await preparedDecodedFrameDuration(of: item, boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs))
+    private func awaitPreparedFrameDuration(of item: AVPlayerItem, targetItemSeconds: Double) async -> PreparedDecodedCadence? {
+        await preparedDecodedFrameDuration(of: item, boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs), targetItemSeconds: targetItemSeconds) { [weak self] detail in
+            self?.noteSurfaceLogOnly("prepared_cadence:\(detail)")
+        }
     }
 
     /// Whether the prepared commit captured as `commit` still belongs to the
@@ -12268,7 +12337,11 @@ extension PlayerController: PreparedSuccessorHost {
         frameDurationSeconds: Double, rate: Float, commit: Attempt
     ) async -> Bool {
         let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
-        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < PreparedReplacementBounds.alignmentMs,
+        // A fixed future rendezvous can be farther away when inspection/seek
+        // finish early. Spend only the original overlap's remaining time;
+        // never create a fresh preparation deadline at this suspension.
+        let remaining = preparedOverlapRemainingMs
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < remaining,
               preparedOverlapRemainingMs > 0 {
             guard !Task.isCancelled, preparedItem === item, preparedPlayer === successor,
                   preparedCommitStillOwned(commit), wantsPlayback, preferredRate == rate,
@@ -13327,12 +13400,31 @@ extension SharedPlayerController: PreparedSuccessorHost {
               player.currentItem != nil, let adoption = preparedAdoption,
               adoption.playback.start.response.sessionId == action.sessionId
         else { return .refused }
-        guard let frameDurationSeconds = await preparedDecodedFrameDuration(of: item, boundMs: PreparedReplacementBounds.alignmentMs),
-              !closing, playing, preparedItem === item, preparedPlayer === successor else { return .refused }
+        // One future switch point, chosen before either bounded suspension,
+        // exactly as Local does: inspection and alignment can each take up to
+        // `alignmentMs`, and a point taken from the playhead after inspecting
+        // routinely lands in the next fragment, refusing a healthy handoff.
+        let rate = Double(player.rate)
+        guard rate.isFinite, rate > 0,
+              let leadWallMs = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: .max) else { return .refused }
         let rendezvous = PreparedCommitRendezvous.plan(stagedFilmPositionMs: preparedFilmPositionMs,
-                                                       incumbentFilmPositionMs: currentPositionMs(), mediaOriginMs: 0)
+                                                       incumbentFilmPositionMs: currentPositionMs(), mediaOriginMs: 0,
+                                                       leadMs: Int(min(16, rate) * Double(leadWallMs)))
+        guard let cadence = await preparedDecodedFrameDuration(of: item, boundMs: PreparedReplacementBounds.alignmentMs,
+                targetItemSeconds: Double(rendezvous.itemPositionMs) / 1000),
+              !closing, playing, preparedItem === item, preparedPlayer === successor else { return .refused }
+        guard cadence.covers(itemPositionMs: rendezvous.itemPositionMs) else { return .refused }
+        let frameDurationSeconds = cadence.frameDurationSeconds
         guard await alignPrepared(item, to: rendezvous.itemPositionMs), !closing,
               preparedItem === item, preparedPlayer === successor else {
+            discardPreparedSuccessor()
+            return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+        }
+        // The parked successor waits at the switch point for the incumbent,
+        // so the swap neither skips nor repeats film.
+        guard await awaitSharedRendezvous(rendezvous, frameDurationSeconds: frameDurationSeconds,
+                                          boundMs: leadWallMs + PreparedReplacementBounds.alignmentMs),
+              !closing, playing, preparedItem === item, preparedPlayer === successor else {
             discardPreparedSuccessor()
             return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
@@ -13350,6 +13442,21 @@ extension SharedPlayerController: PreparedSuccessorHost {
         return .committed(firstFrameUnixMs: frame)
     }
 
+    /// Wait for the incumbent to reach the planned switch point. Arriving
+    /// within one frame is the meeting; passing it means the point was missed.
+    private func awaitSharedRendezvous(_ rendezvous: PreparedCommitRendezvous,
+                                       frameDurationSeconds: Double, boundMs: Int) async -> Bool {
+        let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < boundMs {
+            guard !Task.isCancelled, !closing, playing, player.rate > 0 else { return false }
+            let drift = Double(currentPositionMs()) - Double(rendezvous.filmPositionMs)
+            if abs(drift) <= frameDurationSeconds * 1_000 { return true }
+            if drift > 0 { return false }
+            try? await Task.sleep(nanoseconds: 8_000_000)
+        }
+        return false
+    }
+
     /// The P0 reopen, run by the preparation once its settlement is sent.
     func fallBackToInPlaceReplacement(_ action: PreparedReplacementAction) { preparedFallbackOwed = true }
     /// The preparation loop delivers whatever the ledger owes, in order.
@@ -13361,26 +13468,50 @@ extension SharedPlayerController: PreparedSuccessorHost {
 /// Actual successor cadence, bounded by its caller's existing preparation budget.
 /// Both Local and Shared use the track's sample grid; absence never invents fps.
 @MainActor
-private func preparedDecodedFrameDuration(of item: AVPlayerItem, boundMs remaining: Int) async -> Double? {
+private func preparedDecodedFrameDuration(
+    of item: AVPlayerItem, boundMs remaining: Int, targetItemSeconds: Double,
+    report: (@MainActor (String) -> Void)? = nil
+) async -> PreparedDecodedCadence? {
         guard remaining > 0 else { return nil }
-        var result: Double?
+        var result: PreparedDecodedCadence?
+        var finished = false
+        let began = ProcessInfo.processInfo.systemUptime
         let task = Task { @MainActor in
+            defer { finished = true }
             do {
                 let tracks = try await item.asset.loadTracks(withMediaType: .video)
+                guard !Task.isCancelled else { return }
+                report?("tracks=\(tracks.count)")
+                // Inspect ready-item track presence without substituting
+                // nominal cadence for the required minimum sample duration.
+                let presentationTracks = item.tracks.filter { $0.isEnabled }.compactMap(\.assetTrack).filter { $0.mediaType == .video }
+                report?("item_tracks=\(item.tracks.count):video_tracks=\(presentationTracks.count)")
                 let duration = try await tracks.first?.load(.minFrameDuration)
                 guard !Task.isCancelled else { return }
                 let seconds = duration?.seconds ?? 0
-                result = seconds.isFinite && seconds > 0 && seconds <= 1 ? seconds : 0
+                let valid = seconds.isFinite && seconds > 0 && seconds <= 1
+                report?("duration_valid=\(valid):timescale=\(duration?.timescale ?? 0):value=\(duration?.value ?? 0)")
+                if valid {
+                    result = PreparedDecodedCadence(frameDurationSeconds: seconds)
+                    return
+                }
             } catch {
-                if !Task.isCancelled { result = 0 }
+                if !Task.isCancelled { report?("metadata_error_code=\((error as NSError).code)") }
             }
+            guard !Task.isCancelled, let asset = item.asset as? AVURLAsset else { return }
+            let left = remaining - Int((ProcessInfo.processInfo.systemUptime - began) * 1000)
+            let inspected = await HLSFragmentCadence.inspect(url: asset.url, itemSeconds: targetItemSeconds, boundMs: left)
+            guard !Task.isCancelled else { return }
+            result = inspected
+            report?("fragment_verified=\(inspected != nil)")
         }
         let cadence = await awaitBoundedValue(
             boundMs: remaining, pollMs: PreparedReplacementBounds.pollMs,
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
-            read: { result }
+            read: { finished ? (result ?? PreparedDecodedCadence(frameDurationSeconds: 0)) : nil }
         )
         task.cancel()
-        return cadence.flatMap { $0 > 0 ? $0 : nil }
+        if cadence == nil { report?("deadline_exhausted=true") }
+        return cadence.flatMap { $0.frameDurationSeconds > 0 ? $0 : nil }
 }

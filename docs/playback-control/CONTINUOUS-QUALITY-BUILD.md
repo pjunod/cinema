@@ -1,7 +1,7 @@
 # Continuous quality — build uninterrupted resolution changes
 
-**Status:** production implementation in progress; upstream integrated;
-final adversarial review and qualification pending · **Written:** 2026-09-30 ·
+**Status:** implementation landed in PR #774; post-merge qualification resumed;
+physical/native acceptance and Firefox whole-window evidence remain open · **Written:** 2026-09-30 ·
 **Source anchor:** `origin/main` at `1b2ae4f62e7d131d18c088a643470e40cdb9789c`
 · **Effort:** `effort/continuous-quality`
 
@@ -7222,4 +7222,2593 @@ module and one `docs/API.md` table cell) landed while the lane ran. It
 shares no code with this branch, so the PR merged as `f01031b45` without
 another lane. Deploy and physical-device checks follow; physical display and
 audio, native device behaviour and the Firefox full campaign stay open.
+
+
+### 10.239 Post-merge acceptance resumed (2026-10-07)
+
+The human asked this session to finish the remaining work. The independent
+clone now branches from current main `9023815cb` on
+`codex/continuous-quality-acceptance`. PR #774 is already merged; its final
+review and fast-lane history in §10.232–§10.238 are completed work, not tasks
+to repeat. Earlier passing receipts describe their recorded sources.
+
+The remaining acceptance is Firefox whole-window optical continuity,
+physical display/audio and native Apple/Android device behaviour, the broader
+source/lifecycle matrix, and disk/shared-reader pressure and physical
+multi-host qualification. A private namespace partition proves only its
+recorded scope; recovery after serving-fence refusal remains unresolved.
+Reconcile these rows against current main before making further fixes.
+
+Retain existing Plurx Apple policy and prepared handoffs. Keep the current
+continuous-family cost and evidence rules while measuring their consequences;
+no autonomous AVPlayer policy change is implied by resuming acceptance.
+No new feature gate is authorized. Preserve the human's external Fable pause:
+a new corrective batch receives one final adversarial review when ready, then
+stops for external review before unit execution or merge. Required fast-lane
+units run once on the merging code after that pause is released; rerun only
+failures.
+
+Rust 1.97.1 is installed and verified on the checkout host. An all-target
+`plurxd` compile was started before code edits; no unit tests were run. The
+previously approved source-only lab directory is absent and must be rebuilt
+from committed source without Git history or credentials. Apple CoreDevice
+inventory currently fails with a service-initialization timeout, not evidence
+that any physical device is locked or unavailable.
+
+**Environment restored.** Current-main `plurxd` all-target compile passed
+locally in 1m54s. The normal continuation hook passed catalog, Rust formatting,
+workspace all-target Clippy and 77 served-script syntax checks; no units ran.
+Exact committed main `9023815cb` source-only Linux build passed on verified
+Rust 1.97.1 in 4m37s. A disposable browser image contains Firefox
+153.4.0esr, geckodriver 0.36.0 and Node 22.23.3. Host packages and services
+are unchanged. Browser and daemon stay in separate runtimes because the
+host's newer glibc is incompatible with the browser image's older glibc.
+
+Native Safari input was refused because the Mac is locked. The generated
+loopback fixture was never opened by this attempt, and its owned server was
+retired. This is a blocked measurement, not a playback failure or acceptance
+result. A device-availability question is pending while Linux work continues.
+
+### 10.240 Android negotiated manual intent is independent of Auto (2026-10-07)
+
+Current Android `applyAutoIntent` omits the entire media intent when the
+display-aware Auto preference is off. `ContinuousEnrollment` then declines
+with `no_intent`, including manual selections, despite both the bootstrap and
+decision advertising route-v1. This is a hidden dependency on an unrelated
+policy preference, not a protocol capability requirement.
+
+`PlaybackIntent.bindSessionIntent` now attaches the standing viewer intent
+whenever both protocol floors are negotiated. The display-aware preference
+still controls the measured display target, automatic candidate-height
+binding and Auto recovery causes. An older/unnegotiated server keeps the
+original request unchanged. No setting is forcibly enabled and no new toggle
+or gate is introduced. The Controller uses this same request builder for
+initial creation, replacement and subsequent transport requests.
+
+Authored regressions in `PlaybackIntentTest.kt`: manual creation with Auto
+off retains lifetime/destination/selection and does not invent a display
+measurement; unknown negotiation leaves the request and envelope state alone;
+only enabled Auto rebinds its candidate height and measured display. Final production/test-source compilation and debug APK assembly passed in
+18 seconds; no units executed. Runtime enrollment verification is still pending.
+
+**Current-source Firefox probe.** The first attempt failed before session
+creation because the restored lab omitted its dedicated static parser. Its
+failed receipt stays failed. The corrected attempt used the shipped static
+FFprobe 8.1.3 (SHA-256
+`25d4b5a1a9e403cfc0299b923fae84d40516a4f00c2343363108ad942fb64f51`).
+Two manual changes passed on exact main `9023815cb` in the same session and
+player: first frame 3.172s, clock 0.999x, zero hitches/stalls, video gaps
+57.72ms and 84.14ms. Receipts: ignored reports
+`firefox-9023815cb-focus{1,2}*`. This is a headless browser probe, not an
+independent optical or physical output pass. One full default-CPU campaign
+is running; it does not replace the missing whole-window optical measurement.
+
+### 10.241 Current-main Firefox full browser campaign (2026-10-07)
+
+Exact main `9023815cb`, Firefox 153.4.0esr, default shared host CPUs, one
+owned headless browser/player: **PASS** — fifteen manual changes and five
+actual Auto changes, one parent session/player, 84.14ms mixed video-gap p95
+and 84.16ms callback-gap p95, first frame 2.677s, reported clock 1.004x, zero
+hitches and stalls. The manual-phase metrics record two dropped frames over
+21,178 frames; these are not erased or described as a zero-drop pass. A
+separate lightweight Android lab overlapped part of the campaign; no CPU
+affinity or pool override was applied. Receipt:
+`firefox-9023815cb-full20-default1.{json,xml,log}` in ignored reports.
+
+End producer census was zero at 0/1/3/5 seconds. The exact owned-runtime guard
+confirmed daemon retirement by the harness. This closes the current-source
+headless browser campaign only. No whole-window independent optical capture
+or physical display/audio pass is claimed; those rows remain open.
+
+The first default-off Android start presented manual 720p in 4.136s and
+emitted the continuous attachment's expected-presentation event. Its bounded
+backend later expired before the ledger/switch measurement completed; retain
+it as initial-playback evidence only. A replacement default-off lab now has a
+read-only ledger monitor and a sufficient deadline. Its first emulator also
+retired at the fixed deadline; the owned AVD is restarted for the remaining
+manual-switch check, without changing user AVDs or physical devices.
+
+### 10.242 Re-login restores the negotiated capability bootstrap (2026-10-07)
+
+The monitored Android repeat reproduced `continuous enrollment declined:
+no_intent`, with zero continuous ledger rows despite saved manual 720p. The
+first connection carried intent; the cold re-login did not. The saved bearer
+was invalid for the fresh lab, so launch went directly to NeedLogin without
+`connect`. Login restored the bearer and Home but never reloaded `/server`;
+`Session.displayAwareAutoProtocol` remained its process-default null.
+
+Login now refreshes the capability bootstrap after first paint. The existing
+backfill path applies its response only if the captured origin, bearer and
+authorization generation still match. Its asynchronous identity write also
+compares the persisted origin, so an old response cannot overwrite a newly
+selected server. Rediscovery's intentional origin update keeps its previous
+semantics. Bootstrap failure leaves the authenticated shell available.
+
+Authored `AppViewModelTest.kt` regressions cover rehydrating route-v1 with Auto
+still off, ignoring a response after origin/credential replacement, and keeping
+the authenticated profile on a bootstrap transport failure. Production/test
+sources and debug APK compile in 23s; no units executed. The combined runtime
+verification uses a fresh monitored default-off lab; earlier receipts remain
+failed or explicitly partial.
+
+### 10.243 Default-off Android switch and truthful quality summary (2026-10-07)
+
+The combined Android fixes at `ca061b56b` passed the owned API36 emulator
+check against backend `9023815cb`, with display-aware Auto confirmed off.
+After cold re-login, manual 720p enrolled. Selecting 480p presented in the
+same attachment and generation: the first transaction is disposed and the
+second presented, with a measured 852×480 frame and Playing state. The saved
+before/after ledgers advance accepted sequence 106→145. Receipts live in
+ignored reports `android-default-{before480,after480}.json` and
+`android-ca061b56b-default-off-presented480-info.{xml,png}`.
+
+Playback Info nevertheless repeated the session's initial 720p target in its
+method summary. The corrective summary now prefers a valid measured frame
+height; unavailable measurements label the positive server target as Planned.
+Rotated/unavailable frames retain the existing conservative eligibility rule.
+The authored `switchedFrameOverridesTheInitialSessionTarget` regression
+covers the stale target and unavailable/non-transcoded cases; units remain
+deferred until final review and the human's external-review pause is released.
+
+Explicit Close returned to the detail screen. Owned producers were zero at
+0/1/3/5 seconds; the exact helper retired its daemon and temporary runtime,
+and both emulator and SSH forward retired. This proves enrollment, an in-place
+manual transition and bounded owned cleanup; physical output, audio continuity
+and switch-gap timing were not measured. The monitor's original convenience
+fields used an incorrect schema, so their zero/null placeholders are not pin
+or provenance evidence; the full before/after ledgers carry the facts above.
+Earlier partial/failed attempts are preserved.
+
+The browser image's owned build layers were removed after the lab host ran
+out of root space. Exact cache identifiers reclaimed 837 MB without pruning
+other workloads. Further optical tooling uses extracted packages in the
+owned temporary lab instead of growing the host's image cache. Physical-device
+availability remains unresolved; no native pass or merge readiness is claimed.
+
+### 10.244 Optical completeness and early-pause failure (2026-10-07)
+
+Portable Firefox 153.4.0esr and Xvfb now run from extracted packages in the
+owned temporary lab. A private read-only mount supplies the keyboard compiler;
+no host packages or physical display are changed. The short two-switch run
+on `9023815cb` passed browser timing (85.52ms maximum callback gap, no
+hitches/stalls), but its independent optical window **failed**: 13,280 valid
+samples, zero capture holes or unknown counters, one skipped counter and a
+104.21–113.94ms held picture at film 14.583s. Presented switches were at film
+4s and 46s; this hold was away from both boundaries. One browser dropped frame
+also remains recorded. Receipt: `firefox-9023815cb-portable-optical-focus1*`.
+
+A single steady baseline on the same source/display **passed**: 10,564 samples,
+zero unknown/backward/skipped counters and capture holes, maximum hold bound
+70.83ms. Its window begins after the fixed 1000ms capture warmup; it does not
+cover an entire campaign or physical output. Receipt:
+`firefox-9023815cb-portable-optical-baseline1*`. Neither result erases the
+other, and no threshold is relaxed.
+
+A subsequent lifecycle probe found an actual failure: an eight-second pause
+immediately after the first presented frame reloads the initial manifest,
+then supply-stalls and reopens its session. Seek and five distributed seeks
+landed with no stalls/hitches and the latter retained its session/player,
+but the temporary helper assumed a nonexistent snapshot generation field
+and marked their enrollment checks failed. Those original receipts remain
+failed; family identity is present in their full snapshots. Only the failed
+pause is being instrumented, using the corrected schema.
+
+Main advanced to `e512d131b` with shared Source activation. Integrated branch
+`aa20ab0df` passed pinned Rust all-target check in 2m16s; the source-only Linux
+build is running before repeating the pause against this tree. No unit tests,
+final adversarial review or external-review pause have begun for this batch.
+
+### 10.245 Parsed master readiness survives ordinary level requests (2026-10-07)
+
+The instrumented repeat on integrated `aa20ab0df` reproduced the pause failure.
+The manifest trace disproved a suspected ownership gap: both events belonged
+to the current attachment. hls.js dispatches Parsed synchronously inside its
+Loaded processing, so this app's later Loaded listener downgraded Parsed;
+ordinary level-playlist sends then set Loading. Pause before the presentation
+sampling tick retired startup therefore reloaded an already-decoded master,
+reset the clock, stalled and reopened. Receipt:
+`firefox-aa20ab0df-pause-diagnostic1*`.
+
+Loaded and ordinary playlist dispatches now preserve Parsed. A genuine master
+Loading event still resets it, and the existing attachment/intent/failure
+fences remain. The authored `parsed master survives level loads and early
+Pause/Play` regression follows nested event order, a level send, the immediate
+pause/resume retry, and a retired attachment. No units execute yet. The focused
+runtime repeat will use the committed corrective tree after its pinned build.
+
+### 10.246 Corrected pause and selection lifecycle evidence (2026-10-07)
+
+Committed `25ecd16f4` passed its normal catalog/formatting/all-target Clippy/
+served-script hook. Its pinned Linux build passed in 3m24s. The failed-only
+pause repeat **passed**: master readiness remains Parsed before/through the
+eight-second pause, Play retains its clock/session/player, clock 0.999x,
+no hitches/stalls and exactly one session create. Receipt:
+`firefox-25ecd16f4-pause-fixed1*`. Original failures remain unchanged.
+
+Rapid shipped manual choices 720→480→720 **passed** on the same source: final
+720p presented, same session/player/family, one create, no stalls/hitches.
+The temporary harness deduplicated the two steady-shaped case names, so its
+first receipt covers rapid choices only. The missing seek collision was run
+separately instead of repeating the passing case. Receipts:
+`firefox-25ecd16f4-selection-lifecycle1*` and
+`firefox-25ecd16f4-selection-seekcollision1*`.
+
+The separate quality/seek collision retained the final 720p choice and its
+session/family; film 10s presented in 2.358s (seek proof 2.097s). Its strict
+zero-stall steady report **failed** on one reported 709ms supply interruption.
+The subsequent measured eight-second interval advanced 8.001s with no dropped
+frames or reopens. This is partial action/intent evidence, not a zero-
+interruption or optical pass; the failed report stays failed.
+
+Android release counter advances to 151 above current main's 150. Production,
+test sources and debug APK compile in 32s; units remain unexecuted. On the
+owned emulator an outside-family 480p→720p attempt retained 480p and offered
+Retry/Apply with restart. Explicit restart presented measured 1280×720.
+The bounded backend then expired before its later buffered 480p target reached
+the screen: this repeat is partial. The unavailable-frame fallback visibly
+says Planned 720p. A separate short startup-bound label check is active;
+no physical display/audio claim is made.
+
+Future committed-source transfers use checksum synchronization from a fresh
+archive extraction, exclude the warm target, and preserve unchanged source
+timestamps. This avoids rebuilding identical crates solely because git archive
+uses a new commit timestamp. No repository credential or Git metadata crosses
+the source-only boundary.
+
+### 10.247 Android measured-summary qualification and native readiness (2026-10-07)
+
+The separate short lab at backend `25ecd16f4`, display-aware Auto off and
+Android build 151, **passed** the actual measured-summary check. The saved
+manual 720p start changed in-family to 480p; Playback Info shows Playing,
+measured 852×480, and Transcode/software (x264)/480p. The misleading initial
+720p footer is gone. Evidence: `android151-25ecd16f4-presented480-info.{xml,png}`.
+The final ledger contains one generation, accepted sequence 324, with both
+transactions disposed after explicit Close and first-presented ticks 0 and
+1632. Preserve `android151-25ecd16f4-final-ledgers.json`.
+
+The bounded backend retired before the subsequent 0/1/3/5-second census;
+its daemon is absent throughout, so this is retirement evidence, not a live
+producer-drain measurement. Both owned runtimes from the last two attempts,
+the forward and emulator are retired. Earlier live End measurements remain
+in their original source scope. No physical output or gap timing is claimed.
+
+CoreDevice inventory now responds. 17promax is paired and reachable, but an
+availability-only launch of the already-installed isolated CQ Lab build 206
+still returns Locked. That older build is not qualification evidence and no
+phone playback was started. The physical TV is paired, connected, booted,
+Developer Mode enabled and DDI services available; preparation of an isolated
+current-source TV build can proceed without modifying the production app.
+
+### 10.248 Current-source native artifacts and campaign (2026-10-07)
+
+Current commit `eab5fceb8` passed its pinned Linux build. The full 15-manual/
+5-actual-Auto Firefox campaign is running on this exact source with the
+default shared CPU allocation. Its bounded guard verifies the daemon binary,
+configuration and process start time; the result is pending. No passing
+receipt from an older source is substituted for this run.
+
+Separate CQ Lab iOS and tvOS build-214 artifacts compile from the current
+Apple sources. Their bundle is `tv.plurx.cq.qual`, with no production URL
+scheme, shared app group or shared keychain group. The iOS strict signature
+check passes when the system trust store is accessible. These are compilation
+and isolation checks, not playback qualification or unit execution.
+
+The TV lab installed, but CoreDevice refused foreground launch because the
+TV is asleep. The unused lab app was uninstalled, and its isolated backend
+and forward retired; production was untouched. Preserve
+`tv-eab5fceb8-launch-blocked.{json,log}` as blocked evidence. The phone's
+previous availability probe reports Locked. CoreDevice subsequently installed
+the validated separate iOS build-214 lab artifact; it has not been launched. A hardware-readiness question is pending while
+independent software work continues. Physical display/audio remain unmeasured.
+
+All eight Regression-Test references in the draft PR resolve against the
+current checkout through `validation.regression_field --landing-lines`.
+This checks names only; no unit has run, and final adversarial review and
+the human's Fable pause have not begun.
+
+### 10.249 Current-code campaign and device baseline receipts (2026-10-07)
+
+Firefox on committed `eab5fceb8` **passed** all fifteen manual and five actual
+Auto changes with default shared CPUs. Mixed video-gap p95 is 84.04ms, TTFF
+2.737s, clock 1.005x, zero stalls/hitches/dropped frames over 21,178 frames.
+One session/player is retained. Live Close census is 2/0/0/0 producers at
+0/1/3/5 seconds; the exact owned daemon guard reports retired by harness.
+Preserve `firefox-eab5fceb8-full20-default1*` and
+`eab5fceb8-full20-owned-runtime-guard*.json`. The native lab startup and
+baselines overlapped later Auto stages; no CPU affinity or pool override
+was applied. This remains a browser oracle, not physical pixels/audio.
+
+The separate seek-collision diagnostic **passed** with the chosen target and
+attachment retained, zero stalls/hitches, and no wait episode recorded after
+its seek. The earlier 709ms strict failure is not reproduced, not erased.
+No counter or threshold was changed. Preserve
+`firefox-eab5fceb8-selection-seekcollision-diagnostic1*`.
+
+Half-speed film clock measures 0.49995x, but its strict rate probe **failed**
+on one backward frame callback: media time 2.291666→2.166666 while presented
+frame count increases 56→57. No stall/reopen occurred. Independent pixels
+are needed before attributing that to rendered media rather than callback
+metadata. Preserve `firefox-eab5fceb8-rate-windows1*`. The two unmeasured
+rates then ran once separately and **passed**: requested 1x measured 1.00346x,
+requested 2x measured 2.00546x, stable attachment/family, no stalls/hitches/
+reopens. Preserve `firefox-eab5fceb8-rate-windows12-first1*`. Owned software
+probe daemons retired; the original failure stays failed.
+
+The human readied both physical devices. Current isolated build-214 labs
+now launch. TV baseline has 29 AVPlayer probes, advancing 0.274→57.336s
+in one session/attempt with zero access-log stalls. The first phone window
+launched but saw no device API/media traffic and does not qualify playback;
+a longer window then has 73 probes advancing 1.158→148.596s in one session/
+attempt, zero access-log stalls. Preserve
+`tv-eab5fceb8-ready-baseline1.json` and
+`ios-eab5fceb8-ready-baseline{1,2}.json`. Both baseline app processes retired.
+These qualify only SDK baseline scope, not transitions, pixels or audio.
+A disposable external TV UI driver is compiling to exercise shipped quality
+controls and capture app-scoped screen/accessibility state; no production
+source changed and no unit suite executes. The native backend and new TV
+telemetry window remain bounded and active.
+
+### 10.250 Half-speed pixels and interrupted native UI preparation (2026-10-07)
+
+The independent half-speed Xvfb diagnostic does not reproduce a backward
+callback. Film clock is 0.499x; all 4,571 decoded counter samples are readable,
+with zero backward/skipped counters. It nevertheless **fails**: two capture
+gaps make coverage incomplete and a held-picture bound reaches 170.97ms.
+This cannot establish clean pixels or explain the original callback fault.
+The expected half-speed clock floor is 0.45x only for this diagnostic; the
+100ms optical criterion and zero-hitch checks remain unchanged. Preserve
+`firefox-eab5fceb8-half-speed-optical1*`. The exact owned daemon retired by
+harness and its private display was stopped. No production measurement
+threshold or counter changed.
+
+An interrupted tool session lost its temporary native build files before
+a physical UI result was saved; the baseline receipts remain intact.
+Disposable runtime work is now in the independent clone's ignored target
+area. The fresh TV UI lab uses a separate `tv.plurx.cq.qual214` identity so
+a retired lab's Keychain bearer cannot authenticate a new disposable backend.
+There are no production URL schemes or shared app/keychain groups.
+
+The first Xcode physical destination lookup missed the TV, but a refreshed
+`xcdevice` inventory reports both named physical devices available over the
+network. Xcode 27.0 is verified. The UI-only runtime scheme is compiling
+against generic tvOS; its physical execution is pending signature validation.
+No repository implementation source or unit suite is changed by this driver.
+
+### 10.251 Physical TV controls expose retained successor failure (2026-10-07)
+
+The disposable TV UI driver now **passes its interaction scope**: it opens
+the shipped quality menu and requests 1080p then 720p while the film clock
+advances. Earlier driver failures remain in `tv-eab5fceb8-ui{2,3,4,5}.xcresult`;
+they exposed real tvOS accessibility menu cells, localized `1,080p` labels
+and the labeled reveal surface. No product navigation changed to satisfy
+the driver. The passed case is `tv-eab5fceb8-ui6.xcresult`, with its exported
+app-scoped screen and accessibility attachments.
+
+That UI pass is **not a transition pass**. The companion SDK trace records
+`prepared_successor_abandoned:failed` on the 1080p request and the truthful
+retained-quality message. All 33 probes remain at 720p in one session/attempt,
+advancing 0.534→65.906s with zero access-log stalls. Preserve
+`tv-eab5fceb8-quality-ui4.json`. The explicit 32.583s capture contains the
+numbered pattern; an earlier XCTest failure capture was black. Isolated
+images do not prove continuous physical display or sample-level audio.
+
+The failure journal previously omitted the failing stage and typed item
+error. A new diagnostic records stage, readiness/overlap budget, and a
+bounded two-error framework-domain/code chain before the successor is
+discarded. It leaves the original abandonment record, retention behavior
+and deadlines unchanged. Domains are whitelisted; descriptions, resource
+URLs and arbitrary nested context never enter the journal. The authored
+credential-exclusion regression and production/test sources compile through
+Xcode 27.0; no unit executes. Apple build counter advances to 215. The next
+failed-only device observation will use the committed diagnostic source.
+
+### 10.252 Diagnostic backend build recovery (2026-10-07)
+
+The diagnostic source is committed at `e4c367634`. The first isolated Linux
+build accidentally used debug information instead of the warm no-debug
+profile and failed on the owned workspace quota. Birth-time scoped cleanup
+removed only that attempt's new artifacts. The pinned no-debug build then
+compiled through the daemon but failed at linking; its linker diagnostic was
+truncated, so no more specific cause is asserted. Removing rebuildable
+dependency incremental caches reclaimed another 1.3 GB while preserving
+compiled libraries, daemon objects and all runtime receipts. Only the failed
+compile/link is being retried; no unit execution is implied.
+
+Both requested devices are available in the refreshed inventory. The build-215
+TV lab and UI-only runner pass strict signature validation, with isolated
+bundle identities and no custom URL schemes. The next runtime case requests
+only the previously failed 1080p replacement. Final adversarial review and
+the subsequent external Fable review stop remain ahead.
+
+A subsequent tiny diagnostic-file write returned `EDQUOT`, confirming the
+remaining quota constraint despite filesystem-wide free space. Failed partial
+executables and all rebuildable owned incremental caches were removed. The
+next pinned build uses `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0`; its
+receipt is written to the independent checkout rather than the constrained
+lab. Source, compiled dependency libraries and historical receipts remain.
+
+The bounded no-incremental daemon build passed in 2m34s. The first build-215
+TV repeat failed before requesting quality: its initial 720p AVPlayer item
+reported `CoreMediaErrorDomain -66681`. Apple's installed tvOS SDK names that
+audio-start code `kAudioQueueErr_CannotStart`. The proxy recorded zero transport
+errors and the owned backend produced media fragments. The physical TV/audio
+readiness check is pending; no prepared-successor diagnosis is claimed.
+Preserve `tv-e4c367634-diagnostic1.xcresult` and its companion JSON.
+
+The independent phone build and strict signatures passed, but the physical
+runner timed out enabling iOS UI automation before any case ran. Preserve
+`ios-e4c367634-diagnostic1.xcresult`; its proxy records zero playback probes.
+Exact observed disposable app/runner processes, proxies and owned backend
+retired, including removal of the synthetic private control. No live producer
+drain census is claimed.
+
+Offline analysis of the preserved half-speed pixels places the 164ms lower
+hold bound at encoded frame 225, separate from both capture gaps. The prior
+report retained only its maximum callback gap and cannot correlate this
+later hold. A failed-only half-speed repeat now acquires bounded raw
+composition callbacks alongside the pixel counter, preserving the 100ms
+optical criterion and all hitch/counter checks. It is a diagnostic, not a
+physical-output qualification.
+
+### 10.253 Half-speed callbacks and pixels disagree (2026-10-07)
+
+The exact diagnostic-backend half-speed repeat fails: one backward callback,
+one late-frame hitch, five capture gaps, and a 129.16ms lower held-picture
+bound (137.52ms upper). All 4,621 optical samples are readable, with zero
+backward or skipped encoded counters. Preserve
+`firefox-e4c367634-half-speed-optical-d3diagnostic1*`; the exact owned daemon
+and isolated display retired.
+
+Offline correlation uses the snapshot wall/performance offsets, differing by
+2ms, with an explicit 12ms neighborhood. The callback claiming media time
+2.875s (counter 69) coincides with pixels containing counter 64. Its following
+callback claims 2.75s while pixels advance to counter 65. This supports a
+metadata inconsistency; it does not erase the independently held pixels or
+turn incomplete coverage into a pass. The existing future-clock guard records
+one earlier anomaly but lets this later outlier seed a backward fault.
+
+A focused follow-up adds the element's current time and actual callback
+execution time to bounded lab composition records. No production counter or
+threshold changes; no unit executes. It will establish whether the guard's
+coarse-clock allowance explains the missed outlier before changing behavior.
+
+The element-clock follow-up has complete optical sampling: 4,608 readable
+samples, zero gaps/backward/skipped counters. It still fails the unchanged
+100ms criterion with 100.02ms lower/109.22ms upper held-picture bounds, plus
+three late callbacks. No future-timestamp outlier recurred; this does not
+justify changing the production metadata guard. Callback execution lag stays
+below 15ms, while the late reported presentation intervals approach 119ms.
+Preserve `firefox-e4c367634-half-speed-optical-d3diagnostic2*`. Its daemon
+and display retired.
+
+### 10.254 Preserve failure context until settlement (2026-10-07)
+
+Inspection found eight failed pre-exposure commit branches that discarded the
+prepared item before returning to the coordinator. The coordinator already
+records the abandonment and then disposes it, so that early cleanup erased
+the typed error and original overlap budget before the new journal read them.
+Those redundant disposals are removed; the same coordinator owns immediate
+settlement cleanup. Incumbent retention, deadlines and post-exposure rollback
+remain unchanged. Apple build counter advances to 216. The existing
+`testFailedVoluntaryExposureRestoresIncumbentWithoutFallbackReopen` names the
+failed-outcome cleanup/retention contract; units remain deferred.
+
+iOS production compilation passed. The isolated tvOS compile harness initially
+referenced the production product name in its test-host path; correcting only
+that disposable path and retaining the production module name lets the
+production/test-source compile pass. No device or unit execution is
+implied. Physical failure diagnosis still needs the pending TV output and
+phone automation readiness windows.
+
+### 10.255 Exact candidate producer-byte reference (2026-10-07)
+
+The committed candidate `198b37330` passed its pinned Linux build in 2m26s
+with no debug information or incremental caches. A bounded eight-second
+headless half-speed reference advances at 0.499x without browser hitches or
+stalls. This is byte acquisition, not an independent display/audio pass.
+Before runtime retirement, only stable encoded media was copied, with a
+64 MiB limit and SHA256 inventory (42.03 MB / 115 artifacts); no runtime
+configuration, database or credential was copied.
+
+Independent decoding verifies 480 consecutive 1080p counters (0–479) and
+192 available 720p counters (0–191), with zero unknown, backward, repeated or
+skipped values. The generated input's first 480 counters also decode without
+those faults. This rules out counter duplication in these reference bytes,
+not every prior encode or the display path. Preserve
+`firefox-198b37330-producer-byte-reference1*`; the exact daemon retired.
+
+The isolated Safari session-readiness check still times out after 30 seconds;
+its owned driver retires. No current Safari playback qualification is claimed,
+and the read-only Mac lock-state query returns unavailable rather than proving
+a lock. No Chrome binary or reusable browser image exists in the isolated lab.
+A portable official browser dependency is being extracted only inside the
+owned lab for a focused same-host comparison, without a global install or
+rerunning the passed manual/Auto campaign.
+
+The isolated pitch-preservation experiment also fails the unchanged optical
+criterion (complete sampling; 178.39ms lower / 187.47ms upper hold). Disabling
+pitch preservation is not a proposed production fix or an audio qualification.
+Preserve `firefox-e4c367634-half-speed-optical-pitch-experiment1*`; its daemon
+and display retired.
+
+### 10.256 Same-host browser comparison calibration (2026-10-07)
+
+Official portable Chrome 155.0.8059.39 is extracted only inside the owned lab;
+its downloaded package/intermediate archive is removed. The comparison uses
+the same committed backend, fixture, Xvfb host, shared CPU allocation and
+100ms optical criterion. Chrome's viewport origin is measured with a unique
+20×16 pixel marker, removed before the scoring window, rather than guessed
+from toolbar dimensions.
+
+The first two attempts fail calibration, not playback qualification. The
+second bounded capture shows the marker at the viewport corner is partly
+clipped (180 exact-color pixels rather than 320). Its screen and DOM geometry
+receipts remain in `chrome-198b37330-half-speed-optical-reference{1,2}*`. The
+corrected attempt places the marker 40px inward, subtracting its known CSS
+position from the observed screen position, and preserves every optical
+threshold. Its runtime guard is attached before the case starts.
+
+The corrected Chrome run fails the strict half-speed criterion: 4,590
+readable samples, no backward/skipped counters, two capture gaps and
+116.49ms lower / 124.99ms upper held-picture bounds. The failure is not
+limited to Firefox. Its owned daemon and display retired.
+
+### 10.257 Minimal playback isolates the remaining streaming failure (2026-10-07)
+
+A 20-second copy-remux of checksum-verified candidate producer video/audio
+runs through a minimal native MP4 element, without live encoding or Plurx
+controls. Both browser references pass unchanged optical limits with complete
+4,802-sample windows: Firefox upper hold 96.03ms, Chrome 99.95ms, zero
+unknown samples, capture gaps, backward counters or skipped counters. This
+is a scoped diagnostic rather than Plurx or physical audio qualification.
+Preserve `minimal-198b37330-half-speed-{firefox,chrome}1*`; the owned display
+retired.
+
+The next isolation uses the same saved fragments through fully buffered MSE,
+with no live encoder or application controls. Its first attempt omits the
+owned display environment and fails browser startup before playback; preserve
+that failed harness receipt and correct the environment before repeating.
+Native readiness questions, Safari session creation, the broader acceptance
+matrix, final adversarial review and the subsequent external Fable review
+stop remain open. No unit test has executed in this continuation.
+
+The explicit prebuffer preparation reference passes both browsers: Firefox
+4,801 samples / 96.00ms upper hold, Chrome 4,802 / 96.04ms; both have complete
+sampling and zero unknown, backward or skipped counters. Preserve
+`minimal-mse-198b37330-half-speed-{firefox,chrome}5*`. Earlier setup attempts
+remain failed: buffer creation ordering/codec spelling, unsupported async
+syntax in the synchronous Firefox helper, and video colors contaminating the
+calibration marker. The final harness creates both buffers before appending,
+polls preparation explicitly and hides the video only during calibration,
+restoring it before the scoring window. No production code or limits change.
+
+A saved-segment HLS comparison is now running with the repository's exact
+player library. Its checksum-verified fragments are prebuffered and loading
+stopped before playback; it removes the live encoder and application controls
+while retaining HLS parsing and fragment timestamps. Neither the MP4 nor MSE
+reference discharges the actual streaming or physical-output acceptance rows.
+
+The saved-segment HLS reference passes both browsers with complete sampling:
+Firefox 4,802 samples / 91.90ms upper hold; Chrome 4,803 / 95.92ms. Both have
+zero unknown, backward or skipped counters. Preserve
+`minimal-hls-198b37330-half-speed-{firefox,chrome}1*`. This narrows the
+remaining failure to the actual application runtime, live producer load, or
+their interaction; it does not identify a production fix.
+
+A diagnostic of the actual Plurx player waits for 16 seconds of buffer and
+stops continued HLS loading before the unchanged half-speed optical window.
+Its first attempt omits the lab's existing `PLURX_BOUND_FFPROBE` binding and
+is refused before creating any session. The corrected launcher explicitly
+uses the verified self-contained parser, with unchanged backend source.
+Preserve `firefox-198b37330-half-speed-optical-buffered-plurx{1,2}*`. The first
+daemon retired; the repeat's exact-daemon guard attached before playback.
+
+The corrected actual-player prebuffer diagnostic still fails: 137.51ms lower
+/ 146.36ms upper hold, two capture gaps, zero backward/skipped counters.
+The recorded runway was 16.83 seconds before stopping further HLS loads.
+Its browser trace advances exactly 0.5x without reported hitches/stalls;
+independent pixels retain the failure. The exact daemon retired.
+
+A bounded Chrome renderer sampling diagnostic also fails with complete
+optical sampling: 104.17ms lower / 112.53ms upper hold, no unknown, backward
+or skipped counters. Its longest uninterrupted non-idle sampled span is
+99.32ms and includes verification digests, append handling and garbage
+collection. Sampling includes scheduling effects and does not establish
+causation. Preserve `chrome-198b37330-half-speed-optical-cpu-profile1*`; its
+exact daemon retired. A lab-only worker experiment keeps identical SHA-256
+verification while moving digest work off the page thread. No production
+code or acceptance threshold changes before evaluating that experiment.
+
+Digest-only offload fails (150.19ms lower / 158.50ms upper, one capture gap).
+Moving both sample-fingerprint assembly and digest work off the page thread
+passes the Chrome experiment: complete 4,557-sample window, 95.92ms upper
+hold, accurate 0.498x clock, zero hitches/stalls/backward/skipped counters.
+Firefox improves to complete sampling and 91.68ms lower / 100.036ms upper
+hold, but remains a strict failure; do not round it into a pass. Preserve
+`{chrome,firefox}-198b37330-half-speed-optical-facts-worker1*`. All experiment
+daemons retired. The producer-suspension attempt finds no encoder matching
+its full identity/path filter and stops before measurement, suspending none.
+No producer-free playback claim is made.
+
+### 10.258 Attachment-owned verification candidate (2026-10-07)
+
+The production candidate gives each continuous MediaSource attachment one
+lazy verification worker. Artifact and elementary-sample fingerprints share
+one loader snapshot; SourceBuffer verification transfers its already-owned
+snapshot, preserving actual appended bytes and retained init configuration.
+Parsing and all exact ledger comparisons remain in place. Eight outstanding
+jobs / 64 MiB and a 14-second deadline bound work; detach rejects pending
+work, terminates the worker and revokes its object URL. A platform without
+blob workers retains the same verification with cooperative assembly/hash
+work and attachment cancellation. No feature switch or readiness gate is
+added.
+
+Worker provenance/container-rewrite, ownership transfer, bounded cancellation
+and fallback regressions are authored but deliberately unrun. The existing
+adapter test loads the media dependency it now initializes. Syntax checks
+pass. Normal hook, committed-source build and actual browser qualification
+are next; experimental injected-page results are not evidence for the new
+production candidate. Phone build-216 UI-runner compilation/signing passed,
+without executing units or a device case; the phone currently reports a
+connected local-network tunnel, which does not prove it is unlocked.
+
+Candidate `0e778892d` passes its normal tracked hook and pinned exact-source
+Linux build in 2m30s. Both shipped browser windows still fail unchanged
+optical criteria despite complete capture and observed verifier activity
+(142 responses each, zero worker errors): Chrome 104.17ms upper hold;
+Firefox 137.47ms. Preserve `{chrome,firefox}-0e778892d-half-speed-optical-verifier1*`.
+Their exact daemons retire. The worker implementation is not asserted to
+resolve the whole-window acceptance failure. Thirteen PR regression fields
+resolve statically; no unit executes.
+
+The diagnostic core split reduces daemon admission capacity and refuses the
+family before any session creates. An encoder-wrapper attempt also fails
+before playback, with an artwork pipeline identity-change warning. Neither
+qualifies a CPU-contention hypothesis. Preserve both failed receipts; their
+daemons and the owned display retire. No global affinity or resource guard
+changes occur.
+
+A fresh bounded native backend uses the exact current candidate and the
+existing self-contained probe. Build-216 helper source checks, bundle IDs
+and completion markers are prepared; phone/TV UI attempts remain upcoming.
+The phone UI runner's strict signature check passes with host trust-store
+access after the sandboxed verifier cannot access that trust. No certificate
+or trust settings change.
+
+### 10.259 Physical phone bootstrap and safe-retention evidence (2026-10-07)
+
+The build-216 phone UI runner now executes. Its first case fails before
+playback because the isolated app cannot reach the shaping proxy. The proxy
+has the host's current address and returns public server identity from the lab
+node; host firewall readback requires no settings change. Resetting only the
+disposable app exposes its local-network permission sheet. The first scoped
+permission handler fails on XCTest's legacy Alert/modern Sheet snapshot
+conflict; a direct own-app/name predicate resolves that harness failure.
+Preserve all three `ios-0e778892d-diagnostic{1,2,3}.xcresult` receipts.
+
+The third UI case passes its control interaction, but the actual 1080p change
+fails safely. Sixteen probes remain at 720p in one session/attempt, advancing
+0–30.66s with zero access stalls and no empty-buffer sample. The failure
+journal reports `stage=switching:item=unreported:ready_ms=unknown:overlap_ms=9699`.
+This is retention evidence, not a successful transition or continuous
+physical audio/display qualification.
+
+Build 217 adds fixed commit-checkpoint labels, plus relative film-clock drift
+at rendezvous/boundary failure, to distinguish a bounded readiness failure
+that has no AVPlayer item error. Outcomes, fences, deadlines and retention
+remain the same. iOS UI-runner source compilation and tvOS production/test
+source compilation pass; units remain deferred. The next failed-only phone
+request identifies the checkpoint before any alignment behavior changes.
+
+### 10.260 Fresh lab bearer and measured cadence refusal (2026-10-07)
+
+The first build-217 checkpoint run reaches an HTTP 401 before playback: the
+disposable app's saved Keychain bearer belongs to the previous backend
+window. Build 218 reads an explicitly supplied acceptance-launch argument
+before consulting the saved vault. This leaves normal bootstrap, proxy
+identity checking and saved credentials unchanged. Its focused regression
+covers argument precedence without vault reads/writes and is authored but
+unrun. iOS UI source and tvOS production/test source compile successfully.
+
+The failed-only phone request now reaches playback and its UI case completes.
+Seventeen probes retain 720p; the requested 1080p handoff reports
+`prepared_commit_failed:checkpoint=frame-duration:delta_ms=unknown`, with
+9,163ms of overlap remaining. This identifies the cadence lookup as the next
+diagnostic target; it does not establish whether track discovery, metadata
+loading or invalid cadence caused the refusal. Preserve
+`ios-0e778892d-prepared-failure-diagnostic5.json` and the fifth UI result.
+Client build 218 is paired with unchanged server component `0e778892d`; this
+is component-scoped diagnosis rather than final whole-tree qualification.
+No successful native transition, continuous physical audio/display evidence
+or unit-test execution is claimed.
+
+### 10.261 HLS cadence absence and refreshed TV failure (2026-10-07)
+
+Build 219 retains bounded numeric metadata diagnostics: asset track count,
+ready-item presentation track count, minimum-duration validity and exact
+time values, metadata error code or deadline exhaustion. It does not log
+URLs or credentials. The first case plays at 720p but the UI harness hides
+its controls with its permission-triggering tap and never submits a change.
+The own-app capture confirms the reveal surface; the harness now reveals it
+before waiting for the quality button.
+
+The corrected seventh phone case completes and identifies zero asset video
+tracks with 10,746ms overlap remaining. Build 220's eighth case also exposes
+two presentation tracks, including one video track; trying that actual
+track's minimum duration still returns invalid time (value/timescale zero).
+Both requests retain 720p. The ineffective presentation-track fallback is
+removed; its presence remains numeric diagnostic evidence only. Unknown
+cadence still cannot authorize exposure. Preserve diagnostics 6–8, including
+the failed harness receipt. Current iOS production/test source and tvOS UI
+source compile; no units execute. A trustworthy HLS sample duration remains
+an implementation task, rather than a larger readiness timeout.
+
+The fresh build-220 TV case now reaches initial playback and records six
+720p probes. It then fails before the quality request with
+CoreMediaErrorDomain -66681 (AudioQueue cannot start), reproducing the
+earlier SDK/audio-start refusal with current bootstrap credentials. The
+quality-control failure is downstream of that item failure, not a focus
+proof. Preserve `tv-0e778892d-prepared-failure-diagnostic2.json` and its UI
+result. Both app runners terminate their owned app; their proxy forwards
+close and private control copies retire. Continuous physical audio/display
+and a successful native quality transition remain unmeasured.
+
+### 10.262 Fragment-derived cadence and first phone SDK handoff (2026-10-08)
+
+The candidate resolves minimum video sample duration from the actual bounded
+init/fragment sample tables, including trun, tfhd and trex defaults. It
+inspects only the item's media namespace, refuses redirects/encoded path
+escapes, encrypted/discontinuous/sliding timelines and multiple master
+variants, and bounds init/fragment bytes and sample counts. Its result is
+scoped to the inspected item interval. Valid asset-track minimum duration
+remains the first source. Missing or malformed proof retains the incumbent.
+Local and Shared continue decoded alignment with this duration; Shared still
+requires its eventual rendezvous to fit the inspected interval.
+
+The ninth phone case verifies real fragment cadence but refuses when a
+rendezvous chosen after inspection lies outside that interval. Local now
+chooses one future film instant before inspection/seek; all follow-up proof
+uses that same instant. Its future lead accounts for the existing inspection
+and alignment allowances within the original overlap. The rendezvous wait
+uses only that overlap's remaining time, rather than a fresh phase deadline;
+no physical overlap extension or exposure-fence removal occurs.
+
+The tenth build-222 case completes and adopts the 1080p successor from 720p.
+Eighteen SDK probes share one viewer attempt, advance 1.17–35.57s, stay
+playing, report zero access stalls and no empty buffer. The handoff changes
+its server session as expected; the last 720p / first 1080p probe clocks are
+19.44s / 21.27s. Fragment cadence verifies and no prepared-commit failure is
+reported. This is one successful SDK handoff, not a continuous physical
+audio/display measurement or the required repeated qualification campaign.
+Preserve `ios-0e778892d-prepared-failure-diagnostic{9,10}.json`. Client build
+222 remains paired with unchanged server component `0e778892d`.
+
+Three focused regressions cover real video duration/default resolution,
+malformed/missing duration and interval refusal, and namespace escape. Their
+source compiles for tvOS; iOS production/UI source compiles and strict lab
+signatures pass. Seventeen regression fields resolve statically; unit
+execution remains deferred.
+
+The post-startup CPU split preserves the actual encoder executable and
+daemon admission. It applies only to verified owned descendants and restores
+surviving threads. The optical run still fails (341.69ms upper hold, five
+capture gaps), so it supplies no remedy or production qualification. Its
+exact daemon and virtual display retire; receipts are copied locally.
+
+### 10.263 Repeated-request control ownership (2026-10-08)
+
+The first alternating manual subset stops on its second request and is a
+failed series. Its first upshift reaches the successor; the reverse request
+retains current playback. Build 223 settles the quality-only progress pin
+after actual frame proof, retaining a viewer seek's separate ownership and
+rejecting stale/invalid completion. Its failed-only two-request rerun still
+refuses the reverse request and now identifies `transport:410:session_ended`
+followed by `prepared_offer_ended:reason=not_reporting`. The actual owner
+problem is that Apple discards the successor control bootstrap supplied by
+the prepared payload and keeps reporting to the retired predecessor.
+
+Build 224 preserves that bootstrap, validates its protocol/epoch/generation
+and exact named successor path, and keeps it pending until the predecessor's
+accepted committed acknowledgement. Rebind also requires this controller to
+remain started and own that exact successor session. New-title/stop cleanup
+discards pending ownership. The successor's reporter starts with its supplied
+identity and the same frozen transport origin; no guessed endpoint/owner or
+new feature switch is introduced. The predecessor still carries the commit.
+
+The failed-only retry reaches three sessions in order (720p, 1080p, 720p)
+within one viewer attempt. Twenty-four SDK probes advance 1.17–47.54s with
+zero access stalls and no empty buffer. The first accepted rebind is logged;
+the second settlement is still retrying `425 owner_transition` near teardown.
+Do not count this as a fully settled repeated series, twenty successes or
+continuous physical audio/display evidence. Preserve the failed manual
+subset, progress-pin retry and successor-control retry under their distinct
+`ios-d8bb10381-*sdk1` names. Client build 224 is component-paired with the
+unchanged server `0e778892d`, not a final whole-tree receipt.
+
+Progress-pin and bootstrap wire/namespace regressions are authored and compile
+with tvOS production/test source; iOS production/UI source and strict lab
+signatures pass. Nineteen regression references resolve statically. Units
+remain deferred. A fresh Safari readiness attempt again times out in 30.28s;
+its owned driver retires, and its source-named receipt preserves the earlier
+readiness result rather than replacing it.
+
+### 10.264 Conservative presentation cadence and batching handoff (2026-10-08)
+
+Build 226 also reads fragment decode timestamps and composition offsets.
+The tolerance cannot exceed the smallest positive actual presentation spacing;
+duplicate timestamps, missing decode-time proof and arithmetic overflow refuse
+qualification. This bounds reordered and variable-cadence fragments rather
+than treating decode durations alone as presentation cadence. A fourth focused
+cadence regression is authored. iOS and tvOS production/test source compile;
+twenty regression references resolve statically. No units have executed.
+The TV item-failure diagnostic reports only audio output count and finite
+sample rate, without route names, identifiers or media URLs. It is compiled
+but awaits its new physical measurement. New-control setup clears pending
+successor metadata before an invalid bootstrap can return.
+
+A corrected Firefox diagnostic starts optical acquisition after forward
+buffering, stopped consumer loads and settling. Pausing only two identity-
+verified owned producers passes its diagnostic window (95.942ms upper hold,
+no capture gaps). The matched unpaused post-ready case fails at 170.891ms
+and one capture gap. The earlier buffered case included acquisition during
+initial filling, so it is not producer-free buffered-only evidence. A normal-
+loading producer nice-floor diagnostic still fails at 375.039ms despite
+complete sampling. Its census covers 885 threads across thirteen owned
+FFmpeg processes; no shipping priority change is justified. Guards retire
+the exact daemons and display; paused identities are resumed before retirement.
+These comparisons do not qualify the shipped half-speed player.
+
+The human assigns final unit execution, failed-test retries and merging to
+the session **Coordinate PR merge batches**. Finish qualification and the
+final adversarial review here, then preserve the requested Fable review pause.
+After release of that pause, send the exact candidate, regression fields,
+receipts and independent-clone constraint to that session. Do not merge or
+run final units here. The work remains a draft and is not ready for handoff.
+
+### 10.265 Build-226 device measurements (2026-10-08)
+
+The fresh TV runtime again stops before any quality request with CoreMedia
+−66681, after six SDK probes. At item failure it reports one output and a
+48 kHz audio sample rate. This proves route metadata exists, not that physical
+audio is working. The isolated UI case fails and its own-app attachments and
+`tv-0e778892d-audio-route-diagnostic226.json` preserve that failure.
+
+The phone's two-request case gives each request thirty seconds of observation.
+It reaches three sessions (720p, 1080p, 720p) within one viewer attempt and
+records thirty-seven SDK probes. The first control rebind is accepted, but
+`425 owner_transition` follows; no second accepted rebind is measured. Preserve
+`ios-226-presentation-control-sdk1.json`. Longer observation therefore does
+not yet qualify repeated settlement. A bounded proxy-only refusal classifier
+is prepared to distinguish publication/lease, missing worker and admission
+authority changes without modifying shipping code or retaining credentials.
+No fast-lane unit test runs; the designated merger owns that phase after
+qualification, adversarial review and release of the Fable pause.
+
+The one-handoff proxy classifier finishes with twenty SDK probes and records
+two `publication-or-lease` responses. No worker-unavailable or changed-admission
+classification is recorded in that run. It preserves
+`ios-226-control-refusal-{sdk1,context1}.json`. This narrows the first successor's
+425 source; it does not establish a second prepared commit or physical display
+continuity. The exact native helper and daemon retire through their guard;
+private control copies and launch arguments are cleared.
+
+### 10.266 Background caption-fixture resource budget (2026-10-08)
+
+The unmodified normal-producer Firefox census case passes its complete optical
+window at 96.458ms upper hold, with zero capture gaps, unknown pixels, backward
+frames or skipped counters. Preserve the earlier failing cases; this single
+diagnostic pass shows variability and does not establish the full campaign.
+Twenty-nine activity snapshots observe at most four simultaneous owned FFmpeg
+processes and 153 threads. Background Live TV caption probes reach 97 threads;
+foreground VOD producers reach thirty in this run. Lifetime process counts
+are not simultaneous admission counts. The exact daemon and display retire.
+
+Synthetic caption-fixture generation now bounds filter pools and its MPEG-2
+encoder to one thread; mux preparation also bounds its filter/decoder pools.
+The actual production Live TV graph audited by the self-test is unchanged.
+This targets fixture production, not every caption-probe child or a proven
+remedy for the browser hold. The existing byte-ground-truth regression
+`the_caption_fixture_carries_608_and_708` is named for the merger; twenty-one
+regression fields resolve statically. Pinned Rust 1.97.1 is verified and the
+all-targets compiler loop runs before publication; unit execution is deferred
+to the designated merger. Exact-source runtime measurement remains needed.
+
+The exact committed-source Linux build of `4bfe03058` passes on pinned Rust
+1.97.1. Its optical case fails at 125.002ms upper hold with one capture gap.
+The role census measures synthetic generators at twenty-one threads, with
+explicit filter/encoder options of one; actual caption graph workers still
+reach ninety-seven without encoder thread options. This preserves
+`firefox-4bfe03058-half-speed-optical-caption-budget1*` as failed evidence and
+does not claim that the fixture cap fixes browser timing.
+
+The boot graph audit now supplies a one-thread software encoder budget to
+the existing production plan constructor. It had no foreground admission
+budget and passed None, allowing FFmpeg automatic encoder pools. This keeps
+the production builder, filter graph, captions and ordinary playback admission
+policy; only the background audit's encoder budget changes. The existing
+software caption-ground-truth regression covers both deinterlace modes.
+Twenty-two references are recorded for static validation; units stay deferred.
+
+### 10.267 Exact audit budget, failed optical window and quota recovery (2026-10-08)
+
+The committed `67520f7a8` archive builds on pinned Rust 1.97.1 in 2m29s;
+normal catalog, formatting, Clippy/all-targets and served-script syntax hooks
+pass. Its graph-worker role census measures twenty-four threads with an
+explicit one-thread encoder option, down from ninety-seven; synthetic fixture
+generators remain twenty-one. This is a measured background resource reduction,
+not an optical acceptance fix. Its complete optical window has 4,569 samples,
+zero unknown pixels/capture gaps/backward/skipped counters, but fails at
+145.967ms upper hold. Preserve the source-named caption-budget2 receipts.
+The web controller consumes actual element rate on ratechange; no separately
+saved rate mismatch is identified. No further priority or foreground decoder
+policy change is justified by these comparisons.
+
+The first committed-worker full Firefox campaign is interrupted by EDQUOT
+on a log write. There is no completed campaign verdict. Its exact guard
+retires the daemon; the final receipt write also hits quota. The orphaned
+packaged driver and twelve recorded descendants are retired by executable,
+PID and start identity. The guard-identified runtime and driver-log-identified
+profile are removed after preserving failure logs. Fifteen remote raw optical
+duplicates free 340,380,864 bytes only after matching every byte's SHA-256
+against preserved local copies. Unused installer archives free 147,780,392
+bytes; installed browser roots and the warm compiler target remain intact.
+Preserve the infrastructure-failure and quota675 cleanup/retirement receipts.
+
+Only the interrupted fifteen-manual/five-Auto campaign is restarted on the
+same committed code under `worker-full20-quota-retry2`; it has a new bounded
+guard that also tracks its packaged driver and can report final retirement
+on stdout if quota prevents writing. Earlier product failures and the
+interrupted series are not erased or counted as successes. No units run.
+
+Native capture research finds that [Apple's ReplayKit overview](https://developer.apple.com/documentation/replaykit)
+explicitly excludes AVPlayer content. No ReplayKit instrumentation is added and no
+AVPlayer capture claim follows from it. Physical/native audio/display remains
+open; software source/loopback comparisons retain their stated scope.
+
+### 10.268 Batched merger ownership and current-app capture preparation (2026-10-08)
+
+The human designates Codex session `01a11907-f720-71b1-8c51-89902b919e6f`,
+**Coordinate PR merge batches**, as the final landing owner. Finish software
+and runtime qualification here, perform the final adversarial review only
+when main-ready, resolve its findings, and preserve the explicit external
+Fable review pause. After the human releases that pause, send the exact ready
+head/base, pull request, regression fields and scoped receipts to that session.
+It owns fast-lane unit execution, failed-test fixes/retries and merging. It
+must use an independent clone: its reported checkout is the human's checkout,
+which this effort is explicitly forbidden to use. No handoff has been sent
+and no final review or unit suite has started.
+
+The SDK 27 ScreenCaptureKit headers expose
+`presentPickerForCurrentApplication` for iOS and tvOS. An ignored, separate
+CQ Lab helper uses that app-only system picker, excludes camera/microphone,
+and writes app video/audio to its own container. The recorder is bounded
+to 180 recorded seconds, 256 MiB, and a 300-second overall stop; it stops
+on backgrounding and refuses to overwrite an existing owned receipt. This
+is capture preparation, not a physical speaker or display-photon measurement.
+No production source, capture setting or audio-session policy changes.
+
+The helper passes iOS/tvOS SDK compiler syntax checks; signed iOS lab build
+227 and its UI-only harness compile successfully. Strict bundle signature
+verification passes, and installation onto the named 17promax succeeds after
+a fresh device inventory initially reports disconnected. The app-only picker
+and AVPlayer/audio capture have not yet been qualified. The exact committed
+Firefox fifteen-manual/five-Auto quota retry remains active separately.
+
+The first app-only picker snapshot is retained without granting capture. A
+second diagnostic accepts only the observed system prompt naming Plurx CQ Lab,
+records its setup UI, backgrounds the app to stop capture, and retrieves only
+its owned container output. The finalized receipt reports thirteen recorded
+seconds and no microphone/camera. The 292,653-byte MP4 has an H.264 video
+track at native portrait dimensions and no audio track; there was no playback
+on this silent setup screen. This proves the bounded own-app capture setup,
+not AVPlayer capture, playback audio or physical continuity. Preserve
+`ios-227-owned-app-picker{1,2}*` and the picker2 container receipt/video.
+
+The second full Firefox attempt also ends in EDQUOT without a campaign
+verdict. Its guard retires the exact daemon and tracked driver. Logs are
+preserved privately before removing the exact 1,681,685,438-byte runtime and
+469,132,693-byte log-identified profile. Fifteen more remote optical raw
+duplicates free 269,699,904 bytes only after local preservation and matching
+SHA-256. In the owned compiler target, 771 six-hour-old daemon linker objects
+from an older build hash occupy 1,288,716,528 bytes; only those stale objects
+are removed after proving no owned compiler active. The current executable's
+SHA-256 stays unchanged, and the warm current/third-party dependencies remain.
+The exact-source full campaign retries under `worker-full20-quota-retry3`
+with a bounded fifty-minute guard, preserving failed/interrupted attempts.
+No product criterion, normal forward buffer or planned transition count changes.
+
+A fresh bounded Safari readiness attempt, `safari-readiness-67520f7a8-1`,
+again times out creating its isolated session after 30,298 ms; the owned
+driver retires. No personal Safari settings or remote-automation preference
+is changed, and no native Safari playback evidence is claimed.
+
+Separate lab build 228 compiles the production Apple source plus the bounded
+current-app recorder and a two-request UI probe. Its own backend/proxy helpers
+are syntax-checked and prepared for server component `67520f7a8`, with actual
+display-aware Auto enabled only on that disposable lab server. They have not
+been launched: keep the full Firefox runtime uncontended until it finishes.
+The next phone measurement pairs the same scoped SDK/control diagnostics
+with captured AVPlayer/app audio; captured playback remains unmeasured now.
+
+Additional capacity cleanup verifies the current daemon's Cargo dependency
+fingerprint before removing the other, unused compiler-profile core library
+and metadata (551,065,526 bytes). The current core dependency and daemon
+SHA-256 remain unchanged; current/third-party compilation caches stay warm.
+The inactive owned packaged Chrome directory (461,618,308 bytes) is also
+removed after proving no process references it. Chrome's earlier receipts
+remain, but future Chrome measurements require re-provisioning its isolated
+browser. Together these recover another 1.01 GB without changing Firefox,
+fixtures, current compiled code or product behavior. Preserve
+`quota675-retry3-unused-profile-browser-cleanup.json`.
+
+The prepared native proxy records only bounded booleans/numeric fields for
+successor control presence/protocol/path/generation shape, plus fixed known
+425 response classifications. It retains no request bodies, bootstrap URLs
+or credentials. These observations are prepared, not measured outcomes.
+The tvOS SDK identifies AudioQueue -66681 as CannotStart; the previous route
+metadata does not establish a working audible output. Keep that failure open.
+
+### 10.269 Committed-worker Firefox twenty-transition runtime pass (2026-10-08)
+
+`firefox-67520f7a8-worker-full20-quota-retry3` completes in 1,483,269 ms
+and passes: fifteen manual and five actual Auto transitions, one session,
+one player generation, zero keeper fires, hitches, stalls and case errors.
+The measured server build is `67520f7a8`; TTFF is 2,764 ms and the final
+observed clock ratio is 0.998. Manual callback/video gap maximum is
+84.14 ms; the five Auto changes reach a maximum 84.08 ms. Preserve the
+complete JSON/JUnit, ownership guard and cache-cleanup receipts.
+
+This is the committed shipped-browser callback/transport scope. The receipt
+explicitly calls its video evidence partial; there is no whole-window optical
+or audio capture here. Earlier half-speed optical failures remain failed.
+The two quota interruptions have no campaign verdict and do not contribute
+to the success count. No unit test runs.
+
+The shipped successful harness already removes its runtime/cache and closes
+the browser. The exact guard reports retired_by_harness; the daemon, tracked
+driver and guard-identified runtime are absent. No broad temporary-directory
+or user-cache cleanup occurs. A subsequent separate phone lab backend starts
+on the same compiled server component only after that retirement. Lab build
+228 pairs two requested quality changes with the bounded current-app recorder
+and token-free control-shape diagnostics; its runtime result is still pending.
+The branch's newer `3eae20c61` commit changes documentation only; this remains
+a component-scoped receipt, not a final main promotion receipt.
+
+### 10.270 Native app pixels, missing captured audio and telemetry counting (2026-10-08)
+
+Lab 228 records 23 seconds of actual synthetic AVPlayer video, but its UI
+probe stops before any quality request. Its activity trace shows the initial
+app tap invokes automatic handling of the app-capture system prompt; the
+subsequent explicit prompt wait fails, and accessibility-description collection
+raises a JSON-decoding error. Preserve that failed setup attempt and video.
+The lab harness now handles only the named capture prompt before tapping the
+app and avoids collecting that problematic description during capture.
+
+Lab 229 then passes its two-request UI case against server component
+`67520f7a8`: 41 SDK probes over three sessions observe 720p → 1080p → 720p,
+zero access stalls and no reported prepared/item failure. Its finalized
+77-second own-app movie visibly contains the burned-in source clock. The
+strict clock ROI is calibrated against independently visible counter 269
+in the earlier recording; guard and checksum agree. The preserved whole
+movie analysis has zero observed backwards/skipped counter values where
+readable, but 161 unknown samples and 2,133 capture gaps under the unchanged
+12.5 ms sampling limit. It is incomplete, including menu/startup/background
+regions, and does not qualify physical display continuity. The conservative
+upper hold spans unknown intervals and is not an observed 45-second freeze.
+
+App-audio output registration succeeds but delivers zero buffers/samples;
+the movie contains video only. This narrows missing audio to the capture
+feed, without proving whether physical playback was audible. Camera and
+microphone remain excluded; no normal production audio routing changes.
+Preserve `ios-229-capture-two-requests2*`, the container receipt/movie, optical
+receipt and SDK/control-context receipts.
+
+Four bounded 425 observations classify as publication-or-lease; all fourteen
+observed prepared offers carry valid successor-control shapes. Repeated
+`surface_log_only` reasons are suppressed per attached generation by
+`noteSurfaceLogOnly`. Therefore one emitted control-rebind note is not a
+count of handoffs and cannot establish that the second handoff failed to
+settle. Earlier comments about only one measured rebind retain that limited
+telemetry scope; treat second settlement as not directly counted, rather
+than diagnosing failure from the missing repeated note. A bounded lab 230
+three-request probe is prepared to count actual accepted control responses
+by hashed canonical session namespace. No production fix or unit run is
+justified by the deduplicated note count.
+
+### 10.271 Three native requests and independently accepted control namespaces (2026-10-08)
+
+Lab 230 passes three consecutive requested changes: 720p → 1080p → 720p →
+1080p, 58 SDK probes and no reported failure. The owned proxy separately
+counts successful protocol-valid control responses by SHA-256 of canonical
+session namespace. All four SDK-observed sessions have accepted controls,
+with 12, 15, 16 and 7 replies respectively. Six temporary publication-or-lease
+425 responses do not prevent those accepted exchanges. This confirms the
+reporter reaches each successor; repeated log-note counts were not a reliable
+settlement counter. No speculative production control patch is added.
+
+The bounded movie finalizes at 111 seconds; app-audio registration succeeds
+but again yields zero samples. Preserve `ios-230-capture-three-requests3*`,
+SDK/control-context receipts and the exact retired native230 backend/guard
+receipts. This remains a three-request SDK/app-video scope, not twenty
+transitions or physical audio/display acceptance.
+
+Lab 231 compiles a full fifteen-manual/five-Auto UI series. It starts at
+1080p in landscape, alternates fifteen manual choices down/up, then uses the
+existing Auto choice. A lab-only authenticated coordinator derives link
+stages from the same runtime's observed positive encoded-candidate peaks,
+waits for two advancing SDK probes at each Auto target and ends on failure
+or a 240-second stage timeout. Catalog and initial measured 1080p are checked
+before spending time on the series. Ordinary production policy remains.
+Its app-only recorder is bounded to 1,800 recorded seconds / 1.5 GiB, with
+camera/microphone excluded; read-only numeric route/player audio metadata
+helps distinguish missing capture from mute/volume state. The prior runtime
+retires before the new forty-minute guarded runtime starts. Units remain
+owned by the designated merge session after review and the Fable pause.
+
+### 10.272 Full native startup blocked; continue independent optical work (2026-10-08)
+
+The signed lab 231 full-series app/UI harness compiles. Before any test case
+starts, Xcode reports that 17promax is locked. There are zero playback probes
+and zero transitions; preserve `ios-231-full20-series1-infrastructure-block.json`
+and the launch log instead of assigning a product verdict. The exact waiting
+Xcode process is retired, the proxy receives its owned stop marker, disposable
+launch arguments are cleared, and the forty-minute native backend/guard retire.
+The phone-unlock request remains pending; no unrelated device settings change.
+
+Independent Firefox follow-up keeps shipped source `67520f7a8`, normal
+producers and the unchanged strict optical criteria. It stops only the
+existing D3 acquisition observer before the independent pixel window, to
+measure its contribution rather than speculate about it. Ordinary player
+frame probes remain; this is an observer comparison, not a fully uninstrumented
+shipping qualification. The owned virtual display and exact daemon are bounded
+and guarded. Preserve the separately named d3-stopped1 results. No units run.
+
+### 10.273 Paired observer comparison and designated merge owner (2026-10-08)
+
+The normal-producer Firefox half-speed window with D3 acquisition stopped
+passes its unchanged optical criteria: 4,586 samples over 19,112 ms, lower
+hold 87.561 ms and upper hold 95.872 ms. The matched D3-enabled comparison
+fails: 4,584 samples over 19,103 ms, lower hold 154.233 ms and upper hold
+162.572 ms. Both captures are complete with zero unknown samples, capture
+gaps, backwards frames or skipped counter values. Production source remains
+`67520f7a8`; the verifier, producers, ordinary frame probes and strict limits
+are unchanged. Preserve both separately named `d3-stopped1` and `d3-enabled2`
+report sets, raw pixels and checksums. One pair suggests an observer effect
+but does not establish causality or qualify uninstrumented shipping playback.
+
+The enabled comparison finishes before its external guard attaches. Record
+that limit honestly: a subsequent exact-command process census finds no owned
+comparison daemon or wrapper. The bounded owned virtual display then retires
+through its own stop marker. No unrelated process or host policy changes.
+
+The user explicitly designates `Coordinate PR merge batches`, session
+`01a11907-f720-71b1-8c51-89902b919e6f`, to receive the ready work. No handoff
+has been sent while qualification remains open. Finish qualification and
+fixes, obtain final adversarial review only at readiness, then stop for the
+human's external Fable reviews. After the human releases that pause, hand off
+the exact candidate and receipts to that session. It must use an independent
+clone, run the required fast-lane units once on the merging code, rerun only
+failed tests, fix failures and merge with all Regression-Test landing lines.
+No unit suite or merge runs in this continuation.
+
+### 10.274 D3 absent from startup: pixel pass, callback fault preserved (2026-10-08)
+
+A fresh `firefox-67520f7a8-half-speed-optical-no-d3-1` run disables the optional
+D3 acquisition observer from startup. The unchanged independent optical
+criterion passes: 4,556 samples over 18,985 ms, complete capture, zero unknowns,
+gaps, backwards/skipped counters and 95.876 ms maximum upper hold. The overall
+report fails on one late-frame callback fault: expected-display step 136.32 ms
+and callback step 153.26 ms at media time 2.5 seconds. Preserve the failure,
+rather than replacing it with the optical verdict.
+
+Checksum-validated captured source counters 57–62 around that media position
+have conservative pixel upper holds 91.657, 91.652, 83.192, 87.478, 87.625 and
+75.010 ms. This does not infer browser/capture wall-clock synchronization;
+it compares the same burned-in source positions. It demonstrates the callback
+fault alone does not establish an optical freeze in this window. No production
+measurement threshold or diagnostic counter is changed. The exact daemon
+retires through the harness/guard and its owned virtual display retires.
+
+The next fresh full fifteen-manual/five-Auto run adds continuous post-startup
+independent pixels to the existing committed qualification campaign. A bounded
+120 Hz cropped recorder preserves raw pixels plus per-packet checksums. Capture
+starts before any manual request and stops before the deliberate End operation;
+initial startup and physical/audio output are outside that explicit scope.
+The optical ROI uses the original encoded clock's proportional position so
+720p and 1080p occupy the same displayed region. Whole-window completeness and
+unchanged 100 ms hold / zero backwards/skipped criteria determine the added
+optical verdict; ordinary qualification failures remain failures. The capture,
+display and exact daemon are bounded. No verdict is assigned while running.
+
+A fresh 17promax lock-state query reports passcodeRequired=true. The prepared
+phone series remains blocked before launch; no repeated Xcode launch or unit
+execution is used to rediscover that condition.
+
+### 10.275 Continuous recorder setup refusal and bounded retry (2026-10-08)
+
+`full20-optical1` stops before the first quality request because the recorder
+produces no frames. Its warning identifies the output duration parameter;
+combining `-copyts` absolute capture timestamps with output `-t 2100` places
+the output stop before the first timestamp. Preserve the failed setup report,
+empty raw/MD5 files and warning. This is not a product transition verdict.
+The exact owned daemon and its display retire.
+
+The ignored lab-only helper removes that output duration option and uses an
+independent 35-minute wall-clock recorder stop instead. Fresh `full20-optical2`
+runs the same committed qualification behavior with a fresh forty-minute
+owned display and exact daemon/browser guard. It does not overwrite an earlier
+receipt or change production code, thresholds, encoding policy or user devices.
+Its eventual preserved pixels will also support separate conservative
+per-switch source-counter join analysis against pre-switch cadence. That
+analysis explicitly scopes its display-interval assumption to the software
+display and cannot establish physical audio/display qualification.
+
+A fresh isolated Safari readiness check (`safari-readiness-67520f7a8-2`) again
+times out creating a session after 30,319 ms. Its exact owned driver retires;
+no global Remote Automation preference or personal Safari session changes.
+The browser campaign remains the only playback workload on the Linux lab.
+Its captured packet checksums and burned-in source counters are readable
+after resolution changes. Lightweight tail matching initially fails because
+raw and MD5 sinks buffer independently; exact packet-index reads validate
+checksums at packets 0, 120, 1,200 and 56,984, with readable source counters
+26, 242 and 11,398 after the initial setup-screen packet. That is capture
+progress, not a completed transition/whole-window verdict.
+
+Current-source rapid-selection/seek-collision helpers are prepared for serial
+execution after the active campaign. An unsent handoff preparation retains all
+22 landing regression fields and explicit remaining scope; no recipient
+message is sent before readiness and release of the Fable pause.
+
+### 10.276 Captured manual campaign fails; current lifecycle cases pass (2026-10-08)
+
+`firefox-67520f7a8-full20-optical2` completes all fifteen manual requests in
+one session/player. Its unchanged video-gap p95 bound fails at 169.62 ms
+against 100 ms, so the existing qualification campaign does not run Auto.
+This is not twenty accepted transitions and is not silently retried. Reported
+clock is 1.003×, hitches/stalls are zero and dropped-frame count is 73. The
+independent 889,336 ms capture is incomplete: 106,725 samples, zero unknowns,
+221 sampling gaps, zero backwards counters, 76 skipped source counters and
+299.988 ms maximum upper hold. Preserve the raw pixels, packet checksums,
+report, warnings and separately scoped join analysis. The capture cannot
+qualify whole-window continuity. Its analysis records fifteen conservative
+join bounds as not proven; no physical-refresh or physical-output claim follows.
+The exact daemon's End census is empty after five seconds and its guard/owned
+display retire. Earlier successful headless callback evidence keeps its scope.
+
+The separate current-source rapid-choice case passes: final choice 720p settles
+in 4,056 ms and preserves session, player generation and family identity,
+with zero reported hitches/stalls. The existing suite deduplicates identical
+fixture/quality/operation case names, so the seek-collision case is executed
+separately rather than counted from the first run. Its own report passes with
+zero reported hitches/stalls. Preserve `selection-lifecycle-current1*` and
+`selection-seekcollision-current1*` receipts; these are focused lifecycle
+diagnostics, not physical audio/display or full twenty-change qualification.
+
+The installed ScreenCaptureKit SDK explicitly marks `minimumFrameInterval`
+unavailable on iOS/tvOS; no unsupported frame-rate setting is added. A fresh
+ignored lab232 helper registers a separate screen output and counts valid
+sample timestamps, minimum/maximum positive intervals and nonmonotonic/invalid
+times. It retains/copies no pixel sample and preserves camera/microphone
+exclusion, normal player/audio policy and recording/time/file bounds. Its
+numeric receipt will distinguish screen-stream cadence from recording cadence
+when the phone can run. Its iOS app/UI harness compile succeeds (`apple232-cadence-ios-build.log`);
+no native run or unit execution is claimed. tvOS online playback deliberately avoids explicit audio
+session activation because that previously regressed startup; the blocked
+physical route does not justify restoring that behavior speculatively.
+
+### 10.277 Focused display comparison, native automation block and parallel ownership (2026-10-08)
+
+`firefox-67520f7a8-headed-no-recorder3` passes three manual changes on the
+matched 1920×1200 software display with no independent recorder. No Auto or
+physical-output result is claimed. This short comparison narrows possible
+capture contribution but does not establish causality for the longer captured
+series. Its exact guard/display retire. The full captured series' 430,790,976-byte
+remote raw duplicate is removed only after local SHA-256 preservation agrees;
+the local pixels and all receipts remain intact.
+
+17promax later reports passcodeRequired=false. Lab232 recompiles its private
+launch arguments and passes a second pre-launch unlock check. Its UI runtime
+runner then exits65 before any test case with 'Timed out while enabling
+automation mode'. There are zero playback probes/transitions. Preserve
+`ios-232-full20-series1-infrastructure-block.json`, Xcode log and result bundle.
+The controller writes its owned stop marker and clears disposable launch
+arguments; proxy/backend/guard retire. A subsequent device read still reports
+unlocked, with compatible usable Developer Disk Image services. That rules
+out simply counting this as another measured locked-device playback failure;
+OS UI automation readiness remains unresolved. No unit suite executes.
+
+The human explicitly requests separate parallel sessions. Each clones the
+acceptance branch independently and avoids the human checkout. Ownership:
+
+| Session | Work | Coordination boundary |
+|---|---|---|
+| `01a11c09-4336-7bc2-9423-848cb636eb0a` | Browser capture/observer/display attribution | No native/Rust/status edits; coordinate remote playback first |
+| `01a11c09-6210-75d3-8c44-412016ce45f3` | Apple automation and lab capture | Own copied helpers; no production/status changes without agreement |
+| `01a11c09-7e9c-77d3-97da-747c8cb2fa50` | Source/lifecycle/pressure inventory and focused helpers | Offline evidence first; coordinate lab and production file ownership |
+
+This session retains integration and the shared status/ledger. Unit execution
+still belongs to the designated merge session after readiness, final adversarial
+review and the human's external Fable pause. Parallel development is not the
+final adversarial review and does not waive any qualification scope.
+
+Parallel browser analysis validates all 106,843 raw packets and reproduces the
+retained optical metrics. It finds all 76 skipped counters across adjacent
+captures within 12.5 ms, and eleven source-counter holds whose lower bound
+exceeds 100 ms without a sampling hole. The worst such hold is counter5676,
+191.663 ms lower / 209.403 ms upper. Therefore callback coalescing and the
+221 capture holes cannot alone dismiss the pixel failure. Other callback
+windows disagree with pixels: the sixth request's 134.94 ms callback window
+has all expected counters and a 58.331 ms pixel upper bound. These are offline
+source-scoped observations, not proof of which renderer/capture layer caused
+the eleven adequately sampled holds. Preserve both classes of observation.
+
+Parallel Apple analysis finds installation, testmanagerd connection and runner
+authorization succeeded; timeout occurred after those steps while enabling
+OS automation. It is not evidence for changing trust/developer settings.
+The matrix inventory parses 192 receipts and preserves their source/scope;
+paused-media suspension is a surrogate, and the older read-pressure receipt's
+zero physical read bytes cannot prove disk pressure or shared-reader fairness.
+
+The browser session additionally identifies an acquisition-timestamp limit:
+upstream FFmpeg8.0.1 xcbgrab timestamps before its synchronous image request,
+not after image completion. The retained pipeline uses `x11grab -copyts`,
+120 Hz, the measured cropped ROI, RGB24 nearest-neighbor 336×4, rawvideo and
+framemd5 tee outputs with a 1/1,000,000 encoder timebase. Its closed command
+provenance is preserved in `full20-optical2-recorder-provenance.json` under
+the owned runtime artifacts. It did not separately bracket image acquisition.
+Therefore the eleven point-timestamp lower/upper estimates remain algorithm
+outputs, not latency-corrected actual display-hold bounds. No failed receipt
+is removed or changed. A future bounded acquisition should preserve request
+and reply timing brackets rather than assume the image instant equals PTS.
+
+### 10.278 Parallel integration and app-owned SDK series preparation (2026-10-08)
+
+Integrate the browser session's `629bfbf62` as `31b9ba39d`: standalone offline
+attribution validates every raw packet and exactly reproduces retained metric
+values, without changing verdicts or thresholds. Integrate the source session's
+`e488eb1d8` and `b60c218fc` as `aa2bc875d` and `ed23482d7`: focused lifecycle
+helper, one catalog source-glob, indexed 26-row matrix and SHA-bound inventory.
+Normal child hooks pass pinned compiler/format/JS checks; no units run. The
+helper's runtime is still unrun and does not claim switches, app backgrounding
+or physical/audio proof.
+
+The Apple session's backend-free lab233 readiness reproduces the same OS
+automation-enable timeout with zero cases, while the phone remains unlocked
+and its DDI usable. Runner installation/authorization succeeds and the exact
+owned runner retires. No full native campaign retry or OS trust/developer/route
+change follows. Its copied capture helper and readiness harness compile.
+
+Prepare a fresh ignored lab234 app-owned runner. An owned copy of PlayerView
+adds one registration call and a QA-only task that invokes the unchanged
+`PlayerController.selectQuality` entry point; the primary production source
+is untouched. It waits on the authenticated isolated coordinator for two
+advancing SDK probes at each target, fifteen manual requests spaced at least
+thirty seconds, then the existing catalog-derived five-Auto coordinator.
+Retained/failure outcomes end the series; deadlines stay bounded. CoreDevice
+can launch an authorized own app without XCTest's UI automation mode. This
+is SDK/normal selection-method scope, not menu-tap or physical/audio evidence.
+Compile before any launch; no result is claimed while preparing. No unit
+suite or final adversarial review begins.
+
+Lab234's app-owned runner now compiles and its signed app identity verifies
+as `tv.plurx.cq.qual216`, version234. A fresh phone read still reports
+passcodeRequired=false. Install only this own app and prepare a fresh isolated
+backend/guard; the disposable launch JSON is mode0600 and never printed.
+The app task reports terminal failure back to its authenticated coordinator
+and stops the normal player, so a failed setup/retained outcome cannot leave
+the coordinator waiting silently. Do not count any transitions before
+actual SDK observations. No app-video/audio recorder is enabled for this
+first method-path series; it cannot fill physical/capture acceptance rows.
+
+CoreDevice launch succeeds for own lab234 (exit0), without XCTest automation.
+Initial actual SDK probes advance at 1080p with zero reported failure. The
+series is now active; wait for target observations before counting any
+manual or Auto changes. No UI-tap, capture or physical-output claim follows
+from the successful app launch.
+
+### 10.279 First app-owned request safely retained during startup (2026-10-08)
+
+Lab234 launches normally and emits three advancing initial 1080p SDK probes.
+Its first 720p request then retains current. The actual player reports
+`prepared_offer_ended:reason=declined:seek_pending=true`; the app-owned receipt
+classifies retained_current and the coordinator ends failed. Preserve
+`ios-234-full20-control-{sdk1,context1}.json` and the own-app receipt. Zero
+transitions are completed; do not count a callback/launch as a successful
+series. The old QA receipt's empty manual_requests list contains completed
+observations only and omits this sent intent; record that limitation here.
+Backend/guard retire and the private launch configuration is removed.
+
+Prepare fresh lab235 one-request startup preflight. An owned source copy adds
+a read-only predicate using the existing healthy-incumbent check, no pending
+seek and no retained choice; no production source or guard changes. Its task
+requires advancing initial SDK probes, the predicate and five seconds of
+stable startup before selecting 720p. It logs the request before awaiting
+target observation, so a failed intent remains recorded. The one-request
+receipt explicitly cannot replace the fifteen-manual/five-Auto requirement.
+Compile first; do not rerun the full campaign to discover startup readiness.
+
+Clarify the decline diagnostic: `selectQuality` itself creates a quality-owned
+progress/seek pin before asking for an offer, and `offerPreparedQualityChange`
+logs seek_pending only after the await returns. The post-request flag does
+not establish that a pre-existing startup seek caused the decline. The fresh
+preflight records an explicitly healthy pre-request baseline to distinguish
+that uncertainty; it clears or overrides no pending state and is not a
+production fix. The lab235 compile catches an overbroad copied-view edit
+before any device launch. Restrict it to the appended QA runner, verify
+normal PlayerView and PlayerController byte-equivalence after removing the
+registration/read-only predicate, then compile successfully. Preserve the
+failed compile log and repaired build provenance.
+
+Lab235's repaired compile succeeds and the signed own app installs. The
+focused proxy/backend are prepared, but a fresh pre-launch lock-state read
+reports passcodeRequired=true; do not launch or assign a transition result.
+The unlock request remains pending. Unlike the earlier XCTest automation
+timeout, this is a directly observed lock before the CoreDevice launch.
+Continue independent software work if the device cannot remain ready.
+
+### 10.280 Parallel follow-up diagnostics and focused lifecycle setup (2026-10-08)
+
+Three additional agents work in independent temporary clones: acquisition
+request/reply timing with an independent X11 control counter; native declined
+offer attribution; and shipped fullscreen lifecycle controls. These are
+implementation/diagnostic tasks, not the final adversarial readiness review.
+No unit suites run and no ready merge handoff is sent.
+
+The first invocation of the integrated lifecycle helper ends before server
+startup with `no cases match pause`. Its diagnostic kind collided with the
+playback lab's manifest-name filter. Preserve
+`firefox-67520f7a8-pause-current1.json`; zero playback observations occurred.
+Save the kind separately and remove the reserved filter option before invoking
+the lab. The normal commit hook also finds the optical attribution helper's
+missing functionality-point registration; add its exact path to the existing
+playback point. These are tooling setup repairs, not production fixes.
+
+The fresh phone query still reports passcodeRequired=true. Lab235 remains
+installed but unlaunched. Its unused backend/proxy/guard retire; no native
+transition is claimed. The independent native analysis identifies missing
+bounded control-wire fields in earlier receipts: accepted sequences alone
+cannot distinguish a Source control route from a prepared transcode offer.
+The post-await seek_pending flag still does not establish decline causality.
+A fresh projection should preserve request selection/capability and response
+preparation/action without credentials or raw session identifiers.
+
+### 10.281 Focused pause evidence and diagnostic setup alignment (2026-10-08)
+
+The repaired `pause-current2` run reaches playback. Its eight-second paused
+clock stays at 2.042 seconds; resume preserves the same continuous identities.
+The following moving window runs at 1.00284x, maximum callback/display gap
+83.78 ms, zero new hitches/stalls/reopens. The overall receipt remains failed:
+two held counters occur immediately on resume, and the all-daemon census still
+contains FFmpeg children five seconds after End. Preserve the failed receipt.
+
+The first resumed callback compares the pre-pause expected time 4901.52 ms
+with 13001.62 ms. Independent source analysis confirms the detector's closure
+baseline survives a pause when no callback observes the paused state. Prepare
+a minimal lifecycle-boundary fix; preserve lifetime counters and the second
+same-media callback fault rather than assuming both are explained. Its focused
+regression is written but deferred to the designated final unit lane.
+
+All three pre-End producer identities are gone by the three-second sample.
+The later PIDs are new, and the retained log identifies independent background
+caption probes during this interval. This is not enough evidence to call the
+playback producer retirement a leak. Align both new lifecycle tools with the
+existing qualification setup: enable ordinary Auto/display-aware preferences,
+wait for eight seconds of owned startup producer quiet, and warm ordinary
+engine attestation before playback. Give the fullscreen tool the explicit
+binary identity required by census. Do not rewrite the earlier failed verdict.
+
+### 10.282 Acquisition tool integration and runtime calibration (2026-10-08)
+
+Integrate the fullscreen agent's `5863ec0e3` as `45b1aa414` and acquisition
+agent's `0d14d0dc9` as `c94444afb`. Resolve overlapping catalog registrations
+once per helper. Parent integration hook passes with explicit pinned Rust
+1.97.1: catalog 3116, formatting, all-target Clippy and 77 served JS scripts.
+No unit tests execute. The diagnostic source archive contains committed
+source only and enters the approved isolated lab without `.git` or credentials.
+
+A fresh owned display calibrates synchronous XGetImage against an independent
+software counter. Both bounded processes exit zero. Five seconds yield 600
+samples, zero unreadable counters, counters 12 through 131, maximum request
+gap 8.544481 ms and maximum image-acquisition bracket 0.608172 ms. Every raw
+packet SHA256 validates. Preserve `acquisition1-calibration-{capture,control}`
+and `acquisition1-calibration-summary.json`. This proves the tool can sample
+this control in its software-display scope; it is not Plurx playback,
+physical presentation or audio acceptance, and the image instant stays
+within its request/reply interval rather than being assigned its midpoint.
+
+A separate fresh fullscreen-current1 diagnostic now runs shipped trusted
+fullscreen entry/exit against measured server component 67520f7a8, with owned
+startup probes settled before playback. No result is claimed before its
+three lifecycle windows and exact process retirement complete.
+
+Fullscreen-current1 completes passed: normal/fullscreen/normal window clocks
+0.99755x, 0.99755x and 0.99823x; maximum gaps 57.06, 84.94 and 84.94 ms;
+zero hitches/stalls. Same continuous identities remain. The exact End census
+has child counts 2, 0, 0, 0 at immediate/one/three/five seconds. This is shipped
+fullscreen state/clock scope, without quality switches, subtitles or optical/
+audio/physical acceptance. Its guard retires and the calibration display closes.
+
+Integrate the confirmed pause timing fix `a6775ea2b` as `aea0263a7`.
+Only temporal frame/rate windows reset on owned pause/play events; thresholds,
+nominal/decode history and lifetime counters remain. A distinct resumed
+duplicate is still a fault. The meaningful regression is deferred to the final
+unit lane; record its exact field in draft #844, bringing that list to 23.
+A new server build and runtime on this production source remain necessary.
+
+Integrate process-purpose metadata `667dc074c` as `4aaded294`. Only End
+snapshots enrich the raw census using bracketing PID/start-tick checks and
+bounded admin registration fields. Exact background caption jobs can be
+attributed; unknown processes and all raw children remain visible. No failure
+threshold is relaxed and no background job is disabled.
+
+The human now confirms the phone is unlocked and staying awake. A fresh
+CoreDevice query independently reports passcodeRequired=false. Prepare a
+new lab235 one-request attempt with bounded control-wire projection. Let the
+already active short browser acquisition baseline complete before native
+playback starts; the two runtimes must not compete on the shared lab node.
+
+### 10.283 Short bracketed playback and native startup preflight (2026-10-08)
+
+The fresh control-off acquisition diagnostic runs 30 seconds of 1080p steady
+playback with D3 acquisition disabled, preserving the qualification harness's
+100-to-10 Mbps shaping. Its transport/clock receipt passes at 1.001x, TTFF
+3175 ms, zero hitches/stalls. Raw capture completes 3600 samples; the first
+57 are unreadable within the initial 467 ms. Apply the predeclared fixed
+1000 ms warmup from the earlier optical method, preserving those startup
+samples and uncertainty. The 3480 post-warmup samples have no unreadable,
+skipped or backwards counters; request/reply bracket hold bounds are
+57.311086 ms lower and 75.153316 ms upper. Packet checksums validate. Preserve
+the bounded analysis and raw receipts. This is a short software-display
+window; it cannot replace the failed fifteen-manual capture or full acceptance.
+Its daemon/driver/guard and owned display retire before native playback.
+
+Lab235's fresh focused attempt passes. CoreDevice independently confirms
+unlocked immediately before launch; only own tv.plurx.cq.qual216 launches.
+The app logs the 720p request before awaiting its result and reports
+focused_pass with one observed change, about14.76 seconds after intent.
+Coordinator records20 SDK probes and no reported failure. The new bounded
+wire projection contains22 requests/replies, including actual staging and
+prepare offers followed by advancing720p probes. Preserve the app receipt,
+SDK/context and launch results; backend/proxy/guard retire and private
+configuration clears. This proves a healthy-startup normal-selection method
+path, not UI taps, fifteen/manual-five/Auto, capture or physical audio/display.
+No inference that startup alone caused the earlier decline is made.
+
+### 10.284 Exact-source rebuild and reusable QA run namespace (2026-10-08)
+
+Committed909e0c7b7 source archive SHA256 is
+b85ffc4bc03fa58de0550af88937246d25268f14fa713e476eaefa7896f2beba.
+The initial compiler setup uses an incorrect cache subpath, then an unrelated
+registry cache and a larger debug/incremental profile. Preserve those failures.
+The prior host rustup executable is installed outside default SSH PATH.
+Explicitly verify Rust1.97.1, restore the established CARGO_PROFILE_DEV_DEBUG=0
+and CARGO_INCREMENTAL=0 recipe, and remove only failed current-build artifacts
+newer than the commit plus disposable incremental cache. The cleanup frees
+3,973,903,805 file bytes and preserves prior warm dependencies/executable.
+The bounded exact-source build passes in2m23s. Restore the owned compile-loop
+helper with these explicit settings. No unit tests run and CI is not used
+as a compiler. Draft#844 is pushed at909e0c7b7 and remains draft, with23 fields.
+
+The full lab235 launch on909e0c7b7 succeeds while independently unlocked but
+issues zero quality requests. The app's existing cq-native-series-235 receipt
+folder makes its QA runner return before execution. Its copied live receipt
+still contains the earlier focused-pass timestamp, which cannot qualify this
+new run. Preserve the QA namespace-block classification and initial SDK
+observations; stop the coordinator, retire its exact backend/guard/private
+configuration, and terminate only own launched app PID7388. No full native
+product verdict is claimed.
+
+An independent Apple agent prepares lab236 source/project copies with a
+validated per-run receipt name (default fresh UUID). Existing named namespaces
+report setup failure in a fresh receipt rather than silently returning. The
+production81 Apple files remain byte-equivalent after removing only the QA
+registration/helper and read-only readiness getter. Compile/sign first;
+no production behavior, preferences, gates or thresholds change.
+
+Integrate real-caption fixture and shipped subtitle tooling4c16188fe as
+f1a71d136. Transfer only its committed tool source to a separate extraction;
+the active909 server source is unchanged. Remove only the three completed
+older tool extractions; preserve raw receipts/current source/warm target.
+The caption recipe verifies450 cues and identical43200 video/84376 audio
+packet payloads, integer timestamps and timebases. Preserve its source-packet
+proof beside the caption fixture; no subtitle playback is qualified yet.
+
+
+### 10.285 Native manual series and remaining Auto failure (2026-10-08)
+
+Signed owned lab236 launches into the fresh full20-909e0c7b7-1 namespace
+while the phone is unlocked. All15 normal-selection manual requests are
+observed after about13–15 seconds, with two fresh advancing target-height
+probes required by the helper. The coordinator records346 SDK probes,
+zero reported playback failures and17 independently accepted control sessions.
+The first Auto stage at100 Mbps remains720p for240 seconds and fails;
+zero actual Auto changes are qualified. The app reports native_failure after
+the coordinator's failed state; this classification does not establish an
+AVPlayer error. Preserve the app receipt, SDK/context and bounded wire timeline.
+The exact owned backend retires; its identity-checked guard confirms cleanup.
+Investigate Auto selection and delivered evidence offline before repeating
+any successful manual requests. Physical display/audio and menu taps remain
+unmeasured.
+
+The new909e Firefox pause diagnostic fails with one held-frame fault.
+Its End child census is0/0/0/0. Preserve the result and investigate actual
+callback registration/delivery against bracketed pixels; do not erase the
+fault or weaken thresholds. The prepared focused acquisition coordinator
+uses monotonic request/reply brackets and fresh owned display/runtime guards.
+
+Android source f1a71d136 compiles main and unit-test sources and assembles
+its signed APK without executing tests. All340 production Android files
+match67520f7a8. A fresh owned Android36 ARM64 AVD boots and installs build151;
+its Connect screen renders, then the app is stopped. The owned ADB server
+uses5041, explicit emulator-5580 and disabled mDNS auto-connect after initial
+wireless discovery; no physical-device commands are issued. This is readiness,
+not playback qualification. TV lab237 compiles/signs with read-only startup
+app/scene/audio-route metadata, preserving production controller equivalence.
+The TV is paired, connected, booted and unlocked; display/audio readiness
+and historical−66681 causality remain unmeasured. No unit tests run.
+
+
+### 10.286 Bracketed pause observations and focused device diagnostics (2026-10-08)
+
+A single fresh Firefox pause capture on909e0c7b7 verifies the actual1:1 ROI,
+1529 bounded callback records without drops, and all4200 pixel packet hashes.
+The post-resume moving window has1022 samples, no unreadable/skipped counters,
+12.400525 ms conservative maximum sampling interval and75.129096 ms hold
+upper bound. Zero lifecycle hitches/stalls are reported: the earlier one-held
+fault does not reproduce, which is not evidence for another fix. The strict
+original result remains failed because raw End samples contain FFmpeg children.
+Stable process/registry joins classify all four samples as background Live TV
+caption probes, not demonstrated lingering VOD writers. Those exact processes
+are absent after owned daemon retirement. Preserve raw census, advisory purpose
+classification and failed verdict; all display/driver/configuration cleanup
+receipts are retained. No physical/audio or full-series acceptance is claimed.
+
+The native236 coordinator's first Auto stage expects1080p independent of
+actual display dimensions. Production Auto chooses the smallest display-fitting
+candidate;720p can be legitimate on a phone. Actual target dimensions and Auto
+predicates were not retained, so this remains a harness hypothesis. Its bounded
+wire observer exhausts64 entries before Auto, and app reporting reclassifies
+coordinator timeout as native_failure before the coordinator overwrites its
+reason. These are evidence/provenance defects, not established decoder faults.
+Lab237 adds bounded read-only Auto facts and an Auto-only method diagnostic,
+starting720p and calling ordinary selectQuality(nil), with no forced target.
+The new observer separately preserves first64/latest128 projected exchanges.
+It never claims full acceptance. Install/launch succeeds after a fresh unlocked
+preflight; a150-second observation is underway on exact server909e0c7b7.
+
+TV lab237 installs successfully, but foreground launch is refused by tvOS:
+System is asleep - foreground app launch forbidden. Preserve sanitized OS
+error and zero-probe SDK setup receipt. Its backend/guard retire before the
+phone campaign. Ask the human to wake the TV; no settings/audio policy change
+is made. The refreshed evidence matrix integrates as7db67e604, with27 rows
+and28 hash-bound references, retaining historical source scopes. Unit tests,
+final adversarial review, Fable pause and merge handoff remain deferred.
+
+
+### 10.287 Real captions pass; Auto facts identify a successor binding defect (2026-10-08)
+
+The caption-bearing909e Firefox diagnostic passes all three shipped selector
+windows: Off→On→Off, active deterministic cues aligned with the film clock,
+clock rates1.00225/1.00229/0.99927, zero reported hitches/stalls and unchanged
+attachment identity. End direct-child census is0/0/0/0. Preserve the original
+passed receipt and exact daemon/display retirement receipts. This is text-track
+state/clock/identity evidence, not quality-plus-subtitle, pixel cue visibility
+or physical/audio acceptance.
+
+Phone lab237 finishes its150-second Auto-only diagnostic with145 read-only
+fact rows and no app error. Actual portrait target is1125×2436, aspect-fitted
+need1125×632.8125; display policy prefers720p. Thus the earlier unconditional
+high-stage1080 expectation is invalid for this target. Preserve the failed
+full-series receipt rather than changing its verdict. After entering Auto,
+fresh transfers report installed_session_current=false and
+installed_candidate_current=false. Source inspection identifies a causal
+binding order: prepared commit installs its observer before assigning the
+successor sessionId, and the later Auto-driven reinstall is skipped for a
+manual→Auto transition. The native agent prepares a minimal product fix;
+receipt absence is investigated separately. No link authority is fabricated.
+The bounded wire observer preserves56 requests/replies in both early/tail
+arrays without eviction. Backend/proxy/guard/private metadata retire.
+
+Long-campaign acquisition support integrates as4defd5e09: explicit campaign
+capture up to1800 seconds and fresh graceful stop marker; focused120-second
+limit remains. Ignored coordinators stream bounded callbacks/clock brackets,
+and the verifier requires actual15-manual/five-Auto original evidence plus
+unchanged100 ms hold/12.5 ms sampling bounds. No full campaign run is claimed.
+An isolated Android UI backend starts on909e and its guarded emulator reaches
+only an explicit localhost reverse port. Normal login/fixture/quality actions
+are delegated; readiness is not a completed transition. Units remain deferred.
+
+
+### 10.288 Android selector diagnosis and display-fitting Auto sequence (2026-10-08)
+
+Android normal UI Connect and Sign in succeed against the explicit owned
+localhost proxy. Exact fixture search/result selection succeeds, then the
+helper's exact Play selector times out: the production detail label contains
+two leading spaces. No playback event or720/1080 request is reported. Preserve
+first fixture failure and the first offscreen Signout selector failure.
+Two bounded Settings swipes expose normal Signout; authentication screen is
+observed, then the app stops and its exact XML dump is removed. The proxy
+finishes its500-second bound, the exact reverse port is removed and backend/
+guard retire. Parent had initially queued instructions to an idle agent rather
+than restarting its task; correct dispatch with followup_task before actual
+UI execution. The ignored helper now trims ASCII padding for Play/Signout
+roles while exact fixture identity and unique-match requirements stay intact.
+No unit tests or production Android changes are made.
+
+Plan§8.3 requires twenty alternating completed changes with at least five
+actual Auto changes; it does not fix the pair to1080/720. The native viewport's
+720 preference is confirmed. Choose720/480 for a later fresh campaign:
+start480, fifteen alternating manual requests end720, then five policy-driven
+low/high/low/high/low changes yield480/720/480/720/480. Mode entry with an
+unchanged height is not counted. Catalog peaks6.16/3.16 Mbps define a3758 kbps
+low stage inside the existing upgrade/downgrade bounds; high remains100 Mbps.
+First verify a single actual cliff after successor identity and receipt proof
+are measured. The failed236 series cannot be extended into a pass. Preserve
+all original continuity limits and unresolved physical/audio scope.
+
+
+### 10.289 Current main, successor binding and receipt bootstrap (2026-10-08)
+
+Merge main079960daebd5a1e23dff2b0e8f8506c1238bc1b0 into the independent
+acceptance branch as b234bd090. Preserve Apple version226 and resolve Android
+version to153. The merged baseline compiles with pinned Rust1.97.1 in3m16s.
+Current Apple lab239 compiles83 production Swift files and36 unit-source files
+without running tests; its signed isolated bundle installs successfully.
+Android153 app/unit-source compilation and assembly pass in57s; the verified
+APK installs only in the guarded owned emulator. Current-source runtime
+qualification is still pending. Isolated portable Chrome155.0.8059.39 extracts
+from the verified official package and reports that version; no host install
+or personal browser profile is used.
+
+Phone lab238 on71d7f2ba4 completes145 Auto diagnostic fact rows. After Auto
+entry,143 rows bind transfer metrics to the current session and142 to the
+current candidate, confirming the observer ordering repair. No SDK playback
+fault is reported.156 complete200 segment responses carry ETags but no link
+receipts. The planned cliff never fires because the diagnostic watched Auto
+create, whereas mode entry uses prepared control. Preserve this run as a
+binding/receipt diagnostic, not an actual Auto-switch pass. Backend/proxy and
+private metadata retire. The fresh diagnostic must observe accepted Auto
+control selection and successor receipts before applying its single cliff.
+
+Integrate agent repair831d85eeab as dfb9e2a03. An authenticated same/lower
+encoded Auto preparation can register for its own completed-body receipts
+without an incumbent nonce. RegistrationOnly is excluded from transition
+admission; upgrades still require measured incumbent Link/output cost. Exact
+candidate/source identity and accepted/staged route, cancellation and expiry
+fences remain. Original/remux retain existing measured/trial registration.
+Two meaningful regressions are authored and compile, but are not executed:
+chunk_06.rs::auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade
+and ::a05_prepared_http_observation_is_optional_auth_not_capability_authority.
+The agent's pinned all-target check and normal catalog/fmt/Clippy/JS hook pass.
+The parent archives the exact integrated commit for the warm Linux build;
+no .git directory or credentials are transferred. Units remain deferred to
+the batch merge session. No final review, qualification or handoff is claimed.
+
+
+### 10.290 Receipts measured; Auto retention remains open (2026-10-08)
+
+Freeze60c0f0f00197b36c03c1ba342970776ccf16831b for the phone diagnostic.
+Its pinned Linux build passes in2m13s; archive SHA256 is
+2a96713159ff29896cd546015cea65734f26bb162a3d0cefb1d867c009f05128
+and binary SHA256 is
+e7204b619ef88db8b2c07ec58a21da26e9ea4e10fa6dd9e9f04d5710a3c7b12f.
+Draft844 is pushed/verified at that head with26 regression fields.
+
+The first fresh239 setup attempt fails before phone launch because current
+main's deviceRunCommand requires a canonical CoreDevice process reply,
+whereas the old238 helper only prepared deferred arguments. Preserve that
+setup failure. The agent verifies an empty owned-app process census,
+reconciles the exact nonce-matching unresolved lease and retires its backend.
+The next fresh239 attempt uses the direct private CoreDevice bridge and
+verifies owned PID7436. The app completes150 seconds normally, error none,
+with145 policy facts.131 facts attest completed valid link evidence, current
+installed session/candidate/origin and receipt/ETag. This directly measures
+the receipt bootstrap repair. The cliff applies after accepted Auto control,
+a fresh advancing720 successor and an eligible completed successor receipt.
+All SDK heights remain720, switch_count0, auto_preparing false. Final runway
+47.66s and link3.896Mbps do not establish a720→480 transition. Investigate
+actual policy inputs; do not force an unsafe cliff or relabel a pass.
+
+The SDK harness reports failed solely because the deliberate restore adapter
+omits production restoration. Owned PID absence is verified. Full projected
+context is incomplete because the old outer helper writes it only after a
+successful await; preserve the durable SDK/app/progress receipts and that
+gap. The shaper's captured_at field is generated locally, not supplied by
+the phone, so its event ordering uses one host clock. No physical/audio
+continuity or full twenty-switch qualification is claimed.
+
+Integrate checked tool repair3cbf860d4e as c7f9055f0: explicit
+--restore-policy isolated-lab with a separate QA bundle skips only production
+restoration, after verified owned process cleanup. Production restoration
+remains the default; exact PID/executable, lease, snapshot, proxy-close and
+signal reconciliation remain. Two meaningful regressions are authored,
+with the existing default-restoration regression included in the batch;
+none execute here. Node syntax and normal pinned hook pass. Integrate
+matrixf09bbd751 as612661b25:37 artifact references match; subtitle909 scoped
+pass and native238 diagnostic are distinguished from prerequisites.
+TV239 current83-source signed app installs successfully, but awake playback
+is unmeasured. Android153 normal Play/quality retry awaits the next source
+build and lab slot. No remote source/binary overwrite occurs during phone
+playback. No final adversarial, Fable release or merge handoff is claimed.
+
+
+### 10.291 Qualified costs, retention diagnosis and current phone alignment (2026-10-08)
+
+Freeze0d989755ed3d748b12ba87de1f30c7e6c19cb645. The exact pinned Linux
+build passes in2m13s; archive SHA256 is
+2b082c21263381bce94f0bd55e34f9a0cd3f6451fafa9ff22b8228c271f425d6
+and binary SHA256 is
+05bb6d2168a27c40ed65443c7346f8950ebfe3a88509df793904f6f36ec37211.
+Draft844 remains pushed and draft, with29 named regression fields. No units
+execute here; the batched merge coordinator owns final execution.
+
+The isolated full-output-cost2 campaign produces actual bound normalized
+480p and720p whole-title outputs. Both have900 observed entries, ENDLIST,
+1800-second duration and complete_full_mux_rfc8216_v1 measurement. Their
+peaks are2,443,984 and4,562,440bps. Source SHA256 remains
+d7074838fddd09bbfde0fb1585793148955ea44684da847d49677a0e42c7c28d.
+Production measurement validates member hashes; no separate rehash of every
+retained byte is claimed. Fresh native decision and installed catalogs agree:
+480p subsequently disappears through the normal300-second idle retirement,
+while720p remains. Cost queries do not renew retention. This is not evidence
+for a stale-catalog repair. The owned backend and guard retire and original
+output preparation/cache/display-aware settings restore with readback.
+
+QA240's cost2 and warm1 attempts preserve real metadata-ready successor
+failures;6888ms and7184ms are remaining budgets, not elapsed seek latency.
+QA241 adds a bounded readonly diagnostic journal to copied lab sources. All
+83 production source files are inverse-byte-equivalent to the frozen branch;
+app and36 unit-source files compile and signing verifies. Its actual focused
+fixed-high-bandwidth run completes cleanly: initial and commit seeks for
+manual and Auto entry all succeed (724/102/936/101ms), with127 valid installed
+completed-link observations. Current720p measured peak matches. Owned PID
+retirement and isolated-lab cleanup pass. No cliff, downgrade, physical
+audio/display continuity or full twenty-switch qualification is claimed.
+Earlier readiness failures remain unexplained, not erased.
+
+Android153 has byte-equivalent current sources and compile-only evidence.
+Two normal-UI followups reach actual720p first frames in3190ms and3036ms.
+Both quality helpers stop before any tap or quality request because their
+expected player semantic root is absent. Preserve these failures. A bounded
+text-free actual player-structure diagnostic is prepared; no production
+state fix is justified yet. Owned app/backend/reverse/private metadata retire.
+
+The fresh full-output-pinned3 campaign uses normal cached viewer sessions to
+retain each qualified output and verifies actual cached bytes before the next
+job. Its480p output completes, but the first holder media response does not
+match the retained-manifest SHA/length. It stops before720p or a phone run;
+cleanup completes. Diagnose actual resource selection and response semantics
+before retrying. No retention, admission, proof or overlap threshold changes.
+Private digital-audio package preparation stops before download because host
+APT sources fail official-domain validation; independently signed official
+repository preparation continues separately without host changes.
+No final adversarial review, Fable release, qualification receipt or ready
+merge handoff is claimed.
+
+
+### 10.292 Cache non-reuse isolated; diagnostic and capture repairs integrated (2026-10-08)
+
+Instrumented pinned4 reproduces cache non-reuse on0d989755e. The retained
+seg00000 member matches its manifest before and after HTTP delivery:
+535,225 bytes, unchanged inode/link count and SHA. The actual HTTP200 body
+is536,131 different bytes, no Range requested, with no retained ETag UUID
+and a newly active owned FFmpeg. This establishes non-reuse, not corruption;
+it does not identify the refusing comparison. Normal APIs do not expose the
+private origin, full binding and logical production fields. No720 job or
+phone campaign is admitted. Exact guard1476595, daemon1477212 and encoder
+1481766 retire; original settings restore with readback, runtime/private
+control retire. Raw backend log is never transferred and is removed after
+retaining its hash. Seven structured receipt files are copied with verified
+hashes; handoff SHA is
+a9d756ebe3f727e9edc2f75bff83ee0479496d0e38bc592dc14bf2deab13e3e2.
+
+Integrate ecd3c1c773 as52eb48500: bounded debug equality facts under the
+dedicated plurxd::retained_reuse target cover early candidate/audio refusals
+and private artifact matching. No paths, raw arguments, tokens or identities
+are logged; differing argument positions are capped at32. All authority
+predicates remain unchanged. Own pinned1.97.1 check passes before editing,
+then final check and normal catalog/fmt/all-target Clippy/served-JS hook pass.
+No log-mirroring tests are added or units executed. One new exact-source
+compiled diagnostic reproduction is required before a behavioral fix.
+
+Integrate43dc5db19 asb352a70be: an optional calibrated alternate video ROI
+is sampled in the same synchronous XGetImage and clock bracket. One valid
+counter or agreeing valid counters resolve; conflicting valid counters fail
+the whole capture, while neither valid remains unknown. Single-ROI default
+and timing/integrity limits remain. Four meaningful regressions are authored
+and named in draft844; none execute here. Normal pinned hook passes. Actual
+fullscreen geometry calibration and state-plus-switch campaign remain open.
+No VOD mute control is invented for qualification; observed browser-native
+controls must be measured before any trusted mute claim.
+
+QA242 compiles/signs/installs the separate bundle216, with83 production
+files inverse-byte-equivalent to0d and36 unit-source files compile-only.
+Its ignored harness uses absolute probe counts and bounded full-series facts.
+No run occurs. A generic-name preinstall check failed but the shell continued
+to install; canonical reconciliation proves PID6767 belongs another QA bundle
+and bundle216 had no running process. The other bundle remains untouched.
+The helper now stops dependent actions on failed exact-scope checks.
+Superseded owned build artifacts reclaim726,982,656 allocated bytes.
+
+AndroidUI4 fails before UI because its metadata wait was only five seconds.
+The corrected monotonic setup wait permits UI5 on the unchanged0d daemon:
+actual720 first frame in3295ms, followed by a six-node native hierarchy
+without expected player controls. No quality tap or switch occurs. Foreground
+owner is unresolved because package identity was not retained; future bounded
+diagnostics now preserve package/resource/foreground owner and own-process
+crash classifications without raw text/logs. UI5 finishes101.240 seconds;
+normal Signout, app stop, reverse/proxy/private cleanup and daemon1490074
+retirement are verified. Both attempts remain scoped and preserved.
+
+Private Pulse17 packages and modules pass signed official Ubuntu metadata,
+package hash, version and dependency checks, without host changes or daemon
+runtime. Owned download temporaries reclaim18,558,810 bytes. A60-second
+nonperiodic stereo48k audio reference is materialized: copied H264 payloads
+and rational timestamps match1,442 original packets; AAC decodes2,880,000
+samples/channel, with600 unique reference windows. Captured-window thresholds
+and physical speakers remain unvalidated. Short nonzero-origin stream-copy
+and18-second VFR inputs are also measured; preparation does not qualify
+production normalization, family compatibility, joins or full20 acceptance.
+No final adversarial, Fable release, qualification or merge handoff is claimed.
+
+
+### 10.293 Exact cache refusal and canonical incoming audio repair (2026-10-08)
+
+Combined11d5289f27b20effff7391fdb23c852d386fc802 builds on pinned Rust1.97.1
+in2m14s; archive SHA256
+cd50e39e395c00edb780ca2c6ff9f3f4d7d754d0893e2cbbeaba279be20c0bc4,
+binary SHA256
+1326dc6aa7482b794a2bd68b004efc4164ba8464e77ff833d35c5bcdd9222422.
+A single480p diagnostic verifies running executable/source identity before
+its one preparation job. Job succeeds, failed attempts0/yields0, exact cost
+match1. Both seed and holder have request_audio_present/valid false and
+recipe_audio_present/valid true, with context/binding/logical present and
+all20 request/context/binding comparisons true. Refusal precedes the private
+artifact matcher at request.audio_delivery.as_ref(). The holder again serves
+newly encoded bytes. This isolates the first refusing condition; it does not
+prove later private comparisons will pass after repair. Four filtered events
+are preserved; handoff SHA256 is
+890c004da04c780b6337707f0ecd6fc7dce47e50da474078a56e3a085228d203.
+The run promptly retires after143 seconds: guard1505306, daemon1505325 and
+encoder1509627 absent, runtime/private control removed, settings restored
+with readback, raw log removed after hash. No720 job or phone run occurs.
+
+HTTP create deliberately publishes final audio delivery only for Copy.
+Encoded requests retain the typed audio claim until the actual producer route
+is resolved. This absence is not caused by synthetic capability fields. The
+constructed probe and actual Apple caps are not byte-equivalent; the original
+body is not preserved and no such claim is made. The independent incoming
+LogicalOutput records the actual producer resolution before rendition sharing.
+Integrate checked repaircd3a22f69 as27d398daa: obtain candidate audio from that
+private incoming logical output, rebind exact file/kind/track/offset/claim and
+EncodedVod route; ordinary absent delivery requires a valid typed claim and
+canonical source/claim resolution with exact byte identity. Explicit invalid
+or mismatched delivery still refuses. Existing Copy path, canonical recipe
+checks and full artifact/logical/source/origin/expiry gates remain.
+
+The meaningful regression is retained.rs::
+encoded_candidate_reuses_completed_output_with_resolved_claim_audio. It
+exercises completed registry/member/ETag reuse for an ordinary encoded request
+and refusals for changed claim/offset, mismatched or invalid explicit delivery,
+claimless absence and wrong privately resolved audio. It does not claim real
+encoded-media qualification. Pinned check and normal hook pass; units remain
+unexecuted. Runtime proof must follow the exact integrated new build.
+
+Integrate calibrated capturea84e02e6a as the parent tool commit: optional
+independent normal/fullscreen maps sample42 cells at four interior reference
+rows in the same XGetImage/bracket. Floor mapping, finite positive bounds,
+minimum two-pixel cells and no aliases preserve504-byte streams and strict
+ambiguity/integrity rules. Three authored regressions remain unrun. Static
+resolution catches class-qualified Python trailers; correct the unpublished
+parent commit to bare methods before push. No capture qualification is claimed.
+
+AndroidUI6 confirms actual720 first frame in2844ms, then six nodes owned by
+com.android.systemui with immersive_cling resources and unique OK control.
+Plurx MainActivity is resumed; own PID6181 alive, no current fatal/ANR markers.
+Historical exit reasons are USER REQUESTED, not a current crash diagnosis.
+No overlay/quality tap occurs. Normal Signout and exact cleanup pass within
+92.788 seconds; daemon1510915 retires. The authorized acknowledgment followup
+UI7 fails before input on malformed UI XML, actions empty; no login occurs.
+It cleans app/reverse/proxy/private metadata and daemon1523188 within61.339
+seconds. Preserve both results. A bounded same-view XML reacquisition is being
+prepared; no blind quality retries, production UI patch or switch claim.
+All37 regression references resolve statically; no units run here. Final
+adversarial review, external Fable release and ready merge handoff remain open.
+
+
+### 10.294 Cached bytes pass; retained viewer must not drive an encoder (2026-10-08)
+
+Fixed44f1cde489961328bd3d2b08ad5af902a4d31912 passes normal pinned hook and
+Linux build in2m12s. Archive SHA256
+02d5ac127bbebdd460847cc75f560dcbc72616e9338b6789868fbfcbcc8348f9;
+binary SHA256
+a668b386d2719dfa4f84d6654d1b9f5c2860537a94642462c8affb730164b548.
+The next paired campaign stops after480p: HTTP535,672 bytes exactly match
+the retained member, its UUID/digest ETag and unchanged file before/after.
+Every private matching/logical/source/audio/binding comparison is true,
+including identical81-argument production recipes. This directly confirms
+the canonical incoming-audio repair. It is a partial pass only: a new owned
+FFmpeg1540802 starts, so the strict no-new-encoder guard stops before720p
+or phone launch. Physical argument role was not recorded and is not asserted.
+
+Source inspection independently isolates a producing-reader defect. The
+factory installs verified retained output but creates an ordinary producing
+reader; rendition.kick can therefore feed driver Produce even while HTTP
+bypasses that rendition and serves the artifact. Exact retained repair copies
+existing bytes and never requires a new producer. Retained removal detaches
+the reader/rendition; it needs no later role promotion. Integrate checked
+3e9428129 ase820e7354: Session::attachment_reader preserves authority-only
+controlled children and also marks verified retained attachments. Ordinary
+readers, owner/control/lease/source/repair and admission fences remain.
+The meaningful regression retained.rs::
+cached_attachment_serves_retained_bytes_without_driver_demand uses completed
+fenced artifact acquisition on a fresh empty rendition, actual session reader
+factory and retained member/ETag; cached frontier and accidental WaitPool
+requests create no driver demands, ordinary missing reads still produce,
+and detach retires demands. Unit sources compile and normal pinned hook
+passes; no units execute. Runtime no-encoder and720p coexistence remain to
+be verified on the next exact build.
+
+The partial campaign retires within144 seconds: guard1536198, daemon1536214
+and encoder1540802 absent, runtime/private metadata removed and settings
+readback restored. Scoped evidence is preserved in the parent. QA24283
+production Swift sources remain byte-equivalent to44f and reuse its signed
+installed app; no unnecessary rebuild occurs.
+
+AndroidUI8 reaches a720 first frame in3064ms but makes no acknowledgment
+or quality tap: the helper counts four references to one immersive window
+as four windows. Full visible-window record parsing is corrected offline,
+with distinct full records still rejected. Normal Signout and exact cleanup
+pass in99.103 seconds; parent1546061/daemon1546077 and their exact runtime
+are independently absent. UI9 is the justified same-source followup, not
+a claimed pass. The XML parser retains a first malformed snapshot and permits
+only one same-view reacquisition with unchanged foreground token, no input
+or arbitrary trimming. Earlier startup cleanup is hardened in ignored guards:
+exact child/runtime ownership is persisted before startServer returns, so
+failed metadata setup cannot leave private runtime/config behind.
+All38 regression references resolve statically; units, final adversarial,
+Fable release and ready merge handoff remain deferred.
+
+
+### 10.295 Retained output avoids redundant preparation; Android route diagnosis (2026-10-08)
+
+Exact2314ccb45 passes the480p retained-member check:535,828 HTTP bytes,
+SHA256 b4265d14 prefix, matching UUID/digest ETag and unchanged retained
+file. No FFmpeg exists at EOF or one second later. The subsequent cached-job
+census fails, stopping before720p or phone launch. Its exact unexpected job
+identity was not projected before the assertion; do not infer its kind from
+that missing evidence. Guard1567440 and daemon1567461 retire within144
+seconds, settings restore and runtime/private metadata are removed.
+
+Independent source inspection finds an unconditional preparation handoff after
+attachment. Integrate7cd4760db as51c0df4a6: take one actual post-attachment
+HLS snapshot and skip preparation only when its private response owner owns
+verified retained output. Cold/no-artifact responses still enqueue, even if
+public candidate hints say complete_cache. Audio and retained response facts
+come from that same snapshot. The regression
+cached_output_attachment_skips_preparation_but_cold_candidate_enqueues uses
+an actual completed artifact, attached response graph and bounded worker
+channel. Pinned check and normal child hook pass; units remain unexecuted.
+The paired runtime helper now projects job facts before its assertion.
+
+AndroidUI11 selects the observed1080 row and receives prepared successor
+responses, but retains the incumbent720 after12,326 milliseconds. Family
+response seq4 contains only480 and720;1080 therefore exercises prepared
+replacement, not a continuous switch. Successor playlist/init/segments return
+HTTP200. The only presented transition is initial seq23, before the tap; it
+cannot count as target presentation. Available receipts do not distinguish
+readiness, rendezvous or player error at abandonment. Diagnose bounded stage
+facts before another attempt; do not extend the12-second overlap limit.
+The earlier continuous-only matcher was mis-scoped for this family. Android
+cleanup finishes within132.231 seconds; exact parent1582934/daemon1582954,
+runtime, reverse, proxy and private control are absent. Preserve the parallel
+non-atomic progress JSON read failure; the ignored helper now publishes via
+atomic rename and stops on the actual terminal SDK outcome.
+
+QA242 remains installed;83 production Swift files are byte-equivalent to
+2314. Recheck equivalence before reusing it with the Rust-only repair. Fresh
+480/720 coexistence and cost/identity proof must precede phone launch. All39
+regression references resolve statically; final units belong to the batched
+merge session. Final adversarial review, external Fable review and ready
+handoff remain open.
+
+
+### 10.296 Current paired reuse passes; phone Auto-entry seek fails (2026-10-08)
+
+Frozen1659a185d3d96fd2dbf250e44ab77b8adbc19766 builds on pinned Rust1.97.1
+in2m13s. Archive SHA256
+edff5ff4e3bda4c2c4c9f149ef78b7f64d9a7d834ff476ce16e58edfd043f8b1;
+binary SHA256
+71e4be7867e305a574367f43cb35582524889a540db8d51464f6cb2ebd51116d.
+Both480 and720 cached media responses match their retained member bytes and
+UUID/digest ETag, with no encoder or unexpected job. The720 preparation job
+runs within30 seconds while a legitimate480 viewer holds its completed
+output. Normal60-second media touches keep both current without retention
+changes. Actual480 average/peak are2,159,861/2,433,424 bits per second;
+720 are4,160,964/4,570,064. Historical peaks must not substitute for current
+artifact costs. Eleven safe paired receipts pass independent hash checks.
+
+QA242 passes canonical owned-bundle idle and exact daemon/source/binary
+preflight, then launches asPID7505. All83 production Swift files match the
+frozen source. Manual480-to720 alignment succeeds: initial40.784-second
+target in2808 milliseconds, commit52.578-second target in107 milliseconds.
+The old driver expected previous artifact peaks and correctly refuses the
+cliff. Preserve that setup failure. Independently, ordinary Auto-entry720
+prepared replacement fails metadataReady alignment:70.841-second target,
+origin0, nativeReady1; after4097 milliseconds item time remains0 and loaded
+range is54–57.961 seconds. Outcome is absent, cancellation false, current
+pipeline/owner match; readiness/overlap7128 milliseconds is remaining budget,
+not elapsed. No accepted Auto successor, cliff or twenty-switch pass exists.
+The actual control request includes position70844 and seek_target70841;
+a stale incumbent position is not supported. Prepare origin/start/playlist
+and segment-index projections were not retained and remain unmeasured.
+The proposed corrected retry is stopped until seek/media-request RCA exists.
+
+Owned phone/proxy/forward/control cleanup passes. Warm guard1594515 and
+daemon1594531 are independently absent; runtime/private control and raw
+backend log removed, bounded projections retained. Original lab settings
+restore by readback: preparation off/cache50/display-aware Auto false. The
+paired cache pass and native failure retain separate scopes.
+
+Integrate Android diagnostic43b99297 at this safe boundary. Finite failure
+reason/phase/player-state/track/rendezvous/seek/runway/warm-frame/error-code
+facts are captured before release; reporting is guarded and free-text decoder
+messages excluded. Existing12-second overlap and20-second readiness remain.
+The surface-ready query is read-only; exposure/invalidation mutations are
+separate. JBR21 Kotlin and unit-source compilation pass, normal pinned hook
+passes; units remain unexecuted. Signed APK154 is prepared offline with an
+explicit ignored version override, not installed yet. Future480/720 continuous
+and outside-family1080 prepared checks are separate and bind actual family,
+recipes, source and current control revision. All41 regression references
+must resolve before push; final adversarial/Fable/ready handoff remain open.
+
+### 10.297 · Android continuous settlement and acquisition failures remain separate
+
+Frozen server3201f925c has one measured Android1080-to720 continuous switch,
+not a whole-series receipt. UI13 stops on the observed connection screen before
+login or playback. Fresh `am start -W` and just-in-time view inspection locate
+the actual manual-connection action. UI14 then reaches an initial1080 frame,
+but480 is outside its observed720/1080 continuous family; no quality tap occurs.
+UI15 selects the actual720 row and settles in13.623 seconds. Its new presented
+transaction67eb4df9-dd95-42e3-ad70-91d592267b0e has revision2, matching latest
+revision2, target720 and accepted frame tick912. The initial frame and revision1
+are excluded. This is SDK/UI/protocol evidence, not physical pixels or audio.
+All27 safe receipt files independently match their SHA256 and length manifest.
+Owned daemon, proxy, reverse, private control and runtime close; the app stops.
+Signout was not observed after four known navigation actions and is not claimed.
+
+The short Firefox geometry preflight on that server fails. Both trusted
+fullscreen transitions and actual native Mute work; the requested native
+Unmute menu does not match and the exact failed menu labels were not retained.
+Among1963 optical samples,25 are unknown, none conflict, and11 acquisition
+intervals exceed the unchanged12.5-millisecond bound; maximum20.582797ms.
+Twenty-one unknowns are startup samples. Four occur during fullscreen exit:
+only one original sixteen-pixel band has a valid counter, insufficient for the
+required four spaced rows. Retain every sample and these failed verdicts.
+Processing/request/XGetImage timings are measured; scheduler causality is not.
+Exact owned daemon/display processes and sockets close. The old WebDriver
+profile path was not recorded, so its absence remains unmeasured.
+
+The integrated optical search translates the existing four spaced rows across
+bounded intermediate vertical positions in one synchronous XGetImage. It never
+accepts one band or four consecutive pixels as the four-row pattern. All valid
+windows and fixed ROIs must agree; conflicts fail and no valid window remains
+unknown. Seven regression references are authored and statically resolved,
+not executed. The normal hook passes. Next preflight adds a fixed one-second
+settled baseline before acquisition, finite actual chrome-menu observations,
+and explicit owned profile provenance; captured transition samples remain.
+
+Android automatic accepted-presentation journaling and read-only network/frame
+probes are integrated. Auto records only the actual accepted current revision
+and candidate. A body observation requires upstream EOF, immutable media
+authorization and the current owner; transfer close is not EOF. Its duration
+starts after response headers, before reading the body. Unknown status, cache,
+pacing, timing and decoder counters remain unknown. Absolute counters are
+attachment-owned and guarded reporting uses the existing cadence without
+changing playback policy or deadlines. APK156 source compilation and its
+normal pinned hook pass, and the signed APK assembles with SHA256
+`de71f37a5d0244c2a3f88ca21dc08884acc02564f8ade20177f95e37033637ef`.
+It has not been installed or run. The two probe regressions and two Auto-journal
+regressions remain unexecuted. Source equivalence must be rebound to the next
+frozen parent before runtime.
+
+QA243 is installed in the owned phone bundle, with all83 production Swift
+inputs matching the parent at installation. No QA243 playback is claimed.
+Read-only seekable ranges, duration, seek-call/completion generations and
+hashed prepared wire/segment observations are ready for the next focused
+alignment attempt. The first-preparation durable seal repair is still local:
+a static audit catches SQL placeholder first-appearance ordering before push.
+Both backend parameter lists and the shared SQL are being corrected together,
+with predicates unchanged. The storage agent owns the sole compiler slot;
+no unit execution, final adversarial review, Fable release or ready merge
+handoff has occurred.
+
+The correction is now committed and integrated as0d7307123. Actual Hiqlite
+all-target source check passes58.97 seconds, Hiqlite Clippy passes97 seconds,
+and the normal one-job pinned hook passes109-second workspace Clippy,
+catalog3166, formatting and77 served JavaScript syntax checks. The actual
+replicated SQL validator regression is authored but not run. Owner-local
+hashed capture events follow successful durable sealing while holding the
+actual owner; caller-ready events follow an independent durable readiness
+check. Their local sequence/monotonic brackets supply diagnostic ordering,
+not publication authority or native presentation proof. Both recipe objects
+are validated before diagnostic serialization. The next parent hook and
+exact-source Linux build precede runtime admission.
+
+### 10.298 · Frozen first-prepared runtime admission
+
+Draft844 is pushed atf32594248d44a8f9a6ba9f1aad52b6d33909f1c9 with57
+statically resolved regression fields. The parent normal one-job hook passes
+3m46-second workspace Clippy, catalog3166, formatting and77 JavaScript syntax
+checks. No units execute. Exact committed-source Linux build passes3m15s on
+verified Rust1.97.1. Archive SHA256 is
+`5ab09193fe400eaff2390e19dd5a7648de5489ed02dc3a5367c3bb21daaffd58`;
+binary SHA256 is
+`b1666e5c2919936e0d9d0203d4844f010881a1a51c1c6be35728883cdf9e0657`.
+All83 QA243 production Swift inputs and345 APK156 Android inputs plus three
+reader assets match this frozen source. APK156 upgrades only the owned idle
+emulator installation in7.329 seconds; exact installed bytes and version are
+read back. No playback follows from these build/install facts.
+
+A fresh paired warm begins once inretained-reuse-f32594248-prepared1,
+guard1679044/daemon1679058, absolute deadline1791509095623 and60-second
+cleanup reserve starting1791509035623. It retains ordinary60-second media
+touches with120-second maximum gap and never resets the deadline. Both
+artifacts must independently prove current cost, immutable member bytes,
+ETag, no encoder and no unexpected preparation job before phone admission.
+The first480 job is running; no warm or native pass is claimed at this entry.
+
+The executable QA243 proof callback joins streamed prepared media to the
+current authoritative retained member table and owner-local first-seal /
+caller-ready events. Private RemoteStartRequest canonical hashes are compared
+only between owner and caller for the same prepared identity. They are a
+different domain from the catalog encoder recipe digest; do not equate them.
+The member table separately proves current source, audio, catalog recipe,
+actual resolved candidate, artifact and output identity. Unknown or missing
+bindings refuse the experimental cliff; no new production authority is added.
+Cross-host wall clocks do not prove seal ordering. The server-local event
+sequence and successful seal/caller checks provide that ordering, before the
+acknowledgement and activation sites. The actual current playback target is
+recorded; historical70.841 is never substituted into the control request.
+
+Browser short-preflight helpers are rebound offline to this same source and
+binary. They retain the fixed one-second settled baseline before acquisition,
+four spaced rows, all captured transition samples and unchanged sampling
+bounds. They remain inactive while native owns the backend lane. Android's
+full-series driver also remains inactive; an offline timing fix samples the
+hold start once so its mandatory30-second post-acceptance hold is not rejected
+by a second clock read. Its2100-second budget and required2400-second fixture
+are unchanged; that longer fixture has not been generated. Final adversarial
+review, external Fable pause and merge-coordinator handoff remain pending.
+
+### 10.299 · QA243 failure narrows the remaining first-prepared miss
+
+Both current480/720 warm artifacts strictly pass: actual first members are
+536457 and1059880 bytes, with exact retained ETag/body digest, no new encoder
+or unexpected output job. Actual480 average/peak are2159845/2441628;
+7204160937/4561088. Current5Mb/s lies within
+4394930.4≤link<5929414.4 bits per second. Preserve these current costs separately
+from1659; historical constants are not evidence. QA243 launches after fresh
+canonical unlocked/connected/DDI/version243/idle checks, as ownedPID7552.
+
+The focused run fails ordinary Auto-entry metadataReady. It performs no cliff
+or full series. Manual720 succeeds in the same run, with40.486-second alignment
+in2563ms and later52.548-second alignment in25ms. Failed Auto seeks70.528 with
+origin0, duration1800, seekable0–1800, loaded54–57.961 and item time0. Generation3
+issues the actual70528/1000 CMTime with zero tolerances; the bounded wait ends
+after4096ms. Current prepared item/pipeline identities remain valid and native
+error is unreported. Completionfalse arrives16ms after abandonment with the
+item no longer prepared, so that completion is not the initiating cause.
+
+Actual Auto manifest isHTTP200 VOD, sequence0,900 two-second entries,1800-second
+sum, ENDLIST and no EXT-X-START offset. Observed Auto segments0/27/28/29 reach
+HTTP200 and upstream EOF with non-retained ETags; segment35 is not observed.
+Segment27 request-to-headers takes3813.337ms on the same proxy clock and
+request-to-EOF3839.857ms; these intervals are separate from phone-clock seek
+measurements. Do not subtract cross-host clocks or assert sole causality.
+Incumbent503/410 responses follow failure/end and are not assigned as cause.
+Media random-access/PTS details and native access/error logs remain unmeasured.
+
+The four owner-local debug events establish FIRST capture then complete caller
+readiness for manual720 and failed Auto, local sequences0→1 and2→3. Per identity,
+private canonical recipe hashes agree and current owner checks pass. Both
+choices honestly seal None, with no artifact/output hash. Thus no actual
+prepared cached-body pass exists. One initial native480 encoder/new preparation
+job is observed independently of the strict ordinary warm holders; later encoder
+count is zero, while that historical new job remains in the raw census. The
+cliff proof remains false; no resource row is ignored or reclassified as a pass.
+
+The final comparison group matches candidate, recipe, geometry, grade, route,
+file, audio offset, actual audio delivery, engine/executable/source/playlist and
+all81 producer arguments. LogicalOutput differs only in audio_claim and
+owner_node_id. Restored catalog context currently has ownerNone, whereas normal
+creation records the eligible owner. This is a source-supported repair seam;
+the separate claim difference still requires exact observed capability evidence.
+No equality or ownership predicate is relaxed. All12 safe failure files are
+independently verified against manifestSHA256
+`ae1b7857c9eb83d58ef093920df3295a3de51700e7f940ace08bd70d54c5a563`.
+The app has118 facts, proxy115 and SDK38 probes; their different scopes remain.
+Owned phone/proxy/forward/control cleanup passes and the shared warm backend is
+untouched. The ignored coordinator originally serializes a failed receipt but
+exits0; future helper exits nonzero on failure while preserving this original
+receipt/hash. No retry, unit execution or final review occurs at this entry.
+
+The audio difference is now explained by authoritative durable data: the warm
+claim has one AAC stereo48k sink and decoderAAC; actual native initial/manual/
+Auto requests have five stereo sinks and decodersAAC/AC3/ALAC/EAC3/MP3. Strict
+claim rejection is correct. Actual normalized candidate_catalog.caps is retained
+and its audio decoder/sink snapshot exactly matches the request claim. Export
+SHA256 `e9c4a02717abb098e435e77a34cb55d6cf674174fe129ed6eb553a5df6d2ed27`
+preserves all13 normalized fields; the original wire capability document was
+not retained and is not reconstructed. The next seed uses this observed
+normalized authority, without guessed HDMI/hardware values or relaxed equality.
+The third job is an unbound ordinary480 preparation: normalized geometry false,
+no candidate ID/digest and the actual native audio claim. It is distinct from
+the bound720 recipe. Its physical FFmpeg PID-to-job/session mapping was not
+retained and remains unknown. Any next resource receipt must retain the whole
+raw census and define its preparation baseline explicitly; this failed run
+is not promoted by later attribution.
+
+
+### 10.300 · Browser geometry integrity passes; lifecycle and sampling still fail
+
+Focused geometryf325a1 preserves every captured sample and the unchanged
+thresholds. All1947 samples across three raw streams independently decode with
+zero unknown/conflicting counters. The fixed pre-acquisition baseline is
+1000.998ms and bounded spaced search is active. Actual native Mute succeeds;
+Unmute fails before a fifth phase. The failed menu still reports the prior
+fullscreen/unmuted state while the observed content video is normal/muted.
+Popup closure after the first command was not measured, so stale-target
+causality remains unproven. Future helpers require observed closure and a
+fresh trusted context/popup event before inspecting the actual target; labels
+or IDs are never guessed.
+
+There are18 sampling-upper-gap violations; maximum51.35314ms exceeds12.5ms.
+That largest bracket contains previousXGet2.787ms, elapsed after-reply
+processing39.193ms, next wait7.848ms and nextXGet1.525ms. Processing median is
+4.549ms/p955.921ms. Elapsed processing can include descheduling; CPU or
+compositor causality is not established. Add advisory own-process CPU
+endpoints beside existing monotonic brackets, reporting unknown when
+unavailable. These never replace wall bounds, subtract waits or turn a sampling
+failure into a pass. One authored regression exercises capture and the actual
+frame-clock analyzer to preserve the failed wall verdict with zero/unknown CPU
+metadata; it remains unexecuted.
+
+All22 original optical evidence files pass independent SHA/length verification
+against manifest5661bff3f05fb0d910ce2fb4b81e32c6ec22070ca1e969d769e07be19485e00b.
+Exact daemon1699539, coordinator1699504, guard1699503, display1699499 and
+Firefox1702552 are absent. Profile/runtime/config/authority and helper scratch
+are removed. The exact staleX525 socket is removed only after no kernel
+listener and matching owner/type; no global preferences or foreign files change.
+Overall verdict remains failed, with no runtime retry or full twenty claim.
+
+### 10.301 · Bind fresh restored ownership from ordinary eligible-source authority
+
+Integrate source repair153ee1fd1 from properly committed0adbb3a89. Local and
+remote preparation callers supply private current source authority. Only the
+serialized genuinely new, unattached FirstPreparation obtains the ordinary
+eligible local catalog. Exact candidate/recipe/geometry/grade/source binding,
+decoder compatibility, complete nonpartial dispatch support and agreement with
+the reserved owner are required before injecting that owner into restored
+context. No artifact supplies ownership. Missing authority preserves normal
+nonretained preparation; recovery, attached retries and sealed choices never
+refresh or reinterpret absence. Audio and shared-unbound predicates remain.
+The source-restore regression includes owner/source/candidate/dispatch refusals.
+
+Pinned Hiqlite all-target source check passes134seconds. Clippy finds an enum
+size issue from carrying AppState by value; private Arc storage corrects it.
+Final Hiqlite all-target Clippy/source compilation passes186seconds. The first
+bounded normal hook reaches its original600-second limit and its owned group
+is verified gone; a separate serialized hook attempt succeeds in68.582seconds,
+including59.74-second workspace Clippy/catalog3166/formatting/77JS checks.
+No successful source check or unit suite is rerun, and no units execute.
+
+Next warm uses exact observed normalized native capabilities. An explicitly
+named ordinary unbound480 setup job is prepared before phone admission,
+separately from the two qualified candidate artifacts. It must match the
+observed current source/claim/legacy role and be terminal; no legacy cached
+playback is inferred. Existing awaited manual720 facts can establish a
+prospective durable resource baseline before Auto within four seconds of the
+unchanged five-second HTTP timeout. The full raw census stays visible; live
+FFmpeg or unclassified/new jobs refuse admission. Later target proof requires
+actual Some seal/current owner/body/ETag/EOF and zero new jobs after that exact
+baseline. No retrospective subtraction, initial cache claim, production
+selection change or native readiness/overlap/budget extension is allowed.
+These next helpers are preparation only; no retry or promotion occurs here.
+
+
+### 10.302 Current-main integration and longer source closure
+
+Integrate main1088d7529401297bddced74bfa11c166457468d8 before the next
+qualification freeze. Conflict resolution retains both prepared-owner binding
+and selected-output-codec helpers, Android version155 and Apple version226.
+The parent includes the eligible-owner repair and advisory process CPU timing;
+wall sampling limits remain unchanged. Current main changes client capability
+inputs, so APK156/QA243 equality and the f325 normalized native caps packet are
+historical evidence. New client builds and current capability proof are needed.
+
+The isolated2400-second source materialization completes in294.028seconds.
+The approved-node fixture is1246989788bytes, SHA256
+27c6987176016755e89371c962ebbe862953dda66f63e4333d3db489e90efe8c.
+All57600video and112501audio packets have complete strictly increasing
+per-track PTS/DTS, retained payload/sequence hashes and decoded clock prefix.
+AAC priming PTS-1024 is recorded. Worker and transferred helper are gone;
+free storage6001704960bytes exceeds the4GiB reserve. This is source preparation,
+not playback acceptance. No unit tests, full series or promotion occurs.
+
+
+The first current-main hook reports three test-source candidate initializers
+missing main's new planned_codec field and exits1 in298.027seconds. All three
+receive planned_codec:None, preserving their original unspecified codec
+behavior. This is source compilation feedback; no unit test executes. Its
+failed log/lease remain unchanged, and the retry uses separate owned records.
+
+
+The current-main integration lands as ee0655789 after the separate normal
+hook succeeds in363.166seconds (workspace all-target Clippy5m52s, catalog3398,
+formatting and86served scripts). No units execute. Main's new planned_codec
+field controls VideoToolbox execution; prepared owner binding therefore also
+requires exact codec equality. The existing restored-source refusal fixture
+adds a codec mismatch with otherwise unchanged candidate identity/digest.
+
+
+### 10.303 Takeover, main integration and Auto after a viewer choice (2026-10-10)
+
+A new session took over from the 10.302 handoff. Its lab differs: the
+operator Mac is reachable only through a Linux VM, so Mac-native runs (owned
+emulator, physical Apple devices, Safari) are not driven from here. Android
+runs move to physical devices over wireless debugging from lab3. Apple builds
+and simulators move to the macOS CI runner.
+
+**Main integration.** Merged `main` `c96142ac5` (136 commits) into the branch
+as `55db341a7`. Conflicts were in `create.rs` `StartInfo` (the single
+post-attachment `response_facts` snapshot is kept, plus main's
+`processed_dv_profile`), in `web-control.test.js` (both sides appended
+independent tests, so both are kept) and in the client versions: Android
+versionCode **160** (main took 159), Apple stays at 227. On lab3, the pinned
+1.97.1 toolchain passes workspace all-target `cargo check` and
+`make precommit-check` (catalog 3432 files, fmt, Clippy `-D warnings`, served
+scripts). Both release and capability-probe APKs build and the unit-test
+sources compile. No tests ran.
+
+**Root cause: Android Auto never decided again after a viewer quality
+choice.** `Controller.directedChange` keeps the viewer's last directed
+change, and nothing ever clears the reference. `DirectedChange.isSettled`
+records when the change is over. Six sites nevertheless tested
+`directedChange != null` as "a change is in flight": the display-aware Auto
+tick gate, decode-pressure observation, stall-link recovery, both negative
+link-sample paths and the original-boundary re-plan. After the first
+quality choice on a title, including choosing Auto itself, the tick gate
+reported `change_pending` for the rest of the title. Auto made no decision,
+answered no link cliff and answered no decode pressure. UI30 (10.302) shows
+exactly this sequence: `manual`, then `change_pending` once Auto was entered,
+then no change while an applied cliff waited 60 s.
+
+The fix is `991289a62`. The six sites ask `directedChangeOutstanding()`,
+which is `isSettled == false`. A reopen in flight is still held by its own
+pending seek, and a prepared successor by `preparedPlayer`, exactly as
+before. Regression:
+`AutoDecisionGateTest::onlyAnUnsettledDirectedChangeHoldsAuto`.
+
+**Physical Android TV verification.** Hardware: Google TV Streamer, API 34.
+The capability-probe build of `991289a62` is a separate package, so the
+viewer's installed app was not touched. It played the 1800-second clock
+fixture from an owned lab daemon on lab3 behind the shaping device proxy,
+with display-aware Auto enabled. The sequence was manual 720p, then Auto:
+
+| Device time | Gate / event |
+|---|---|
+| 14:54:17 | `auto gate manual` (720p chosen; committed `via=continuous quality=720`) |
+| 14:55:58 | `auto gate change_pending` (Auto chosen) |
+| 14:56:05 | `quality_switch via=continuous quality=Auto` |
+| 14:56:08 | `auto gate open` |
+
+The second sequence was manual 480p, then Auto. The gate went to `manual`,
+then `change_pending` at 15:06:33, then committed `quality=Auto`, then
+`open` at 15:06:43. Auto then prepared and presented its own candidate
+(`change_pending` at 15:07:03, `continuous_auto_presented` at 15:07:10,
+`open` at 15:07:13). Before the fix, every one of these stayed at
+`change_pending`.
+
+This is a scoped hardware pass of the gate root cause only. It is not
+the 20-transition series. One lab-induced failure is preserved: restarting
+the shaping proxy refused connections for about three seconds, and the
+player ended with `ERROR_CODE_IO_NETWORK_CONNECTION_FAILED`. That is an
+expected terminal network failure, not a switch failure, and a proxy
+restart is not a valid way to change a shaping stage mid-run.
+
+On the unshaped link, Auto twice stepped 720p→480p about 35 s after start
+with no link cliff. Neither a link sample nor a decode cause was reported, so
+the remaining downgrade path is producer pressure. Software x264 on a loaded
+shared host is plausible, but it was not measured, and it is recorded here
+as unexplained.
+
+**A9 optical failure is an instrument outage, not a held picture.** The A9
+geometry preflight (zero quality changes) failed on an upper hold of
+125.6 ms. Its only wide sampling gap (packet 2591, 74.4 ms) has 3.7 ms of
+processing CPU and 69.9 ms wall time between processing completion and the
+next request, with 0.22 ms CPU. The acquisition process was off-CPU, so the
+cause is not the A8 `search_video` cost. Every lower hold bound is at most
+59.3 ms. The other four gaps are 12.7–13.9 ms: X server acquisition spikes
+of 4–5 ms plus about 4 ms of in-loop processing exceed the 12.5 ms budget
+by design.
+
+**Acceptance scope, pending Paul's ruling.** §8.3 measures *switch-induced*
+gaps. 10.228 found every switch boundary optically clean, and every
+whole-window failure since (10.244, A8, A9) lies in steady playback away
+from any switch. This session treats those as lab display/capture
+limitations rather than switch failures. It does not relax any limit. It
+also recommends that #844's repairs land on `main` through the normal
+review, fast-lane and merge sequence, with the per-platform campaigns
+continuing against `main` afterwards. Both points await Paul's ruling.
+
+### 10.304 Rulings, review, fast lane and landing through #979 (2026-10-10)
+
+**Rulings.** Paul ruled that the repairs land on `main` now, with one fast
+lane on the final code and no external Fable pause. The per-platform
+campaigns continue against `main` as separate work. The §8.3 scope reading
+(switch-induced gaps) stands as recommended in 10.303.
+
+**Adversarial review.** A three-way review (server, Android, Apple/web) ran
+on the frozen tree. The server major: `LogicalOutput` equality compared the
+dispatching `owner_node_id`, so a sealed reused output could never be
+reacquired after a restart, reap or takeover. Fixed in `abdb46374`; durable
+identity now excludes only the dispatch owner. The Android majors were fixed
+in `0e7a7e010`. Auto keys on the quality actually executing, the directed
+change exists from the tap, commits and fallbacks honour only an outstanding
+change, and the read-only probe log is debug-only. In the Apple major
+(`20db2824d`), the shared receiver plans its switch point before inspecting
+it, and the local handoff keeps the post-swap reserve for its first-frame
+proof. In the web major (`1c213e17e`), a stuck verification worker fails its
+own jobs and is replaced. Minor items are in #978. All 19 corrective client
+commits carry `tests/client-fixes.toml` anchors (`4a6388f4b`).
+
+**Campaigns on the frozen tree.** Chrome on `7fc2d9c15` failed Auto change 4
+on two hitches at the 10 Mb/s stage while compile jobs loaded the same lab
+host. The quiet rerun on `4a6388f4b` passed: 15 manual and 5 actual Auto
+changes, with zero hitches, stalls or drops and an 83 ms maximum gap. The
+Firefox campaign on the same tree is still running.
+
+**Fast lane.** The first preflight on `7f0136789` found three gaps:
+- An unlisted census comparison: `commitPreparedSuccessor` settles the
+  manual-quality pin's seek only while no newer seek replaced it. It is
+  listed with `retainManualQualityFailure`'s reason, because it reads the
+  same record.
+- Stale Apple build claims (222 against `project.yml` 227).
+- Two web test files that no lane ran.
+
+The next preflight reached the rolling-producer ownership ledger. Ten shapes
+added by the server repairs now have reviewed counts. Two of them are
+pattern false positives.
+
+Running the two web tests then showed that `aea0263a7`'s per-element
+lifecycle registry broke the web-policy metadata harness, which extracts
+`armHitchDetector` alone. The harness now supplies that module state, as it
+already supplies the detector's constants.
+
+That node-script failure left a phase error in #844's journal. The receipt
+adapter refuses to replay any later attempt on that PR until a bespoke
+recovery accounts for the partial node log. #844 was closed without
+deleting any evidence. The same branch landed as #979, so every unit runs
+once on the final code.
 

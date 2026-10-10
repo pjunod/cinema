@@ -117,6 +117,91 @@ impl VodServe {
     }
 }
 
+/// Actual cached response graph for enqueue-boundary regression tests.
+#[cfg(test)]
+pub(crate) async fn test_post_attachment_output_facts() -> (
+    tempfile::TempDir,
+    Arc<VodServe>,
+    crate::vodserve::VodHlsFacts,
+    SessionRequest,
+) {
+    tests::post_attachment_output_facts_fixture().await
+}
+
+/// Model a prior first attachment which captured None while a compatible
+/// artifact subsequently exists. Repeating it must not promote that absence.
+#[cfg(test)]
+pub(crate) async fn test_make_attachment_uncaptured(serve: &VodServe, id: &str) {
+    let mut sessions = serve.shared.sessions.lock().await;
+    let session = sessions.get_mut(id).expect("fixture attachment");
+    session.retained_output = None;
+    let reader = session.attachment_reader(0);
+    session
+        .rendition
+        .as_ref()
+        .expect("fixture rendition")
+        .readers
+        .lock()
+        .await
+        .insert(id.into(), reader);
+}
+
+/// A sealed receipt drives real GET delivery and exact registry restoration.
+#[cfg(test)]
+pub(crate) async fn test_assert_sealed_cached_delivery(
+    serve: &VodServe,
+    id: &str,
+    expected: &crate::transcode::RetainedOutputFacts,
+) {
+    use tokio::io::AsyncReadExt;
+    let publication = serve
+        .segment_before(
+            id,
+            "seg00000.m4s",
+            Some(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .expect("cached session");
+    let mut member = publication
+        .result
+        .expect("cached delivery")
+        .expect("member");
+    let mut bytes = Vec::new();
+    member
+        .file
+        .read_to_end(&mut bytes)
+        .await
+        .expect("real body");
+    assert_eq!(bytes, vec![0; 1000]);
+    assert!(member.etag.contains(&expected.artifact_id));
+    let rendition = publication
+        .owner
+        .rendition
+        .as_ref()
+        .expect("exact rendition");
+    assert!(
+        serve
+            .shared
+            .retained_artifacts
+            .acquire_expected_for_request(expected, rendition, &rendition.recipe.retained_logical)
+            .is_some(),
+        "sealed receipt is strict restore authority"
+    );
+    let mut changed = expected.clone();
+    changed.artifact_id = uuid::Uuid::new_v4().to_string();
+    assert!(serve
+        .shared
+        .retained_artifacts
+        .acquire_expected_for_request(&changed, rendition, &rendition.recipe.retained_logical)
+        .is_none());
+    let readers = rendition.readers.lock().await;
+    let manifest = rendition.manifest.lock().await;
+    assert!(
+        super::driver::playback_demands(&serve.shared.pool, rendition, &readers, &manifest)
+            .is_empty()
+    );
+}
+
 /// Synthetic completed bytes through the existing Sink/retained registry.
 /// This checks digest-key isolation, not encoded-media qualification.
 #[cfg(test)]
@@ -1079,6 +1164,50 @@ impl RetainedArtifactRegistry {
         incoming_file: &MediaFile,
         request: &SessionRequest,
     ) -> Option<Arc<RetainedVodArtifact>> {
+        if tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG) {
+            tracing::debug!(target: "plurxd::retained_reuse",
+                context_present = request.candidate_context.is_some(),
+                binding_present = rendition.recipe.measured_candidate.is_some(),
+                incoming_logical_present = incoming_logical.is_some(),
+                request_audio_present = request.audio_delivery.is_some(),
+                recipe_audio_present = rendition.recipe.audio_delivery.is_some(),
+                request_audio_valid = request.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                recipe_audio_valid = rendition.recipe.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                audio_identity_matches = request.audio_delivery.as_ref().zip(rendition.recipe.audio_delivery.as_ref())
+                    .is_some_and(|(r, a)| r.byte_identity() == a.byte_identity()),
+                "Prepared candidate acquisition prerequisites");
+            if let Some((context, binding)) = request
+                .candidate_context
+                .as_ref()
+                .zip(rendition.recipe.measured_candidate.as_ref())
+            {
+                let candidate = &context.selected_candidate;
+                let matches = serde_json::json!({
+                    "presentation_vod": request.presentation == crate::transcode::Presentation::Vod,
+                    "candidate_identity": candidate.identity_matches(),
+                    "decoder_compatible": candidate.decoder_compatible,
+                    "candidate_id": candidate.id == context.candidate_id,
+                    "candidate_recipe": candidate.recipe_digest == context.recipe_digest,
+                    "candidate_geometry": candidate.normalized_geometry == context.normalized_geometry,
+                    "candidate_grade": candidate.grade == context.grade,
+                    "binding_id": binding.candidate_id == context.candidate_id,
+                    "binding_recipe": binding.recipe_digest == context.recipe_digest,
+                    "binding_geometry": binding.normalized_geometry == context.normalized_geometry,
+                    "binding_profile": binding.profile == context.profile,
+                    "binding_grade": binding.grade == context.grade,
+                    "binding_route": binding.route == candidate.route,
+                    "binding_kind": binding.kind == request.kind,
+                    "binding_request_file": binding.file_id == request.file_id,
+                    "binding_incoming_file": binding.file_id == incoming_file.id,
+                    "binding_audio_index": binding.audio_index == request.audio_index,
+                    "binding_request_audio_offset": binding.audio_offset_ms == request.audio_offset_ms,
+                    "binding_incoming_audio_offset": binding.audio_offset_ms == incoming_file.audio_offset_ms,
+                    "binding_subtitle": binding.subtitle_burn == request.subtitle_burn,
+                });
+                tracing::debug!(target: "plurxd::retained_reuse", request_binding_fields = %matches,
+                    "Prepared candidate acquisition request comparisons");
+            }
+        }
         let context = request.candidate_context.as_ref()?;
         let binding = rendition.recipe.measured_candidate.as_ref()?;
         let candidate = &context.selected_candidate;
@@ -1105,7 +1234,15 @@ impl RetainedArtifactRegistry {
         {
             return None;
         }
-        let audio = request.audio_delivery.as_ref()?;
+        // HTTP encoded delivery remains provisional until this incoming
+        // producer selects its route. Never borrow a shared recipe as authority.
+        let audio = if matches!(request.kind, SessionKind::Transcode { .. }) {
+            incoming_logical
+                .as_ref()?
+                .encoded_audio_for_request(request, incoming_file)?
+        } else {
+            request.audio_delivery.as_ref()?
+        };
         if !audio.valid_snapshot()
             || !rendition
                 .recipe
@@ -1129,11 +1266,17 @@ impl RetainedArtifactRegistry {
         candidate: Option<&RetainedCandidateBinding>,
     ) -> Option<Arc<RetainedVodArtifact>> {
         if incoming_logical.is_none() {
+            tracing::debug!(target: "plurxd::retained_reuse",
+                incoming_logical_present = false,
+                "Prepared retained output acquisition unavailable");
             return None;
         }
         let (executable_digest, engine_digest) = match &rendition.recipe.encoding {
             Some(encoding) => {
                 if !recipe_engine_is_current(&rendition.recipe).await {
+                    tracing::debug!(target: "plurxd::retained_reuse",
+                        recipe_engine_current = false,
+                        "Prepared retained output acquisition unavailable");
                     return None;
                 }
                 (
@@ -1147,12 +1290,63 @@ impl RetainedArtifactRegistry {
                 (executable.digest, engine.digest)
             }
         };
-        let source_metadata = manual_source_metadata(incoming_file)?;
+        let Some(source_metadata) = manual_source_metadata(incoming_file) else {
+            tracing::debug!(target: "plurxd::retained_reuse",
+                source_metadata_available = false,
+                "Prepared retained output acquisition unavailable");
+            return None;
+        };
         let facts = {
             // Registry is capped at MAX_ARTIFACTS. Keep no lock over awaits.
             let state = self.state.lock().expect("retained registry lock");
             state.entries.values().find_map(|entry| {
                 let artifact = &entry.artifact;
+                // Emit only bounded equality facts for a relevant retained
+                // candidate. The authoritative predicate below stays separate.
+                if tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG)
+                    && artifact.candidate.as_ref().zip(candidate).is_some_and(|(actual, requested)| {
+                        actual.candidate_id == requested.candidate_id
+                    })
+                {
+                    let origin = artifact.private_preparation_origin.get();
+                    let actual = artifact.candidate.as_ref().expect("matched candidate");
+                    let requested = candidate.expect("matched candidate");
+                    let binding = serde_json::json!({
+                        "kind": actual.kind == requested.kind,
+                        "normalized_geometry": actual.normalized_geometry == requested.normalized_geometry,
+                        "profile": actual.profile == requested.profile,
+                        "candidate_id": actual.candidate_id == requested.candidate_id,
+                        "recipe_digest": actual.recipe_digest == requested.recipe_digest,
+                        "file_id": actual.file_id == requested.file_id,
+                        "audio_index": actual.audio_index == requested.audio_index,
+                        "audio_offset_ms": actual.audio_offset_ms == requested.audio_offset_ms,
+                        "subtitle_burn": actual.subtitle_burn == requested.subtitle_burn,
+                        "grade": actual.grade == requested.grade,
+                        "route": actual.route == requested.route,
+                    });
+                    let logical = artifact.logical.as_ref().zip(incoming_logical.as_ref())
+                        .map(|(actual, requested)| actual.comparison(requested));
+                    tracing::debug!(target: "plurxd::retained_reuse",
+                        origin_present = origin.is_some(),
+                        origin_artifact_matches = origin.is_some_and(|o| o.artifact_id == artifact.id),
+                        executable_matches = origin.is_some_and(|o| o.executable == executable_digest),
+                        engine_matches = origin.is_some_and(|o| o.engine == engine_digest),
+                        source_metadata_matches = origin.is_some_and(|o| o.source_metadata == source_metadata),
+                        candidate_matches = artifact.candidate.as_ref() == candidate,
+                        actual_audio_valid = artifact.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                        requested_audio_valid = rendition.recipe.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                        audio_identity_matches = artifact.audio_delivery.as_ref().zip(rendition.recipe.audio_delivery.as_ref())
+                            .is_some_and(|(a, r)| a.byte_identity() == r.byte_identity()),
+                        validated = artifact.validated.load(Acquire),
+                        logical_matches = artifact.logical == *incoming_logical,
+                        playlist_matches = artifact.observation.preimage.playlist == rendition.playlist,
+                        source_present = rendition.source.is_some(),
+                        source_unchanged = rendition.source.as_ref().is_some_and(|s| s.unchanged()),
+                        source_version_matches = rendition.source.as_ref().is_some_and(|s| s.object_version() == artifact.source_version),
+                        candidate_fields = %binding,
+                        logical_fields = ?logical,
+                        "Prepared retained output acquisition comparison");
+                }
                 let origin = artifact.private_preparation_origin.get()?;
                 (origin.artifact_id == artifact.id
                     && origin.executable == executable_digest
@@ -1808,6 +2002,19 @@ mod tests {
         Arc<Rendition>,
         crate::transcode::RetainedOutputFacts,
     ) {
+        let (temp, serve, rendition, facts, _) = durable_fixture_with_candidate(false).await;
+        (temp, serve, rendition, facts)
+    }
+
+    async fn durable_fixture_with_candidate(
+        encoded_candidate: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+        SessionRequest,
+    ) {
         use crate::vodgen::Sink;
         let temp = crate::test_tempdir().expect("durable fixture");
         let serve = crate::vodserve::tests::bare_serve(temp.path());
@@ -1816,8 +2023,27 @@ mod tests {
         tokio::fs::write(&source_path, b"exact durable source")
             .await
             .expect("source");
-        let file = crate::vodserve::tests::media_file_at(source_path, 10_000);
-        let request = SessionRequest {
+        let mut file = crate::vodserve::tests::media_file_at(
+            source_path,
+            if encoded_candidate {
+                plan_duration_ms(&rendition.plan)
+            } else {
+                10_000
+            },
+        );
+        if encoded_candidate {
+            file.audio_streams = vec![plurx_core::domain::AudioStream {
+                index: 0,
+                codec: "aac".into(),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                channel_layout: Some("stereo".into()),
+                language: None,
+                title: None,
+                default: true,
+            }];
+        }
+        let mut request = SessionRequest {
             sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false,
@@ -1848,7 +2074,58 @@ mod tests {
             block_budget_secs: None,
             transport: None,
         };
+        if encoded_candidate {
+            use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+            let digest = [42; 32];
+            let candidate = QualityCandidate {
+                id: CandidateId::for_recipe_digest(digest),
+                recipe_digest: digest,
+                route: CandidateRoute::Encode,
+                normalized_geometry: true,
+                width: 854,
+                height: 480,
+                target_height: 480,
+                planned_codec: None,
+                average_bps: None,
+                peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            };
+            request.kind = SessionKind::Transcode { height: 480 };
+            request.audio_claim = Some(plurx_core::playback::audio::canonical_producer_claim());
+            request.candidate_context = Some(Box::new(
+                crate::transcode::TranscodeManager::candidate_context(&candidate),
+            ));
+        }
+        let mut resolved_request = request.clone();
+        if encoded_candidate {
+            let audio = plurx_core::playback::audio::resolve_audio(
+                file.audio_streams.first(),
+                &request.audio_claim.as_ref().expect("typed claim").profile(),
+                plurx_core::playback::audio::AudioRoute::EncodedVod,
+                file.audio_offset_ms,
+            );
+            resolved_request.audio_delivery = Some(audio);
+        }
         let owned = Arc::get_mut(&mut rendition).expect("unshared rendition");
+        if let Some(context) = request.candidate_context.as_ref() {
+            owned.recipe.measured_candidate = Some(RetainedCandidateBinding {
+                kind: request.kind,
+                normalized_geometry: context.normalized_geometry,
+                profile: context.profile,
+                candidate_id: context.candidate_id,
+                recipe_digest: context.recipe_digest,
+                file_id: file.id,
+                audio_index: request.audio_index,
+                audio_offset_ms: request.audio_offset_ms,
+                subtitle_burn: request.subtitle_burn,
+                grade: context.grade,
+                route: context.selected_candidate.route,
+            });
+            owned.recipe.audio_delivery = resolved_request.audio_delivery.clone();
+        }
         owned.key = "a".repeat(64);
         owned.source = Some(
             crate::fragment_index_cluster::open_source_fence(&file, None)
@@ -1857,7 +2134,7 @@ mod tests {
         );
         owned.recipe.retained_logical =
             Some(super::super::retained_manifest::LogicalOutput::resolve(
-                &request,
+                &resolved_request,
                 None,
                 &file,
                 owned.recipe.video,
@@ -1904,9 +2181,456 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         let facts = artifact.facts();
+        if encoded_candidate {
+            // This fixture publishes real complete Sink bytes and source fences;
+            // its private preparation authority is minted only inside the test.
+            // It is a registry reuse regression, not encoded-media qualification.
+            artifact
+                .private_preparation_origin
+                .set(PreparedOrigin {
+                    _reservation: uuid::Uuid::new_v4(),
+                    artifact_id: artifact.id,
+                    executable: crate::ffmpeg::EncodedExecutable::capture()
+                        .await
+                        .expect("current executable")
+                        .digest,
+                    engine: crate::ffmpeg::EncodedEngine::capture(None)
+                        .await
+                        .expect("current engine")
+                        .digest,
+                    source_metadata: manual_source_metadata(&rendition.recipe.file)
+                        .expect("source metadata"),
+                })
+                .expect("one private origin");
+        }
         drop(artifact);
         drop(sink);
-        (temp, serve, rendition, facts)
+        (temp, serve, rendition, facts, request)
+    }
+
+    #[tokio::test]
+    async fn encoded_candidate_reuses_completed_output_with_resolved_claim_audio() {
+        let (_temp, serve, rendition, facts, request) = durable_fixture_with_candidate(true).await;
+        assert!(
+            request.audio_delivery.is_none(),
+            "ordinary encoded create is provisional"
+        );
+        let logical = &rendition.recipe.retained_logical;
+        let reused = serve
+            .shared
+            .retained_artifacts
+            .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &request)
+            .await
+            .expect("reuse exact server-resolved encoded audio");
+        assert_eq!(reused.facts(), facts);
+        let member = reused
+            .open(
+                Some(0),
+                &Arc::new(crate::meter::Meter::default()),
+                &serve.shared,
+                &rendition,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("exact retained member");
+        assert_eq!(member.len, 1000);
+        assert!(member.etag.contains(&facts.artifact_id));
+
+        let mut altered = request.clone();
+        altered.audio_claim.as_mut().expect("claim").sinks[0].max_channels = 1;
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .await
+                .is_none(),
+            "changed route claim refuses"
+        );
+        altered = request.clone();
+        altered.audio_offset_ms = 1;
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .await
+                .is_none(),
+            "changed source offset refuses"
+        );
+        altered = request.clone();
+        altered.audio_delivery = Some(plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::None,
+            downmix: None,
+            reason: "wrong retained snapshot".into(),
+        });
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .await
+                .is_none(),
+            "explicit mismatched audio must not fallback"
+        );
+        let mut invalid = request.clone();
+        invalid.audio_delivery = Some(plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::Encode {
+                codec: "aac".into(),
+                channels: 0,
+                layout: None,
+                bitrate_kbps: 0,
+                sample_rate: 0,
+            },
+            downmix: None,
+            reason: "invalid issued snapshot".into(),
+        });
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &invalid)
+                .await
+                .is_none(),
+            "invalid explicit snapshot must not fallback"
+        );
+        let mut claimless = request.clone();
+        claimless.audio_claim = None;
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &claimless)
+                .await
+                .is_none(),
+            "missing snapshot cannot borrow authority without its typed claim"
+        );
+        let mut altered_logical = serde_json::to_value(logical).expect("logical");
+        altered_logical["audio_delivery"] =
+            serde_json::to_value(altered.audio_delivery).expect("wrong audio");
+        let altered_logical = serde_json::from_value(altered_logical).expect("altered logical");
+        assert!(
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_prepared_candidate(
+                    &rendition,
+                    &altered_logical,
+                    &rendition.recipe.file,
+                    &request
+                )
+                .await
+                .is_none(),
+            "wrong resolved audio refuses"
+        );
+    }
+
+    async fn cached_session_fixture() -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+        Session,
+    ) {
+        let (temp, serve, fresh, facts, session, _) = cached_session_fixture_for(None).await;
+        (temp, serve, fresh, facts, session)
+    }
+
+    async fn cached_session_fixture_for(
+        start: Option<f64>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+        Session,
+        Option<SessionRequest>,
+    ) {
+        let (temp, serve, completed, facts, request) = if let Some(start) = start {
+            let (temp, serve, completed, facts, mut request) =
+                durable_fixture_with_candidate(true).await;
+            request.start_seconds = start;
+            (temp, serve, completed, facts, Some(request))
+        } else {
+            let (temp, serve, completed, facts) = durable_fixture().await;
+            (temp, serve, completed, facts, None)
+        };
+        // A new attachment can have no live manifest bytes, even though its
+        // independently verified immutable response covers the whole title.
+        let mut fresh =
+            crate::vodserve::tests::synthetic_rendition(&temp.path().join("incoming")).await;
+        let incoming = Arc::get_mut(&mut fresh).expect("new incoming rendition");
+        incoming.key = "b".repeat(64);
+        incoming.recipe.file = completed.recipe.file.clone();
+        incoming.recipe.retained_logical = completed.recipe.retained_logical.clone();
+        incoming.recipe.audio_delivery = completed.recipe.audio_delivery.clone();
+        incoming.recipe.measured_candidate = completed.recipe.measured_candidate.clone();
+        incoming.source = Some(
+            crate::fragment_index_cluster::open_source_fence(&incoming.recipe.file, None)
+                .await
+                .expect("same held source"),
+        );
+        let artifact = if let Some(request) = request.as_ref() {
+            let mut resolved = request.clone();
+            resolved.audio_delivery = completed.recipe.audio_delivery.clone();
+            let logical = super::super::retained_manifest::LogicalOutput::resolve(
+                &resolved,
+                None,
+                &fresh.recipe.file,
+                fresh.recipe.video,
+            );
+            assert!(
+                Some(logical) == fresh.recipe.retained_logical,
+                "70.841 seek changes demand, not the full zero-origin delivery tuple"
+            );
+            assert!(
+                fresh
+                    .output_measurement
+                    .lock()
+                    .expect("measurement")
+                    .complete_rates()
+                    .is_none(),
+                "no fresh measurement shortcut"
+            );
+            assert!(
+                request.start_seconds * 1000.0
+                    < fresh.recipe.file.duration_ms.expect("full fixture source") as f64
+            );
+            assert!(entry_containing(&fresh.plan, request.start_seconds) > 0);
+            assert!(
+                fresh.readers.lock().await.is_empty(),
+                "actual New acquisition precedes attachment"
+            );
+            serve
+                .capture_retained_output(
+                    RetainedOutputCapture::New,
+                    &fresh,
+                    &fresh.recipe.retained_logical,
+                    request,
+                    &fresh.recipe.file,
+                    false,
+                )
+                .await
+                .expect("first capture")
+                .expect("actual private candidate acquired")
+        } else {
+            serve
+                .shared
+                .retained_artifacts
+                .acquire_expected_for_request(&facts, &fresh, &fresh.recipe.retained_logical)
+                .expect("verified incoming cached attachment")
+        };
+        let session = Session {
+            children: Vec::new(),
+            passive_grant: None,
+            rendition: Some(Arc::clone(&fresh)),
+            retained_output: Some(artifact),
+            rendition_key: fresh.key.clone(),
+            file: Arc::new(fresh.recipe.file.clone()),
+            playback_id: "cached-attachment".into(),
+            user_name: "fixture".into(),
+            item_title: "Fixture".into(),
+            started_unix: 1,
+            target_height: request.as_ref().map_or(360, |request| match request.kind {
+                SessionKind::Transcode { height } => height,
+                _ => 360,
+            }),
+            kind: request.as_ref().map_or(
+                SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                },
+                |request| request.kind,
+            ),
+            supersession_user: "fixture".into(),
+            block_budget: Duration::from_secs(1),
+            sdr_master_codecs: false,
+            lifecycle: serve.shared.session_lifecycle("cached"),
+            incarnation: Arc::new(()),
+            last_touch: StdMutex::new(Instant::now()),
+            delivery: Arc::new(crate::meter::Meter::default()),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
+            marker_destinations: Vec::new(),
+            control_observed_at: None,
+            last_control_snapshot: None,
+            control_end: None,
+            control_end_snapshot: None,
+            prepared_incarnation: None,
+            terminal_cleanup: None,
+            tombstone: None,
+        };
+        (temp, serve, fresh, facts, session, request)
+    }
+
+    pub(super) async fn post_attachment_output_facts_fixture() -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        crate::vodserve::VodHlsFacts,
+        SessionRequest,
+    ) {
+        // Exercise the SAME New capture branch as FirstPreparation at 70.841s,
+        // before any reader/Session exists. Bytes are synthetic Sink publications.
+        let (temp, serve, rendition, _, mut session, request) =
+            cached_session_fixture_for(Some(70.841)).await;
+        let mut request = request.expect("actual first acquisition request");
+        request.playback_id = "first-capture".into();
+        session.playback_id = request.playback_id.clone();
+        let at = entry_containing(&rendition.plan, 70.841);
+        let reader = session.attachment_reader(at);
+        assert_eq!(reader.frontier, at);
+        assert!(reader.authority_only);
+        rendition
+            .readers
+            .lock()
+            .await
+            .insert("00000000-0000-4000-8000-00000000cace".into(), reader);
+        serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .insert("00000000-0000-4000-8000-00000000cace".into(), session);
+        let facts = serve
+            .hls_facts("00000000-0000-4000-8000-00000000cace")
+            .await
+            .expect("actual cached post-attachment snapshot");
+        (temp, serve, facts, request)
+    }
+
+    #[tokio::test]
+    async fn failed_preparation_cleanup_does_not_end_replacement_owner() {
+        let (_temp, serve, initial, _) = post_attachment_output_facts_fixture().await;
+        let id = "00000000-0000-4000-8000-00000000cace";
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let replacement = sessions.get_mut(id).expect("replacement");
+            replacement.incarnation = Arc::new(());
+        }
+        let replacement = serve.hls_facts(id).await.expect("replacement facts");
+        serve.end_for_owner(id, &initial.response_owner).await;
+        assert!(
+            serve
+                .response_status_owner_is_current(id, &replacement.response_owner)
+                .await
+        );
+        super::test_assert_sealed_cached_delivery(
+            &serve,
+            id,
+            &replacement
+                .response_owner
+                .retained_output_facts()
+                .expect("private proof"),
+        )
+        .await;
+        serve.end_for_owner(id, &replacement.response_owner).await;
+        assert!(serve.hls_facts(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cached_attachment_serves_retained_bytes_without_driver_demand() {
+        let (_temp, serve, fresh, facts, mut session) = cached_session_fixture().await;
+        let owner = session.response_owner();
+        let mut cached = session.attachment_reader(0);
+        cached.accept_control(1, 33);
+        fresh.readers.lock().await.insert("cached".into(), cached);
+        let cached_wait = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: fresh.key.clone(),
+                    index: 33,
+                },
+                "cached",
+            )
+            .expect("bounded accidental cached wait");
+        {
+            let readers = fresh.readers.lock().await;
+            let manifest = fresh.manifest.lock().await;
+            assert!(
+                super::super::driver::playback_demands(
+                    &serve.shared.pool,
+                    &fresh,
+                    &readers,
+                    &manifest
+                )
+                .is_empty(),
+                "neither cached frontier nor a cached waiter starts a producer"
+            );
+            assert_eq!(readers["cached"].control_sequence, Some(1));
+            assert_eq!(readers["cached"].frontier, 33);
+        }
+        assert!(fresh.reader_windows().await.is_empty());
+        let member = owner
+            .retained_output
+            .as_ref()
+            .expect("response owns exact lease")
+            .open(
+                Some(0),
+                &session.delivery,
+                &serve.shared,
+                &fresh,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("retained bytes remain available without a producer");
+        assert_eq!(member.len, 1000);
+        assert!(member.etag.contains(&facts.artifact_id));
+
+        session.retained_output = None;
+        fresh
+            .readers
+            .lock()
+            .await
+            .insert("ordinary".into(), session.attachment_reader(2));
+        let ordinary_wait = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: fresh.key.clone(),
+                    index: 2,
+                },
+                "ordinary",
+            )
+            .expect("ordinary missing media");
+        {
+            let readers = fresh.readers.lock().await;
+            let manifest = fresh.manifest.lock().await;
+            let demands = super::super::driver::playback_demands(
+                &serve.shared.pool,
+                &fresh,
+                &readers,
+                &manifest,
+            );
+            assert!(
+                demands
+                    .iter()
+                    .any(|d| d.blocked_on == Some(2) && d.foreground),
+                "an ordinary missing byte still demands production"
+            );
+            assert!(!demands.iter().any(|d| d.blocked_on == Some(33)));
+        }
+        fresh.detach_reader(&serve.shared.pool, "ordinary").await;
+        fresh.detach_reader(&serve.shared.pool, "cached").await;
+        drop(ordinary_wait);
+        drop(cached_wait);
+        {
+            let readers = fresh.readers.lock().await;
+            let manifest = fresh.manifest.lock().await;
+            assert!(readers.is_empty());
+            assert!(
+                super::super::driver::playback_demands(
+                    &serve.shared.pool,
+                    &fresh,
+                    &readers,
+                    &manifest
+                )
+                .is_empty(),
+                "actual detach retires every frontier and waiter"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2024,6 +2748,61 @@ mod tests {
             .replace(&segment_name(0), "../outside.m4s")
             .into_bytes();
         assert!(manifest.observation().is_err());
+    }
+
+    #[tokio::test]
+    async fn durable_reacquisition_ignores_the_dispatch_owner_of_the_sealed_tuple() {
+        // A first preparation seals with its bound dispatch owner, while
+        // recovery rebuilds the context from the durable catalog with no
+        // owner. The bytes are the same, so the restart must still restore.
+        let (temp, old, rendition, facts) = durable_fixture().await;
+        drop(old);
+        let sealed = rendition
+            .recipe
+            .retained_logical
+            .clone()
+            .expect("sealed logical tuple");
+        let mut recovered = serde_json::to_value(&sealed).expect("logical");
+        recovered["owner_node_id"] = match recovered["owner_node_id"] {
+            serde_json::Value::Null => serde_json::json!("node-that-dispatched"),
+            _ => serde_json::Value::Null,
+        };
+        let recovered: super::super::retained_manifest::LogicalOutput =
+            serde_json::from_value(recovered).expect("recovered logical");
+        let fresh = crate::vodserve::tests::bare_serve(temp.path());
+        fresh.shared.retained_artifacts.collect(temp.path()).await;
+        let artifact = fresh
+            .shared
+            .retained_artifacts
+            .reacquire_expected_for_request(
+                &facts,
+                &fresh.shared,
+                &rendition,
+                &Some(recovered.clone()),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("owner-independent durable restore");
+        assert_eq!(artifact.facts(), facts);
+        drop(artifact);
+        let mut different = serde_json::to_value(&recovered).expect("logical");
+        different["audio_offset_ms"] = serde_json::json!(250);
+        let different = serde_json::from_value(different).expect("different logical");
+        assert!(
+            fresh
+                .shared
+                .retained_artifacts
+                .reacquire_expected_for_request(
+                    &facts,
+                    &fresh.shared,
+                    &rendition,
+                    &Some(different),
+                    Duration::from_secs(5),
+                )
+                .await
+                .is_none(),
+            "a delivery field still refuses"
+        );
     }
 
     #[tokio::test]

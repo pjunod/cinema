@@ -1,0 +1,181 @@
+#!/usr/bin/env node
+"use strict";
+
+// Offline diagnostics only. Never replaces the original qualification verdict.
+// Usage: node scripts/playback-optical-attribution REPORT.json OPTICAL.json FRAMES.md5 RGB.raw
+// Redirect stdout to a NEW receipt; the four inputs are opened read-only.
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const path = require("node:path");
+const {FRAME_CLOCK, decodeFrameClockRgb, analyzeFrameClock} = require("./playback-frame-clock");
+
+const samplingLimit = 12.5;
+const holdLimit = 100;
+const xcbSource = "https://github.com/FFmpeg/FFmpeg/blob/n8.0.1/libavdevice/xcbgrab.c#L388-L445";
+const sha256 = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+const max = values => values.length ? Math.max(...values) : null;
+
+function readCapture(md5Text, rawPath) {
+  if (!/^#tb 0: 1\/1000000$/m.test(md5Text)
+      || !/^#dimensions 0: 336x4$/m.test(md5Text)
+      || !/^#hash: MD5$/m.test(md5Text)) {
+    throw new Error("Expected stream 0, microsecond timebase, 336x4 RGB24 with MD5 checksums");
+  }
+  const stride = FRAME_CLOCK.readWidth * FRAME_CLOCK.readHeight * 3;
+  const bytes = Buffer.alloc(stride), samples = [], rawHash = crypto.createHash("sha256");
+  const fd = fs.openSync(rawPath, "r");
+  let offset = 0;
+  try {
+    for (const line of md5Text.split(/\r?\n/)) {
+      if (!line.trim() || line.startsWith("#")) continue;
+      const fields = line.split(",").map(value => value.trim());
+      const [stream, dts, pts, duration, size] = fields.slice(0, 5).map(Number);
+      if (fields.length !== 6 || stream !== 0 || dts !== pts || size !== stride
+          || !Number.isSafeInteger(pts) || !Number.isSafeInteger(duration) || duration <= 0
+          || !/^[a-f0-9]{32}$/.test(fields[5])) throw new Error(`Invalid checksum row at packet ${samples.length}`);
+      if (fs.readSync(fd, bytes, 0, stride, offset) !== stride) throw new Error("Truncated RGB packet");
+      if (crypto.createHash("md5").update(bytes).digest("hex") !== fields[5]) {
+        throw new Error(`RGB/checksum mismatch at packet ${samples.length}`);
+      }
+      rawHash.update(bytes);
+      samples.push({packet: samples.length, at_ms: pts / 1000, frame: decodeFrameClockRgb(bytes)});
+      offset += stride;
+    }
+    if (!samples.length || offset !== fs.fstatSync(fd).size) throw new Error("RGB/checksum packet count mismatch");
+  } finally {fs.closeSync(fd);}
+  return {samples, integrity: {packets_verified: samples.length, raw_bytes: offset, raw_sha256: rawHash.digest("hex")}};
+}
+
+function describeRuns(samples, startMs, endMs) {
+  const runs = [], holes = [], skipped = [];
+  let run = null, previous = null;
+  function finish(next) {
+    if (!run) return;
+    run.next_at_ms = next?.at_ms ?? null;
+    run.bracketed = run.previous_at_ms !== null && run.next_at_ms !== null;
+    run.lower_ms = run.last_at_ms - run.first_at_ms;
+    run.upper_ms = (run.next_at_ms ?? endMs) - (run.previous_at_ms ?? startMs);
+    // xcbgrab timestamps before synchronous acquisition. With unretimed,
+    // one-to-one packets, the next packet's PTS bounds completion of this one.
+    // Keep this conditional model separate from the original point-PTS rule.
+    const afterFirst = samples[run.first_packet + 1];
+    const afterNext = next && samples[next.packet + 1];
+    run.acquisition_interval_model = {
+      lower_ms: afterFirst ? Math.max(0, run.last_at_ms - afterFirst.at_ms) : null,
+      upper_ms: run.bracketed && afterNext && afterNext.at_ms <= endMs
+        ? afterNext.at_ms - run.previous_at_ms : null};
+    if (next) run.maximum_sampling_gap_ms = Math.max(run.maximum_sampling_gap_ms, next.at_ms - run.last_at_ms);
+    runs.push(run);
+    run = null;
+  }
+  for (const sample of samples) {
+    if (sample.at_ms < startMs || sample.at_ms > endMs) continue;
+    if (previous && sample.at_ms <= previous.at_ms) throw new Error("Capture timestamps are not strictly increasing");
+    const delta = sample.at_ms - (previous?.at_ms ?? startMs);
+    if (delta > samplingLimit) holes.push({from_packet: previous?.packet ?? null,
+      to_packet: sample.packet, from_frame: previous?.frame ?? null, to_frame: sample.frame,
+      from_at_ms: previous?.at_ms ?? startMs, to_at_ms: sample.at_ms, gap_ms: delta});
+    if (sample.frame === null) {finish(null); previous = sample; continue;}
+    if (previous?.frame !== null && previous?.frame !== undefined && sample.frame > previous.frame + 1) {
+      skipped.push({from_frame: previous.frame, to_frame: sample.frame,
+        missing_counters: sample.frame - previous.frame - 1, sampling_gap_ms: delta,
+        capture_hole: delta > samplingLimit, from_packet: previous.packet, to_packet: sample.packet});
+    }
+    if (!run || sample.frame !== run.frame) {
+      finish(sample);
+      run = {frame: sample.frame, first_packet: sample.packet, last_packet: sample.packet,
+        first_at_ms: sample.at_ms, last_at_ms: sample.at_ms,
+        previous_at_ms: previous?.frame !== null ? previous?.at_ms ?? null : null,
+        maximum_sampling_gap_ms: delta, samples: 1};
+    } else {
+      run.last_packet = sample.packet; run.last_at_ms = sample.at_ms; run.samples++;
+      run.maximum_sampling_gap_ms = Math.max(run.maximum_sampling_gap_ms, delta);
+    }
+    previous = sample;
+  }
+  finish(null);
+  if (endMs - (previous?.at_ms ?? startMs) > samplingLimit) holes.push({from_packet: previous?.packet ?? null,
+    to_packet: null, from_at_ms: previous?.at_ms ?? startMs, to_at_ms: endMs,
+    gap_ms: endMs - (previous?.at_ms ?? startMs)});
+  return {runs, holes, skipped};
+}
+
+function sourceWindow(runs, fromSeconds, toSeconds) {
+  if (![fromSeconds, toSeconds].every(Number.isFinite)) return null;
+  // Include both endpoints plus a frame on each side. Source position matching
+  // does not claim synchronization between browser and recorder wall clocks.
+  const low = Math.round(Math.min(fromSeconds, toSeconds) * FRAME_CLOCK.fps) - 1;
+  const high = Math.round(Math.max(fromSeconds, toSeconds) * FRAME_CLOCK.fps) + 1;
+  if (low < 0 || high > 0xffffff || high - low > 2400) return null;
+  const selected = runs.filter(run => run.frame >= low && run.frame <= high);
+  const seen = new Set(selected.map(run => run.frame));
+  const missing = [];
+  for (let frame = low; frame <= high; frame++) if (!seen.has(frame)) missing.push(frame);
+  return {from_counter: low, through_counter: high, missing_counters: missing,
+    duplicate_runs: selected.length - seen.size,
+    fully_sampled: !missing.length && selected.length === seen.size
+      && selected.every(run => run.bracketed && run.maximum_sampling_gap_ms <= samplingLimit),
+    maximum_hold_lower_ms: max(selected.map(run => run.lower_ms)),
+    maximum_hold_upper_ms: max(selected.map(run => run.upper_ms)), runs: selected};
+}
+
+function analyze(report, optical, capture) {
+  const {start_ms: startMs, end_ms: endMs} = optical;
+  const strict = analyzeFrameClock(capture.samples, {startMs, endMs, maximumSamplingGapMs: samplingLimit});
+  const {runs, holes, skipped} = describeRuns(capture.samples, startMs, endMs);
+  const results = report.results.map(result => ({name: result.name, original_status: result.status,
+    original_errors: result.errors, changes: (result.operation_detail?.changes || []).map((change, index) => {
+      const gap = change.frame_probe_gap_detail, callback = change.frame_probe_callback_gap_detail;
+      const presented = change.continuous_after?.presented;
+      const joinSeconds = presented?.film_tick / presented?.timescale;
+      return {index: index + 1, original_video_gap_ms: change.video_gap_ms,
+        original_gap_detail: gap, original_callback_detail: callback,
+        join_seconds: Number.isFinite(joinSeconds) ? joinSeconds : null,
+        join: sourceWindow(runs, joinSeconds, joinSeconds),
+        gap_media_position: sourceWindow(runs, gap?.from_media_time, gap?.to_media_time),
+        callback_element_position: sourceWindow(runs, callback?.from?.current_time, callback?.to?.current_time)};
+    })}));
+  const long = runs.filter(run => run.upper_ms > holdLimit);
+  return {schema_version: 1, scope: "offline preserved software-display capture attribution; no qualification override",
+    limits: {maximum_sampling_gap_ms: samplingLimit, maximum_hold_ms: holdLimit},
+    assumptions: ["Hold bounds describe the sampled surface, not physical display or audio.",
+      "A repeatedly captured counter can be held by playback, compositor, Xvfb or acquisition; this file alone cannot distinguish them.",
+      "Source-position comparisons do not synchronize browser and capture clocks; callback media timestamps can be anomalous.",
+      "No gap, skipped counter, callback fault or original failed verdict is removed."],
+    acquisition_interval_model: {source: xcbSource,
+      condition: "Only if these are unretimed one-to-one xcbgrab packets, with synchronous acquisition and a stable capture wall clock.",
+      method: "Each image acquisition falls between its PTS and the next packet PTS. Lower hold = last PTS minus PTS after first; upper hold = PTS after next differing image minus previous differing image PTS.",
+      limitation: "Conditional sensitivity analysis, not measured request/reply times or a replacement qualification verdict."},
+    original_optical: optical, recomputed_optical: strict, integrity: capture.integrity,
+    original_metrics_reproduced: Object.entries(optical.optical || {}).every(([key, value]) => strict[key] === value),
+    attribution: {runs: runs.length, capture_holes: holes.length,
+      maximum_sampling_gap_ms: max(runs.map(run => run.maximum_sampling_gap_ms).concat(holes.map(hole => hole.gap_ms))),
+      skipped_counters_with_capture_hole: skipped.filter(row => row.capture_hole).reduce((n, row) => n + row.missing_counters, 0),
+      skipped_counters_without_capture_hole: skipped.filter(row => !row.capture_hole).reduce((n, row) => n + row.missing_counters, 0),
+      holds_upper_over_limit: long.length,
+      holds_lower_over_limit_without_capture_hole: long.filter(run => run.lower_ms > holdLimit && run.bracketed
+        && run.maximum_sampling_gap_ms <= samplingLimit).length,
+      acquisition_model_lower_over_limit_without_capture_hole: long.filter(run => run.bracketed
+        && run.maximum_sampling_gap_ms <= samplingLimit && run.acquisition_interval_model.lower_ms > holdLimit).length,
+      holds_upper_over_limit_with_capture_hole: long.filter(run => run.maximum_sampling_gap_ms > samplingLimit).length},
+    long_holds: long, capture_holes: holes, skipped_counter_events: skipped, results};
+}
+
+function main(args) {
+  if (args.length !== 4 || args.includes("--help")) {
+    throw new Error("Usage: playback-optical-attribution REPORT.json OPTICAL.json FRAMES.md5 RGB.raw > NEW-RECEIPT.json");
+  }
+  const [reportPath, opticalPath, md5Path, rawPath] = args;
+  const inputs = [reportPath, opticalPath, md5Path].map(file => fs.readFileSync(file));
+  const report = JSON.parse(inputs[0]), optical = JSON.parse(inputs[1]);
+  if (!Array.isArray(report.results)) throw new Error("Expected playback report results");
+  const capture = readCapture(inputs[2].toString("utf8"), rawPath);
+  const output = analyze(report, optical, capture);
+  output.inputs = args.map((file, index) => ({name: path.basename(file),
+    sha256: index < 3 ? sha256(inputs[index]) : capture.integrity.raw_sha256}));
+  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+}
+
+if (require.main === module) {
+  try {main(process.argv.slice(2));} catch (error) {console.error(error.message); process.exitCode = 1;}
+}

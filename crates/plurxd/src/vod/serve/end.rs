@@ -232,9 +232,24 @@ impl VodServe {
         session_id: &str,
         cause: Terminal,
     ) -> Option<Arc<TerminalCleanup>> {
+        self.begin_end_inner(session_id, cause, None).await
+    }
+
+    async fn begin_end_inner(
+        &self,
+        session_id: &str,
+        cause: Terminal,
+        expected: Option<&ResponseOwner>,
+    ) -> Option<Arc<TerminalCleanup>> {
         let (lifecycle, incarnation) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
+            if expected.is_some_and(|owner| {
+                !Arc::ptr_eq(&owner.lifecycle, &session.lifecycle)
+                    || !Arc::ptr_eq(&owner.incarnation, &session.incarnation)
+            }) {
+                return None;
+            }
             (
                 Arc::clone(&session.lifecycle),
                 Arc::clone(&session.incarnation),
@@ -327,6 +342,16 @@ impl VodServe {
             );
         }
         Some(cleanup)
+    }
+
+    /// Failure cleanup for an exact unpublished attachment; a replacement is untouched.
+    pub(crate) async fn end_for_owner(&self, session_id: &str, owner: &ResponseOwner) {
+        if let Some(cleanup) = self
+            .begin_end_inner(session_id, Terminal::Replaced, Some(owner))
+            .await
+        {
+            cleanup.wait().await;
+        }
     }
 
     pub async fn end(&self, session_id: &str, cause: Terminal) -> bool {

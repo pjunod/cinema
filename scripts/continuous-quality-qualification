@@ -47,6 +47,55 @@ async function producerCensus(server) {
   return {at_unix_ms: Date.now(), daemon_pid: pid, daemon_identity_verified: true, children};
 }
 
+// End-only metadata enrichment. The original /proc census and retirement
+// verdict remain authoritative; background attribution never removes a child.
+async function producerPurposeCensus(server) {
+  const before = await producerCensus(server);
+  const requested = Date.now();
+  let registered = [], metadataStatus = "activity_unavailable", truncated = false;
+  try {
+    const activity = await lab.api(server.baseUrl, "/activity/detail", {token: server.token});
+    if (Array.isArray(activity?.processes)) {
+      metadataStatus = "available";
+      truncated = activity.processes.length > 2048;
+      // Keep no sessions, paths, users, command lines, hostnames or whole response.
+      registered = activity.processes.slice(0, 2048).map(row => ({
+        pid: row?.pid, class: row?.class, purpose: row?.purpose,
+      }));
+    } else metadataStatus = "process_registry_absent";
+  } catch (_) {
+    // Error strings can contain URLs/private response bodies; retain only status.
+  }
+  const received = Date.now();
+  const after = await producerCensus(server);
+  const old = new Map(before.children.map(child => [child.pid, child]));
+  const classifications = after.children.slice(0, 512).map(child => {
+    const previous = old.get(child.pid);
+    const stable = previous && /^[0-9]+$/.test(child.start_ticks)
+      && child.start_ticks === previous.start_ticks;
+    const matches = stable ? registered.filter(row => Number.isSafeInteger(row.pid)
+      && row.pid === child.pid) : [];
+    const row = matches.length === 1 ? matches[0] : null;
+    const registeredClass = ["background", "realtime"].includes(row?.class) ? row.class : null;
+    const purpose = typeof row?.purpose === "string" && /^[A-Za-z0-9 _./()+:-]{1,128}$/.test(row.purpose)
+      ? row.purpose : null;
+    return {pid: child.pid, start_ticks: child.start_ticks,
+      stable_across_activity_read: !!stable,
+      registered_class: registeredClass, registered_purpose: purpose,
+      classification: registeredClass === "background" && purpose === "Live TV caption probe"
+        ? "background_caption_probe" : "unresolved",
+      attribution_status: !stable ? "process_not_stable" : matches.length > 1
+        ? "ambiguous_registry_pid" : !row ? "no_registered_pid" : "joined_stable_pid"};
+  });
+  return {...after, purpose_metadata: {
+    scope: "admin registry PID joined only to unchanged owned direct FFmpeg PID/start_ticks across both /proc censuses; classification is advisory and does not alter End verdict",
+    activity_status: metadataStatus, activity_requested_at_unix_ms: requested,
+    activity_received_at_unix_ms: received, before,
+    registry_truncated: truncated, classifications_truncated: after.children.length > 512,
+    classifications,
+  }};
+}
+
 async function measureAuto(driver, shaper, result) {
   const catalog = await driver.eval("PLAYER.qualityCandidates.map(c=>({id:c.id,route:c.route,height:c.target_height||c.height,peak_bps:c.peak_bps}))");
   const detail = result.actual_auto = {catalog, status: "running", changes: [], policy_trace: [],
@@ -246,6 +295,6 @@ async function main(args) {
   return outcome.code;
 }
 
-module.exports = {autoLinkProfile, producerCensus, measureAuto, mixedCase, main};
+module.exports = {autoLinkProfile, producerCensus, producerPurposeCensus, measureAuto, mixedCase, main};
 if (require.main === module) main(process.argv.slice(2)).then(code => {process.exitCode = code;})
   .catch(error => {process.stderr.write(`continuous qualification: ${error.message}\n`);process.exitCode = 1;});

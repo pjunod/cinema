@@ -1,5 +1,28 @@
 import Foundation
 
+/// Resource URLs and NSError descriptions may contain playback credentials.
+/// Preserve only the typed framework domain and code for retained failures.
+func preparedSuccessorErrorDetail(_ error: NSError?) -> String {
+    guard let error else { return "unreported" }
+    var cursor: NSError? = error
+    var parts: [String] = []
+    // A bounded cause chain retains the decoder/HTTP code behind a framework
+    // wrapper without serializing resource context or following arbitrary chains.
+    for _ in 0..<2 {
+        guard let current = cursor else { break }
+        let domain: String
+        switch current.domain {
+        case NSURLErrorDomain, NSOSStatusErrorDomain, "AVFoundationErrorDomain", "CoreMediaErrorDomain":
+            domain = current.domain
+        default:
+            domain = "other"
+        }
+        parts.append("\(domain):\(current.code)")
+        cursor = current.userInfo[NSUnderlyingErrorKey] as? NSError
+    }
+    return parts.joined(separator: ">")
+}
+
 /// One optional manual choice, separate from the standing media recipe.
 /// A stale failure cannot restore a recipe over a newer viewer command.
 struct ManualQualityRetention: Equatable {
@@ -30,6 +53,16 @@ struct ManualQualityRetention: Equatable {
               pending.incumbentRecipeAttached, incumbentHealthy else { return nil }
         self.pending = nil
         retained = pending
+        return pending
+    }
+
+    /// Consume only this viewer's frame-proved handoff. The returned attempt
+    /// distinguishes a progress pin made by quality selection from a seek
+    /// that the viewer already had in flight and still owns.
+    mutating func finishCommitted(viewerEpoch: Int, firstFrameUnixMs: Int) -> Attempt? {
+        guard firstFrameUnixMs > 0, let pending, pending.viewerEpoch == viewerEpoch else { return nil }
+        self.pending = nil
+        retained = nil
         return pending
     }
 
@@ -401,6 +434,19 @@ struct PreparedCommitRendezvous: Equatable {
     /// Where that falls in the successor's own timeline, whose zero is the
     /// staging's `media_origin_ms`.
     let itemPositionMs: Int
+
+    /// Selection reconciliation and the first-frame proof after the swap
+    /// draw on the same overlap; this much of it is kept for them.
+    static let postSwapReserveMs = PreparedReplacementBounds.alignmentMs
+
+    /// How far ahead of the incumbent to put the switch point, in wall time.
+    /// It covers inspection and alignment, each bounded by `alignmentMs`, and
+    /// leaves the post-swap reserve of the overlap untouched. Nil when the
+    /// overlap that remains cannot afford a switch at all.
+    static func commitLeadWallMs(overlapRemainingMs: Int) -> Int? {
+        guard overlapRemainingMs > postSwapReserveMs + 1_000 else { return nil }
+        return min(PreparedReplacementBounds.alignmentMs * 2, overlapRemainingMs - postSwapReserveMs)
+    }
 
     /// Never behind the staged position: a successor asked to seek backwards
     /// from where it was primed would fetch media the switch does not need.

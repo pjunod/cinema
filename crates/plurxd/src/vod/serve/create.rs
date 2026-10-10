@@ -466,6 +466,67 @@ impl VodServe {
         Ok((attachment, incoming_logical))
     }
 
+    /// Select the output once for this attachment. New capture and issued
+    /// recovery stay distinct; viewer start positions never trim full artifacts.
+    pub(super) async fn capture_retained_output(
+        &self,
+        capture: RetainedOutputCapture,
+        rendition: &Arc<Rendition>,
+        incoming_logical: &Option<crate::vodserve::retained_manifest::LogicalOutput>,
+        req: &SessionRequest,
+        file: &MediaFile,
+        continuous: bool,
+    ) -> Result<Option<Arc<crate::vodserve::retained::RetainedVodArtifact>>, String> {
+        Ok(match capture {
+            RetainedOutputCapture::Restore(Some(ref expected)) => Some(
+                self.shared
+                    .retained_artifacts
+                    .reacquire_expected_for_request(
+                        expected,
+                        &self.shared,
+                        rendition,
+                        incoming_logical,
+                        rendition.materialize_budget,
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        crate::transcode::vod_refusal_error(
+                            "retained_artifact_unavailable",
+                            "the issued output artifact cannot be exactly reacquired",
+                        )
+                    })?,
+            ),
+            RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
+                None
+            }
+            // A continuous parent serves role-split private children; no
+            // complete retained output can stand in for that reader graph.
+            RetainedOutputCapture::New if continuous => None,
+            RetainedOutputCapture::New => {
+                let existing = rendition
+                    .output_measurement
+                    .lock()
+                    .expect("output measurement lock")
+                    .complete_rates()
+                    .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity))
+                    .filter(|artifact| artifact.logical == *incoming_logical);
+                if existing.is_some() {
+                    existing
+                } else if req.candidate_context.is_some() {
+                    self.shared
+                        .retained_artifacts
+                        .acquire_prepared_candidate(rendition, incoming_logical, file, req)
+                        .await
+                } else {
+                    self.shared
+                        .retained_artifacts
+                        .acquire_prepared_manual(rendition, incoming_logical, file)
+                        .await
+                }
+            }
+        })
+    }
+
     /// Resolve native prerequisites without reserving a reader or attaching a
     /// rendition. Existing preparation owners may receive copy-index demand.
     pub(crate) async fn preview_recipe(
@@ -1155,54 +1216,16 @@ impl VodServe {
         };
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
-        let retained_output = match prepared.retained_capture {
-            RetainedOutputCapture::Restore(Some(ref expected)) => Some(
-                self.shared
-                    .retained_artifacts
-                    .reacquire_expected_for_request(
-                        expected,
-                        &self.shared,
-                        &rendition,
-                        &incoming_logical,
-                        rendition.materialize_budget,
-                    )
-                    .await
-                    .ok_or_else(|| {
-                        crate::transcode::vod_refusal_error(
-                            "retained_artifact_unavailable",
-                            "the issued output artifact cannot be exactly reacquired",
-                        )
-                    })?,
-            ),
-            RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
-                None
-            }
-            // A continuous parent serves role-split private children; no
-            // complete retained output can stand in for that reader graph.
-            RetainedOutputCapture::New if continuous => None,
-            RetainedOutputCapture::New => {
-                let existing = rendition
-                    .output_measurement
-                    .lock()
-                    .expect("output measurement lock")
-                    .complete_rates()
-                    .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity))
-                    .filter(|artifact| artifact.logical == incoming_logical);
-                if existing.is_some() {
-                    existing
-                } else if req.candidate_context.is_some() {
-                    self.shared
-                        .retained_artifacts
-                        .acquire_prepared_candidate(&rendition, &incoming_logical, file, req)
-                        .await
-                } else {
-                    self.shared
-                        .retained_artifacts
-                        .acquire_prepared_manual(&rendition, &incoming_logical, file)
-                        .await
-                }
-            }
-        };
+        let retained_output = self
+            .capture_retained_output(
+                prepared.retained_capture,
+                &rendition,
+                &incoming_logical,
+                req,
+                file,
+                continuous,
+            )
+            .await?;
         let marker_destinations = stored_marker_destinations(
             self.shared.store.as_ref(),
             file,
@@ -1414,8 +1437,7 @@ impl VodServe {
             }
         }
         replacement.children = std::mem::take(&mut private_media);
-        let mut authority = Reader::new(start_entry);
-        authority.authority_only = replacement.children.iter().any(|child| child.controlled);
+        let authority = replacement.attachment_reader(start_entry);
         replacement_readers.insert(session_id.clone(), authority);
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         // A live entry with this id is replaced rather than refused, and the

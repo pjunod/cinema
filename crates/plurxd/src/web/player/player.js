@@ -886,7 +886,9 @@ function createHlsStartupLoader(StockLoader,episode){
           return;
         }
         this.plurxRequestOrdinal=++episode.dispatches;
-        episode.manifestState='loading';
+        // Level playlists also cross this gate. They do not undo a parsed
+        // master, which an early Pause/Play must resume without loadSource.
+        if(episode.manifestState!=='parsed') episode.manifestState='loading';
         episode.requestStartedAt=performance.now();
         clientLog(Object.assign({level:'info',event:'hls_manifest_dispatch',
           ordinal:this.plurxRequestOrdinal,
@@ -1108,7 +1110,9 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
     if(observesCurrent()) startup.manifestState='loading';
   });
   if(Hls.Events.MANIFEST_LOADED) hls.on(Hls.Events.MANIFEST_LOADED,()=>{
-    if(observesCurrent()) startup.manifestState='loaded';
+    // hls.js parses synchronously inside MANIFEST_LOADED dispatch; our
+    // later listener can run after MANIFEST_PARSED. Keep that stronger fact.
+    if(observesCurrent()&&startup.manifestState!=='parsed') startup.manifestState='loaded';
   });
   resetPlaybackTransportEvents(video);
   // A subtitle chosen before the rendition list arrived is dropped on the

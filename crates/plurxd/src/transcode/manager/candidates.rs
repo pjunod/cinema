@@ -1202,6 +1202,49 @@ impl TranscodeManager {
         }
     }
 
+    /// Bind only a current ordinary eligible row to the validated restored
+    /// context. Costs/cache availability are advisory; recipe/source/owner are
+    /// exact. Failure leaves the context unchanged and forbids fresh reuse.
+    pub(crate) fn bind_prepared_candidate_owner(
+        context: &mut CandidateExecutionContext,
+        reserved_owner: &str,
+        eligible: Option<&crate::media_pool::WorkerQualityCandidate>,
+    ) -> bool {
+        let Some(entry) = eligible else {
+            return false;
+        };
+        let selected = &context.selected_candidate;
+        let actual = &entry.candidate;
+        if reserved_owner.is_empty()
+            || entry.node_id != reserved_owner
+            || !entry.dispatch_supported
+            || entry.partial
+            || !actual.decoder_compatible
+            || !actual.identity_matches()
+            || context.planning_binding.is_none()
+            || context.planning_binding != entry.binding
+            || context
+                .owner_node_id
+                .as_ref()
+                .is_some_and(|current| current != &entry.node_id)
+            || context.candidate_id != actual.id
+            || context.recipe_digest != actual.recipe_digest
+            || selected.id != actual.id
+            || selected.recipe_digest != actual.recipe_digest
+            || selected.route != actual.route
+            || selected.planned_codec != actual.planned_codec
+            || selected.grade != actual.grade
+            || selected.width != actual.width
+            || selected.height != actual.height
+            || selected.target_height != actual.target_height
+            || selected.normalized_geometry != actual.normalized_geometry
+        {
+            return false;
+        }
+        context.owner_node_id = Some(entry.node_id.clone());
+        true
+    }
+
     /// Read only the catalog row restored and bound by this server. Wire echo
     /// never supplies this private execution context or changes its digest.
     pub(super) fn selected_output_codec(
@@ -2604,6 +2647,95 @@ mod snapshot_catalog_regression {
                 .expect("restored")
                 .recipe_digest,
             on.recipe_digest
+        );
+        // Actual source/catalog restoration loses process-private dispatch
+        // ownership on the wire. Only current ordinary eligible source authority
+        // may restore it, without changing the audio claim or recipe.
+        let restored = expired_envelope
+            .request
+            .candidate_context
+            .as_ref()
+            .expect("restored")
+            .clone();
+        assert!(restored.owner_node_id.is_none());
+        let eligible = crate::media_pool::WorkerQualityCandidate {
+            node_id: "prepared-owner".into(),
+            candidate: restored.selected_candidate.clone(),
+            binding: restored.planning_binding.clone(),
+            partial: false,
+            dispatch_supported: true,
+        };
+        let original_claim = expired_envelope.request.audio_claim.clone();
+        let mut bound = restored.clone();
+        assert!(TranscodeManager::bind_prepared_candidate_owner(
+            &mut bound,
+            "prepared-owner",
+            Some(&eligible),
+        ));
+        assert_eq!(bound.owner_node_id.as_deref(), Some("prepared-owner"));
+        assert_eq!(bound.selected_candidate, restored.selected_candidate);
+        assert_eq!(bound.planning_binding, restored.planning_binding);
+        assert_eq!(expired_envelope.request.audio_claim, original_claim);
+        let mut refusals = Vec::new();
+        let mut wrong_owner = eligible.clone();
+        wrong_owner.node_id = "another-owner".into();
+        refusals.push(wrong_owner);
+        let mut wrong_binding = eligible.clone();
+        wrong_binding
+            .binding
+            .as_mut()
+            .expect("actual source binding")
+            .generation += 1;
+        refusals.push(wrong_binding);
+        let mut absent_binding = eligible.clone();
+        absent_binding.binding = None;
+        refusals.push(absent_binding);
+        let mut wrong_candidate = eligible.clone();
+        wrong_candidate.candidate.recipe_digest[0] ^= 1;
+        refusals.push(wrong_candidate);
+        let mut wrong_codec = eligible.clone();
+        wrong_codec.candidate.planned_codec = Some("unproven-codec".into());
+        refusals.push(wrong_codec);
+        let mut unsupported = eligible.clone();
+        unsupported.dispatch_supported = false;
+        refusals.push(unsupported);
+        let mut partial = eligible.clone();
+        partial.partial = true;
+        refusals.push(partial);
+        let mut incompatible = eligible.clone();
+        incompatible.candidate.decoder_compatible = false;
+        refusals.push(incompatible);
+        for refused in &refusals {
+            let mut unchanged = restored.clone();
+            assert!(!TranscodeManager::bind_prepared_candidate_owner(
+                &mut unchanged,
+                "prepared-owner",
+                Some(refused),
+            ));
+            assert!(
+                unchanged.owner_node_id.is_none(),
+                "no unproven owner injected"
+            );
+            assert_eq!(unchanged.selected_candidate, restored.selected_candidate);
+            assert_eq!(unchanged.planning_binding, restored.planning_binding);
+        }
+        let mut unavailable = restored.clone();
+        assert!(!TranscodeManager::bind_prepared_candidate_owner(
+            &mut unavailable,
+            "prepared-owner",
+            None,
+        ));
+        assert!(unavailable.owner_node_id.is_none());
+        let mut already_owned = restored.clone();
+        already_owned.owner_node_id = Some("another-owner".into());
+        assert!(!TranscodeManager::bind_prepared_candidate_owner(
+            &mut already_owned,
+            "prepared-owner",
+            Some(&eligible),
+        ));
+        assert_eq!(
+            already_owned.owner_node_id.as_deref(),
+            Some("another-owner")
         );
         // Old reader/manual byte shape remains exact when the field is absent.
         let mut legacy = job.supported_payload().expect("payload");

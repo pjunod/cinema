@@ -9,7 +9,15 @@ pub(super) const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
 
 /// Logical delivery facts are separate from the original salted execution.
 /// No process digest is stripped and no durable idempotency key is reused.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+///
+/// Equality is the delivery identity: every field that shapes the bytes or
+/// their meaning. `owner_node_id` is recorded but excluded. It names where a
+/// candidate's job was dispatched, which does not change one byte of the
+/// output. Recovery rebuilds the candidate context from the durable catalog,
+/// and that envelope carries no dispatch owner. Comparing it refused every
+/// sealed reused output after a restart or reap, so the session stalled
+/// instead of resurrecting.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct LogicalOutput {
     version: u32,
@@ -25,6 +33,40 @@ pub(super) struct LogicalOutput {
     candidate: Option<LogicalCandidate>,
     owner_node_id: Option<String>,
     production: Option<LogicalProduction>,
+}
+
+impl PartialEq for LogicalOutput {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructure so a new field cannot be added without deciding here
+        // whether it is part of the delivery identity.
+        let Self {
+            version,
+            file_id,
+            kind,
+            audio_index,
+            audio_offset_ms,
+            subtitle_burn,
+            hdr10,
+            copy_video_args,
+            audio_claim,
+            audio_delivery,
+            candidate,
+            owner_node_id: _,
+            production,
+        } = self;
+        *version == other.version
+            && *file_id == other.file_id
+            && *kind == other.kind
+            && *audio_index == other.audio_index
+            && *audio_offset_ms == other.audio_offset_ms
+            && *subtitle_burn == other.subtitle_burn
+            && *hdr10 == other.hdr10
+            && *copy_video_args == other.copy_video_args
+            && *audio_claim == other.audio_claim
+            && *audio_delivery == other.audio_delivery
+            && *candidate == other.candidate
+            && *production == other.production
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -56,6 +98,115 @@ struct LogicalProduction {
 }
 
 impl LogicalOutput {
+    /// Audio resolved for this incoming request before a shared rendition can
+    /// replace its recipe. An ordinary encoded request carries a claim, not a
+    /// final delivery; recheck that claim against the selected source/route.
+    pub(super) fn encoded_audio_for_request(
+        &self,
+        request: &SessionRequest,
+        file: &MediaFile,
+    ) -> Option<&plurx_core::playback::audio::AudioDelivery> {
+        if !matches!(request.kind, SessionKind::Transcode { .. })
+            || self.kind != request.kind
+            || self.file_id != request.file_id
+            || self.file_id != file.id
+            || self.audio_index != request.audio_index
+            || self.audio_offset_ms != request.audio_offset_ms
+            || self.audio_offset_ms != file.audio_offset_ms
+            || self.audio_claim != request.audio_claim
+        {
+            return None;
+        }
+        let audio = self.audio_delivery.as_ref()?;
+        if !audio.is_encoded_vod_compatible() {
+            return None;
+        }
+        if let Some(retained) = request.audio_delivery.as_ref() {
+            return (retained.is_encoded_vod_compatible()
+                && retained.byte_identity() == audio.byte_identity())
+            .then_some(audio);
+        }
+        let claim = request.audio_claim.as_ref()?;
+        if !claim.valid_snapshot() {
+            return None;
+        }
+        let selected = request.audio_index.map_or_else(
+            || file.audio_streams.first(),
+            |index| {
+                file.audio_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
+            },
+        );
+        let resolved = plurx_core::playback::audio::resolve_audio(
+            selected,
+            &claim.profile(),
+            plurx_core::playback::audio::AudioRoute::EncodedVod,
+            request.audio_offset_ms,
+        );
+        (resolved.is_encoded_vod_compatible() && resolved.byte_identity() == audio.byte_identity())
+            .then_some(audio)
+    }
+    /// Debug-only equality projection. Never expose paths, encoder arguments,
+    /// source identities or audio claims from this private matching contract.
+    pub(super) fn comparison(&self, requested: &Self) -> serde_json::Value {
+        let mut fields = serde_json::Map::new();
+        macro_rules! compare {
+            ($($field:ident),+ $(,)?) => {$(
+                fields.insert(stringify!($field).into(), (self.$field == requested.$field).into());
+            )+};
+        }
+        compare!(
+            version,
+            file_id,
+            kind,
+            audio_index,
+            audio_offset_ms,
+            subtitle_burn,
+            hdr10,
+            copy_video_args,
+            audio_claim,
+            audio_delivery,
+            candidate,
+            owner_node_id,
+            production
+        );
+        if let Some((actual, requested)) = self.candidate.as_ref().zip(requested.candidate.as_ref())
+        {
+            fields.insert(
+                "candidate_fields".into(),
+                serde_json::json!({
+                    "id": actual.id == requested.id,
+                    "digest": actual.digest == requested.digest,
+                    "geometry": actual.geometry == requested.geometry,
+                    "grade": actual.grade == requested.grade,
+                    "profile": actual.profile == requested.profile,
+                }),
+            );
+        }
+        if let Some((actual, requested)) =
+            self.production.as_ref().zip(requested.production.as_ref())
+        {
+            let differing_positions: Vec<usize> = (0..actual.args.len().max(requested.args.len()))
+                .filter(|&index| actual.args.get(index) != requested.args.get(index))
+                .take(32)
+                .collect();
+            fields.insert(
+                "production_fields".into(),
+                serde_json::json!({
+                    "plan": actual.plan == requested.plan,
+                    "executable": actual.executable == requested.executable,
+                    "build": actual.build == requested.build,
+                    "subtitle": actual.subtitle == requested.subtitle,
+                    "args": actual.args == requested.args,
+                    "actual_arg_count": actual.args.len(),
+                    "requested_arg_count": requested.args.len(),
+                    "differing_arg_positions_first32": differing_positions,
+                }),
+            );
+        }
+        serde_json::Value::Object(fields)
+    }
     pub(super) fn resolve(
         request: &SessionRequest,
         encoding: Option<&crate::vodencode::Encoding>,

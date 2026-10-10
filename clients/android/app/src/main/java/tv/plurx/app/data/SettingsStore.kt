@@ -120,8 +120,9 @@ class SettingsStore(private val context: Context) {
      * same instance on a new address. The token still belongs to it, so this
      * deliberately keeps it; that is the whole difference from [saveOrigin].
      */
-    suspend fun saveServerIdentity(origin: String, instanceId: String?) {
+    suspend fun saveServerIdentity(origin: String, instanceId: String?, expectedOrigin: String? = null) {
         context.dataStore.edit { p ->
+            if (expectedOrigin != null && p[Keys.ORIGIN] != expectedOrigin) return@edit
             p[Keys.ORIGIN] = origin
             if (instanceId == null) p.remove(Keys.INSTANCE_ID) else p[Keys.INSTANCE_ID] = instanceId
         }

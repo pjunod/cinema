@@ -129,7 +129,55 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         XCTAssertEqual(plan.itemPositionMs, 0)
     }
 
+    func testTheLeadKeepsThePostSwapReserveOfTheOverlap() {
+        XCTAssertEqual(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: 12_000),
+                       PreparedReplacementBounds.alignmentMs * 2)
+        XCTAssertEqual(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: 9_000), 5_000,
+                       "nine seconds left: five for inspection and alignment, four kept for after the swap")
+        XCTAssertNil(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: 5_000),
+                     "a commit that cannot keep its reserve is refused before it starts")
+        XCTAssertEqual(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: .max),
+                       PreparedReplacementBounds.alignmentMs * 2)
+    }
+
+    func testTheSharedCommitPlansItsSwitchPointBeforeInspectingIt() throws {
+        let source = try playerControllerSource()
+        let shared = try XCTUnwrap(source.range(of: "final class SharedPlayerController"))
+        let tail = source[shared.upperBound...]
+        let commit = try XCTUnwrap(tail.range(of: "func commitPreparedSuccessor("))
+        let body = tail[commit.upperBound...]
+        let plan = try XCTUnwrap(body.range(of: "PreparedCommitRendezvous.plan("))
+        let inspect = try XCTUnwrap(body.range(of: "preparedDecodedFrameDuration(of: item"))
+        let target = try XCTUnwrap(body.range(of: "targetItemSeconds: Double(rendezvous.itemPositionMs)"))
+        let wait = try XCTUnwrap(body.range(of: "awaitSharedRendezvous("))
+        let swap = try XCTUnwrap(body.range(of: "player.replaceCurrentItem(with: item)"))
+        XCTAssertTrue(plan.lowerBound < inspect.lowerBound,
+                      "a point taken after inspecting lands past the inspected fragment")
+        XCTAssertTrue(inspect.lowerBound < target.lowerBound)
+        XCTAssertTrue(wait.lowerBound < swap.lowerBound,
+                      "the parked successor meets the incumbent before the swap")
+    }
+
     // MARK: The order, which is the defect
+
+    func testPreparedMetricsBindSuccessorBeforeObservationAndRestoreIncumbentOnRollback() throws {
+        let body = try commitBody()
+        let install = try XCTUnwrap(body.range(of: "installItemObserver(for: item)"))
+        let session = try XCTUnwrap(body.range(of: "sessionId = action.sessionId"))
+        let candidate = try XCTUnwrap(body.range(of: "autoActiveCandidateId = action.effectiveSelection.candidateId"))
+        XCTAssertTrue(session.lowerBound < install.lowerBound && candidate.lowerBound < install.lowerBound,
+            "completed-body observation captures the successor identity even without an Auto proposal")
+        let proposal = try XCTUnwrap(body.range(of: "if let requested = autoDesiredCandidate"))
+        XCTAssertTrue(install.lowerBound < proposal.lowerBound,
+            "manual-to-Auto has no desired candidate; observation cannot depend on that proposal")
+        XCTAssertNotNil(body.range(of: "candidateId: autoActiveCandidateId"),
+            "rollback retains the exact incumbent candidate beside its session")
+        let restore = try XCTUnwrap(body.range(of: "autoActiveCandidateId = incumbentState.candidateId"))
+        let restoreSession = try XCTUnwrap(body.range(of: "sessionId = incumbentState.sessionId"))
+        let restoreObserver = try XCTUnwrap(body.range(of: "installItemObserver(for: incumbent)"))
+        XCTAssertTrue(restore.lowerBound < restoreObserver.lowerBound && restoreSession.lowerBound < restoreObserver.lowerBound,
+            "failed first-frame proof restores both incumbent identities before its observation resumes")
+    }
 
     func testTheCommitFinishesTheAlignmentBeforeItExposesTheItem() throws {
         let body = try commitBody()

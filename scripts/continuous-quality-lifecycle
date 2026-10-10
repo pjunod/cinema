@@ -1,0 +1,203 @@
+#!/usr/bin/env node
+"use strict";
+
+// Focused Linux lifecycle diagnostics, not a twenty-transition acceptance run.
+// Each invocation owns one fresh daemon/profile and one explicitly named case.
+const fs = require("node:fs");
+const path = require("node:path");
+const lab = require("./playback-lab");
+const {producerCensus, producerPurposeCensus} = require("./continuous-quality-qualification");
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function snapshot(driver) {
+  const state = await driver.eval(lab.playerSnapshotExpression());
+  state.lifecycle = await driver.eval(`(()=>{const v=document.getElementById('video');
+    return {visibility:document.visibilityState,fullscreen:!!document.fullscreenElement,
+      muted:v?.muted??null,volume:v?.volume??null,wants_playback:PLAYER?.wantsPlayback??null};})()`);
+  return state;
+}
+
+function identityErrors(before, after) {
+  const fields = [
+    ["session", before.session_id, after.session_id],
+    ["player", before.player_generation, after.player_generation],
+    ...["family_id", "element", "hls", "media_source"].map(key =>
+      [key, before.continuous?.[key], after.continuous?.[key]]),
+  ];
+  return fields.filter(([, a, b]) => a == null || a !== b)
+    .map(([name]) => `${name} identity missing or changed`);
+}
+
+async function until(driver, predicate, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await snapshot(driver);
+    if (state.video.error) throw new Error(`media error during ${label}`);
+    if (predicate(state)) return state;
+    await sleep(100);
+  }
+  throw new Error(`${label}: deadline`);
+}
+
+async function observe(driver, seconds, rate, thresholds) {
+  // A pause interval is intentionally retained in separate phase snapshots;
+  // measure moving playback only after actual resume. Never reset hitch/stall
+  // counters or claim that this window covers the excluded lifecycle interval.
+  await driver.exec(`{const p=globalThis.__plurxLabFrameProbe;if(p){
+    p.maximum_gap_ms=0;p.maximum_callback_gap_ms=0;p.maximum_gap_detail=null;
+    p.maximum_callback_gap_detail=null;p.frames=0;p.measurement_start_at_ms=performance.now();}}
+    return true;`);
+  const before = await snapshot(driver), started = performance.now();
+  await sleep(seconds * 1000);
+  const after = await snapshot(driver), elapsed = (performance.now() - started) / 1000;
+  const observedRate = (after.video.absolute_time - before.video.absolute_time) / elapsed;
+  const transition = lab.transitionMetrics(before, after);
+  const errors = identityErrors(before, after);
+  if (!Number.isFinite(observedRate) || Math.abs(observedRate / rate - 1) > 0.1)
+    errors.push(`clock ${observedRate} differs from requested ${rate} by more than 10%`);
+  if (after.video.playback_rate !== rate) errors.push("playback rate changed during observation");
+  if (!transition.complete) errors.push("incomplete media event trace");
+  if (!after.frame_probe?.supported || !(after.frame_probe.frames > 0))
+    errors.push("no advancing frame callback evidence");
+  for (const [field, limit] of [
+    ["maximum_video_gap_ms", thresholds.maximum_video_gap_ms],
+    ["wait_events", thresholds.maximum_wait_events],
+    ["reopen_events", thresholds.maximum_reopen_events],
+    ["stalls", thresholds.maximum_stalls], ["hitches", thresholds.maximum_hitches],
+  ]) if (transition[field] > limit) errors.push(`${field} ${transition[field]} exceeds ${limit}`);
+  return {before, after, elapsed_seconds: elapsed, requested_rate: rate,
+    observed_rate: observedRate, transition, errors};
+}
+
+async function lifecycleCase(kind, driver, server, manifest, fixture, testCase, browserInfo) {
+  const began = Date.now();
+  const result = await lab.runOneCase(driver, server, manifest, fixture,
+    {...testCase, operation: "steady"}, browserInfo, 2);
+  result.matrix_case = kind;
+  result.metrics_scope = "initial two-second steady baseline; lifecycle windows are separate";
+  result.evidence_scope = "focused state/clock/identity and owned producer retirement; no quality switches, app background, pixel or audio capture";
+  result.lifecycle_diagnostic = {phases: [], windows: []};
+  const detail = result.lifecycle_diagnostic;
+  try {
+    if (result.status !== "passed") return result;
+    const before = await snapshot(driver);
+    detail.phases.push({phase: "before", state: before});
+    if (kind === "pause") {
+      if (before.video.paused) throw new Error("incumbent is already paused");
+      await driver.exec("togglePlay(); return true;");
+      const paused = await until(driver, s => s.video.paused && s.lifecycle.wants_playback === false,
+        3000, "shipped Pause control");
+      detail.phases.push({phase: "paused", state: paused});
+      await sleep(8000);
+      const held = await snapshot(driver);
+      detail.phases.push({phase: "held_eight_seconds", state: held});
+      result.errors.push(...identityErrors(before, held));
+      if (!held.video.paused || held.lifecycle.wants_playback !== false)
+        result.errors.push("Pause intent did not remain held");
+      if (Math.abs(held.video.absolute_time - paused.video.absolute_time) > 0.1)
+        result.errors.push("paused film clock moved more than 100ms");
+      await driver.exec("togglePlay(); return true;");
+      const resumed = await until(driver, s => !s.video.paused && s.lifecycle.wants_playback === true
+        && s.video.absolute_time > held.video.absolute_time + 0.2, 10000, "shipped Play control");
+      detail.phases.push({phase: "resumed", state: resumed});
+    } else if (kind === "rate-2") {
+      await driver.exec("document.getElementById('video').playbackRate=2; return true;");
+    }
+    const mutes = kind === "mute-cycle" ? [true, false] : [null];
+    for (const muted of mutes) {
+      if (muted !== null) await driver.exec(`document.getElementById('video').muted=${muted}; return true;`);
+      const window = await observe(driver, 8, kind === "rate-2" ? 2 : 1, testCase.transition);
+      window.requested_muted = muted;
+      if (muted !== null && [window.before, window.after].some(s => s.lifecycle.muted !== muted))
+        window.errors.push("requested mute state not retained");
+      detail.windows.push(window);
+      result.errors.push(...window.errors);
+      if (window.errors.length) break; // retain the first failed window; no silent retry
+    }
+    result.end = await snapshot(driver);
+    result.errors.push(...identityErrors(before, result.end));
+    const lifecycleTransition = lab.transitionMetrics(before, result.end);
+    detail.whole_lifecycle_transition = lifecycleTransition;
+    if (!lifecycleTransition.complete) result.errors.push("incomplete whole lifecycle event trace");
+    // Deliberate pause changes elapsed frame gaps, but may not erase counters.
+    for (const field of ["reopen_events", "stalls", "hitches"])
+      if (lifecycleTransition[field] > 0) result.errors.push(`whole lifecycle ${field}: ${lifecycleTransition[field]}`);
+  } catch (error) { result.errors.push(error.message); }
+  finally {
+    try {
+      const before = await producerPurposeCensus(server), requested = Date.now();
+      await driver.exec("closePlayer(); return true;");
+      const samples = [];
+      for (const elapsed of [0, 1000, 3000, 5000]) {
+        await sleep(Math.max(0, requested + elapsed - Date.now()));
+        samples.push(await producerPurposeCensus(server));
+      }
+      result.producer_end = {requested_at_unix_ms: requested, before, samples,
+        scope: "exact owned Linux daemon direct FFmpeg children; physical queues/reader leases unmeasured"};
+      if (samples.at(-1).children.length) result.errors.push("owned producers remain five seconds after End");
+    } catch (error) {result.errors.push(`End census: ${error.message}`);}
+    result.duration_ms = Date.now() - began;
+    result.status = result.errors.length ? "failed" : "passed";
+  }
+  return result;
+}
+
+async function main(args) {
+  if (args.includes("--help")) {
+    process.stdout.write("Usage: scripts/continuous-quality-lifecycle --server PATH --source-ref BUILD --case pause|rate-2|mute-cycle --browser firefox|chrome --json NEW_PATH [--fixtures DIR] [--firefox PATH] [--geckodriver PATH] [--chrome PATH] [--junit NEW_PATH]\n");
+    return 0;
+  }
+  const options = {}, allowed = new Set(["server", "source-ref", "case", "browser", "json", "fixtures", "firefox", "geckodriver", "chrome", "junit"]);
+  for (let i = 0; i < args.length; i += 2) {
+    const key = args[i].replace(/^--/, "");
+    if (!args[i].startsWith("--") || !allowed.has(key) || !args[i + 1] || args[i + 1].startsWith("--")
+        || options[key.replaceAll("-", "_")] !== undefined) throw new Error(`invalid option ${args[i]}`);
+    options[key.replaceAll("-", "_")] = args[i + 1];
+  }
+  if (process.platform !== "linux") throw new Error("owned producer census requires Linux");
+  if (!options.server || !options.source_ref || !options.json) throw new Error("explicit server/source-ref/new JSON path required");
+  if (!["pause", "rate-2", "mute-cycle"].includes(options.case)) throw new Error("unknown lifecycle case");
+  if (!["firefox", "chrome"].includes(options.browser)) throw new Error("choose firefox or chrome");
+  for (const key of ["json", "junit"]) if (options[key] && fs.existsSync(options[key]))
+    throw new Error(`refusing to overwrite existing ${key} receipt`);
+  const manifest = lab.loadManifest(), testCase = manifest.suites.continuous.cases[0];
+  Object.assign(testCase, {fixture: "continuous-mpeg4-aac-1080", quality: "1080", operation: "steady",
+    repetitions: 1, switches: []});
+  // All original continuous-suite bounds remain; the clock window measures
+  // elapsed media / wall time explicitly at the requested rate.
+  manifest.thresholds.maximum_hitches = 0;
+  const lifecycleKind = options.case;
+  delete options.case; // executeRun reserves --case for manifest case-name filtering.
+  options.suite = "continuous";
+  const outcome = await lab.executeRun(manifest, options, {
+    startServer: async (opts, directory) => {
+      const server = await lab.startServer({...opts, enable_auto_abr: true}, directory);
+      try {
+        const system = await lab.api(server.baseUrl, "/system", {token: server.token});
+        if (system.build !== options.source_ref) throw new Error(`server build ${system.build} differs from ${options.source_ref}`);
+        await lab.api(server.baseUrl, "/settings", {token: server.token, method: "PUT", body: {playback_display_aware_auto: true}});
+        server.qualification_binary = path.resolve(options.server);
+        const quietStart = Date.now(); let quietSince = null;
+        while (Date.now() - quietStart < 120000) {
+          if ((await producerCensus(server)).children.length) quietSince = null;
+          else if (quietSince == null) quietSince = Date.now();
+          if (quietSince != null && Date.now() - quietSince >= 8000) break;
+          await sleep(1000);
+        }
+        if (quietSince == null || Date.now() - quietSince < 8000)
+          throw new Error("owned startup FFmpeg probes did not settle");
+        server.preparation.cache_condition.startup_producer_quiet_ms = Date.now() - quietStart;
+        await lab.api(server.baseUrl, "/activity/detail", {token: server.token});
+        server.preparation.cache_condition.engine_attestation_before_playback = "warmed_by_ordinary_activity_detail_read";
+        return server;
+      } catch (error) {await server.close(false); throw error;}
+    },
+    runOneCase: (...params) => lifecycleCase(lifecycleKind, ...params),
+  });
+  if (outcome.error) throw outcome.error;
+  return outcome.code;
+}
+
+module.exports = {main, identityErrors, lifecycleCase};
+if (require.main === module) main(process.argv.slice(2)).then(code => {process.exitCode = code;})
+  .catch(error => {process.stderr.write(`continuous lifecycle: ${error.message}\n`); process.exitCode = 1;});

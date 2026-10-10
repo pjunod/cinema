@@ -108,7 +108,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 159
+        versionCode = 160
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

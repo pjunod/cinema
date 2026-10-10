@@ -1,4 +1,89 @@
+enum VodRecipeAttachment {
+    Recovery { speculative: bool },
+    FirstPreparation(PreparedVodOwner),
+}
+
+/// Cancellation after actual capture still retires only that exact private owner.
+struct FirstPreparationCleanup {
+    vod: Arc<crate::vodserve::VodServe>,
+    session_id: String,
+    owner: Option<crate::vodserve::ResponseOwner>,
+}
+impl Drop for FirstPreparationCleanup {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.take() {
+            let vod = self.vod.clone();
+            let session_id = self.session_id.clone();
+            tokio::spawn(async move {
+                vod.end_for_owner(&session_id, &owner).await;
+            });
+        }
+    }
+}
+
 use super::*;
+
+/// Bounded identity-only facts for ordering private seal and caller admission.
+/// These observations never participate in capture or publication authority.
+fn trace_prepared_capture(
+    seal: &plurx_core::store::PreparedOutputSeal,
+    owner_current: Option<bool>,
+    ready: bool,
+) {
+    if !tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG) {
+        return;
+    }
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    static START: OnceLock<Instant> = OnceLock::new();
+    let sequence = SEQUENCE
+        .fetch_update(Relaxed, Relaxed, |value| Some(value.saturating_add(1)))
+        .expect("saturating sequence always updates");
+    let monotonic_us = START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros()
+        .min(u64::MAX as u128) as u64;
+    let digest = |value: &[u8]| format!("{:x}", Sha256::digest(value));
+    let mut recipe: serde_json::Value =
+        serde_json::from_str(&seal.expected_recipe_json).expect("validated private recipe");
+    recipe
+        .as_object_mut()
+        .expect("validated private object")
+        .insert(
+            "retained_output".into(),
+            seal.retained_output
+                .clone()
+                .unwrap_or(serde_json::Value::Null),
+        );
+    let proof = seal.retained_output.as_ref();
+    let facts = serde_json::json!({
+        "sequence": sequence,
+        "monotonic_us": monotonic_us,
+        "session_sha256": digest(seal.session_id.as_bytes()),
+        "incarnation_sha256": digest(seal.incarnation_id.as_bytes()),
+        "owner_sha256": digest(seal.owner_node_id.as_bytes()),
+        "predecessor_sha256": digest(seal.predecessor_incarnation_id.as_bytes()),
+        "recipe_canonical_sha256": digest(&serde_json::to_vec(&recipe).expect("private JSON serializes")),
+        "file_binding_sha256": digest(&serde_json::to_vec(&recipe["request"]["file_id"]).expect("private JSON serializes")),
+        "artifact_sha256": proof.and_then(|proof| proof["artifact_id"].as_str()).map(|id| digest(id.as_bytes())),
+        "output_identity_sha256": proof.and_then(|proof| proof["output_identity"].as_str()).map(|id| digest(id.as_bytes())),
+        "owner_epoch": seal.owner_epoch,
+        "deadline_ms": seal.deadline_ms,
+        "capture_first": !seal.already_complete,
+        "retained_some": proof.is_some(),
+        "sealed_complete": ready,
+        "owner_checked": owner_current.is_some(),
+        "owner_current": owner_current.unwrap_or(false),
+        "ready": ready,
+    });
+    if owner_current.is_some() {
+        tracing::debug!(target: "plurxd::retained_reuse", capture_facts = %facts,
+            "Prepared retained output capture sealed");
+    } else {
+        tracing::debug!(target: "plurxd::retained_reuse", capture_facts = %facts,
+            "Prepared retained output caller ready");
+    }
+}
 
 fn recovered_retained_output_matches(
     capture: &crate::vodserve::RetainedOutputCapture,
@@ -1933,6 +2018,115 @@ impl TranscodeManager {
             .await
     }
 
+    /// Bind only the actual resolved route/digest, shared by ordinary creation
+    /// and the first unpublished preparation. Catalogue numbers cannot mint it.
+    async fn resolved_retained_candidate_binding(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        encoding: &Option<Arc<crate::vodencode::Encoding>>,
+    ) -> Result<Option<crate::vodserve::RetainedCandidateBinding>, String> {
+        let kind = encoding
+            .as_ref()
+            .map_or(req.kind, |encoding| SessionKind::Transcode {
+                height: encoding.options.target_height,
+            });
+        Ok(
+            if let Some(context) = req
+                .candidate_context
+                .as_ref()
+                .filter(|_| req.continuous_media.is_none())
+            {
+                use plurx_core::playback::candidate::{CandidateId, CandidateRoute};
+                let actual_grade = encoding.as_ref().map_or_else(
+                    || super::manager_candidates::copy_candidate_grade(file),
+                    |encoding| encoding.options.pipeline.output_grade(),
+                );
+                let (actual, route) = if let Some(encoding) = encoding {
+                    (
+                        self.candidate_recipe_digest(
+                            &encoding.plan,
+                            req.presentation,
+                            encoding.reorder_frames,
+                        )?,
+                        CandidateRoute::Encode,
+                    )
+                } else if let SessionKind::Copy {
+                    aac,
+                    preserve_dolby_vision,
+                    convert_dolby_vision,
+                } = req.kind
+                {
+                    let source =
+                        crate::fragment_index_cluster::open_source_fence(file, None).await?;
+                    let executable = crate::ffmpeg::EncodedExecutable::capture()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let engine = crate::ffmpeg::EncodedEngine::capture(None)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let raster = file
+                        .width
+                        .and_then(|value| u32::try_from(value).ok())
+                        .zip(file.height.and_then(|value| u32::try_from(value).ok()))
+                        .ok_or_else(|| {
+                            vod_refusal_error(
+                                "candidate_recipe_changed",
+                                "copy geometry is unknown",
+                            )
+                        })?;
+                    let actual = super::manager_candidates::copy_candidate_recipe_digest(
+                        file,
+                        req.audio_index,
+                        file.audio_offset_ms,
+                        req.subtitle_burn,
+                        (aac, preserve_dolby_vision, convert_dolby_vision),
+                        Some(source.object_version()),
+                        Some(&executable.digest),
+                        Some(&engine.digest),
+                        raster,
+                    );
+                    if !source.unchanged() {
+                        return Err(vod_refusal_error(
+                            "candidate_recipe_changed",
+                            "copy source changed during equality validation",
+                        ));
+                    }
+                    (actual, CandidateRoute::Remux)
+                } else {
+                    return Err(vod_refusal_error(
+                        "candidate_recipe_changed",
+                        "no actual candidate route",
+                    ));
+                };
+                if actual != context.recipe_digest
+                    || CandidateId::for_recipe_digest(actual) != context.candidate_id
+                    || actual_grade != context.grade
+                {
+                    return Err(vod_refusal_error(
+                        "candidate_recipe_changed",
+                        "actual execution differs from the accepted candidate",
+                    ));
+                }
+                Some(crate::vodserve::RetainedCandidateBinding {
+                    kind,
+                    normalized_geometry: context.normalized_geometry,
+                    profile: context.profile,
+                    candidate_id: context.candidate_id,
+                    recipe_digest: actual,
+                    file_id: file.id,
+                    audio_index: req.audio_index,
+                    audio_offset_ms: file.audio_offset_ms,
+                    subtitle_burn: req.subtitle_burn,
+                    grade: context.grade,
+                    route,
+                })
+            } else {
+                None
+            },
+        )
+    }
+
     /// The only public HLS presentation: immutable VOD or a typed refusal.
     #[allow(clippy::too_many_arguments)]
     async fn try_vod_session(
@@ -2019,94 +2213,9 @@ impl TranscodeManager {
         // candidate output: it binds no measured candidate and offers nothing
         // to the complete-output queue.
         let complete_candidate_output = req.continuous_media.is_none();
-        let measured_candidate = if let Some(context) = req
-            .candidate_context
-            .as_ref()
-            .filter(|_| complete_candidate_output)
-        {
-            use plurx_core::playback::candidate::{CandidateId, CandidateRoute};
-            let actual_grade = encoding.as_ref().map_or_else(
-                || super::manager_candidates::copy_candidate_grade(&file),
-                |encoding| encoding.options.pipeline.output_grade(),
-            );
-            let (actual, route) = if let Some(encoding) = &encoding {
-                (
-                    self.candidate_recipe_digest(
-                        &encoding.plan,
-                        req.presentation,
-                        encoding.reorder_frames,
-                    )?,
-                    CandidateRoute::Encode,
-                )
-            } else if let SessionKind::Copy {
-                aac,
-                preserve_dolby_vision,
-                convert_dolby_vision,
-            } = req.kind
-            {
-                let source = crate::fragment_index_cluster::open_source_fence(&file, None).await?;
-                let executable = crate::ffmpeg::EncodedExecutable::capture()
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let engine = crate::ffmpeg::EncodedEngine::capture(None)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let raster = file
-                    .width
-                    .and_then(|value| u32::try_from(value).ok())
-                    .zip(file.height.and_then(|value| u32::try_from(value).ok()))
-                    .ok_or_else(|| {
-                        vod_refusal_error("candidate_recipe_changed", "copy geometry is unknown")
-                    })?;
-                let actual = super::manager_candidates::copy_candidate_recipe_digest(
-                    &file,
-                    req.audio_index,
-                    file.audio_offset_ms,
-                    req.subtitle_burn,
-                    (aac, preserve_dolby_vision, convert_dolby_vision),
-                    Some(source.object_version()),
-                    Some(&executable.digest),
-                    Some(&engine.digest),
-                    raster,
-                );
-                if !source.unchanged() {
-                    return Err(vod_refusal_error(
-                        "candidate_recipe_changed",
-                        "copy source changed during equality validation",
-                    ));
-                }
-                (actual, CandidateRoute::Remux)
-            } else {
-                return Err(vod_refusal_error(
-                    "candidate_recipe_changed",
-                    "no actual candidate route",
-                ));
-            };
-            if actual != context.recipe_digest
-                || CandidateId::for_recipe_digest(actual) != context.candidate_id
-                || actual_grade != context.grade
-            {
-                return Err(vod_refusal_error(
-                    "candidate_recipe_changed",
-                    "actual execution differs from the accepted candidate",
-                ));
-            }
-            Some(crate::vodserve::RetainedCandidateBinding {
-                kind,
-                normalized_geometry: context.normalized_geometry,
-                profile: context.profile,
-                candidate_id: context.candidate_id,
-                recipe_digest: actual,
-                file_id: file.id,
-                audio_index: req.audio_index,
-                audio_offset_ms: file.audio_offset_ms,
-                subtitle_burn: req.subtitle_burn,
-                grade: context.grade,
-                route,
-            })
-        } else {
-            None
-        };
+        let measured_candidate = self
+            .resolved_retained_candidate_binding(req, &file, &encoding)
+            .await?;
         // Complete-output queue publication is handed to the owned enqueue
         // worker once the session exists; it never runs on the start path.
         // Only when the Developer switch admits this kind: a play must not
@@ -2222,28 +2331,28 @@ impl TranscodeManager {
         if let Some((encoder, grade, pipeline)) = codec_qualification {
             self.record_codec_qualification_session(encoder, grade, Some(pipeline));
         }
+        // This snapshot follows the actual attachment; a candidate catalog or
+        // a queued result cannot claim that this response owns retained bytes.
+        let response_facts = self.vod.hls_facts(&start.session_id).await;
         if let Some((request, file, settings, encoding)) = output_enqueue {
-            self.hand_off_output_enqueue(OutputEnqueue {
-                request,
-                file,
-                settings,
-                encoding,
-                session_id: start.session_id.clone(),
-                queued_at: Instant::now(),
-            });
+            self.hand_off_output_enqueue(
+                OutputEnqueue {
+                    request,
+                    file,
+                    settings,
+                    encoding,
+                    session_id: start.session_id.clone(),
+                    queued_at: Instant::now(),
+                },
+                response_facts.as_ref().map(|facts| &facts.response_owner),
+            );
         }
         Ok(StartInfo {
             processed_dv_profile,
-            retained_output: self
-                .vod
-                .hls_facts(&start.session_id)
-                .await
+            retained_output: response_facts
+                .as_ref()
                 .and_then(|facts| facts.response_owner.retained_output_facts()),
-            audio_delivery: self
-                .vod
-                .hls_facts(&start.session_id)
-                .await
-                .and_then(|facts| facts.audio_delivery),
+            audio_delivery: response_facts.and_then(|facts| facts.audio_delivery),
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
             duration_ms: Some(start.duration_ms),
@@ -2565,6 +2674,275 @@ impl TranscodeManager {
         self.vod.live_session_ids().await
     }
 
+    /// A peer's 204 is not capture evidence. Re-read the sealed reservation
+    /// before the actor can offer it; a mixed-version peer leaving pending
+    /// unchanged is refused and the existing reservation guard owns cleanup.
+    pub(crate) async fn prepared_prime_is_ready(
+        &self,
+        preparation: &plurx_core::domain::MediaSessionPreparation,
+        primed: bool,
+    ) -> bool {
+        if !primed {
+            return false;
+        }
+        let Ok(response) = serde_json::from_str::<serde_json::Value>(&preparation.response_json)
+        else {
+            return false;
+        };
+        if response["prepared_output_capture_pending"] != true {
+            return true;
+        }
+        let Ok(Some(route)) = self
+            .store
+            .media_session_route_by_incarnation(&preparation.incarnation_id)
+            .await
+        else {
+            return false;
+        };
+        if !plurx_core::store::PreparedOutputSeal::matches_reservation(preparation, &route) {
+            return false;
+        }
+        let Ok(remote) =
+            serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json)
+        else {
+            return false;
+        };
+        let Some(user_id) = route.principal.local_user_id() else {
+            return false;
+        };
+        let seal = plurx_core::store::PreparedOutputSeal {
+            incarnation_id: route.incarnation_id,
+            session_id: route.session_id,
+            user_id,
+            playback_id: route.playback_id,
+            owner_node_id: route.owner_node_id,
+            owner_epoch: route.owner_epoch,
+            expected_recipe_json: route.recipe_json,
+            expected_response_json: route.response_json,
+            predecessor_incarnation_id: preparation.expected_predecessor_incarnation_id.clone(),
+            predecessor_owner_node_id: preparation.expected_predecessor_owner_node_id.clone(),
+            predecessor_owner_epoch: preparation.expected_predecessor_owner_epoch,
+            deadline_ms: preparation.deadline_ms,
+            now_ms: crate::media_sessions::unix_ms(),
+            already_complete: true,
+            retained_output: remote
+                .retained_output
+                .map(|proof| serde_json::to_value(proof).expect("private facts serialize")),
+        };
+        let ready = self
+            .store
+            .seal_prepared_output(&seal)
+            .await
+            .is_ok_and(|sealed| sealed);
+        trace_prepared_capture(&seal, None, ready);
+        ready
+    }
+
+    /// Prime a genuinely new unpublished reservation and seal its private output
+    /// choice before admitting a client. Missing pending markers are strict recovery.
+    pub(crate) fn vod_prepare_first_before<'a>(
+        &'a self,
+        recipe_json: &'a str,
+        session_id: &'a str,
+        user_id: i64,
+        owner: PreparedVodOwner,
+        adoption: SessionAdoptionToken,
+        deadline: Instant,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let gate = Arc::clone(&adoption.gate);
+            let work = async {
+                let _first = Arc::clone(&gate.first_preparation).lock_owned().await;
+                if gate.released.load(Acquire) {
+                    return false;
+                }
+                let Ok(initial) =
+                    serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(recipe_json)
+                else {
+                    return false;
+                };
+                let Ok(Some(route)) = self
+                    .store
+                    .media_session_route_by_incarnation(&initial.incarnation_id)
+                    .await
+                else {
+                    return false;
+                };
+                let now = crate::media_sessions::unix_ms();
+                if route.session_id != session_id
+                    || route.principal.local_user_id() != Some(user_id)
+                    || route.owner_node_id != owner.node_id
+                    // prepare_media_session mints epoch one; takeover is recovery,
+                    // never a first-capture reservation under this private entry.
+                    || route.owner_epoch != 1
+                    || route.state != "active"
+                    || route.lease_expires_at_ms <= now
+                    || route.publication_ready_at_ms
+                        != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+                {
+                    return false;
+                }
+                let Ok(response) = serde_json::from_str::<serde_json::Value>(&route.response_json)
+                else {
+                    return false;
+                };
+                let Ok(Some(ledger)) = self
+                    .store
+                    .staged_media_session_for_playback(&route.principal, &route.playback_id)
+                    .await
+                else {
+                    return false;
+                };
+                if ledger.staged_incarnation_id != route.incarnation_id
+                    || ledger.deadline_ms != route.lease_expires_at_ms
+                {
+                    return false;
+                }
+                let Ok(Some(predecessor)) = self
+                    .store
+                    .media_session_route_by_incarnation(&ledger.expected_predecessor_incarnation_id)
+                    .await
+                else {
+                    return false;
+                };
+                if adoption.session_id != session_id || gate.released.load(Acquire) {
+                    return false;
+                }
+                let Ok(current_recipe) = serde_json::from_str::<
+                    crate::media_sessions::RemoteStartRequest,
+                >(&route.recipe_json) else {
+                    return false;
+                };
+                if initial
+                    .retained_output
+                    .as_ref()
+                    .is_some_and(|issued| current_recipe.retained_output.as_ref() != Some(issued))
+                {
+                    return false;
+                }
+                let Ok(mut incoming) = serde_json::to_value(&initial) else {
+                    return false;
+                };
+                let Ok(mut current) = serde_json::to_value(&current_recipe) else {
+                    return false;
+                };
+                incoming
+                    .as_object_mut()
+                    .expect("remote object")
+                    .remove("retained_output");
+                current
+                    .as_object_mut()
+                    .expect("remote object")
+                    .remove("retained_output");
+                if incoming != current {
+                    return false;
+                }
+                let pending = response["prepared_output_capture_pending"] == true;
+                let complete = response["prepared_output_capture_complete"] == true;
+                if !pending && !complete {
+                    return self
+                        .resurrect_vod_from_recipe_before(
+                            &route.recipe_json,
+                            session_id,
+                            user_id,
+                            adoption,
+                            deadline,
+                            VodRecipeAttachment::Recovery { speculative: true },
+                        )
+                        .await;
+                }
+                if let Some(facts) = self.vod.hls_facts(session_id).await {
+                    if !self
+                        .vod
+                        .prepared_owner_matches(
+                            session_id,
+                            &facts.response_owner,
+                            &route.incarnation_id,
+                        )
+                        .await
+                    {
+                        return false;
+                    }
+                }
+                // A retry after an interrupted first attempt seals the existing actual
+                // attachment, including None; it never upgrades/replaces that choice.
+                if self.vod.hls_facts(session_id).await.is_none()
+                    && !self
+                        .resurrect_vod_from_recipe_before(
+                            &route.recipe_json,
+                            session_id,
+                            user_id,
+                            adoption,
+                            deadline,
+                            if pending {
+                                VodRecipeAttachment::FirstPreparation(owner.clone())
+                            } else {
+                                VodRecipeAttachment::Recovery { speculative: true }
+                            },
+                        )
+                        .await
+                {
+                    return false;
+                }
+                let Some(facts) = self.vod.hls_facts(session_id).await else {
+                    return false;
+                };
+                let mut cleanup = FirstPreparationCleanup {
+                    vod: self.vod.clone(),
+                    session_id: session_id.to_owned(),
+                    owner: pending.then(|| facts.response_owner.clone()),
+                };
+                let Some(_owner_guard) = self
+                    .vod
+                    .lock_preparation_owner(
+                        session_id,
+                        &facts.response_owner,
+                        &route.incarnation_id,
+                    )
+                    .await
+                else {
+                    return false;
+                };
+                let output = facts.response_owner.retained_output_facts();
+                let seal = plurx_core::store::PreparedOutputSeal {
+                    incarnation_id: route.incarnation_id,
+                    session_id: session_id.to_owned(),
+                    user_id,
+                    playback_id: route.playback_id,
+                    owner_node_id: route.owner_node_id,
+                    owner_epoch: route.owner_epoch,
+                    expected_recipe_json: route.recipe_json,
+                    expected_response_json: route.response_json,
+                    predecessor_incarnation_id: ledger.expected_predecessor_incarnation_id,
+                    predecessor_owner_node_id: predecessor.owner_node_id,
+                    predecessor_owner_epoch: predecessor.owner_epoch,
+                    deadline_ms: route.lease_expires_at_ms,
+                    now_ms: crate::media_sessions::unix_ms(),
+                    already_complete: complete,
+                    retained_output: output.map(|output| {
+                        serde_json::to_value(output).expect("output facts serialize")
+                    }),
+                };
+                if gate.released.load(Acquire)
+                    || !self
+                        .store
+                        .seal_prepared_output(&seal)
+                        .await
+                        .is_ok_and(|sealed| sealed)
+                    || gate.released.load(Acquire)
+                {
+                    return false;
+                }
+                trace_prepared_capture(&seal, Some(true), true);
+                cleanup.owner = None;
+                true
+            };
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
+                .await
+                .unwrap_or(false)
+        })
+    }
+
     /// Rebuild a reaped VOD session from its durable route's recipe (plan
     /// §2.5: sessions are handles, and a handle whose durable route is still
     /// active resurrects instead of failing the viewer). The caller has
@@ -2596,7 +2974,7 @@ impl TranscodeManager {
             user_id,
             adoption,
             deadline,
-            speculative,
+            VodRecipeAttachment::Recovery { speculative },
         ))
     }
 
@@ -2607,8 +2985,13 @@ impl TranscodeManager {
         user_id: i64,
         adoption: SessionAdoptionToken,
         deadline: Instant,
-        speculative: bool,
+        purpose: VodRecipeAttachment,
     ) -> bool {
+        let (speculative, first_owner) = match purpose {
+            VodRecipeAttachment::Recovery { speculative } => (speculative, None),
+            VodRecipeAttachment::FirstPreparation(owner) => (true, Some(owner)),
+        };
+        let first_capture = first_owner.is_some();
         if Instant::now() >= deadline {
             return false;
         }
@@ -2636,7 +3019,32 @@ impl TranscodeManager {
             {
                 return false;
             }
-            let req = remote.request;
+            // Only the first unattached pending attempt evaluates current source
+            // authority. Replay/recovery never refresh an immutable choice.
+            let eligible = if let Some(owner) = first_owner.as_ref() {
+                if let Some(state) = owner
+                    .source_authority
+                    .as_ref()
+                    .filter(|state| state.node_id == owner.node_id)
+                {
+                    crate::media_pool::prepared_vod_owner(
+                        state,
+                        &remote,
+                        tokio::time::Instant::from_std(deadline),
+                    )
+                    .await
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let mut req = remote.request;
+            let fresh_reuse = first_owner.as_ref().is_some_and(|owner| {
+                req.candidate_context.as_mut().is_some_and(|context| {
+                    Self::bind_prepared_candidate_owner(context, &owner.node_id, eligible.as_ref())
+                })
+            });
             if req.presentation != Presentation::Vod {
                 return false;
             }
@@ -2662,6 +3070,17 @@ impl TranscodeManager {
             };
             let Ok(companion) = self.prepare_vod_companion(&req, &file).await else {
                 return false;
+            };
+            let measured_candidate = if first_capture {
+                match self
+                    .resolved_retained_candidate_binding(&req, &file, &encoding)
+                    .await
+                {
+                    Ok(binding) => binding,
+                    Err(_) => return false,
+                }
+            } else {
+                None
             };
             if speculative {
                 if let Some((_, encoding)) = companion.as_ref() {
@@ -2696,10 +3115,14 @@ impl TranscodeManager {
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
                         companion,
-                        measured_candidate: None,
-                        retained_capture: crate::vodserve::RetainedOutputCapture::Restore(
-                            remote.retained_output.clone(),
-                        ),
+                        measured_candidate,
+                        retained_capture: if fresh_reuse {
+                            crate::vodserve::RetainedOutputCapture::New
+                        } else {
+                            crate::vodserve::RetainedOutputCapture::Restore(
+                                remote.retained_output.clone(),
+                            )
+                        },
                         request: &req,
                         encoding,
                         soundtrack,
@@ -2742,7 +3165,17 @@ impl TranscodeManager {
     /// Hand a started session's complete-output queue publication to the
     /// owned worker. Never waits: a full hand-off is reported and skipped,
     /// and the title's next start offers the same deduplicated job again.
-    fn hand_off_output_enqueue(&self, work: OutputEnqueue) {
+    fn hand_off_output_enqueue(
+        &self,
+        work: OutputEnqueue,
+        response_owner: Option<&crate::vodserve::ResponseOwner>,
+    ) {
+        if response_owner
+            .and_then(|owner| owner.retained_output_facts())
+            .is_some()
+        {
+            return;
+        }
         let file_id = work.file.id;
         if let Err(error) = self.output_enqueue.sender.try_send(work) {
             let reason = match error {
@@ -3170,6 +3603,432 @@ pub(super) fn constrain_finite_vod_rate(
 #[cfg(test)]
 mod retained_recovery_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues() {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let (_temp, _serve, facts, _) =
+            crate::vodserve::retained::test_post_attachment_output_facts().await;
+        assert!(facts.response_owner.retained_output_facts().is_some());
+        let work_root = crate::test_tempdir().expect("enqueue work root");
+        let manager = TranscodeManager::new(
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store")),
+            work_root.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let mut receiver = manager
+            .output_enqueue
+            .receiver
+            .lock()
+            .expect("queue owner")
+            .take()
+            .expect("actual bounded enqueue receiver");
+        let digest = [42; 32];
+        let candidate = QualityCandidate {
+            id: CandidateId::for_recipe_digest(digest),
+            recipe_digest: digest,
+            route: CandidateRoute::Remux,
+            normalized_geometry: false,
+            width: 1280,
+            height: 720,
+            target_height: 720,
+            planned_codec: None,
+            average_bps: None,
+            peak_bps: None,
+            grade: OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: true,
+            sustainable: true,
+        };
+        let request = SessionRequest {
+            sdr_master_codecs: None,
+            continuous_media: None,
+            quality_catalog: None,
+            candidate_context: Some(Box::new(TranscodeManager::candidate_context(&candidate))),
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
+            control_sequence: None,
+            file_id: facts.file.id,
+            playback_id: "enqueue-fixture".into(),
+            request_id: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            start_seconds: 0.0,
+            audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Presentation::Vod,
+            block_budget_secs: None,
+            transport: None,
+        };
+        let make_work = |session_id: &str| OutputEnqueue {
+            request: request.clone(),
+            file: facts.file.clone(),
+            settings: crate::vodserve::VodSettings {
+                working_set_bytes: 8 << 30,
+                completed_cache_bytes: 4 << 30,
+                block_budget: Duration::from_secs(30),
+                materialize_budget: Duration::from_secs(30),
+                blocked_get_cap: 100,
+                sdr_master_codecs: false,
+                index_cluster_cache: false,
+                hevc_unverified_copy: false,
+                live_recovery: true,
+                output_preparation: crate::vodserve::OutputPreparation::CopyAndEncoded,
+                output_budget_bytes: 4 << 30,
+            },
+            encoding: None,
+            session_id: session_id.into(),
+            queued_at: Instant::now(),
+        };
+        manager.hand_off_output_enqueue(make_work("cached"), Some(&facts.response_owner));
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "a verified actual cached response publishes no duplicate preparation"
+        );
+        // The same eligible candidate without actual retained attachment still
+        // reaches the real owned worker hand-off, regardless of catalog hints.
+        manager.hand_off_output_enqueue(make_work("cold"), None);
+        let cold = receiver
+            .try_recv()
+            .expect("cold candidate offered to worker");
+        assert_eq!(cold.session_id, "cold");
+        assert_eq!(
+            cold.request
+                .candidate_context
+                .as_ref()
+                .expect("candidate")
+                .candidate_id,
+            candidate.id
+        );
+        assert_eq!(cold.file.id, facts.file.id);
+        assert!(cold.settings.output_preparation.admits(false));
+        manager.hand_off_output_enqueue(make_work("rolling-no-facts"), None);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("no-artifact fallback still offered")
+                .session_id,
+            "rolling-no-facts"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_preparation_seals_actual_choice_and_replay_keeps_owner() {
+        use plurx_core::store::{MediaSessionStore, UserStore};
+        for absence in [false, true] {
+            let (_temp, serve, _, actual_request) =
+                crate::vodserve::retained::test_post_attachment_output_facts().await;
+            let id = "00000000-0000-4000-8000-00000000cace";
+            if absence {
+                crate::vodserve::retained::test_make_attachment_uncaptured(&serve, id).await;
+            }
+            let initial_facts = serve.hls_facts(id).await.expect("actual current choice");
+            let store =
+                Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("capture store"));
+            let user = store
+                .create_user("capture", "hash", false)
+                .await
+                .expect("user");
+            let principal =
+                plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+            let now = crate::media_sessions::unix_ms();
+            let predecessor = uuid::Uuid::new_v4().to_string();
+            let activation = plurx_core::domain::MediaSessionActivation {
+                incarnation_id: predecessor.clone(),
+                session_id: uuid::Uuid::new_v4().to_string(),
+                principal: principal.clone(),
+                playback_id: "first-capture".into(),
+                recovery_epoch: "capture-epoch".into(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: true,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: "node".into(),
+                recipe_json: "{}".into(),
+                response_json: "{}".into(),
+                publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: now,
+                lease_expires_at_ms: now + 60_000,
+                expected_desired_revision: None,
+            };
+            assert!(store
+                .activate_media_session(&activation)
+                .await
+                .expect("predecessor")
+                .is_some());
+            let incarnation = uuid::Uuid::new_v4().to_string();
+            let fixture = crate::media_sessions::takeover_eligible_route(id, &incarnation);
+            let mut recipe: crate::media_sessions::RemoteStartRequest =
+                serde_json::from_str(&fixture.recipe_json).expect("typed recipe");
+            recipe.principal = principal.clone();
+            recipe.retained_output_receiver = Some(1);
+            recipe.retained_output = None;
+            recipe.request = actual_request;
+            recipe.request.request_id = Some(incarnation.clone());
+            assert_eq!(recipe.request.start_seconds, 70.841);
+            serve.mark_prepared_incarnation(id, &incarnation).await;
+            let recipe_json = serde_json::to_string(&recipe).expect("recipe");
+            let preparation = plurx_core::domain::MediaSessionPreparation {
+                quality_cancellation_key: None,
+                incarnation_id: incarnation.clone(),
+                session_id: id.into(),
+                principal: principal.clone(),
+                playback_id: "first-capture".into(),
+                expected_predecessor_incarnation_id: predecessor.clone(),
+                expected_predecessor_owner_node_id: "node".into(),
+                expected_predecessor_owner_epoch: 1,
+                request_fingerprint: "b".repeat(64),
+                owner_node_id: "node".into(),
+                recipe_json: recipe_json.clone(),
+                response_json: r#"{"prepared_output_capture_pending":true}"#.into(),
+                media_origin_ms: 0,
+                now_ms: now,
+                expected_desired_revision: None,
+                deadline_ms: now + 30_000,
+            };
+            assert!(store
+                .prepare_media_session(&preparation)
+                .await
+                .expect("reserve")
+                .is_some());
+            let work = crate::test_tempdir().expect("capture work");
+            let mut manager = TranscodeManager::new(
+                store.clone(),
+                work.path().to_path_buf(),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            );
+            manager.vod = Arc::clone(&serve);
+            let manager = Arc::new(manager);
+            let mut remote_state =
+                crate::http::internal_media_sessions::output_capture_test_state();
+            remote_state.store = store.clone();
+            remote_state.transcode = Arc::clone(&manager);
+            remote_state.node_id = "node".into();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            // An old peer can return 204 without changing this actual reserved
+            // row. That reply must never expose the pending successor.
+            let stub_peer_reply = axum::http::StatusCode::NO_CONTENT;
+            assert!(
+                !manager
+                    .prepared_prime_is_ready(
+                        &preparation,
+                        stub_peer_reply == axum::http::StatusCode::NO_CONTENT
+                    )
+                    .await,
+                "204 with durable pending capture is refused"
+            );
+            let prepare_request = crate::media_sessions::RemotePrepareRequest {
+                protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                incarnation_id: incarnation.clone(),
+                session_id: id.into(),
+                principal: principal.clone(),
+                expected_owner_epoch: 1,
+            };
+            let response = crate::http::internal_media_sessions::prepare_authorized(
+                remote_state,
+                axum::body::Bytes::from(
+                    serde_json::to_vec(&prepare_request).expect("remote preparation"),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::NO_CONTENT,
+                "remote success waits for actual durable capture"
+            );
+            assert!(
+                manager.prepared_prime_is_ready(&preparation, true).await,
+                "local and remote activation wait for the exact durable seal"
+            );
+            assert!(!manager.prepared_prime_is_ready(&preparation, false).await);
+            let sealed = store
+                .media_session_route_by_incarnation(&incarnation)
+                .await
+                .expect("read")
+                .expect("sealed");
+            let durable: crate::media_sessions::RemoteStartRequest =
+                serde_json::from_str(&sealed.recipe_json).expect("sealed typed recipe");
+            assert_eq!(
+                durable.retained_output,
+                initial_facts.response_owner.retained_output_facts()
+            );
+            assert_eq!(
+                durable.retained_output.is_none(),
+                absence,
+                "actual private choice, never advisory promotion"
+            );
+            assert!(
+                manager
+                    .vod_prepare_first_before(
+                        &recipe_json,
+                        id,
+                        user.id,
+                        PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
+                        manager.session_adoption_token(id).expect("repeat adoption"),
+                        deadline
+                    )
+                    .await
+            );
+            assert!(
+                serve
+                    .response_status_owner_is_current(id, &initial_facts.response_owner)
+                    .await,
+                "repeat leaves actual private attachment unchanged"
+            );
+            assert_eq!(
+                store
+                    .media_session_route_by_incarnation(&incarnation)
+                    .await
+                    .expect("read")
+                    .expect("same"),
+                sealed
+            );
+            let mut changed_request = recipe.clone();
+            changed_request.request.start_seconds += 1.0;
+            let changed_recipe = serde_json::to_string(&changed_request).expect("changed request");
+            assert!(
+                !manager
+                    .vod_prepare_first_before(
+                        &changed_recipe,
+                        id,
+                        user.id,
+                        PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
+                        manager
+                            .session_adoption_token(id)
+                            .expect("changed request adoption"),
+                        deadline
+                    )
+                    .await,
+                "same incarnation cannot replay a different nonretained recipe"
+            );
+            let mut changed_receipt = durable.clone();
+            changed_receipt.retained_output = Some(RetainedOutputFacts {
+                artifact_id: uuid::Uuid::new_v4().to_string(),
+                output_identity: "ab".repeat(32),
+                average_bps: 8000,
+                peak_bps: 12000,
+            });
+            let changed_receipt = serde_json::to_string(&changed_receipt).expect("changed receipt");
+            assert!(
+                !manager
+                    .vod_prepare_first_before(
+                        &changed_receipt,
+                        id,
+                        user.id,
+                        PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
+                        manager
+                            .session_adoption_token(id)
+                            .expect("changed receipt adoption"),
+                        deadline
+                    )
+                    .await
+            );
+            // This is the same owner wrapper invoked by local and authenticated remote
+            // PREPARE. A foreign owner cannot return a successful preparation receipt.
+            assert!(
+                !manager
+                    .vod_prepare_first_before(
+                        &recipe_json,
+                        id,
+                        user.id,
+                        PreparedVodOwner {
+                            node_id: "foreign".into(),
+                            source_authority: None
+                        },
+                        manager
+                            .session_adoption_token(id)
+                            .expect("foreign adoption"),
+                        deadline
+                    )
+                    .await
+            );
+            assert!(
+                serve
+                    .response_status_owner_is_current(id, &initial_facts.response_owner)
+                    .await
+            );
+            if let Some(expected) = durable.retained_output.as_ref() {
+                crate::vodserve::retained::test_assert_sealed_cached_delivery(&serve, id, expected)
+                    .await;
+            }
+            let committed = store
+                .commit_media_session_preparation(
+                    &principal,
+                    "first-capture",
+                    &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                        staged_incarnation_id: incarnation.clone(),
+                        expected_predecessor_owner_node_id: "node".into(),
+                        expected_predecessor_owner_epoch: 1,
+                        now_ms: crate::media_sessions::unix_ms(),
+                        lease_expires_at_ms: now + 60_000,
+                        control_receipt: None,
+                        expected_desired_revision: None,
+                    },
+                )
+                .await
+                .expect("commit sealed preparation")
+                .expect("committed");
+            assert_eq!(
+                committed.route.recipe_json, sealed.recipe_json,
+                "handoff keeps captured recipe"
+            );
+            if let Some(expected) = durable.retained_output.as_ref() {
+                crate::vodserve::retained::test_assert_sealed_cached_delivery(&serve, id, expected)
+                    .await;
+            }
+            assert!(
+                !manager
+                    .vod_prepare_first_before(
+                        &recipe_json,
+                        id,
+                        user.id,
+                        PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
+                        manager
+                            .session_adoption_token(id)
+                            .expect("published adoption"),
+                        deadline
+                    )
+                    .await,
+                "published route cannot perform first capture"
+            );
+            assert!(
+                serve
+                    .response_status_owner_is_current(id, &initial_facts.response_owner)
+                    .await,
+                "refused published repeat cannot kill serving owner"
+            );
+            serve.end_for_owner(id, &initial_facts.response_owner).await;
+        }
+    }
 
     #[test]
     fn idempotent_recovery_preserves_captured_absence_and_exact_artifact_identity() {

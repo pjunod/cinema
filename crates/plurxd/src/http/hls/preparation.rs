@@ -1579,13 +1579,30 @@ pub(super) async fn process_preparation_candidate(
             // whole proof (prior, cost, live link, source fence), not a
             // short per-read cap. A miss is Unknown and stages no proof.
             let advisory = super::link_receipts::advisory_deadline();
-            tokio::time::timeout_at(
+            let admitted = tokio::time::timeout_at(
                 advisory,
                 observation.proposed_proof(&state, source, &mut candidate, selected, advisory),
             )
             .await
             .ok()
-            .flatten()
+            .flatten();
+            if admitted.is_some() {
+                admitted
+            } else if candidate_auto && proposed.height <= delivered.height {
+                // Entering Auto from a manual session cannot already have an
+                // Auto receipt. Register this permitted stage's own bodies;
+                // do not substitute that registration for upgrade authority.
+                tokio::time::timeout_at(
+                    advisory,
+                    observation
+                        .receipt_registration(&state, source, &candidate, selected, advisory),
+                )
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -1645,7 +1662,9 @@ pub(super) async fn process_preparation_candidate(
     // cost proof. Unknown is not a feature/ordinary/manual/recovery refusal.
     let successor_owner = if candidate_auto
         && proposed.height > delivered.height
-        && prepared_proof.is_none()
+        && !prepared_proof
+            .as_ref()
+            .is_some_and(super::prepared_link::PreparedProof::has_transition_admission)
         && matches!(purpose, PreparationPurpose::SelectionChange)
     {
         None
@@ -2020,6 +2039,15 @@ pub(super) async fn stage_prepared_successor_with_prime(
         Ok(value) => value,
         Err(_) => return,
     };
+    if staged_request.presentation == crate::transcode::Presentation::Vod && prime_worker {
+        response_value
+            .as_object_mut()
+            .expect("StartResponse object")
+            .insert(
+                "prepared_output_capture_pending".into(),
+                serde_json::Value::Bool(true),
+            );
+    }
     if let Some(caps) = retained_planning_caps(&route.response_json) {
         response_value
             .as_object_mut()
@@ -2189,15 +2217,19 @@ pub(super) async fn stage_prepared_successor_with_prime(
                         .session_adoption_token(&preparation.session_id)
                     {
                         Some(adoption) => {
+                            let owner = crate::transcode::PreparedVodOwner {
+                                node_id: state.node_id.clone(),
+                                source_authority: Some(std::sync::Arc::new(state.clone())),
+                            };
                             state
                                 .transcode
-                                .vod_resurrect_before(
+                                .vod_prepare_first_before(
                                     &preparation.recipe_json,
                                     &preparation.session_id,
                                     local_user_id,
+                                    owner,
                                     adoption,
                                     prime_deadline,
-                                    true,
                                 )
                                 .await
                         }
@@ -2229,7 +2261,11 @@ pub(super) async fn stage_prepared_successor_with_prime(
             () = active.cancelled.cancelled() => false,
             primed = prime => primed,
         };
-        if !primed {
+        if !state
+            .transcode
+            .prepared_prime_is_ready(&preparation, primed)
+            .await
+        {
             crate::playback_control::record_preparation_staged(false);
             return;
         }

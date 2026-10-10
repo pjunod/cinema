@@ -493,6 +493,45 @@ internal const val PREPARED_COMMIT_FRAME_BOUND_MS = 5_000L
 /** Pause parks observation but cannot retain a second decoder indefinitely. */
 internal const val PREPARED_OVERLAP_BOUND_MS = 12_000L
 
+/** Finite failure causes; never include decoder messages or credential-bearing URLs. */
+internal enum class PreparedFailureReason {
+    UNSPECIFIED, CONSTRUCTION_OVERLAP, OVERLAP_WATCHDOG, PLAYER_ERROR,
+    AUTO_READINESS_REVOKED, READINESS_OVERLAP, RENDEZVOUS_OVERLAP,
+    RENDEZVOUS_EXHAUSTED, COMMIT_OVERLAP, AUTO_COMMIT_REVOKED,
+}
+
+/** A failure snapshot describes the observed wait gate, not an inferred decoder fault. */
+internal data class PreparedFailureDiagnostic(
+    val reason: PreparedFailureReason,
+    val phase: PreparationPhase,
+    val state: Int?,
+    val tracks: Int?,
+    val rendezvous: Boolean,
+    val seekObserved: Boolean,
+    val bufferedReady: Boolean?,
+    val warmReady: Boolean?,
+    val elapsedMs: Long,
+    val targetHeight: Long?,
+    val errorCode: Int?,
+) {
+    val observedWaitGate: String get() = when {
+        state == null -> "successor_absent"
+        state != 3 -> "player_not_ready"
+        tracks == null || tracks == 0 -> "tracks_unavailable"
+        !rendezvous -> "rendezvous_not_started"
+        !seekObserved -> "seek_not_observed"
+        bufferedReady != true -> "runway_unproven"
+        warmReady == false -> "warm_frame_unproven"
+        else -> "meeting_or_commit_pending"
+    }
+
+    fun detail(): String = "reason=${reason.name} phase=${phase.name} gate=$observedWaitGate " +
+        "state=${state ?: "unknown"} tracks=${tracks ?: "unknown"} rendezvous=$rendezvous " +
+        "seek_observed=$seekObserved runway_ready=${bufferedReady ?: "unknown"} " +
+        "warm_ready=${warmReady ?: "not_required_or_unknown"} elapsed_ms=${elapsedMs.coerceAtLeast(0)} " +
+        "target_height=${targetHeight ?: "unknown"} error_code=${errorCode ?: "none"}"
+}
+
 /**
  * How long a retired predecessor may sit parked before the watchdog collects it
  * without waiting for the composition.

@@ -8735,6 +8735,15 @@ mod tests {
     }
 
     #[test]
+    fn first_preparation_seal_uses_canonical_replicated_parameter_order() {
+        // Validate the actual statement sent by the timed replicated writer,
+        // not a stand-in query. SQLite's real seal fixtures separately exercise
+        // the same ordered values and require the exact artifact and owner.
+        validate_sql(crate::store::prepared_output::SEAL)
+            .expect("first-preparation seal must be admitted before replicated IO");
+    }
+
+    #[test]
     fn replicated_auth_schema_and_writes_bind_every_clock_value() {
         validate_sql(AUTH_SCHEMA).expect("schema has no connection-local values");
         for sql in [

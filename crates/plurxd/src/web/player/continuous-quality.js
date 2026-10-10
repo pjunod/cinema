@@ -281,6 +281,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   const protocol=continuousQualityProtocol(bootstrap,{client_instance_id:CONTROL_CLIENT_ID,
     lifetime_id:lifetime,attachment_id:continuousQualityNewIdentity(),family_id:family.family_id},exchange);
   const readers=new Map(),records=new Map(),buffers=new Set(),loaders=new Set();
+  const verifier=continuousMediaVerifier();
   let hls=null,closed=false,mediaDetached=false,transaction=null,revision=0,frontier=0,frameToken=null;
   const pendingAppends=new Map(),pendingDisposals=new Set();
   let disposalTimer=null,seekRevision=0,seekBoundary=null;
@@ -359,7 +360,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     const inspection=read(data);
     if(found.init){
       if(inspection.fragments.length||inspection.initializations.length!==1
-        ||await continuousMediaDigest(inspection.bytes)!==found.row.init_id)throw new Error('Continuous init identity');
+        ||await verifier.digest(inspection.bytes)!==found.row.init_id)throw new Error('Continuous init identity');
       const track=inspection.initializations[0];
       if(track.timescale!==found.row.timescale||(found.type==='video'
         ?track.type!=='vide'||track.width!==found.row.width||track.height!==found.row.height
@@ -367,7 +368,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       readers.set(found.row.rendition_id,read);return null;
     }
     if(!readers.has(found.row.rendition_id))throw new Error('Continuous fragment before verified init');
-    const [facts,artifact]=await Promise.all([continuousSampleFacts(inspection),continuousMediaDigest(inspection.bytes)]);
+    const {facts,artifact}=await verifier.verify(inspection);
     if(facts.timescale!==found.row.timescale||(found.type==='video'
       ?facts.type!=='vide'||facts.width!==found.row.width||facts.height!==found.row.height
       :facts.type!=='soun'||facts.channels!==found.row.channels))throw new Error('Continuous fragment format');
@@ -461,7 +462,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         if(data.byteLength>16*1024*1024)throw new Error('Continuous append payload bound');
         const snapshot=new Uint8Array(data instanceof ArrayBuffer?data:new Uint8Array(data.buffer,data.byteOffset,data.byteLength)).slice();
         const inspection=inspect(snapshot);
-        facts=inspection.fragments.length?continuousSampleFacts(inspection).catch(error=>{note(error);return null;}):Promise.resolve(null);
+        facts=inspection.fragments.length?verifier.facts(inspection,true).catch(error=>{note(error);return null;}):Promise.resolve(null);
       }catch(error){note(error);facts=Promise.resolve(null);}
       const operation={kind:'append',facts,failed:false};pending=operation;
       try{return append(data);}catch(error){if(pending===operation)pending=null;inspect=continuousMediaInspector();throw error;}
@@ -681,7 +682,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     });},
     detached(){
       if(!mediaDetached)return Promise.reject(new Error('Continuous media disposal needs detach receipt'));
-      if(closed)return;closed=true;
+      if(closed)return;closed=true;verifier.close();
       if(disposalTimer!=null){clearTimeout(disposalTimer);disposalTimer=null;}
       if(frameToken!=null)try{video.cancelVideoFrameCallback(frameToken);}catch(e){}
       for(const loader of loaders)loader.abort();loaders.clear();

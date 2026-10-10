@@ -107,13 +107,17 @@ test("future callback metadata cannot seed false backward hitches or erase real 
     {nowMs:1000,currentTime:1,playbackRate:1,nominalSeconds:1/24}),false);
   assert.equal(policy.frameMetadataAheadOfClock({mediaTime:0.8,expectedDisplayTime:1000},
     {nowMs:1000,currentTime:1,nominalSeconds:1/24}),false);
-  const p={},v={requestVideoFrameCallback(){},paused:false,seeking:false,playbackRate:1,currentTime:0,dataset:{}};
+  const p={},v={requestVideoFrameCallback(){},addEventListener(){},removeEventListener(){},
+    paused:false,seeking:false,playbackRate:1,currentTime:0,dataset:{}};
   let next,settled=0;
   const run=new Function('PLAYER','PlaybackPolicy','document','performance','queuePlaybackFrame',
     'playbackOwnsAttachedMedia','settlePlaybackControlSeek','reportRateChase',
     `let PLAYBACK_LIFETIME_HITCHES=0;
      const HITCH_WARMUP=12,HITCH_WINDOW=120,HITCH_NEAR_MS=150,HITCH_GAP_FRAMES=2.5,
        HITCH_SLOW_FACTOR=3,HITCH_LATE_FLOOR_MS=25,HITCH_LATE_FRACTION=0.75;
+     // The detector's per-element pause/play boundary registry is module state
+     // beside it, like the constants above.
+     const HITCH_LIFECYCLE_BOUNDARIES=new WeakMap();
      ${shippedSource('armHitchDetector')}
      // The slice keeps the comment block that trails the declaration, so the
      // call must start on its own line or it is commented out.
