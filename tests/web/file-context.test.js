@@ -334,7 +334,8 @@ test("shipped Start caller asks Shared direct play without HLS-only or subtitle 
 test("Shared direct attachment polls no status, starts no control, DELETEs its B session and restarts once",async()=>{
   const ctx=vm.createContext({AUTH_GENERATION:0,console});
   const functions=[["player/directed-change.js",["releaseSession","releaseSharedDirect","attachSharedDirect","restartSharedDirectAfterError"]],
-    ["player/decode-margin.js",["beginPlaybackMediaAttachment"]],["player/stats.js",["pollSessionHealth"]]]
+    ["player/decode-margin.js",["beginPlaybackMediaAttachment"]],["player/stats.js",["pollSessionHealth"]],
+    ["detail/dynamic-range.js",["clearEffectiveProcessing"]]]
     .flatMap(([file,names])=>names.map(name=>shippedFunction(file,name))).join("\n");
   vm.runInContext(source+"\n"+functions+`
     const API="/api/v1",TOKEN="t",log=[],deletes=[],apis=[],changes=[];let PLAYER=null;

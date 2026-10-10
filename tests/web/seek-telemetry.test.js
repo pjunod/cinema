@@ -37,7 +37,7 @@ function harness(options={}){
   for(const name of ['dispatchPlaybackSeekTelemetry','playbackSeekTraceRanges',
     'recordPlaybackSeekRoute','finishPlaybackSeekTelemetry','watchPlaybackSeekTelemetry',
     'beginPlaybackControlSeek','markPlaybackControlSeekExecuted','samplePlaybackPresentationClock',
-    'settlePlaybackControlSeek','seekTo'])vm.runInContext(source(name),c);
+    'settlePlaybackControlSeek','seekTo','clearEffectiveProcessing'])vm.runInContext(source(name),c);
   function emit(name){for(const fn of [...(listeners.get(name)||[])])fn();}
   function present(at=clock.ms+50){clock.ms=at;video.seeking=false;emit('seeked');
     return c.settlePlaybackControlSeek(video,c.PLAYER,video.currentTime,++c.PLAYER.controlPresentedFrames,{epoch:c.PLAYER.controlPresentationEpoch,attachment:c.PLAYER.mediaAttachment,intent:c.PLAYER.controlSeek?.sequence});}

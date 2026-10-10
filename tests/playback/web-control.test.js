@@ -169,7 +169,7 @@ function fullOpenHarness() {
     shippedSource("beginPlaybackPreparation"),
     shippedSource("takePlaybackAttemptReason"), shippedSource("playbackSelection"),
     shippedSource("positionForPlaybackIntent"), nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
-    seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
+    seekTelemetrySources(), shippedSource("clearEffectiveProcessing"),shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
     shippedSource("noSegments"), shippedSource("copyHlsMseOk"),
     shippedSource("playbackInitialRoute"), shippedSource("restartPendingPlaybackOpen"),
     shippedSource("unexecutedPlaybackDestinationSec"),
@@ -926,7 +926,7 @@ async function main() {
     "function notifyPlaybackControl(){notifications+=1;}",
     nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
     "AUTOPLAY_NEXT_PREPARED={page:{id:'next-episode'}};",
-    seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
+    seekTelemetrySources(), shippedSource("clearEffectiveProcessing"),shippedSource("beginPlaybackControlSeek"),
     shippedSource("markPlaybackControlSeekExecuted"),
     shippedSource("samplePlaybackPresentationClock"),
     shippedSource("settlePlaybackControlSeek"),
@@ -1175,7 +1175,7 @@ async function main() {
       "function remuxUrl(path,audio,pos){calls.push({kind:'remux',position:pos*1000});return '/remux';}",
       nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
       shippedSource("positionForPlaybackIntent"),
-      seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
+      seekTelemetrySources(), shippedSource("clearEffectiveProcessing"),shippedSource("beginPlaybackControlSeek"),
       shippedSource("markPlaybackControlSeekExecuted"),
       shippedSource("samplePlaybackPresentationClock"),
       shippedSource("streamGeneration"),
@@ -4241,7 +4241,7 @@ async function main() {
         shippedSource("playbackControlSelection"),
         shippedSource("positionForPlaybackIntent"),
         nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
-        seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
+        seekTelemetrySources(), shippedSource("clearEffectiveProcessing"),shippedSource("beginPlaybackControlSeek"),
         shippedSource("clearPlaybackControlWaiters"),
         shippedSource("settlePlaybackControlWaiters"),
         shippedSource("settlePreparedOfferWaiter"),
@@ -7262,6 +7262,7 @@ function preparedRollbackTransportTests(){
     const rollback=new Function("resumePreparedIncumbentLoad","restorePreparedOverlap",
       "adoptPlaybackMediaElement","resetPlaybackTransportEvents","destroyHlsInstance",
       "disposeRetiredMediaElement","renderPlayerInfo",
+      shippedSource("clearEffectiveProcessing")+"\n"+
       shippedSource("rollbackPreparedReplacement")+";return rollbackPreparedReplacement;")(
       ()=>{},()=>{},(_,video)=>{adopted=video;},()=>{},()=>{},()=>{},()=>{});
     assert.equal(rollback(p,state,successor),true);
@@ -7461,12 +7462,12 @@ test("late control terminal and typed 410 preserve authority retirement before n
     const build=new PlaybackContextFunction('PlaybackPolicy',[
       "let STREAM_FAILURE=null,PLAYER={method:'remux',sessionId:'retired',mediaAttachment:{},wantsPlayback:true,stallRecoveries:0,controlIntentGeneration:0}; const callbacks={},reopens=[],rescues=[];",
       "const CONTROL_CLIENT_ID='test',window={PlurxPlaybackControl:{}},performance={now:()=>1},console={warn(){}},document={getElementById:()=>({})};",
-      "class Reporter{constructor(config){this.config=config;}start(){}notify(){return null;}} const PlurxPlaybackControl={Reporter,capture:(snapshot,intentGeneration,owner)=>({intentGeneration,owner})};",
+      "class Reporter{constructor(config){this.config=config;this.bootstrap=config.bootstrap;}start(){}notify(){return null;}} const PlurxPlaybackControl={Reporter,capture:(snapshot,intentGeneration,owner)=>({intentGeneration,owner})};",
       "function stopPlaybackControl(){}function continueStoppingPlaybackControl(){return false;}function playbackOwnsAttachedMedia(p){return p===PLAYER;}function playbackControlSnapshot(){return {};}function sendPlaybackControl(){}function settlePlaybackControlWaiters(){}function settlePlaybackControlAcknowledgement(){}",
       "function notifyPlaybackControl(){return null;}function clearStall(){}function pbTick(){}function pbSyncPlayIcon(){}function endWait(){}function clientLog(){}function playbackContext(){return {};}function playbackSurfaceGeneration(){return null;}",
       "function positionForPlaybackIntent(){return 42;}function stallRecoverySnapshot(p,v,facts){return facts;}function seekTo(...args){reopens.push(args);}function raisePlaybackSurface(){}function showStallRecoveryFailure(){throw Error('unexpected exhausted recovery');}function startTranscodeFallback(){rescues.push(true);}function finishStallRecovery(){return false;}function playbackIsReal(){return false;}function streamRejectionFacts(){return {};}",
       shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),shippedSource('startPlaybackControl'),
-      shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),
+      shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),shippedSource('effectiveHdrProcessing'),shippedSource('clearEffectiveProcessing'),
       "const v={error:{code:3},currentSrc:'/retired',getAttribute:()=>'/retired',addEventListener:(name,fn)=>callbacks[name]=fn};",
       "const reporter=startPlaybackControl(v,PLAYER,{lease_timeout_ms:1000});if(!reporter)throw Error('control owner did not start');wirePlayerMedia(v);",
       "return {player:PLAYER,reopens,rescues,retire:()=>noteStreamFailure(503,JSON.stringify({code:'serving_fenced',message:'proof expired'}),{attachment:PLAYER.mediaAttachment}),exchange:event=>reporter.config.onExchange({...event,request:{demand:'active',render_state:'playing'},capture:reporter.config.capture()}),error:()=>callbacks.error(),overlay:currentStreamFailureOverlay};",
@@ -7716,7 +7717,7 @@ test("local seek preserves only its attached continuous manual request",()=>{
     "function abandonPreparedReplacement(){}function settleDirectedChange(){}",
     "const document={getElementById(){return null;}};",
     nextEpisodeCancellationSources(),
-    shippedSource("supersedePlaybackControlIntent"),shippedSource("beginPlaybackControlSeek"),
+    shippedSource("supersedePlaybackControlIntent"),shippedSource("clearEffectiveProcessing"),shippedSource("beginPlaybackControlSeek"),
     "return beginPlaybackControlSeek;",
   ].join("\n"))(events);
   const attachment={},owner={noteSeek(target){events.push(target);}};
