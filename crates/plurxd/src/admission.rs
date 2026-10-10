@@ -522,6 +522,14 @@ pub struct TranscodePermit {
 }
 
 impl TranscodePermit {
+    /// Inspect this exact held bundle without acquiring or cloning capacity.
+    pub(crate) fn retained_resources(&self) -> RetainedTranscodePermit<'_> {
+        RetainedTranscodePermit {
+            hardware: self.hardware.as_ref(),
+            software: self.software.as_ref(),
+        }
+    }
+
     /// Split the bundle into the two guards a session stores. Both halves were
     /// granted together; taking them apart here does not un-grant anything,
     /// and each still releases itself on drop.

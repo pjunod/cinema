@@ -90,7 +90,7 @@ function watchTrackRow(which,tracks,selected,label,offChip){
   const names=rest.slice(0,3).map(t=>langName(t.language)||"Untagged");
   const summary=which==="audio"
     ?`<b>${rest.length}</b> more`
-    :`<b>${rest.length}</b> available${names.length?" · "+esc(names.join(", "))+(rest.length>names.length?` +${rest.length-names.length}`:""):""}`;
+    :`<b>${tracks.length}</b> available${names.length?" · "+esc(names.join(", "))+(rest.length>names.length?` +${rest.length-names.length}`:""):""}`;
   return `<div class="watch-trks">${current}<button type="button" class="watch-trkmore" data-watch-fold="${which}">${summary}</button>${watchFoldButton(which,false)}</div>`;
 }
 function watchDeliveryRow(f){

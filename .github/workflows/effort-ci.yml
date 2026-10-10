@@ -98,6 +98,9 @@ jobs:
       - name: Check CI, deploy, and shipping contracts
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # Fetch only inside the one pending test, so failure records a failed
+          # method in its completed journal rather than interrupting prepare.
+          PLURX_HIQLITE_FETCH_UPSTREAM: "1"
         run: python3 -m validation.python_unit_receipts run
       - name: Preserve Python success journal even on unit failure
         if: always() && steps.receipts.outcome == 'success'

@@ -433,6 +433,22 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertEqual(reads, 2, "cadence reads the capture slot, never AVPlayer")
     }
 
+    func testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: nil, unavailable: true)
+    }
+
+    func testQueuedSubtitleFailureCannotCrossSessionReplacement() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: true, unavailable: true)
+    }
+
+    func testQueuedSubtitleFailureCannotCrossTeardown() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: false, unavailable: true)
+    }
+
+    func testQueuedSubtitleFailureCannotCrossNewIntent() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: nil, newIntent: true, unavailable: true)
+    }
+
     func testQueuedSubtitleReadinessFromSessionACannotMutateSessionBWithTheSameTrack() async throws {
         try await assertQueuedSubtitleReadinessIsFenced(replaceSession: true)
     }
@@ -487,7 +503,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertNil(session.terminalVerdict, "End revokes publication even after its outer guard passed")
     }
 
-    private func assertQueuedSubtitleReadinessIsFenced(replaceSession: Bool?, newIntent: Bool = false) async throws {
+    private func assertQueuedSubtitleReadinessIsFenced(replaceSession: Bool?, newIntent: Bool = false, unavailable: Bool = false) async throws {
         controlExchanges.reset()
         controlAnswer.setReadiness("pending")
         defer { controlAnswer.setReadiness(nil) }
@@ -503,12 +519,13 @@ final class PlaybackControlSessionTests: XCTestCase {
             bootstrap: sessionBootstrap(),
             transport: transport,
             observe: { player.observation() },
-            onSubtitleReady: { deliveries += 1 }
+            onSubtitleReady: { if !unavailable { deliveries += 1 } },
+            onSubtitleUnavailable: { if unavailable { deliveries += 1 } }
         )
         // Seeing two requests guarantees the first non-ready response was
         // consumed before the readiness edge is introduced.
         _ = try await waitForExchange { $0.sequence == 2 }
-        controlAnswer.setReadiness("ready")
+        controlAnswer.setReadiness(unavailable ? "unavailable" : "ready")
         session.playerChanged()
         let deadline = Date().addingTimeInterval(5)
         var queued: (@MainActor @Sendable () -> Void)?
@@ -525,7 +542,8 @@ final class PlaybackControlSessionTests: XCTestCase {
                 bootstrap: next,
                 transport: transport,
                 observe: { player.observation() },
-                onSubtitleReady: { deliveries += 100 }
+                onSubtitleReady: { if !unavailable { deliveries += 100 } },
+                onSubtitleUnavailable: { if unavailable { deliveries += 100 } }
             )
         } else if replaceSession == false {
             session.end()

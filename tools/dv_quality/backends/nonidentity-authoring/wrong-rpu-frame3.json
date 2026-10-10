@@ -1,0 +1,209 @@
+{
+  "dovi_profile": 8,
+  "header": {
+    "rpu_nal_prefix": 25,
+    "rpu_type": 2,
+    "rpu_format": 18,
+    "vdr_rpu_profile": 1,
+    "vdr_rpu_level": 0,
+    "vdr_seq_info_present_flag": true,
+    "chroma_resampling_explicit_filter_flag": false,
+    "coefficient_data_type": 0,
+    "coefficient_log2_denom": 23,
+    "coefficient_log2_denom_length": 23,
+    "vdr_rpu_normalized_idc": 1,
+    "bl_video_full_range_flag": false,
+    "bl_bit_depth_minus8": 2,
+    "el_bit_depth_minus8": 2,
+    "ext_mapping_idc_0_4": 0,
+    "ext_mapping_idc_5_7": 0,
+    "vdr_bit_depth_minus8": 4,
+    "spatial_resampling_filter_flag": false,
+    "reserved_zero_3bits": 0,
+    "el_spatial_resampling_filter_flag": false,
+    "disable_residual_flag": true,
+    "vdr_dm_metadata_present_flag": true,
+    "use_prev_vdr_rpu_flag": false,
+    "prev_vdr_rpu_id": 0
+  },
+  "rpu_data_mapping": {
+    "vdr_rpu_id": 0,
+    "mapping_color_space": 0,
+    "mapping_chroma_format_idc": 0,
+    "num_x_partitions_minus1": 0,
+    "num_y_partitions_minus1": 0,
+    "curves": [
+      {
+        "num_pivots_minus2": 0,
+        "pivots": [
+          0,
+          1023
+        ],
+        "mapping_idc": "Polynomial",
+        "poly_order_minus1": [
+          0
+        ],
+        "linear_interp_flag": [
+          false
+        ],
+        "poly_coef_int": [
+          [
+            0,
+            0
+          ]
+        ],
+        "poly_coef": [
+          [
+            524288,
+            6291456
+          ]
+        ]
+      },
+      {
+        "num_pivots_minus2": 0,
+        "pivots": [
+          0,
+          1023
+        ],
+        "mapping_idc": "Polynomial",
+        "poly_order_minus1": [
+          0
+        ],
+        "linear_interp_flag": [
+          false
+        ],
+        "poly_coef_int": [
+          [
+            0,
+            1
+          ]
+        ],
+        "poly_coef": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      {
+        "num_pivots_minus2": 0,
+        "pivots": [
+          0,
+          1023
+        ],
+        "mapping_idc": "Polynomial",
+        "poly_order_minus1": [
+          0
+        ],
+        "linear_interp_flag": [
+          false
+        ],
+        "poly_coef_int": [
+          [
+            0,
+            1
+          ]
+        ],
+        "poly_coef": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  "vdr_dm_data": {
+    "compressed": false,
+    "affected_dm_metadata_id": 0,
+    "current_dm_metadata_id": 0,
+    "scene_refresh_flag": 0,
+    "ycc_to_rgb_coef0": 9574,
+    "ycc_to_rgb_coef1": 0,
+    "ycc_to_rgb_coef2": 13802,
+    "ycc_to_rgb_coef3": 9574,
+    "ycc_to_rgb_coef4": -1540,
+    "ycc_to_rgb_coef5": -5348,
+    "ycc_to_rgb_coef6": 9574,
+    "ycc_to_rgb_coef7": 17610,
+    "ycc_to_rgb_coef8": 0,
+    "ycc_to_rgb_offset0": 16777216,
+    "ycc_to_rgb_offset1": 134217728,
+    "ycc_to_rgb_offset2": 134217728,
+    "rgb_to_lms_coef0": 7222,
+    "rgb_to_lms_coef1": 8771,
+    "rgb_to_lms_coef2": 390,
+    "rgb_to_lms_coef3": 2654,
+    "rgb_to_lms_coef4": 12430,
+    "rgb_to_lms_coef5": 1300,
+    "rgb_to_lms_coef6": 0,
+    "rgb_to_lms_coef7": 422,
+    "rgb_to_lms_coef8": 15962,
+    "signal_eotf": 65535,
+    "signal_eotf_param0": 0,
+    "signal_eotf_param1": 0,
+    "signal_eotf_param2": 0,
+    "signal_bit_depth": 12,
+    "signal_color_space": 0,
+    "signal_chroma_format": 0,
+    "signal_full_range_flag": 1,
+    "source_min_pq": 0,
+    "source_max_pq": 4095,
+    "source_diagonal": 42,
+    "cmv29_metadata": {
+      "num_ext_blocks": 3,
+      "ext_metadata_blocks": [
+        {
+          "Level1": {
+            "min_pq": 0,
+            "max_pq": 4092,
+            "avg_pq": 2045
+          }
+        },
+        {
+          "Level5": {
+            "active_area_left_offset": 0,
+            "active_area_right_offset": 0,
+            "active_area_top_offset": 0,
+            "active_area_bottom_offset": 0
+          }
+        },
+        {
+          "Level6": {
+            "max_display_mastering_luminance": 1000,
+            "min_display_mastering_luminance": 1,
+            "max_content_light_level": 0,
+            "max_frame_average_light_level": 0
+          }
+        }
+      ]
+    },
+    "cmv40_metadata": {
+      "num_ext_blocks": 3,
+      "ext_metadata_blocks": [
+        {
+          "Level9": {
+            "length": 1,
+            "source_primary_index": 0
+          }
+        },
+        {
+          "Level11": {
+            "content_type": 1,
+            "whitepoint": 0,
+            "reference_mode_flag": true,
+            "reserved_byte2": 0,
+            "reserved_byte3": 0
+          }
+        },
+        {
+          "Level254": {
+            "dm_mode": 0,
+            "dm_version_index": 2
+          }
+        }
+      ]
+    }
+  },
+  "rpu_data_crc32": 817974546
+}

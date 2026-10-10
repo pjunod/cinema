@@ -1,5 +1,13 @@
 //! Frozen encoded-VOD recipes and per-generation foreground capacity.
 
+#[cfg(target_os = "linux")]
+#[path = "dv_runtime.rs"]
+pub(crate) mod dv_runtime;
+
+#[cfg(any(target_os = "linux", test))]
+#[path = "dv_report_lifetime.rs"]
+pub(crate) mod dv_report_lifetime;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,6 +19,117 @@ use plurx_core::transcode::{
     VodFrameGrid,
 };
 use sha2::{Digest, Sha256};
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod dv_failed_episode {
+    use plurx_core::transcode::dv_processing::{DvDestination, DvDigest};
+    use sha2::{Digest, Sha256};
+    fn ledger() -> &'static std::sync::Mutex<std::collections::VecDeque<DvDigest>> {
+        static LEDGER: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<DvDigest>>> =
+            std::sync::OnceLock::new();
+        LEDGER.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+    }
+    pub(crate) fn key(
+        playback: &str,
+        source: &str,
+        backend: &DvDigest,
+        settings: i64,
+        destination: DvDestination,
+    ) -> DvDigest {
+        let bytes = serde_json::to_vec(&(
+            "plurx.dv.failed-playback-episode.v1",
+            playback,
+            source,
+            backend,
+            settings,
+            destination,
+        ))
+        .expect("DV episode identity");
+        DvDigest::new(hex::encode(Sha256::digest(bytes))).expect("DV episode digest")
+    }
+    pub(crate) fn failed(key: &DvDigest) -> bool {
+        ledger().lock().expect("DV failed episodes").contains(key)
+    }
+    pub(crate) fn refuse(key: &DvDigest) {
+        let mut ledger = ledger().lock().expect("DV failed episodes");
+        if !ledger.contains(key) {
+            if ledger.len() == 128 {
+                ledger.pop_front();
+            }
+            ledger.push_back(key.clone());
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn failed_later_window_excludes_fresh_create_without_predecessor_fields() {
+            let backend = DvDigest::new("12".repeat(32)).expect("valid focused control");
+            let first = key(
+                "failure-after-first-window",
+                "source-a",
+                &backend,
+                41,
+                DvDestination::Hdr10,
+            );
+            assert!(
+                !failed(&first),
+                "the initial completed window can select processing"
+            );
+            refuse(&first);
+            let fresh = key(
+                "failure-after-first-window",
+                "source-a",
+                &backend,
+                41,
+                DvDestination::Hdr10,
+            );
+            assert!(
+                failed(&fresh),
+                "fresh creation must use the ordinary route after later refusal"
+            );
+            for changed in [
+                key(
+                    "new-playback",
+                    "source-a",
+                    &backend,
+                    41,
+                    DvDestination::Hdr10,
+                ),
+                key(
+                    "failure-after-first-window",
+                    "source-b",
+                    &backend,
+                    41,
+                    DvDestination::Hdr10,
+                ),
+                key(
+                    "failure-after-first-window",
+                    "source-a",
+                    &backend,
+                    42,
+                    DvDestination::Hdr10,
+                ),
+                key(
+                    "failure-after-first-window",
+                    "source-a",
+                    &backend,
+                    41,
+                    DvDestination::Profile81,
+                ),
+                key(
+                    "failure-after-first-window",
+                    "source-a",
+                    &DvDigest::new("34".repeat(32)).expect("valid focused control"),
+                    41,
+                    DvDestination::Hdr10,
+                ),
+            ] {
+                assert!(!failed(&changed));
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 use crate::seam_hooks::AsyncPause;
@@ -59,6 +178,11 @@ pub(crate) fn try_admit_frozen_bundle(
 pub(crate) struct Encoding {
     pub source_object_version: String,
     pub plan: ResolvedTranscode,
+    /// Worker-selected processing decision frozen with this rendition. A saved
+    /// switch or catalog DV label cannot create a selected backend plan.
+    pub dv_processing: plurx_core::transcode::dv_processing::DvSelection,
+    #[cfg(target_os = "linux")]
+    pub dv_runtime: Option<Arc<dv_runtime::RuntimeRecipe>>,
     /// A soundtrack producer owns its AAC recipe independently of video.
     pub shared_audio: Option<plurx_core::transcode::VodSharedAudioRecipe>,
     pub resources: TranscodeResourceEstimate,
@@ -274,6 +398,7 @@ impl std::fmt::Debug for Encoding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Encoding")
+            .field("dv_processing", &self.dv_processing)
             .field("decoder", &self.plan.decode().backend())
             .field("encoder", &self.plan.encoder())
             .field("resources", &self.resources())
@@ -397,6 +522,16 @@ impl EncodePermit {
         Some(EncodeWorkerPermit {
             reservation: self._reservation,
         })
+    }
+}
+
+impl EncodeWorkerPermit {
+    /// Borrow the reservation owned by this exclusive generation worker.
+    pub(crate) fn retained_resources(&self) -> crate::admission::RetainedTranscodePermit<'_> {
+        crate::admission::RetainedTranscodePermit {
+            hardware: self.reservation._hardware.as_ref(),
+            software: self.reservation._software.as_ref(),
+        }
     }
 }
 
@@ -542,6 +677,9 @@ impl Encoding {
         Arc::new(Encoding {
             source_object_version: self.source_object_version.clone(),
             plan: self.plan.clone(),
+            dv_processing: self.dv_processing.clone(),
+            #[cfg(target_os = "linux")]
+            dv_runtime: self.dv_runtime.clone(),
             shared_audio: self.shared_audio.clone(),
             resources: self.resources,
             options: self.options.clone(),
@@ -895,6 +1033,23 @@ impl Encoding {
         options.start_seconds = start_seconds;
         let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
             .expect("frozen VOD execution remains valid");
+        #[cfg(target_os = "linux")]
+        if let Some(runtime) = &self.dv_runtime {
+            let output = self
+                .plan
+                .completed_reconstructed_output(runtime.encoder)
+                .expect("verified reconstructed output encoder");
+            return plurx_core::transcode::vod_completed_reconstructed_pipe_args(
+                file,
+                &output,
+                &execution,
+                self.grid,
+                duration_seconds,
+                "/proc/self/fd/3",
+                "/proc/self/fd/4",
+            )
+            .expect("verified reconstructed VOD recipe remains valid");
+        }
         if let Some(audio) = &self.shared_audio {
             // This input is the source duration, not an already rounded plan
             // end. Re-rounding the latter could add another whole video frame.
@@ -916,6 +1071,42 @@ impl Encoding {
         }
     }
 
+    /// The encoder of the admitted, prepared processing graph, rather than
+    /// the software source-decode plan used to build its input contract.
+    pub(crate) fn delivered_encoder_label(&self) -> &'static str {
+        #[cfg(target_os = "linux")]
+        if let Some(runtime) = &self.dv_runtime {
+            if matches!(&self.dv_processing,
+                plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
+                    if plurx_core::transcode::dv_processing::DvProductionRegistry.permits(plan))
+            {
+                return match runtime.encoder {
+                    plurx_core::transcode::Encoder::Software => "software (x265)",
+                    encoder => encoder.label(),
+                };
+            }
+        }
+        self.plan.encoder().label()
+    }
+
+    pub(crate) fn preserves_processed_dv(&self) -> bool {
+        matches!(&self.dv_processing,
+            plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
+                if plurx_core::transcode::dv_processing::DvProductionRegistry.permits(plan)
+                    && plan.destination() == plurx_core::transcode::dv_processing::DvDestination::Profile81)
+    }
+    pub(crate) fn processed_dv_supplemental(&self) -> Option<String> {
+        if !self.preserves_processed_dv() {
+            return None;
+        }
+        let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) = &self.dv_processing
+        else {
+            return None;
+        };
+        plan.profile81_level()
+            .map(|level| format!("dvhe.08.{level:02}"))
+    }
+
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
         let mut hash = Sha256::new();
         hash.update(if self.shared_audio.is_some() {
@@ -928,6 +1119,14 @@ impl Encoding {
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());
+        if let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) =
+            &self.dv_processing
+        {
+            // Only a byte-changing qualified graph enters the output key.
+            // Disabled/unavailable preferences keep the existing cache identity.
+            hash.update(b"plurx.vod.dv-processing.v1\0");
+            hash.update(plan.semantic_digest().as_str().as_bytes());
+        }
         hash.update(
             self.shared_audio
                 .as_ref()

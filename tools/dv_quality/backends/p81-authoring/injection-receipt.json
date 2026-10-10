@@ -1,0 +1,35 @@
+{
+  "scope": "no-reorder synthetic analytic control",
+  "frames": 4,
+  "rpu_count": 4,
+  "rpu_sha256_by_frame": [
+    "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+    "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+    "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+    "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c"
+  ],
+  "source_definition_sha256": "86c23bec2dbc4d8283db00baf6ca177d9e1d4c76a032637db7c6adf493b5601e",
+  "nal_types": [
+    35,
+    32,
+    33,
+    34,
+    39,
+    39,
+    39,
+    20,
+    62,
+    35,
+    1,
+    62,
+    35,
+    1,
+    62,
+    35,
+    1,
+    62
+  ],
+  "exact_payload_match": true,
+  "timestamp_basis": "No reorder, four IDR/TRAIL_R access units at input 24/1; raw HEVC has no PTS timestamps",
+  "p81_conformance": null
+}

@@ -32,3 +32,9 @@ interface Window {
   WebKitMediaSource?: typeof MediaSource;
   startNativeReader?: any;
 }
+
+/** Script captions share the attached video element's media timeline. */
+interface HTMLVideoElement {
+  _vsubs?: TextTrack;
+  _subtitleCueOwner?: {player: Player; index: number; off: number; intent: number};
+}

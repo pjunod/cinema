@@ -522,6 +522,73 @@ class PlaybackControlRefusalTest {
 
 class PlaybackControlFailureTest {
     @Test
+    fun temporaryServingFenceReplaysThenResumesFreshControl() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlTransportException(
+            status = 503, code = "serving_fenced", retryAfterMs = 4_000,
+        )))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        harness.current = snapshot(position = 2_000)
+        advanceTimeBy(3_999)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+        assertFalse(subject.isStopped())
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals(2, harness.requests.size)
+        assertEquals(harness.requests[0], harness.requests[1])
+        advanceTimeBy(5_001)
+        runCurrent()
+        assertEquals(2L, harness.requests[2].sequence)
+        assertEquals(2_000L, harness.requests[2].positionMs)
+        subject.stop()
+    }
+
+    @Test
+    fun temporaryServingFenceCanEndWithADefinitiveTerminal() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlTransportException(status = 503, code = "serving_fenced")))
+        harness.enqueue(Result.failure(ControlTransportException(status = 410, code = "session_ended")))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1_001)
+        runCurrent()
+        assertEquals(2, harness.requests.size)
+        assertEquals(harness.requests[0], harness.requests[1])
+        assertTrue(subject.isStopped())
+    }
+
+    @Test
+    fun closeCancelsTheServingFenceRetry() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlTransportException(
+            status = 503, code = "serving_fenced", retryAfterMs = 4_000,
+        )))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        subject.stop()
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+        assertTrue(subject.isStopped())
+    }
+
+    @Test
+    fun anUnknown503StillStopsControlReporting() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlTransportException(status = 503, code = "unknown_refusal")))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1_001)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+        assertTrue(subject.isStopped())
+    }
+
+    @Test
     fun `a retryable control failure replays the exact request`() = runTest {
         val harness = Harness(this)
         harness.enqueue(
@@ -940,6 +1007,21 @@ class PlaybackControlWireTest {
     }
 
     @Test
+    fun `unavailable subtitle notifies once per intent without consuming ready retry`() {
+        val notice = SubtitleUnavailableNoticeState()
+        val readiness = SubtitleReadinessRetryState()
+        assertFalse(notice.record(null, intent = 1))
+        assertFalse(notice.record("unknown", intent = 1))
+        assertTrue(notice.record("unavailable", commitUnavailable = false, intent = 1))
+        assertTrue(notice.record("unavailable", intent = 1))
+        assertFalse(notice.record("unavailable", intent = 1))
+        assertFalse(notice.record("warming", intent = 1))
+        assertTrue(readiness.record("ready", intent = 1))
+        assertFalse(notice.record("unavailable", intent = 1))
+        assertTrue(notice.record("unavailable", intent = 2))
+    }
+
+    @Test
     fun `subtitle readiness is closed and a ready edge retries once`() {
         mapOf(
             "ready" to true,
@@ -951,6 +1033,17 @@ class PlaybackControlWireTest {
             assertEquals(expected, SubtitleReadinessDecision.meansReady(value), value)
         }
         assertFalse(SubtitleReadinessDecision.meansReady(null))
+
+        val initial = SubtitleReadinessRetryState()
+        assertTrue(initial.record("ready", commitReady = false, intent = 1))
+        assertTrue(initial.record("ready", intent = 1), "first ready needs no observed warming")
+        assertFalse(initial.record("ready", intent = 1))
+        assertTrue(initial.record("ready", intent = 2), "new intent owns a new retry")
+        assertFalse(initial.record("ready", intent = 2))
+
+        assertTrue(initial.record("ready", intent = 2, revision = "window-200"))
+        assertFalse(initial.record("ready", intent = 2, revision = "window-200"))
+        assertTrue(initial.record("ready", intent = 2, revision = "whole"))
 
         val transition = SubtitleReadinessRetryState()
         assertFalse(transition.record(null))

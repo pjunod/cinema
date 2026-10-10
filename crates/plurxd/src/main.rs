@@ -1,6 +1,7 @@
 // Production children go through `process_control::spawn_job_owned`; see
 // clippy.toml.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+#![cfg_attr(plurx_dv_segment_probe, allow(dead_code))]
 
 mod admission;
 mod availability;
@@ -28,6 +29,8 @@ mod decode_facts;
 mod decoder_health;
 mod delivery;
 mod dv_disk;
+#[cfg(unix)]
+mod dv_segment;
 mod dvpipe;
 mod ffmpeg;
 mod fontenv;
@@ -83,6 +86,7 @@ mod storeprobe;
 mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
+mod subtitle_transcription;
 mod subtitles;
 mod telemetry;
 mod titlestore;
@@ -504,6 +508,7 @@ fn cli_exit(code: i32, message: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
+#[cfg(not(plurx_dv_segment_probe))]
 fn main() -> anyhow::Result<()> {
     if let Some(result) = decode_facts::dispatch_probe_bootstrap() {
         result.context("launching namespace-bound probe")?;
@@ -511,6 +516,18 @@ fn main() -> anyhow::Result<()> {
     }
     daemon_main()
 }
+
+// Source-only validation entry: compile the real production graph without
+// unrelated unit bodies. No public command, server listener or qualification.
+#[cfg(all(unix, plurx_dv_segment_probe))]
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dv_segment::physical_probe().await;
+    Ok(())
+}
+
+#[cfg(all(not(unix), plurx_dv_segment_probe))]
+compile_error!("DV segment physical probe requires Unix descriptor custody");
 
 #[tokio::main]
 async fn daemon_main() -> anyhow::Result<()> {
@@ -3190,6 +3207,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(http::file_grants::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(subtitle_transcription::run(
         state.clone(),
         background_shutdown.clone(),
     ));
@@ -7756,6 +7777,29 @@ mod startup_tests {
     /// Boots `config` over `root`, checks it is serving, shuts it down, and
     /// hands back the store it ran on.
     async fn boot_serve_and_drain(
+        config: &Config,
+        root: &std::path::Path,
+    ) -> Arc<dyn plurx_core::store::Store> {
+        let config = config.clone();
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            // Each simulated process owns its runtime. Settle its detached
+            // tasks and blocking writers before a later boot reopens the file.
+            // The SQLite handle owns its connections independently; subsequent
+            // inspection runs on the caller's current runtime.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("boot runtime");
+            let store = runtime.block_on(boot_serve_and_drain_in_runtime(&config, &root));
+            drop(runtime);
+            store
+        })
+        .await
+        .expect("boot runtime worker")
+    }
+
+    async fn boot_serve_and_drain_in_runtime(
         config: &Config,
         root: &std::path::Path,
     ) -> Arc<dyn plurx_core::store::Store> {

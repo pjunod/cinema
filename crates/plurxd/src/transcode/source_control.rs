@@ -10,6 +10,7 @@ use crate::playback_control::{
 pub(crate) struct SourceOpenedControl {
     result: Result<LocalControlResult, ControlStateError>,
     guard: SourceResponseGuard,
+    subtitle_revision: Option<String>,
     projection: Box<(
         MediaSessionRoute,
         crate::http::hls::StartResponse,
@@ -26,14 +27,19 @@ impl SourceOpenedControl {
     ) {
         let (route, start, recipe) = *self.projection;
         let response = self.result.map(|result| {
-            crate::http::hls::source_control_response(
+            let mut response = crate::http::hls::source_control_response(
                 &route,
                 &start,
                 &recipe,
                 request,
                 &result,
                 crate::media_sessions::unix_ms(),
-            )
+            );
+            if let Some(revision) = self.subtitle_revision {
+                response.delivery.subtitle_readiness = Some("ready".into());
+                response.delivery.subtitle_revision = Some(revision);
+            }
+            response
         });
         (response, self.guard)
     }
@@ -283,7 +289,23 @@ impl SourceViewerActor {
             .await
             .ok_or(SourceWorkerError::Unavailable)?;
         drop(authority);
+        let subtitle_revision = {
+            let state = self.0.state.lock().expect("Source native control");
+            match (
+                request.selection.subtitle.mode,
+                request.selection.subtitle.track,
+                state.native.as_ref(),
+            ) {
+                (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
+                    u16::try_from(index)
+                        .ok()
+                        .and_then(|index| tracks.revision(index))
+                }
+                _ => None,
+            }
+        };
         Ok(SourceOpenedControl {
+            subtitle_revision,
             result,
             guard,
             projection: Box::new((route, current_response, recipe)),

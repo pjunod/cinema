@@ -102,8 +102,9 @@ function prePlayPickers(f){
   const id=context.source_ref.file_id, idArg=esc(JSON.stringify(id));
   const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
   const find=f.subtitle_search_enabled?`<button class="ghost sm" onclick="findSubtitles(${idArg})">Find subtitles</button><div id="subtitle-search-${id}"></div>`:"";
+  const generate=typeof ME!=="undefined"&&ME&&ME.is_admin&&f.video_codec?`<button class="ghost sm" onclick="generateSubtitles(${idArg},this)">Generate subtitles</button><div id="subtitle-generate-${id}" role="status" aria-live="polite"></div>`:"";
   // Nothing to choose between: one audio track and no subtitles at all.
-  if(auds.length<2 && !subs.length) return find;
+  if(auds.length<2 && !subs.length) return find+generate;
   const pd=f.playback_defaults||{}, ad=pd.audio||{}, sd=pd.subtitle||{};
   const sel=prePlaySelection(context)||{audio:null,subtitle:null};
   const defAudio=auds.find(a=>a.index===ad.selected_index);
@@ -123,7 +124,7 @@ function prePlayPickers(f){
         ${subs.map(s=>opt(s.index,subFactLabel(s),sel.subtitle===s.index)).join("")}
       </select></div>`:"";
   return `<div class="preplay">
-    <div class="pprow">${audioField}${subField}</div>${find}
+    <div class="pprow">${audioField}${subField}</div>${find}${generate}
     <div class="ppnote" id="pp-n-${id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`;
 }
 // Criterion 7, said out loud rather than merely implemented: this is one
@@ -828,4 +829,23 @@ function classicItemBody(p){
         ${it.overview?`<p class="overview">${esc(it.overview)}</p>`:''}
         ${body}</div>
     </div></div>`;
+}
+
+async function generateSubtitles(fileId,button){
+  const panel=document.getElementById(`subtitle-generate-${fileId}`);
+  if(!panel||!button)return;
+  button.disabled=true;
+  panel.textContent="Requesting local transcription…";
+  try{
+    const result=await api(`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`,{method:"POST",body:{}});
+    if(!panel.isConnected)return;
+    if(result.outcome!=="accepted"&&result.outcome!=="existing"){
+      const reasons={queue_full:"The background queue is full. Try again after current work finishes.",source_changed:"The media file changed. Refresh this page before trying again.",conflict:"Another request changed this job. Refresh Activity to see its current state.",no_demand:"This file does not need transcription for the configured language."};
+      panel.textContent=reasons[result.outcome]||"Transcription was not queued. Check Activity and transcription settings.";
+      return;
+    }
+    panel.innerHTML=`${result.outcome==="existing"?"This transcription is already queued or running.":"Transcription queued."} <a href="#/activity">Follow progress or stop it in Activity</a>. Refresh this title after completion to select the generated captions.`;
+  }catch(error){
+    if(panel.isConnected){panel.textContent=error.message||"Could not request transcription.";const link=document.createElement("a");link.href="#/settings/developer";link.textContent=" Configure offline transcription";panel.append(link);}
+  }finally{if(button.isConnected)button.disabled=false;}
 }

@@ -106,7 +106,7 @@ class MetalBindingContract(unittest.TestCase):
 
     def test_svn_source_offer_uses_local_versioned_inventory_and_excludes_generated_files(self):
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary)
+            source = Path(temporary).resolve()
             tracked = source / "source.c"
             generated = source / "native.o"
             tracked.write_text("original source")

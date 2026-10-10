@@ -1,0 +1,11 @@
+{
+  "status": "passed",
+  "dependency_lock_sha256": "25296780730f11cec9874a91f74314ad601b8b01d82f938bde117f8f89f582c6",
+  "ffmpeg_revision": "bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
+  "reuse_policy": "approved static prefix reused after full identity validation; new helpers compiled",
+  "reviewed_evidence": {
+    "receipt.json": "d251e416ba8c61fe5fc942038f315f385812a761b5f028e0a1c1b878c0dec57f",
+    "artifact-inventory.json": "c56fad265836d5e2ac01ebd42e715b57ea02e4ac5bb10b1b13f9e4bb772bd763",
+    "bundle-hashes.json": "d9f3607b0582d17a456e1caeeb1ee7c35032ed2dc5c10808797abc1e469e4801"
+  }
+}

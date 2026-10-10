@@ -1,0 +1,24 @@
+{
+  "runtime_commit": "deaa1496868bf559e5704a009436df021b296e25",
+  "source_archive_sha256": "60c25a71beaeb2b33557affde3013d0b3393e6838eda1e5a959c31ffbfe2725c",
+  "rustc": "1.97.1",
+  "normal_linux_arm_daemon_build": "passed",
+  "renderer_source_sha256": "cd20e90a091990675be2c8660305407432a0deacb5519fb7965b18dd0c2f0a8b",
+  "helper_manifest_sha256": "8f239187b834882f12f6cea16737d070e552c688a9c9e993a8b7ebbaf9041760",
+  "default_private_budget_seconds": 8,
+  "encoder": "Jellyfin FFmpeg 8.1.3",
+  "scope": "Local ARM software Vulkan synthetic routing, custody, metadata, audio and timing; no physical-display/reference-quality or ROG performance proof",
+  "final_outcomes": {
+    "p5": "Initial processed HDR10 media and effective enhancement report passed; older collector seek stopped on legitimate segment_pending, retained failed attempt. Genuine seek separately passed with P7.",
+    "p7_p81": "Passed nonzero source windows 2..4 and 4..6, decoded source frames48/96; each48 parsed profile8 RPUs associated with actual source window, FEL48/NLQ48 and fresh publication.",
+    "p7_hdr_seek": "Passed initial processed FEL HDR10, one accepted in-session seek5000 clearing prior report, source4..6/frame96 and fresh report; one exact segment_pending retried within20s collector bound.",
+    "p8_hdr": "Passed processed HDR10 actualPQ/10bit/HEVC/AAC timing and BaseRpu enhancement report.",
+    "late": "Resource refusal and fresh same-playback ordinary HDR10 fallback passed; intended invalid-active-area metadata refusal UNPROVEN because observed cause was DV encoder private-output bound exceeded. Strict expected-cause analyzer failed and preserved.",
+    "synthetic4k": "Passed exact private-window deadline cause at unchanged8s, ordinary compatible HDR10/AAC and fresh same-playback new-request fallback, no enhancement report."
+  },
+  "evidence_manifest": "manifest.json",
+  "credentials_excluded": true,
+  "artifact_count": 487,
+  "artifact_bytes": 27739747,
+  "daemon_binary_sha256": "aa34307e196358aaab8a7f44f4a3b75de8211c0874e1a48357c9af0c0ff30f76"
+}

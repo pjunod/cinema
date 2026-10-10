@@ -925,6 +925,11 @@ impl TranscodeManager {
                     Some(encoding.plan.output_contract()),
                 );
                 let mut codecs = transcoded_hls_codecs_for_plan(&encoding.plan);
+                // P81 authoring uses the verified in-band HEVC sample entry.
+                // The served init still supplies its complete RFC 6381 value.
+                if encoding.preserves_processed_dv() {
+                    codecs = codecs.replacen("hvc1", "hev1", 1);
+                }
                 codecs = audio_delivery_hls_codecs(codecs, facts.audio_delivery.as_ref());
                 if file.audio_streams.is_empty() {
                     codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
@@ -942,7 +947,7 @@ impl TranscodeManager {
                         start_seconds: 0.0,
                         media_origin_seconds: 0.0,
                         codecs,
-                        supplemental_codecs: None,
+                        supplemental_codecs: encoding.processed_dv_supplemental(),
                         frame_rate: Some(
                             f64::from(encoding.grid.numerator)
                                 / f64::from(encoding.grid.denominator),

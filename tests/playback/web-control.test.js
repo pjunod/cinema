@@ -406,6 +406,19 @@ async function main() {
     assert.equal(subtitleReadinessRetryTransition(isolated,delivery),false,
       "non-ready readiness never directs a retry");
   }
+  const firstReady={controlIntentGeneration:1};
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready"}),true,
+    "first ready repairs an empty fragment even when warming was never observed");
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready"}),false);
+  firstReady.controlIntentGeneration++;
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready"}),true,
+    "a new subtitle selection or seek cannot inherit the old intent's completed retry");
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready"}),false);
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready",subtitle_revision:"window-200"}),true,
+    "a newly ready window repairs prefetched empty fragments without an observed warming edge");
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready",subtitle_revision:"window-200"}),false);
+  assert.equal(subtitleReadinessRetryTransition(firstReady,{subtitle_readiness:"ready",subtitle_revision:"whole"}),true,
+    "whole-track publication repairs gaps even while the current window was already ready");
   const readySidecarReads=[];
   const retryReadyNativeSubtitle=new PlaybackContextFunction("applyReadySubtitleSidecar",[
     shippedSource("nativeHlsSubtitleOrdinal"),
@@ -439,8 +452,8 @@ async function main() {
       &&retryReadyNativeSubtitle(nativePlayer)) retries++;
   }
   assert.equal(retries,1,"one readiness edge performs one directed retry");
-  assert.deepEqual(subtitleTrackWrites,[-1],
-    "the retry disables the cached empty HLS rendition");
+  assert.deepEqual(subtitleTrackWrites,[],
+    "the retry preserves native captions until the whole-track sidecar has arrived");
   assert.deepEqual(readySidecarReads,[{player:nativePlayer,index:7}],
     "the readiness edge requests the selected sidecar on the same player");
   assert.equal(nativePlayer.sessionId,"same-video-session",
@@ -7822,9 +7835,159 @@ test("parsed master survives level loads and early Pause/Play", () => {
   assert.equal(h.episode.manifestState, "parsed", "a retired attachment cannot change readiness");
 });
 
+// Cached window delivery regressions run in the required web-control lane.
+function subtitleWindowFixture(url="/api/v1/files/42/subs/0?token=viewer"){
+  const track={mode:"disabled",items:[],get cues(){return this.mode==="disabled"?null:this.items;},
+    addCue(c){this.items.push(c);},removeCue(c){this.items.splice(this.items.indexOf(c),1);}};
+  const video={currentTime:0,addTextTrack(kind,label){assert.equal(kind,"subtitles");assert.equal(label,"","hls native-selection polling must ignore the script track");return track;}};
+  const writes=[],displays=[],reads=[];
+  const player={sessionId:"same-session",probeUrl:url.includes("/shared/")?"/api/v1/shared/playback/same-session/index.m3u8":"/api/v1/hls/same-session/index.m3u8",fileId:"42",offset:0,controlIntentGeneration:1,curSub:0,
+    subs:[{index:0,native:true}],hls:{set subtitleTrack(v){writes.push(v);},set subtitleDisplay(v){displays.push(v);}}};
+  const env={player,video,track,writes,displays,reads,url};
+  const functions=new Function("env",`let PLAYER=env.player;
+    const document={getElementById:()=>env.video};
+    const window={VTTCue:class {constructor(startTime,endTime,text){Object.assign(this,{startTime,endTime,text});}}};
+    const fetch=url=>{env.reads.push(url);return env.reply(url);};const subUrl=()=>env.url;const tok=url=>url;
+    ${["vttTime","vttParse","nativeHlsSubtitleOrdinal","retryReadyNativeSubtitle",
+      "applyReadySubtitleSidecar","applyReadySubtitleRevision"].map(shippedSource).join("\n")}
+    return {apply:applyReadySubtitleRevision,retry:retryReadyNativeSubtitle,setPlayer:p=>PLAYER=p};`)(env);
+  env.reply=async()=>({ok:true,status:200,headers:{get:()=>"false"},text:async()=>subtitleWindowVtt(1,5,"first")});
+  return Object.assign(env,functions);
+}
+function subtitleWindowVtt(start,end,text){const time=s=>`00:${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}.000`;return `WEBVTT\n\n${time(start)} --> ${time(end)}\n${text}\n\n`;}
+function subtitleWindowResponse(text,complete=false,status=200){return {ok:true,status,headers:{get:()=>String(complete)},text:async()=>text};}
+function subtitleWindowHeld(){let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};}
+
+test("cached subtitle windows render immediately, merge stable cues, and yield to the whole track",async()=>{
+  for(const url of ["/api/v1/files/42/subs/0?token=viewer","/api/v1/shared/imports/import/files/locator/subs/0?token=viewer"]){
+    const f=subtitleWindowFixture(url);
+    await f.apply(f.player,0,"first-window");
+    assert.equal(f.reads[0],f.player.probeUrl.replace("index.m3u8","subs/0/cached-first-window"));
+    assert.equal(f.player.sessionId,"same-session");assert.equal(f.video._vsubs,f.track);
+    assert.deepEqual(f.track.items.map(c=>c.text),["first"]);assert.deepEqual(f.writes,[],"partial cues keep native segment I/O selected");assert.deepEqual(f.displays,[false]);
+    const first=f.track.items[0];
+    f.reply=async()=>subtitleWindowResponse(subtitleWindowVtt(1,5,"first")+subtitleWindowVtt(4,9,"second"));
+    await f.apply(f.player,0,"next-window");
+    assert.equal(f.track.items[0],first,"overlapping window leaves active cue object stable");
+    assert.deepEqual(f.track.items.map(c=>c.text),["first","second"]);
+    f.reply=async()=>subtitleWindowResponse("WEBVTT\n\n");await f.apply(f.player,0,"empty-window");
+    assert.equal(f.track.items[0],first,"empty window cannot erase a still-valid cue");
+    f.reply=async()=>subtitleWindowResponse("",false,204);await f.apply(f.player,0,"evicted-window");
+    assert.deepEqual(f.track.items.map(c=>c.text),["first","second"]);
+    f.reply=async()=>subtitleWindowResponse(subtitleWindowVtt(1,5,"first")+subtitleWindowVtt(4,9,"second")+subtitleWindowVtt(10,15,"whole"),true);
+    await f.apply(f.player,0,"whole-track");
+    assert.deepEqual(f.track.items.map(c=>c.text),["first","second","whole"]);
+    assert.equal(f.track.mode,"showing");assert.deepEqual(f.writes,[-1],"whole takeover retires native delivery");
+  }
+});
+
+test("cached subtitle completion is fenced by intent, source, session and attached video",async()=>{
+  for(const change of [f=>f.player.curSub=-1,f=>f.player.controlIntentGeneration++,f=>f.player.offset++,
+    f=>f.player.fileId="43",f=>f.player.fileContext={},f=>f.player.sessionId="replacement",
+    f=>f.video={addTextTrack(){throw new Error("stale video");}},f=>f.setPlayer({})]){
+    const f=subtitleWindowFixture(),wait=subtitleWindowHeld();f.reply=()=>wait.promise;
+    const pending=f.apply(f.player,0,"window");change(f);wait.resolve(subtitleWindowResponse(subtitleWindowVtt(1,5,"stale")));
+    await pending;assert.deepEqual(f.track.items,[]);assert.deepEqual(f.writes,[]);
+  }
+});
+
+test("cached subtitle reads deduplicate pending delivery and newer publication fences old completion",async()=>{
+  const f=subtitleWindowFixture(),wait=subtitleWindowHeld();f.reply=()=>wait.promise;
+  const pending=f.apply(f.player,0,"window");await f.apply(f.player,0,"window");
+  assert.equal(f.reads.length,1,"same publication has one request");
+  f.reply=async()=>subtitleWindowResponse(subtitleWindowVtt(1,5,"whole"),true);
+  await f.apply(f.player,0,"whole");wait.resolve(subtitleWindowResponse(subtitleWindowVtt(1,5,"late-window")));await pending;
+  assert.deepEqual(f.track.items.map(c=>c.text),["whole"]);
+});
+
+
+test("unavailable captions notify once per current selection or seek intent without mutating playback",()=>{
+  const notice=new Function(shippedSource("nativeHlsSubtitleOrdinal")+"\n"+shippedSource("subtitleReadinessUnavailableNotice")+"\nreturn subtitleReadinessUnavailableNotice;")();
+  const f=subtitleWindowFixture();
+  for(const value of [undefined,"ready","warming","future_value"]){assert.equal(notice(f.player,{subtitle_readiness:value}),false);}
+  assert.equal(notice(f.player,{subtitle_readiness:"unavailable"}),true);
+  assert.equal(notice(f.player,{subtitle_readiness:"unavailable"}),false);
+  assert.equal(notice(f.player,{subtitle_readiness:"ready"}),false);
+  assert.equal(notice(f.player,{subtitle_readiness:"unavailable"}),false,"ready does not rearm a spent notice");
+  f.player.controlIntentGeneration++;assert.equal(notice(f.player,{subtitle_readiness:"unavailable"}),true);
+  f.player.curSub=-1;assert.equal(notice(f.player,{subtitle_readiness:"unavailable"}),false);
+  assert.equal(f.player.sessionId,"same-session");assert.deepEqual(f.writes,[]);assert.deepEqual(f.displays,[]);
+});
+
+
+test("cached caption windows bound accumulated cue storage before mutating valid captions",async()=>{
+  const f=subtitleWindowFixture();
+  await f.apply(f.player,0,"first-window");
+  const active=f.track.items[0];active.text="x".repeat(1024*1024);
+  f.reply=async()=>subtitleWindowResponse(subtitleWindowVtt(4,9,"y".repeat(7*1024*1024+1)));
+  await f.apply(f.player,0,"over-budget-window");
+  assert.deepEqual(f.track.items,[active],"over-budget snapshot preserves active cue object");
+  f.player.controlIntentGeneration++;
+  f.reply=async()=>subtitleWindowResponse(subtitleWindowVtt(2,5,"new intent"));
+  await f.apply(f.player,0,"new-intent-window");
+  assert.deepEqual(f.track.items.map(c=>c.text),["new intent"],"new intent retires retained storage");
+});
 test("buffer capacity hold wording identifies the playback buffer for both scheduler codes", () => {
   const wording = new Function(`${shippedSource("holdReasonText")}\nreturn holdReasonText;`)();
   for (const reason of ["working_set", "no_room"]) {
     assert.equal(wording(reason), "The server’s playback buffer limit has been reached.");
   }
+});
+
+
+test("cached captions follow the attached local or shared owner namespace and fence owner changes",async()=>{
+  for(const base of ["/api/v1/hls/worker-session/","/api/v1/shared/playback/receiver-session/"]){
+    const f=subtitleWindowFixture();
+    f.player.probeUrl=base+"index.m3u8?native=1";
+    f.player.controlReporter={bootstrap:{generation:"incarnation-a",control_epoch:1}};
+    const held=subtitleWindowHeld();f.reply=()=>held.promise;
+    const pending=f.apply(f.player,0,"f42-s0-5-1000-w0-200.vtt");
+    assert.deepEqual(f.reads,[base+"subs/0/cached-f42-s0-5-1000-w0-200.vtt"]);
+    f.player.controlReporter.bootstrap={generation:"incarnation-b",control_epoch:2};
+    const next=subtitleWindowHeld();f.reply=()=>next.promise;
+    const replacement=f.apply(f.player,0,"f42-s0-5-1000-w0-200.vtt");
+    assert.equal(f.reads.length,2,"an old owner in flight cannot block the new owner");
+    const active=f.player._subtitleSidecarRequest;
+    held.resolve(subtitleWindowResponse(subtitleWindowVtt(1,5,"stale")));
+    await pending;assert.equal(f.track.items.length,0);
+    assert.equal(f.player._subtitleSidecarRequest,active,"old cleanup cannot clear the current request");
+    next.resolve(subtitleWindowResponse(subtitleWindowVtt(1,5,"owner")));
+    await replacement;
+    assert.deepEqual(f.track.items.map(c=>c.text),["owner"]);
+  }
+});
+
+
+test("paused subtitle selection projects ordinal zero and Off immediately", async () => {
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const h=new Function("PlaybackPolicy",[
+    "const file={id:'1',video_codec:'h264',subtitle_streams:[{index:0,language:'eng',title:'English'}]};",
+    "let PLAYER={fileId:'1',curSub:-1,subs:file.subtitle_streams,sessionId:'caption-session',offset:0,hls:{subtitleDisplay:false,subtitleTrack:-1}};",
+    "const WATCH={accepted:true,page:{files:[file],playable:file},folds:{subs:false,audio:false}};",
+    "const video={paused:true,currentTime:10,textTracks:[{mode:'disabled'}],querySelectorAll:()=>[]};",
+    "let ccOn=false;const cc={classList:{toggle(_name,value){ccOn=value;}}};",
+    "const ledger={innerHTML:'',querySelectorAll:()=>[]},band={innerHTML:'',querySelectorAll:()=>[]};",
+    "const document={activeElement:null,getElementById(id){return {video,pbsubs:cc,'watch-ledger':ledger,'watch-band-ledger':band}[id]||null;}};",
+    "function closeMenu(){}function endWait(){}function subNeedsBurn(){return false;}function positionForPlaybackIntent(){return 10;}",
+    "function supersedePlaybackControlIntent(){}function notifyPlaybackControl(){}function restartPendingPlaybackOpen(){return false;}function nativeHlsSubtitleOrdinal(){return 0;}",
+    "function playbackOwnsAttachedMedia(){return false;}function esc(s){return String(s);}function fmtMbps(){return '';}function fmtSize(){return '';}function fmtDur(){return '';}",
+    "function audioFactLabel(t){return t.title;}function subFactLabel(t){return t.title;}function langName(){return 'English';}",
+    ...["setSub","clearSubs","rememberPlaybackSelection","pbSyncSubIcon","watchCurrentFile",
+      "watchSelectedAudio","watchSelectedSub","watchTrackChip","watchFoldButton","watchTrackRow",
+      "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds"].map(shippedSource),
+    "return {setSub,video,player:PLAYER,ledger,band,ccOn:()=>ccOn};",
+  ].join("\n"))(policy);
+  await h.setSub(0);
+  assert.equal(h.video.paused,true,"selection must not resume paused playback");
+  assert.equal(h.player.curSub,0);
+  assert.equal(h.player.hls.subtitleTrack,0);
+  assert.equal(h.ccOn(),true);
+  assert.match(h.ledger.innerHTML,/data-watch-sub="0" aria-pressed="true"[^>]*>English</);
+  assert.equal(h.band.innerHTML,h.ledger.innerHTML);
+  await h.setSub(-1);
+  assert.equal(h.video.paused,true);
+  assert.equal(h.player.curSub,-1);
+  assert.equal(h.ccOn(),false);
+  assert.match(h.ledger.innerHTML,/data-watch-sub="-1" aria-pressed="true"[^>]*>Off</);
+  assert.equal(h.band.innerHTML,h.ledger.innerHTML);
 });

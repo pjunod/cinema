@@ -37,6 +37,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod source_date;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(plurx_dv_segment_probe)");
     println!("cargo:rerun-if-env-changed=PLURX_BUILD_REF");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-changed=build_support/source_date.rs");

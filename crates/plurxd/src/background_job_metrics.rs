@@ -51,6 +51,7 @@ fn kind_slot(kind: JobKind) -> usize {
         JobKind::MediaProbe => 9,
         JobKind::CopyOutputPrepare => 10,
         JobKind::EncodedOutputPrepare => 11,
+        JobKind::SubtitleTranscribe => 12,
     }
 }
 

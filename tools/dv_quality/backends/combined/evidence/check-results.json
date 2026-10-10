@@ -1,0 +1,20 @@
+{
+  "result": "bounded-synthetic-combined-pass",
+  "frames": 6,
+  "pts_preserved": true,
+  "stored_durations_preserved": true,
+  "gpu_max_pq_error": 1.0559171717439142e-05,
+  "gpu_max_rgb_code_error": 1,
+  "decoded_yuv_vs_independent_ncl_max_code_error": 4,
+  "decoded_rgb_vs_inverse_ncl_max_code_error": 0,
+  "decoded_rgb_vs_reconstructed_max_code_error": 323,
+  "inherited_arithmetic_rgb_bound": 1065,
+  "initial_stricter_yuv_envelope_met": false,
+  "initial_stricter_rgb_bound": 640,
+  "legacy_bound_application": "preexisting registered cap4 applied after observing current combined result; diagnostic only; no newly preregistered acceptance claim",
+  "source_sha256": "f3d70fa8e07d7fce7d233bb910858904cab0483409d748f52ae8d851333c31cb",
+  "output_sha256": "4c5a4608f08756316ae629a8a14a2981efa363d0cc06c4221e3d773fe6655f29",
+  "production_admission": false,
+  "full_dv_conformance": null,
+  "independent_dv_picture_reference": null
+}

@@ -85,6 +85,43 @@ async fn source_retired_predecessor_cannot_invalidate_surviving_owner_generation
 fn source_fixture_state() -> Arc<crate::state::AppState> {
     Arc::new(crate::http::source_actor_test_state())
 }
+
+fn source_fixture_addresses() -> (std::net::SocketAddr, std::net::SocketAddr) {
+    static USED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeSet<std::net::SocketAddr>>,
+    > = std::sync::OnceLock::new();
+
+    // The voter binds after asynchronous store initialization. Keep every
+    // probed address claimed by this fixture family even after its listener
+    // is dropped, so another fixture cannot reuse a pending boot's address.
+    let mut used = USED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+        .lock()
+        .expect("Source fixture address registry");
+    let mut reserve = || loop {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Source fixture listener");
+        let address = listener.local_addr().expect("Source fixture address");
+        if used.insert(address) {
+            break (listener, address);
+        }
+    };
+    let (raft, raft_address) = reserve();
+    let (api, api_address) = reserve();
+    drop((raft, api));
+    (raft_address, api_address)
+}
+
+#[test]
+fn source_fixture_boots_do_not_reuse_probe_addresses() {
+    let mut addresses = std::collections::BTreeSet::new();
+    for _ in 0..64 {
+        let (raft, api) = source_fixture_addresses();
+        assert!(addresses.insert(raft));
+        assert!(addresses.insert(api));
+    }
+    assert_eq!(addresses.len(), 128);
+}
+
 fn source_fixture_store(
     config: &plurx_core::config::Config,
 ) -> std::pin::Pin<
@@ -122,12 +159,8 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     eprintln!("Source fixture: actual standalone selection");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
-    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("Raft port");
-    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("API port");
-    config.cluster.raft_bind = raft.local_addr().expect("Raft address");
-    config.cluster.api_bind = api.local_addr().expect("API address");
+    (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
     config.cluster.advertise_host = "localhost".into();
-    drop((raft, api));
     let mut selected = source_fixture_store(&config)
         .await
         .expect("actual standalone voter");
@@ -1903,6 +1936,70 @@ async fn source_actual_actor(
         ingress_monitor.join().await;
         return;
     }
+    if mode == 56 {
+        let bootstrap = response.control.as_ref().expect("cached caption fixture");
+        let request: crate::playback_control::ControlRequestV1 = serde_json::from_value(serde_json::json!({
+            "protocol":crate::playback_control::PROTOCOL_V1,"generation":bootstrap.generation,"control_epoch":bootstrap.control_epoch,
+            "client_instance_id":uuid::Uuid::new_v4().to_string(),"sequence":1,"demand":"active",
+            "position_ms":0,"buffered_from_ms":0,"buffered_through_ms":1000,"playback_rate":1.0,
+            "render_state":"seeking","seek_target_ms":1000,
+            "selection":{"quality":{"mode":"original"},"audio_track":null,"subtitle":{"mode":"native","track":0},"audio_offset_ms":0,"codec":"auto","dynamic_range":"auto"},
+            "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},
+            "supported_actions":[],"intent":null
+        })).expect("cached caption fixture");
+        let opened = actor
+            .control(request.clone(), Instant::now() + Duration::from_secs(10))
+            .await
+            .expect("cached caption fixture");
+        let (control, guard) = opened.into_response(&request);
+        let control = control.expect("cached caption fixture");
+        assert_eq!(
+            control.delivery.subtitle_readiness.as_deref(),
+            Some("ready")
+        );
+        let reported = control
+            .delivery
+            .subtitle_revision
+            .expect("cached caption fixture");
+        drop(guard);
+        let revision = actor
+            .0
+            .state
+            .lock()
+            .expect("cached caption fixture")
+            .native
+            .as_ref()
+            .expect("cached caption fixture")
+            .revision(0)
+            .expect("cached caption fixture");
+        assert_eq!(reported, revision);
+        for (requested, present) in [(revision, true), ("source-stale.vtt".to_owned(), false)] {
+            let opened = actor
+                .open_resource(
+                    &SharingHlsResource::parse(&format!("subs/0/cached-{requested}"))
+                        .expect("cached caption fixture"),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("the assigned Source owner reads retained captions");
+            let (payload, guard) = opened.into_parts();
+            let SourceResourcePayload::CachedSubtitle {
+                bytes,
+                complete,
+                absent,
+            } = payload
+            else {
+                panic!("cached caption payload");
+            };
+            assert_eq!(complete, present);
+            assert_eq!(absent, !present);
+            assert_eq!(bytes.is_empty(), !present);
+            if present {
+                assert!(String::from_utf8_lossy(&bytes).contains("Actual Source caption"));
+            }
+            drop(guard);
+        }
+    }
     let native_body = if mode >= 21 {
         assert!(response.playlist_url.contains("master.m3u8"));
         assert!(matches!(
@@ -2929,4 +3026,10 @@ async fn source_fixture_monitor_join_propagates_task_failure() {
     assert!(joined
         .expect_err("monitor panic must reach the fixture")
         .is_panic());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_assigned_owner_cached_caption_revision_reads_retained_bytes_and_refuses_stale_identity(
+) {
+    Box::pin(source_copy_preadmission_fixture(56)).await;
 }

@@ -30,6 +30,7 @@ pub(crate) enum PeerAuthMode {
 
 #[derive(Debug)]
 pub(crate) struct PeerResponse {
+    pub(crate) dv_processing_header: Option<String>,
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: Vec<u8>,
     pub(crate) clock_timing: Option<(i64, i64, plurx_core::cluster::clock::ClockDecisionTicket)>,
@@ -553,6 +554,12 @@ pub(crate) async fn read_bounded(
         return Err(PeerTransportError::InvalidResponse);
     }
     let status = response.status();
+    let dv_processing_header = response
+        .headers()
+        .get("x-plurx-dv-processing")
+        .filter(|value| value.as_bytes().len() <= 4096)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let mut body = Vec::new();
     loop {
         let chunk = tokio::time::timeout_at(deadline, response.chunk())
@@ -574,6 +581,7 @@ pub(crate) async fn read_bounded(
         body.extend_from_slice(&chunk);
     }
     Ok(PeerResponse {
+        dv_processing_header,
         status,
         body,
         clock_timing: None,

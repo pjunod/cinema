@@ -351,7 +351,11 @@ impl BoundedDiagnosticChild {
                     .open(path)
                     .await?;
                 let mut total = 0_u64;
-                let mut buffer = [0_u8; 64 * 1024];
+                // This buffer lives across awaits. Inline storage propagates
+                // through extractor/timeout/select future states; their debug
+                // poll frames exceeded the worker stack during window warming.
+                // Keep the same bounded chunk owned by the IO future on heap.
+                let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
                 let exceeded = loop {
                     let read = tokio::select! {
                         biased;
@@ -542,6 +546,21 @@ pub async fn ffmpeg_build() -> String {
         })
         .unwrap_or_else(|| "version unavailable".to_owned());
     format!("{bin} ({version})")
+}
+
+/// Keep the private completed output linked until its held-descriptor probe
+/// finishes. Some bind filesystems cannot reopen an unlinked file through
+/// /proc/self/fd even while the original descriptor remains valid.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn stage_completed_probe_file(
+    bytes: &[u8],
+    cache: &std::path::Path,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut held = tempfile::NamedTempFile::new_in(cache)?;
+    held.write_all(bytes)?;
+    held.seek(SeekFrom::Start(0))?;
+    Ok(held)
 }
 
 /// Probe the exact source capability retained by a recipe preparer. Comparing
@@ -5345,6 +5364,45 @@ mod tests {
         held["chapters"] = serde_json::json!(null);
         assert!(
             !probes_describe_same_input(scanned, &held.to_string()).expect("malformed chapters")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_mp4_probe_retains_private_named_file_until_probe_finishes() {
+        let directory = crate::test_tempdir().expect("private completed output");
+        let bytes = include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/authored.mp4");
+        let held =
+            stage_completed_probe_file(bytes, directory.path()).expect("stage completed MP4");
+        let path = held.path().to_owned();
+        assert!(path.exists());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            held.as_file()
+                .metadata()
+                .expect("private file")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let document = held_source_probe_json(
+            held.as_file(),
+            crate::process_control::ChildWork::realtime("test completed output probe"),
+        )
+        .await
+        .expect("actual held completed MP4 probe");
+        let document: serde_json::Value = serde_json::from_str(&document).expect("probe JSON");
+        let streams = document["streams"].as_array().expect("probed streams");
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0]["codec_name"], "hevc");
+        assert_eq!(streams[0]["profile"], "Main 10");
+        assert_eq!(streams[0]["width"], 64);
+        assert_eq!(streams[0]["height"], 64);
+        drop(held);
+        assert!(
+            !path.exists(),
+            "private completed bytes are automatically removed"
         );
     }
 

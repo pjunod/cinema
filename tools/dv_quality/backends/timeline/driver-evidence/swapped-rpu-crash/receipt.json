@@ -1,0 +1,28 @@
+{
+  "case": "swapped-rpu",
+  "fault": "crash",
+  "driver_exit": 139,
+  "actual_decode_status": 139,
+  "complete_trace_matches_real_decode": true,
+  "trace_sha256": "2ba3c10476efe0146bb5244f3e411c2ca91c6806eeb55eb0e56799deb05eda33",
+  "artifacts": {
+    "epoch-0-bl-frame-000.rpu.nal": "5b7946f0b2670a4bafbc32219497eb26f9f90bc5a3bfe50cfa94184e454febc5",
+    "epoch-0-bl-frame-000.yuv420p10le": "82c8e7a131e26ee8140e43dcbd758c7597fc4ed602e94a1e710a2ea1cadafcef",
+    "epoch-0-bl-frame-001.rpu.nal": "617ca0734eeb46897fe546b10e85e77d7d724c93f2a2fb505362fa185e445957",
+    "epoch-0-bl-frame-001.yuv420p10le": "d68ac06a2f12aef3d73d2a2790da750f8a72a7202b39e0c933b02e394cb5ac6a",
+    "epoch-0-bl-frame-002.rpu.nal": "dc67507b8cb1bf1d12a36f17a58f5aabafef5c377295566879942eef645e63f6",
+    "epoch-0-bl-frame-002.yuv420p10le": "e255dff9f0e9ee0259adff4c00ef7259e5bc4cdf590c59582cfbaeadb510dbc6",
+    "epoch-0-bl-frame-003.rpu.nal": "9e476cfaf711e8535b92dd998ddd2dc9cfed5f358bcaa765ee6e30989f303fa8",
+    "epoch-0-bl-frame-003.yuv420p10le": "d4ac91b058fedcf06feb54fb19ef1f048286b0aef2fe3566fa26d02364e9939e",
+    "epoch-0-bl-frame-004.rpu.nal": "1ff2f693ab5f49bddd25287108e75378a1bca7922505ea96e92083605353299e",
+    "epoch-0-bl-frame-004.yuv420p10le": "d8db2c495c21be386887658e03fa6b449a30cf3f79baff546c822377d4c188d4",
+    "epoch-0-bl-frame-005.rpu.nal": "fc580fa753c45d3db2f2881ded2cf09f07dee2fe94ff329baec50941f35a3eb6",
+    "epoch-0-bl-frame-005.yuv420p10le": "3dc0eae3f41f181a176885a5259da60d0015bcdb0977e84eae1601b38973ef86",
+    "epoch-0-el-frame-000.yuv420p10le": "6e7dd1d8991d3f20d276a07506c56295d0086445caa595f6dc41ff5868242e94",
+    "epoch-0-el-frame-001.yuv420p10le": "40e7509e471dd29538f5e30d966a9451cf619774470e78e8cc524e82b52b793b",
+    "epoch-0-el-frame-002.yuv420p10le": "2aab2dd0bd04c1386a52216b4034bc196d71df11da4b92b131a7c5ecb9a6782a",
+    "epoch-0-el-frame-003.yuv420p10le": "f0af7a8b49cd16f80fc03dc31aa5d0e8fe42101f9b09268f1a919c804c3444dd",
+    "epoch-0-el-frame-004.yuv420p10le": "c85659cff2553b669b5cbc5bf583e435ba346c6d88738888963994532ed36ea5",
+    "epoch-0-el-frame-005.yuv420p10le": "4298647f45ca773faec717d4dec735ee0f4dc0c6ee6140d9bb2608ec1d558279"
+  }
+}

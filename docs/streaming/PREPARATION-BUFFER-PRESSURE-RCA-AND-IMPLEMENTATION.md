@@ -1,6 +1,6 @@
 # Preparation buffer pressure — why a completed copy froze Apple TV
 
-**Status:** built and reviewed; merge gate pending · **Written:**
+**Status:** merged; postmerge fixture repairs verified; deployment/device acceptance pending · **Written:**
 2026-10-08 · **Incident binary:** `6e1089d3fb27bde5cdd92d297249024ae2a6e9dd` ·
 **Source inspected:** `079960dae` · **Owner:** GPT-6.1 Sol implementation, following the approved review.
 
@@ -305,9 +305,9 @@ and promotion gates; do not silently merge partially integrated tasks to main.
 | B3 | Apple `PlayerController.swift`, web `prepared-switch-measurement.js`, existing related test suites; Apple build metadata/notes | Replace the false disk-space claim with “The server’s playback buffer limit has been reached.” Keep recovery semantics unchanged. |
 | B4 | This ledger, docs index, backlog, operations reference if behavior changes | Exact tests, review dispositions, PR/gate/landing evidence and remaining deployment/device acceptance. |
 
-Current branch `codex/playback-buffer-warning` has only the two warning edits
-plus these planning documents; it also has unrelated untracked `Claude outputs/`
-which must not be staged, moved or deleted. No implementation is merged.
+At the original handoff, `codex/playback-buffer-warning` held the warning
+edits and planning documents. Unrelated untracked `Claude outputs/` remain
+outside this repair. The completed implementation landing is recorded in §7.5.
 
 ## 6. Regression and validation contract
 
@@ -462,3 +462,41 @@ the Rust, Cargo/toolchain and native client source diff from `1088d7529` is
 empty. Integrating this metadata preserves the reviewed product source and
 its applicable proofs. The exact merged candidate still receives the compiler
 loop before push and the current-base gate before landing.
+
+
+### 7.5 Landing and postmerge unit closure
+
+[PR #947](http://forge.lan:3000/noirr/plurx/pulls/947) landed as
+`881d5bd37da9f18d0367785736d34149c3ecbc31`, with tree
+`9cd529d7ac03a6624c4a647277e2d2ff631a127e` and all ten regression trailers
+preserved. The user waived Windows compilation and requested no monitoring
+of that check.
+
+The fixed-source Linux x64/Rust 1.97.1/Jellyfin FFmpeg 8.1.3 consumer run
+[4551](http://forge.lan:3000/noirr/plurx/actions/runs/4551) (API `4572`)
+reported 2,430 passed, four failed, 19 ignored and 1,532 filtered. Its passing
+outcomes and original failures are retained; the selected daemon run does not
+claim full-workspace qualification.
+
+All four failures required test-fixture corrections:
+
+| Failed subject | Correction |
+|---|---|
+| Native progressive Dolby Vision mux | Use the existing CC0 Main10 HDR10/P5 controls, convert the injected P7 RPUs to P8.1, and retain genuine P5 RPUs. The former 8-bit untagged source failed Jellyfin's DV validation. Exact output box, profile and RPU assertions remain. |
+| Clean Plex census restart | Give each simulated boot its own runtime and destroy it after graceful drain, before the next boot reopens SQLite. Both startup callers and the ten-second drain bound remain. |
+| Source permission from another registry boot | Allocate addresses once per Source fixture family, retaining their logical claims across asynchronous startup. A 128-address regression checks non-reuse; unrelated processes are outside that guarantee. |
+| Cancelled inventory waiter | Wait for the detached owner's actual `cold_ready` completion within five seconds, replacing a scheduler-turn count. Cancellation, marked cleanup, exact 19-byte legacy charge and zero ordinary pressure assertions remain. |
+
+Independent review approved the four-file test-only patch. On base
+`12680bf2`, pinned Rust 1.97.1 workspace/all-target check passed; all six focused
+regressions, both concurrent Source bootstrap/retirement controls and both
+explicitly ignored restart regressions passed (ten actual tests). The seven
+strict ownership checks passed after recording one joined blocking worker,
+two bounded timer observations and one finite test-only fixture remux.
+Corrected DV controls also passed direct Jellyfin 8.1.3 and native FFmpeg 9
+replays with every RPU preserved byte-for-byte; the original Jellyfin failure
+remains recorded. The batch coordinator confirmed one repair owner and this
+focused closure, without replaying the 2,430 passing outcomes.
+
+The follow-up changes test fixtures and evidence only. Deployment and physical
+Apple TV playback/background-completion acceptance remain owed.

@@ -604,11 +604,12 @@ function developerPanels(){
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
+      shippedSource("dolbyVisionHdrProcessingCard"), shippedSource("dolbyVisionFelReencodeCard"),
       shippedSource("sdrMasterCodecsCard"),
       // The main-merge defects build (2026-10-04): complete-output
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
-      shippedSource("subtitleNotReadyCard"),
+      shippedSource("subtitleTranscriptionCard"),
       shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
       // The fifth time: #517 put the automatic playback-ranges card at the
@@ -697,7 +698,6 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     prepared_quality_handoff: true,
     automatic_decoder_recovery: true,
     vod_live_recovery: true,
-    subtitle_not_ready_503: false,
     pgs_overlay: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
@@ -713,7 +713,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill"])
+  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "pgsoverlay", "subsrc", "subcluster", "subbackfill"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Parallel playback ranges are automatic: the card explains them and reads
   // peer reachability as advisory, and offers no switch of its own.
@@ -1806,6 +1806,43 @@ test("standalone Developer omits cluster controls while preserving local feature
     "hiding an inapplicable control never changes its saved value");
 });
 
+test("transcription readiness never overrides enable or disables Save", async () => {
+  const form=new Function("esc",`${shippedSource("subtitleTranscriptionForm")} return subtitleTranscriptionForm;`)(String);
+  const missing={enabled:true,command:"whisper-cli",model_path:"",language:"en",interval_mins:0,
+    readiness:{ready:false,command_available:false,model_available:false,reason:"Install a local model."}};
+  const html=form(missing);
+  assert.match(html,/id="st-enabled" type="checkbox" checked/);
+  assert.doesNotMatch(html,/disabled/);
+  assert.match(html,/Worker readiness:<\/b> Not ready/);
+  const nodes={"subtitle-transcription-form":{isConnected:true,innerHTML:""},"st-status":{isConnected:true,textContent:""},
+    "st-enabled":{checked:true},"st-command":{value:"whisper-cli"},"st-model":{value:""},"st-language":{value:"en"},"st-interval":{value:"0"}};
+  let request;
+  const save=new Function("document","api","subtitleTranscriptionForm",`${shippedSource("saveSubtitleTranscription")} return saveSubtitleTranscription;`)(
+    {getElementById:id=>nodes[id]},async(path,options)=>{request={path,...options};return missing;},form);
+  await save({isConnected:true,disabled:false});
+  assert.equal(request.path,"/subtitle-transcription");
+  assert.equal(request.body.enabled,true);
+  assert.equal(request.body.interval_mins,0);
+  assert.equal(request.body.model_path,"");
+  assert.match(nodes["st-status"].textContent,/Saved/);
+});
+
+test("transcription queue refusal is not displayed as successful work", async () => {
+  const panel={isConnected:true,textContent:"",innerHTML:""},button={isConnected:true,disabled:false};
+  let outcome="queue_full";
+  const generate=new Function("document","api",`${shippedSource("generateSubtitles")}\nreturn generateSubtitles;`)(
+    {getElementById:()=>panel},async()=>({outcome,job_id:"job-a"}));
+  await generate("42",button);
+  assert.match(panel.textContent,/queue is full/);
+  assert.equal(panel.innerHTML,"");
+  assert.equal(button.disabled,false);
+  outcome="existing";
+  await generate("42",button);
+  assert.match(panel.innerHTML,/already queued or running/);
+  assert.match(panel.innerHTML,/#\/activity/);
+  assert.equal(button.disabled,false);
+});
+
 main().then(() => {
   if (started !== finished) failures += started - finished;
   process.stdout.write(`${started - failures}/${started} passed\n`);
@@ -1849,6 +1886,92 @@ test("Cinema sharing lists endpoint setup and unverified host network without ga
   assert.match(html,/Readiness observations never prevent saving/);
 });
 
+
+
+
+test("DV preferences stay independent and editable with unmet or unavailable readiness", () => {
+  const panels=developerPanels();
+  for(const readiness of [{items:[]},{unavailable:"Reading failed"},{items:[
+    {id:"dolby_vision_hdr_processing",requirements:[{id:"dv_hdr_backend_reference",status:"unmet",evidence:"No qualified backend."}]},
+    {id:"dolby_vision_fel_reencode",requirements:[{id:"dv_fel_backend_reference",status:"unmet",evidence:"No qualified authoring."}]}
+  ]}]) {
+    for(const hdr of [false,true]) for(const fel of [false,true]) {
+      const html=panels.developerPanel({dolby_vision_convert:false,dolby_vision_hdr_processing:hdr,dolby_vision_fel_reencode:fel},readiness);
+      assert.match(html,new RegExp(`TOG:dv-hdr-processing\\|[^|]*\\|[^|]*\\|checked=${hdr}`));
+      assert.match(html,new RegExp(`TOG:dv-fel-reencode\\|[^|]*\\|[^|]*\\|checked=${fel}`));
+      assert.match(html,/FOOT:saveDolbyVisionHdrProcessing/);
+      assert.match(html,/FOOT:saveDolbyVisionFelReencode/);
+      assert.match(html,/Unsupported sources or processing failures use compatible playback/);
+      assert.match(html,/Unsupported sources or processing failures keep the existing permitted conversion fallback/);
+      assert.doesNotMatch(html,/not implemented in production yet|when qualified/);
+      assert.match(html,/This preference never enables conversion by itself/);
+      assert.match(html,/HDR backend\/reference proof/);
+      assert.match(html,/FEL\/P8.1 backend\/reference proof/);
+      assert.match(html,/moves independently to Settings → Playback/);
+    }
+  }
+  for(const name of ["dolbyVisionHdrProcessingCard","dolbyVisionFelReencodeCard"])
+    assert.doesNotMatch(shippedSource(name),/disabled|HDR10-E/);
+});
+
+test("DV preference saves roundtrip either choice and preserve advisory failures", async () => {
+  for(const [name,cardName,field,id] of [
+    ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
+    ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
+  ]) {
+    for(const readiness of [{unavailable:"Reading failed"},{items:[{id:field,requirements:[{status:"unmet"}]}]}]) {
+      const writes=[],nodes={[id]:{checked:false},[`${id}-error`]:{textContent:""},[`${id}-card`]:{outerHTML:""}};
+      let reject=false;
+      const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
+        `${shippedSource(name)} return ${name};`)(
+        {getElementById:key=>{assert.ok(key in nodes);return nodes[key];}},
+        async(path,request)=>{assert.equal(request.method,"PUT");writes.push([path,request.body]);if(reject)throw new Error("Write failed");return {...request.body,dolby_vision_convert:false};},
+        value=>value,(settings,evidence)=>{assert.equal(evidence,readiness);return `saved:${settings[field]}`;},readiness,()=>{});
+      for(const enabled of [true,false]) {
+        nodes[id].checked=enabled;const button={disabled:false};await save(button);
+        assert.deepEqual(writes.at(-1),["/settings",{[field]:enabled}]);
+        assert.equal(nodes[`${id}-card`].outerHTML,`saved:${enabled}`);
+        assert.equal(button.disabled,false);
+      }
+      reject=true;const button={disabled:false};await save(button);
+      assert.equal(nodes[`${id}-error`].textContent,"Write failed");
+      assert.equal(nodes[`${id}-card`].outerHTML,"saved:false");
+      assert.equal(button.disabled,false);
+    }
+  }
+});
+
+
+test("DV preference responses preserve newer edits and replacement cards", async () => {
+  for(const [name,cardName,field,id] of [
+    ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
+    ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
+  ]) {
+    for(const change of ["edit","replace","leave"]) {
+      const card={dataset:{revision:"1"},outerHTML:"unsaved"};
+      const replacement={dataset:{revision:"0"},outerHTML:"new page"};
+      const nodes={[id]:{checked:true},[`${id}-error`]:{textContent:""},[`${id}-card`]:card};
+      let resolve,requested,cached;
+      const pending=new Promise(done=>{resolve=done;});
+      const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
+        `${shippedSource(name)} return ${name};`)(
+        {getElementById:key=>nodes[key]},
+        (_path,request)=>{requested=request.body;return pending;},
+        value=>{cached=value;return value;},()=>"saved:true",{},()=>{});
+      const button={disabled:false};const work=save(button);
+      assert.deepEqual(requested,{[field]:true});
+      if(change==="edit"){nodes[id].checked=false;card.dataset.revision="2";}
+      if(change==="replace")nodes[`${id}-card`]=replacement;
+      if(change==="leave")nodes[`${id}-card`]=null;
+      resolve({[field]:true});await work;
+      assert.equal(cached[field],true,"the confirmed write refreshes shared settings");
+      assert.equal(card.outerHTML,"unsaved","an earlier reply cannot erase a newer draft");
+      assert.equal(replacement.outerHTML,"new page","a reply cannot repaint a replacement card");
+      if(change==="edit")assert.equal(nodes[id].checked,false);
+      assert.equal(button.disabled,false);
+    }
+  }
+});
 
 test("Mac processing exposes every independent implemented graph while preserving the enabled choice", () => {
   const requirements=[];let enabled;let graduation;

@@ -1051,6 +1051,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     defaultPlaybackRate:intent.defaultPlaybackRate};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
+  clearEffectiveProcessing(p);
   p.hls=state.hls;
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;

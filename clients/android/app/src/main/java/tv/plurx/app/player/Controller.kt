@@ -624,6 +624,10 @@ class Controller internal constructor(
      * Compose state so the badge row and the info panel recompose on a change;
      * it steers nothing.
      */
+    var effectiveProcessing: tv.plurx.app.data.EffectiveProcessingReport? by mutableStateOf(null)
+        private set
+    var effectiveProcessingGeneration: String? by mutableStateOf(null)
+        private set
     var deliveredRange: String? by mutableStateOf(plan.deliveredDynamicRange)
         private set
 
@@ -1690,6 +1694,8 @@ class Controller internal constructor(
     }
 
     fun seekTo(targetMs: Long) {
+        effectiveProcessing = null
+        effectiveProcessingGeneration = null
         playbackIntent.noteViewerDestination()
         resetAutoQualityBudgetForViewer()
         val t = targetMs.coerceIn(0, if (plan.durationMs > 0) plan.durationMs else Long.MAX_VALUE)
@@ -1698,6 +1704,8 @@ class Controller internal constructor(
 
     /** Repeated transport nudges accumulate while the newest seek is coalescing. */
     fun seekBy(deltaMs: Long) {
+        effectiveProcessing = null
+        effectiveProcessingGeneration = null
         playbackIntent.noteViewerDestination()
         resetAutoQualityBudgetForViewer()
         enqueueSeek {
@@ -2160,6 +2168,8 @@ class Controller internal constructor(
     }
 
     fun release() {
+        effectiveProcessing = null
+        effectiveProcessingGeneration = null
         if (!playbackControlBootstrapFence.isActive()) return
         playbackTelemetry.cancelPending()
         playbackControlBootstrapFence.release()
@@ -3041,6 +3051,8 @@ class Controller internal constructor(
         // Back on the plan's own delivery, so back to the plan's own grade —
         // otherwise a chip would keep reporting the session that just ended.
         // Both halves, for the same reason they are adopted together.
+        effectiveProcessing = null
+        effectiveProcessingGeneration = null
         deliveredRange = plan.deliveredDynamicRange
         deliveredDolbyVisionProfile = plan.deliveredDolbyVisionProfile
     }
@@ -3237,10 +3249,15 @@ class Controller internal constructor(
         controlRenderOverride = null
         controlEvidencePositionMs = null
         val claim = playbackControlBootstrapFence.claim(hls.session_id)
+        effectiveProcessing = null
+        effectiveProcessingGeneration = null
         val bootstrap = hls.control
         if (bootstrap == null || !bootstrap.isValid) {
             return
         }
+        effectiveProcessingGeneration = bootstrap.generation
+        effectiveProcessing = tv.plurx.app.data.EffectiveProcessingReport.fromJson(hls.effective_processing)
+            ?.takeIf { it.matches(bootstrap.generation, hls.delivered_dynamic_range) }
         // Capabilities are the one input that has to be probed rather than
         // read, and the protocol requires them on the first request of a
         // generation, so reporting waits for that one probe. Until it lands
@@ -3253,9 +3270,14 @@ class Controller internal constructor(
                 observe = ::playbackControlObservation,
                 linkReceipt = { if (playbackControlBootstrapFence.isCurrent(claim, sessionId)) currentLinkReceipt() else null },
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
-            onSubtitleUnavailable = {
-                raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
-            },
+                onProcessingGeneration = { generation, report ->
+                    effectiveProcessing = report?.takeIf { it.matches(generation, deliveredRange) }
+                    effectiveProcessingGeneration = generation
+                },
+                onSubtitleUnavailable = {
+                    if (selectedSubtitle != null) raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
+                },
+
                 onPrepare = ::onPrepareAction,
                 onAcknowledged = ::acknowledgementDelivered,
                 onEffectiveSelection = { effective ->
@@ -3302,6 +3324,8 @@ class Controller internal constructor(
         settling: PlaybackControlSnapshot? = settlingSnapshotIfOwed(),
         afterFinalExchange: () -> Unit = {},
     ) {
+        effectiveProcessing = null
+        effectiveProcessingGeneration = null
         playbackControlBootstrapFence.invalidate()
         if (settling != null) {
             playbackControl.endAfterFinalExchange(
@@ -3349,13 +3373,19 @@ class Controller internal constructor(
                 return@launch
             }
             textSelectionArmed = false
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                .build()
-            kotlinx.coroutines.yield()
-            textSelectionArmed = true
-            applyTextSelection()
+            retryNativeTextRendition(
+                player,
+                isCurrent = {
+                    playbackControlBootstrapFence.isCurrent(claim, sessionId) &&
+                        playbackIntent.generation() == intentGeneration &&
+                        selectedSubtitle == index &&
+                        subtitleDelivery == SubtitleDelivery.NativeSession
+                },
+                restore = {
+                    textSelectionArmed = true
+                    applyTextSelection()
+                },
+            )
         }
     }
 
@@ -4156,16 +4186,19 @@ class Controller internal constructor(
     private fun settleVideoPlaybackIntentIfPresented() {
         val pending = playbackIntent.pendingSeek ?: return
         val first = firstVideoFrameForSeek ?: return
-        // A progressive remux may start at the preceding keyframe. Its first
+        // A copied stream may start at the preceding keyframe. Its first
         // rendered frame proves the new surface is live; later rendered output
         // and a clock that has crossed the target prove arrival at the seek.
-        if (!progressiveTransport || first.first != pending.sequence ||
-            first.second !in (pending.targetMs - 2_000L)..pending.targetMs ||
-            !presentationForeground || !player.isPlaying ||
-            textSelectionArmed || audioSelectionArmed ||
-            selectionRecipe?.let(recipeOwnership::canPresent) != true ||
-            (player.videoDecoderCounters?.renderedOutputBufferCount ?: 0) <= first.third
-        ) return
+        if (!copyPrerollHasRenderedProgress(
+                transport = recipeOwnership.attachedTransport,
+                pending = pending,
+                firstFrame = first,
+                foreground = presentationForeground,
+                playing = player.isPlaying,
+                selectionReady = !textSelectionArmed && !audioSelectionArmed &&
+                    selectionRecipe?.let(recipeOwnership::canPresent) == true,
+                renderedOutputCount = player.videoDecoderCounters?.renderedOutputBufferCount ?: 0,
+            )) return
         if (playbackTelemetry.presentedVideoProgress(playbackIntent, realPosition(), pending.sequence, monotonicNowMs())) {
             playbackControl.playerChanged()
             disarmVideoPresentation()
@@ -4463,6 +4496,8 @@ class Controller internal constructor(
      * Sign in. Anything else is the owner's `stopped` with today's sentence.
      */
     private fun stopAndRaisePlaybackFailure(refusal: MediaRefusal?, sentence: String) {
+        effectiveProcessing = null
+        effectiveProcessingGeneration = null
         playbackTelemetry.cancelPending()
         val attached = mediaMutationEpoch
         if (refusal != null && refusal.source == SurfaceSources.MEDIA_OWNER_LOST_410) {
@@ -5362,6 +5397,8 @@ class Controller internal constructor(
             DeliveredGrade(deliveredRange, deliveredDolbyVisionProfile),
             action.effectiveSelection,
         ).let {
+            effectiveProcessing = null
+            effectiveProcessingGeneration = null
             deliveredRange = it.range
             deliveredDolbyVisionProfile = it.dolbyVisionProfile
         }
@@ -5498,6 +5535,8 @@ class Controller internal constructor(
         sessionIsVod = predecessor.sessionIsVod
         sessionId = predecessor.sessionId
         activeMediaPath = predecessor.activeMediaPath
+        effectiveProcessing = null
+        effectiveProcessingGeneration = null
         deliveredRange = predecessor.deliveredRange
         deliveredDolbyVisionProfile = predecessor.deliveredDolbyVisionProfile
         encoder = predecessor.encoder

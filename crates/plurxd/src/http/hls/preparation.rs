@@ -1964,6 +1964,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
+        effective_processing: None,
         measured_candidate_outputs: None,
         delivered_audio: staged_request.audio_delivery.clone(),
         quality_catalog_status: candidate.quality_catalog.as_ref().map(

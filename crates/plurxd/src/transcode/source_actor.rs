@@ -281,6 +281,11 @@ pub(crate) struct SourceViewerActor(Arc<SourceViewerInner>);
 pub(crate) enum SourceResourcePayload {
     Playlist(Vec<u8>),
     SubtitleText(Vec<u8>),
+    CachedSubtitle {
+        bytes: Vec<u8>,
+        complete: bool,
+        absent: bool,
+    },
     File(crate::vodserve::SegmentReady),
 }
 pub(crate) struct SourceOpenedResource {
@@ -693,22 +698,31 @@ impl SourceViewerActor {
                             .rsplit('/')
                             .next()
                             .unwrap_or("");
-                        let sequence = name
-                            .strip_prefix("seg")
-                            .and_then(|name| name.strip_suffix(".vtt"))
-                            .and_then(|name| name.parse::<u64>().ok())
-                            .ok_or(SourceWorkerError::Unsupported)?;
-                        let bytes = crate::http::hls::source_native_segment(
-                            &video,
-                            track,
-                            sequence,
-                            context.media_origin_seconds,
-                        )
-                        .ok_or(SourceWorkerError::Unavailable)?;
-                        if bytes.len() > 2 * 1024 * 1024 {
-                            return Err(SourceWorkerError::Capacity);
+                        if let Some(revision) = resource.cached_subtitle_revision() {
+                            let present = tracks.revision(index).as_deref() == Some(revision);
+                            SourceResourcePayload::CachedSubtitle {
+                                bytes: if present { track.to_vec() } else { Vec::new() },
+                                complete: present,
+                                absent: !present,
+                            }
+                        } else {
+                            let sequence = name
+                                .strip_prefix("seg")
+                                .and_then(|name| name.strip_suffix(".vtt"))
+                                .and_then(|name| name.parse::<u64>().ok())
+                                .ok_or(SourceWorkerError::Unsupported)?;
+                            let bytes = crate::http::hls::source_native_segment(
+                                &video,
+                                track,
+                                sequence,
+                                context.media_origin_seconds,
+                            )
+                            .ok_or(SourceWorkerError::Unavailable)?;
+                            if bytes.len() > 2 * 1024 * 1024 {
+                                return Err(SourceWorkerError::Capacity);
+                            }
+                            SourceResourcePayload::SubtitleText(bytes)
                         }
-                        SourceResourcePayload::SubtitleText(bytes)
                     }
                     _ => return Err(SourceWorkerError::Unsupported),
                 };
@@ -1864,7 +1878,7 @@ fn source_native_presentation(
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
             codecs,
-            supplemental_codecs: None,
+            supplemental_codecs: encoding.processed_dv_supplemental(),
             frame_rate: Some(
                 f64::from(encoding.grid.numerator) / f64::from(encoding.grid.denominator),
             ),

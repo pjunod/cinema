@@ -1,0 +1,531 @@
+{
+  "scope": "Declared affine-luma synthetic control; full-matrix independent arithmetic, no independent DV picture reference",
+  "registered_limits_sha256": "d7d71c1aad9f1278e567a38589dc96bf1cc8b0f800b40c98a95d801c16821e9f",
+  "result": "analytic-control-pass",
+  "results": [
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 0,
+        "slope_integer": 1,
+        "slope_fraction": 0,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "0/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 0,
+      "control": "correct",
+      "stage": "reconstruction",
+      "max_pq_error": 8.809218989935808e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "1038750ee13b97655657e9c1579deb199ced3815cdef06974a6d22aed16d2219",
+      "rpu_sha256": "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+      "decoded_frame_sha256": "70fda9234d8b69eadf2853afe66131d6fe7816d0e837ea4f429129bfca585912"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 0,
+        "slope_integer": 1,
+        "slope_fraction": 0,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "0/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 0,
+      "control": "correct",
+      "stage": "rendered",
+      "max_pq_error": 8.809218989935808e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "1038750ee13b97655657e9c1579deb199ced3815cdef06974a6d22aed16d2219",
+      "rpu_sha256": "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+      "decoded_frame_sha256": "70fda9234d8b69eadf2853afe66131d6fe7816d0e837ea4f429129bfca585912"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 524288,
+        "slope_integer": 0,
+        "slope_fraction": 6291456,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "0/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 0,
+      "control": "wrong",
+      "stage": "reconstruction",
+      "max_pq_error": 6.856264092802711e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "c8e54f8fb170ceb27782f13066da50cdfc37cf948933ca7b5703d7fef93693eb",
+      "rpu_sha256": "6bb20ebc399557cf4766b802a0e93b21fa441ce6a1ceab92ed9a0f92c86dddac",
+      "decoded_frame_sha256": "70fda9234d8b69eadf2853afe66131d6fe7816d0e837ea4f429129bfca585912"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 524288,
+        "slope_integer": 0,
+        "slope_fraction": 6291456,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "0/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 0,
+      "control": "wrong",
+      "stage": "rendered",
+      "max_pq_error": 6.856264092802711e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "c8e54f8fb170ceb27782f13066da50cdfc37cf948933ca7b5703d7fef93693eb",
+      "rpu_sha256": "6bb20ebc399557cf4766b802a0e93b21fa441ce6a1ceab92ed9a0f92c86dddac",
+      "decoded_frame_sha256": "70fda9234d8b69eadf2853afe66131d6fe7816d0e837ea4f429129bfca585912"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 0,
+        "slope_integer": 1,
+        "slope_fraction": 0,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "1/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 1,
+      "control": "correct",
+      "stage": "reconstruction",
+      "max_pq_error": 8.809218989935808e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "89940418ab5fc7098a8f7d20e582901f51f156040257646cdc49f45ce175aed7",
+      "rpu_sha256": "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+      "decoded_frame_sha256": "9674001558b8245694ac0b8a1d8b737abe03c21adf5cb0978079857342ac523b"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 0,
+        "slope_integer": 1,
+        "slope_fraction": 0,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "1/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 1,
+      "control": "correct",
+      "stage": "rendered",
+      "max_pq_error": 8.809218989935808e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "89940418ab5fc7098a8f7d20e582901f51f156040257646cdc49f45ce175aed7",
+      "rpu_sha256": "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+      "decoded_frame_sha256": "9674001558b8245694ac0b8a1d8b737abe03c21adf5cb0978079857342ac523b"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 524288,
+        "slope_integer": 0,
+        "slope_fraction": 6291456,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "1/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 1,
+      "control": "wrong",
+      "stage": "reconstruction",
+      "max_pq_error": 6.856264092802711e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "dec898db2e1430a5c5fc3bc4d8a2af75c1f83302e012b3933420d7af8ea79a6e",
+      "rpu_sha256": "16ea07fdf270e5b4d47b28f6ca11c8a4d8a9daad5678c5a2106864c25811717c",
+      "decoded_frame_sha256": "9674001558b8245694ac0b8a1d8b737abe03c21adf5cb0978079857342ac523b"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 524288,
+        "slope_integer": 0,
+        "slope_fraction": 6291456,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "1/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 1,
+      "control": "wrong",
+      "stage": "rendered",
+      "max_pq_error": 6.856264092802711e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "dec898db2e1430a5c5fc3bc4d8a2af75c1f83302e012b3933420d7af8ea79a6e",
+      "rpu_sha256": "16ea07fdf270e5b4d47b28f6ca11c8a4d8a9daad5678c5a2106864c25811717c",
+      "decoded_frame_sha256": "9674001558b8245694ac0b8a1d8b737abe03c21adf5cb0978079857342ac523b"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 0,
+        "slope_integer": 1,
+        "slope_fraction": 0,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "2/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 2,
+      "control": "correct",
+      "stage": "reconstruction",
+      "max_pq_error": 8.809218989935808e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "d1fd1a591da9ace89bb3de18243a0c7605ddc391e53b8068efb86e681b92429b",
+      "rpu_sha256": "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+      "decoded_frame_sha256": "19dcd89e6c33bbbf80f2d9f4f6f0e9eb3a91ec659f00cea19790eee0202a3152"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 0,
+        "slope_integer": 1,
+        "slope_fraction": 0,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "2/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 2,
+      "control": "correct",
+      "stage": "rendered",
+      "max_pq_error": 8.809218989935808e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "d1fd1a591da9ace89bb3de18243a0c7605ddc391e53b8068efb86e681b92429b",
+      "rpu_sha256": "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+      "decoded_frame_sha256": "19dcd89e6c33bbbf80f2d9f4f6f0e9eb3a91ec659f00cea19790eee0202a3152"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 524288,
+        "slope_integer": 0,
+        "slope_fraction": 6291456,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "2/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 2,
+      "control": "wrong",
+      "stage": "reconstruction",
+      "max_pq_error": 6.856264092802711e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "62737e184858ae3f3b18bdcfd1f99d0595a5e8ec2ea96d18c7fb8e450c0857b9",
+      "rpu_sha256": "fa55d080e60cc3fefe671ac467a3232e83a2b73ab2b983355d930418bbe42695",
+      "decoded_frame_sha256": "19dcd89e6c33bbbf80f2d9f4f6f0e9eb3a91ec659f00cea19790eee0202a3152"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 524288,
+        "slope_integer": 0,
+        "slope_fraction": 6291456,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "2/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 2,
+      "control": "wrong",
+      "stage": "rendered",
+      "max_pq_error": 6.856264092802711e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "62737e184858ae3f3b18bdcfd1f99d0595a5e8ec2ea96d18c7fb8e450c0857b9",
+      "rpu_sha256": "fa55d080e60cc3fefe671ac467a3232e83a2b73ab2b983355d930418bbe42695",
+      "decoded_frame_sha256": "19dcd89e6c33bbbf80f2d9f4f6f0e9eb3a91ec659f00cea19790eee0202a3152"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 0,
+        "slope_integer": 1,
+        "slope_fraction": 0,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "3/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 3,
+      "control": "correct",
+      "stage": "reconstruction",
+      "max_pq_error": 8.178876053421824e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "abbd34130a0c308b288b2d912e8f9075f617f821f78cd8935c6b0dbda9c02904",
+      "rpu_sha256": "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c",
+      "decoded_frame_sha256": "c3aee480261f631897516ef9f1e27d060b204a274bd5aa3c6476d9f8eacb3d8a"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 0,
+        "slope_integer": 1,
+        "slope_fraction": 0,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "3/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 3,
+      "control": "correct",
+      "stage": "rendered",
+      "max_pq_error": 8.178876053421824e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "abbd34130a0c308b288b2d912e8f9075f617f821f78cd8935c6b0dbda9c02904",
+      "rpu_sha256": "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c",
+      "decoded_frame_sha256": "c3aee480261f631897516ef9f1e27d060b204a274bd5aa3c6476d9f8eacb3d8a"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 524288,
+        "slope_integer": 0,
+        "slope_fraction": 6291456,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "3/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 3,
+      "control": "wrong",
+      "stage": "reconstruction",
+      "max_pq_error": 5.7367600531654794e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "7cdc8878fa9aed0188f5a84441223b1e19d51edf525a1a291af7e8b02a3de393",
+      "rpu_sha256": "aa46758b5243864f4f2de5539f71db0ff5336f8cf814ed9cc4a8292a69821927",
+      "decoded_frame_sha256": "c3aee480261f631897516ef9f1e27d060b204a274bd5aa3c6476d9f8eacb3d8a"
+    },
+    {
+      "consumed_bytes_verified": true,
+      "actual_parsed_luma_curve": {
+        "constant_integer": 0,
+        "constant_fraction": 524288,
+        "slope_integer": 0,
+        "slope_fraction": 6291456,
+        "denominator": 8388608
+      },
+      "actual_frame_event": {
+        "kind": "frame",
+        "case": "zero",
+        "pts": "3/24",
+        "duration": "1/24",
+        "el_bound": false,
+        "nlq_active": false,
+        "rpu_parsed": true,
+        "direct_dispatch_ok": true,
+        "render_ok": true,
+        "render_errors": 0,
+        "qualified_fel": false
+      },
+      "frame": 3,
+      "control": "wrong",
+      "stage": "rendered",
+      "max_pq_error": 5.7367600531654794e-06,
+      "max_rgb_code_error": 1,
+      "output_sha256": "7cdc8878fa9aed0188f5a84441223b1e19d51edf525a1a291af7e8b02a3de393",
+      "rpu_sha256": "aa46758b5243864f4f2de5539f71db0ff5336f8cf814ed9cc4a8292a69821927",
+      "decoded_frame_sha256": "c3aee480261f631897516ef9f1e27d060b204a274bd5aa3c6476d9f8eacb3d8a"
+    }
+  ],
+  "repeated_mapping_negative": [
+    {
+      "frame": 0,
+      "wrong_vs_correct_max_rgb_code_delta": 2962,
+      "wrong_vs_once_scalar_max_rgb_code_error": 2962,
+      "once_scalar_control_rejects_wrong_output": true
+    },
+    {
+      "frame": 1,
+      "wrong_vs_correct_max_rgb_code_delta": 2944,
+      "wrong_vs_once_scalar_max_rgb_code_error": 2943,
+      "once_scalar_control_rejects_wrong_output": true
+    },
+    {
+      "frame": 2,
+      "wrong_vs_correct_max_rgb_code_delta": 2944,
+      "wrong_vs_once_scalar_max_rgb_code_error": 2943,
+      "once_scalar_control_rejects_wrong_output": true
+    },
+    {
+      "frame": 3,
+      "wrong_vs_correct_max_rgb_code_delta": 2943,
+      "wrong_vs_once_scalar_max_rgb_code_error": 2943,
+      "once_scalar_control_rejects_wrong_output": true
+    }
+  ],
+  "p81_conformance": null,
+  "reference_fidelity_improvement": null
+}

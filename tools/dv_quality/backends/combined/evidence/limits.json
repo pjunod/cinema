@@ -1,0 +1,9 @@
+{
+  "scope": "inherited bounded synthetic arithmetic controls; no quality or production qualification",
+  "selection": "before this combined output is decoded or compared; inherited two-code QP0 allowance from accepted authoring controls",
+  "max_gpu_pq_error": 0.00002,
+  "max_gpu_rgb_code_error": 2,
+  "max_rgb_to_yuv_model_code_error": 1,
+  "max_qp0_yuv_code_error": 2,
+  "max_inverse_ncl_rgb_code_error": 1
+}

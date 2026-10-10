@@ -335,7 +335,7 @@ class OperationsContractCase(unittest.TestCase):
     def test_ui_baseline_pins_vod_index_status_before_seeding_libraries(self):
         script = read("scripts/ui-baseline")
         seed = script.index("    def seed(self):")
-        pinned = script.index('{"vod_index_mins": 0}', seed)
+        pinned = script.index('"vod_index_mins": 0', seed)
         libraries = script.index("for name, kind, share in LIBRARIES:", seed)
 
         self.assertLess(pinned, libraries)
@@ -709,7 +709,12 @@ assert.equal(context.ACT_TIMER, null);
             with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
                 # Inspect the real shell-owned overlay directory; positional
                 # stub arguments change when preparation flags are added.
-                with patch.dict(os.environ, {"TMPDIR": temporary}):
+                # Parse Make before changing TMPDIR: macOS's SDK lookup may
+                # create xcrun_db, which is unrelated to the shell's overlay.
+                commands = make_dry_run_commands(target)
+                with patch.dict(os.environ, {"TMPDIR": temporary}), patch(
+                    __name__ + ".make_dry_run_commands", return_value=commands
+                ):
                     code, pull, derive, proof, up, _ = self._run_rollout_recipe(
                         target, command, proof_exit=0, hardware_exit=2
                     )
@@ -3576,7 +3581,8 @@ assert.equal(context.ACT_TIMER, null);
                 preflight = workflow_job_blocks(
                     f".github/workflows/{workflow}.yml"
                 )["preflight"]
-                self.assertIn("timeout-minutes: 10", preflight)
+                budget = 15 if workflow == "main-fast-lane" else 10
+                self.assertIn(f"timeout-minutes: {budget}", preflight)
                 for command in (
                     "make history-check",
                     "make validation-lint",

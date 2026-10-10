@@ -150,10 +150,10 @@ class PlaybackControlAskTest {
         return PlaybackControlTransport("https://cinema.example", client, json)
     }
 
-    private fun subtitleReadinessTransport(sequence: AtomicLong): PlaybackControlTransport {
+    private fun subtitleReadinessTransport(sequence: AtomicLong, value: String = "ready"): PlaybackControlTransport {
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val accepted = sequence.incrementAndGet()
-            val readiness = if (accepted == 1L) "pending" else "ready"
+            val readiness = if (accepted == 1L) "pending" else value
             val body = """{"protocol":"${PlaybackControl.PROTOCOL}",""" +
                 """"generation":"$GENERATION","control_epoch":7,""" +
                 """"accepted_sequence":$accepted,"action":{"type":"none"},""" +
@@ -376,6 +376,51 @@ class PlaybackControlAskTest {
                     ::observation,
                     transport = subtitleReadinessTransport(sequence),
                     onSubtitleReady = { retries += 1 },
+                )
+                awaitFirstExchange(sequence)
+                session.reportIntent()
+                val queued = callbacks.poll(5, TimeUnit.SECONDS)
+                assertTrue(queued != null, "subtitle readiness never queued for $transition")
+
+                when (transition) {
+                    "replacement" -> session.begin(bootstrap(), ::observation, transport = transport("none"))
+                    "end" -> session.end()
+                    "new-intent" -> session.clearVerdict()
+                }
+                queued()
+                assertEquals(if (transition == "current") 1 else 0, retries, transition)
+                if (transition == "new-intent") {
+                    session.playerChanged()
+                    val deadline = monotonicNowMs() + 5_000
+                    while (retries == 0 && monotonicNowMs() < deadline) callbacks.poll(100, TimeUnit.MILLISECONDS)?.invoke()
+                    assertEquals(1, retries, "discarded A readiness must remain available to current B")
+                    session.reportIntent()
+                    kotlinx.coroutines.delay(300)
+                    while (true) (callbacks.poll() ?: break).invoke()
+                    assertEquals(1, retries, "ready cadence commits exactly one retry")
+                }
+            } finally {
+                session.end()
+                scope.cancel()
+            }
+        }
+    }
+    @Test
+    fun `queued subtitle failure belongs only to its current session and intent`() = runBlocking {
+        // This drives the real session/reporter/HTTP response path and holds
+        // only the final UI dispatch, the window in which the race occurred.
+        for (transition in listOf("current", "replacement", "end", "new-intent")) {
+            val scope = scope()
+            val callbacks = LinkedBlockingQueue<() -> Unit>()
+            val session = PlaybackControlSession(scope) { callbacks.add(it) }
+            val sequence = AtomicLong(0)
+            var retries = 0
+            try {
+                session.begin(
+                    bootstrap(),
+                    ::observation,
+                    transport = subtitleReadinessTransport(sequence, "unavailable"),
+                    onSubtitleUnavailable = { retries += 1 },
                 )
                 awaitFirstExchange(sequence)
                 session.reportIntent()

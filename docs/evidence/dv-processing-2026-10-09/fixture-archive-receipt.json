@@ -1,0 +1,9 @@
+{
+  "archive": "dv-fixture-reproduction.tar.gz",
+  "sha256": "9cea3c16f462f203186ea47d94e7b3000305bbce5c36ecf2847b617cdabc5ef2",
+  "bytes": 61575,
+  "members": 1167,
+  "manifest_sha256": "046d73d8e4bbeaba842c6c5d689fbb0878e72c1660fa1392649a77c3603f5055",
+  "reproducibility": "sorted members; zero timestamps/owners; fixed modes; gzip mtime0/no filename",
+  "scope": "fixture inputs/recipes/receipts only; no generated media or auth/config"
+}

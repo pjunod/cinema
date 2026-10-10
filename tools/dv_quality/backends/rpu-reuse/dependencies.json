@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "inputs": {
+    "bl-vfr-b2.mkv": "6af152b438835b23205313ca3c9e7e55d4af3de5ac686af20fd0eb09181f4df2",
+    "bl.yuv420p10le": "286c629dc58dd3a1cc6c0605f58389f4356346aaa80bf519d90fe7f0fe6d0113",
+    "ffmpeg-source.tar.gz": "fb1931fd4eb29297ee1c1017a24f800c4d8fbea35b4f2aaeb28308a48a9149b4",
+    "dovi-source.tar.gz": "57d13f03d04a7a1b3d7dcb139b976dc3748c745c1720d4b6e44b61e5ef67b69b"
+  },
+  "cargo_cache_manifest_sha256": "10d72e7b30bf92bef7a486acf3ee5f0e9e7e53c8298d84878f31f0e9490b8199",
+  "libdovi_workspace_patch": "append workspace containing dolby_vision",
+  "cargo_lock_sha256": "715faa8e92b23a00dd7cb317ebf4cf17741c0a955ffc5710da69c505ee494309",
+  "ffmpeg_patch": "none"
+}

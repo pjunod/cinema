@@ -2663,6 +2663,8 @@ final class PlayerController: ObservableObject {
     /// does not report it. Purely a readout: nothing in this controller ever
     /// reads it back, and no decision, capability, or session request depends
     /// on it (MEDIA-BADGES-PLAN.md §9).
+    @Published private(set) var effectiveProcessing: EffectiveProcessingReport?
+    @Published private(set) var effectiveProcessingGeneration: String?
     @Published private(set) var deliveredRange: String?
     /// Take a delivery answer, both halves at once.
     ///
@@ -2683,6 +2685,8 @@ final class PlayerController: ObservableObject {
             deliveredRange = range
             deliveredDolbyVisionProfile = hls.deliveredDolbyVisionProfile
         } else {
+            effectiveProcessing = nil
+            effectiveProcessingGeneration = nil
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
         }
@@ -3830,6 +3834,8 @@ final class PlayerController: ObservableObject {
         initialDecisionRequest = InitialDecisionRequest()
         selectedAudio = offline.audioLabel == nil ? nil : 0
         selectedSubtitle = offline.subtitleIndex == nil ? nil : 0
+        effectiveProcessing = nil
+        effectiveProcessingGeneration = nil
         deliveredRange = "sdr"
         encoder = "offline"
         isVOD = true
@@ -4662,6 +4668,9 @@ final class PlayerController: ObservableObject {
         intentAlreadyPublished: Bool = false,
         viewerBoundary: Bool = false
     ) {
+        // Relative jumps and manual/automatic markers all enter here too.
+        effectiveProcessing = nil
+        effectiveProcessingGeneration = nil
         let actionEpoch = owningActionEpoch ?? beginViewerAction()
         // The seek is executed below without waiting for anything optional.
         // The original-first re-plan a viewer seek is owed is served later by
@@ -5427,6 +5436,8 @@ final class PlayerController: ObservableObject {
     }
 
     func stop(deactivateAudioSession: Bool = true) {
+        effectiveProcessing = nil
+        effectiveProcessingGeneration = nil
         retireAutoTransferMetrics()
         abandonSeekMeasurement()
         requestedSeekGeneration = nil
@@ -5960,6 +5971,8 @@ final class PlayerController: ObservableObject {
             // Direct play has no session, so the decision's answer stands for
             // the whole playback (MEDIA-BADGES-PLAN.md §3.2). Both halves of
             // it, for the reason `adoptSessionDelivery` gives.
+            effectiveProcessing = nil
+            effectiveProcessingGeneration = nil
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
             let deliveryPath = try contextForFile(fileId).translatedDeliveryPath(decision.delivery?.url ?? decision.playUrl)
@@ -7496,6 +7509,8 @@ final class PlayerController: ObservableObject {
     /// The server's own sentence wins wherever it sent one: the adapter reads
     /// the refusal body and the source table classifies on its code.
     private func fail(_ error: Error) {
+        effectiveProcessing = nil
+        effectiveProcessingGeneration = nil
         isChangingStream = false
         ttffMeasurement.reset()
         // M5: the create-retry owner has already stopped the player and raised
@@ -7575,6 +7590,8 @@ final class PlayerController: ObservableObject {
     /// implementation, and `wantsPlayback` — which is also the presenter's
     /// `playback_requested` — has one owner-side writer rather than five.
     private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {
+        effectiveProcessing = nil
+        effectiveProcessingGeneration = nil
         abandonSeekMeasurement()
         player.pause()
         isPlaying = false
@@ -10848,7 +10865,21 @@ extension PlayerController {
     /// A server that sends no bootstrap, or one this client cannot address,
     /// leaves the reporter silent. That is the passive M2 behaviour: playback
     /// does not depend on the control plane and never should.
+    /// Adopt only the received report for this HLS response's own identity.
+    /// This does not start a reporter, choose a route, or derive processing.
+    func adoptEffectiveProcessing(_ hls: HlsStart) {
+        effectiveProcessing = nil
+        effectiveProcessingGeneration = nil
+        guard let bootstrap = hls.control, bootstrap.isValid else { return }
+        effectiveProcessingGeneration = bootstrap.generation
+        if let report = hls.effectiveProcessing,
+           report.matches(generation: bootstrap.generation, delivered: hls.deliveredDynamicRange) {
+            effectiveProcessing = report
+        }
+    }
+
     func beginPlaybackControl(_ hls: HlsStart, origin: String) {
+        adoptEffectiveProcessing(hls)
         autoRouteProtocol = hls.displayAwareAutoProtocol
         if hls.displayAwareAutoProtocol == "route-v1" {
             if let candidates = hls.qualityCandidates { decision?.qualityCandidates = candidates }
@@ -10886,6 +10917,17 @@ extension PlayerController {
             },
             onSubtitleReady: { [weak self] in
                 self?.retryNativeSubtitleAfterReadiness()
+            },
+            onSubtitleUnavailable: { [weak self] in
+                guard let self, self.selectedSubtitle != nil else { return }
+                self.showPlaybackNotice("That subtitle could not be prepared. Playback was kept unchanged.")
+            },
+            onProcessingGeneration: { [weak self] generation, report in
+                guard let self else { return }
+                self.effectiveProcessing = report.flatMap {
+                    $0.matches(generation: generation, delivered: self.deliveredRange) ? $0 : nil
+                }
+                self.effectiveProcessingGeneration = generation
             },
             // Deliberately ungated at this call site. Everything that could
             // refuse a staging — one already live, one already settled, a
@@ -12042,6 +12084,8 @@ extension PlayerController: PreparedSuccessorHost {
         guard playbackSurface?.promote(successor) == true else { return .failedWithoutReopen }
         incumbentPlayer.isMuted = true
         unprovenPreparedItem = item
+        effectiveProcessing = nil
+        effectiveProcessingGeneration = nil
         adoptWarmPlayer(successor)
         player.volume = incumbentVolume
         player.isMuted = incumbentMuted
