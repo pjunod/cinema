@@ -135,8 +135,19 @@ def _references(text: str) -> list[str]:
     return _copy_sources(text) + [stage.base for stage in _stages(text)]
 
 
+# The audited amd64 Dolby package enters the installer stage as a named
+# BuildKit context (`--build-context linux-dolby-package=...`), produced by the
+# `linux-dolby-package-export` target in a separate, audited build.
+LINUX_DOLBY_PACKAGE_CONTEXT = "linux-dolby-package"
+
+
 def _stage_closure(
-    source: str, kept: str, roots: list[str], *, include_build: bool
+    source: str,
+    kept: str,
+    roots: list[str],
+    *,
+    include_build: bool,
+    external_contexts: tuple[str, ...] = (),
 ) -> str:
     """Return the pre-runtime stages reachable from `roots`, in source order.
 
@@ -162,6 +173,8 @@ def _stage_closure(
         name = pending.pop()
         if name in selected or name in emitted or name == "scratch":
             continue
+        if name in external_contexts and name not in before:
+            continue  # Supplied by the caller as a named build context.
         if name not in before and any(mark in name for mark in ":@"):
             continue  # A pinned image, not a stage of this Dockerfile.
         if name not in before:
@@ -185,14 +198,33 @@ def _stage_closure(
     )
 
 
+def _split_final_runtime(text: str) -> tuple[str, str] | None:
+    """Split `text` at the shipped `FROM runtime-assets AS runtime` stage.
+
+    The declaration is matched as a whole FROM line. A later stage such as
+    `FROM runtime-assets AS runtime-assets-dolby-amd64` begins with the same
+    characters, and a substring match counted it as a second shipped runtime.
+    """
+
+    finals = [
+        match
+        for match in _FROM.finditer(text)
+        if match.group(1) == RUNTIME_ASSETS and match.group(2) == "runtime"
+    ]
+    if not finals:
+        return None
+    if len(finals) != 1:
+        raise ValueError("tagged Dockerfile must contain one final runtime stage")
+    return text[: finals[0].start()], text[finals[0].end() :]
+
+
 def _runtime(source: str) -> str:
     runtime = source[_runtime_start(source):]
-    final_stage = "FROM runtime-assets AS runtime"
-    if final_stage not in runtime:
+    final_stage = RUNTIME_FINAL_STAGE
+    split = _split_final_runtime(runtime)
+    if split is None:
         return runtime  # Historical one-stage release Dockerfiles.
-    if runtime.count(final_stage) != 1:
-        raise ValueError("tagged Dockerfile must contain one final runtime stage")
-    assets, final = runtime.split(final_stage, 1)
+    assets, final = split
     # Later build/export/installer stages are independent targets, never the
     # default release runtime. Select them explicitly only for audited amd64.
     final = re.split(r"(?m)^FROM ", final, maxsplit=1)[0]
@@ -250,12 +282,13 @@ def render(source: str, runtime_image: str | None = None, linux_dolby_package: b
     if runtime_image is not None:
         if not IMMUTABLE_IMAGE.fullmatch(runtime_image):
             raise ValueError("media runtime image must have an immutable sha256 digest")
-        if runtime.count(RUNTIME_FINAL_STAGE) != 1:
+        split = _split_final_runtime(runtime)
+        if split is None:
             raise ValueError("tagged Dockerfile must contain one final runtime stage")
         runtime = (
             f"FROM {runtime_image} AS runtime-assets\n\n"
             + RUNTIME_FINAL_STAGE
-            + runtime.split(RUNTIME_FINAL_STAGE, 1)[1]
+            + split[1]
         )
     if linux_dolby_package:
         if runtime_image is not None:
@@ -265,7 +298,10 @@ def render(source: str, runtime_image: str | None = None, linux_dolby_package: b
         if source.count(start) != 1 or source.count(end) != 1:
             raise ValueError("tagged source lacks the audited amd64 package installer")
         installer = start + source.split(start, 1)[1].split(end, 1)[0]
-        assets, final = runtime.split(RUNTIME_FINAL_STAGE, 1)
+        split = _split_final_runtime(runtime)
+        if split is None:
+            raise ValueError("tagged Dockerfile must contain one final runtime stage")
+        assets, final = split
         runtime = assets + installer + "FROM runtime-assets-dolby-amd64 AS runtime" + final
     for name, source_copy, artifact_copy in SUPPORTED_BINARY_COPIES:
         if name in binaries:
@@ -276,7 +312,13 @@ def render(source: str, runtime_image: str | None = None, linux_dolby_package: b
     # A runtime that copies prebuilt private assets keeps the stages producing
     # them; the published runtime image of a digest-bound release already
     # contains them, so that form keeps none.
-    dependencies = _stage_closure(source, runtime, _references(runtime), include_build=False)
+    dependencies = _stage_closure(
+        source,
+        runtime,
+        _references(runtime),
+        include_build=False,
+        external_contexts=(LINUX_DOLBY_PACKAGE_CONTEXT,) if linux_dolby_package else (),
+    )
     generated = (
         "# syntax=docker/dockerfile:1\n\n"
         "# Generated from the tagged runtime stage by "

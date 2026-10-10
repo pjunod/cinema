@@ -115,7 +115,13 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertIn("plurx-cluster-check", image)
         self.assertIn("build-identity", image)
         self.assertIn("GLIBC_$max_glibc; Bookworm provides 2.36", workflow)
-        self.assertIn("target: runtime-assets", image)
+        # amd64 tags carrying the audited Dolby package publish the runtime
+        # that installs it; every other tag publishes the plain runtime.
+        self.assertIn(
+            "target: ${{ steps.media-contract.outputs.dolby_required == 'true' "
+            "&& 'runtime-assets-dolby-amd64' || 'runtime-assets' }}",
+            image,
+        )
         self.assertIn("REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST", image)
         self.assertIn("--runtime-image", image)
         self.assertLess(
@@ -322,6 +328,36 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         for message, refused in refusals.items():
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message.strip()):
                 render(refused)
+
+    def test_runtime_named_with_the_final_stage_prefix_is_not_a_second_runtime(self):
+        source = (
+            "FROM rust:1-bookworm AS build\n"
+            "RUN cargo build --release\n\n"
+            "FROM debian:bookworm-slim AS runtime-assets\n"
+            "RUN true\n\n"
+            "FROM runtime-assets AS runtime\n"
+            "COPY --from=build /plurxd /usr/local/bin/plurxd\n\n"
+            "FROM runtime-assets AS runtime-assets-dolby-amd64\n"
+            "RUN true\n"
+        )
+        from validation.release_dockerfile import _runtime, _split_final_runtime
+
+        assets, final = _split_final_runtime(source)
+        self.assertTrue(final.startswith("\nCOPY --from=build /plurxd"))
+        self.assertNotIn("runtime-assets-dolby-amd64", _runtime(source))
+        with self.assertRaises(ValueError):
+            _split_final_runtime(source + "\nFROM runtime-assets AS runtime\n")
+
+    def test_named_dolby_package_context_is_accepted_only_in_its_render_mode(self):
+        from validation.release_dockerfile import render
+
+        source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        rendered = render(source, linux_dolby_package=True)
+        self.assertIn("--mount=from=linux-dolby-package,", rendered)
+        self.assertIn("FROM runtime-assets-dolby-amd64 AS runtime", rendered)
+        self.assertNotIn("cargo build", rendered)
+        plain = render(source)
+        self.assertNotIn("linux-dolby-package", plain)
 
     def test_generator_derives_current_two_binary_runtime(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
