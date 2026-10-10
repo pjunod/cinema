@@ -32,6 +32,19 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL = ROOT / "deploy" / "install"
 INSTALL_PS1 = ROOT / "deploy" / "install.ps1"
+MAC_FFMPEG_PIN = ROOT / "scripts" / "build-macos-video-ffmpeg"
+
+
+def mac_ffmpeg_pin() -> tuple[str, dict[str, str]]:
+    """The Jellyfin FFmpeg release and per-architecture archive checksums the
+    macOS video path pins -- the single source the installer must agree with."""
+    text = MAC_FFMPEG_PIN.read_text(encoding="utf-8")
+    tag = re.search(r'^TAG = "v([^"]+)"', text, re.M).group(1)
+    sums = dict(re.findall(r'"(arm64|x86_64)": \("mac(?:arm)?64", "([0-9a-f]{64})"\)', text))
+    return tag, sums
+
+
+MAC_FFMPEG_VERSION, MAC_FFMPEG_SHA256 = mac_ffmpeg_pin()
 
 
 def read(relative: str) -> str:
@@ -76,11 +89,28 @@ class Host:
         # A fixed non-root identity, so "sudo only where needed" is provable
         # even when the suite itself runs as root (CI containers do).
         self.stub("id", 'case "$1" in -u) echo 1000 ;; -g) echo 1000 ;; *) echo "uid=1000(test) gid=1000(test)" ;; esac\n')
-        self.stub("ffmpeg", "")
-        self.stub("ffprobe", "")
+        # The PATH ffmpeg is a stand-in for Homebrew's: not a Jellyfin build.
+        self.stub("ffmpeg", 'echo "ffmpeg version 8.0 Copyright (c) the FFmpeg developers"\n')
+        self.stub("ffprobe", 'echo "ffprobe version 8.0 Copyright (c) the FFmpeg developers"\n')
+        # A download (`curl ... -o FILE URL`) writes a placeholder archive.
         self.stub(
             "curl",
+            'out=; prev=; for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done\n'
+            '[ -n "$out" ] && { echo archive > "$out"; exit 0; }\n'
             'case "$*" in *readyz*) exit 0 ;; *api/v1/server*) echo \'{"version":"0.0.0-test"}\' ;; esac\n',
+        )
+        # An Apple Silicon Mac whose archive checksums as the pinned one and
+        # unpacks to tools that report the pinned Jellyfin release.
+        self.stub("uname", 'case "$1" in -m) echo arm64 ;; *) echo Darwin ;; esac\n')
+        self.stub("shasum", f'echo "{MAC_FFMPEG_SHA256["arm64"]}  $3"\n')
+        jellyfin = MAC_FFMPEG_VERSION.rsplit("-", 1)[0]
+        self.stub(
+            "tar",
+            'dir=; prev=; for a in "$@"; do [ "$prev" = -C ] && dir=$a; prev=$a; done\n'
+            "for t in ffmpeg ffprobe; do\n"
+            f'  printf \'#!/bin/sh\\necho "%s version {jellyfin}-Jellyfin Copyright (c) the FFmpeg developers"\\n\' "$t" > "$dir/$t"\n'
+            '  chmod 755 "$dir/$t"\n'
+            "done\n",
         )
         # `install` is the one stub that has to do its job, because later
         # assertions read what it wrote. It honours -d and copies otherwise;
@@ -250,7 +280,10 @@ class InstallerCase(unittest.TestCase):
         }
         for mode, log in expected.items():
             self.host.log.write_text("")
-            result = self.host.run(mode, "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / mode), env={"PLURX_INSTALL_READY_TIMEOUT": "2"})
+            # macOS installs its engine from a local archive here, because this
+            # test's curl answers nothing at all.
+            extra = ["--ffmpeg-archive", str(self.host.fake_binary)] if mode == "macos" else []
+            result = self.host.run(mode, "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / mode), *extra, env={"PLURX_INSTALL_READY_TIMEOUT": "2"})
             self.assertNotEqual(result.returncode, 0, f"{mode} claimed success with no server answering")
             self.assertIn("did not become ready within 2s", result.stderr, mode)
             self.assertIn(log, result.stderr, mode)
@@ -303,8 +336,15 @@ class InstallerCase(unittest.TestCase):
         self.assertEqual(plist["Label"], "com.plurx.plurxd")
         self.assertEqual(plist["ProgramArguments"], [f"{prefix}/bin/plurxd", "run"])
         env = plist["EnvironmentVariables"]
-        self.assertEqual(env["PLURX_FFMPEG"], str(self.host.bin / "ffmpeg"), "the plist names the ffmpeg that was on PATH")
-        self.assertEqual(env["PLURX_FFPROBE"], str(self.host.bin / "ffprobe"))
+        engine = prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}"
+        self.assertEqual(env["PLURX_FFMPEG"], str(engine / "ffmpeg"), "the agent runs the pinned Jellyfin FFmpeg, not PATH's")
+        self.assertEqual(env["PLURX_FFPROBE"], str(engine / "ffprobe"))
+        self.assertTrue((engine / "ffmpeg").exists() and (engine / "ffprobe").exists())
+        archive = f"jellyfin-ffmpeg_{MAC_FFMPEG_VERSION}_portable_macarm64-gpl.tar.xz"
+        downloads = [call for call in self.host.calls() if call.startswith("curl") and " -o " in call]
+        self.assertEqual(len(downloads), 1, self.host.calls())
+        self.assertIn(f"/releases/download/v{MAC_FFMPEG_VERSION}/{archive}", downloads[0])
+        self.assertFalse([call for call in self.host.calls() if call.startswith("brew")], "Homebrew ffmpeg is never installed")
         self.assertEqual(env["PLURX_DATA_DIR"], f"{self.host.home}/Library/Application Support/plurx")
         self.assertEqual(plist["StandardOutPath"], f"{self.host.home}/Library/Logs/plurxd.log")
         self.assertTrue((self.host.home / "Library/Application Support/plurx").is_dir())
@@ -320,6 +360,74 @@ class InstallerCase(unittest.TestCase):
             "curl",
         )
         self.assertNotIn("sudo", "\n".join(self.host.calls()), "a user-owned prefix needs no sudo")
+
+        # A second run finds the pinned build in place and does not fetch it again.
+        self.host.log.write_text("")
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([call for call in self.host.calls() if call.startswith("curl") and " -o " in call])
+        self.assertIn("already in", result.stdout)
+
+    def test_macos_refuses_an_engine_archive_that_is_not_the_pinned_build(self):
+        self.host.stub("launchctl", "")
+        self.host.stub("shasum", 'echo "0000000000000000000000000000000000000000000000000000000000000000  $3"\n')
+        prefix = self.tmp / "homebrew"
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("is not the pinned Jellyfin FFmpeg", result.stderr)
+        self.assertIn(MAC_FFMPEG_SHA256["arm64"], result.stderr)
+        self.assertFalse((prefix / "libexec").exists())
+        self.assertFalse((prefix / "bin" / "plurxd").exists(), "nothing is installed past a failed engine check")
+        self.assertFalse((self.host.home / "Library/LaunchAgents/com.plurx.plurxd.plist").exists())
+
+    def test_macos_installs_the_engine_from_a_local_archive_without_downloading(self):
+        self.host.stub("launchctl", "")
+        archive = self.tmp / "jellyfin.tar.xz"
+        archive.write_text("archive")
+        prefix = self.tmp / "homebrew"
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix),
+                               "--ffmpeg-archive", str(archive))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([call for call in self.host.calls() if call.startswith("curl") and " -o " in call])
+        self.assertIn(f"shasum -a 256 {archive}", self.host.calls())
+        self.assertTrue((prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}" / "ffmpeg").exists())
+
+    def test_macos_upgrade_repoints_a_non_jellyfin_engine_and_keeps_a_chosen_jellyfin_one(self):
+        self.host.stub("launchctl", "")
+        chosen = self.tmp / "my-build" / "ffprobe"
+        chosen.parent.mkdir()
+        write_executable(chosen, '#!/bin/sh\necho "ffprobe version 7.1.2-Jellyfin Copyright"\n')
+        agents = self.host.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        plist_path = agents / "com.plurx.plurxd.plist"
+        with plist_path.open("wb") as handle:
+            plistlib.dump({
+                "Label": "com.plurx.plurxd",
+                "ProgramArguments": ["/opt/x/bin/plurxd", "run"],
+                "EnvironmentVariables": {
+                    "PLURX_BIND": "127.0.0.1:32400",
+                    "PLURX_FFMPEG": str(self.host.bin / "ffmpeg"),
+                    "PLURX_FFPROBE": str(chosen),
+                },
+            }, handle)
+        prefix = self.tmp / "hb"
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with plist_path.open("rb") as handle:
+            plist = plistlib.load(handle)
+        env = plist["EnvironmentVariables"]
+        engine = prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}"
+        self.assertEqual(env["PLURX_FFMPEG"], str(engine / "ffmpeg"), "a non-Jellyfin engine is repointed")
+        self.assertEqual(env["PLURX_FFPROBE"], str(chosen), "a Jellyfin build the operator chose is kept")
+        self.assertEqual(env["PLURX_BIND"], "127.0.0.1:32400", "every other operator choice is kept")
+        self.assertEqual(plist["ProgramArguments"], ["/opt/x/bin/plurxd", "run"])
+        self.assertIn("repointed PLURX_FFMPEG", result.stdout)
+
+    def test_macos_engine_pin_matches_the_macos_video_package_pin(self):
+        script = INSTALL.read_text(encoding="utf-8")
+        self.assertIn(f"jellyfin_ffmpeg_version={MAC_FFMPEG_VERSION}\n", script)
+        self.assertIn(f"jellyfin_ffmpeg_sha256_arm64={MAC_FFMPEG_SHA256['arm64']}\n", script)
+        self.assertIn(f"jellyfin_ffmpeg_sha256_x86_64={MAC_FFMPEG_SHA256['x86_64']}\n", script)
 
     def test_macos_upgrade_keeps_the_operators_plist(self):
         self.host.stub("launchctl", "")
@@ -337,6 +445,9 @@ class InstallerCase(unittest.TestCase):
         prefix = self.tmp / "homebrew"
         (prefix / "bin").mkdir(parents=True)
         (prefix / "bin" / "plurxd").write_text("bin")
+        engine = prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}"
+        engine.mkdir(parents=True)
+        (engine / "ffmpeg").write_text("engine")
         agents = self.host.home / "Library/LaunchAgents"
         agents.mkdir(parents=True)
         (agents / "com.plurx.plurxd.plist").write_text(
@@ -351,6 +462,7 @@ class InstallerCase(unittest.TestCase):
         self.assertIn(f"launchctl bootout gui/{1000}/com.plurx.plurxd", self.host.calls())
         self.assertFalse((agents / "com.plurx.plurxd.plist").exists())
         self.assertFalse((prefix / "bin" / "plurxd").exists())
+        self.assertFalse((prefix / "libexec/plurx").exists(), "the agent's Jellyfin FFmpeg goes with it")
         self.assertEqual((support / "plurx.db").read_text(), "precious")
 
     # ---- docker ----------------------------------------------------------------
@@ -502,7 +614,8 @@ class InstallerCase(unittest.TestCase):
                 self.assertIn("would wait for http://127.0.0.1:32400/readyz", result.stdout, mode)
         after = sorted(str(p) for p in self.host.destdir.rglob("*"))
         self.assertEqual(before, after)
-        self.assertEqual([c for c in self.host.calls() if not c.startswith("id ")], [], "a dry run invokes no host tool")
+        # `id` and `uname` only read who and what this host is.
+        self.assertEqual([c for c in self.host.calls() if not c.startswith(("id ", "uname "))], [], "a dry run invokes no host tool")
 
     # ---- the make targets and the docs --------------------------------------
 
