@@ -2310,7 +2310,7 @@ impl AutoQualityRateProfile {
     /// Wire peak includes the actual resolved audio budget. Input pacing is
     /// excluded from encode sustainability and never turns this into link proof.
     pub fn peak_bitrate_bps(self, audio_bitrate_kbps: u32) -> u64 {
-        u64::from(self.video_bitrate_kbps()) * 1500 + u64::from(audio_bitrate_kbps) * 1000
+        super::vbv_maxrate_bps(self.video_bitrate_kbps()) + u64::from(audio_bitrate_kbps) * 1000
     }
 
     pub fn bandwidth(self, audio_bitrate_kbps: u32) -> OutputBandwidth {

@@ -1014,6 +1014,26 @@ impl Encoding {
             .ok()
     }
 
+    /// The rate this continuous rendition needs from a link: the encoder's
+    /// VBV cap for video, the configured rate for the shared soundtrack. It is
+    /// the same figure the candidate catalog advertises for the encode route,
+    /// split by role. [`Self::continuous_peak_bps`] stays the publication
+    /// ceiling; nothing enforces this value, and it is always below it.
+    pub(crate) fn continuous_sustained_bps(&self) -> Option<u64> {
+        if self.shared_audio.is_some() {
+            return Some(u64::from(self.options.audio_bitrate_kbps) * 1000);
+        }
+        if self.plan.options().input_has_audio
+            || self.options.video_sample_envelope
+                != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+        {
+            return None;
+        }
+        Some(plurx_core::transcode::vbv_maxrate_bps(
+            self.options.video_bitrate_kbps,
+        ))
+    }
+
     pub(crate) fn continuous_object_fits(
         &self,
         plan: &plurx_core::segplan::SegmentPlan,

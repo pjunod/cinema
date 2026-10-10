@@ -891,6 +891,16 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .iter()
         .all(|rung| rung["candidate_id"].is_string()));
     assert_eq!(description["audio"]["rendition_id"], soundtrack.key);
+    // Clients read each role's link rate beside its publication ceiling.
+    for row in description["video"]
+        .as_array()
+        .expect("rungs")
+        .iter()
+        .chain([&description["audio"]])
+    {
+        let sustained = row["sustained_bps"].as_u64().expect("declared link rate");
+        assert!(sustained > 0 && sustained < row["peak_bps"].as_u64().expect("ceiling"));
+    }
     let verified = serve
         .verified_continuous_family_before(&parent, Instant::now() + Duration::from_secs(5))
         .await
@@ -905,6 +915,15 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .iter()
         .find(|rung| verified.candidates.get(rung.rendition_id()) == Some(&companion_id))
         .expect("companion catalog provenance");
+    // The durable descriptor never carries them: its bytes are compared exactly
+    // on re-bind and parsed by older nodes during a rolling deploy.
+    let durable: plurx_core::store::ContinuousFamilyDescription =
+        serde_json::from_slice(&verified.description().expect("durable bytes"))
+            .expect("the durable shape older nodes parse");
+    assert_eq!(durable.video.len(), 2);
+    assert!(!String::from_utf8(verified.description().expect("durable bytes"))
+        .expect("utf8")
+        .contains("sustained_bps"));
     let intervals = serve
         .quality_ready_before(
             &parent,

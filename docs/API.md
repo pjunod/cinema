@@ -1800,8 +1800,13 @@ no-store`, at most 32 KiB, relayed to the owner like a playlist: `{version: 1,
 family_id, mode, master, video[], audio}`. `mode` is `autonomous_reserved` or
 `controlled`. Each video row names its `candidate_id`, `rendition_id`,
 `init_id`, actual `width`/`height`/`codec`, `timescale`, `frame_ticks`,
-`segment_ticks`, `peak_bps` and relative `playlist`; `audio` names the shared
-rendition the same way. Every value comes from the init-verified family, never
+`segment_ticks`, `peak_bps`, `sustained_bps` and relative `playlist`; `audio`
+names the shared rendition the same way. `peak_bps` is the per-object
+publication ceiling (an object over it is refused); `sustained_bps` is the rate
+the rendition needs from a link (the encoder's VBV cap, or the soundtrack's
+configured rate), which clients cost Auto by. `sustained_bps` is in the served
+bytes only, never in the durable family descriptor, and a client treats it as
+optional. Every value comes from the init-verified family, never
 from scanner metadata. An ordinary session answers 404; an ended or lost owner
 answers the §9.2 410s.
 

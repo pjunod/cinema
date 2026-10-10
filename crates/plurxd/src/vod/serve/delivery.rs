@@ -571,7 +571,7 @@ impl VodServe {
                 "durable continuous family changed or its owner retired".into(),
             ));
         }
-        Ok(bytes)
+        family.client_description()
     }
 
     pub(crate) async fn verified_continuous_family_before(
@@ -731,6 +731,7 @@ impl VodServe {
                             peak_bps: encoding.continuous_peak_bps(&rendition.plan).ok_or_else(
                                 || VodError::ProducerFailed("audio delivery budget missing".into()),
                             )?,
+                            sustained_bps: encoding.continuous_sustained_bps(),
                         });
                     }
                 }
@@ -757,6 +758,7 @@ impl VodServe {
                         peak_bps: encoding.continuous_peak_bps(&rendition.plan).ok_or_else(
                             || VodError::ProducerFailed("video delivery budget missing".into()),
                         )?,
+                        sustained_bps: encoding.continuous_sustained_bps(),
                     });
                 }
                 let family = plurx_core::transcode::VodPresentationFamily::new(
