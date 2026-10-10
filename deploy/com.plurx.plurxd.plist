@@ -38,9 +38,10 @@
              connections the first time. -->
         <key>PLURX_BIND</key>
         <string>0.0.0.0:32400</string>
-        <!-- ffmpeg/ffprobe for scanning + remux/transcode. `brew install ffmpeg`
-             satisfies this; point these at jellyfin-ffmpeg for the best
-             tone-mapping if you prefer. -->
+        <!-- ffmpeg/ffprobe for scanning + remux/transcode: Jellyfin FFmpeg
+             8.1.3-1, which `make install-macos` downloads, verifies and
+             installs under <prefix>/libexec/plurx/. Homebrew's ffmpeg is a
+             different build and is not supported (deploy/MACOS.md). -->
         <key>PLURX_FFMPEG</key>
         <string>/usr/local/bin/ffmpeg</string>
         <key>PLURX_FFPROBE</key>

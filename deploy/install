@@ -14,6 +14,9 @@
 #   --binary PATH   install this prebuilt plurxd instead of building one
 #   --prefix DIR    where the binary goes (default: /usr/local, or the
 #                   Homebrew prefix on macOS); the service unit follows it
+#   --ffmpeg-archive PATH
+#                   macOS: the Jellyfin FFmpeg portable archive, already
+#                   downloaded (offline installs); still checksum-verified
 #   --uninstall     remove the service and the binary; keep data and config
 #   --dry-run       print every command instead of running it
 #
@@ -30,11 +33,12 @@ root=$(cd -P -- "$here/.." && pwd -P)
 mode=auto
 binary=
 prefix=
+ffmpeg_archive=
 uninstall=0
 dry_run=0
 
 usage() {
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 say() { printf '%s\n' "install: $*"; }
@@ -79,6 +83,8 @@ while [ $# -gt 0 ]; do
     --binary=*) binary=${1#--binary=} ;;
     --prefix) shift; [ $# -gt 0 ] || die "--prefix needs a directory"; prefix=$1 ;;
     --prefix=*) prefix=${1#--prefix=} ;;
+    --ffmpeg-archive) shift; [ $# -gt 0 ] || die "--ffmpeg-archive needs a path"; ffmpeg_archive=$1 ;;
+    --ffmpeg-archive=*) ffmpeg_archive=${1#--ffmpeg-archive=} ;;
     --uninstall) uninstall=1 ;;
     --dry-run) dry_run=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -276,10 +282,148 @@ linux_uninstall() {
 
 macos_agent_label=com.plurx.plurxd
 
+# The media engine on macOS is Jellyfin FFmpeg 8.1.3-1, the official portable
+# build: it carries the VideoToolbox, tone-mapping, AC-4 and Dolby Vision
+# pieces the macOS video path is built and qualified against. Homebrew's
+# ffmpeg is a different build and is never used. The release and checksums
+# are the ones scripts/build-macos-video-ffmpeg pins (a test holds the two
+# copies equal); a new pin is a new versioned directory beside the old one.
+jellyfin_ffmpeg_version=8.1.3-1
+jellyfin_ffmpeg_sha256_arm64=22445d7299742749ad2eeb9ce87963d50def0357e45b3e6c7b69987c8365dbf6
+jellyfin_ffmpeg_sha256_x86_64=cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a167b093d4bb6fb
+macos_ffmpeg=
+macos_ffprobe=
+
+# The directory the pinned build lives in: beside the binary's prefix, never
+# on PATH, so nothing else on the Mac picks it up or replaces it.
+macos_ffmpeg_dir() {
+  printf '%s/libexec/plurx/jellyfin-ffmpeg-%s\n' "$(dirname -- "$1")" "$jellyfin_ffmpeg_version"
+}
+
+# The first line of `$1 -version`, read whole so no pipe can cut it short.
+tool_version_line() {
+  [ -x "$1" ] || return 0
+  "$1" -version 2>/dev/null | sed -n 1p || true
+}
+
+# True when $1 is an ffmpeg/ffprobe that reports a Jellyfin build.
+is_jellyfin_tool() {
+  case $(tool_version_line "$1") in *-Jellyfin*) return 0 ;; esac
+  return 1
+}
+
+# True when $1 is exactly the pinned release ("ffmpeg version 8.1.3-Jellyfin").
+is_pinned_jellyfin_tool() {
+  case $(tool_version_line "$1") in *" version ${jellyfin_ffmpeg_version%-*}-Jellyfin"*) return 0 ;; esac
+  return 1
+}
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else die "no shasum or sha256sum to verify the Jellyfin FFmpeg archive with"
+  fi
+}
+
+# Install the pinned Jellyfin FFmpeg for this Mac's architecture into
+# $(macos_ffmpeg_dir), unless that exact build is already there.
+macos_ensure_jellyfin_ffmpeg() {
+  local dir=$1 dest arch target expected name url archive work tool actual
+  dest=$(macos_ffmpeg_dir "$dir")
+  macos_ffmpeg=$dest/ffmpeg
+  macos_ffprobe=$dest/ffprobe
+  if is_pinned_jellyfin_tool "$macos_ffmpeg" && is_pinned_jellyfin_tool "$macos_ffprobe"; then
+    say "Jellyfin FFmpeg $jellyfin_ffmpeg_version already in $dest"
+    return
+  fi
+  arch=$(uname -m)
+  case $arch in
+    arm64) target=macarm64; expected=$jellyfin_ffmpeg_sha256_arm64 ;;
+    x86_64) target=mac64; expected=$jellyfin_ffmpeg_sha256_x86_64 ;;
+    *) die "no Jellyfin FFmpeg build for this Mac's architecture: $arch" ;;
+  esac
+  name=jellyfin-ffmpeg_${jellyfin_ffmpeg_version}_portable_${target}-gpl.tar.xz
+  url=https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v$jellyfin_ffmpeg_version/$name
+  if [ "$dry_run" = 1 ]; then
+    say "would install Jellyfin FFmpeg $jellyfin_ffmpeg_version ($name, sha256 $expected) into $dest"
+    return
+  fi
+  work=$(mktemp -d "${TMPDIR:-/tmp}/plurx-jellyfin-ffmpeg.XXXXXX")
+  if [ -n "$ffmpeg_archive" ]; then
+    [ -f "$ffmpeg_archive" ] || die "no such file: $ffmpeg_archive"
+    archive=$ffmpeg_archive
+  else
+    say "downloading Jellyfin FFmpeg $jellyfin_ffmpeg_version for $arch"
+    archive=$work/$name
+    curl -fL --retry 3 --silent --show-error -o "$archive" "$url" \
+      || { rm -rf "$work"; die "could not download $url (pass --ffmpeg-archive <file> to install from a copy)"; }
+  fi
+  actual=$(sha256_of "$archive")
+  if [ "$actual" != "$expected" ]; then
+    rm -rf "$work"
+    die "$archive is not the pinned Jellyfin FFmpeg $jellyfin_ffmpeg_version for $arch (sha256 $actual, expected $expected)"
+  fi
+  mkdir -p "$work/x"
+  tar -xJf "$archive" -C "$work/x" || { rm -rf "$work"; die "could not unpack $archive"; }
+  for tool in ffmpeg ffprobe; do
+    [ -f "$work/x/$tool" ] || { rm -rf "$work"; die "$archive has no $tool"; }
+  done
+  run_for_dir "$dest" install -d "$dest"
+  for tool in ffmpeg ffprobe; do
+    run_for_dir "$dest" install -m 0755 "$work/x/$tool" "$dest/$tool"
+    # A browser-downloaded archive passes its quarantine flag on to what it
+    # unpacks, and Gatekeeper then refuses to let launchd run the tool.
+    if command -v xattr >/dev/null 2>&1; then xattr -d com.apple.quarantine "$dest/$tool" 2>/dev/null || true; fi
+  done
+  rm -rf "$work"
+  is_pinned_jellyfin_tool "$macos_ffmpeg" && is_pinned_jellyfin_tool "$macos_ffprobe" \
+    || die "the installed $dest/ffmpeg does not run as Jellyfin FFmpeg $jellyfin_ffmpeg_version"
+  say "installed Jellyfin FFmpeg $jellyfin_ffmpeg_version into $dest"
+}
+
+# One <string> value under <key>NAME</key> in EnvironmentVariables.
+plist_env_get() {
+  awk -v key="<key>$2</key>" '
+    index($0, key) { found = 1; next }
+    found && /<string>/ { sub(/.*<string>/, ""); sub(/<\/string>.*/, ""); print; exit }
+  ' "$1" | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g'
+}
+
+# An existing agent is the operator's and keeps every choice they made. The
+# one thing an upgrade corrects is an engine that is not Jellyfin FFmpeg (a
+# Homebrew ffmpeg an older installer wrote, a path that no longer exists):
+# that is repointed at the pinned build. A Jellyfin build they chose stays.
+macos_repoint_engine() {
+  local plist=$1 key value current
+  for key in PLURX_FFMPEG PLURX_FFPROBE; do
+    if [ "$key" = PLURX_FFMPEG ]; then value=$macos_ffmpeg; else value=$macos_ffprobe; fi
+    current=$(plist_env_get "$plist" "$key")
+    [ -n "$current" ] || continue
+    if is_jellyfin_tool "$current"; then continue; fi
+    if [ "$dry_run" = 1 ]; then
+      say "would repoint $key in $plist from $current to $value"
+      continue
+    fi
+    if command -v plutil >/dev/null 2>&1; then
+      plutil -replace "EnvironmentVariables.$key" -string "$value" "$plist" \
+        || die "could not update $key in $plist"
+    else
+      local rewritten
+      rewritten=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+      awk -v key="<key>$key</key>" -v value="$(printf '%s' "$value" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')" '
+        index($0, key) { found = 1; print; next }
+        found && /<string>/ { sub(/<string>.*<\/string>/, "<string>" value "</string>"); found = 0 }
+        { print }
+      ' "$plist" > "$rewritten" && mv "$rewritten" "$plist"
+    fi
+    say "repointed $key from $current (not Jellyfin FFmpeg) to $value"
+  done
+}
+
 macos_render_plist() {
   local dir=$1 out=$2 ffmpeg ffprobe
-  ffmpeg=$(plist_escape "$(command -v ffmpeg || echo /usr/local/bin/ffmpeg)")
-  ffprobe=$(plist_escape "$(command -v ffprobe || echo /usr/local/bin/ffprobe)")
+  ffmpeg=$(plist_escape "$macos_ffmpeg")
+  ffprobe=$(plist_escape "$macos_ffprobe")
   local home dir_escaped
   home=$(plist_escape "$HOME"); dir_escaped=$(plist_escape "$dir")
   # The template's XML comments explain the choices to a human reading the
@@ -304,16 +448,18 @@ macos_install() {
   data="$HOME/Library/Application Support/plurx"
   uid=$(id -u)
   resolve_binary
-  ensure_ffmpeg
+  macos_ensure_jellyfin_ffmpeg "$dir"
   # Boot a running agent out before its binary is replaced. A fresh install
   # has nothing to boot out and that is fine.
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   install_binary_to "$dir"
   run mkdir -p "$agents" "$data" "$HOME/Library/Logs"
   # The plist is rendered once. An existing one is the operator's (the
-  # runbook has them plutil -replace tool paths in it), so an upgrade keeps it.
+  # runbook has them plutil -replace tool paths in it), so an upgrade keeps it
+  # and only repoints an engine that is not Jellyfin FFmpeg.
   if [ -f "$plist" ]; then
     say "keeping the existing $plist (edit it with plutil; the template is deploy/$macos_agent_label.plist)"
+    macos_repoint_engine "$plist"
   elif [ "$dry_run" = 1 ]; then
     say "would render $plist from deploy/$macos_agent_label.plist"
   else
@@ -341,7 +487,8 @@ macos_uninstall() {
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   run rm -f "$plist"
   run_for_dir "$dir" rm -f "$dir/plurxd"
-  say "removed the agent and $dir/plurxd; kept ~/Library/Application Support/plurx"
+  run_for_dir "$dir" rm -rf "$(dirname -- "$dir")/libexec/plurx"
+  say "removed the agent, $dir/plurxd and its Jellyfin FFmpeg; kept ~/Library/Application Support/plurx"
 }
 
 # ---- windows: the native service, via deploy/install.ps1 ---------------------
