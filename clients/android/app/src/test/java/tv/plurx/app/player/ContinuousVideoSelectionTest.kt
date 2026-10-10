@@ -155,6 +155,36 @@ class ContinuousVideoSelectionTest {
         assertSame(unrelated, continuousQualityBoundCatalog(listOf(unrelated), family).single())
     }
 
+    @Test fun continuousAutoCostsAreTheDeclaredLinkRateNotThePublicationCeiling() {
+        fun candidate(height: Int): tv.plurx.app.data.QualityCandidate {
+            val recipe = List(32) { height % 256 }
+            val hash = java.security.MessageDigest.getInstance("SHA-256")
+            hash.update("plurx:auto-quality-candidate:v1\u0000".toByteArray(Charsets.UTF_8))
+            val id = hash.digest(recipe.map { it.toByte() }.toByteArray()).take(16)
+                .joinToString("") { "%02x".format(it.toInt() and 255) }
+            return tv.plurx.app.data.QualityCandidate(id, recipe, "encode",
+                height * 16 / 9, height, height, peak_bps = null,
+                grade = "sdr", decoder_compatible = true, complete_cache = false, sustainable = true)
+        }
+        // The hardware run: 480p and 720p continuous rungs, a 3 Mb/s link.
+        val raw = listOf(candidate(480), candidate(720))
+        val family = buildJsonObject {
+            put("video", JsonArray(listOf(9_281_590L to 3_000_000L, 17_281_590L to 6_000_000L).mapIndexed { index, (peak, rate) ->
+                buildJsonObject { put("candidate_id", raw[index].id); put("peak_bps", peak); put("sustained_bps", rate) } }))
+            put("audio", buildJsonObject { put("peak_bps", 518_144); put("sustained_bps", 128_000) })
+        }
+        val bound = continuousQualityBoundCatalog(raw, family)
+        assertEquals(listOf(3_128_000L, 6_128_000L), bound.map { it.peak_bps })
+        assertEquals(raw[0].id, autoRecoveryCandidate(bound, bound[1], emptySet(), 4_000_000.0)?.id)
+        assertEquals(raw[0].id, autoRecoveryCandidate(bound, bound[1], emptySet(), 3_000_000.0)?.id)
+        val ceilings = continuousQualityBoundCatalog(raw, buildJsonObject {
+            put("video", JsonArray(family.getValue("video").jsonArray.map { row ->
+                JsonObject(row.jsonObject - "sustained_bps") }))
+            put("audio", buildJsonObject { put("peak_bps", 518_144) })
+        })
+        assertEquals(listOf(9_799_734L, 17_799_734L), ceilings.map { it.peak_bps })
+    }
+
     @Test
     fun onlyVideoMembersOfTheFamilyTakeFamilyLinkEvidence() {
         val family = buildJsonObject {

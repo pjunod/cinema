@@ -660,8 +660,8 @@ function measuredCandidateOutput(p,candidate){
 }
 function measuredCandidateCatalog(p,candidates){
   // A member of the open continuous family is costed by the family's own
-  // declared delivery budget, which continuousQualityBoundCatalog already
-  // bound onto the row; every other unmeasured advertised peak is discarded.
+  // declared link rate, which continuousQualityBoundCatalog already bound onto
+  // the row; every other unmeasured advertised peak is discarded.
   const family=p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null;
   const members=new Set(family&&Array.isArray(family.video)?family.video.map(row=>row.candidate_id):[]);
   return (candidates||[]).map(candidate=>{
@@ -671,11 +671,12 @@ function measuredCandidateCatalog(p,candidates){
   });
 }
 function continuousFamilyPeak(p,candidateId){
-  // The open family's declared, server-enforced container-inclusive budget
-  // (video plus shared audio): an object over it is refused, never served.
+  // The open family's declared link rate (video plus shared audio), the same
+  // cost continuousQualityBoundCatalog binds. The per-object publication
+  // ceiling is the fallback only for a server that declares no rate.
   const family=p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null;
   const row=family&&Array.isArray(family.video)?family.video.find(member=>member.candidate_id===candidateId):null;
-  const peak=row?row.peak_bps+(family.audio?.peak_bps||0):null;
+  const peak=row?continuousQualityLinkRate(row)+continuousQualityLinkRate(family.audio):null;
   return Number.isSafeInteger(peak)&&peak>0?peak:null;
 }
 function candidatePositiveMargin(p,candidate,transfer){
@@ -683,7 +684,7 @@ function candidatePositiveMargin(p,candidate,transfer){
   const own=!!(candidateTransferOriginCurrent(transfer)&&transfer.etag&&transfer.attachment===p.mediaAttachment
     &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId&&link>0);
   // Between members of the open continuous family, cost is the family's
-  // enforced budget and the evidence is a completed family object of this
+  // declared link rate and the evidence is a completed family object of this
   // session. Those role-split objects are not a muxed candidate's output, so
   // they carry no candidate link receipt and are never reported as one.
   const family=continuousFamilyPeak(p,candidate?.id);

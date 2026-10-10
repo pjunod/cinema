@@ -62,6 +62,11 @@ function continuousQualityResponse(value,request){
   return transition.operation.kind!=='prepare'||(receipt.transaction.intent_revision===transition.operation.intent_revision
     &&receipt.transaction.target_rendition_id===transition.operation.target_rendition_id);
 }
+// The link rate a rendition needs (its encoder cap), declared beside the
+// per-object publication ceiling. A server that predates it declares neither.
+function continuousQualitySustained(row){
+  return row.sustained_bps==null||continuousQualityInteger(row.sustained_bps,1)&&row.sustained_bps<=row.peak_bps;
+}
 function continuousQualityFamily(value){
   if(!value||value.version!==1||!['autonomous_reserved','controlled'].includes(value.mode)||!continuousQualityArtifact(value.family_id)
     ||value.master!=='master.m3u8'||!Array.isArray(value.video)||value.video.length<2||value.video.length>8)return false;
@@ -73,7 +78,7 @@ function continuousQualityFamily(value){
     &&continuousQualityInteger(row.timescale,1)&&row.timescale<=1000000
     &&continuousQualityInteger(row.frame_ticks,1)&&continuousQualityInteger(row.segment_ticks,1)
     &&row.segment_ticks%row.frame_ticks===0&&continuousQualityInteger(row.peak_bps,1)
-    &&row.playlist===`video/${row.rendition_id}/index.m3u8`))return false;
+    &&continuousQualitySustained(row)&&row.playlist===`video/${row.rendition_id}/index.m3u8`))return false;
   if(new Set(rows.map(row=>row.rendition_id)).size!==rows.length
     ||new Set(rows.map(row=>row.candidate_id)).size!==rows.length
     ||new Set(rows.map(row=>`${row.width}x${row.height}`)).size!==rows.length
@@ -82,7 +87,8 @@ function continuousQualityFamily(value){
   const audio=value.audio;
   return audio==null||(continuousQualityArtifact(audio.rendition_id)&&continuousQualityArtifact(audio.init_id)
     &&audio.codec==='mp4a.40.2'&&audio.timescale===48000&&continuousQualityInteger(audio.channels,1)&&audio.channels<=8
-    &&continuousQualityInteger(audio.peak_bps,1)&&audio.playlist===`audio/${audio.rendition_id}/index.m3u8`
+    &&continuousQualityInteger(audio.peak_bps,1)&&continuousQualitySustained(audio)
+    &&audio.playlist===`audio/${audio.rendition_id}/index.m3u8`
     &&!rows.some(row=>row.rendition_id===audio.rendition_id));
 }
 async function continuousQualityFetch(url,body,{signal=null,limit=270336,timeoutMs=14000}={}){
@@ -215,10 +221,18 @@ function continuousQualitySelectionCompatible(player,selection){
   const candidate=continuousQualityCandidate(player,selection);
   return !!candidate&&controller.family.video.some(row=>row.candidate_id===candidate.id);
 }
+// Auto compares a measured link against this cost, so it is the rate each
+// role needs from a link (video plus the shared soundtrack). peak_bps is one
+// object's publication ceiling, several times that rate: costing a rung by it
+// left no lower rung that fitted any ordinary link. It is the cost only when
+// the server declares no sustained rate.
+function continuousQualityLinkRate(row){
+  return row?(row.sustained_bps??row.peak_bps):0;
+}
 function continuousQualityBoundCatalog(catalog,family){
   if(!Array.isArray(catalog)||!family)return catalog;
   const costs=new Map(family.video.map(row=>{
-    const peak=row.peak_bps+(family.audio?.peak_bps||0);
+    const peak=continuousQualityLinkRate(row)+continuousQualityLinkRate(family.audio);
     if(!Number.isSafeInteger(peak)||peak<=0)throw new Error('Continuous delivery budget shape');
     return [row.candidate_id,peak];
   }));

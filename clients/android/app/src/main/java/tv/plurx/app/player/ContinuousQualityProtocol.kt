@@ -260,6 +260,17 @@ internal object ContinuousQualityWire {
         }
     }
 
+    /**
+     * The link rate a rendition needs (its encoder cap), declared beside the
+     * per-object publication ceiling. A server that predates it declares
+     * neither, and a declared rate never exceeds the ceiling.
+     */
+    private fun sustainedRate(row: JsonObject): Boolean {
+        val value = row["sustained_bps"] ?: return true
+        if (value is JsonNull) return true
+        return row.integer("sustained_bps", 1) && row.number("sustained_bps")!! <= row.number("peak_bps")!!
+    }
+
     fun family(value: JsonObject): Boolean {
         if (value.number("version") != 1L || value.text("mode") !in setOf("controlled", "autonomous_reserved") ||
             !hash(value["family_id"]) || value.text("master") != "master.m3u8") return false
@@ -268,7 +279,7 @@ internal object ContinuousQualityWire {
                 row.text("codec") == "avc1.640032" && row.integer("width", 1, 8192) && row.integer("height", 1, 8192) &&
                 row.integer("timescale", 1, 1_000_000) && row.integer("frame_ticks", 1) && row.integer("segment_ticks", 1) &&
                 row.number("segment_ticks")!! % row.number("frame_ticks")!! == 0L && row.integer("peak_bps", 1) &&
-                row.text("playlist") == "video/${row.text("rendition_id")}/index.m3u8" }) return false
+                sustainedRate(row) && row.text("playlist") == "video/${row.text("rendition_id")}/index.m3u8" }) return false
         if (!listOf("rendition_id", "candidate_id").all { key -> video.map { it[key] }.toSet().size == video.size } ||
             video.map { it["width"] to it["height"] }.toSet().size != video.size ||
             !video.all { row -> listOf("timescale", "frame_ticks", "segment_ticks").all { row[it] == video.first()[it] } }) return false
@@ -277,7 +288,7 @@ internal object ContinuousQualityWire {
         val audio = audioValue as? JsonObject ?: return false
         return hash(audio["rendition_id"]) && hash(audio["init_id"]) && audio.text("codec") == "mp4a.40.2" &&
             audio.number("timescale") == 48_000L && audio.integer("channels", 1, 8) && audio.integer("peak_bps", 1) &&
-            audio.text("playlist") == "audio/${audio.text("rendition_id")}/index.m3u8" && video.none { it["rendition_id"] == audio["rendition_id"] }
+            sustainedRate(audio) && audio.text("playlist") == "audio/${audio.text("rendition_id")}/index.m3u8" && video.none { it["rendition_id"] == audio["rendition_id"] }
     }
 }
 
