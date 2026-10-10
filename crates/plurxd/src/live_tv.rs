@@ -3317,7 +3317,10 @@ impl StartPlanSource {
 /// have changed on another node.
 pub(crate) enum SettingsChangeSource {
     /// Nothing but this process writes the settings (a single-node store), and
-    /// its saves reach `observe_config` themselves.
+    /// its saves reach `observe_config` themselves. No other process writes
+    /// Live TV settings into a running daemon's SQLite database: `restore`
+    /// runs only while the daemon is stopped, `reset-password` refuses, and
+    /// `refresh-metadata` writes no settings.
     LocalOnly,
     /// A replicated store whose Raft log is applied in another process: no
     /// change signal reaches this one, so the observer reads every interval.
@@ -5489,8 +5492,9 @@ impl LiveTvManager {
     /// While a transport is held it takes one consistent read a second and
     /// publishes it as the session fence's observation, which is why sessions
     /// do not read the store themselves. While nothing is held nothing
-    /// validates against the observation, so it parks: one read at boot, then
-    /// none until a transport opens (whose start fence read is the first
+    /// validates against the observation, so it parks: one read at boot (read
+    /// again each interval until one succeeds), then none until a transport
+    /// opens (whose start fence read is the first
     /// observation, `ensure_session_fence`) or the settings may have changed
     /// on another node. A change elsewhere moves this node's applied Raft
     /// index; the loop then reads `live_tv.config_generation` from its own
@@ -5512,17 +5516,23 @@ impl LiveTvManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
             .unwrap_or(SettingsChangeSource::LocalOnly);
-        let mut proved = tokio::select! {
-            _ = shutdown.cancelled() => return,
-            proved = self.observe_fence() => proved,
-        };
-        let mut applied = changes.applied_index();
+        // Nothing is proved until a read succeeds, so the first pass reads (the
+        // boot read) and the loop keeps reading at the running cadence until
+        // one succeeds: parking on a failed read would hold the gauges unproved
+        // until some unrelated write moved the applied index.
+        let mut proved = false;
+        let mut applied = None;
         let mut watch_open = true;
         loop {
-            if self.transports_held() > 0 || matches!(changes, SettingsChangeSource::Polled) {
+            if self.transports_held() > 0
+                || !proved
+                || matches!(changes, SettingsChangeSource::Polled)
+            {
                 self.metrics
                     .settings_watched
                     .store(false, Ordering::Release);
+                // A consistent read covers every entry applied before it.
+                applied = changes.applied_index();
                 proved = tokio::select! {
                     _ = shutdown.cancelled() => return,
                     proved = self.observe_fence() => proved,
@@ -11833,6 +11843,64 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(enabled_gauge(&manager), "NaN");
         assert_eq!(observer_reads(&manager), released);
+
+        shutdown.cancel();
+        observer.await.expect("the observer loop");
+    }
+
+    /// A failed boot read proves nothing, so the observer must not park on it:
+    /// parked, nothing but an unrelated replicated write would make it read
+    /// again, and the gauges would stay unproved until then. It keeps reading
+    /// at the running cadence until a read succeeds, and only then parks.
+    #[tokio::test]
+    async fn a_failed_boot_read_keeps_the_settings_observer_reading_until_one_succeeds() {
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        tokio::time::pause();
+        let enabled_gauge = |manager: &LiveTvManager| {
+            let prometheus = manager.metrics.prometheus();
+            prometheus
+                .lines()
+                .find_map(|line| line.strip_prefix("plurx_live_tv_enabled "))
+                .expect("the enabled gauge")
+                .to_owned()
+        };
+        let (_applied, changes) = tokio::sync::watch::channel(0u64);
+        manager.set_settings_changes(SettingsChangeSource::Test(changes));
+        manager.test_fail_settings_reads(true);
+        let shutdown = CancellationToken::new();
+        let observer = tokio::spawn(Arc::clone(&manager).settings_observer_loop(shutdown.clone()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            settings_reads(&manager, SettingsReadSite::Observer),
+            (0, 1),
+            "the boot read failed"
+        );
+
+        // Unproved: one read an interval, not parked and not back to back.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let (ok, failed) = settings_reads(&manager, SettingsReadSite::Observer);
+        assert_eq!(ok, 0);
+        assert!(
+            (5..=7).contains(&failed),
+            "{failed} reads in five unproved seconds"
+        );
+        assert_eq!(enabled_gauge(&manager), "NaN");
+
+        // The store answers again: the next read proves the settings, and the
+        // observer parks on that proof.
+        manager.test_fail_settings_reads(false);
+        tokio::time::sleep(FENCE_OBSERVATION_INTERVAL + Duration::from_millis(500)).await;
+        let proved = settings_reads(&manager, SettingsReadSite::Observer);
+        assert_eq!(proved.0, 1, "the first read after recovery succeeded");
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(
+            settings_reads(&manager, SettingsReadSite::Observer),
+            proved,
+            "a proved observer with nothing live parked"
+        );
+        assert_eq!(enabled_gauge(&manager), "1");
 
         shutdown.cancel();
         observer.await.expect("the observer loop");
