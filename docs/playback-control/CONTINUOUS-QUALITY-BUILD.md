@@ -9761,3 +9761,54 @@ limitations rather than switch failures. It does not relax any limit. It
 also recommends that #844's repairs land on `main` through the normal
 review, fast-lane and merge sequence, with the per-platform campaigns
 continuing against `main` afterwards. Both points await Paul's ruling.
+
+### 10.304 Rulings, review, fast lane and landing through #979 (2026-10-10)
+
+**Rulings.** Paul ruled that the repairs land on `main` now, with one fast
+lane on the final code and no external Fable pause. The per-platform
+campaigns continue against `main` as separate work. The §8.3 scope reading
+(switch-induced gaps) stands as recommended in 10.303.
+
+**Adversarial review.** A three-way review (server, Android, Apple/web) ran
+on the frozen tree. The server major: `LogicalOutput` equality compared the
+dispatching `owner_node_id`, so a sealed reused output could never be
+reacquired after a restart, reap or takeover. Fixed in `abdb46374`; durable
+identity now excludes only the dispatch owner. The Android majors were fixed
+in `0e7a7e010`. Auto keys on the quality actually executing, the directed
+change exists from the tap, commits and fallbacks honour only an outstanding
+change, and the read-only probe log is debug-only. In the Apple major
+(`20db2824d`), the shared receiver plans its switch point before inspecting
+it, and the local handoff keeps the post-swap reserve for its first-frame
+proof. In the web major (`1c213e17e`), a stuck verification worker fails its
+own jobs and is replaced. Minor items are in #978. All 19 corrective client
+commits carry `tests/client-fixes.toml` anchors (`4a6388f4b`).
+
+**Campaigns on the frozen tree.** Chrome on `7fc2d9c15` failed Auto change 4
+on two hitches at the 10 Mb/s stage while compile jobs loaded the same lab
+host. The quiet rerun on `4a6388f4b` passed: 15 manual and 5 actual Auto
+changes, with zero hitches, stalls or drops and an 83 ms maximum gap. The
+Firefox campaign on the same tree is still running.
+
+**Fast lane.** The first preflight on `7f0136789` found three gaps:
+- An unlisted census comparison: `commitPreparedSuccessor` settles the
+  manual-quality pin's seek only while no newer seek replaced it. It is
+  listed with `retainManualQualityFailure`'s reason, because it reads the
+  same record.
+- Stale Apple build claims (222 against `project.yml` 227).
+- Two web test files that no lane ran.
+
+The next preflight reached the rolling-producer ownership ledger. Ten shapes
+added by the server repairs now have reviewed counts. Two of them are
+pattern false positives.
+
+Running the two web tests then showed that `aea0263a7`'s per-element
+lifecycle registry broke the web-policy metadata harness, which extracts
+`armHitchDetector` alone. The harness now supplies that module state, as it
+already supplies the detector's constants.
+
+That node-script failure left a phase error in #844's journal. The receipt
+adapter refuses to replay any later attempt on that PR until a bespoke
+recovery accounts for the partial node log. #844 was closed without
+deleting any evidence. The same branch landed as #979, so every unit runs
+once on the final code.
+
