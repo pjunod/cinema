@@ -96,8 +96,17 @@ function liveTvOutputChannels(){
     return LIVE_TV_AUDIO_CONTEXT.destination.maxChannelCount;
   }catch(e){ return 2; }
 }
+// The caption formats the player this page attaches decodes; the owner
+// advertises only those services. hls.js renders CEA-608 alone: it has no 708
+// decoder and maps SERVICE1 onto the text track it made for CC1, so a 708
+// service advertised to it is a phantom second entry that takes CC1's label.
+// Safari's native HLS, the fallback below hls.js, decodes both. The same test
+// as the attach in live-tv-controls.js (`Hls` is the global hls.min.js sets).
+function liveTvCaptionDecoders(){
+  return typeof Hls!=="undefined"&&Hls&&Hls.isSupported()?["cea608"]:["cea608","cea708"];
+}
 function liveTvPlaybackEnvelope(compatibility=null){
-  const caps=currentCapsDocument();
+  const caps={...currentCapsDocument(),caption_decoders:liveTvCaptionDecoders()};
   const aacChannels=liveTvAacChannelCeiling(liveTvOutputChannels());
   const audio=(caps.audio||[]).filter(codec=>["aac","ac3","eac3"].includes(codec));
   const formats=[{container:"mpegts",video:"h264",audio:"aac"}];
@@ -432,8 +441,37 @@ function liveTvCaptionTracks(){
 function liveTvCaptionTrackLabel(track,index){
   return track.label||track.language||`${track.kind==="captions"?"Caption":"Subtitle"} ${index+1}`;
 }
+// The viewer's last Live TV caption pick, kept in this browser: "off", or the
+// label and language of the track picked. hls.js creates the captions track
+// only when the first cue arrives, and hidden — it ignores the manifest's
+// DEFAULT/AUTOSELECT — so every channel and every reattach came up without
+// the captions the viewer had turned on.
+function liveTvSavedCaption(){
+  try{
+    const saved=JSON.parse(localStorage.getItem("plurx_live_tv_captions")||"null");
+    return saved==="off"||(saved&&typeof saved.label==="string")?saved:null;
+  }catch(e){ return null; }
+}
+function liveTvSaveCaption(track){
+  try{
+    localStorage.setItem("plurx_live_tv_captions",JSON.stringify(
+      track?{label:track.label||"",language:track.language||""}:"off"));
+  }catch(e){}
+}
+// A track that appears while nothing is showing takes the saved pick: the
+// same label, or failing that the same language. No pick, or "off", leaves
+// the player's own default (hidden) alone.
+function liveTvApplySavedCaption(tracks){
+  if(tracks.some(({track})=>track.mode==="showing")) return;
+  const saved=liveTvSavedCaption();
+  if(!saved||saved==="off") return;
+  const match=tracks.find(({track})=>track.label===saved.label&&track.language===saved.language)
+    ||tracks.find(({track})=>saved.language&&track.language===saved.language);
+  if(match) match.track.mode="showing";
+}
 function liveTvRefreshCaptionControls(){
   const tracks=liveTvCaptionTracks();
+  liveTvApplySavedCaption(tracks);
   const signature=JSON.stringify(tracks.map(({track,index})=>[index,track.kind,track.label,track.language]));
   const showing=tracks.find(({track})=>track.mode==="showing");
   for(const select of document.querySelectorAll("[data-live-tv-captions]")){
@@ -458,6 +496,7 @@ function liveTvSelectCaption(value){
   const selected=value==="off"?null:tracks.find(({index})=>String(index)===value);
   if(value!=="off"&&!selected) return;
   for(const {track} of tracks) track.mode=selected&&track===selected.track?"showing":"disabled";
+  liveTvSaveCaption(selected?selected.track:null);
   liveTvRefreshCaptionControls();
 }
 let LIVE_TV_STATS_TIMER=null;

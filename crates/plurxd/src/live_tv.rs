@@ -1625,6 +1625,14 @@ impl LiveTvSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(delivery);
     }
 
+    /// The caption formats this viewer's player decodes, when it said.
+    fn caption_decoders(&self) -> Option<Vec<String>> {
+        self.request
+            .playback
+            .as_ref()
+            .and_then(crate::live_tv_delivery::LivePlaybackRequest::caption_decoders)
+    }
+
     fn channel_with_source_format(&self) -> LiveTvChannel {
         let mut channel = self.channel.clone();
         // `self.channel` can contain a cached observation copied from lineup
@@ -7090,6 +7098,7 @@ async fn run_live_session_inner(
             &source,
             delivery.clone(),
             admission.as_ref().map(|value| value.encoder.label()),
+            session.caption_decoders().as_deref(),
         ));
         let mut transcode_plan = LiveTvTranscodePlan::new(
             &owner.system,
@@ -7254,6 +7263,7 @@ async fn run_live_session_inner(
                                                 .encoder
                                                 .as_ref()
                                                 .map(|encoder| encoder.label()),
+                                            session.caption_decoders().as_deref(),
                                         ),
                                         None => delivery,
                                     });
@@ -8831,11 +8841,18 @@ fn session_source_format(
 /// graph can use its proof; H.264 copy and other source families stay
 /// unadvertised until their own production graph has been proven on this
 /// FFmpeg build.
+///
+/// The reason lists only the proved services this viewer's player decodes
+/// (`decoders`, `LivePlaybackRequest::caption_decoders`); `None` lists them
+/// all, as before the claim existed. hls.js has no CEA-708 decoder and maps
+/// `SERVICE1` onto the text track it made for `CC1`, so advertising both to it
+/// produced one phantom track labelled "English 708".
 fn advertise_proven_captions(
     proofs: &[caption_probe::CaptionProof],
     source: &LiveSourceFacts,
     mut delivery: LiveDeliveryPlan,
     encoder: Option<&str>,
+    decoders: Option<&[String]>,
 ) -> LiveDeliveryPlan {
     if source.video_codec.as_deref() == Some("mpeg2video")
         && delivery.video_action == LiveTrackAction::Encode
@@ -8847,15 +8864,39 @@ fn advertise_proven_captions(
                 && source.height == Some(proof.source_height)
                 && proof.output_height == delivery.output.height
         }) {
-            delivery
-                .reasons
-                .push(crate::live_tv_delivery::LiveDeliveryReason {
-                    code: "captions_advertised".to_owned(),
-                    explanation: proof.services.join(","),
-                });
+            let services = proof
+                .services
+                .iter()
+                .copied()
+                .filter(|service| caption_service_decodable(service, decoders))
+                .collect::<Vec<_>>();
+            if !services.is_empty() {
+                delivery
+                    .reasons
+                    .push(crate::live_tv_delivery::LiveDeliveryReason {
+                        code: "captions_advertised".to_owned(),
+                        explanation: services.join(","),
+                    });
+            }
         }
     }
     delivery
+}
+
+/// Whether a player that decodes `decoders` can show `service`: `CC1`–`CC4`
+/// are CEA-608 channels, `SERVICE1`–`SERVICE63` CEA-708 services.
+fn caption_service_decodable(service: &str, decoders: Option<&[String]>) -> bool {
+    let Some(decoders) = decoders else {
+        return true;
+    };
+    let format = if service.starts_with("CC") {
+        "cea608"
+    } else if service.starts_with("SERVICE") {
+        "cea708"
+    } else {
+        return false;
+    };
+    decoders.iter().any(|decoder| decoder == format)
 }
 
 /// Plan L-02 §3.3: whether the FFmpeg a warm start is already running — the
@@ -11659,6 +11700,51 @@ mod tests {
     /// the guide cache's generation current. Those now ride on change
     /// signals, so an idle node takes no consistent read, its gauges keep what
     /// it last proved, and they blank only when that proof is lost.
+    /// A proved caption service is advertised only to a player that decodes
+    /// it. hls.js has no CEA-708 decoder and folds `SERVICE1` onto the text
+    /// track it made for `CC1`, so the web client was shown a phantom
+    /// "English 708" in place of CC1's label.
+    #[test]
+    fn advertised_caption_services_follow_the_players_decoders() {
+        let delivery = test_encode_delivery(720);
+        let source = delivery.source.clone();
+        let proof = caption_probe::CaptionProof {
+            encoder: Encoder::Software.label().to_owned(),
+            packaging: delivery.packaging,
+            deinterlace: delivery.deinterlace_output,
+            source_height: source.height.expect("fixture source height"),
+            output_height: delivery.output.height,
+            services: vec!["CC1", "SERVICE1"],
+        };
+        let advertised = |decoders: Option<&[String]>| {
+            advertise_proven_captions(
+                std::slice::from_ref(&proof),
+                &source,
+                delivery.clone(),
+                Some(Encoder::Software.label()),
+                decoders,
+            )
+            .reasons
+            .into_iter()
+            .find(|reason| reason.code == "captions_advertised")
+            .map(|reason| reason.explanation)
+        };
+        assert_eq!(
+            advertised(None).as_deref(),
+            Some("CC1,SERVICE1"),
+            "a player that makes no claim is offered what it always was"
+        );
+        let request: crate::live_tv_delivery::LivePlaybackRequest = serde_json::from_value(
+            serde_json::json!({"v": 1, "caps": {"v": 2, "caption_decoders": ["cea608"]}}),
+        )
+        .expect("the web's live envelope");
+        let hls_js = request.caption_decoders().expect("the web's claim");
+        assert_eq!(advertised(Some(&hls_js)).as_deref(), Some("CC1"));
+        let native = ["cea608".to_owned(), "cea708".to_owned()];
+        assert_eq!(advertised(Some(&native)).as_deref(), Some("CC1,SERVICE1"));
+        assert_eq!(advertised(Some(&[])), None);
+    }
+
     #[tokio::test]
     async fn the_settings_observer_reads_only_while_a_transport_is_held() {
         let root = crate::test_tempdir().expect("scratch root");

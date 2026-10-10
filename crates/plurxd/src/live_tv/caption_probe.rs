@@ -1348,6 +1348,7 @@ async fn the_progressive_live_graph_proves_and_advertises_608_and_708() {
         &source,
         delivery.clone(),
         Some(Encoder::Software.label()),
+        None,
     );
     assert!(advertised.reasons.iter().any(|reason| {
         reason.code == "captions_advertised" && reason.explanation == "CC1,SERVICE1"
@@ -1359,6 +1360,7 @@ async fn the_progressive_live_graph_proves_and_advertises_608_and_708() {
         &other_source,
         delivery,
         Some(Encoder::Software.label()),
+        None,
     );
     assert!(!not_advertised
         .reasons

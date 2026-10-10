@@ -486,11 +486,12 @@ async function main() {
     const transport={dataset:{},innerHTML:"",value:"off",parentElement:{hidden:true}};
     const document={getElementById:id=>id==="live-tv-video"?{textTracks:tracks}
       :id==="live-tv-captions"?select:null,querySelectorAll:()=>[select,transport]};
-    const controls=new Function("document","esc",[
+    const controls=new Function("document","esc","localStorage",[
       shipped("liveTvCaptionTracks"),shipped("liveTvCaptionTrackLabel"),
+      shipped("liveTvSavedCaption"),shipped("liveTvSaveCaption"),shipped("liveTvApplySavedCaption"),
       shipped("liveTvRefreshCaptionControls"),shipped("liveTvSelectCaption"),
       "return {refresh:liveTvRefreshCaptionControls,select:liveTvSelectCaption};",
-    ].join("\n"))(document,String);
+    ].join("\n"))(document,String,memoryStorage());
     controls.refresh();
     assert.match(select.innerHTML,/English 708/);
     assert.match(select.innerHTML,/English CC1/);
@@ -516,6 +517,50 @@ async function main() {
     assert.equal(select.parentElement.hidden,true);
     assert.equal(transport.parentElement.hidden,true);
     assert.match(shipped("liveTvStatsTelemetry"),/selectedCaption\?liveTvCaptionTrackLabel/);
+  });
+
+  await test("a captions track that appears later follows the viewer's saved pick", () => {
+    const storage=memoryStorage();
+    const tracks=[];
+    const caption=()=>({kind:"captions",label:"English CC1",language:"en",mode:"hidden"});
+    const select={dataset:{},innerHTML:"",value:"off",parentElement:{hidden:true}};
+    const document={getElementById:id=>id==="live-tv-video"?{textTracks:tracks}:null,
+      querySelectorAll:()=>[select]};
+    const controls=new Function("document","esc","localStorage",[
+      shipped("liveTvCaptionTracks"),shipped("liveTvCaptionTrackLabel"),
+      shipped("liveTvSavedCaption"),shipped("liveTvSaveCaption"),shipped("liveTvApplySavedCaption"),
+      shipped("liveTvRefreshCaptionControls"),shipped("liveTvSelectCaption"),
+      "return {refresh:liveTvRefreshCaptionControls,select:liveTvSelectCaption};",
+    ].join("\n"))(document,String,storage);
+    // hls.js adds the track on its first cue, hidden. Nothing saved: it stays so.
+    tracks.push(caption());
+    controls.refresh();
+    assert.equal(tracks[0].mode,"hidden");
+    assert.equal(select.value,"off");
+    controls.select("0");
+    assert.equal(tracks[0].mode,"showing");
+    // The next channel's player makes a fresh hidden track: the pick follows it.
+    tracks.splice(0,tracks.length,caption());
+    controls.refresh();
+    assert.equal(tracks[0].mode,"showing");
+    assert.equal(select.value,"0");
+    // Turned off, the next track stays hidden.
+    controls.select("off");
+    tracks.splice(0,tracks.length,caption());
+    controls.refresh();
+    assert.equal(tracks[0].mode,"hidden");
+    assert.equal(select.value,"off");
+  });
+
+  await test("an hls.js page claims CEA-608 only, so it is never advertised SERVICE1", () => {
+    const decoders=hls=>new Function("Hls",
+      `${shipped("liveTvCaptionDecoders")} return liveTvCaptionDecoders();`)(hls||undefined);
+    assert.deepEqual(decoders({isSupported:()=>true}),["cea608"]);
+    assert.deepEqual(decoders(null),["cea608","cea708"]);
+    assert.match(shipped("liveTvPlaybackEnvelope"),/caption_decoders:liveTvCaptionDecoders\(\)/);
+    // The attach picks hls.js on the same test the claim is made on.
+    assert.match(fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/pages/live-tv-controls.js"),"utf8"),
+      /if\(window\.Hls&&Hls\.isSupported\(\)\)\{/);
   });
 
   await test("protected channels are visible but never watchable", () => {
