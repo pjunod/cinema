@@ -200,12 +200,15 @@ impl LiveTvManager {
 
     /// The serving half of a session's fence: no Store read, so a playlist or
     /// segment request answers from it alone. The ledger half is the session
-    /// observer's: it checks the ledger off the tick (`spawn_session_fence`)
-    /// and a refusal ends the session, which cancels it before anything
-    /// slower, so `resource_local` sees that verdict as a cancelled or
-    /// terminal session. While a ledger read is outstanding the session's
-    /// tuner lease is what bounds its authority: the transport renews its
-    /// ingest against a deadline the Store cannot extend.
+    /// observer's: it reads the ledger off the tick
+    /// (`spawn_session_ledger_fence`) and a refusal ends the session, which
+    /// cancels it before anything slower, so `resource_local` sees that
+    /// verdict as a cancelled or terminal session. While a ledger read is
+    /// outstanding the tick still checks the settings observation every
+    /// second (`session_fence_local`), so a disable, a generation change or a
+    /// settings store that stops answering ends the session as before, and the
+    /// transport's ingest lease, renewed against a deadline the Store cannot
+    /// extend, bounds what only the ledger records.
     pub(super) fn resource_serving_fence(
         &self,
         session: &LiveTvSession,
