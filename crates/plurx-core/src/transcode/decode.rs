@@ -3822,9 +3822,18 @@ fn authorize_strict_p5(
         .as_ref()
         .and_then(super::StrictDolbyPolicy::linux_identity)
     {
-        if !policy
-            .linux_dolby()
-            .is_some_and(|context| context.identity() == identity)
+        // A pending reprobe publishes no observation. The plan's captured
+        // context then authorizes it, exactly as `select_linux_strict_p5`
+        // admits it; a current report with another identity still refuses.
+        let authorized = match policy.linux_dolby() {
+            Some(current) => current.identity() == identity,
+            None => options
+                .strict_dolby
+                .as_ref()
+                .and_then(super::StrictDolbyPolicy::linux_observed_context)
+                .is_some_and(|captured| captured.identity() == identity),
+        };
+        if !authorized
             || options.pipeline != Pipeline::DoviStrictTonemapx
             || !strict_p5_source(facts)
             || options.subtitle_burn.is_some()
