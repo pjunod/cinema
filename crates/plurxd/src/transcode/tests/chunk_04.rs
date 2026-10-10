@@ -2465,7 +2465,6 @@ fn every_vod_refusal_code_is_classified() {
         "hevc_configuration_unsupported",
         "vod_frame_cadence_unknown",
         "vod_video_geometry_unknown",
-        "vod_engine_unattested",
         "vod_disabled",
     ] {
         assert!(
@@ -2473,7 +2472,15 @@ fn every_vod_refusal_code_is_classified() {
             "{code} falls back to the rolling engine"
         );
     }
-    for code in ["vod_audio_track_missing", "vod_invalid_height", "vod_session_ended"] {
+    // `vod_engine_unattested` is a retryable not-yet the clients wait out
+    // (and a failed font attestation must refuse the burn), never a reason
+    // to serve another engine.
+    for code in [
+        "vod_audio_track_missing",
+        "vod_invalid_height",
+        "vod_session_ended",
+        "vod_engine_unattested",
+    ] {
         assert!(LiveRecoveryReason::from_refusal(code).is_none(), "{code}");
     }
 }

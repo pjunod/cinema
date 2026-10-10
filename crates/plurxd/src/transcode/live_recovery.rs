@@ -19,12 +19,11 @@ pub(crate) enum LiveRecoveryReason {
     HevcConfigurationUnsupported,
     FrameCadenceUnknown,
     VideoGeometryUnknown,
-    EngineUnattested,
     VodDisabled,
 }
 
 impl LiveRecoveryReason {
-    pub(crate) const COUNT: usize = 11;
+    pub(crate) const COUNT: usize = 10;
 
     pub(super) fn index(self) -> usize {
         match self {
@@ -37,8 +36,7 @@ impl LiveRecoveryReason {
             Self::HevcConfigurationUnsupported => 6,
             Self::FrameCadenceUnknown => 7,
             Self::VideoGeometryUnknown => 8,
-            Self::EngineUnattested => 9,
-            Self::VodDisabled => 10,
+            Self::VodDisabled => 9,
         }
     }
 
@@ -53,7 +51,6 @@ impl LiveRecoveryReason {
         "hevc_configuration_unsupported",
         "vod_frame_cadence_unknown",
         "vod_video_geometry_unknown",
-        "vod_engine_unattested",
         "vod_disabled",
     ];
 
@@ -89,7 +86,9 @@ pub(crate) enum VodRefusalClass {
     /// invalid or names a track/route/session that does not exist, the
     /// source must be rescanned first, or the request is a VOD-only service
     /// policy. Falling back would either fail the same way or serve
-    /// something other than what was asked for.
+    /// something other than what was asked for. Also a VOD answer that is
+    /// only "not yet" (`vod_engine_unattested`), which the client waits out
+    /// and VOD then serves.
     Refuse,
 }
 
@@ -125,11 +124,21 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
         // decoded stream.
         ("vod_frame_cadence_unknown", Live(R::FrameCadenceUnknown)),
         ("vod_video_geometry_unknown", Live(R::VideoGeometryUnknown)),
-        // The encoded-engine attestation is a VOD artifact-identity input;
-        // the rolling engine does not key immutable output by it.
-        ("vod_engine_unattested", Live(R::EngineUnattested)),
-        // VOD switched off: rolling is the only presentation left.
+        // VOD switched off (`playback.vod_presentation=0`): rolling is the
+        // only presentation left. `vod_disabled` still reaches a client when
+        // the operator also switched live recovery off, and on a VOD-only
+        // (compatibility) request.
         ("vod_disabled", Live(R::VodDisabled)),
+        // ---- Not yet: a retryable 503 the client waits out. ----
+        // The encoded engine (executable, dependency closure, font inputs)
+        // could not be attested yet, typically in the first moments after a
+        // restart. Every client's create-retry ladder waits it out
+        // (`create_503_not_yet`, `START_NOT_YET_CODES`, the Jellyfin retry
+        // delay), and a failed font attestation must refuse the burn rather
+        // than render with other fonts (FONT-ATTESTATION-AND-BLOCKING-IO), so
+        // falling back to the rolling engine here would be the wrong answer
+        // twice over.
+        ("vod_engine_unattested", Refuse),
         // ---- No engine would serve this request as asked: refuse. ----
         // Invalid or VOD-only service requests (passive retention, finite
         // bitrate ceilings, continuous-media families exist only in VOD).

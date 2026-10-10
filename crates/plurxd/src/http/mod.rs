@@ -20111,6 +20111,75 @@ mod tests {
             .await;
     }
 
+    /// S-05: with VOD switched off (`playback.vod_presentation=0`) the
+    /// rolling engine is the only presentation left, so an ordinary create
+    /// is served by it and attributed to `vod_disabled`. The surface
+    /// contract's `vod_disabled` row (`stopped`, start-only) still has a
+    /// source: the answer reaches a client when the operator has also
+    /// switched live recovery off (and on a VOD-only compatibility request).
+    #[tokio::test]
+    async fn vod_switched_off_is_served_by_the_retained_engine_unless_recovery_is_off() {
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, s.file, 16).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_PRESENTATION, "0")
+            .await
+            .expect("switch VOD off");
+        let reason = crate::transcode::LIVE_RECOVERY_LABELS
+            .iter()
+            .position(|label| *label == "vod_disabled")
+            .expect("vod_disabled is a recovery reason");
+        let before = crate::transcode::live_recovery_snapshot();
+
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "pb-vod-off", "copy": true }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "VOD switched off must not fail playback: {body}"
+        );
+        assert_eq!(body["vod"], false, "{body}");
+        assert!(
+            crate::transcode::live_recovery_snapshot()[reason] > before[reason],
+            "the session is attributed to the switch that chose it"
+        );
+        state
+            .transcode
+            .stop_session(
+                body["session_id"].as_str().expect("session id"),
+                "test cleanup",
+            )
+            .await;
+
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("switch live recovery off");
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "pb-vod-off-no-recovery", "copy": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["code"], "vod_disabled", "{body}");
+    }
+
     /// All four routes at once, each under its own name, from the three places
     /// that actually know: the transcode manager, the progressive registry,
     /// and the direct-play registry that S2 added because nothing else held

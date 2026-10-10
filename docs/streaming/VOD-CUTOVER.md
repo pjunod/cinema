@@ -101,8 +101,10 @@ ordinary immutable encoded session.
 
 New and existing installations default to accepting VOD session creation. An
 absent `playback.vod_presentation` setting means enabled; an explicit `0`
-disables new HLS sessions and returns `vod_disabled`. It does not restore live
-HLS.
+disables new VOD sessions. A create is then served by the retained rolling
+engine (the live-recovery fallback, counted under `vod_disabled`), and answers
+503 `vod_disabled` only when live recovery (`playback.vod_live_recovery`) is
+also switched off or the request is VOD-only (corrected 2026-10-10, S-05).
 
 The fragment-index job defaults to a 15-minute interval when its setting is
 absent. An explicit zero pauses indexing. Settings → Playback describes both
