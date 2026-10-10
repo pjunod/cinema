@@ -20,9 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `160` — Continuous-quality acceptance repairs
-> (Auto decides again after a viewer quality choice; shared-audio EOF evidence);
-> not yet installed on hardware.
+> Status: **v0.3.0**, build `161` — Developer graduation pass (Enable Live TV
+> is the first card of Settings → Live TV; Prepared replacement is in Playback;
+> the release startup profile status is in About); not yet installed on hardware.
+> Build `160` — Continuous-quality acceptance repairs
+> (Auto decides again after a viewer quality choice; shared-audio EOF evidence).
 > Build `159` — Shared-library playback and controls;
 > not yet installed on hardware.
 > Build `152` — Prepared-video geometry and playback-panel contrast repairs
