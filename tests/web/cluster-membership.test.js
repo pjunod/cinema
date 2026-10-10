@@ -4011,8 +4011,6 @@ function tickHarness({ cluster, ops, now, clustered=true }) {
      ${shippedSource("repaintClusterPreserving")}
      ${shippedSource("clusterControlValues")}
      ${shippedSource("clusterRestoreControlValues")}
-     ${shippedSource("clusterDirtyCards")}
-     ${shippedSource("clusterRestoreDirtyCards")}
      ${shippedSource("clusterOpenDetailNodes")}
      ${shippedSource("patchClusterReadingAge")}
      ${shippedSource("clenv")}
@@ -4569,29 +4567,16 @@ test("every repaint on this tab preserves what the operator was looking at", () 
   const ttl = { id: "clttl", value: "3600" };
   const role = { id: "clrole", value: "learner" };
   const auto = { id: "cllogauto", type: "checkbox", checked: false, value: "on" };
-  // A cluster settings card with an unsaved edit: its Save is enabled by the
-  // edit, so a repaint must hand back the edit as well as the value.
-  const settingsCard = (dirty) => {
-    const save = { disabled: !dirty }, state = { textContent: dirty ? "Unsaved changes" : "Saved" };
-    const classes = new Set(dirty ? ["dirty"] : []);
-    return { id: "cluster-placement-settings", dataset: { revision: dirty ? "2" : "0" }, save, state,
-      classList: { add: (name) => classes.add(name), has: (name) => classes.has(name) },
-      querySelector: (selector) => (selector.includes("button.primary") ? save : state) };
-  };
-  let card = settingsCard(true);
   const controls = { clttl: ttl, clrole: role, cllogauto: auto };
   const document = {
-    getElementById: (id) => (id === "cluster-node-list" ? list : id === card.id ? card : controls[id] || null),
-    querySelectorAll: (selector) => (selector.includes("clnodebody") ? bodies
-      : selector.includes("setcard.dirty") ? (card.classList.has("dirty") ? [card] : []) : [ttl, role, auto]),
+    getElementById: (id) => (id === "cluster-node-list" ? list : controls[id] || null),
+    querySelectorAll: (selector) => (selector.includes("clnodebody") ? bodies : [ttl, role, auto]),
   };
   const repaint = new Function(
     "document",
     `${shippedSource("clusterOpenDetailNodes")}
      ${shippedSource("clusterControlValues")}
      ${shippedSource("clusterRestoreControlValues")}
-     ${shippedSource("clusterDirtyCards")}
-     ${shippedSource("clusterRestoreDirtyCards")}
      ${shippedSource("repaintClusterPreserving")}
      return repaintClusterPreserving;`,
   )(document);
@@ -4607,7 +4592,6 @@ test("every repaint on this tab preserves what the operator was looking at", () 
     ttl.value = "600";
     role.value = "voter";
     auto.checked = true;
-    card = settingsCard(false);
   });
   assert.equal(list.scrollTop, 420, "the roster scroller kept its place");
   // A repaint between choosing a token's lifetime and clicking Create must not
@@ -4616,10 +4600,6 @@ test("every repaint on this tab preserves what the operator was looking at", () 
   assert.equal(ttl.value, "3600");
   assert.equal(role.value, "learner");
   assert.equal(auto.checked, false);
-  assert.ok(card.classList.has("dirty"), "the unsaved settings card is still marked unsaved");
-  assert.equal(card.save.disabled, false, "and its Save is still available");
-  assert.equal(card.state.textContent, "Unsaved changes");
-  assert.equal(card.dataset.revision, "2", "with the revision its in-flight save compares against");
   assert.deepEqual(
     bodies.map((body) => body.detail.open),
     [true, false],

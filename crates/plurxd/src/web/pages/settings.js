@@ -202,6 +202,9 @@ function patchSettingsSecondary(tab,key,value){
     // board does not, so it never waits for them. Fill only their mount.
     const mount=document.getElementById("cluster-settings");
     if(mount) mount.outerHTML=clusterSettingsSection(SETTINGS_DATA);
+    // A link from Analysis names a card in here; the board painted before
+    // the card existed, so land on it now.
+    revealSettingsAnchor(tab);
   }
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     // Patch only the evidence rows. Re-rendering the entire panel here could
@@ -236,7 +239,7 @@ function patchSettingsSecondaryError(tab,key,error){
   }
   if(tab==="cluster"&&key==="settings"){
     const mount=document.getElementById("cluster-settings");
-    if(mount) mount.innerHTML=`<div class="hint">Cluster settings are unavailable: ${message}</div>`;
+    if(mount) mount.outerHTML=clusterSettingsUnavailable(message);
   }
   if(tab==="cluster"&&key==="clusterOps"){
     const mount=document.getElementById("cluster-operations");
@@ -291,6 +294,9 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
     CLUSTER_LOADED=false; forgetJoinToken();
   }
   const tab=settingsTab();
+  // A same-section reload (Refresh nodes) redraws through the loading shell;
+  // carry the kept mounts across it the way renderSettings does a repaint.
+  SETTINGS_PENDING_KEEP=!reset&&SETTINGS_SHOWN_TAB===tab?captureSettingsMounts(tab):null;
   // Leaving a section drops any minted join token: it is bearer material, and
   // the operator who switched away is done with it whether or not they said so.
   if(SETTINGS_SHOWN_TAB!==tab) forgetJoinToken();

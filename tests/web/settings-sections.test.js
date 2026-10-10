@@ -1061,22 +1061,72 @@ test("late readiness success and failure update evidence without repainting move
 });
 
 test("Cluster's settings cards fill their own mount when /settings lands, and say so when it cannot", () => {
-  const mount={outerHTML:"",innerHTML:""};
-  const patch=new Function("applyDeveloperReadiness","esc","document","clusterSettingsSection","SETTINGS_DATA",`
+  const mount={outerHTML:"",innerHTML:""}, revealed=[];
+  const patch=new Function("applyDeveloperReadiness","esc","document","clusterSettingsSection","clusterSettingsUnavailable","revealSettingsAnchor","SETTINGS_DATA",`
     ${shippedConst("SETTINGS_MANIFEST")}
     ${shippedSource("patchSettingsSecondary")}
     ${shippedSource("patchSettingsSecondaryError")}
     return {ok:patchSettingsSecondary,fail:patchSettingsSecondaryError};
-  `)(()=>{},esc,{getElementById:id=>id==="cluster-settings"?mount:null},d=>`cards:${d.settings.x}`,{settings:{x:1}});
+  `)(()=>{},esc,{getElementById:id=>id==="cluster-settings"?mount:null},d=>`cards:${d.settings.x}`,
+    message=>`unavailable:${message}`,tab=>revealed.push(tab),{settings:{x:1}});
   // No renderSettings: the roster above is interactive while this lands, and
   // repainting it would close an open drill-down or an election dialog.
   patch.ok("cluster","settings",{x:1});
   assert.equal(mount.outerHTML,"cards:1");
+  assert.deepEqual(revealed,["cluster"],"a link that named a card in here lands on it once it exists");
   patch.fail("cluster","settings",new Error("offline <now>"));
-  assert.equal(mount.innerHTML,'<div class="hint">Cluster settings are unavailable: offline &lt;now&gt;</div>');
+  assert.equal(mount.outerHTML,"unavailable:offline &lt;now&gt;");
+  const unavailable=new Function(`${shippedSource("clusterSettingsUnavailable")} return clusterSettingsUnavailable;`)()("offline");
+  assert.match(unavailable,/data-state="error"/);
+  assert.match(unavailable,/onclick="retryClusterSettings\(this\)"/,"the section retries its own read, not the board's");
   // Another tab's settings read never reaches the cluster mount.
   mount.outerHTML="untouched"; patch.ok("playback","settings",{x:2});
   assert.equal(mount.outerHTML,"untouched");
+});
+
+test("a section repaint carries kept settings cards across as live nodes", () => {
+  // The cluster board repaints the whole section on status changes and
+  // roster refreshes; the analysis summary does after its Save. A settings
+  // card on the same page must come through with its unsaved edit, its
+  // enabled Save, open disclosures and focus — so the node itself is kept.
+  const make=(id,state)=>{
+    const node={id,dataset:state?{state}:{},isConnected:true,contains:other=>other===node||other===node.child,replaced:null};
+    node.child={isConnected:true,focused:0,focus(){this.focused+=1;}};
+    node.replaceWith=other=>{node.replaced=other;};
+    return node;
+  };
+  let dom={}, active=null;
+  const document={getElementById:id=>dom[id]||null,get activeElement(){return active;}};
+  const keep=new Function("document",`${shippedConst("SETTINGS_KEPT_MOUNTS")}
+    ${shippedSource("captureSettingsMounts")}
+    ${shippedSource("restoreSettingsMounts")}
+    return {capture:captureSettingsMounts,restore:restoreSettingsMounts};`)(document);
+  const editing=make("cluster-settings","ready"); dom={"cluster-settings":editing}; active=editing.child;
+  const captured=keep.capture("cluster");
+  assert.deepEqual(captured.nodes,[editing]);
+  const repainted=make("cluster-settings","ready"); dom={"cluster-settings":repainted};
+  keep.restore(captured);
+  assert.equal(repainted.replaced,editing,"the repaint's copy is replaced by the node being edited");
+  assert.equal(editing.child.focused,1,"focus goes back where it was");
+  // Waiting for /settings is never kept over the cards themselves…
+  dom={"cluster-settings":make("cluster-settings","loading")};
+  assert.deepEqual(keep.capture("cluster").nodes,[]);
+  // …and an error stays until the data arrives, then gives way to it.
+  const failed=make("cluster-settings","error"); dom={"cluster-settings":failed};
+  const errorKeep=keep.capture("cluster");
+  const stillLoading=make("cluster-settings","loading"); dom={"cluster-settings":stillLoading};
+  keep.restore(errorKeep); assert.equal(stillLoading.replaced,failed);
+  const arrived=make("cluster-settings","ready"); dom={"cluster-settings":arrived};
+  keep.restore(errorKeep); assert.equal(arrived.replaced,null);
+  // Analysis keeps the backfill card across its own panel's Save.
+  const backfill=make("subbackfillcard"); dom={subbackfillcard:backfill}; active=null;
+  assert.deepEqual(keep.capture("analysis").nodes,[backfill]);
+  assert.deepEqual(keep.capture("playback").nodes,[],"other sections redraw everything, as before");
+  const render=shippedSource("renderSettings");
+  assert.ok(render.indexOf("captureSettingsMounts(tab)")<render.indexOf('innerHTML=`<div class="setlayout">'),"captured before the repaint");
+  assert.ok(render.indexOf("restoreSettingsMounts(keep)")>render.indexOf('innerHTML=`<div class="setlayout">'),"restored after it");
+  assert.match(shippedSource("viewSettings"),/SETTINGS_PENDING_KEEP=!reset&&SETTINGS_SHOWN_TAB===tab\?captureSettingsMounts\(tab\):null/,
+    "a same-section reload (Refresh nodes) carries them across the loading shell too");
 });
 
 test("the guide's readiness rows are advisory and never disable the save", () => {
@@ -1515,7 +1565,7 @@ test("a section route may name the element it lands on", () => {
   assert.deepEqual(replaced, ["#/settings/maintenance"], "the address drops the anchor");
   api.revealSettingsAnchor("maintenance");
   assert.equal(scrolled, 1, "once: a repaint does not scroll the reader back");
-  assert.match(shippedSource("renderSettings"), /settingsPanel\(tab,d\)\}<\/div><\/div>`;\s*revealSettingsAnchor\(tab\);/);
+  assert.match(shippedSource("renderSettings"), /settingsPanel\(tab,d\)\}<\/div><\/div>`;\s*restoreSettingsMounts\(keep\);\s*revealSettingsAnchor\(tab\);/);
   assert.match(shippedSource("subtitleStoredSourcesCard"), /\{id:"subsrccard"\}/, "the anchor is the switch's own card");
   assert.match(shippedSource("maintenancePanel"), /subtitleStoredSourcesCard\(settings,readiness\)/, "and Maintenance draws it");
 });

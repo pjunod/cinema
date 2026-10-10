@@ -47,6 +47,32 @@ function settingsTab(){
 // drop the join token on a section change, and render() uses the route to
 // keep the cached aggregate across one (a tab switch is not a page load).
 let SETTINGS_SHOWN_TAB=null;
+// Settings cards that share a section with something that repaints the whole
+// section: the cluster board on every status change and roster refresh, the
+// analysis summary after its Save. Each mount is carried across the repaint as
+// the live DOM node, so an unsaved edit, the Save it enabled, an open readiness
+// disclosure and focus all survive; the card's own Save replaces it from the
+// server's answer, and a fresh visit to the section draws it anew.
+const SETTINGS_KEPT_MOUNTS={cluster:["cluster-settings"],analysis:["subbackfillcard"]};
+let SETTINGS_PENDING_KEEP=null;
+function captureSettingsMounts(tab){
+  const nodes=(SETTINGS_KEPT_MOUNTS[tab]||[]).map(id=>document.getElementById(id))
+    .filter(node=>node&&node.dataset.state!=="loading");
+  const active=document.activeElement;
+  return {tab,nodes,focus:nodes.some(node=>node.contains(active))?active:null};
+}
+// A mount that is still waiting for /settings is never kept over one that has
+// it; an error stays until the data arrives, so a repaint cannot turn
+// "unavailable" back into a "Loading…" that nothing will ever finish.
+function restoreSettingsMounts(keep){
+  for(const node of keep.nodes){
+    const fresh=document.getElementById(node.id);
+    if(!fresh) continue;
+    if(node.dataset.state==="error"&&fresh.dataset.state==="ready") continue;
+    fresh.replaceWith(node);
+  }
+  if(keep.focus&&keep.focus.isConnected&&keep.focus.focus) keep.focus.focus();
+}
 function setSettingsTab(t){
   if(t===settingsTab()) return;
   if(!SET_TABS.some(x=>x[0]===t)) return;
@@ -65,7 +91,10 @@ function renderSettings(){
   const tab=settingsTab();
   const manifest=settingsManifest(tab);
   if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
+  const keep=SETTINGS_PENDING_KEEP&&SETTINGS_PENDING_KEEP.tab===tab?SETTINGS_PENDING_KEEP:captureSettingsMounts(tab);
+  SETTINGS_PENDING_KEEP=null;
   document.getElementById("main").innerHTML=`<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div></div>`;
+  restoreSettingsMounts(keep);
   revealSettingsAnchor(tab);
   if(tab==="developer")cinemaRemoteLoadManagement();
   if(tab==="system") return refreshLogs(); // its initial loading row is part of settled

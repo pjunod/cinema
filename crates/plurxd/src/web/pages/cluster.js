@@ -103,12 +103,10 @@ function repaintClusterPreserving(paint){
   const scroll=list?list.scrollTop:0;
   const open=clusterOpenDetailNodes();
   const controls=clusterControlValues();
-  const dirty=clusterDirtyCards();
   paint();
   const painted=document.getElementById("cluster-node-list");
   if(painted) painted.scrollTop=scroll;
   clusterRestoreControlValues(controls);
-  clusterRestoreDirtyCards(dirty);
   if(!open.length) return;
   document.querySelectorAll("#cluster-node-list .clnodebody").forEach(body=>{
     const detail=body.querySelector(".clnodedetail");
@@ -126,23 +124,6 @@ function clusterControlValues(){
     values.push({id:control.id,value:control.value,checked:control.checked});
   });
   return values;
-}
-// The settings cards below the board save per card, and their Save is enabled
-// by the edit, not by the value. A repaint restores the values above; this
-// restores the edit, so a status refresh cannot turn an unsaved choice back
-// into one that looks saved with its Save disabled.
-function clusterDirtyCards(){
-  return [.../** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll(".clusterwrap .setcard.dirty[id]"))].map(card=>({id:card.id,revision:card.dataset.revision}));
-}
-function clusterRestoreDirtyCards(cards){
-  (cards||[]).forEach(saved=>{
-    const card=document.getElementById(saved.id);
-    if(!card) return;
-    card.dataset.revision=saved.revision||"1";
-    card.classList.add("dirty");
-    const save=/** @type {HTMLButtonElement|null} */ (card.querySelector(".setfoot button.primary")); if(save) save.disabled=false;
-    const state=card.querySelector(".setfoot .setstate"); if(state) state.textContent="Unsaved changes";
-  });
 }
 function clusterRestoreControlValues(values){
   (values||[]).forEach(saved=>{
@@ -380,10 +361,10 @@ function clusterClockCard(settings,readiness){
   const enabled=!!settings.cluster_clock_guard_enforced;
   return setCard(`${cardHead("Cluster clock guard","Refuse clock-dependent cluster decisions when peer clock offsets cannot be bounded.",enabled?`<span class="pill warn">enforced</span>`:`<span class="pill">advisory</span>`)}
     ${togRow("cluster-clock-enforced","Enforce the cluster clock guard","When on, session takeover, the expired-session scan, membership changes and /readyz are refused while clock evidence is unknown or above 2,000 ms. When off, offsets are still measured and what would have been refused is counted. Startup is never refused.",enabled)}
-    ${devReq(readiness,"cluster_clock","coverage","Every voter reachable and observed","Every committed remote voter must answer a fresh authenticated probe. A learner that does not answer is reported but not required; a learner beyond the bound refuses only the takeover of its own sessions and its own promotion.")}
-    ${devReq(readiness,"cluster_clock","upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty over voters; an unknown member has no numeric offset.")}
+    ${devReq(readiness,"cluster_clock","coverage","Every voter reachable and observed","Every committed remote voter must answer a fresh authenticated probe. A learner that does not answer is reported but not required; a measured learner still counts, and promoting one needs its own bound.")}
+    ${devReq(readiness,"cluster_clock","upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty; an unknown member has no numeric offset.")}
     ${devReq(readiness,"cluster_clock","ntp","NTP running on every node","Check chronyd or systemd-timesyncd on each node; this server cannot see them.")}
-    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down or out-of-bound learner blocks only the takeover of its own sessions and its own promotion, until it returns, is back within the bound, or is removed.")}
+    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down learner blocks only the takeover of its own sessions, until it returns or is removed.")}
     <p class="hint">Requirements are advisory and never prevent saving, in either direction.</p>
     <div class="err" id="cluster-clock-error" role="alert"></div>${setCardFoot("saveClusterClockGuard")}`,{id:"cluster-clock-settings"});
 }
@@ -444,10 +425,14 @@ async function saveSubtitleClusterSources(btn){
 // The health board paints from the roster alone; these cards need the saved
 // settings, which arrive as a secondary read and fill this mount when they do.
 function clusterSettingsSection(d){
-  const settings=d&&d.settings, readiness=d&&d.developerReadiness;
+  // A failed readiness read is not cached as data, so fall back to the last
+  // document the page received (which records the failure) rather than draw
+  // every row as "checking…" forever.
+  const settings=d&&d.settings;
   const head=`<div class="setsection"><h2 id="cluster-settings-title">Cluster settings</h2><p>Where new streams run, how replicas serve browsing, clock enforcement, backups and shared subtitle tracks. Readiness rows are advisory and never block a Save.</p></div>`;
-  if(!settings) return `<section class="cluster-settings" id="cluster-settings" aria-labelledby="cluster-settings-title">${head}<div class="empty">Loading cluster settings…</div></section>`;
-  return `<section class="cluster-settings" id="cluster-settings" aria-labelledby="cluster-settings-title">${head}
+  if(!settings) return `<section class="cluster-settings" id="cluster-settings" data-state="loading" aria-labelledby="cluster-settings-title">${head}<div class="empty">Loading cluster settings…</div></section>`;
+  const readiness=d.developerReadiness||DEVELOPER_READINESS;
+  return `<section class="cluster-settings" id="cluster-settings" data-state="ready" aria-labelledby="cluster-settings-title">${head}
     ${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}${clusterBackupCard(settings,readiness)}${subtitleClusterSourcesCard(settings,readiness)}</section>`;
 }
 function clusterTransportRecoveryCard(readiness){
@@ -460,4 +445,20 @@ function clusterTransportRecoveryCard(readiness){
       ${devReq(readiness,"cluster_transport_recovery","recovery_receipt","Recovery receipt","Qualify the real-TLS 3 MiB transport matrix, acknowledged writes, and twenty learner plus twenty voter recovery cycles before fleet rollout.")}
       <p class="devcheck-note">Use the supported one-node-at-a-time deployment when these checks are acceptable. Readiness is advisory; transport recovery remains automatic on clustered nodes.</p>
       </div></details>`);
+}
+// The section's read failed. Its own retry, so the board above never reloads
+// for it; the state marker keeps a repaint from drawing "Loading…" over it.
+function clusterSettingsUnavailable(message){
+  return `<section class="cluster-settings" id="cluster-settings" data-state="error" aria-labelledby="cluster-settings-title"><div class="setsection"><h2 id="cluster-settings-title">Cluster settings</h2></div><div class="hint">Cluster settings are unavailable: ${message}</div><div class="row"><button class="ghost sm" onclick="retryClusterSettings(this)">Retry</button></div></section>`;
+}
+async function retryClusterSettings(button){
+  const generation=PAGE_RENDER_GENERATION;
+  if(button) button.disabled=true;
+  try{
+    await loadSettingsKey("settings",generation);
+    if(settingsCurrent(generation,"cluster")) patchSettingsSecondary("cluster","settings",SETTINGS_DATA.settings);
+  }catch(error){
+    if(error&&error.status===401) throw error;
+    if(settingsCurrent(generation,"cluster")) patchSettingsSecondaryError("cluster","settings",error);
+  }
 }
