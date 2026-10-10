@@ -556,7 +556,37 @@ pub async fn item_detail(
         statuses.extend(batch);
     }
     record_detail_projection(&statuses, probe_bytes);
-    for ((f, observation), (raw_probe, range, videos)) in
+    // The cluster-artifact fallback for identities the local projection does
+    // not have, folded into the same batched projection. The source object
+    // comes from the bounded observation above — never a second stat, which
+    // a hung mount would turn into a stalled page — and the artifact state
+    // from one batched Store read per chunk, not two reads per identity.
+    let mut lookups = Vec::new();
+    let mut lookup_slots = Vec::new();
+    for ((file, observation), (_, range, videos)) in files.iter().zip(&availability).zip(&prepared)
+    {
+        let Some(object_version) = observation
+            .stat
+            .filter(|_| observation.state == crate::availability::Availability::Available)
+            .and_then(|stat| {
+                crate::fragment_index_cluster::copy_object_version_from_stat(file, &stat)
+            })
+        else {
+            continue;
+        };
+        for (slot, video) in range.clone().zip(videos) {
+            if statuses[slot].presence != plurx_core::store::IndexPresence::Ready {
+                lookups.push((file, *video, object_version.clone()));
+                lookup_slots.push(slot);
+            }
+        }
+    }
+    let cluster_present: std::collections::HashSet<usize> = lookup_slots
+        .into_iter()
+        .zip(state.transcode.cluster_index_availability(&lookups).await)
+        .filter_map(|(slot, present)| present.then_some(slot))
+        .collect();
+    for ((f, observation), (raw_probe, range, _)) in
         files.into_iter().zip(availability).zip(prepared)
     {
         let path = f.path.clone();
@@ -590,10 +620,11 @@ pub async fn item_detail(
             let mut refusals = Vec::new();
             // Preserve metadata-only batched local answers and the newer
             // cluster-artifact fallback for the exact same captured pipeline.
-            // Never reintroduce packed per-file local index reads here.
-            for (status, video) in statuses[range.clone()].iter().zip(&videos) {
+            // Never reintroduce packed per-file local index reads, or
+            // per-identity Store reads or source stats, here.
+            for (slot, status) in range.clone().zip(&statuses[range.clone()]) {
                 if status.presence == plurx_core::store::IndexPresence::Ready
-                    || state.transcode.cluster_index_available(&f, *video).await
+                    || cluster_present.contains(&slot)
                 {
                     present += 1;
                 } else if let Some(outcome) = &status.outcome {
@@ -1159,7 +1190,7 @@ mod tests {
         };
 
         plurx_core::testfixtures::require_ffmpeg();
-        let page = index_page(2, false).await;
+        let mut page = index_page(2, false).await;
         publish(&page, 0, 1, 4100).await;
         let file = &page.files[1];
         // Owned metadata fixture, not a claim that these bytes are playable
@@ -1300,6 +1331,10 @@ mod tests {
         // The metadata badge is advisory, not blob availability authority.
         // Changing the physical source invalidates only its cluster fallback.
         std::fs::write(&file.path, b"changed source").expect("replace owned source");
+        // The fallback names the source object from the detail page's own
+        // bounded observation (C-05), so the change is seen once that
+        // observation is refreshed rather than by a second, unbounded stat.
+        page.state.detail_availability = crate::availability::AvailabilityCache::new();
         let body = detail(&page).await;
         assert_eq!(body["files"][0]["vod_index_status"], "indexed");
         assert_eq!(body["files"][1]["vod_index_status"], "pending");
@@ -1385,6 +1420,68 @@ mod tests {
         assert_eq!(
             body["files"][0]["vod_index_refusal"],
             super::index_refusal_summary(&[outcome]).expect("summary").1
+        );
+    }
+
+    /// C-05: the cluster-artifact fallback is part of the batched projection.
+    /// With cluster mode on, a source mount whose stat never returns cannot
+    /// stall the page past the availability deadline (the fallback never
+    /// stats on its own), and stat-proven sources cost one batched Store read
+    /// per chunk rather than two reads per identity.
+    #[tokio::test]
+    async fn the_cluster_index_fallback_never_stats_and_reads_once_per_chunk() {
+        // The fallback consults the current fragment-index engine first.
+        plurx_core::testfixtures::require_ffmpeg();
+        let mut page = index_page(300, false).await;
+        page.state.detail_availability =
+            crate::availability::AvailabilityCache::with_test_probe(|_| {
+                std::future::pending::<bool>()
+            });
+        let counts = HttpStoreOperationCounts::default();
+        let started = std::time::Instant::now();
+        let body = scope_http_store_operations(counts.clone(), detail(&page)).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a hung mount must not hold the detail page: {:?}",
+            started.elapsed()
+        );
+        let files = body["files"].as_array().expect("parts");
+        assert_eq!(files.len(), 300);
+        assert!(
+            files
+                .iter()
+                .all(|file| file["availability"] == "unknown"
+                    && file["vod_index_status"] == "pending")
+        );
+        assert_eq!(
+            counts.cluster_index_availability_calls(),
+            0,
+            "nothing was stat-proven, so nothing is looked up"
+        );
+
+        // Real stats that match the scanner's identity: every unindexed
+        // identity is looked up, 300 of them, in two chunk-sized reads.
+        for file in &page.files {
+            std::fs::write(&file.path, vec![0_u8; file.size as usize]).expect("owned source");
+            std::fs::File::open(&file.path)
+                .expect("source handle")
+                .set_times(std::fs::FileTimes::new().set_modified(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(file.mtime as u64),
+                ))
+                .expect("fixture scanner mtime");
+        }
+        page.state.detail_availability = crate::availability::AvailabilityCache::new();
+        let counts = HttpStoreOperationCounts::default();
+        let body = scope_http_store_operations(counts.clone(), detail(&page)).await;
+        let files = body["files"].as_array().expect("parts");
+        assert!(files.iter().all(
+            |file| file["availability"] == "available" && file["vod_index_status"] == "pending"
+        ));
+        assert_eq!(counts.index_status_calls(), 2);
+        assert_eq!(
+            counts.cluster_index_availability_calls(),
+            300_u64.div_ceil(plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK as u64),
+            "one batched cluster read per chunk"
         );
     }
 

@@ -207,6 +207,7 @@ impl Shared {
                 owners: 1,
                 retry_pending: false,
                 watchdog: None,
+                verdict: None,
             },
         );
         let owner = MaterializeDemand {
@@ -257,6 +258,27 @@ impl Shared {
             if !expired || rendition.failure().is_some() {
                 return;
             }
+            // Name the phase the deadline caught rather than calling every
+            // expiry a producer failure: a rendition parked on a refused
+            // encoder permit never had a producer to fail.
+            let verdict = rendition.materialize_verdict(index, rendition.slot.belief().await);
+            tracing::warn!(
+                target: "plurxd::vodserve",
+                rendition = %rendition.key,
+                entry = index,
+                verdict = ?verdict,
+                "materialize deadline expired"
+            );
+            {
+                let mut clocks = rendition.demand_since.lock().expect("demand lock");
+                let Some(clock) = clocks
+                    .get_mut(&index)
+                    .filter(|clock| clock.started == started)
+                else {
+                    return;
+                };
+                clock.verdict = Some(verdict.clone());
+            }
             if index != INIT_DEMAND_INDEX {
                 // A slow, cancelled, or superseded segment request cannot
                 // prove that this shared producer is unhealthy. Settle only
@@ -273,15 +295,9 @@ impl Shared {
                 {
                     return;
                 }
-                shared.pool.fail_entry(
-                    &rendition.key,
-                    index,
-                    &format!(
-                        "materializing {} exceeded the {:.1}s producer deadline",
-                        segment_name(u64::from(index)),
-                        rendition.materialize_budget.as_secs_f64()
-                    ),
-                );
+                shared
+                    .pool
+                    .expire_entry(&rendition.key, index, verdict.wait_outcome());
                 drop(clocks);
                 rendition.kick();
             } else {
@@ -291,7 +307,7 @@ impl Shared {
             // Preserve expiry long enough for a normal Retry-After cycle to
             // receive its typed failure, then forget an abandoned HTTP retry.
             // An old task never removes a newer episode for this same entry.
-            tokio::time::sleep(PENDING_RETRY_AFTER.saturating_mul(2)).await;
+            tokio::time::sleep(MATERIALIZE_EXPIRY_RETAINED).await;
             let mut demands = rendition.demand_since.lock().expect("demand lock");
             if demands
                 .get(&index)
@@ -887,6 +903,7 @@ impl Shared {
             handoff: StdMutex::new(None),
             handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
+            fragment_received: StdMutex::new(None),
         });
         Ok(rendition)
     }
