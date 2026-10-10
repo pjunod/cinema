@@ -7,9 +7,10 @@ const {init,media}=require('./continuous-media.fixture.js');
 const source=fs.readFileSync('crates/plurxd/src/web/player/continuous-media.js','utf8');
 function environment(stalled=false){
  const urls=new Map(),workers=[];let nextUrl=0;
+ const stall=typeof stalled==='function'?stalled:()=>stalled;
  class PageWorker {
   constructor(url){
-   workers.push(this);this.terminated=false;
+   this.index=workers.length;workers.push(this);this.terminated=false;
    this.ready=urls.get(url).text().then(body=>{
     if(this.terminated)return null;
     const prelude="const {parentPort}=require('node:worker_threads');globalThis.onmessage=null;globalThis.postMessage=value=>parentPort.postMessage(value);parentPort.on('message',data=>onmessage({data}));";
@@ -23,7 +24,7 @@ function environment(stalled=false){
    // Match the browser's immediate ownership transfer, including before
    // the worker has finished starting. No payload is borrowed from HLS.
    const copy=structuredClone(message,{transfer});
-   if(stalled)return;
+   if(stall(this.index))return;
    this.ready.then(child=>{
     if(!child||this.terminated)return;
     const bytes=copy.kind==='digest'?copy.bytes:copy.inspection.bytes;
@@ -79,4 +80,13 @@ test('worker unavailable fallback preserves provenance and attachment cancellati
  assert.equal(verified.facts.fingerprint,(await context.continuousSampleFacts(inspect(payload))).fingerprint);
  const pending=owner.verify(inspect(media()));const checked=assert.rejects(pending,/verification ended/);
  owner.close();await checked;
+});
+test('a stuck worker fails its own jobs and the next job uses a fresh worker',async()=>{
+ const env=environment(index=>index===0),owner=env.context.continuousMediaVerifier({deadlineMs:50});
+ const payload=new Uint8Array([1,2,3]);
+ await assert.rejects(owner.digest(payload),/verification deadline/);
+ assert.equal(env.workers.length,1);assert.ok(env.workers[0].terminated);
+ assert.equal(await owner.digest(payload),createHash('sha256').update(payload).digest('hex'));
+ assert.equal(env.workers.length,2,'the attachment kept verifying with a new worker');
+ owner.close();await env.retired();assert.equal(env.urls.size,0);
 });

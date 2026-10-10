@@ -241,9 +241,10 @@ async function continuousSoftwareSHA256(input,signal=null){
 
 // One verifier belongs to one MediaSource attachment. Raw payloads stay on
 // that attachment; only bounded copies cross its worker port.
-function continuousMediaVerifier(){
+function continuousMediaVerifier(options={}){
   const pending=new Map(),cancellation=new AbortController();
-  let worker=null,workerUrl=null,workerAttempted=false,closed=false,nextId=0,charged=0;
+  const deadlineMs=Number.isSafeInteger(options.deadlineMs)&&options.deadlineMs>0?options.deadlineMs:14000;
+  let worker=null,workerUrl=null,workerAttempted=false,workerFailures=0,closed=false,nextId=0,charged=0;
   const release=id=>{
     const job=pending.get(id);if(!job)return null;
     pending.delete(id);charged-=job.bytes;clearTimeout(job.timer);return job;
@@ -252,6 +253,16 @@ function continuousMediaVerifier(){
     if(closed)return;closed=true;cancellation.abort();
     if(worker){worker.terminate();worker=null;}
     if(workerUrl){URL.revokeObjectURL(workerUrl);workerUrl=null;}
+    for(const id of Array.from(pending.keys()))release(id).reject(error);
+  }
+  // A stuck or failed worker ends the jobs it holds, not the attachment's
+  // verification. The next job starts a fresh worker; after three failures
+  // in a row without a success, verification runs cooperatively in the page.
+  function resetWorker(error){
+    if(closed||!worker)return;
+    worker.terminate();worker=null;
+    if(workerUrl){URL.revokeObjectURL(workerUrl);workerUrl=null;}
+    workerFailures++;workerAttempted=workerFailures>=3;
     for(const id of Array.from(pending.keys()))release(id).reject(error);
   }
   const digestValid=value=>typeof value==='string'&&/^[0-9a-f]{64}$/.test(value);
@@ -264,6 +275,7 @@ function continuousMediaVerifier(){
   }
   function settle(id,result,error){
     const job=release(id);if(!job)return;
+    if(!error)workerFailures=0;
     if(error){job.reject(error);return;}
     const valid=job.kind==='digest'?digestValid(result):job.kind==='facts'?factsValid(result):
       result&&factsValid(result.facts)&&digestValid(result.artifact);
@@ -297,8 +309,8 @@ function continuousMediaVerifier(){
         const data=event.data;if(!data||!Number.isSafeInteger(data.id))return;
         settle(data.id,data.result,data.error?new Error(data.error):null);
       };
-      worker.onerror=()=>close(new Error('Continuous verification worker failed'));
-      worker.onmessageerror=()=>close(new Error('Continuous verification worker message failed'));
+      worker.onerror=()=>resetWorker(new Error('Continuous verification worker failed'));
+      worker.onmessageerror=()=>resetWorker(new Error('Continuous verification worker message failed'));
     }catch(error){
       if(worker){worker.terminate();worker=null;}
       if(workerUrl){URL.revokeObjectURL(workerUrl);workerUrl=null;}
@@ -317,7 +329,10 @@ function continuousMediaVerifier(){
     if(nextId===Number.MAX_SAFE_INTEGER){if(pending.size)return Promise.reject(new Error('Continuous verification identity bound'));nextId=0;}
     const id=++nextId;
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>close(new Error('Continuous verification deadline')),14000);
+      const timer=setTimeout(()=>{
+        const error=new Error('Continuous verification deadline');
+        if(worker)resetWorker(error);else settle(id,null,error);
+      },deadlineMs);
       pending.set(id,{kind,bytes:bytes.byteLength,timer,resolve,reject});charged+=bytes.byteLength;
       if(!worker){
         const signal=cancellation.signal;
