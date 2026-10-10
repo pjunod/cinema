@@ -78,12 +78,17 @@ function theaterNavItems(active){
   // non-admin sees no Settings anywhere in theater's chrome. (The account
   // popover applies the same test to its own entry.)
   if(ME&&ME.is_admin) items.push({tab:"settings", href:"#/settings", label:"Settings", on:active==="settings"});
-  return items;
+  // A section whose server switch is off is not a tab (featureVisible()).
+  return items.filter(i=>featureVisible(i.tab));
 }
 function theaterNavHtml(active){
   return theaterNavItems(active).map(i=>
     `<a href="${i.href}" data-tab="${i.tab}" class="${i.on?"on":""}"${i.on?' aria-current="page"':""}>${esc(i.label)}</a>`
   ).join("");
+}
+// Both copies — the header row and the phone pills — repaint from the one list.
+function theaterNavChanged(active){
+  for(const nav of document.querySelectorAll(".th-nav,.th-pills")) nav.innerHTML=theaterNavHtml(active);
 }
 function theaterChrome(active, inner){
   const searchFocus=captureSearchFocus();
@@ -529,7 +534,8 @@ LAYOUTS.theater={name:"Theater", surfaces:["desktop","mobile","tv"],
   chrome: theaterChrome,
   views: {home: theaterHomeBody, item: theaterItemBody,
           library: {shell: theaterLibraryShell}},
-  stickyFloor: theaterStickyFloor};
+  stickyFloor: theaterStickyFloor,
+  navChanged: theaterNavChanged};
 // applyLayout() ran in the <head>, where the registry may not yet know this
 // id. Re-applying here is invisible — boot() has not resolved /server yet, so
 // #app is empty and there is nothing painted to reflow — and it is a belt to

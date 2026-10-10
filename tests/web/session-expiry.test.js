@@ -117,6 +117,7 @@ async function main() {
         "function markBootReady(){}",
         "function refreshClientErrorReporterAuth(){}",
         "function render(){}",
+        "async function loadFeatures(){}",
         "async function api(){return {token:'new',user:{id:1}};}",
         "function authShell(title,sub,fields,btn,onsubmit){painted.push(sub);setSubmit(onsubmit);}",
         shippedSource("renderLogin"),

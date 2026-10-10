@@ -14,6 +14,7 @@ function headerSearch(layout){
   captureSearchFocus:()=>null,restoreSearchFocus:noop,installAvailable:()=>false,esc:String,getQ:()=>'',buildLabel:()=>'',
   navKeyboardWireOnce:noop,theaterWireOnce:noop,catalogWireOnce:noop,pollActivity:noop,
   theaterNavHtml:()=>'',catalogIcon:()=>'',catalogTabsHtml:()=>'',catalogFillNav:noop,
+  classicNavHtml:()=>'',catalogMainNavHtml:()=>'',catalogHomeOn:()=>false,
   setTimeout:fn=>{timers.set(++nextTimer,fn);return nextTimer;},clearTimeout:id=>timers.delete(id)});
  // Execute each shipped renderer, including its real search listener.
  vm.runInContext(source('wireSearchInput')+'\n'+source(layout),c);c[layout]('settings','Metadata');

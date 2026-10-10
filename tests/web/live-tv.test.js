@@ -1686,8 +1686,8 @@ async function main() {
   });
 
   await test("theater viewers can discover Live TV without administrator access", () => {
-    const nav = new Function("ME", "location", `${shipped("theaterNavItems")} return theaterNavItems;`)(
-      { is_admin: false }, { hash: "#/live-tv" });
+    const nav = new Function("ME", "location", "featureVisible", `${shipped("theaterNavItems")} return theaterNavItems;`)(
+      { is_admin: false }, { hash: "#/live-tv" }, () => true);
     const items = nav("live-tv");
     assert.deepEqual(items.find(item => item.tab === "live-tv"), {
       tab: "live-tv", href: "#/live-tv", label: "Live TV", on: true,

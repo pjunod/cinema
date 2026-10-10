@@ -1,5 +1,6 @@
 "use strict";
 LAYOUTS.classic.chrome=classicChrome;
+LAYOUTS.classic.navChanged=classicNavChanged;
 LAYOUTS.classic.views={
   home:classicHomeBody,
   item:classicItemBody,
