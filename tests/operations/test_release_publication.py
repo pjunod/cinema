@@ -348,6 +348,22 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         with self.assertRaises(ValueError):
             _split_final_runtime(source + "\nFROM runtime-assets AS runtime\n")
 
+    def test_stage_boundaries_are_whole_from_declarations_in_any_case(self):
+        from validation.release_dockerfile import _runtime
+
+        source = (
+            "FROM debian:bookworm-slim AS runtime-assets\n"
+            "RUN true\n\n"
+            "from runtime-assets as Runtime\n"
+            "COPY --from=build /plurxd /usr/local/bin/plurxd\n\n"
+            "  from runtime-assets AS runtime-assets-dolby-amd64-extra\n"
+            "RUN echo later\n"
+        )
+        runtime = _runtime(source)
+        self.assertIn("COPY --from=build /plurxd", runtime)
+        self.assertNotIn("echo later", runtime)
+        self.assertNotIn("dolby-amd64-extra", runtime)
+
     def test_named_dolby_package_context_is_accepted_only_in_its_render_mode(self):
         from validation.release_dockerfile import render
 

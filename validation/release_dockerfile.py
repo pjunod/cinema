@@ -209,7 +209,8 @@ def _split_final_runtime(text: str) -> tuple[str, str] | None:
     finals = [
         match
         for match in _FROM.finditer(text)
-        if match.group(1) == RUNTIME_ASSETS and match.group(2) == "runtime"
+        if match.group(1).lower() == RUNTIME_ASSETS
+        and (match.group(2) or "").lower() == "runtime"
     ]
     if not finals:
         return None
@@ -227,13 +228,15 @@ def _runtime(source: str) -> str:
     assets, final = split
     # Later build/export/installer stages are independent targets, never the
     # default release runtime. Select them explicitly only for audited amd64.
-    final = re.split(r"(?m)^FROM ", final, maxsplit=1)[0]
+    following = _FROM.search(final)
+    if following is not None:
+        final = final[: following.start()]
     # CI-only stages may sit between runtime-assets and the shipped runtime.
     # The release packager needs the assets and final stage, never their
     # toolchains; the default Dockerfile still ends in the shipped runtime.
-    intervening = re.search(r"(?m)^FROM ", assets[len(RUNTIME_STAGE) :])
-    if intervening:
-        assets = assets[: len(RUNTIME_STAGE) + intervening.start()]
+    declarations = list(_FROM.finditer(assets))
+    if len(declarations) > 1:
+        assets = assets[: declarations[1].start()]
     return assets + final_stage + final
 
 
@@ -293,11 +296,21 @@ def render(source: str, runtime_image: str | None = None, linux_dolby_package: b
     if linux_dolby_package:
         if runtime_image is not None:
             raise ValueError("audited package context and immutable runtime image are separate modes")
-        start = "FROM runtime-assets AS linux-dolby-install"
-        end = "FROM runtime AS runtime-dolby-amd64"
-        if source.count(start) != 1 or source.count(end) != 1:
+        def declaration(base: str, name: str) -> re.Match[str]:
+            found = [
+                match
+                for match in _FROM.finditer(source)
+                if match.group(1).lower() == base and (match.group(2) or "").lower() == name
+            ]
+            if len(found) != 1:
+                raise ValueError("tagged source lacks the audited amd64 package installer")
+            return found[0]
+
+        start = declaration(RUNTIME_ASSETS, "linux-dolby-install")
+        end = declaration("runtime", "runtime-dolby-amd64")
+        if end.start() <= start.start():
             raise ValueError("tagged source lacks the audited amd64 package installer")
-        installer = start + source.split(start, 1)[1].split(end, 1)[0]
+        installer = source[start.start() : end.start()]
         split = _split_final_runtime(runtime)
         if split is None:
             raise ValueError("tagged Dockerfile must contain one final runtime stage")
