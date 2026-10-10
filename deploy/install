@@ -98,6 +98,47 @@ run_for_file() {
   fi
 }
 
+# Hand paths a run as root left behind back to the user running this one.
+# macOS sudo keeps HOME, so `sudo make install` writes root-owned files into
+# the user's build tree, cargo cache and Library, and every later run as the
+# user then fails on them. `--top` claims only the directory itself, for a
+# directory that may hold other tools' files (~/Library/LaunchAgents).
+# Paths already the user's are left alone; a run as root claims nothing.
+claim_for_user() {
+  local depth= path uid gid
+  [ "${1:-}" = --top ] && { depth="-maxdepth 0"; shift; }
+  uid=$(id -u); gid=$(id -g)
+  [ "$uid" = 0 ] && return 0
+  for path in "$@"; do
+    [ -e "$path" ] || continue
+    # shellcheck disable=SC2086
+    [ -z "$(find "$path" $depth ! -user "$uid" -print 2>/dev/null | head -1)" ] && continue
+    if [ -n "$depth" ]; then
+      run_root chown "$uid:$gid" "$path"
+    else
+      run_root chown -R "$uid:$gid" "$path"
+    fi
+    [ "$dry_run" = 1 ] || say "gave $path back to uid $uid (an earlier run as root left it root-owned)"
+  done
+}
+
+# Temporary files are removed however the script ends, including a declined
+# sudo prompt under `set -e`.
+temp_files=
+cleanup_temp_files() {
+  local f
+  for f in $temp_files; do rm -f "$f"; done
+}
+trap cleanup_temp_files EXIT
+# `new_temp_file VAR` creates one and stores its path in VAR (not printed,
+# because a command substitution's subshell could not record it for cleanup).
+new_temp_file() {
+  local f
+  f=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+  temp_files="$temp_files $f"
+  printf -v "$1" '%s' "$f"
+}
+
 while [ $# -gt 0 ]; do
   case $1 in
     auto|linux|macos|windows|docker|binary) mode=$1 ;;
@@ -139,6 +180,7 @@ resolve_binary() {
   fi
   command -v cargo >/dev/null 2>&1 \
     || die "cargo is not on PATH; install the Rust toolchain from rust-toolchain.toml, or pass --binary <prebuilt plurxd>"
+  claim_for_user "${CARGO_TARGET_DIR:-$root/target}" "${CARGO_HOME:-$HOME/.cargo}/registry" "${CARGO_HOME:-$HOME/.cargo}/git"
   say "building plurxd (release, --locked) in $root"
   (cd "$root" && run cargo build --locked --release -p plurxd)
   binary=${CARGO_TARGET_DIR:-$root/target}/release/plurxd
@@ -315,18 +357,14 @@ macos_refuse_root() {
   die "run this as your login user, not as root or through sudo: the agent runs in that user's GUI session (launchd gui/<uid>), and the installer asks for sudo itself for the steps that need it"
 }
 
-# The agent runs as the login user, so everything it reads or writes in that
-# user's Library must belong to them. A path an earlier root run left behind
-# is handed back; anything already theirs is left alone.
-macos_claim() {
-  local path uid gid
-  uid=$(id -u); gid=$(id -g)
-  for path in "$@"; do
-    [ -e "$path" ] || continue
-    [ -z "$(find "$path" ! -user "$uid" -print 2>/dev/null | head -1)" ] && continue
-    run_root chown -R "$uid:$gid" "$path"
-    [ "$dry_run" = 1 ] || say "gave $path back to uid $uid (an earlier run as root left it root-owned)"
-  done
+# In a prefix the user owns (Homebrew's, on Apple Silicon), the binary and
+# the engine are the user's too; a root run's copies are handed back so an
+# upgrade or uninstall does not trip over them. A root-owned prefix such as
+# /usr/local is left as it is: its files are written through sudo anyway.
+macos_claim_prefix() {
+  local dir=$1
+  dir_writable "$dir" || return 0
+  claim_for_user "$dir/plurxd" "$(dirname -- "$dir")/libexec/plurx"
 }
 
 # Put the agent plist $1 in place at $2: mode 0644, owned by the login user,
@@ -455,11 +493,13 @@ plist_env_get() {
 # same path works whether or not the agent's file or directory needs root.
 macos_repoint_engine() {
   local plist=$1 key value current copy changed=0
-  if [ ! -r "$plist" ]; then
-    [ "$dry_run" = 1 ] && { say "would read $plist through sudo to check its engine"; return; }
+  if [ "$dry_run" = 1 ]; then
+    [ -r "$plist" ] || { say "would read $plist through sudo to check its engine"; return; }
+    copy=$plist
+  else
+    new_temp_file copy
+    if [ -r "$plist" ]; then cat "$plist" > "$copy"; else sudo cat "$plist" > "$copy"; fi
   fi
-  copy=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
-  if [ -r "$plist" ]; then cat "$plist" > "$copy"; else sudo cat "$plist" > "$copy"; fi
   for key in PLURX_FFMPEG PLURX_FFPROBE; do
     if [ "$key" = PLURX_FFMPEG ]; then value=$macos_ffmpeg; else value=$macos_ffprobe; fi
     current=$(plist_env_get "$copy" "$key")
@@ -471,21 +511,20 @@ macos_repoint_engine() {
     fi
     if command -v plutil >/dev/null 2>&1; then
       plutil -replace "EnvironmentVariables.$key" -string "$value" "$copy" \
-        || { rm -f "$copy"; die "could not update $key in $plist"; }
+        || die "could not update $key in $plist"
     else
       local rewritten
-      rewritten=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+      new_temp_file rewritten
       awk -v key="<key>$key</key>" -v value="$(printf '%s' "$value" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')" '
         index($0, key) { found = 1; print; next }
         found && /<string>/ { sub(/<string>.*<\/string>/, "<string>" value "</string>"); found = 0 }
         { print }
-      ' "$copy" > "$rewritten" && mv "$rewritten" "$copy"
+      ' "$copy" > "$rewritten" && cat "$rewritten" > "$copy"
     fi
     changed=1
     say "repointed $key from $current (not Jellyfin FFmpeg) to $value"
   done
-  [ "$changed" = 1 ] && macos_place_plist "$copy" "$plist"
-  rm -f "$copy"
+  if [ "$changed" = 1 ]; then macos_place_plist "$copy" "$plist"; fi
 }
 
 macos_render_plist() {
@@ -517,13 +556,15 @@ macos_install() {
   uid=$(id -u)
   macos_refuse_root
   resolve_binary
+  macos_claim_prefix "$dir"
   macos_ensure_jellyfin_ffmpeg "$dir"
   # Boot a running agent out before its binary is replaced. A fresh install
   # has nothing to boot out and that is fine.
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   install_binary_to "$dir"
+  claim_for_user --top "$agents"
+  claim_for_user "$plist" "$data" "$HOME/Library/Logs/plurxd.log"
   [ -d "$agents" ] || run_for_dir "$agents" mkdir -p "$agents"
-  macos_claim "$plist" "$data" "$HOME/Library/Logs/plurxd.log"
   run mkdir -p "$data" "$HOME/Library/Logs"
   # The plist is rendered once. An existing one is the operator's (the
   # runbook has them plutil -replace tool paths in it), so an upgrade keeps it
@@ -535,11 +576,10 @@ macos_install() {
     say "would render $plist from deploy/$macos_agent_label.plist"
   else
     local rendered
-    rendered=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+    new_temp_file rendered
     macos_render_plist "$dir" "$rendered"
     if command -v plutil >/dev/null 2>&1; then plutil -lint "$rendered" >/dev/null || die "rendered plist is not valid: $rendered"; fi
     macos_place_plist "$rendered" "$plist"
-    rm -f "$rendered"
     say "rendered $plist"
   fi
   run launchctl bootstrap "gui/$uid" "$plist"
@@ -557,6 +597,7 @@ macos_uninstall() {
   dir=${installed:-$(bin_dir)}
   uid=$(id -u)
   macos_refuse_root
+  macos_claim_prefix "$dir"
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   run_for_file "$plist" rm -f "$plist"
   run_for_dir "$dir" rm -f "$dir/plurxd"
