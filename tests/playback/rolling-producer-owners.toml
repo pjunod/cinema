@@ -587,12 +587,17 @@ replacement = "the rate-control refresh schedule remains a named lifecycle timer
 
 [[symbols]]
 id = "all-ffmpeg-process-starts"
-pattern = "\\bspawn_ffmpeg(?:_at)?\\("
+pattern = "\\bspawn_ffmpeg(?:_at(?:_with_env)?)?\\("
+# Video-processing follow-ups: the two initial launches now pass the captured
+# processing environment through spawn_ffmpeg_at_with_env, the same owned
+# executor path; the pattern follows them so they stay in this scan.
 # Review59: preserve the ordinary/fallback wrapper; include its exact-path
 # delegate and definition. The NEW executable fixture is outside this source
 # row's scope; its bounded child lifecycle is counted in the module sentinel.
 # The two initial launches moved to _at, not outside this ownership scan.
-expected_occurrences = 8
+# +2 with the follow-ups: the definition of spawn_ffmpeg_at_with_env and
+# spawn_ffmpeg_at delegating to it (spawn.rs); call sites are unchanged.
+expected_occurrences = 10
 kind = "process_start_scan"
 replacement = "one session executor acquires process capacity and cleanup registration before every rolling spawn"
 
@@ -2853,7 +2858,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # removes its second relay task and reuses StartupObservationHttp's existing
 # owned listener/router. The two task deltas cancel; no new detached owner.
 # DV/subtitle main union; measured by the focused ownership census.
-expected_occurrences = 928
+# Video-processing follow-ups (reviewed 2026-10-10, +2): one awaited
+# `tokio::task::spawn_blocking` in ffmpeg.rs reads the macOS clock package's
+# bounded provenance bytes and returns them to the caller, and the admin
+# `POST /system/video-processing/reprobe` handler spawns the existing serial
+# compatibility owner (`try_lock`, so at most one generation) bound to the
+# server shutdown token. Neither owns a producer or process.
+expected_occurrences = 930
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4365,7 +4376,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # learner drain, whose staged listeners/writers now drain directly. Task and
 # process counts stay unchanged; no production owner or timer is added.
 # DV/subtitle main union; measured by the focused ownership census.
-expected_occurrences = 1665
+# Video-processing follow-ups (reviewed 2026-10-10, +2): the Linux strict
+# probe bounds its fixture preparation with one 5-second `tokio::time::timeout`,
+# and source preparation bounds clock-reporter capture with `timeout_at` on
+# the operation's own deadline. Both are deadlines on awaited work; neither
+# decides producer recovery.
+expected_occurrences = 1667
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4784,7 +4800,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # constructs the committed HDR10/P5 control; the synchronous fixture collector
 # owns and reaps it. No production process constructor is added.
 # DV/subtitle main union; measured by the focused ownership census.
-expected_occurrences = 254
+# Video-processing follow-ups (reviewed 2026-10-10, +3): linux_dolby.rs builds
+# the strict probe graph, its reporter query and its delivered-pixel decode.
+# Each runs through bounded_command_*_cancellable under
+# ChildWork::background: bounded time and output, cancelled with the probe,
+# reaped before the result is used. No rolling producer is started.
+expected_occurrences = 257
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
