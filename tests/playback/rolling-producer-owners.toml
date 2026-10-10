@@ -430,7 +430,12 @@ also_in = ["crates/plurxd/src/transcode"]
 # output workers and the Source actor/preparation fixtures. The whole-module
 # structural task count equals effort + main - merge base; these three extra
 # scoped text references do not introduce an additional detached owner.
-expected_occurrences = 113
+# Continuous-quality acceptance (#844): +1 in transcode/manager/create.rs.
+# FirstPreparationCleanup's Drop hands an exact unpublished first-preparation
+# ResponseOwner to VodServe::end_for_owner. The task owns only that owner and
+# the serve handle, ends nothing when the session already holds a replacement
+# incarnation, and exits after the existing bounded TerminalCleanup wait.
+expected_occurrences = 114
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -1097,7 +1102,11 @@ expected_occurrences = 52
 id = "m4-vod-status-owner-admission"
 pattern = "response_status_owner_is_current"
 # DV report projection revalidates the physical session owner after its lookup.
-expected_occurrences = 8
+# #844: +4, all test-only. Three create.rs prepared-capture tests confirm the
+# initial attachment's owner stays current until the seal settles, and
+# retained.rs proves end_for_owner leaves a replacement incarnation's owner
+# current. No shipped admission path is added.
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "m4-vod-supersession-transaction"
@@ -1442,7 +1451,11 @@ pattern = "publication_ready_at_ms"
 # staged link proof can be shown to end at commit. No shipped fence moves.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 139
+# #844: +3. vod_prepare_first_before refuses a durable route whose fence has
+# left the sentinel (a published route is not a first preparation); one
+# create.rs and one chunk_06.rs fixture build an unpublished route at the
+# sentinel. None moves a shipped fence.
+expected_occurrences = 142
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1501,7 +1514,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
 # +1 subtitle remote-owner fixture starts its activation publication-blocked
 # before Confirm, matching the admitted durable owner; no production writer.
-expected_occurrences = 50
+# #844: +3, the same three sites as the handoff fence above: the first-
+# preparation refusal compares the sentinel, and two fixtures set it.
+expected_occurrences = 53
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1701,7 +1716,9 @@ pattern = "SessionAdoptionToken"
 # +1: `vod_resurrect_before` now constructs its boxed future outside the
 # caller's frame and passes the same token by value to the inner async fn;
 # one owner, moved once, no new adoption.
-expected_occurrences = 13
+# #844: +1. vod_prepare_first_before takes the session's existing adoption
+# token exactly as vod_resurrect_before did; it mints none.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-takeover-settlement-owner"
@@ -1914,7 +1931,10 @@ pattern = "TerminalCleanup"
 # `terminal_cleanup_shipped_shape` builds one through `new`, and
 # `seam_census_of_the_workspace` names the owner as a string. Test-only; the
 # production graph still mints exactly one cleanup per tombstoned session.
-expected_occurrences = 22
+# #844: +1. begin_end splits into begin_end_inner, which may be given the
+# exact ResponseOwner it is allowed to end; a different incarnation returns
+# None before any terminal state is touched. Same single compaction owner.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-vod-terminal-rendition-compaction"
@@ -2853,7 +2873,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # removes its second relay task and reuses StartupObservationHttp's existing
 # owned listener/router. The two task deltas cancel; no new detached owner.
 # DV/subtitle main union; measured by the focused ownership census.
-expected_occurrences = 928
+# #844: +1, the FirstPreparationCleanup drop task reviewed under
+# `all-detached-tokio-tasks`.
+expected_occurrences = 929
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4365,7 +4387,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # learner drain, whose staged listeners/writers now drain directly. Task and
 # process counts stay unchanged; no production owner or timer is added.
 # DV/subtitle main union; measured by the focused ownership census.
-expected_occurrences = 1665
+# #844: +2 net. preparation.rs keeps its advisory-deadline proof and adds a
+# second timeout_at on the same deadline for Auto entry's own receipt
+# registration; create.rs bounds the prepared-output seal by the caller's
+# absolute prime deadline. Neither adds a timer owner.
+expected_occurrences = 1667
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -5390,7 +5416,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Final DV/main integration: measured union of the reviewed DV sites and
 # PR #947 ownership additions above; neither history is discarded.
 # DV/subtitle main union; measured by the focused ownership census.
-expected_occurrences = 742
+# #844: +1 false positive. A create.rs test reads `response.status()` from
+# prepare_authorized; no process is launched.
+expected_occurrences = 743
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5666,7 +5694,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # registered child.
 # Final DV/main integration: measured union of the reviewed DV sites and
 # PR #947 ownership additions above; neither history is discarded.
-expected_occurrences = 324
+# #844: +1 false positive. end_for_owner awaits `cleanup.wait()` on the
+# existing TerminalCleanup; it is not a child-process wait.
+expected_occurrences = 325
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

@@ -383,6 +383,43 @@ impl VodServe {
         owner.file.as_ref().clone()
     }
 
+    pub(crate) async fn prepared_owner_matches(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+        incarnation: &str,
+    ) -> bool {
+        let sessions = self.shared.sessions.lock().await;
+        sessions.get(session_id).is_some_and(|session| {
+            session.tombstone.is_none()
+                && session.prepared_incarnation.as_deref() == Some(incarnation)
+                && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+                && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+        })
+    }
+
+    /// Keep the exact attachment stable while its first private choice is sealed.
+    /// No release-transition lock may be held by the caller.
+    pub(crate) async fn lock_preparation_owner(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+        incarnation: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let guard = Arc::clone(&owner.lifecycle).lock_owned().await;
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        if session.prepared_incarnation.as_deref() != Some(incarnation)
+            || session.tombstone.is_some()
+            || !Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+            || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+            || !session.owns_response_media(owner)
+        {
+            return None;
+        }
+        Some(guard)
+    }
+
     /// Admit a typed VOD status against the exact live-or-terminal snapshot
     /// that produced it, without renewing the session or publishing media.
     pub async fn response_status_owner_is_current(

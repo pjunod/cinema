@@ -2,6 +2,28 @@ import Foundation
 import XCTest
 @testable import plurx
 
+final class PreparedFailureDiagnosticTests: XCTestCase {
+    func testPreparedFailureDiagnosticExcludesResourceCredentials() {
+        let secretURL = "https://example.invalid/media?token=private-playback-credential"
+        let context = [NSLocalizedDescriptionKey: secretURL, NSURLErrorFailingURLStringErrorKey: secretURL]
+        XCTAssertEqual(preparedSuccessorErrorDetail(
+            NSError(domain: NSURLErrorDomain, code: -1100, userInfo: context)), "NSURLErrorDomain:-1100")
+        XCTAssertEqual(preparedSuccessorErrorDetail(
+            NSError(domain: "AVFoundationErrorDomain", code: -11850, userInfo: context)),
+            "AVFoundationErrorDomain:-11850")
+        XCTAssertEqual(preparedSuccessorErrorDetail(
+            NSError(domain: secretURL, code: 42, userInfo: context)), "other:42")
+        let deep = NSError(domain: secretURL, code: 99, userInfo: context)
+        let decoder = NSError(domain: NSOSStatusErrorDomain, code: -12909,
+                              userInfo: [NSUnderlyingErrorKey: deep, NSLocalizedDescriptionKey: secretURL])
+        let wrapped = NSError(domain: "AVFoundationErrorDomain", code: -11800,
+                              userInfo: [NSUnderlyingErrorKey: decoder, NSLocalizedDescriptionKey: secretURL])
+        XCTAssertEqual(preparedSuccessorErrorDetail(wrapped),
+                       "AVFoundationErrorDomain:-11800>NSOSStatusErrorDomain:-12909")
+        XCTAssertEqual(preparedSuccessorErrorDetail(nil), "unreported")
+    }
+}
+
 // MARK: - Fixtures
 
 private let stagingId = "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01"
@@ -1268,5 +1290,56 @@ final class ManualQualityRetentionTests: XCTestCase {
             carryingSeek: false, incumbentRecipeAttached: false))
         XCTAssertNil(state.retain(viewerEpoch: 4, incumbentHealthy: true))
         XCTAssertNil(state.retained)
+    }
+}
+
+final class ManualQualityCommitPinTests: XCTestCase {
+    func testFrameProvedQualityCommitSettlesOnlyItsOwnedProgressPin() throws {
+        var state = ManualQualityRetention()
+        let attempt = ManualQualityRetention.Attempt(viewerEpoch: 7, incumbent: .manual(height: 720),
+            seekGeneration: 12, carryingSeek: false, incumbentRecipeAttached: true)
+        state.begin(attempt)
+        XCTAssertNil(state.finishCommitted(viewerEpoch: 7, firstFrameUnixMs: 0))
+        XCTAssertEqual(state.pending, attempt)
+        XCTAssertNil(state.finishCommitted(viewerEpoch: 8, firstFrameUnixMs: 1000))
+        XCTAssertEqual(state.pending, attempt)
+        let settled = try XCTUnwrap(state.finishCommitted(viewerEpoch: 7, firstFrameUnixMs: 1000))
+        XCTAssertEqual(settled.seekGeneration, 12)
+        XCTAssertFalse(settled.carryingSeek)
+        XCTAssertNil(state.pending)
+        XCTAssertNil(state.retained)
+        XCTAssertNil(state.finishCommitted(viewerEpoch: 7, firstFrameUnixMs: 2000))
+        state.begin(.init(viewerEpoch: 9, incumbent: .manual(height: 1080),
+            seekGeneration: 13, carryingSeek: true, incumbentRecipeAttached: true))
+        let carried = try XCTUnwrap(state.finishCommitted(viewerEpoch: 9, firstFrameUnixMs: 3000))
+        XCTAssertTrue(carried.carryingSeek, "an existing viewer seek must keep its own presentation proof")
+        XCTAssertEqual(carried.seekGeneration, 13)
+    }
+}
+
+final class PreparedSuccessorBootstrapTests: XCTestCase {
+    func testPreparedSuccessorBootstrapSurvivesWireDecodeAndCannotNameAnotherSession() throws {
+        var action = prepareAction()
+        let bootstrap = ControlBootstrap(proto: PlaybackControl.protocolName,
+            url: "/api/v1/hls/\(successorSessionId)/control", generation: UUID().uuidString.lowercased(),
+            controlEpoch: 2, nextExchangeMs: 1500, leaseTimeoutMs: 45_000)
+        action.control = bootstrap
+        let wire = try PlaybackControl.encoder.encode(action)
+        let decoded = try PlaybackControl.decoder.decode(ControlAction.self, from: wire)
+        XCTAssertEqual(decoded.control, bootstrap, "the successor owner is part of the server's prepare payload")
+        XCTAssertEqual(try XCTUnwrap(PreparedReplacementAction(decoded)).control, bootstrap)
+        action.control?.url = "/api/v1/hls/\(UUID().uuidString.lowercased())/control"
+        XCTAssertNil(PreparedReplacementAction(action))
+        action.control = bootstrap
+        action.control?.url = "https://other.invalid/api/v1/hls/\(successorSessionId)/control"
+        XCTAssertNil(PreparedReplacementAction(action))
+        action.control = bootstrap
+        action.control?.generation = "not-a-generation"
+        XCTAssertNil(PreparedReplacementAction(action))
+        action.control = bootstrap
+        action.control?.controlEpoch = 0
+        XCTAssertNil(PreparedReplacementAction(action))
+        action.control = nil
+        XCTAssertNotNil(PreparedReplacementAction(action), "legacy payloads remain readable without inventing an owner")
     }
 }

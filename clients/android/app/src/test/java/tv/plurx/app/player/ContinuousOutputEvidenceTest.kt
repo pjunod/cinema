@@ -6,6 +6,7 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import org.junit.Assert.*
 import org.junit.Test
+import kotlinx.serialization.json.*
 
 class ContinuousOutputEvidenceTest {
     @Test fun hardwareCallbacksUseTheirQueuedFormatAndRejectEarlierEpochs() {
@@ -84,4 +85,121 @@ class ContinuousOutputEvidenceTest {
         evidence.emit(ContinuousOutputEvidence.Event.AudioHead(300), next)
         assertEquals(listOf(ContinuousOutputEvidence.Event.AudioHead(100), ContinuousOutputEvidence.Event.AudioHead(300)), events)
     }
+    private fun acceptedJournalFixture(): Triple<JsonObject, JsonObject, JsonObject> {
+        val row = buildJsonObject {
+            put("candidate_id", "a".repeat(32)); put("rendition_id", "b".repeat(64))
+            put("width", 1280); put("height", 720); put("timescale", 24)
+        }
+        val family = buildJsonObject { put("family_id", "c".repeat(64)) }
+        val transaction = buildJsonObject {
+            put("transaction_id", "12345678-1234-1234-1234-123456789abc")
+            put("intent_revision", 2); put("intent_superseded", false); put("state", "presented")
+            put("target_rendition_id", "b".repeat(64)); put("first_presented_tick", 96)
+            put("appended", buildJsonArray { add(buildJsonObject { put("artifact_id", "d".repeat(64)) }) })
+        }
+        return Triple(row, family, transaction)
+    }
+
+    @Test fun automaticJournalRejectsStaleUnacceptedAndSupersededFrames() {
+        val (row, family, accepted) = acceptedJournalFixture()
+        fun ledger(revision: Long = 2) = buildJsonObject {
+            put("latest_intent_revision", revision)
+            put("attachment", buildJsonObject { put("family_id", "c".repeat(64)) })
+        }
+        val frame = ContinuousOutputEvidence.Event.Frame(4_000_000,
+            Format.Builder().setWidth(1280).setHeight(720).build(), 5_000)
+        fun snapshot(tx: JsonObject = accepted, current: JsonObject? = ledger(), delivered: Long = 1,
+                     observed: ContinuousOutputEvidence.Event.Frame = frame) =
+            continuousAcceptedPresentation(row, family, current, tx, observed, "d".repeat(64), 96, delivered)
+        val before = accepted.toString()
+        assertNotNull(snapshot())
+        assertNull(snapshot(current = null))
+        assertNull(snapshot(current = ledger(3)))
+        assertNull(snapshot(delivered = 2))
+        assertNull(snapshot(tx = JsonObject(accepted + ("intent_superseded" to JsonPrimitive(true)))))
+        assertNull(snapshot(tx = JsonObject(accepted - "first_presented_tick")))
+        assertNull(snapshot(tx = JsonObject(accepted + ("first_presented_tick" to JsonPrimitive(95)))))
+        assertNull(snapshot(tx = JsonObject(accepted + ("state" to JsonPrimitive("appended")))))
+        assertNull(snapshot(tx = JsonObject(accepted + ("appended" to buildJsonArray {}))))
+        assertNull(snapshot(observed = frame.copy(format = Format.Builder().setWidth(1920).setHeight(1080).build())))
+        assertEquals(before, accepted.toString())
+    }
+
+    @Test fun automaticJournalKeepsOnlyExactAcceptedBindingAndDecoderGeometry() {
+        val (row, family, tx) = acceptedJournalFixture()
+        val ledger = buildJsonObject {
+            put("latest_intent_revision", 2)
+            put("attachment", buildJsonObject { put("family_id", "c".repeat(64)) })
+        }
+        val frame = ContinuousOutputEvidence.Event.Frame(4_000_000,
+            Format.Builder().setWidth(1280).setHeight(720).build(), 5_000)
+        val journal = requireNotNull(continuousAcceptedPresentation(row, family, ledger, tx, frame,
+            "d".repeat(64), 96, 1))
+        assertEquals(96L, journal.filmTick)
+        assertEquals(24L, journal.timescale)
+        assertEquals(1280, journal.width)
+        assertEquals(720, journal.height)
+        assertEquals(2L, journal.revision)
+        assertEquals("d".repeat(64), journal.artifactId)
+        assertTrue(journal.automaticDetail().contains("mode=auto route=continuous"))
+        assertTrue(journal.automaticDetail().contains("intent_revision=2 latest_intent_revision=2"))
+        assertNull(continuousAcceptedPresentation(row, family,
+            JsonObject(ledger + ("attachment" to buildJsonObject { put("family_id", "e".repeat(64)) })),
+            tx, frame, "d".repeat(64), 96, 1))
+    }
+
+    @Test fun networkEofProbeRejectsMissingEofFailedAuthorizationAndForeignOwner() {
+        val (row, _, _) = acceptedJournalFixture()
+        val resource = ContinuousQualityMedia.Resource("video", row, false, 2)
+        val authorized = ContinuousQualityMedia.Authorized(buildJsonObject {
+            put("artifact_id", "d".repeat(64)); put("rendition_id", "b".repeat(64))
+        }, setOf("12345678-1234-1234-1234-123456789abc"))
+        fun eof(read: Boolean = true, owner: Boolean = true,
+                auth: ContinuousQualityMedia.Authorized? = authorized,
+                media: ContinuousQualityMedia.Resource? = resource, network: Boolean = true) =
+            continuousNetworkEof(read, owner, "c".repeat(64), "e".repeat(64), media, auth,
+                100, network, 200, true, false, 10, 5_000)
+        assertNotNull(eof())
+        assertNull(eof(read = false))
+        assertNull(eof(owner = false))
+        assertNull(eof(auth = null))
+        assertNull(eof(network = false))
+        assertNull(eof(media = resource.copy(initialization = true)))
+        assertNull(eof(auth = authorized.copy(interval = buildJsonObject {
+            put("artifact_id", "d".repeat(64)); put("rendition_id", "f".repeat(64))
+        })))
+        val output = ContinuousOutputEvidence()
+        val old = Any(); val current = Any(); val probe = ContinuousReadOnlyProbe()
+        output.subscribe(old) { if (it is ContinuousOutputEvidence.Event.NetworkEof) probe.eof(it.facts) }
+        output.unsubscribe(old)
+        output.subscribe(current) { if (it is ContinuousOutputEvidence.Event.NetworkEof) probe.eof(it.facts) }
+        output.emit(ContinuousOutputEvidence.Event.NetworkEof(requireNotNull(eof())), old)
+        assertTrue(probe.detail().contains("eof_count=0 eof_bytes=0"))
+        output.emit(ContinuousOutputEvidence.Event.NetworkEof(requireNotNull(eof())), current)
+        assertTrue(probe.detail().contains("eof_count=1 eof_bytes=100"))
+        assertTrue(probe.detail().contains("qualified_video_eof_count=1 qualified_video_eof_bytes=100"))
+    }
+
+    @Test fun readOnlyProbeKeepsAbsoluteHardwareCountersAndUnknownEofProvenance() {
+        val probe = ContinuousReadOnlyProbe()
+        probe.frame(1_000, 0); probe.frame(1_041, 41_667); probe.frame(1_300, 83_333)
+        val uncertain = ContinuousNetworkEof("a".repeat(64), "b".repeat(64), "c".repeat(64),
+            "d".repeat(64), "video", 128, null, null, null, null, 2_000)
+        probe.eof(uncertain)
+        val first = probe.detail()
+        assertTrue(first.contains("frame_count=3 eof_count=1 eof_bytes=128"))
+        assertTrue(first.contains("frame_gaps_ge100ms=1"))
+        assertTrue(first.contains("eof_status=unknown eof_cache=unknown eof_paced=unknown"))
+        assertTrue(first.contains("qualified_video_eof_count=0 qualified_video_eof_bytes=0"))
+        assertEquals(first, probe.detail())
+        probe.frame(1_341, 83_333)
+        assertTrue(probe.detail().contains("nonprogressing_frame_count=1"))
+        probe.eof(uncertain.copy(status = 200, cacheAbsent = true, paced = false, bodyDurationMs = 20))
+        assertTrue(probe.detail().contains("eof_count=2 eof_bytes=256"))
+        assertTrue(probe.detail().contains("qualified_video_eof_count=1 qualified_video_eof_bytes=128"))
+        probe.eof(uncertain.copy(status = 200, cacheAbsent = true, paced = false, bodyDurationMs = 20, completedAtMs = null))
+        assertTrue(probe.detail().contains("eof_count=3 eof_bytes=384"))
+        assertTrue(probe.detail().contains("qualified_video_eof_count=1 qualified_video_eof_bytes=128"))
+    }
+
 }
