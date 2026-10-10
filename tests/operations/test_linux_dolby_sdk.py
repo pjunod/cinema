@@ -517,3 +517,15 @@ def test_bootstrap_claims_normalize_staged_license_path_without_losing_source_id
         module.validate_build_tool_claims(declared, {"meson": observed["meson"]})
     with unittest.TestCase().assertRaises(ValueError):
         module.validate_build_tool_claims(declared, {**observed, "gperf": {**observed["gperf"], "executable_sha256": "c" * 64}})
+
+
+def load_tests(loader, tests, pattern):
+    """Collect this module's plain `test_*` functions under unittest.
+
+    `make operations-check` runs `unittest discover`, which only collects
+    TestCase methods; without this hook the functions below never run.
+    """
+    for name, value in sorted(globals().items()):
+        if name.startswith("test_") and callable(value) and not isinstance(value, type):
+            tests.addTest(unittest.FunctionTestCase(value, description=name))
+    return tests

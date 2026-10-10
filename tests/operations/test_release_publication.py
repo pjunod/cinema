@@ -700,8 +700,6 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             self.assertIn("tracked changes", dirty_tree.stderr)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 def test_audited_amd64_release_render_excludes_export_tools_and_keeps_arm_incumbent():
@@ -736,3 +734,18 @@ def test_publish_and_ci_produce_and_consume_same_audited_media_export():
     assert '"$target" == x86_64-unknown-linux-gnu' in candidate
     assert 'media_args+=(--linux-dolby-package)' in candidate
     assert '"${media_args[@]}"' in candidate
+
+
+def load_tests(loader, tests, pattern):
+    """Collect this module's plain `test_*` functions under unittest.
+
+    `make operations-check` runs `unittest discover`, which only collects
+    TestCase methods; without this hook the functions below never run.
+    """
+    for name, value in sorted(globals().items()):
+        if name.startswith("test_") and callable(value) and not isinstance(value, type):
+            tests.addTest(unittest.FunctionTestCase(value, description=name))
+    return tests
+
+if __name__ == "__main__":
+    unittest.main()

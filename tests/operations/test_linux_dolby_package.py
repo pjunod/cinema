@@ -305,3 +305,15 @@ def test_sdk_link_search_resolves_real_transitive_elf_without_runtime_build_path
         assert dynamic.returncode == 0, dynamic.stderr
         assert "RPATH" in dynamic.stdout and "/usr/lib/jellyfin-ffmpeg/lib" in dynamic.stdout
         assert str(sdk) not in dynamic.stdout
+
+
+def load_tests(loader, tests, pattern):
+    """Collect this module's plain `test_*` functions under unittest.
+
+    `make operations-check` runs `unittest discover`, which only collects
+    TestCase methods; without this hook the functions below never run.
+    """
+    for name, value in sorted(globals().items()):
+        if name.startswith("test_") and callable(value) and not isinstance(value, type):
+            tests.addTest(unittest.FunctionTestCase(value, description=name))
+    return tests
