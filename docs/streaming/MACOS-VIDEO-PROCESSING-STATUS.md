@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups qualified; AMD raw strict-P5 qualified; corrected amd64 daemon/API and Intel pending; combined review/landing pending · **Updated:** 2026-10-10 · **Owner:** Claude (continuing the managed effort after the 2026-10-09 session ended) · **Integration:** `effort/video-processing-followups`.
+**Status:** Mac follow-ups qualified; AMD raw and normal-API strict-P5 qualified; Intel pending approval; combined review/landing in progress · **Updated:** 2026-10-10 · **Owner:** Claude (continuing the managed effort after the 2026-10-09 session ended) · **Integration:** `effort/video-processing-followups`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -14,36 +14,35 @@ measurements, negative results, provenance and reproducible raw receipts.
 **Checkpoint 2026-10-10.** The previous session ended on quota with the
 probe-raster correction, three documentation edits and the AMD rerun
 uncommitted on the workstation. That workstation's temporary directory was
-cleared before recovery, so only the pushed branch `862fc208` and the
-retained AMD-node evidence survived. Everything lost was rebuilt from those
-two sources:
+cleared before recovery, so everything was rebuilt from the pushed branch
+`862fc208` and the evidence retained on the AMD node. Since then:
 
-- The correction is re-implemented with focused regressions. Encoded tiny
-  positive probes on Linux keep the corpus raster `SOURCE_RASTER` (320×180);
-  `observe_encoded` checks the encoded raster exactly; pixels are still
-  projected to the 160×90 oracle. Raw negatives stay 160×90 and UHD stays
-  1920×1080, with no device-specific size.
-- The collector was rebuilt with the same raster rule. Its first window
-  passed all 12 tiny software controls and then exposed a collector-only UHD
-  timestamp-origin check stricter than the product's `observe_uhd_output`.
-  Mirroring the product contract, the corrected window passes all 32 raw
-  controls in 20.59 seconds, with production untouched.
-- The shipping image record is rebuilt from the 57 retained raw files.
+- **Probe raster** (`876800ed`). Encoded tiny probes keep the 320×180 corpus
+  raster on every backend; AMD's 160×96 encoder refusal is gone.
+- **AMD raw graphs.** The raw collector passes all 32 strict controls, with
+  production untouched ([§42](MACOS-VIDEO-PROCESSING-EVIDENCE.md#42-shipping-linux-image-and-amd-raw-strict-p5-qualification--2026-100910)).
+- **Current `main` merged** (`911a1704`), including one semantic conflict in
+  the DV runtime's held probe.
+- **Daemon probe.** The daemon's own probe exposed two further root causes:
+  the progress meter spliced into the observer's log records (`e4033409`),
+  and refusals that gave no reasons (`15075896`).
+- **Encoder pairing.** The normal-API run then exposed a 64×64 Dolby Vision
+  encoder-pairing proof that pinned DV to x264 on AMD (`c862c6a9`).
+- **Normal-API delivery passes** on the shipping image with VA-API hardware
+  P5 decode and VA-API encode
+  ([§43](MACOS-VIDEO-PROCESSING-EVIDENCE.md#43-daemon-probe-and-normal-api-strict-p5-delivery-on-the-shipping-image--2026-10-10)).
 
-Pinned Rust 1.97.1 check and Clippy with denied warnings pass on the
-corrected tree. See [evidence §42](MACOS-VIDEO-PROCESSING-EVIDENCE.md#42-shipping-linux-image-and-amd-raw-strict-p5-qualification--2026-100910).
 Remaining work, in order:
 
-1. Build the corrected amd64 daemon incrementally from the retained warm
-   target.
-2. Run normal Linux API acceptance.
-3. Run the Intel window once its transfer is explicitly approved.
-4. Freeze the candidate, reconcile `main`, and run the combined adversarial
-   review.
-5. Run the fast lane once and merge.
+1. Run the combined adversarial review and address its findings.
+2. Run the fast lane once (rerunning only failures), then merge.
+3. Clean up.
 
-On 2026-10-10 the user directed this session to own the fast lane and
-merge. That supersedes the earlier hand-off to a separate merge coordinator.
+Intel qualification waits for the owner's explicit approval to copy the
+observer image to the Intel node. It stays open and is not inferred from
+AMD; each node's own probe decides availability. On 2026-10-10 the user
+directed this session to own the fast lane and merge, superseding the
+earlier merge-coordinator hand-off.
 
 On 2026-10-08 the user explicitly promoted GPU subtitle compositing,
 non-Mac Profile 5 hardware decoding and the caption-bearing file-VOD
@@ -59,7 +58,7 @@ merged tree passes pinned all-target compilation and the normal tracked hook.
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | All eight raw graph comparisons, merged `c10f16f0` text API and one complete performance campaign pass; wall time is 13.02–31.14% lower and child CPU/frame 49.90–81.73% lower | Preserve exact evidence through combined review and landing |
-| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | Package, shipping image and observer verified. AMD exposed a probe-raster defect (160×90 aligned to 160×96, under the encoder's 128-row minimum); encoded tiny probes now keep the 320×180 source raster. The corrected AMD raw window passes all 32 controls | Corrected amd64 daemon, normal Linux API acceptance, Intel window (transfer approval pending) |
+| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | AMD raw graphs pass 32/32. On the shipping image, the corrected daemon's own probe admits the package, and normal-API delivery runs the strict graph with VA-API decode and encode. Fixed on the way: the probe raster, the progress-meter splice, refusal attribution and the 64×64 DV encoder-pairing proof | Intel window (transfer approval pending) |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on `2139fa9c`; the merged `c10f16f0` MPEG-2 case also passes unchanged caption/picture assertions and clean shutdown | Preserve evidence through combined review/landing; broader DVR and client presentation remain separate |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner

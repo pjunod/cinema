@@ -1901,9 +1901,9 @@ The macOS `observe` wrapper keeps its exact 160×90 contract. The changes:
 - UHD positive output stays 1920×1080.
 - Metadata, timing, pixel tolerances and negative assertions are unchanged.
 
-Regressions: `crates/plurxd/src/macos_video/p5.rs::tests::encoded_raster_is_checked_exactly_while_pixels_keep_the_oracle_projection`,
-`crates/plurxd/src/macos_video/p5.rs::tests::source_raster_is_the_manifest_source_shape`
-and `crates/plurxd/src/ffmpeg/linux_dolby.rs::tests::encoded_tiny_probes_keep_source_raster_on_every_backend`.
+Regressions: `crates/plurxd/src/macos_video/p5.rs::encoded_raster_is_checked_exactly_while_pixels_keep_the_oracle_projection`,
+`crates/plurxd/src/macos_video/p5.rs::source_raster_is_the_manifest_source_shape`
+and `crates/plurxd/src/ffmpeg/linux_dolby.rs::encoded_tiny_probes_keep_source_raster_on_every_backend`.
 
 **Collector correction exposed a second, collector-only defect.** With the
 source raster, all 12 tiny software-decode controls passed. The UHD positive
@@ -1940,6 +1940,12 @@ The window ran under the following limits and checks:
   the production epoch was unchanged, and peak GPU busy was 3%.
 - The owned container was removed afterward.
 
+A fifth window reran the collector as SHA-256
+`aa95d683c930fff44286c0c6c10f02d308b49ca6286824457fd0e87d32ab381a` after §43
+found the daemon's progress-meter defect. That collector runs its graphs with
+`-nostats` and reads stderr as newline-only records, exactly as the daemon's
+observer does, and it passes all 32 controls again in 22.51 seconds.
+
 This is raw shipping-graph evidence. It is not an API, availability,
 performance or production claim, and it says nothing about Intel, NVIDIA or
 other AMD devices.
@@ -1953,9 +1959,126 @@ are excluded. This record was rebuilt on 2026-10-10 from those retained raw
 files, because the original workstation archive (SHA-256 `5e1efe39…`) was lost
 with its temporary directory.
 [AMD raw qualification evidence](evidence/macos-video-20261008/amd-raw-p5-qualification-evidence.tar.gz)
-contains one neutral JSON record, 7995 compressed bytes, SHA-256
-`38a086d12521e3de0feab924b30e7e7b983982b1e5222655963e0ac73b2cf3f6`.
-It records all four windows with their dispositions, per-run results,
+contains one neutral JSON record, 12571 compressed bytes, SHA-256
+`7b23b2419e600a8948aaa089dc1e9b8bc80074b4564b8bb1fe093b02b01074a8`.
+It records all five windows with their dispositions, per-run results,
 window/admission facts and a size/hash inventory of every retained
 observation. Each archived member was reopened and compared byte-for-byte.
 No unit suite ran.
+
+## 43. Daemon probe and normal-API strict-P5 delivery on the shipping image — 2026-10-10
+
+**Merge.** Current `main` (`c96142ac5`) was merged into the effort as
+`911a1704`:
+
+- `plurx-core` `transcode/mod.rs`: kept both modules and took the union of
+  the re-exports.
+- `create.rs`: kept the effort's clock-pair engine binding, followed by
+  main's DV window.
+- The backlog took the effort's rows.
+
+One semantic conflict remained. Main's DV runtime called
+`held_source_probe_json`, which the effort had narrowed to tests so that every
+production held probe names its reporter. The DV completed-output check now
+captures the current reporter for that query and calls
+`held_source_probe_json_bound`. Workspace Clippy with denied warnings passes.
+
+**The daemon's own probe refused every hardware graph.** The corrected
+daemon (`876800ed`, release build 1146.0 seconds) ran inside the authentic
+shipping image on the AMD node, on private loopback and private state. Its
+automatic Linux probe published only `hardware_graph_unobserved`, although the
+same graphs pass the raw collector. An ffmpeg timeline taken from inside the
+container showed that discovery succeeded and then all four validation runs
+failed. Replicating the six discovery graphs by hand found no loader or
+closure difference.
+
+Replaying their stderr with the daemon's newline-only record splitting then
+failed the selected-metadata observer every time. The Linux graph left ffmpeg's progress meter on.
+Its `frame=` records end with a bare carriage return, so the next showinfo
+record is spliced onto them and that frame vanishes from the observer. The
+collector had masked this by splitting on carriage returns as well. The
+macOS strict graph already passes `-nostats`; the Linux graph now shares one
+argument list with it (`e4033409`).
+
+The defect stayed hidden because the probe gave no reasons. Discovery dropped
+failed candidates silently, validation collapsed every failure into
+`output_contract_failed`, and a refused report then discarded even that. Each
+refusal now keeps its stage and reason on the operator report, and a refused
+report still gives the planner no context (`15075896`).
+
+**Hardware decode delivered; encode fell back.** The `15075896` daemon
+(1209.5 seconds) admits the package: Software/Software, Software/VA-API,
+VA-API/Software and VA-API/VA-API are observed, and both QSV candidates are
+reported as `discovery · graph_failed`. Normal scan and session creation
+select the strict graph with `-hwaccel vaapi`, `-strict_dovi 1` and
+`tonemapx … apply_dovi=1:require_dovi=1`, and all 24 served frames pass.
+
+The response named x264, though. The log said "the Dolby Vision reshape
+cannot use this hardware encoder". That pairing proof encodes one 64×64
+frame, and AMD VA-API refuses anything under 128×128. On the shipping image,
+the same graph exits 234 at 64×64 and 0 at 1920×1080. So every Dolby Vision
+session on such a node was pinned to software encoding. The proof now encodes
+the 1080p delivery raster, as the VA-API Main10 proof already does
+(`c862c6a9`).
+
+**Final window passes.** Daemon `c862c6a9` (1207.1 seconds; `plurxd` SHA-256
+`09b0c07fb71649440700743a6c56f009a39dd34f321049d0a087f93a8fe85d01`, debug
+`.dwp` `9d2a5c7470fdae1b962ad5437a57b9a508bb45e164f375f133668e2b3b496686`)
+admits the same observed envelope. Normal library scan and HLS create return
+encoder `VA-API`. The producer runs the strict graph with VA-API hardware P5
+decode and `h264_vaapi` encode. The first object arrives in 1.28 seconds.
+All 24 independently decoded frames pass:
+
+- 256×144 AVC 8-bit limited range;
+- BT.709 progressive;
+- no Dolby or mastering side data;
+- exact 12 fps cadence.
+
+The window then closes cleanly:
+
+- the daemon shuts down with exit 0;
+- the window takes 135.7 seconds;
+- production's epoch is unchanged and no foreign GPU holder appears;
+- the owned container is removed.
+
+Regressions:
+
+- `crates/plurxd/src/ffmpeg/linux_dolby.rs::probe_graph_stderr_is_line_records_without_the_progress_meter`
+- `crates/plurxd/src/ffmpeg/linux_dolby.rs::refused_hardware_report_keeps_each_graph_reason_and_no_context`
+- `crates/plurxd/src/ffmpeg.rs::dovi_reshape_pairing_proof_uses_a_delivery_raster_every_encoder_accepts`
+
+These and the 16 surrounding `linux_dolby`/`p5` tests pass on the merged
+tree (19 total).
+
+All daemon builds use the following setup:
+
+- the unchanged release profile, pinned public Rust 1.97.1 and one Cargo job;
+- two CPUs, 12 GiB memory and no network;
+- the retained warm target, rebuilt only for changed sources.
+
+Two build attempts and two windows were refused or aborted:
+
+- a wrong commit argument, caught by the archive-identity check;
+- a memory admission, while a CI VM held 14 GB;
+- a monitor race that misread a short-lived owned child as a foreign GPU
+  holder (the monitor now reads each holder's cgroup);
+- the first refused probe, which is the defect above.
+
+All of these remain recorded.
+
+This is one AMD VA-API render node. It makes no Intel, NVIDIA, deployment,
+performance, concurrency or client-presentation claim.
+
+[Linux normal-API evidence](evidence/macos-video-20261008/linux-normal-api-p5-evidence.tar.gz)
+contains one neutral JSON record, 7357 compressed bytes, SHA-256
+`16c84bf98fb3c9cdb614e12f57424152ac6c1c08b074807f6cc726295564a5e5`.
+It records:
+
+- the four daemon builds with artifact hashes and refused attempts;
+- the five API windows, with observations, strict producer argv and ffmpeg
+  timelines;
+- the six-graph discovery replication;
+- both findings above.
+
+The archived member was reopened and compared byte-for-byte. No unit suite
+ran.
