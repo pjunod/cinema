@@ -3297,7 +3297,8 @@ class Controller internal constructor(
                 onAcknowledged = ::acknowledgementDelivered,
                 onEffectiveSelection = { effective ->
                     if (tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1")
-                        autoActiveCandidateId = effective.candidateId
+                        autoActiveCandidateId = autoCandidateAfterEffectiveSelection(autoActiveCandidateId,
+                            effective.candidateId, liveContinuous()?.hasMember(effective.candidateId) == true)
                 },
                 onGaveUp = ::controlReportingGaveUp,
             )
@@ -6197,6 +6198,19 @@ internal data class AutoTickState(
 
 /** Auto owns quality only while Auto is the quality that executes. */
 internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto
+
+/**
+ * The control plane's effective selection names the session recipe's
+ * candidate. A continuous family changes rung inside that one session, so for
+ * a family member the server keeps naming the rung the session started on
+ * while the attachment presents another. The attachment's presented rung
+ * ([continuousQualityPresented]) is then the only authority on what Auto is
+ * executing. Taking the server's id put Auto back on the rung it had just
+ * left: every exchange re-armed link pressure and re-requested the rung
+ * already playing, about every fifteen seconds.
+ */
+internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean): String? =
+    if (continuousMember) current else effective
 
 /** A directed change still owes the viewer an outcome. A settled change —
  * committed, retained, reopened or superseded — is history, not a change in

@@ -66,4 +66,12 @@ class AutoDecisionGateTest {
         assertTrue(fromAuto.retainFailedQuality(toManual, QualitySelection.Auto))
         assertTrue(autoExecuting(fromAuto))
     }
+
+    @Test fun aContinuousMemberKeepsThePresentedRungOverTheSessionCandidate() {
+        // The attachment presented 480p; the control plane still names the
+        // 720p rung the continuous session started on.
+        assertEquals("480", autoCandidateAfterEffectiveSelection("480", "720", continuousMember = true))
+        assertEquals("720", autoCandidateAfterEffectiveSelection("480", "720", continuousMember = false))
+        assertEquals(null, autoCandidateAfterEffectiveSelection("480", null, continuousMember = false))
+    }
 }
