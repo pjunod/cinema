@@ -78,6 +78,8 @@ const BORROWED = [
   "clusterWorkersHtml",
   "activityIsClustered",
   "durableJobReason",
+  "activityBlockedScans",
+  "activityBlockedScansHtml",
   "restoreDurableFocus",
   "paintActivityBody",
 ];
@@ -677,6 +679,43 @@ test("node assignments are independent of queue filters and expired ownership st
 });
 
 
+// The 2026-10-10 report: a fresh install showed "2 jobs queued" and nothing
+// else, because both library roots were mistyped. The reason existed — on the
+// scan status, behind a closed disclosure, and on the Jobs tab — but not where
+// the queue count sent the reader.
+function queuedScan(library, error) {
+  return {library, library_id: 1, status: {running: true, phase: "queued", error}};
+}
+test("a queued scan that cannot start names its reason above the queue count", () => {
+  const html = paint(snapshot({scans: [queuedScan("movies",
+    "This node could not read library root /Users/me/mnt/20t/movies: No such file or directory (os error 2). Waiting for a compatible worker.")]}));
+  const attention = html.indexOf("data-activity-blocked-scans");
+  assert.ok(attention !== -1, "the blocked scan has an attention section");
+  assert.ok(attention < html.indexOf('id="cluster-workers"'), "it sits above the queue count");
+  assert.match(html, /A library scan can’t start<\/h2><p><b>movies<\/b><br>This node could not read library root \/Users\/me\/mnt\/20t\/movies: No such file or directory/);
+  assert.match(html, /href="#\/settings\/libraries">Review library locations/);
+  assert.match(html, /data-activity-section="scans" open><summary>Library scans · 1/,
+    "the scans disclosure opens while a scan is blocked");
+});
+test("waiting, running and finished scans raise no attention", () => {
+  for (const status of [
+    {running: true, phase: "queued", error: null},
+    {running: true, phase: "scanning", error: "stale"},
+    {running: false, phase: null, error: "finished with an error"},
+  ]) {
+    const html = paint(snapshot({scans: [{library: "movies", library_id: 1, status}]}));
+    assert.doesNotMatch(html, /data-activity-blocked-scans/);
+    assert.doesNotMatch(html, /data-activity-section="scans" open/);
+  }
+});
+test("several blocked scans are counted and their text is escaped", () => {
+  const html = paint(snapshot({scans: [queuedScan("<b>films</b>", "root <x> unreadable"), queuedScan("tv", "root missing")]}));
+  assert.match(html, /2 library scans can’t start/);
+  assert.match(html, /&lt;b&gt;films&lt;\/b&gt;/);
+  assert.match(html, /root &lt;x&gt; unreadable/);
+  assert.doesNotMatch(html, /<b><b>films|<x>/);
+});
+
 test("watching stays above both tabs and the selected workspace survives polling", () => {
   for(const tab of ["status","jobs"]){
     painter.view.tab=tab;
@@ -786,7 +825,10 @@ test("queued library jobs show their local mount problem by library identity", (
     job.kind=kind;
     const html=paint(snapshot({clustered:false,deliveries:[],scans}));
     assert.match(html, /durable-reason[^>]*>Cannot read \/media\/&lt;movies&gt;; check the mount\./);
-    assert.doesNotMatch(html, /A different library problem|\/media\/<movies>/);
+    // The row must not borrow library 2's reason. The page as a whole now
+    // names it, in the blocked-scans section, because library 2 is blocked too.
+    assert.doesNotMatch(html, /durable-reason[^>]*>A different library problem/);
+    assert.doesNotMatch(html, /\/media\/<movies>/);
   }
   job.state="running";
   assert.doesNotMatch(paint(snapshot({scans})), /durable-reason[^>]*>Cannot read/);
