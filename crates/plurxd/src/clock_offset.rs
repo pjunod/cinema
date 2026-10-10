@@ -539,7 +539,12 @@ impl Filter {
             } else if candidate.round_trip_us.max(CLOCK_RTT_QUANTIZATION_FLOOR_US)
                 > selected.round_trip_us.max(CLOCK_RTT_QUANTIZATION_FLOOR_US) * 4
             {
-                return PeerClockOffset::Unknown;
+                // A slow exchange's four timestamps still bound the true
+                // offset; queueing widens the interval, it does not falsify
+                // it. Publish the candidate's own wider interval for this
+                // round, but keep it out of the minimum-delay window so the
+                // older selected sample is never republished as authority.
+                return candidate.observation();
             }
         }
         self.0.push_back(candidate);
@@ -882,15 +887,51 @@ mod tests {
         let now = Instant::now();
         let mut filter = Filter::default();
         filter.observe(Sample::exchange(1000, 1000, 1000, 1000, now), now);
-        assert_eq!(
+        assert!(matches!(
             filter.observe(Sample::exchange(2000, 2000, 2000, 2010, now), now),
-            PeerClockOffset::Unknown
-        );
+            PeerClockOffset::Bounded { .. }
+        ));
+        assert_eq!(filter.0.len(), 1, "a slow sample never enters the window");
         let later = now + Duration::from_secs(26);
         assert!(matches!(
             filter.observe(Sample::exchange(3000, 3000, 3000, 3010, later), later),
             PeerClockOffset::Bounded { .. }
         ));
         assert_eq!(filter.0.len(), 1);
+    }
+
+    /// A loaded peer answers slowly: its round trip exceeds four times the
+    /// window minimum, yet its interval still intersects the selected one.
+    /// That is less precise evidence, not missing evidence, so the round is
+    /// Bounded by the candidate's own interval (never the old minimum's), and
+    /// the window is unchanged. A disjoint slow sample is still a step.
+    #[test]
+    fn slow_intersecting_exchange_is_bounded_by_its_own_interval() {
+        let start = Instant::now();
+        let mut filter = Filter::default();
+        filter.observe(Sample::exchange(1000, 1000, 1000, 1000, start), start);
+        let later = start + Duration::from_secs(10);
+        let slow = Sample::exchange(2000, 2005, 2005, 2010, later).expect("slow fixture");
+        assert_eq!(slow.round_trip_us, 10_000);
+        let PeerClockOffset::Bounded {
+            offset_us,
+            uncertainty_us,
+            observed_at,
+        } = filter.observe(Some(slow), later)
+        else {
+            panic!("an intersecting slow exchange is bounded, not Unknown");
+        };
+        assert_eq!(
+            (offset_us, uncertainty_us),
+            (slow.offset_us, slow.uncertainty_us)
+        );
+        assert!(uncertainty_us >= slow.round_trip_us / 2);
+        assert_eq!(observed_at, later);
+        assert_eq!(filter.0.len(), 1, "the minimum-delay window is unchanged");
+
+        let stepped = Sample::exchange(3000, 13005, 13005, 3010, later).expect("slow step fixture");
+        assert_eq!(filter.observe(Some(stepped), later), stepped.observation());
+        assert_eq!(filter.0.len(), 1, "a disjoint slow sample still resets");
+        assert_eq!(filter.0[0], stepped);
     }
 }

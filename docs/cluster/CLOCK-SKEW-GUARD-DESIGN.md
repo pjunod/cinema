@@ -379,8 +379,14 @@ the recorded point and uncertainty still use the measured round trip. It
 prevents a valid zero-millisecond sample from making every later positive
 sample fail `candidate > 4 * minimum`; a `0 ms` then `1 ms` LAN observation is
 accepted. A candidate whose floored `round_trip` exceeds four times the
-floored window minimum is unusable for that round rather than silently
-leaving an old sample authoritative.
+floored window minimum never enters the window and never leaves an old
+sample authoritative: if its interval intersects the selected sample's, the
+round publishes the candidate's own (wider) interval, because the four
+timestamps bound the true offset whatever the queueing delay; if it does not
+intersect, the step reset below applies. (Amended 2026-10-10: publishing
+`Unknown` here made every round with a CPU-loaded peer Unknown, so enforced
+expiry scans on every voter refused although each exchange bounded the
+offset.)
 
 Before every comparison, discard entries whose monotonic `observed_at` age is
 greater than `CLOCK_OBSERVATION_MAX_AGE = 25 s`, even if every candidate since
@@ -388,8 +394,9 @@ the selected sample was rejected. Expiry is time-based, not accepted-sample-
 count-based: a zero-delay minimum cannot remain in an eight-entry window
 forever by rejecting the observations that would evict it. If pruning empties
 the window, the current otherwise-usable candidate starts a new one. A
-rejected current round still publishes `Unknown`; expiry prevents poisoning
-later rounds rather than converting a rejected sample into success.
+rejected current round (no usable exchange) still publishes `Unknown`;
+expiry prevents poisoning later rounds rather than converting a rejected
+sample into success.
 
 A minimum-delay window must not hide a clock step for 80 seconds. Before a
 usable candidate enters the window, compare its conservative interval with
@@ -826,8 +833,9 @@ Each is an assessment disposition; each says how this plan honours it.
   in microseconds so half-millisecond results are exact; decisions
   compare `|offset| + uncertainty`, and a sample whose round trip exceeds the
   transport deadline becomes `Unknown`. The delay ratio has a 1 ms
-  quantization floor, and selected entries expire by monotonic age even when
-  later candidates are rejected.
+  quantization floor; a slow intersecting sample is published with its own
+  interval but kept out of the window; and selected entries expire by
+  monotonic age even when later candidates are kept out.
 - **Relative agreement is not local-clock continuity.** A fixed
   wall/monotonic anchor detects local and common-mode steps synchronously at
   dangerous decisions. Generation revalidation closes awaits between the
@@ -896,6 +904,7 @@ interval).
 | above bound | `1000,3510,3512,1022` | `+2500 ms` | `11 ms` | upper `2511 ms`, refuse |
 | crosses bound | `1000,3100,3102,2202` | `+1500 ms` | `601 ms` | upper `2101 ms`, refuse |
 | quantized LAN | `1000,1000,1000,1000`, then `2000,2000,2000,2001` | `0 ms`, then `-0.5 ms` | `1 ms`, then `1.5 ms` | both bounded; `0 ms` minimum accepts `1 ms` RTT |
+| slow, intersecting | `1000,1000,1000,1000`, then `2000,2005,2005,2010` | `0 ms`, then `0 ms` | `1 ms`, then `6 ms` | both bounded; the 10 ms sample publishes its own interval and stays out of the window |
 | responder step | any `t3 < t2` | n/a | n/a | `Unknown` |
 | excessive RTT | network RTT `2001 ms` | n/a | n/a | `Unknown` |
 
