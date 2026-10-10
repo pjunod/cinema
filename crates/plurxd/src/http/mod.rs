@@ -2289,6 +2289,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             || matches!(
                 path,
                 "/api/v1/me"
+                    | "/api/v1/features"
                     | "/api/v1/auth/login"
                     | "/api/v1/auth/logout"
                     | "/api/v1/activity"
@@ -4398,6 +4399,9 @@ mod tests {
             (Method::POST, internal_auth_revocation::PATH),
             (Method::POST, "/api/v1/auth/login"),
             (Method::POST, "/api/v1/auth/logout"),
+            // Read beside /me so a client signed in to a node under
+            // maintenance still lists only the sections that are on.
+            (Method::GET, "/api/v1/features"),
             (Method::POST, "/api/v1/cluster/election"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b/maintenance"),
             (

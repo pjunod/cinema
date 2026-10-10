@@ -133,6 +133,14 @@ pub struct FeaturesDto {
 }
 
 impl FeaturesDto {
+    /// The only settings `from_snapshot` reads.
+    const KEYS: [&'static str; 4] = [
+        keys::LIVE_TV_ENABLED,
+        keys::DVR_ENABLED,
+        keys::SHARING_ENABLED,
+        keys::LIBRARY_CHANNELS_ENABLED,
+    ];
+
     /// Read with the same parsers `/settings` uses, so the navigation and the
     /// Settings switches can never disagree about one stored value.
     pub(crate) fn from_snapshot(settings: &BTreeMap<String, String>, node_id: &str) -> Self {
@@ -157,7 +165,10 @@ pub async fn features(
     AuthUser(_user): AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<FeaturesDto>, ApiError> {
-    let settings = state.store.settings_snapshot().await?;
+    // Every client reads this on each home load, so it names its four keys
+    // instead of taking the whole settings table, which grows with the
+    // catalogue. One snapshot keeps the four mutually consistent.
+    let settings = state.store.get_settings(&FeaturesDto::KEYS).await?;
     Ok(Json(FeaturesDto::from_snapshot(&settings, &state.node_id)))
 }
 
