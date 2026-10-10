@@ -449,14 +449,19 @@ pub(crate) struct EncodedExecutable {
 
 #[derive(Default)]
 struct ExecutableCaptureCache {
-    executable: Option<EncodedExecutable>,
+    executables: Vec<EncodedExecutable>,
     #[cfg(test)]
     hashes: u64,
 }
 
-// One configured encoder, one retained attestation. Concurrent recipe captures
-// share the hash; every reuse still checks the exact object identity that the
-// production launch and publication fences require.
+/// Retained attestations, one per media tool path. A VOD start captures the
+/// held-source reporter and then the encoder; with a single slot each capture
+/// evicted the other, so every start re-hashed both binaries under this lock.
+const EXECUTABLE_CAPTURE_SLOTS: usize = 8;
+
+// Concurrent captures of one tool share its hash; every reuse still checks the
+// exact object identity that the production launch and publication fences
+// require.
 static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<ExecutableCaptureCache>> =
     std::sync::OnceLock::new();
 
@@ -496,7 +501,7 @@ impl EncodedExecutable {
         cache: &tokio::sync::Mutex<ExecutableCaptureCache>,
     ) -> Result<Self, String> {
         let mut cache = cache.lock().await;
-        if let Some(captured) = cache.executable.as_ref().filter(|value| value.path == path) {
+        if let Some(captured) = cache.executables.iter().find(|value| value.path == path) {
             let objects = vec![captured.attestation_object()].into();
             if engine_objects_are_current_batch(None, objects).await.0 {
                 return Ok(captured.clone());
@@ -513,7 +518,13 @@ impl EncodedExecutable {
         {
             cache.hashes += 1;
         }
-        cache.executable = Some(captured.clone());
+        cache
+            .executables
+            .retain(|value| value.path != captured.path);
+        if cache.executables.len() >= EXECUTABLE_CAPTURE_SLOTS {
+            cache.executables.remove(0);
+        }
+        cache.executables.push(captured.clone());
         Ok(captured)
     }
 
@@ -5862,6 +5873,29 @@ mod tests {
         assert_eq!(retained.object_version, frozen.object_version);
         assert!(retained.linux_binding.is_some());
         assert!(retained.is_current().await);
+    }
+
+    #[tokio::test]
+    async fn alternating_tool_captures_do_not_rehash_each_other() {
+        let base = crate::test_tempdir().expect("tool capture cache");
+        let encoder = base.path().join("encoder");
+        let reporter = base.path().join("reporter");
+        std::fs::write(&encoder, b"encoder").expect("encoder bytes");
+        std::fs::write(&reporter, b"reporter").expect("reporter bytes");
+        let cache = tokio::sync::Mutex::new(ExecutableCaptureCache::default());
+        for _ in 0..3 {
+            EncodedExecutable::capture_at_with_cache(reporter.clone(), &cache)
+                .await
+                .expect("reporter capture");
+            EncodedExecutable::capture_at_with_cache(encoder.clone(), &cache)
+                .await
+                .expect("encoder capture");
+        }
+        assert_eq!(
+            cache.lock().await.hashes,
+            2,
+            "a VOD start's reporter and encoder captures keep both attestations"
+        );
     }
 
     #[tokio::test]
