@@ -44,6 +44,10 @@ cleared before recovery, so everything was rebuilt from the pushed branch
 - **Combined adversarial review done.** All three major and five minor
   findings are addressed
   ([§44](MACOS-VIDEO-PROCESSING-EVIDENCE.md#44-combined-adversarial-review-and-its-dispositions--2026-10-10)).
+- **Third merge** (`1d3765776`, main #979/#981). The only conflict was the
+  producer-ownership ledger, where both reviewed histories add together.
+  Main changed prepared-output reuse, not decoder selection, so the
+  frozen-candidate hardware evidence still describes the tree.
 
 Remaining work, in order:
 
