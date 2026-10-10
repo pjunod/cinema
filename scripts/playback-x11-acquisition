@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""Bounded diagnostic: software X11 pixels, never a qualification override.
+
+Example (an owned display only; reserve the control strip outside the video):
+  playback-x11-acquisition control --display :99 --at 624,650 --seconds 30 --out NEW_CONTROL
+  playback-x11-acquisition capture --display :99 --video 624,641 --control 624,650 --seconds 30 --out NEW_CAPTURE
+Wrap each invocation in an owned external timeout (e.g. 130 seconds with a
+5-second kill grace): a hung X server can block synchronous Xlib calls.
+Use --campaign explicitly for up to 1800 seconds, with an external timeout
+longer than that bound. --stop-file accepts only a fresh owned marker path.
+Optional --video-map LEFT,TOP,SCALE maps the reference672x64 encoded stripe
+using independent continuous cell centers; --video-alternate-map allows a
+different measured presentation scale in the same acquisition.
+Optional --video-vertical-search searches only translations of the same four
+spaced rows between equal-scale/equal-X maps (maximum256 candidates); every
+valid counter must agree. Original strips and selected observed pixels persist.
+Optional --video-alternate X,Y samples a second calibrated video location in
+the same XGetImage request. Agreeing counters are accepted; conflicting valid
+counters fail the capture, and neither valid remains unknown.
+Receipts and RGB stream incrementally; no sample history is held in memory.
+Run control and capture as independent processes. Run a separate control-off
+baseline with capture's --control omitted; this tool does not automate retries.
+Own-process CPU observations are advisory and UNKNOWN when unavailable. They
+never replace monotonic sampling brackets or excuse a wall-clock capture gap.
+Both receipts use host CLOCK_MONOTONIC nanoseconds. They cannot synchronize a
+browser clock, identify a physical presentation time, or prove audio continuity.
+"""
+import argparse
+import ctypes as c
+import ctypes.util
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import sys
+import time
+
+WIDTH, HEIGHT, READ_WIDTH = 672, 4, 42
+
+
+def stopped(args):
+    return args.stop_file is not None and args.stop_file.exists()
+
+
+def own_process_cpu_ns():
+    """Advisory process CPU only; an unavailable clock never changes wall verdicts."""
+    try:
+        value = time.process_time_ns()
+        return value if type(value) is int and value >= 0 else None
+    except Exception:
+        return None
+
+
+def own_process_cpu_observation(before, reply, complete):
+    valid = all(type(value) is int and value >= 0 for value in (before, reply, complete))
+    valid = valid and before <= reply <= complete
+    return {"status": "measured" if valid else "unknown", "clock": "process_time_ns",
+            "scope": "all threads of this acquisition process only; excludes X server/browser CPU",
+            "read_order": "CPU before request wall; CPU after reply wall; CPU before processing-complete wall",
+            "request_cpu_ns": before, "reply_cpu_ns": reply, "processing_complete_cpu_ns": complete,
+            "acquisition_cpu_ns": reply - before if valid else None,
+            "processing_cpu_ns": complete - reply if valid else None,
+            "advisory_only": True, "wall_sampling_criteria_unchanged": True}
+
+
+class XImage(c.Structure):
+    _fields_ = [("width", c.c_int), ("height", c.c_int), ("xoffset", c.c_int),
+                ("format", c.c_int), ("data", c.c_void_p), ("byte_order", c.c_int),
+                ("bitmap_unit", c.c_int), ("bitmap_bit_order", c.c_int),
+                ("bitmap_pad", c.c_int), ("depth", c.c_int),
+                ("bytes_per_line", c.c_int), ("bits_per_pixel", c.c_int),
+                ("red_mask", c.c_ulong), ("green_mask", c.c_ulong),
+                ("blue_mask", c.c_ulong)]
+
+
+def coord(value):
+    try:
+        pair = tuple(int(part) for part in value.split(","))
+        if len(pair) == 2 and all(0 <= n <= 16384 for n in pair):
+            return pair
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("Expected nonnegative X,Y coordinates <= 16384")
+
+
+def mapped_roi(value):
+    try:
+        values = tuple(float(part) for part in value.split(","))
+        if len(values) == 3 and all(math.isfinite(n) for n in values):
+            px, py, scale = values
+            if 0 <= px <= 16384 and 0 <= py <= 16384 and .125 <= scale <= 4:
+                return values
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("Expected finite LEFT,TOP,SCALE; origin0..16384, scale1/8..4")
+
+
+def roi_sampling(mapping):
+    """Map the reference672x64 stripe into containing device pixels.
+
+    floor selects the pixel containing each continuous cell-center coordinate;
+    no rounded origin/pitch is accumulated. Four interior rows are independent.
+    """
+    px, py, scale = mapping
+    if not all(math.isfinite(n) for n in mapping) or px < 0 or py < 0 or not .125 <= scale <= 4:
+        raise RuntimeError("Invalid calibrated ROI mapping")
+    xs = [math.floor(px + (8 + 16 * cell) * scale) for cell in range(READ_WIDTH)]
+    ys = [math.floor(py + row * scale) for row in (8, 24, 40, 56)]
+    if len(set(xs)) != READ_WIDTH or len(set(ys)) != HEIGHT:
+        raise RuntimeError("Calibrated cell centers alias device pixels")
+    left, top = math.floor(px), math.floor(py)
+    width, height = math.ceil(px + WIDTH * scale) - left, math.ceil(py + 64 * scale) - top
+    if not all(left <= n < left + width for n in xs) or not all(top <= n < top + height for n in ys):
+        raise RuntimeError("Calibrated samples escape stripe bounds")
+    return {"mapping": list(mapping), "rectangle": [left, top, width, height],
+            "sampled_x": xs, "sampled_y": ys, "rounding": "floor continuous coordinate to containing device pixel",
+            "reference_stripe": [672, 64], "reference_sample_y": [8, 24, 40, 56]}
+
+
+def checksum(frame):
+    return ((frame & 255) + ((frame >> 8) & 255) * 31 + (frame >> 16) * 17 + 17) & 255
+
+
+def bits(frame):
+    return [(211 >> n) & 1 for n in range(8)] + [(frame >> n) & 1 for n in range(24)] + [(checksum(frame) >> n) & 1 for n in range(8)]
+
+
+def decode_sums(totals):
+    # Exact equivalent of the existing12-channel average: no new threshold.
+    result = [0 if totals[cell] <= 60 * HEIGHT * 3 else
+              1 if totals[cell] >= 195 * HEIGHT * 3 else None for cell in range(1, 41)]
+    if None in result:
+        return None
+    word = lambda start, length: sum(result[start + n] << n for n in range(length))
+    frame = word(8, 24)
+    return frame if word(0, 8) == 211 and word(32, 8) == checksum(frame) else None
+
+
+def decode(rgb):
+    return decode_sums([sum(rgb[(y * READ_WIDTH + cell) * 3 + channel]
+                           for y in range(HEIGHT) for channel in range(3))
+                        for cell in range(READ_WIDTH)])
+
+
+def vertical_search_plan(mappings):
+    if set(mappings) != {"video", "video_alternate"}:
+        raise RuntimeError("Vertical search requires two calibrated video maps")
+    first, second = mappings["video"], mappings["video_alternate"]
+    offsets = [n - first["sampled_y"][0] for n in first["sampled_y"]]
+    other = [n - second["sampled_y"][0] for n in second["sampled_y"]]
+    if first["mapping"][2] != second["mapping"][2] or first["sampled_x"] != second["sampled_x"] or offsets != other:
+        raise RuntimeError("Vertical search requires equal X columns/scale/spaced-row pattern")
+    low, high = sorted([first["sampled_y"][0], second["sampled_y"][0]])
+    if high - low + 1 > 256:
+        raise RuntimeError("Vertical search exceeds256 translated candidates")
+    return {"sampled_x": first["sampled_x"], "relative_spaced_y": offsets,
+            "first_row_min": low, "first_row_max": high,
+            "candidate_count": high - low + 1,
+            "scope": "Integer translations only between measured first rows; original four spaced offsets preserved"}
+
+
+
+def resolve_video_frames(frames):
+    """Resolve declared pixels only; a conflict is never hidden by picking an ROI."""
+    valid = {name: frame for name, frame in frames.items() if frame is not None}
+    counters = set(valid.values())
+    if len(counters) > 1:
+        return {"status": "conflicting", "frame": None, "valid_rois": list(valid)}
+    if not valid:
+        return {"status": "unknown", "frame": None, "valid_rois": []}
+    return {"status": "agreeing" if len(valid) > 1 else "unambiguous",
+            "frame": next(iter(counters)), "valid_rois": list(valid)}
+
+
+class X11:
+    def __init__(self, display_name):
+        if not sys.platform.startswith("linux"):
+            raise RuntimeError("Linux X11 only")
+        library = ctypes.util.find_library("X11")
+        if not library:
+            raise RuntimeError("libX11 unavailable")
+        self.lib = c.CDLL(library)
+        specs = {
+            "XOpenDisplay": ([c.c_char_p], c.c_void_p),
+            "XDefaultRootWindow": ([c.c_void_p], c.c_ulong),
+            "XDefaultScreen": ([c.c_void_p], c.c_int),
+            "XDefaultDepth": ([c.c_void_p, c.c_int], c.c_int),
+            "XWhitePixel": ([c.c_void_p, c.c_int], c.c_ulong),
+            "XDisplayWidth": ([c.c_void_p, c.c_int], c.c_int),
+            "XDisplayHeight": ([c.c_void_p, c.c_int], c.c_int),
+            "XGetImage": ([c.c_void_p, c.c_ulong, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_ulong, c.c_int], c.POINTER(XImage)),
+            "XDestroyImage": ([c.POINTER(XImage)], c.c_int),
+            "XCreateSimpleWindow": ([c.c_void_p, c.c_ulong, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_uint, c.c_ulong, c.c_ulong], c.c_ulong),
+            "XCreatePixmap": ([c.c_void_p, c.c_ulong, c.c_uint, c.c_uint, c.c_uint], c.c_ulong),
+            "XCreateGC": ([c.c_void_p, c.c_ulong, c.c_ulong, c.c_void_p], c.c_void_p),
+            "XSetForeground": ([c.c_void_p, c.c_void_p, c.c_ulong], c.c_int),
+            "XFillRectangle": ([c.c_void_p, c.c_ulong, c.c_void_p, c.c_int, c.c_int, c.c_uint, c.c_uint], c.c_int),
+            "XCopyArea": ([c.c_void_p, c.c_ulong, c.c_ulong, c.c_void_p, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_int, c.c_int], c.c_int),
+            "XMapRaised": ([c.c_void_p, c.c_ulong], c.c_int),
+            "XChangeWindowAttributes": ([c.c_void_p, c.c_ulong, c.c_ulong, c.c_void_p], c.c_int),
+            "XSync": ([c.c_void_p, c.c_int], c.c_int),
+            "XFreeGC": ([c.c_void_p, c.c_void_p], c.c_int),
+            "XFreePixmap": ([c.c_void_p, c.c_ulong], c.c_int),
+            "XDestroyWindow": ([c.c_void_p, c.c_ulong], c.c_int),
+            "XCloseDisplay": ([c.c_void_p], c.c_int),
+        }
+        for name, (arguments, result) in specs.items():
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = arguments, result
+        self.display = self.lib.XOpenDisplay(display_name.encode())
+        if not self.display:
+            raise RuntimeError("Cannot open requested display")
+        self.root = self.lib.XDefaultRootWindow(self.display)
+        self.screen = self.lib.XDefaultScreen(self.display)
+
+    def inside(self, x, y, width, height):
+        if x + width > self.lib.XDisplayWidth(self.display, self.screen) or y + height > self.lib.XDisplayHeight(self.display, self.screen):
+            raise RuntimeError("Capture/control rectangle is outside the display")
+
+    def close(self):
+        self.lib.XCloseDisplay(self.display)
+
+
+# XSetWindowAttributes has ABI padding between these members. Declare the full
+# prefix through override_redirect instead of guessing its byte offset.
+class WindowAttributes(c.Structure):
+    _fields_ = [("background_pixmap", c.c_ulong), ("background_pixel", c.c_ulong),
+                ("border_pixmap", c.c_ulong), ("border_pixel", c.c_ulong),
+                ("bit_gravity", c.c_int), ("win_gravity", c.c_int),
+                ("backing_store", c.c_int), ("backing_planes", c.c_ulong),
+                ("backing_pixel", c.c_ulong), ("save_under", c.c_int),
+                ("event_mask", c.c_long), ("do_not_propagate_mask", c.c_long),
+                ("override_redirect", c.c_int), ("colormap", c.c_ulong),
+                ("cursor", c.c_ulong)]
+
+
+def paced(deadline):
+    delay = (deadline - time.monotonic_ns()) / 1e9
+    if delay > 0:
+        time.sleep(delay)
+
+
+def control(x, args, emit):
+    px, py = args.at
+    x.inside(px, py, WIDTH, HEIGHT)
+    lib, display = x.lib, x.display
+    window = lib.XCreateSimpleWindow(display, x.root, px, py, WIDTH, HEIGHT, 0, 0, 0)
+    attributes = WindowAttributes(override_redirect=1)
+    lib.XChangeWindowAttributes(display, window, 1 << 9, c.byref(attributes))
+    pixmap = lib.XCreatePixmap(display, window, WIDTH, HEIGHT, lib.XDefaultDepth(display, x.screen))
+    gc = lib.XCreateGC(display, pixmap, 0, None)
+    try:
+        lib.XMapRaised(display, window)
+        lib.XSync(display, 0)
+        start = time.monotonic_ns()
+        end = start + int(args.seconds * 1e9)
+        previous = -1
+        emit({"type": "control_start", "epoch_ns": start, "window": window, "at": args.at, "rate": args.rate})
+        while time.monotonic_ns() < end and not stopped(args):
+            frame = math.floor((time.monotonic_ns() - start) * args.rate / 1e9)
+            if frame <= previous:
+                paced(start + math.ceil((previous + 1) * 1e9 / args.rate))
+                continue
+            lib.XSetForeground(display, gc, 0)
+            lib.XFillRectangle(display, pixmap, gc, 0, 0, WIDTH, HEIGHT)
+            lib.XSetForeground(display, gc, lib.XWhitePixel(display, x.screen))
+            for cell, bit in enumerate(bits(frame)):
+                if bit:
+                    lib.XFillRectangle(display, pixmap, gc, 16 + cell * 16, 0, 16, HEIGHT)
+            # One CopyArea publishes all cells together; its receipt is still
+            # a server-command bracket, not a physical/compositor timestamp.
+            before = time.monotonic_ns()
+            lib.XCopyArea(display, pixmap, window, gc, 0, 0, WIDTH, HEIGHT, 0, 0)
+            lib.XSync(display, 0)
+            after = time.monotonic_ns()
+            emit({"type": "control_publish", "frame": frame, "request_ns": before, "reply_ns": after,
+                  "skipped_schedule_ticks": max(0, frame - previous - 1)})
+            previous = frame
+    finally:
+        lib.XFreeGC(display, gc)
+        lib.XFreePixmap(display, pixmap)
+        lib.XDestroyWindow(display, window)
+        lib.XSync(display, 0)
+
+
+def sample_rgb(image, data, xs, ys):
+    if not all(0 <= n < image.width for n in xs) or not all(0 <= n < image.height for n in ys):
+        raise RuntimeError("Sample exceeds acquired image bounds")
+    if image.bits_per_pixel not in (16, 24, 32) or image.byte_order not in (0, 1):
+        raise RuntimeError("Unsupported XImage layout")
+    bpp = image.bits_per_pixel // 8
+    if image.bytes_per_line < image.width * bpp or len(data) < image.bytes_per_line * image.height:
+        raise RuntimeError("Unsupported XImage stride/data bounds")
+    order = "little" if image.byte_order == 0 else "big"
+    channels = []
+    used = 0
+    for mask in [image.red_mask, image.green_mask, image.blue_mask]:
+        if mask == 0:
+            raise RuntimeError("Unsupported zero RGB mask")
+        if mask >= 1 << image.bits_per_pixel or mask & used:
+            raise RuntimeError("Unsupported overlapping/out-of-pixel RGB mask")
+        used |= mask
+        shift = (mask & -mask).bit_length() - 1
+        scale = mask >> shift
+        if scale & (scale + 1):
+            raise RuntimeError("Unsupported noncontiguous RGB mask")
+        channels.append((mask, shift, scale))
+    rgb = bytearray(len(xs) * len(ys) * 3)
+    # Byte-exact normal8bit channels avoid float/mask work in the measured hot
+    # loop. Generic16bit/non-byte-aligned layouts retain the original rounding.
+    byte_channels = [shift // 8 if order == "little" else bpp - 1 - shift // 8
+                     for _, shift, _ in channels]
+    direct = all(scale == 255 and shift % 8 == 0 for _, shift, scale in channels)
+    for y, sy in enumerate(ys):
+        for cell, sx in enumerate(xs):
+            index = sy * image.bytes_per_line + sx * bpp
+            dest = (y * len(xs) + cell) * 3
+            if direct:
+                for channel, offset in enumerate(byte_channels):
+                    rgb[dest + channel] = data[index + offset]
+            else:
+                pixel = int.from_bytes(data[index:index + bpp], order)
+                for channel, (mask, shift, scale) in enumerate(channels):
+                    rgb[dest + channel] = round(((pixel & mask) >> shift) * 255 / scale)
+    return bytes(rgb)
+
+
+def strip(image, data, offset, sampling=None):
+    ox, oy = offset
+    xs = sampling["sampled_x"] if sampling else [ox + cell * 16 + 8 for cell in range(READ_WIDTH)]
+    ys = sampling["sampled_y"] if sampling else [oy + row for row in range(HEIGHT)]
+    return sample_rgb(image, data, xs, ys)
+
+
+def search_video(image, data, plan, left, top):
+    starts = range(plan["first_row_min"], plan["first_row_max"] + 1)
+    offsets = plan["relative_spaced_y"]
+    ys = sorted({start + delta for start in starts for delta in offsets})
+    grid = sample_rgb(image, data, [n - left for n in plan["sampled_x"]], [n - top for n in ys])
+    rows = {y: grid[n * READ_WIDTH * 3:(n + 1) * READ_WIDTH * 3] for n, y in enumerate(ys)}
+    brightness = {y: [sum(row[cell * 3:cell * 3 + 3]) for cell in range(READ_WIDTH)]
+                  for y, row in rows.items()}
+    outcomes = []
+    chosen = plan["first_row_min"]
+    valid = []
+    for start in starts:
+        # Reuse sampled row sums rather than re-reading/remasking each window.
+        totals = [sum(brightness[start + delta][cell] for delta in offsets) for cell in range(READ_WIDTH)]
+        frame = decode_sums(totals)
+        outcomes.append(frame)
+        if frame is not None:
+            if not valid:
+                chosen = start
+            valid.append((start, frame))
+    rgb = b"".join(rows[chosen + delta] for delta in offsets)
+    resolution = resolve_video_frames({str(y): frame for y, frame in valid})
+    payload = {"candidate_count": len(outcomes), "valid_count": len(valid),
+               "valid_frames": sorted({frame for _, frame in valid}),
+               "chosen_first_row": chosen, "chosen_spaced_rows": [chosen + d for d in offsets],
+               "candidate_outcomes_sha256": hashlib.sha256(b"".join(
+                   (frame if frame is not None else 0xffffffff).to_bytes(4, "little") for frame in outcomes)).hexdigest(),
+               "status": resolution["status"], "frame": resolution["frame"],
+               "acquired_region_sha256": hashlib.sha256(data).hexdigest()}
+    return rgb, payload
+
+
+
+def capture(x, args, emit, output):
+    boxes = {"video": args.video}
+    mappings = {}
+    for name, option in (("video", "video_map"), ("video_alternate", "video_alternate_map")):
+        mapping = getattr(args, option, None)
+        if mapping is not None:
+            mappings[name] = roi_sampling(mapping)
+            boxes[name] = tuple(mappings[name]["rectangle"][:2])
+    if args.video_alternate is not None:
+        boxes["video_alternate"] = args.video_alternate
+    if args.control is not None:
+        boxes["control"] = args.control
+    rectangles = {name: mappings[name]["rectangle"] if name in mappings else [*point, WIDTH, HEIGHT]
+                  for name, point in boxes.items()}
+    if "video_alternate" in rectangles and rectangles["video_alternate"] == rectangles["video"] and mappings.get("video") == mappings.get("video_alternate"):
+        raise RuntimeError("Alternate video strip must use a distinct calibrated mapping")
+    if "control" in rectangles:
+        cx, cy, cw, ch = rectangles["control"]
+        for name, (vx, vy, vw, vh) in rectangles.items():
+            if name != "control" and vx < cx + cw and cx < vx + vw and vy < cy + ch and cy < vy + vh:
+                raise RuntimeError("Control and video strips overlap")
+    left = min(r[0] for r in rectangles.values())
+    top = min(r[1] for r in rectangles.values())
+    width = max(r[0] + r[2] for r in rectangles.values()) - left
+    height = max(r[1] + r[3] for r in rectangles.values()) - top
+    if width * height > 1048576:
+        raise RuntimeError("Bounding rectangle exceeds one million pixels")
+    x.inside(left, top, width, height)
+    search = vertical_search_plan(mappings) if getattr(args, "video_vertical_search", False) else None
+    names = list(boxes) + (["video_search"] if search else [])
+    files = {name: (output / f"{name}.rgb").open("xb") for name in names}
+    hashes = {name: hashlib.sha256() for name in names}
+    start = time.monotonic_ns()
+    end = start + int(args.seconds * 1e9)
+    packet = 0
+    conflicts = 0
+    emit({"type": "capture_start", "epoch_ns": start, "end_ns": end, "bounding_rectangle": [left, top, width, height], "strips": boxes, "calibrated_sampling": mappings, "vertical_search": search})
+    try:
+        while time.monotonic_ns() < end and not stopped(args):
+            cpu_before = own_process_cpu_ns()
+            before = time.monotonic_ns()
+            pointer = x.lib.XGetImage(x.display, x.root, left, top, width, height, c.c_ulong(-1).value, 2)
+            after = time.monotonic_ns()
+            cpu_reply = own_process_cpu_ns()
+            if not pointer:
+                raise RuntimeError("XGetImage failed")
+            try:
+                image = pointer.contents
+                if image.bits_per_pixel not in (16, 24, 32) or image.byte_order not in (0, 1) or image.xoffset != 0:
+                    raise RuntimeError("Unsupported XImage layout")
+                data = c.string_at(image.data, image.bytes_per_line * image.height)
+                row = {"type": "sample", "packet": packet, "request_ns": before, "reply_ns": after,
+                       "acquisition_ms": (after - before) / 1e6, "strips": {}}
+                for name, (px, py) in boxes.items():
+                    sampling = None
+                    if name in mappings:
+                        sampling = {"sampled_x": [n - left for n in mappings[name]["sampled_x"]],
+                                    "sampled_y": [n - top for n in mappings[name]["sampled_y"]]}
+                    rgb = strip(image, data, (px - left, py - top), sampling)
+                    files[name].write(rgb)
+                    hashes[name].update(rgb)
+                    row["strips"][name] = {"frame": decode(rgb), "sha256": hashlib.sha256(rgb).hexdigest(),
+                                           "offset": packet * READ_WIDTH * HEIGHT * 3, "size": len(rgb)}
+                decoded = {name: strip_row["frame"] for name, strip_row in row["strips"].items() if name != "control"}
+                if search:
+                    rgb, details = search_video(image, data, search, left, top)
+                    files["video_search"].write(rgb)
+                    hashes["video_search"].update(rgb)
+                    row["strips"]["video_search"] = {"frame": decode(rgb), "sha256": hashlib.sha256(rgb).hexdigest(),
+                        "offset": packet * READ_WIDTH * HEIGHT * 3, "size": len(rgb)}
+                    row["vertical_search"] = details
+                    # Every valid translated candidate participates, even when
+                    # the deterministic retained first candidate differs.
+                    decoded.update({"video_search_" + str(frame): frame for frame in details["valid_frames"]})
+                row["video_counter"] = resolve_video_frames(decoded)
+                conflicts += row["video_counter"]["status"] == "conflicting"
+                cpu_complete = own_process_cpu_ns()
+                row["processing_complete_ns"] = time.monotonic_ns()
+                row["own_process_cpu"] = own_process_cpu_observation(cpu_before, cpu_reply, cpu_complete)
+                emit(row)
+                packet += 1
+            finally:
+                x.lib.XDestroyImage(pointer)
+            # Absolute schedule, no burst catch-up; skipped sample opportunities
+            # remain visible as request gaps instead of manufactured duplicate PTS.
+            next_tick = math.floor((time.monotonic_ns() - start) * args.rate / 1e9) + 1
+            paced(start + math.ceil(next_tick * 1e9 / args.rate))
+    finally:
+        for file in files.values():
+            file.close()
+        emit({"type": "capture_files", "packets": packet, "strip_width": READ_WIDTH, "strip_height": HEIGHT, "source_strip_width": WIDTH,
+              "sampled_source_x": "8+16*n for n=0..41 (cell centers only)",
+              "format": "RGB24", "video_counter_conflicts": conflicts,
+              "sha256": {name: digest.hexdigest() for name, digest in hashes.items()}})
+    if conflicts:
+        raise RuntimeError(f"Conflicting valid video counters in {conflicts} acquired samples")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for command in ("capture", "control"):
+        sub = commands.add_parser(command)
+        sub.add_argument("--display", required=True, help="Explicit owned X11 display; never inferred")
+        sub.add_argument("--out", required=True, type=Path, help="New output directory; overwrite refused")
+        sub.add_argument("--seconds", type=float, default=30)
+        sub.add_argument("--campaign", action="store_true", help="Explicit long campaign, maximum 1800s; default remains 120s")
+        sub.add_argument("--stop-file", type=Path, help="Fresh owned marker; stop gracefully when created, retaining every sample/checksum")
+        sub.add_argument("--rate", type=float, default=120 if command == "capture" else 24)
+        if command == "control":
+            sub.add_argument("--at", required=True, type=coord)
+        else:
+            primary = sub.add_mutually_exclusive_group(required=True)
+            primary.add_argument("--video", type=coord)
+            primary.add_argument("--video-map", type=mapped_roi, help="Measured stripe LEFT,TOP,SCALE; reference672x64 cell-center sampling")
+            alternate = sub.add_mutually_exclusive_group()
+            alternate.add_argument("--video-alternate-map", type=mapped_roi, help="Second independently calibrated reference stripe mapping")
+            alternate.add_argument("--video-alternate", type=coord, help="Second calibrated video ROI in the same synchronous acquisition; valid counter conflicts fail")
+            sub.add_argument("--video-vertical-search", action="store_true", help="Translate the same four spaced sample rows between equal-scale maps; all valid counters must agree")
+            sub.add_argument("--control", type=coord)
+    args = parser.parse_args()
+    maximum_seconds = 1800 if args.campaign else 120
+    if args.stop_file is not None and args.stop_file.exists():
+        parser.error("Stop marker already exists; use a fresh owned path")
+    if not math.isfinite(args.seconds) or not 0 < args.seconds <= maximum_seconds or not math.isfinite(args.rate) or not 1 <= args.rate <= (240 if args.command == "capture" else 120):
+        parser.error(f"Duration must be (0,{maximum_seconds}] seconds; rate 1..240 capture or 1..120 control")
+    args.out.mkdir(parents=True, exist_ok=False)
+    with (args.out / "receipt.jsonl").open("x") as receipt:
+        def emit(row):
+            receipt.write(json.dumps(row, separators=(",", ":")) + "\n")
+            receipt.flush()
+        emit({"type": "metadata", "schema_version": 1, "pid": os.getpid(), "command": args.command,
+              "display": args.display, "seconds": args.seconds, "rate": args.rate,
+              "campaign": args.campaign, "stop_file": str(args.stop_file) if args.stop_file else None,
+              "storage": "JSONL and RGB stream incrementally; no sample history retained in memory",
+              "clock": "CLOCK_MONOTONIC", "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "scope": "software X11 acquisition diagnostic; no qualification verdict or physical/audio proof",
+              "limitations": ["Image state falls somewhere within request/reply interval, not at midpoint.",
+                              "XGetImage root pixels may differ from browser/compositor/physical display state.",
+                              "Control draws consume X11 resources; compare a separate control-off baseline.",
+                              "Processing overhead and missed sample deadlines are preserved; no threshold waiver."]})
+        x = None
+        try:
+            x = X11(args.display)
+            control(x, args, emit) if args.command == "control" else capture(x, args, emit, args.out)
+            emit({"type": "end", "status": "completed", "completion_cause": "stop_file" if stopped(args) else "deadline", "at_ns": time.monotonic_ns()})
+        except BaseException as error:
+            emit({"type": "end", "status": "failed", "error": str(error), "at_ns": time.monotonic_ns()})
+            raise
+        finally:
+            if x:
+                x.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -315,10 +315,17 @@ async fn captioned_fixture_with_scan(
     };
     let duration = if interlaced { "10" } else { "5" };
     let mut generate = tokio::process::Command::new(&system.ffmpeg);
+    // Synthetic fixture production is background work, not the live graph
+    // whose caption preservation is being audited. Bound its filter and
+    // encoder pools rather than letting FFmpeg size them from every host CPU.
     generate.args([
         "-hide_banner",
         "-loglevel",
         "error",
+        "-filter_threads",
+        "1",
+        "-filter_complex_threads",
+        "1",
         "-f",
         "lavfi",
         "-i",
@@ -341,6 +348,8 @@ async fn captioned_fixture_with_scan(
     generate.args([
         "-c:v",
         "mpeg2video",
+        "-threads:v",
+        "1",
         "-b:v",
         "6M",
         "-bf",
@@ -362,6 +371,12 @@ async fn captioned_fixture_with_scan(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-filter_threads",
+        "1",
+        "-filter_complex_threads",
+        "1",
+        "-threads",
+        "1",
         "-fflags",
         "+genpts",
         "-r",
@@ -734,7 +749,10 @@ async fn run_live_graph(
         system.encoders.forced_idr.qsv = true;
         system.encoders.forced_idr.nvenc = true;
     }
-    let plan = LiveTvTranscodePlan::new(&system, delivery, case.encoder, None)
+    // A boot audit has no viewer admission from which to inherit an encoder
+    // budget. Exercise the ordinary plan with a finite background budget,
+    // rather than letting software encoding allocate a pool for every CPU.
+    let plan = LiveTvTranscodePlan::new(&system, delivery, case.encoder, Some(1))
         .expect("live transcode plan");
     let output = root.path().join("live");
     tokio::fs::create_dir_all(&output)

@@ -709,6 +709,65 @@ test("device-run terminates only its owned PID before clean production restore a
   });
 });
 
+test("device-run isolated lab skips absent production app and retains owned cleanup and lease release", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.options.restore_policy = "isolated-lab";
+    fixture.state.rows.delete(10);
+    fixture.dependencies.deviceCommand = async (args) => {
+      const reply = await fixture.command(args);
+      if (args[1] === "info" && args[2] === "apps") {
+        reply.result.apps = reply.result.apps.filter((app) => app.bundleIdentifier !== "tv.plurx.app");
+      }
+      return reply;
+    };
+    fixture.dependencies.restoreDevice = async () => { throw new Error("production restore must not be requested"); };
+    fixture.dependencies.waitForAcceptance = async () => {
+      const receipt = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(receipt.restore_policy, "isolated-lab", "chosen policy is durable before observation");
+      assert.equal(receipt.owned_process.processIdentifier, 77);
+      assert.equal((await deviceLeases(fixture)).length, 1, "non-restoring run still owns a durable lease");
+      return { reason: "test-complete" };
+    };
+    const result = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    const launches = fixture.state.calls.filter((args) => args[2] === "launch");
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0][launches[0].indexOf("--") + 1], "tv.plurx.diagnostic");
+    assert.deepEqual(fixture.state.calls.filter((args) => args[2] === "terminate"), [
+      ["device", "process", "terminate", "--device", fixture.state.canonical, "--pid", "77"],
+    ]);
+    assert.equal(fixture.state.rows.has(77), false);
+    assert.equal(fixture.state.closed, true);
+    assert.equal(result.cleanup.owned_process_absent, true);
+    assert.equal(result.cleanup.status, "verified-absent");
+    assert.equal(result.cleanup.production_restored, false);
+    assert.equal(result.cleanup.production_restore_skipped, "explicit-isolated-lab-policy");
+    assert.equal(result.production_executable_scope, undefined);
+    assert.equal(result.verdict, "passed");
+    assert.deepEqual(await deviceLeases(fixture), []);
+    const durable = JSON.parse(await fsp.readFile(fixture.options.json));
+    assert.equal(durable.restore_policy, "isolated-lab");
+    assert.equal(durable.cleanup.owned_process_absent, true);
+    assert.equal(durable.cleanup.production_restored, false);
+  });
+});
+
+test("device-run isolated lab requires separate QA bundle and explicit known restore policy", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    for (const options of [
+      { ...fixture.options, restore_policy: "unknown" },
+      { ...fixture.options, restore_policy: true },
+      { ...fixture.options, restore_policy: "isolated-lab", bundle_id: undefined },
+      { ...fixture.options, restore_policy: "isolated-lab", bundle_id: "tv.plurx.app" },
+    ]) {
+      await assert.rejects(lab.deviceRunCommand(options, fixture.dependencies), /restore-policy/);
+    }
+    assert.equal(fixture.state.calls.length, 0, "invalid policy fails before device operations");
+    assert.equal(fixture.state.closed, undefined);
+  });
+});
+
 test("device-run awaits injected launch restore and shaper operations with explicit manual height", async () => {
   await withTempDir(async (directory) => {
     const fixture = deviceRunFixture(directory);

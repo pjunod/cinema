@@ -1773,6 +1773,54 @@ pub(crate) async fn local_quality_catalog(
     }
 }
 
+/// Reuse the ordinary eligible-source catalog rather than deriving ownership
+/// from a retained artifact. Missing current authority is a conservative cache
+/// miss; the reserved preparation may still produce normally.
+pub(crate) async fn prepared_vod_owner(
+    state: &AppState,
+    remote: &crate::media_sessions::RemoteStartRequest,
+    deadline: tokio::time::Instant,
+) -> Option<WorkerQualityCandidate> {
+    let (Some(id), Some(catalog)) = (remote.candidate_id, remote.candidate_catalog.as_ref()) else {
+        return None;
+    };
+    let request = &remote.request;
+    let mut query = QualityCatalogRequest {
+        file_id: request.file_id,
+        source_size: remote.source_size,
+        source_mtime: remote.source_mtime,
+        caps: catalog.caps.clone(),
+        audio_index: request.audio_index,
+        audio_offset_ms: request.audio_offset_ms,
+        audio_claim: request.audio_claim.clone(),
+        audio_delivery: request.audio_delivery.clone(),
+        subtitle_burn: request.subtitle_burn,
+        presentation: request.presentation,
+        copy_contract: match request.kind {
+            crate::transcode::SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
+            crate::transcode::SessionKind::Transcode { .. } => None,
+        },
+    };
+    if let Some(decoder) = remote.decoder_caps.as_ref() {
+        query.caps.video = decoder.device_caps().video;
+    }
+    let result = local_quality_catalog(state, &query, deadline, Some(&catalog.binding)).await;
+    if result.complete && !result.authority_refused {
+        return result.candidates.into_iter().find(|entry| {
+            entry.node_id == state.node_id
+                && entry.candidate.id == id
+                && entry.dispatch_supported
+                && !entry.partial
+                && entry.candidate.decoder_compatible
+        });
+    }
+    None
+}
+
 pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -> MediaOffer {
     let base = || MediaOffer {
         node_id: state.node_id.clone(),

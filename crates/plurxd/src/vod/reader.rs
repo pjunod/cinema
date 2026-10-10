@@ -25,8 +25,8 @@ pub(super) struct Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
-    /// Parent authority or a cold controlled child retains control identity,
-    /// but creates neither background production nor an eviction window.
+    /// A parent authority, cold controlled child or verified retained-output
+    /// attachment keeps control identity without producing or an eviction window.
     pub(super) authority_only: bool,
     /// Current playback anchor, owned by accepted control once available.
     /// Before control arrives, successful media commits are the fallback.

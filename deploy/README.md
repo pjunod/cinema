@@ -694,6 +694,9 @@ Do not replace the exact path with `/mnt` or another broad media root.
 
 ## Run as a service — launchd (macOS)
 
+Setting up a Mac from scratch? Follow the step-by-step
+[macOS install guide](MACOS.md); this section is the reference behind it.
+
 Runs plurxd as a **LaunchAgent** in your login session — start-at-login, restart
 on crash. A user agent rather than a boot-time system daemon on purpose:
 VideoToolbox hardware transcoding needs a logged-in GUI session, which a daemon

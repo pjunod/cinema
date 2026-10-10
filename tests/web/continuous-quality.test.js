@@ -195,6 +195,7 @@ test('attached quality preparation follows a newer cold seek without reviving a 
    location:{href:'http://localhost/'},CONTROL_CLIENT_ID:uuid(2),newRequestId:()=>uuid(9),
    crypto:{getRandomValues:bytes=>{bytes.fill(0);bytes[15]=identity++;return bytes;}},performance:{now:()=>0},mock,
    Hls:{Events:{MANIFEST_PARSED:'manifest',BUFFER_CREATED:'buffers',MEDIA_DETACHED:'detach'}}});
+  vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-media.js','utf8'),scope);
   vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),scope);
   vm.runInContext('continuousQualityProtocol=()=>mock;',scope);
   const player={},attachment={current:()=>true},media={currentTime:0,seeking:false};
