@@ -762,6 +762,22 @@ fn graph_refusal(case: GraphCase<'_>, stage: &str, reason: &str) -> Value {
            "stage": stage, "reason": reason})
 }
 
+/// A failed control refuses only its own candidate graph, so later candidates
+/// (a VA-API pair after a software pair) are still qualified and the report
+/// keeps every reason. Cancellation, the shared deadline, a changed
+/// implementation and an invalid corpus end the whole generation.
+#[cfg(target_os = "linux")]
+fn candidate_refusal_is_fatal(reason: &str) -> bool {
+    matches!(
+        reason,
+        "cancelled"
+            | "probe_deadline"
+            | "implementation_changed"
+            | "invalid_embedded_corpus"
+            | "cache_unavailable"
+    )
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 struct GraphCase<'a> {
@@ -1426,110 +1442,121 @@ async fn qualify_generation(
             graphs.push(graph_refusal(case, "validation", reason));
             continue;
         }
-        // Effective metadata loss must stop this exact decoder/renderer graph;
-        // it cannot skip a failed AU and publish generic PQ output instead.
-        let negative = GraphCase {
-            bytes: UHD_MEDIA[1].1,
-            negative: true,
-            ..case
-        };
-        let rejected = run_graph(
-            &package,
-            &media,
-            negative,
-            &device,
-            &environment,
-            deadline,
-            cancel,
-        )
-        .await?;
-        let rejected_output = rejected.output.map_err(|_| "negative_control_failed")?;
-        crate::macos_video::p5::observe_negative(
-            rejected.status,
-            &rejected_output.stdout,
-            &rejected_output.stderr,
-            10,
-        )
-        .map_err(|_| "negative_control_failed")?;
-        observe_frozen_loader_paths(&rejected_output.stderr, &initialized, false)?;
-        if !package.producer.is_current().await {
-            return Err("implementation_changed");
-        }
-        let controls: Value = serde_json::from_slice(crate::macos_video::p5::MANIFEST)
-            .map_err(|_| "invalid_embedded_corpus")?;
-        for (control, (id, bytes)) in controls["cases"]
-            .as_array()
-            .ok_or("invalid_embedded_corpus")?
-            .iter()
-            .zip(crate::macos_video::p5::MEDIA)
-        {
-            if control["id"] != *id
-                || control["sha256"] != hex::encode(Sha256::digest(bytes))
-                || control["byte_length"].as_u64() != Some(bytes.len() as u64)
-            {
-                return Err("invalid_embedded_corpus");
-            }
-            let negative = !control["negative_max_frames"].is_null();
-            let tiny = GraphCase {
-                bytes,
-                uhd24: false,
-                negative,
-                seek_seconds: control["seek_seconds"]
-                    .as_u64()
-                    .ok_or("invalid_embedded_corpus")?
-                    .try_into()
-                    .map_err(|_| "invalid_embedded_corpus")?,
+        let controls: Result<(), &'static str> = async {
+            // Effective metadata loss must stop this exact decoder/renderer graph;
+            // it cannot skip a failed AU and publish generic PQ output instead.
+            let negative = GraphCase {
+                bytes: UHD_MEDIA[1].1,
+                negative: true,
                 ..case
             };
-            if !package.producer.is_current().await {
-                return Err("implementation_changed");
-            }
-            let outcome = run_graph(
+            let rejected = run_graph(
                 &package,
                 &media,
-                tiny,
+                negative,
                 &device,
                 &environment,
                 deadline,
                 cancel,
             )
             .await?;
-            let output = outcome.output.map_err(|_| "control_failed")?;
-            // Control graphs may initialize fewer objects than the full
-            // encoder graph, but may never introduce an uncaptured object.
-            observe_frozen_loader_paths(&output.stderr, &initialized, false)?;
-            if negative {
-                let maximum = control["negative_max_frames"]
-                    .as_u64()
-                    .ok_or("invalid_embedded_corpus")?
-                    .try_into()
-                    .map_err(|_| "invalid_embedded_corpus")?;
-                crate::macos_video::p5::observe_negative(
-                    outcome.status,
-                    &output.stdout,
-                    &output.stderr,
-                    maximum,
-                )
-                .map_err(|_| "negative_control_failed")?;
-            } else {
-                if !outcome.status.success() {
-                    return Err("positive_control_failed");
+            let rejected_output = rejected.output.map_err(|_| "negative_control_failed")?;
+            crate::macos_video::p5::observe_negative(
+                rejected.status,
+                &rejected_output.stdout,
+                &rejected_output.stderr,
+                10,
+            )
+            .map_err(|_| "negative_control_failed")?;
+            observe_frozen_loader_paths(&rejected_output.stderr, &initialized, false)?;
+            if !package.producer.is_current().await {
+                return Err("implementation_changed");
+            }
+            let controls: Value = serde_json::from_slice(crate::macos_video::p5::MANIFEST)
+                .map_err(|_| "invalid_embedded_corpus")?;
+            for (control, (id, bytes)) in controls["cases"]
+                .as_array()
+                .ok_or("invalid_embedded_corpus")?
+                .iter()
+                .zip(crate::macos_video::p5::MEDIA)
+            {
+                if control["id"] != *id
+                    || control["sha256"] != hex::encode(Sha256::digest(bytes))
+                    || control["byte_length"].as_u64() != Some(bytes.len() as u64)
+                {
+                    return Err("invalid_embedded_corpus");
                 }
-                observe_selected_frames(&output.stderr, tiny)?;
-                inspect_output(
+                let negative = !control["negative_max_frames"].is_null();
+                let tiny = GraphCase {
+                    bytes,
+                    uhd24: false,
+                    negative,
+                    seek_seconds: control["seek_seconds"]
+                        .as_u64()
+                        .ok_or("invalid_embedded_corpus")?
+                        .try_into()
+                        .map_err(|_| "invalid_embedded_corpus")?,
+                    ..case
+                };
+                if !package.producer.is_current().await {
+                    return Err("implementation_changed");
+                }
+                let outcome = run_graph(
                     &package,
                     &media,
-                    &output.stdout,
                     tiny,
+                    &device,
                     &environment,
                     deadline,
                     cancel,
                 )
                 .await?;
+                let output = outcome.output.map_err(|_| "control_failed")?;
+                // Control graphs may initialize fewer objects than the full
+                // encoder graph, but may never introduce an uncaptured object.
+                observe_frozen_loader_paths(&output.stderr, &initialized, false)?;
+                if negative {
+                    let maximum = control["negative_max_frames"]
+                        .as_u64()
+                        .ok_or("invalid_embedded_corpus")?
+                        .try_into()
+                        .map_err(|_| "invalid_embedded_corpus")?;
+                    crate::macos_video::p5::observe_negative(
+                        outcome.status,
+                        &output.stdout,
+                        &output.stderr,
+                        maximum,
+                    )
+                    .map_err(|_| "negative_control_failed")?;
+                } else {
+                    if !outcome.status.success() {
+                        return Err("positive_control_failed");
+                    }
+                    observe_selected_frames(&output.stderr, tiny)?;
+                    inspect_output(
+                        &package,
+                        &media,
+                        &output.stdout,
+                        tiny,
+                        &environment,
+                        deadline,
+                        cancel,
+                    )
+                    .await?;
+                }
+                if !package.producer.is_current().await {
+                    return Err("implementation_changed");
+                }
             }
-            if !package.producer.is_current().await {
-                return Err("implementation_changed");
+            Ok(())
+        }
+        .await;
+        if let Err(reason) = controls {
+            if candidate_refusal_is_fatal(reason) {
+                return Err(reason);
             }
+            graphs.push(graph_refusal(case, "controls", reason));
+            continue;
         }
         hardware_accepted |= case.decoder == DecodeBackend::Vaapi;
         observations.push(
@@ -1579,6 +1606,34 @@ mod tests {
             "showinfo records stay"
         );
         assert!(!GRAPH_GLOBAL_ARGS.contains(&"-stats"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_control_refuses_its_candidate_but_infrastructure_ends_the_generation() {
+        for reason in [
+            "negative_control_failed",
+            "positive_control_failed",
+            "control_failed",
+            "selected_metadata_failed",
+            "opaque_hardware_failed",
+            "output_contract_failed",
+            "output_colors_failed",
+            "output_probe_failed",
+            "graph_failed",
+            "loaded_closure_changed",
+        ] {
+            assert!(!candidate_refusal_is_fatal(reason), "{reason}");
+        }
+        for reason in [
+            "cancelled",
+            "probe_deadline",
+            "implementation_changed",
+            "invalid_embedded_corpus",
+            "cache_unavailable",
+        ] {
+            assert!(candidate_refusal_is_fatal(reason), "{reason}");
+        }
     }
 
     #[cfg(target_os = "linux")]
