@@ -1565,6 +1565,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/analysis-node-names.test.js
 	@node --test tests/web/analysis-reconciliation.test.js
 	@node tests/web/settings-sections.test.js
+	# HDR10-E appears only for an accepted current-generation processing report.
+	@node --test tests/web/dv-processing-badge.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js

@@ -208,7 +208,13 @@ class ReleasePublicationContractCase(unittest.TestCase):
             "/usr/local/bin/plurx-cluster-check",
             generated,
         )
-        self.assertNotIn("FROM rust:", generated)
+        # The runtime copies its private DV processing bundle from the stages
+        # that build it, so those stay; the daemon's Rust build stage and the
+        # bundle's own check stage do not.
+        self.assertIn("AS dv-processing-dependencies", generated)
+        self.assertIn("AS dv-processing-helpers", generated)
+        self.assertNotIn("AS dv-processing-helper-check", generated)
+        self.assertNotRegex(generated, r"(?m)^FROM \S+ AS build$")
         self.assertNotIn("FROM node:", generated)
         self.assertNotIn("FROM runtime-assets AS ci", generated)
         self.assertNotIn("cargo build", generated)
@@ -253,6 +259,70 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         )
         self.assertNotIn("plurx-cluster-check", generated)
 
+    def test_runtime_is_found_by_name_beside_other_bookworm_stages(self):
+        # The DV processing bundle added a Bookworm check stage and helper
+        # stages the runtime copies from. Counting Bookworm bases then found
+        # two runtimes and refused every packaging step, and a renderer that
+        # dropped the helper stages would emit a COPY --from naming nothing.
+        source = """# syntax=docker/dockerfile:1
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release
+# Helper toolchain.
+FROM rust:1-bookworm AS helper-dependencies
+RUN make dependencies
+FROM helper-dependencies AS helpers
+COPY tools/helpers /inputs
+RUN make bundle
+# Loader check, never shipped.
+FROM debian:bookworm-slim AS helper-check
+COPY --from=helpers /opt/bundle /opt/bundle
+FROM debian:bookworm-slim AS runtime-assets
+COPY --from=helpers /opt/bundle /usr/lib/bundle
+FROM node:22-bookworm-slim AS ci-node
+FROM runtime-assets AS ci
+COPY --from=ci-node /usr/local/bin/node /usr/local/bin/node
+FROM runtime-assets AS runtime
+COPY --from=build /plurxd /usr/local/bin/plurxd
+"""
+
+        self.assertEqual(required_binaries(source), ("plurxd",))
+        generated = render(source)
+        self.assertIn("# Helper toolchain.\nFROM rust:1-bookworm AS helper-dependencies", generated)
+        self.assertIn("FROM helper-dependencies AS helpers", generated)
+        self.assertIn("COPY --from=helpers /opt/bundle /usr/lib/bundle", generated)
+        self.assertIn("COPY --chmod=0755 release-bin/plurxd /usr/local/bin/plurxd", generated)
+        for dropped in ("AS helper-check", "Loader check", "AS ci", "cargo build", "COPY . ."):
+            self.assertNotIn(dropped, generated)
+        self.assertNotRegex(generated, r"(?m)^FROM \\S+ AS build$")
+
+        exporter = render_binary_export(source)
+        self.assertTrue(exporter.startswith("# syntax=docker/dockerfile:1\nFROM rust:1-bookworm AS build"))
+        self.assertNotIn("helper", exporter.lower())
+        self.assertNotIn("bookworm-slim", exporter)
+
+        published = render(source, "forge.lan:3000/noirr/plurx-media-runtime@sha256:" + "b" * 64)
+        self.assertNotIn("helper", published.lower())
+
+        refusals = {
+            "neither a stage the packaging output keeps": source.replace(
+                "COPY --from=helpers /opt/bundle /usr/lib", "COPY --from=missing /opt/bundle /usr/lib"),
+            "neither a stage the packaging output keeps nor": source.replace(
+                "COPY --from=build /plurxd", "COPY --from=ci-node /usr/local/bin/node /opt/node\nCOPY --from=build /plurxd"),
+            "must not depend on the Rust build stage": source.replace(
+                "RUN make bundle", "COPY --from=build /plurxd /opt/bundle"),
+            "must not depend on the Rust build stage ": source.replace(
+                "COPY --from=helpers /opt/bundle /usr/lib/bundle",
+                "RUN --mount=type=bind,from=build,source=/plurxd,target=/x true"),
+            "helpers copies the daemon's sources": source.replace(
+                "COPY tools/helpers /inputs", "COPY ./crates /inputs"),
+            "one runtime-assets stage": source.replace("AS helper-check", "AS runtime-assets"),
+        }
+        for message, refused in refusals.items():
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message.strip()):
+                render(refused)
+
     def test_generator_derives_current_two_binary_runtime(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
@@ -264,6 +334,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         for name in BINARIES:
             self.assertIn(f"COPY --from=build /{name} /{name}", exporter)
         self.assertNotIn("FROM debian:bookworm-slim", exporter)
+        self.assertNotIn("dv-processing", exporter)
 
     def test_trusted_helper_can_inspect_real_isolated_tag_checkouts(self):
         tagged_contracts = {

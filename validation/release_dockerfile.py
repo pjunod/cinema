@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import argparse
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 
 RUNTIME_STAGE = "FROM debian:bookworm-slim"
+RUNTIME_ASSETS = "runtime-assets"
 RUNTIME_FINAL_STAGE = "FROM runtime-assets AS runtime"
+BUILD_STAGE = "build"
+_FROM = re.compile(
+    r"(?im)^[ \t]*FROM[ \t]+(?:--platform=\S+[ \t]+)?(\S+)(?:[ \t]+AS[ \t]+(\S+))?[ \t]*$"
+)
+_COPY_FROM = re.compile(r"--from=([^\s,]+)")
+_MOUNT = re.compile(r"--mount=(\S+)")
+_LEAD = re.compile(r"(?:^[ \t]*(?:#[^\n]*)?\n)*\Z", re.M)
+_SOURCE_COPY = re.compile(r"(?im)^[ \t]*(?:COPY|ADD)[ \t]+(.+)$")
+# The daemon's own sources. A retained runtime-asset stage that can see them
+# could compile the daemon, which packaging must take only as verified binaries.
+_DAEMON_SOURCES = ("Cargo.toml", "Cargo.lock", "crates")
 IMMUTABLE_IMAGE = re.compile(
     r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}$"
 )
@@ -33,10 +46,147 @@ SUPPORTED_DEBUG_COPIES = tuple(
 )
 
 
-def _runtime(source: str) -> str:
-    if source.count(RUNTIME_STAGE) != 1:
+@dataclass(frozen=True)
+class _Stage:
+    lead: int  # Start of the comment block written above the FROM line.
+    start: int  # The FROM line itself.
+    end: int  # Where the next stage's comment block begins.
+    base: str
+    name: str | None
+
+
+def _stages(source: str) -> tuple[_Stage, ...]:
+    """Every FROM stage with its source span, in Dockerfile order.
+
+    A stage's comments sit above its FROM line, so each span starts at that
+    comment block and ends where the next stage's block begins.
+    """
+
+    matches = list(_FROM.finditer(source))
+    leads = []
+    for index, match in enumerate(matches):
+        floor = matches[index - 1].end() if index else 0
+        block = _LEAD.search(source, floor, match.start())
+        leads.append(block.start() if block is not None and index else match.start())
+    return tuple(
+        _Stage(
+            leads[index],
+            match.start(),
+            leads[index + 1] if index + 1 < len(matches) else len(source),
+            match.group(1),
+            match.group(2),
+        )
+        for index, match in enumerate(matches)
+    )
+
+
+def _copy_sources(text: str) -> list[str]:
+    """Stage or image names that `text` copies or mounts from."""
+
+    names = _COPY_FROM.findall(text)
+    for mount in _MOUNT.findall(text):
+        names += [
+            field[len("from="):] for field in mount.split(",") if field.startswith("from=")
+        ]
+    return names
+
+
+def _sees_daemon_sources(text: str) -> bool:
+    for line in _SOURCE_COPY.findall(text):
+        arguments = [part for part in line.split() if not part.startswith("--")]
+        if "--from=" in line or len(arguments) < 2:
+            continue
+        for argument in arguments[:-1]:
+            path = argument.removeprefix("./").rstrip("/")
+            if path in ("", ".") or path.split("/")[0] in _DAEMON_SOURCES:
+                return True
+    return False
+
+
+def _runtime_start(source: str) -> int:
+    """Locate the shipped runtime by its stage name, not by its base image.
+
+    Stages that build or check private runtime assets may share the Bookworm
+    base, so a count of Bookworm bases cannot identify the runtime. Tags that
+    predate the `runtime-assets` name had exactly one Bookworm stage, and that
+    stage is still how they are recognized.
+    """
+
+    stages = _stages(source)
+    named = [stage for stage in stages if stage.name == RUNTIME_ASSETS]
+    if len(named) > 1:
+        raise ValueError("tagged Dockerfile must contain one runtime-assets stage")
+    if named:
+        if not named[0].base.startswith(RUNTIME_STAGE[len("FROM "):]):
+            raise ValueError("tagged runtime-assets stage must use the Bookworm runtime base")
+        return named[0].start
+    bookworm = [
+        stage for stage in stages
+        if source[stage.start:].startswith(RUNTIME_STAGE)
+    ]
+    if len(bookworm) != 1:
         raise ValueError("tagged Dockerfile must contain one Bookworm runtime stage")
-    runtime = RUNTIME_STAGE + source.split(RUNTIME_STAGE, 1)[1]
+    return bookworm[0].start
+
+
+def _references(text: str) -> list[str]:
+    """Stage or image names that `text` copies from or builds upon."""
+
+    return _copy_sources(text) + [stage.base for stage in _stages(text)]
+
+
+def _stage_closure(
+    source: str, kept: str, roots: list[str], *, include_build: bool
+) -> str:
+    """Return the pre-runtime stages reachable from `roots`, in source order.
+
+    Packaging keeps a stage only when retained text names it. Verified binaries
+    replace the Rust `build` stage, so rendering may never reach it, and a
+    retained stage may not see the daemon's sources; the binary export starts
+    from `build` instead. A name that is neither a stage written into the
+    output nor a pinned image is an unbuildable copy, and is refused rather
+    than written into the output.
+    """
+
+    runtime_start = _runtime_start(source)
+    stages = _stages(source)
+    before = {
+        stage.name: stage
+        for stage in stages
+        if stage.name is not None and stage.start < runtime_start
+    }
+    emitted = {stage.name for stage in _stages(kept) if stage.name is not None}
+    selected: set[str] = set()
+    pending = list(roots)
+    while pending:
+        name = pending.pop()
+        if name in selected or name in emitted or name == "scratch":
+            continue
+        if name not in before and any(mark in name for mark in ":@"):
+            continue  # A pinned image, not a stage of this Dockerfile.
+        if name not in before:
+            raise ValueError(
+                f"tagged Dockerfile copies from {name}, which is neither a stage "
+                "the packaging output keeps nor a pinned image"
+            )
+        if name == BUILD_STAGE and not include_build:
+            raise ValueError("runtime assets must not depend on the Rust build stage")
+        stage = before[name]
+        body = source[stage.start:stage.end]
+        if not include_build and _sees_daemon_sources(body):
+            raise ValueError(f"runtime asset stage {name} copies the daemon's sources")
+        selected.add(name)
+        pending.append(stage.base)
+        pending.extend(_copy_sources(body))
+    return "".join(
+        source[stage.lead:stage.end]
+        for stage in stages
+        if stage.name in selected and stage.start < runtime_start
+    )
+
+
+def _runtime(source: str) -> str:
+    runtime = source[_runtime_start(source):]
     final_stage = "FROM runtime-assets AS runtime"
     if final_stage not in runtime:
         return runtime  # Historical one-stage release Dockerfiles.
@@ -123,14 +273,21 @@ def render(source: str, runtime_image: str | None = None, linux_dolby_package: b
     for name, source_copy, artifact_copy in SUPPORTED_DEBUG_COPIES:
         if name in debug:
             runtime = runtime.replace(source_copy, artifact_copy)
+    # A runtime that copies prebuilt private assets keeps the stages producing
+    # them; the published runtime image of a digest-bound release already
+    # contains them, so that form keeps none.
+    dependencies = _stage_closure(source, runtime, _references(runtime), include_build=False)
     generated = (
         "# syntax=docker/dockerfile:1\n\n"
         "# Generated from the tagged runtime stage by "
         "validation.release_dockerfile.\n"
+        + dependencies
         + runtime
     )
-    forbidden = ("FROM rust:", "cargo build", "COPY --from=build")
+    forbidden = ("cargo build", "COPY --from=build")
     found = [token for token in forbidden if token in generated]
+    if any(stage.name == BUILD_STAGE for stage in _stages(generated)):
+        found.append(f"AS {BUILD_STAGE}")
     if found:
         raise ValueError(f"generated packaging Dockerfile retained build tokens: {found}")
     return generated
@@ -141,9 +298,16 @@ def render_binary_export(source: str) -> str:
 
     binaries = required_binaries(source)
     debug = required_debug_binaries(source)
-    build_stage = source.split(RUNTIME_STAGE, 1)[0].rstrip()
-    if " AS build" not in build_stage:
+    runtime_start = _runtime_start(source)
+    stages = _stages(source)
+    if not any(stage.name == BUILD_STAGE and stage.start < runtime_start for stage in stages):
         raise ValueError("tagged Dockerfile must name its Rust stage build")
+    # The export compiles the daemon binaries and nothing else: the stage
+    # named build and whatever it derives from, never the runtime's assets.
+    preamble = source[:stages[0].lead]
+    build_stage = (
+        preamble + _stage_closure(source, "", [BUILD_STAGE], include_build=True)
+    ).rstrip()
     if "ARG PLURX_BUILD_SHA" not in build_stage:
         marker = "WORKDIR /src\n"
         if build_stage.count(marker) != 1:
