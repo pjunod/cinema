@@ -111,6 +111,37 @@
         );
     }
 
+    /// A late progress block followed by its catch-up block is not a slow
+    /// producer.
+    ///
+    /// ffmpeg's stdout is read by a thread that can be descheduled, so a
+    /// block sometimes arrives late and the next one right behind it. The
+    /// catch-up block is too close to measure; if it still moved the
+    /// baseline, the content it carried would fall out of every later sample
+    /// and an encoder running at exactly 1.0x would read as roughly 0.56x
+    /// here -- far below the floor the rolling capacity check fails a
+    /// session at. Each cycle: a block 900 ms after the last baseline that
+    /// reports only 500 ms of the content (it was emitted late), then the
+    /// catch-up 100 ms later reporting the rest.
+    #[test]
+    fn a_late_block_and_its_catch_up_do_not_bias_the_recent_rate_low() {
+        let p = Progress::new();
+        let _ = p.begin_attempt();
+        p.note_out_time_at(0, 0);
+        for cycle in 0..30_i64 {
+            let t = cycle * 1_000;
+            p.note_out_time_at(t + 900, t + 500);
+            p.note_out_time_at(t + 1_000, t + 1_000);
+        }
+        let recent = p
+            .recent_speed_milli()
+            .expect("a rate once usable samples exist");
+        assert!(
+            (950..=1_050).contains(&recent),
+            "a producer at exactly 1.0x read as {recent} milli-x"
+        );
+    }
+
     /// Watching a stream is not fetching from it.
     ///
     /// The stats overlay polls session status every couple of seconds while it
