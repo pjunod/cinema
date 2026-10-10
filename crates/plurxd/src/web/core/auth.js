@@ -88,7 +88,6 @@ async function loadFeatures(){
 // settings read or save, so a switch the admin just flipped reaches their nav
 // without a reload. Never rejects; repaints only when the answer changed.
 async function refreshFeatures(){
-  if(typeof loadFeatures!=="function") return false;
   const before=JSON.stringify(FEATURES);
   const after=await loadFeatures();
   if(JSON.stringify(after)===before) return false;

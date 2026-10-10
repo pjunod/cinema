@@ -174,11 +174,6 @@ test("cacheSettings is safe without the features loader", async () => {
   vm.runInContext(["var SETTINGS=null, SETTINGS_DATA={}; const SETTINGS_LOADED=new Set();",
     source("cacheSettings")].join("\n"), context);
   assert.deepEqual({...context.cacheSettings({a: 1})}, {a: 1});
-  const partial = vm.createContext({});
-  vm.runInContext(["var SETTINGS=null, SETTINGS_DATA={}; const SETTINGS_LOADED=new Set();",
-    source("refreshFeatures"), source("cacheSettings")].join("\n"), partial);
-  assert.deepEqual({...partial.cacheSettings({b: 2})}, {b: 2});
-  assert.equal(await partial.refreshFeatures(), false);
 });
 
 test("the DVR header indicator stays dark while Recordings is off", () => {
