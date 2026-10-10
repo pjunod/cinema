@@ -2128,6 +2128,14 @@ class DisplayAwareAutoEvidenceTest {
         assertFalse(autoDisplayFits(1_800, 1_080, 2_000.0, 1_125.0))
     }
 
+    @Test fun aLadderBelowTheDisplayClimbsToItsLargestAffordableRung() {
+        // The hardware case: a 480p/720p family on a 1080p display, back at 480p.
+        val r480 = candidate(480); val r720 = candidate(720)
+        assertEquals(r720, autoPreferredDisplayCandidate(listOf(r480, r720), 1_920.0, 1_080.0))
+        assertEquals(r480, autoPreferredDisplayCandidate(listOf(r480), 1_920.0, 1_080.0))
+        assertNull(autoPreferredDisplayCandidate(emptyList(), 1_920.0, 1_080.0))
+    }
+
     @Test fun linkPressureTakesTheCheapestCostedRungWhenNoLowerRungFits() {
         val current = candidate(1_080, peak = 12_000_000L)
         val r720 = candidate(720, peak = 6_000_000L)

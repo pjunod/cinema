@@ -351,10 +351,15 @@ func autoRecoveryCandidate(_ candidates: [QualityCandidate], current: QualityCan
     return currentCost.map { Double(cheapest.peakBps!) < $0 } ?? true ? cheapest : nil
 }
 
+/// The smallest affordable rung that covers the display; when none covers it,
+/// the largest affordable rung is the closest. Returning nothing there (unlike
+/// the web selector) left a ladder whose rungs are all below the display unable
+/// to climb back after any downgrade.
 func autoPreferredDisplayCandidate(_ candidates: [QualityCandidate], neededWidth: Double, neededHeight: Double) -> QualityCandidate? {
-    candidates.first { $0.route != "encode" } ?? candidates.filter {
+    let area = { (candidate: QualityCandidate) in Int64(candidate.width) * Int64(candidate.height) }
+    return candidates.first { $0.route != "encode" } ?? candidates.filter {
         autoDisplayFits(width: $0.width, height: $0.height, neededWidth: neededWidth, neededHeight: neededHeight)
-    }.min { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
+    }.min { area($0) < area($1) } ?? candidates.max { area($0) < area($1) }
 }
 
 func autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight: Double) -> Bool {

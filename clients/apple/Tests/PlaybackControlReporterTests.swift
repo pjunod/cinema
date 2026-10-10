@@ -1809,6 +1809,12 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertFalse(autoDisplayFits(width: 1_800, height: 1_080, neededWidth: 2_000, neededHeight: 1_125))
     }
 
+    func testALadderBelowTheDisplayClimbsToItsLargestAffordableRung() {
+        XCTAssertEqual(autoPreferredDisplayCandidate([candidate(480), candidate(720)], neededWidth: 1_920, neededHeight: 1_080)?.height, 720)
+        XCTAssertEqual(autoPreferredDisplayCandidate([candidate(480)], neededWidth: 1_920, neededHeight: 1_080)?.height, 480)
+        XCTAssertNil(autoPreferredDisplayCandidate([], neededWidth: 1_920, neededHeight: 1_080))
+    }
+
     func testLinkPressureTakesTheCheapestCostedRungWhenNoLowerRungFits() {
         let current = candidate(1_080, peak: 12_000_000)
         let ladder = [current, candidate(720, peak: 6_000_000), candidate(480, peak: 3_000_000), candidate(360, peak: nil)]

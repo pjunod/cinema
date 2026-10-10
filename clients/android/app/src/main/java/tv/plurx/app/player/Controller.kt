@@ -5933,11 +5933,17 @@ internal fun autoRecoveryCandidate(candidates: List<tv.plurx.app.data.QualityCan
         ?: costed.minByOrNull { it.peak_bps!! }?.takeIf { cheapest -> currentCost == null || cheapest.peak_bps!! < currentCost }
 }
 
+/**
+ * The smallest affordable rung that covers the display; when none covers it,
+ * the largest affordable rung is the closest. Returning nothing there (as
+ * this did, unlike the web selector) left a 480p/720p family on a 1080p
+ * display unable to climb back from 480p after any downgrade.
+ */
 internal fun autoPreferredDisplayCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
     neededWidth: Double, neededHeight: Double): tv.plurx.app.data.QualityCandidate? =
     candidates.firstOrNull { it.route != "encode" } ?: candidates.filter {
         autoDisplayFits(it.width, it.height, neededWidth, neededHeight)
-    }.minByOrNull { it.width.toLong() * it.height }
+    }.minByOrNull { it.width.toLong() * it.height } ?: candidates.maxByOrNull { it.width.toLong() * it.height }
 
 internal fun autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight: Double): Boolean =
     width > 0 && height > 0 && width.toDouble() * 11 >= neededWidth * 10 &&
