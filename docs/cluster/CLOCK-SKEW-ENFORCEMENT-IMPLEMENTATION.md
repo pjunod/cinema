@@ -21,7 +21,10 @@ supply the required release separation.
 
 Paul's 2026-09-30 clarification, recorded in measurement §1, requires a switch
 only where manual on/off is meaningful. K-06 retains its accepted no-switch
-contract, automatic observation, and separate enforcement release. Developer
+contract, automatic observation, and separate enforcement release. (`main`
+nevertheless has the switch — Developer *Cluster clock guard*,
+`cluster.clock_guard_enforced`, default off, advisory readiness rows; see the
+2026-10-04 note below.) Developer
 facts remain read-only and advisory. Enforcement still waits for the merged
 measurement release and its identified fleet receipt; that substantive evidence
 dependency is unchanged. No rollout or clock-step authorization is implied.

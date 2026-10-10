@@ -19,7 +19,10 @@ retain the release/evidence boundaries. Measurement is assigned to
 unclaimed pending measurement fleet evidence. Paul clarified on 2026-09-30
 that switches apply only where manual on/off is meaningful, rather than to
 every unfinished feature. K-06 therefore retains the accepted no-switch
-design, read-only Developer facts and separate releases. Runtime work is now
+design, read-only Developer facts and separate releases. (Since 2026-10-04
+`main` has the switch anyway — Settings → Developer *Cluster clock guard*,
+`cluster.clock_guard_enforced`, default off, with advisory readiness rows;
+see the §3.8 note.) Runtime work is now
 authorized; production rollout and clock-step drills remain separate actions.
 
 Read §2 first: every wall-clock comparison that decides ownership is listed
@@ -94,8 +97,9 @@ Keep §5.5's one-hour idle and 60-second actual network-load observation,
 complete roster/uncertainty/continuity/authority-cost facts, 250 ms local and
 2,000 ms relative bounds, and original failed/missing receipts unchanged.
 The later 24-hour enforcing observation and explicitly approved disposable
-clock-step drill remain final acceptance. There is no enablement switch or
-gate, and this ruling authorizes no deployment, lab launch or clock step.
+clock-step drill remain final acceptance. There was no enablement switch or
+gate at this ruling (one exists now; §3.8 note), and this ruling authorizes
+no deployment, lab launch or clock step.
 
 **2026-10-01 private preparation extension:** coordinator `agent:/root`
 prepares E1 consumer source on `codex/k06-consumer-preparation-20261001`,
