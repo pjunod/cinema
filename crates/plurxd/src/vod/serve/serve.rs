@@ -913,7 +913,7 @@ impl VodServe {
                 rendition.kick();
                 demand
             });
-            if let Some(verdict) = demand.expired_verdict() {
+            if let Some(verdict) = demand.expired_verdict().await {
                 return Err(verdict.into_error());
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1083,7 +1083,7 @@ impl VodServe {
         if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
-        if let Some(verdict) = demand.expired_verdict() {
+        if let Some(verdict) = demand.expired_verdict().await {
             return Err(verdict.into_error());
         }
         self.shared
@@ -1111,7 +1111,7 @@ impl VodServe {
                 }
             }
             WaitOutcome::Deadline => {
-                if let Some(verdict) = demand.expired_verdict() {
+                if let Some(verdict) = demand.expired_verdict().await {
                     return Err(verdict.into_error());
                 }
                 demand.retry_pending();

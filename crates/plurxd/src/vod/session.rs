@@ -206,13 +206,9 @@ impl Rendition {
     /// Classify an expired materialize deadline by what this rendition is
     /// actually doing, in the order that can be proven: a refused encoder
     /// permit with no producer, then a delivered but unpublished fragment,
-    /// then the producer itself. `belief` is the producer slot's state when
-    /// the caller could read it.
-    pub(super) fn materialize_verdict(
-        &self,
-        index: u32,
-        belief: Option<Producer>,
-    ) -> MaterializeVerdict {
+    /// then the producer itself. `belief` is the producer slot's awaited
+    /// state: a guess here decides capacity against producer.
+    pub(super) fn materialize_verdict(&self, index: u32, belief: Producer) -> MaterializeVerdict {
         let name = if index == INIT_DEMAND_INDEX {
             INIT_NAME.to_owned()
         } else {
@@ -222,10 +218,8 @@ impl Rendition {
             "materializing {name} exceeded the {:.1}s producer deadline",
             self.materialize_budget.as_secs_f64()
         );
-        let producer_present = matches!(
-            belief,
-            Some(Producer::Running { .. } | Producer::Stopped { .. })
-        );
+        let producer_present =
+            matches!(belief, Producer::Running { .. } | Producer::Stopped { .. });
         if !producer_present {
             if let Some(refusal) = self
                 .recipe
@@ -262,22 +256,21 @@ impl Rendition {
             },
         );
         MaterializeVerdict::Producer(match belief {
-            Some(Producer::Running { positioned_at, .. }) => format!(
+            Producer::Running { positioned_at, .. } => format!(
                 "{expired}: the producer started at {} did not deliver it; {delivered}",
                 segment_name(u64::from(positioned_at))
             ),
-            Some(Producer::Stopped {
+            Producer::Stopped {
                 positioned_at,
                 reason,
                 ..
-            }) => format!(
+            } => format!(
                 "{expired}: the producer started at {} is stopped ({reason:?}); {delivered}",
                 segment_name(u64::from(positioned_at))
             ),
-            Some(Producer::Absent { .. }) => {
+            Producer::Absent { .. } => {
                 format!("{expired}: no producer is running for it")
             }
-            None => format!("{expired}: the producer did not deliver it"),
         })
     }
 

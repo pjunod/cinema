@@ -177,8 +177,12 @@ impl MaterializeDemand {
 
     /// `None` while the episode's budget runs; afterwards the verdict the
     /// watchdog recorded, or -- when a request observes expiry before the
-    /// watchdog task has run -- the same classification read now.
-    pub(super) fn expired_verdict(&self) -> Option<MaterializeVerdict> {
+    /// watchdog task has run -- the same classification read now, from the
+    /// same awaited producer state the watchdog reads. A contended
+    /// `try_belief` used to stand in for it and read as "no producer", which
+    /// answered capacity over a producer that was running whenever the
+    /// encoding also had a permit wait in flight.
+    pub(super) async fn expired_verdict(&self) -> Option<MaterializeVerdict> {
         if self.started.elapsed() < self.rendition.materialize_budget {
             return None;
         }
@@ -190,10 +194,11 @@ impl MaterializeDemand {
             .get(&self.index)
             .filter(|clock| clock.started == self.started)
             .and_then(|clock| clock.verdict.clone());
-        Some(recorded.unwrap_or_else(|| {
-            self.rendition
-                .materialize_verdict(self.index, self.rendition.slot.try_belief())
-        }))
+        if recorded.is_some() {
+            return recorded;
+        }
+        let belief = self.rendition.slot.belief().await;
+        Some(self.rendition.materialize_verdict(self.index, belief))
     }
 }
 
