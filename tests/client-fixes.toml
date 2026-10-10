@@ -6148,3 +6148,28 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "private fun applyQualityIntent(body: CreateSessionReq): CreateSessionReq {"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
 test_anchor = "manualSessionCarriesIntentWithDisplayAwareAutoDisabled"
+
+# Continuous Auto link cost (#844 follow-up) corrective client anchors: source/test witnesses, not execution receipts.
+[[fixes]]
+id = "android.link-recovery-cheapest-costed-rung"
+commits = ["afacb6dbf0a625e110366cf3da3c96fe72d4cb5f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "?: costed.minByOrNull { it.peak_bps!! }?.takeIf { cheapest -> currentCost == null || cheapest.peak_bps!! < currentCost }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "linkPressureTakesTheCheapestCostedRungWhenNoLowerRungFits"
+
+[[fixes]]
+id = "apple.link-recovery-cheapest-costed-rung"
+commits = ["afacb6dbf0a625e110366cf3da3c96fe72d4cb5f"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "guard let cheapest = costed.min(by: { $0.peakBps! < $1.peakBps! }) else { return nil }"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testLinkPressureTakesTheCheapestCostedRungWhenNoLowerRungFits"
+
+[[fixes]]
+id = "android.continuous-cost-declared-link-rate"
+commits = ["c889f7df76658392a839967ab8e0285cf726203a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousEnrollment.kt"
+source_anchor = "internal fun continuousLinkRate(row: JsonObject): Long? = row.number(\"sustained_bps\") ?: row.number(\"peak_bps\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "continuousAutoCostsAreTheDeclaredLinkRateNotThePublicationCeiling"
