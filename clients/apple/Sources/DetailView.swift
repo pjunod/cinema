@@ -2365,7 +2365,7 @@ struct DetailView: View {
                     mobileDownloadButton(detail: detail, file: file)
                 }
                 if !item.isBook { watchButton(detail) }
-                if ["movie", "show", "episode"].contains(item.kind) {
+                if HomeTab.libraryChannels.isVisible(model.features), ["movie", "show", "episode"].contains(item.kind) {
                     makeChannelButton(item)
                 }
             }
@@ -2407,7 +2407,7 @@ struct DetailView: View {
                 mobileDownloadButton(detail: detail, file: file, grid: true)
             }
             if !item.isBook { mobileWatchButton(detail) }
-            if ["movie", "show", "episode"].contains(item.kind) {
+            if HomeTab.libraryChannels.isVisible(model.features), ["movie", "show", "episode"].contains(item.kind) {
                 makeChannelButton(item)
             }
         }
