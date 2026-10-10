@@ -67,6 +67,15 @@ pub enum WaitOutcome {
     /// The rendition's producer died mid-wait → typed `producer_failed` 502.
     /// Carries the cause so the refusal body can say what actually happened.
     ProducerFailed(String),
+    /// The entry's materialize deadline expired while its rendition was
+    /// still waiting for an encoder permit: no producer ever ran for it, so
+    /// nothing failed → typed `transcode_capacity_pending` 503. Carries the
+    /// pool's refusal.
+    CapacityUnavailable(String),
+    /// The deadline expired after the producer delivered the entry's
+    /// fragment but before publication made it servable → typed
+    /// `segment_publication_failed` 502.
+    PublicationFailed(String),
     /// The rendition went terminal mid-wait → 410.
     Gone,
 }
@@ -656,12 +665,8 @@ impl WaitPool {
 
     /// A demanded entry missed its service deadline. That is not evidence
     /// that another entry or the rendition's producer has failed.
-    pub fn fail_entry(&self, rendition: &str, index: u32, cause: &str) {
-        self.wake_key(
-            rendition,
-            index,
-            WaitOutcome::ProducerFailed(cause.to_owned()),
-        );
+    pub fn expire_entry(&self, rendition: &str, index: u32, outcome: WaitOutcome) {
+        self.wake_key(rendition, index, outcome);
     }
 
     fn wake_key(&self, rendition: &str, index: u32, outcome: WaitOutcome) {
@@ -982,7 +987,11 @@ mod tests {
             .register(key(8), "other")
             .expect("other viewer admitted");
         assert_eq!(pool.demands("abcd1234").len(), 3);
-        pool.fail_entry("abcd1234", 3, "deadline");
+        pool.expire_entry(
+            "abcd1234",
+            3,
+            WaitOutcome::ProducerFailed("deadline".into()),
+        );
         assert_eq!(
             old.wait(secs(1)).await,
             WaitOutcome::ProducerFailed("deadline".into())

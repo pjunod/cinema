@@ -3152,6 +3152,68 @@
         );
     }
 
+    /// The capacity verdict does not swallow a real producer fault: with a
+    /// producer running for the rendition and no fragment ever arriving, the
+    /// expired deadline still answers `producer_failed`, and says where the
+    /// producer started.
+    #[tokio::test]
+    async fn a_running_producer_that_never_delivers_still_answers_producer_failed() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        assert_eq!(rendition.materialize_budget, Duration::from_secs(30));
+        rendition.attach_reader("viewer", 0).await;
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("a producer that never writes");
+        rendition.slot.attach(child, 0).await;
+        tokio::time::pause();
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        1,
+                        Duration::from_secs(120),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        tokio::time::advance(Duration::from_secs(31)).await;
+        match tokio::time::timeout(Duration::from_secs(5), get)
+            .await
+            .expect("the deadline answers the parked GET")
+            .expect("GET task")
+        {
+            Err(VodError::ProducerFailed(cause)) => {
+                assert!(cause.contains("30.0s producer deadline"), "{cause}");
+                assert!(
+                    cause.contains("the producer started at seg00000.m4s did not deliver it"),
+                    "{cause}"
+                );
+            }
+            Err(other) => panic!("expected producer_failed, got {other:?}"),
+            Ok(_) => panic!("nothing was produced"),
+        }
+        rendition.gen_epoch.fetch_add(1, Relaxed);
+        rendition
+            .slot
+            .perform(
+                Step::Terminate {
+                    why: Termination::Idle,
+                },
+                || {},
+            )
+            .await
+            .expect("producer reap");
+    }
+
     /// Pure bookkeeping, faked materialization on purpose: the property under
     /// test is the driver's window construction feeding `make_room`, not the
     /// generation path (the 12 s fixture's plan is too small to leave

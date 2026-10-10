@@ -913,10 +913,8 @@ impl VodServe {
                 rendition.kick();
                 demand
             });
-            if demand.expired() {
-                return Err(VodError::ProducerFailed(
-                    "materializing init.mp4 exceeded the producer deadline".to_owned(),
-                ));
+            if let Some(verdict) = demand.expired_verdict() {
+                return Err(verdict.into_error());
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero()
@@ -1085,11 +1083,8 @@ impl VodServe {
         if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
-        if demand.expired() {
-            return Err(VodError::ProducerFailed(format!(
-                "materializing {} exceeded the producer deadline",
-                segment_name(u64::from(index))
-            )));
+        if let Some(verdict) = demand.expired_verdict() {
+            return Err(verdict.into_error());
         }
         self.shared
             .hooks
@@ -1116,11 +1111,8 @@ impl VodServe {
                 }
             }
             WaitOutcome::Deadline => {
-                if demand.expired() {
-                    return Err(VodError::ProducerFailed(format!(
-                        "materializing {} exceeded the producer deadline",
-                        segment_name(u64::from(index))
-                    )));
+                if let Some(verdict) = demand.expired_verdict() {
+                    return Err(verdict.into_error());
                 }
                 demand.retry_pending();
                 Err(VodError::Pending {
@@ -1128,6 +1120,11 @@ impl VodServe {
                 })
             }
             WaitOutcome::ProducerFailed(cause) => Err(VodError::ProducerFailed(cause)),
+            WaitOutcome::CapacityUnavailable(reason) => Err(VodError::CapacityUnavailable {
+                reason,
+                retry_after: MATERIALIZE_EXPIRY_RETAINED,
+            }),
+            WaitOutcome::PublicationFailed(cause) => Err(VodError::PublicationFailed(cause)),
             // The rendition went away under the wait; the session's own
             // tombstone (if any) is the more precise cause on the next GET.
             WaitOutcome::Gone => Err(VodError::Gone(Terminal::Deleted)),

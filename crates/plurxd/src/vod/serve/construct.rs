@@ -202,6 +202,7 @@ impl VodServe {
             handoff: StdMutex::new(None),
             handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
+            fragment_received: StdMutex::new(None),
         });
 
         let lifecycle = self.shared.session_lifecycle(session_id);

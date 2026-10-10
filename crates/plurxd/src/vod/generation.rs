@@ -1577,6 +1577,9 @@ impl RenditionSink {
             // ended normally rather than faulted.
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
+        // Delivered, not yet published: what an expired deadline needs to
+        // tell a stuck publication from a producer that never got here.
+        self.rendition.note_fragment_received(self.epoch, entry);
         // Both fences record their own class before returning. vodgen sees
         // only an `io::Error` and wraps it as `Failure::Sink`, which would
         // otherwise be classified `producer_write_failed` — a sink fault,

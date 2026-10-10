@@ -2619,6 +2619,40 @@ async fn the_two_blocked_get_caps_answer_a_client_apart() {
     );
 }
 
+/// S-02: the three verdicts an expired materialize deadline can return
+/// answer a client as three different things. A rendition that never got an
+/// encoder permit is the retryable capacity answer every client already
+/// reads as "not yet" on a create, not the terminal 502 `producer_failed`.
+#[tokio::test]
+async fn expired_materialize_verdicts_answer_capacity_producer_and_publication_apart() {
+    let (capacity_status, capacity) = error_body(vod_error(
+        "sess-a",
+        crate::vodserve::VodError::CapacityUnavailable {
+            reason: "waiting for an encoder permit".into(),
+            retry_after: std::time::Duration::from_secs(2),
+        },
+    ))
+    .await;
+    assert_eq!(capacity_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(capacity["code"], "transcode_capacity_pending");
+
+    let (producer_status, producer) = error_body(vod_error(
+        "sess-a",
+        crate::vodserve::VodError::ProducerFailed("no fragment".into()),
+    ))
+    .await;
+    assert_eq!(producer_status, StatusCode::BAD_GATEWAY);
+    assert_eq!(producer["code"], "producer_failed");
+
+    let (publication_status, publication) = error_body(vod_error(
+        "sess-a",
+        crate::vodserve::VodError::PublicationFailed("delivered, not published".into()),
+    ))
+    .await;
+    assert_eq!(publication_status, StatusCode::BAD_GATEWAY);
+    assert_eq!(publication["code"], "segment_publication_failed");
+}
+
 /// The detail object is data. A route that somehow carried a `code` field
 /// must not be able to rename the error a client dispatches on.
 #[tokio::test]

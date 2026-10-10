@@ -1017,7 +1017,31 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        Box::pin(self.prepare_vod_encoding_with_source(req, file, None)).await
+        let encoding = Box::pin(self.prepare_vod_encoding_with_source(req, file, None)).await?;
+        if let Some(encoding) = encoding.as_ref() {
+            self.refuse_unadmittable_encoding(encoding).await?;
+        }
+        Ok(encoding)
+    }
+
+    /// A frozen plan this node's software budget can never admit is refused
+    /// here, typed, rather than accepted and left to wait out the whole
+    /// materialize deadline for a permit no release can grant.
+    async fn refuse_unadmittable_encoding(
+        &self,
+        encoding: &crate::vodencode::Encoding,
+    ) -> Result<(), String> {
+        let software_budget = self.software_budget().await;
+        match encoding.unadmittable_software_floor(software_budget) {
+            Some(floor) => Err(vod_refusal_error(
+                "vod_transcode_unavailable",
+                format!(
+                    "this encode needs {floor} CPU threads and this server's software \
+                     encoder budget is {software_budget}"
+                ),
+            )),
+            None => Ok(()),
+        }
     }
 
     pub(in crate::transcode) async fn prepare_source_vod_encoding(
@@ -1039,13 +1063,15 @@ impl TranscodeManager {
         {
             return Err("Source encoding requires its exact prepared assignment and burn".into());
         }
-        Box::pin(self.prepare_vod_encoding_with_source(
+        let encoding = Box::pin(self.prepare_vod_encoding_with_source(
             prepared.request(),
             prepared.file(),
             Some((evidence, proof)),
         ))
         .await?
-        .ok_or_else(|| "Source encoding recipe missing".to_owned())
+        .ok_or_else(|| "Source encoding recipe missing".to_owned())?;
+        self.refuse_unadmittable_encoding(&encoding).await?;
+        Ok(encoding)
     }
 
     async fn prepare_vod_encoding_with_source(

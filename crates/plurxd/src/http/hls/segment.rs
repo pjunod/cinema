@@ -594,6 +594,28 @@ pub(super) fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiErr
             log("producer_failed", &reason);
             ApiError::typed(StatusCode::BAD_GATEWAY, "producer_failed", &reason)
         }
+        // The deadline expired while the encoder pool refused the permit: no
+        // producer ran, so this is the capacity answer, not a 502.
+        VodError::CapacityUnavailable {
+            reason,
+            retry_after,
+        } => {
+            log("transcode_capacity_pending", &reason);
+            ApiError::TypedRetry {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "transcode_capacity_pending",
+                message: reason,
+                retry_after_seconds: retry_after.as_secs().max(1),
+            }
+        }
+        VodError::PublicationFailed(reason) => {
+            log("segment_publication_failed", &reason);
+            ApiError::typed(
+                StatusCode::BAD_GATEWAY,
+                "segment_publication_failed",
+                &reason,
+            )
+        }
         VodError::Gone(cause) => {
             log("media_session_ended", &format!("{cause:?}"));
             ApiError::typed(
