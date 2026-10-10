@@ -48,4 +48,22 @@ class AutoDecisionGateTest {
         assertTrue(retained.settleFailureOnce(1, incumbentHealthy = true, retain = {}, reopen = {}))
         assertFalse(directedChangeOutstanding(retained))
     }
+
+    @Test fun autoOwnsQualityOnlyWhileAutoExecutes() {
+        // A retained failed Auto choice leaves the wish on Auto while the
+        // incumbent Manual rung keeps playing: Auto must not drive it.
+        val fromManual = PlaybackIntent(initialQuality = PlaybackQuality.Q720)
+        assertFalse(autoExecuting(fromManual))
+        val toAuto = fromManual.beginQualityChange(PlaybackQuality.Auto, tappedAtMs = 1)
+        assertTrue(fromManual.retainFailedQuality(toAuto, QualitySelection.Manual(720)))
+        assertEquals(PlaybackQuality.Auto, fromManual.desiredQuality)
+        assertFalse(autoExecuting(fromManual))
+        assertEquals("manual", autoDecisionGate(open.copy(automatic = autoExecuting(fromManual))))
+
+        // A retained failed Manual choice under Auto keeps Auto executing.
+        val fromAuto = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val toManual = fromAuto.beginQualityChange(PlaybackQuality.Q480, tappedAtMs = 1)
+        assertTrue(fromAuto.retainFailedQuality(toManual, QualitySelection.Auto))
+        assertTrue(autoExecuting(fromAuto))
+    }
 }
