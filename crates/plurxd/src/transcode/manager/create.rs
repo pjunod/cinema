@@ -714,9 +714,13 @@ impl TranscodeManager {
             // Read once here and handed down, so the fallback below decides
             // from the same snapshot the VOD attempt was admitted under.
             let vod_settings = self.vod_settings(req).await?;
-            let live_recovery_enabled = vod_settings
-                .as_ref()
-                .is_some_and(|settings| settings.live_recovery);
+            let live_recovery_enabled = match vod_settings.as_ref() {
+                Some(settings) => settings.live_recovery,
+                // VOD is switched off, so its settings snapshot is absent and
+                // the rolling engine is the only presentation left. It still
+                // answers to the operator's live-recovery switch.
+                None => self.live_hls_recovery_enabled().await?,
+            };
             let vod = self
                 .try_vod_session(
                     vod_settings,
@@ -747,10 +751,11 @@ impl TranscodeManager {
             match vod {
                 Ok(info) => info,
                 Err(error) => {
-                    // One list, not two. `from_refusal` is what decides both
-                    // whether a code may fall back and which reason it is
-                    // counted under, so adding a fifth code cannot produce
-                    // sessions the engine serves and nothing attributes.
+                    // One list, not two. `VOD_REFUSAL_CODES` (through
+                    // `from_refusal`) decides both whether a code may fall
+                    // back and which reason it is counted under, so a new
+                    // code cannot produce sessions the engine serves and
+                    // nothing attributes — nor fail playback unclassified.
                     let live_recovery_reason = vod_refusal(&error)
                         .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
                     if let Some(reason) = live_recovery_reason {
@@ -1097,7 +1102,31 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        Box::pin(self.prepare_vod_encoding_with_source(req, file, None)).await
+        let encoding = Box::pin(self.prepare_vod_encoding_with_source(req, file, None)).await?;
+        if let Some(encoding) = encoding.as_ref() {
+            self.refuse_unadmittable_encoding(encoding).await?;
+        }
+        Ok(encoding)
+    }
+
+    /// A frozen plan this node's software budget can never admit is refused
+    /// here, typed, rather than accepted and left to wait out the whole
+    /// materialize deadline for a permit no release can grant.
+    async fn refuse_unadmittable_encoding(
+        &self,
+        encoding: &crate::vodencode::Encoding,
+    ) -> Result<(), String> {
+        let software_budget = self.software_budget().await;
+        match encoding.unadmittable_software_floor(software_budget) {
+            Some(floor) => Err(vod_refusal_error(
+                "vod_transcode_unavailable",
+                format!(
+                    "this encode needs {floor} CPU threads and this server's software \
+                     encoder budget is {software_budget}"
+                ),
+            )),
+            None => Ok(()),
+        }
     }
 
     pub(in crate::transcode) async fn prepare_source_vod_encoding(
@@ -1119,13 +1148,15 @@ impl TranscodeManager {
         {
             return Err("Source encoding requires its exact prepared assignment and burn".into());
         }
-        Box::pin(self.prepare_vod_encoding_with_source(
+        let encoding = Box::pin(self.prepare_vod_encoding_with_source(
             prepared.request(),
             prepared.file(),
             Some((evidence, proof)),
         ))
         .await?
-        .ok_or_else(|| "Source encoding recipe missing".to_owned())
+        .ok_or_else(|| "Source encoding recipe missing".to_owned())?;
+        self.refuse_unadmittable_encoding(&encoding).await?;
+        Ok(encoding)
     }
 
     async fn prepare_vod_encoding_with_source(
@@ -2380,6 +2411,7 @@ impl TranscodeManager {
                     if vod_refusal(&error).is_some()
                         || is_serving_fence_error(&error)
                         || is_retryable_capacity_error(&error)
+                        || is_start_infrastructure_error(&error)
                         || unsupported_build_reason(&error).is_some()
                     {
                         error

@@ -2100,6 +2100,220 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
     assert_eq!(encoding.admissions.software_in_use(), 0);
 }
 
+/// S-02: the materialize deadline expiring while the encoder pool refuses
+/// the rendition's permit is a capacity answer, not `producer_failed`.
+///
+/// A background permit is held, so live admission is refused (by design:
+/// background yields, live waits). No producer ever runs for the entry. When
+/// the unchanged 30 s deadline expires, the waiter must receive the capacity
+/// outcome with the pool's refusal attached, so the failure record names the
+/// phase that was actually slow.
+#[tokio::test]
+async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_failed() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("capacity verdict");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("one recipe exactly fills the pool");
+    let serve = bare_serve(&base.path().join("renditions"));
+    let plan = encoding.grid.plan(96_000, 0);
+    let rendition = serve
+        .shared
+        .build_rendition(
+            "capacity-verdict",
+            None,
+            Recipe {
+                retained_logical: None,
+                measured_candidate: None,
+                file,
+                audio_index: None,
+                aac: true,
+                audio_delivery: None,
+                video: CopyVideoOptions::new(false, false),
+                source_object_version: Some(encoding.source_object_version.clone()),
+                cluster_cache_key: None,
+                encoding: Some(Arc::clone(&encoding)),
+            },
+            plan,
+            &settings(),
+        )
+        .await
+        .expect("real encoded rendition without an automatic driver");
+    assert_eq!(rendition.materialize_budget, Duration::from_secs(30));
+    rendition.attach_reader("viewer", 0).await;
+    rendition
+        .readers
+        .lock()
+        .await
+        .get_mut("viewer")
+        .expect("reader")
+        .accept_control(1, 0);
+    let background = encoding
+        .admissions
+        .try_admit_software(2, 1, crate::admission::Priority::Background)
+        .expect("background work holds a permit");
+    // The driver pass a viewer's demand triggers: admission is refused.
+    let demand = serve
+        .shared
+        .pool
+        .register(
+            WaitKey {
+                rendition: rendition.key.clone(),
+                index: 0,
+            },
+            "viewer",
+        )
+        .expect("admitted demand");
+    driver_pass(&serve.shared, &rendition).await;
+    drop(demand);
+    assert!(encoding.is_waiting(), "the live start is queued");
+    assert!(
+        encoding
+            .last_refusal()
+            .is_some_and(|refusal| refusal.pool.background_active),
+        "refused because background work holds the permit"
+    );
+    assert!(matches!(
+        rendition.slot.belief().await,
+        Producer::Absent { .. }
+    ));
+
+    tokio::time::pause();
+    let get = {
+        let serve = Arc::clone(&serve);
+        let rendition = Arc::clone(&rendition);
+        tokio::spawn(async move {
+            serve
+                .serve_segment(
+                    &rendition,
+                    "viewer",
+                    0,
+                    Duration::from_secs(120),
+                    Arc::new(crate::meter::Meter::new()),
+                )
+                .await
+        })
+    };
+    tokio::time::advance(Duration::from_secs(31)).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), get)
+        .await
+        .expect("the deadline answers the parked GET")
+        .expect("GET task");
+    match result {
+        Err(VodError::CapacityUnavailable {
+            reason,
+            retry_after,
+        }) => {
+            assert!(reason.contains("30.0s producer deadline"), "{reason}");
+            assert!(reason.contains("waiting for an encoder permit"), "{reason}");
+            assert!(reason.contains("background holds a permit"), "{reason}");
+            assert_eq!(retry_after, MATERIALIZE_EXPIRY_RETAINED);
+        }
+        Err(other) => panic!("expected the capacity verdict, got {other:?}"),
+        Ok(_) => panic!("nothing was produced"),
+    }
+    assert!(
+        rendition.failure().is_none(),
+        "a capacity verdict does not record a producer failure"
+    );
+    drop(background);
+    encoding.cancel_wait();
+}
+
+/// A request that sees the deadline expire before the watchdog records its
+/// verdict classifies from the producer's real state, never a contended
+/// guess. It used to read the slot with `try_belief`, so while a step held
+/// the slot a running producer read as "no producer" and, with a permit wait
+/// in flight on the encoding (an init-head regeneration probes the same
+/// encoding's permit while its producer runs), the expiry answered capacity.
+#[tokio::test]
+async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
+    use futures_util::FutureExt;
+
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("verdict read");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("one recipe exactly fills the pool");
+    let serve = bare_serve(&base.path().join("renditions"));
+    let plan = encoding.grid.plan(96_000, 0);
+    let rendition = serve
+        .shared
+        .build_rendition(
+            "verdict-read",
+            None,
+            Recipe {
+                retained_logical: None,
+                measured_candidate: None,
+                file,
+                audio_index: None,
+                aac: true,
+                audio_delivery: None,
+                video: CopyVideoOptions::new(false, false),
+                source_object_version: Some(encoding.source_object_version.clone()),
+                cluster_cache_key: None,
+                encoding: Some(Arc::clone(&encoding)),
+            },
+            plan,
+            &settings(),
+        )
+        .await
+        .expect("real encoded rendition without an automatic driver");
+    let background = encoding
+        .admissions
+        .try_admit_software(2, 1, crate::admission::Priority::Background)
+        .expect("background work holds a permit");
+    assert!(encoding.try_permit().await.is_none(), "the permit is refused");
+    assert!(encoding.is_waiting() && encoding.last_refusal().is_some());
+    // The rendition's producer is running all the same.
+    let child = tokio::process::Command::new("/bin/sleep")
+        .arg("60")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("a producer that never writes");
+    rendition.slot.attach(child, 0).await;
+
+    let demand = MaterializeDemand {
+        rendition: Arc::clone(&rendition),
+        index: 1,
+        started: Instant::now() - Duration::from_secs(31),
+    };
+    let held = rendition.slot.hold().await;
+    let mut verdict = Box::pin(demand.expired_verdict());
+    assert!(
+        verdict.as_mut().now_or_never().is_none(),
+        "with the slot held, the verdict waits for the real producer state"
+    );
+    drop(held);
+    match verdict.await.expect("the budget is spent") {
+        MaterializeVerdict::Producer(cause) => assert!(
+            cause.contains("the producer started at seg00000.m4s did not deliver it"),
+            "{cause}"
+        ),
+        other => panic!("a running producer is not a capacity wait: {other:?}"),
+    }
+
+    rendition.gen_epoch.fetch_add(1, Relaxed);
+    rendition
+        .slot
+        .perform(
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+            || {},
+        )
+        .await
+        .expect("producer reap");
+    drop(background);
+    encoding.cancel_wait();
+}
+
 #[tokio::test]
 async fn encoded_vod_burn_sidecar_cannot_reuse_replaced_source_captions() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;

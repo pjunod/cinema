@@ -35,6 +35,12 @@ pub(crate) trait TranscodeManagerHooks: std::any::Any + Send + Sync {
         &self,
         source: crate::decode_facts::DecodeFactSource,
     ) -> crate::decode_facts::DecodeFactSource;
+    /// Override: the Dolby Vision pixel proof for `file` in place of running
+    /// its two ffmpeg probes. Production: `None`, so the probes run.
+    fn scripted_dovi_pixel_proof(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Option<crate::ffmpeg::DoviPixelProof>;
 }
 
 /// What production installs: every point is ready, nothing is overridden or
@@ -72,6 +78,13 @@ impl TranscodeManagerHooks for NoopTranscodeManagerHooks {
     ) -> crate::decode_facts::DecodeFactSource {
         source
     }
+
+    fn scripted_dovi_pixel_proof(
+        &self,
+        _: &plurx_core::domain::MediaFile,
+    ) -> Option<crate::ffmpeg::DoviPixelProof> {
+        None
+    }
 }
 
 /// The manager's test hooks.
@@ -102,6 +115,11 @@ pub(crate) struct TranscodeManagerTestHooks {
     /// would revert green.
     pub(super) manifests_published: std::sync::atomic::AtomicUsize,
     pub(super) decode_source_final_identity_delay: std::sync::Mutex<Option<Duration>>,
+    /// The next Dolby Vision pixel proofs, in order, and how many proofs ran.
+    /// Empty means the real probes run.
+    pub(crate) dovi_pixel_proof_script:
+        std::sync::Mutex<std::collections::VecDeque<crate::ffmpeg::DoviPixelProof>>,
+    pub(crate) dovi_pixel_proofs_run: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -164,6 +182,18 @@ impl TranscodeManagerHooks for TranscodeManagerTestHooks {
             Some(delay) => source.with_final_identity_delay(delay),
             None => source,
         }
+    }
+
+    fn scripted_dovi_pixel_proof(
+        &self,
+        _: &plurx_core::domain::MediaFile,
+    ) -> Option<crate::ffmpeg::DoviPixelProof> {
+        self.dovi_pixel_proofs_run
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.dovi_pixel_proof_script
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
     }
 }
 
