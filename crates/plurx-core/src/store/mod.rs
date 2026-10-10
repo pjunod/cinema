@@ -2357,6 +2357,13 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// single snapshot keeps those values mutually consistent and, on a
     /// replicated backend, avoids paying one linearizable read per field.
     async fn settings_snapshot(&self) -> Result<BTreeMap<String, String>, StoreError>;
+    /// One setting as this node's own replica holds it, read without
+    /// consensus and without a leader round trip.
+    ///
+    /// A hint and never an authorization: a follower may not have applied a
+    /// recent save yet. It tells an idle reader whether a consistent read is
+    /// owed at all; the consistent read stays the only thing that decides.
+    async fn local_setting_hint(&self, key: &str) -> Result<Option<String>, StoreError>;
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError>;
     /// Insert an immutable setting value. Returns false when the key already
     /// exists and leaves the first committed value unchanged.
