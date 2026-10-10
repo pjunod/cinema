@@ -1786,6 +1786,32 @@ test("tone-map probe failures stay collapsed beneath the selected pipeline", () 
     "an unprobed node keeps its short explanation");
 });
 
+test("a Mac node reports the Metal tone-map through Mac video processing and never calls a missing build feature a fallback", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\nreturn toneMapHtml;`)(esc);
+  const vulkan = {pipeline:"libplacebo",label:"GPU tone-map (Vulkan)",passed:false,unavailable:true,
+    rejected:"not available on this platform — this FFmpeg build has no vulkan support"};
+  const metal = {pipeline:"vt_tonemap_metal",label:"GPU tone-map (Metal)",passed:true,speedup:2.16};
+  const tm = {ran:true,selected:"vt_tonemap_metal",selected_label:"GPU tone-map (Metal)",
+    verdicts:[metal,vulkan,{pipeline:"cpu",label:"CPU tone-map",passed:true,speedup:1}]};
+  const visible = (html) => html.replace(/<details\b[\s\S]*?<\/details>/, "");
+
+  const off = render(tm, {enabled:false,hdr10_metal:{availability:"available",reason:"available"}});
+  assert.match(visible(off), /^CPU tone-map /);
+  assert.match(visible(off), /GPU tone-map \(Metal\) matched the CPU picture at 2\.16× the CPU chain; HDR uses it once Mac video processing is on in Settings → Developer/);
+  assert.doesNotMatch(off, /fell back|Cannot allocate/);
+  assert.match(off, /<details[\s\S]*GPU tone-map \(Vulkan\): not available on this platform — this FFmpeg build has no vulkan support/);
+
+  const on = render(tm, {enabled:true,hdr10_metal:{availability:"available",reason:"available"}});
+  assert.match(visible(on), /^<span style="color:var\(--good\)">GPU tone-map \(Metal\)<\/span>/);
+  assert.doesNotMatch(visible(on), /matched the CPU picture|fell back/);
+
+  const unobserved = render(tm, {enabled:true,hdr10_metal:{availability:"unavailable",reason:"cpu_parity_failed"}});
+  assert.match(visible(unobserved), /Mac video processing has not observed it \(cpu_parity_failed\)/);
+
+  const cpu = render({ran:true,selected:"cpu",selected_label:"CPU tone-map",verdicts:[vulkan]}, null);
+  assert.doesNotMatch(cpu, /fell back/, "a candidate the build cannot express is not a fallback");
+});
+
 test("standalone Developer omits cluster controls while preserving local features and saved choices", () => {
   const panels=developerPanels();
   const settings=Object.freeze({cluster_media_pool_enabled:true,cluster_session_takeover_enabled:true,

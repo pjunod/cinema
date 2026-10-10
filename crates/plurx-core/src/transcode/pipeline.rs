@@ -51,8 +51,11 @@ impl ReconstructedPqInput {
 
 /// The video path for one session, from decoded frames to the encoder's input.
 ///
-/// The legacy probe walks [`CANDIDATES`] from most to least preferred; Apple
-/// processing uses its separate runtime compatibility context. [`Pipeline::Cpu`] is last and
+/// The boot probe walks [`CANDIDATES`] from most to least preferred, and every
+/// GPU graph — the Apple Metal tone-map included — must match the CPU chain's
+/// picture there before a node may claim it. Sessions reach the Apple graphs
+/// only through their separate runtime compatibility context
+/// ([`Pipeline::requires_macos_context`]). [`Pipeline::Cpu`] is last and
 /// unconditional — it needs no hardware, it is what every other variant falls
 /// back to, and it is the reference the others are checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,9 +63,11 @@ pub enum Pipeline {
     /// VideoToolbox surfaces → native SDR scale → H.264 VideoToolbox encode.
     /// Selected only by the macOS compatibility context in the resolver.
     VtScaleSdr,
-    /// HDR10 VideoToolbox surfaces → native P010 scale → Jellyfin BT.2390/ITP
-    /// Metal mapping → H.264 VideoToolbox encode. HDR10 and HLG require
-    /// independent complete-graph observations; Dolby is excluded.
+    /// HDR VideoToolbox surfaces → native P010 scale → Jellyfin Metal mapping
+    /// → H.264 VideoToolbox encode. PQ input takes the CPU chain's operator
+    /// and HLG keeps BT.2390/ITP ([`Pipeline::tone_map_terms`]). HDR10 and HLG
+    /// require independent complete-graph observations, PQ additionally the
+    /// boot probe's CPU parity; Dolby is excluded.
     VtToneMapMetal,
     /// Ordinary HDR10 P010 native scale, preserving PQ and static metadata.
     VtScaleHdr10,
@@ -153,7 +158,12 @@ pub enum Pipeline {
 }
 
 /// Every pipeline the probe may consider, best first.
+///
+/// [`Pipeline::pairs_with`] narrows it per encoder, so each family sees its own
+/// native graph first: Metal for VideoToolbox, then the vendor-neutral OpenCL
+/// and Vulkan graphs, then the CPU chain.
 pub const CANDIDATES: &[Pipeline] = &[
+    Pipeline::VtToneMapMetal,
     Pipeline::TonemapCuda,
     Pipeline::VppQsv,
     Pipeline::TonemapVaapi,
@@ -195,7 +205,6 @@ impl Pipeline {
             .copied()
             .chain([
                 Pipeline::VtScaleSdr,
-                Pipeline::VtToneMapMetal,
                 Pipeline::VtScaleHdr10,
                 Pipeline::DoviStrictTonemapx,
                 Pipeline::VtDoviTonemapx,
@@ -212,7 +221,7 @@ impl Pipeline {
     pub fn label(self) -> &'static str {
         match self {
             Pipeline::VtScaleSdr => "VideoToolbox SDR scaling",
-            Pipeline::VtToneMapMetal => "Metal HDR tone-map (BT.2390 / ITP)",
+            Pipeline::VtToneMapMetal => "GPU tone-map (Metal)",
             Pipeline::VtScaleHdr10 => "VideoToolbox HDR10 scaling",
             Pipeline::DoviStrictTonemapx => "Strict Dolby Vision CPU reshape",
             Pipeline::VtDoviTonemapx => "Strict VideoToolbox Dolby Vision CPU reshape",
@@ -525,18 +534,18 @@ impl Pipeline {
             Pipeline::VtScaleHdr10 => format!("scale_vt=w={w}:h={height}:format=p010le"),
             Pipeline::VtToneMapMetal => format!(
                 "scale_vt=w={w}:h={height}:format=p010le,\
-                 tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:transfer=bt709:matrix=bt709:\
-                 primaries=bt709:range=tv:format=nv12:apply_dovi=0"
+                 tonemap_videotoolbox={terms}:transfer=bt709:matrix=bt709:\
+                 primaries=bt709:range=tv:format=nv12:apply_dovi=0",
+                terms = self
+                    .tone_map_terms(hdr_format)
+                    .expect("the Metal graph always maps")
             ),
             Pipeline::Cpu => return None,
             Pipeline::TonemapCuda => {
                 let w = width.map_or_else(|| "-2".to_owned(), |w| w.to_string());
                 let scale = format!("scale_cuda=w={w}:h={height}");
-                if hdr {
-                    // Match the CPU reference's Hable/max-channel operator.
-                    // Jellyfin's auto mode selects ITP on newer GPUs, which
-                    // is a different picture, not a faster implementation.
-                    format!("tonemap_cuda=tonemap=hable:tonemap_mode=max:desat=0:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,{scale}")
+                if let Some(terms) = self.tone_map_terms(hdr_format) {
+                    format!("tonemap_cuda={terms}:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,{scale}")
                 } else {
                     format!("{scale}:format=nv12")
                 }
@@ -592,10 +601,10 @@ impl Pipeline {
                     Some(w) => format!("scale={w}:{height}"),
                     None => format!("scale=-2:'min({height},ih)'"),
                 };
-                if hdr {
+                if let Some(terms) = self.tone_map_terms(hdr_format) {
                     format!(
                         "{scale},format=p010,hwupload,\
-                         tonemap_opencl=tonemap=hable:transfer=bt709:matrix=bt709:primaries=bt709:format=nv12,\
+                         tonemap_opencl={terms}:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,\
                          hwdownload,format=nv12"
                     )
                 } else {
@@ -661,6 +670,54 @@ impl Pipeline {
                 format!("scale={w}:{h},format={format}")
             }
         })
+    }
+
+    /// The tone-map operator terms a GPU graph passes, for the graphs whose
+    /// filter exposes them. `None` where there is nothing to map or the graph
+    /// has no such controls (a driver curve, or libplacebo's own defaults).
+    ///
+    /// One source for the filter string and for plan identity
+    /// (`ResolvedTranscode::plan_digest` feeds it), so a cached rendition can
+    /// never carry a different curve than its key names.
+    ///
+    /// For PQ input every graph with the controls takes the CPU reference's
+    /// operator ([`super::zscale_tone_map_filter`]: Hable on the brightest
+    /// channel, no desaturation). Naming the curve alone is not enough: the
+    /// Jellyfin filters default `tonemap_mode` to `auto`, which picks ITP on
+    /// capable GPUs, and leave desaturation on — a different picture behind
+    /// the same operator name. That is what put an Apple Silicon node's
+    /// OpenCL graph 59 levels from the CPU chain at the boot probe
+    /// (Y/U/V 178/115/93 against 119/136/138); with these terms the same run
+    /// lands within ten levels on OpenCL and Metal alike.
+    ///
+    /// HLG through Metal keeps BT.2390/ITP. Its runtime observation pins
+    /// reference white under that treatment, and the boot probe's PQ fixture
+    /// says nothing about an HLG curve.
+    pub fn tone_map_terms(self, hdr_format: Option<&str>) -> Option<&'static str> {
+        const CPU_MATCHED: &str = "tonemap=hable:tonemap_mode=max:desat=0";
+        match self {
+            Pipeline::VtToneMapMetal if hdr_format == Some("hlg") => {
+                Some("tonemap=bt2390:tonemap_mode=itp")
+            }
+            Pipeline::VtToneMapMetal => Some(CPU_MATCHED),
+            Pipeline::TonemapCuda | Pipeline::TonemapOpencl if hdr_format.is_some() => {
+                Some(CPU_MATCHED)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether sessions may reach this graph only through the resolved macOS
+    /// compatibility context. A node may still *prove* one of these at boot —
+    /// the probe holds the Metal tone-map to the same CPU parity as every
+    /// other GPU graph — but proving it never routes a session to it directly:
+    /// opaque VideoToolbox frames skip the CPU path's rotation, aspect and
+    /// cadence normalization, and only the context checks those.
+    pub fn requires_macos_context(self) -> bool {
+        matches!(
+            self,
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10
+        )
     }
 
     /// Whether the unburned graph retains vendor surfaces from decode to encode.
@@ -834,10 +891,7 @@ impl Pipeline {
         if proven == Pipeline::Cpu {
             return None;
         }
-        if matches!(
-            proven,
-            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10
-        ) {
+        if proven.requires_macos_context() {
             return Some("macOS processing requires its resolved compatibility context");
         }
         if !heavy {
@@ -924,6 +978,110 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::domain::FieldOrder;
+
+    /// Each GPU graph that names its curve takes the terms from one place,
+    /// and for PQ those terms are the CPU reference's operator. A graph that
+    /// says `hable` and leaves the mode to Jellyfin's `auto` is a different
+    /// picture under the same name — 59 levels away on an Apple Silicon node.
+    #[test]
+    fn gpu_tone_map_terms_are_one_source_and_match_the_cpu_operator_on_pq() {
+        let cpu = crate::transcode::zscale_tone_map_filter("smpte2084", 1_000);
+        assert!(cpu.contains("tonemap=tonemap=hable:desat=0:"), "{cpu}");
+        for pipeline in [
+            Pipeline::TonemapCuda,
+            Pipeline::TonemapOpencl,
+            Pipeline::VtToneMapMetal,
+        ] {
+            for hdr in ["hdr10", "hdr10plus"] {
+                let terms = pipeline.tone_map_terms(Some(hdr)).expect("maps PQ");
+                assert_eq!(
+                    terms, "tonemap=hable:tonemap_mode=max:desat=0",
+                    "{pipeline:?}"
+                );
+                let graph = pipeline
+                    .filters(Some(1920), 1080, Some(hdr))
+                    .expect("graph");
+                assert!(graph.contains(&format!("={terms}:")), "{graph}");
+                assert!(
+                    graph.contains(":range=tv:"),
+                    "limited range like the CPU chain: {graph}"
+                );
+            }
+        }
+        let hlg = Pipeline::VtToneMapMetal.tone_map_terms(Some("hlg"));
+        assert_eq!(hlg, Some("tonemap=bt2390:tonemap_mode=itp"));
+        let graph = Pipeline::VtToneMapMetal
+            .filters(Some(1920), 1080, Some("hlg"))
+            .expect("graph");
+        assert!(
+            graph.contains("tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:"),
+            "{graph}"
+        );
+        for pipeline in [Pipeline::TonemapCuda, Pipeline::TonemapOpencl] {
+            assert_eq!(pipeline.tone_map_terms(None), None);
+            let sdr = pipeline.filters(Some(1920), 1080, None).expect("scaler");
+            assert!(
+                !sdr.contains("tonemap"),
+                "an SDR source is never mapped: {sdr}"
+            );
+        }
+        for pipeline in [
+            Pipeline::VppQsv,
+            Pipeline::TonemapVaapi,
+            Pipeline::Libplacebo,
+            Pipeline::LibplaceboVaapi,
+            Pipeline::Cpu,
+        ] {
+            assert_eq!(pipeline.tone_map_terms(Some("hdr10")), None, "{pipeline:?}");
+        }
+    }
+
+    /// The boot probe proves the Metal graph like any other; sessions still
+    /// reach it only through the macOS compatibility context.
+    #[test]
+    fn the_metal_graph_is_probed_first_on_videotoolbox_and_routed_only_through_the_mac_context() {
+        assert_eq!(CANDIDATES.first(), Some(&Pipeline::VtToneMapMetal));
+        assert_eq!(CANDIDATES.last(), Some(&Pipeline::Cpu));
+        assert_eq!(
+            Pipeline::parse("vt_tonemap_metal"),
+            Some(Pipeline::VtToneMapMetal)
+        );
+        assert_eq!(Pipeline::VtToneMapMetal.label(), "GPU tone-map (Metal)");
+        for encoder in [
+            Encoder::Software,
+            Encoder::Nvenc,
+            Encoder::Qsv,
+            Encoder::Vaapi,
+            Encoder::VideoToolbox,
+        ] {
+            assert_eq!(
+                Pipeline::VtToneMapMetal.pairs_with(encoder),
+                encoder == Encoder::VideoToolbox
+            );
+        }
+        for pipeline in [
+            Pipeline::VtScaleSdr,
+            Pipeline::VtToneMapMetal,
+            Pipeline::VtScaleHdr10,
+        ] {
+            assert!(pipeline.requires_macos_context());
+            assert_eq!(
+                Pipeline::for_session(pipeline, Encoder::VideoToolbox, Some("hdr10"), true, false),
+                Pipeline::Cpu
+            );
+        }
+        assert!(!Pipeline::TonemapOpencl.requires_macos_context());
+        assert_eq!(
+            Pipeline::for_session(
+                Pipeline::TonemapOpencl,
+                Encoder::VideoToolbox,
+                Some("hdr10"),
+                true,
+                false
+            ),
+            Pipeline::TonemapOpencl
+        );
+    }
 
     #[test]
     fn software_frame_vulkan_route_preserves_transfer_and_reports_cpu_handoff() {
@@ -1268,7 +1426,11 @@ mod tests {
     /// it (PERF-PLAN §5 scope guards).
     #[test]
     fn only_pq_sources_reach_a_gpu_graph() {
-        for p in CANDIDATES.iter().filter(|p| p.on_gpu()) {
+        // Node routing only: the macOS context owns its graphs' source classes.
+        for p in CANDIDATES
+            .iter()
+            .filter(|p| p.on_gpu() && !p.requires_macos_context())
+        {
             assert!(p.handles(Some("hdr10")), "{p:?} hdr10");
             assert!(p.handles(Some("hdr10plus")), "{p:?} hdr10+");
             assert!(!p.handles(Some("hlg")), "{p:?} must not take hlg");
@@ -1286,6 +1448,12 @@ mod tests {
     fn every_gpu_graph_targets_bt709_for_hdr() {
         for p in CANDIDATES.iter().filter(|p| p.on_gpu()) {
             let hdr = p.filters(None, 1080, Some("hdr10")).expect("a graph");
+            if p.requires_macos_context() {
+                // Never offered an SDR source: the context scales those with
+                // its own SDR graph.
+                assert!(hdr.contains("transfer=bt709"), "{p:?}: {hdr}");
+                continue;
+            }
             assert!(
                 hdr.contains("bt709") || hdr.contains("tonemap=1"),
                 "{p:?} does not retarget colour: {hdr}"

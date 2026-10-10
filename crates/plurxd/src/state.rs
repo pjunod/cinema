@@ -1127,6 +1127,11 @@ impl AppState {
             .with_hdr10_passthrough(system.hdr10_passthrough)
             .with_hdr10_passthrough_qsv(system.hdr10_passthrough_qsv)
             .with_hdr10_passthrough_vaapi(system.hdr10_passthrough_vaapi)
+            .with_metal_tone_map_parity(
+                system
+                    .tone_map
+                    .parity(plurx_core::transcode::Pipeline::VtToneMapMetal),
+            )
             .with_cache_layout(
                 cache_dir.clone(),
                 runtime_cache.clone(),

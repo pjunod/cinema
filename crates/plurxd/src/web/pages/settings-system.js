@@ -71,16 +71,28 @@ function buildLabel(){
 // graph" — which are the difference between shrugging and installing a package.
 // Rejected candidates remain available in a collapsed disclosure, so a working
 // GPU selection is not buried under diagnostics from the other probes.
-function toneMapHtml(tm){
+//
+// The Metal graph is proved here like any other but reaches sessions only
+// through Mac video processing, so on a Mac the HDR line follows that context:
+// green when it is on and has observed the graph, otherwise CPU with a note
+// saying the Metal graph matched the CPU picture and where it is turned on.
+function toneMapHtml(tm, mac){
   if(!tm) return `<span class="muted">—</span>`;
-  const gpu = tm.selected && tm.selected!=="cpu";
+  const verdicts=tm.verdicts||[];
+  const viaMac = tm.selected==="vt_tonemap_metal";
+  const macMetal = mac && mac.hdr10_metal || {};
+  const macReady = !!(mac && mac.enabled && macMetal.availability==="available");
+  const gpu = tm.selected && tm.selected!=="cpu" && (!viaMac || macReady);
   // Everything the probe rejected. The CPU chain is the reference the others
   // are measured against rather than a candidate, so it never appears as one —
   // "CPU tone-map: 1.0× — not selected" is a line that tells nobody anything.
-  const rejected=(tm.verdicts||[]).filter(v=>!v.passed && v.pipeline!==tm.selected);
+  // A candidate this FFmpeg build cannot express is a platform fact, listed
+  // after the rejections and never counted as a reason for falling back.
+  const rejected=verdicts.filter(v=>!v.passed && !v.unavailable && v.pipeline!==tm.selected);
+  const unavailable=verdicts.filter(v=>v.unavailable);
   const head = gpu
     ? `<span style="color:var(--good)">${esc(tm.selected_label)}</span>`
-    : esc(tm.selected_label||"CPU tone-map");
+    : esc(viaMac ? "CPU tone-map" : (tm.selected_label||"CPU tone-map"));
   if(!tm.ran){
     // Not probed is not the same as everything failing, and the reason says
     // which — usually "software encoder", where a GPU graph would have to
@@ -92,8 +104,14 @@ function toneMapHtml(tm){
   // whole point of this line: everything still plays, 4K just stays slow, and
   // without this there is nothing on screen to distinguish a box with no GPU
   // tone-map from one whose driver refused the graph.
-  const note = !gpu && rejected.length ? ` <span class="muted">— fell back</span>` : "";
-  const rows=rejected.map(v=>
+  const proved=verdicts.find(v=>v.pipeline===tm.selected);
+  const speed=proved && Number.isFinite(proved.speedup) ? ` at ${proved.speedup.toFixed(2)}× the CPU chain` : "";
+  const note = viaMac && !macReady
+    ? ` <span class="muted">— ${esc(tm.selected_label)} matched the CPU picture${speed}; ${mac && mac.enabled
+        ? `Mac video processing has not observed it (${esc(macMetal.reason||"pending")})`
+        : "HDR uses it once Mac video processing is on in Settings → Developer"}</span>`
+    : !gpu && rejected.length ? ` <span class="muted">— fell back</span>` : "";
+  const rows=rejected.concat(unavailable).map(v=>
     `<div class="muted" style="font-size:12px">${esc(v.label)}: ${esc(v.rejected||"rejected")}</div>`
   ).join("");
   const details=rows
@@ -221,7 +239,7 @@ function transcoderCard(sys){
     <label for="node-hwaccel">Preferred backend</label>
     <select id="node-hwaccel" data-node-id="${esc(sys.node_id)}">${choices.map(([value,label])=>`<option value="${value}"${value===(available?requested:"auto")?" selected":""}>${esc(label)}</option>`).join("")}</select>
     ${available?"":`<p class="muted">The saved backend is unavailable. Choose and save an available option.</p>`}
-    <p>Active: <b>${esc(sys.encoder_selected||active)}</b> · HDR: ${toneMapHtml(sys.tone_map)}</p>
+    <p>Active: <b>${esc(sys.encoder_selected||active)}</b> · HDR: ${toneMapHtml(sys.tone_map, sys.macos_video_processing)}</p>
     <p class="muted" id="node-hwaccel-status">${pending?"Saved choice or new benchmark is waiting for this node to restart.":"Changes apply after restarting this node, when its HDR capabilities are tested again."}</p>
     <p class="muted">720p H.264 encoding, 4 Mb/s, 240 frames; median of three runs after warm-up. CPU is 1.00×. Results include encoder startup and frame upload; HDR and source decoding can change real playback speeds.${report?` Last measured: ${esc(new Date(report.measured_at*1000).toLocaleString())}.`:""}</p>
     <p class="muted" role="status" aria-live="polite">${optimization.running?"Checking capabilities and benchmarking… Playback will stop the benchmark.":optimization.error?esc(optimization.error):"Optimize reruns support checks, benchmarks each backend and checks HDR pipelines. Run while the node is idle."}</p>

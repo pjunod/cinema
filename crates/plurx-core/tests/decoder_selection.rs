@@ -291,6 +291,44 @@ fn macos_selected_options_preserve_software_decode_recovery_for_sdr_and_hdr10() 
     }
 }
 
+/// The Metal PQ plan is keyed by the curve it runs. Renditions cached before
+/// the curve entered plan identity were made with BT.2390/ITP; this plan runs
+/// the CPU reference's Hable/max-channel operator under the same renderer
+/// name, so it must not find them.
+#[test]
+fn the_metal_pq_plan_is_keyed_by_the_curve_it_runs() {
+    const BEFORE_CURVE_IN_IDENTITY: &str =
+        "3e1b8f575c72b1a098a90b4275b56bb7a2ed672a24ad31cd944d2ecd8f8b87e6";
+    let input = facts(macos_stream(true));
+    let caps = unqualified_software_capabilities("hevc");
+    let plan = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &caps,
+        macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+    )
+    .expect("selected Mac HDR plan");
+    assert_eq!(plan.options().pipeline, Pipeline::VtToneMapMetal);
+    let terms = Pipeline::VtToneMapMetal
+        .tone_map_terms(plan.input_hdr_format())
+        .expect("the Metal graph maps PQ");
+    assert_eq!(terms, "tonemap=hable:tonemap_mode=max:desat=0");
+    assert_ne!(plan.plan_digest(), BEFORE_CURVE_IN_IDENTITY);
+    let execution = TranscodeExecution::from_options(
+        &execution_file("/fixture/source.mkv"),
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let argv = hls_args(&plan, &execution).join(" ");
+    assert!(
+        argv.contains(&format!("tonemap_videotoolbox={terms}:")),
+        "{argv}"
+    );
+}
+
 #[test]
 fn macos_software_recovery_survives_readiness_changes_without_authorizing_mac_graphs() {
     for hdr in [false, true] {
@@ -458,7 +496,19 @@ fn macos_processing_rolling_and_vod_share_frozen_color_graph() {
         assert!(!vf.contains("format=yuv420p"));
     }
     assert!(vod.iter().any(|arg| arg == "passthrough"));
-    assert!(!plurx_core::transcode::PIPELINE_CANDIDATES.contains(&Pipeline::VtToneMapMetal));
+    // The boot probe measures the Metal graph against the CPU reference, but a
+    // node that proved it still reaches it only through this context.
+    assert!(Pipeline::VtToneMapMetal.requires_macos_context());
+    assert_eq!(
+        Pipeline::for_session(
+            Pipeline::VtToneMapMetal,
+            Encoder::VideoToolbox,
+            Some("hdr10"),
+            true,
+            false
+        ),
+        Pipeline::Cpu
+    );
 }
 
 #[test]

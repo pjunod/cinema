@@ -17,6 +17,8 @@ use plurx_core::transcode::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+use crate::pipeprobe::CpuParity;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
@@ -58,6 +60,8 @@ pub(crate) enum ProbeReason {
     GraphFailed,
     GraphTimedOut,
     OutputContractFailed,
+    CpuParityFailed,
+    CpuParityNotMeasured,
 }
 
 impl ProbeReason {
@@ -80,6 +84,8 @@ impl ProbeReason {
             Self::GraphFailed => "runtime_graph_failed",
             Self::GraphTimedOut => "runtime_graph_timed_out",
             Self::OutputContractFailed => "output_contract_failed",
+            Self::CpuParityFailed => "cpu_parity_failed",
+            Self::CpuParityNotMeasured => "cpu_parity_not_measured",
         }
     }
 }
@@ -200,6 +206,10 @@ pub(crate) struct MacosVideoProbe {
     runtime_cache: PathBuf,
     report: RwLock<Arc<MacosVideoReport>>,
     serial: tokio::sync::Mutex<()>,
+    /// The boot probe's CPU-parity finding for the Metal tone-map on PQ input
+    /// ([`crate::pipeprobe::PipelineReport::parity`]). Fixed for the process,
+    /// like the boot probe itself.
+    pq_tone_map_parity: RwLock<CpuParity>,
 }
 
 impl MacosVideoProbe {
@@ -213,7 +223,23 @@ impl MacosVideoProbe {
             runtime_cache,
             report: RwLock::new(Arc::new(initial)),
             serial: tokio::sync::Mutex::new(()),
+            pq_tone_map_parity: RwLock::new(CpuParity::default()),
         }
+    }
+
+    pub(crate) fn pq_tone_map_parity(&self) -> CpuParity {
+        *self
+            .pq_tone_map_parity
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Recorded before the first reprobe; every later generation applies it.
+    pub(crate) fn set_pq_tone_map_parity(&self, parity: CpuParity) {
+        *self
+            .pq_tone_map_parity
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = parity;
     }
 
     /// Synchronous Arc clone for the existing synchronous movie-plan resolver.
@@ -1385,7 +1411,38 @@ async fn run_generation(
             *observation = GraphObservation::from_result(Err(reason));
         }
     }
+    apply_pq_tone_map_parity(&mut report, owner.pq_tone_map_parity());
     report
+}
+
+/// The PQ Metal graphs are the boot probe's Metal candidate. The smoke runs
+/// above prove they execute and keep their output contract — ordered patches,
+/// a black-to-peak spread, neutral greys — which any monotone curve passes.
+/// Only the boot probe compares the picture with the CPU reference, so a PQ
+/// graph that has not matched it is not offered: the same bar every other GPU
+/// tone-map meets before a node uses it. HLG keeps its own analytical check.
+/// A graph whose smoke already failed keeps that, more specific, reason.
+fn apply_pq_tone_map_parity(report: &mut MacosVideoReport, parity: CpuParity) {
+    let reason = match parity {
+        CpuParity::Passed => return,
+        CpuParity::Failed => ProbeReason::CpuParityFailed,
+        CpuParity::NotMeasured => ProbeReason::CpuParityNotMeasured,
+    };
+    let demote = |observation: &mut GraphObservation| {
+        if observation.availability == MacosProcessingAvailability::Available {
+            *observation = GraphObservation::from_result(Err(reason));
+        }
+    };
+    demote(&mut report.hdr10_metal);
+    for graph in [
+        MacosProcessingGraph::Hdr10Metal,
+        MacosProcessingGraph::Hdr10TextBurn,
+        MacosProcessingGraph::Hdr10BitmapBurn,
+    ] {
+        if let Some(observation) = report.graphs.get_mut(&graph) {
+            demote(observation);
+        }
+    }
 }
 
 fn held_file_argument(
@@ -2037,6 +2094,66 @@ async fn run_smoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Smoke success is not CPU parity. Only a probe that matched the CPU
+    /// picture leaves the PQ Metal graphs available; failed and unmeasured
+    /// parity each name themselves, and neither touches SDR or HLG.
+    #[test]
+    fn pq_metal_graphs_are_offered_only_after_the_boot_probe_matched_the_cpu_picture() {
+        use MacosProcessingAvailability::{Available, Unavailable};
+        use MacosProcessingGraph::{Hdr10BitmapBurn, Hdr10TextBurn, HlgMetal, SdrTextBurn};
+        let observed = || {
+            let mut report = MacosVideoReport::pending(1);
+            report.sdr_scale = GraphObservation::from_result(Ok(()));
+            report.hdr10_metal = GraphObservation::from_result(Ok(()));
+            for graph in [Hdr10TextBurn, Hdr10BitmapBurn, HlgMetal, SdrTextBurn] {
+                report
+                    .graphs
+                    .insert(graph, GraphObservation::from_result(Ok(())));
+            }
+            report
+        };
+
+        let mut passed = observed();
+        apply_pq_tone_map_parity(&mut passed, CpuParity::Passed);
+        assert_eq!(passed.hdr10_metal.availability, Available);
+        assert!(passed.graphs.values().all(|o| o.availability == Available));
+
+        for (parity, reason) in [
+            (CpuParity::Failed, ProbeReason::CpuParityFailed),
+            (CpuParity::NotMeasured, ProbeReason::CpuParityNotMeasured),
+        ] {
+            let mut report = observed();
+            apply_pq_tone_map_parity(&mut report, parity);
+            assert_eq!(report.hdr10_metal.availability, Unavailable, "{parity:?}");
+            assert_eq!(report.hdr10_metal.reason, reason);
+            for graph in [Hdr10TextBurn, Hdr10BitmapBurn] {
+                assert_eq!(report.graphs[&graph].reason, reason, "{graph:?}");
+            }
+            assert_eq!(report.sdr_scale.availability, Available);
+            assert_eq!(report.graphs[&HlgMetal].availability, Available);
+            assert_eq!(report.graphs[&SdrTextBurn].availability, Available);
+        }
+
+        let mut smoke_failed = observed();
+        smoke_failed.hdr10_metal = GraphObservation::from_result(Err(ProbeReason::GraphFailed));
+        apply_pq_tone_map_parity(&mut smoke_failed, CpuParity::Failed);
+        assert_eq!(
+            smoke_failed.hdr10_metal.reason,
+            ProbeReason::GraphFailed,
+            "the more specific smoke failure is kept"
+        );
+    }
+
+    /// The parity is a fact about this process's boot probe; rebuilding the
+    /// probe for the final cache layout must not forget it.
+    #[test]
+    fn the_parity_survives_the_probe_being_rebuilt_for_the_cache_layout() {
+        let probe = MacosVideoProbe::new(PathBuf::from("unused-runtime-cache"));
+        assert_eq!(probe.pq_tone_map_parity(), CpuParity::NotMeasured);
+        probe.set_pq_tone_map_parity(CpuParity::Passed);
+        assert_eq!(probe.pq_tone_map_parity(), CpuParity::Passed);
+    }
 
     #[test]
     fn macos_pgs_observation_rejects_opaque_missing_and_stale_cues() {
