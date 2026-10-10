@@ -546,6 +546,100 @@ class InstallerCase(unittest.TestCase):
             self.assertNotIn(tool, calls)
         self.assertIn("plurxd run", result.stdout)
 
+    # ---- building from the checkout ---------------------------------------
+
+    def pinned_channel(self) -> str:
+        return re.search(r'^channel = "([^"]+)"', read("rust-toolchain.toml"), re.M).group(1)
+
+    def stub_rustup(self, where: Path, installed: bool) -> Path:
+        """A rustup that behaves like the real one where it matters: `which`
+        names an installed toolchain's rustc (and fails for a missing one),
+        `toolchain install` installs it, and nothing it does reorders PATH.
+        The toolchain's cargo resolves `rustc` from PATH the way real cargo
+        does, then writes a release binary."""
+        toolchain = self.tmp / "toolchains" / self.pinned_channel() / "bin"
+        toolchain.mkdir(parents=True)
+        log = self.host.log
+        write_executable(toolchain / "rustc", f'#!/bin/bash\nprintf \'%s\\n\' "toolchain-rustc $*" >> "{log}"\n')
+        write_executable(
+            toolchain / "cargo",
+            "#!/bin/bash\n"
+            f'printf \'%s\\n\' "toolchain-cargo $*" >> "{log}"\n'
+            '"${RUSTC:-rustc}" -vV >/dev/null || exit 1\n'
+            'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+            "printf '#!/bin/sh\\necho plurxd 0.0.0-test\\n' > \"$CARGO_TARGET_DIR/release/plurxd\"\n"
+            'chmod 755 "$CARGO_TARGET_DIR/release/plurxd"\n',
+        )
+        marker = self.tmp / "toolchains" / "installed"
+        if installed:
+            marker.touch()
+        where.mkdir(parents=True, exist_ok=True)
+        rustup = where / "rustup"
+        write_executable(
+            rustup,
+            "#!/bin/bash\n"
+            f'printf \'%s\\n\' "rustup $*" >> "{log}"\n'
+            'case "$1" in\n'
+            f'  which) [ -e "{marker}" ] || exit 1; echo "{toolchain}/rustc" ;;\n'
+            f'  toolchain) : > "{marker}" ;;\n'
+            "  *) exit 2 ;;\n"
+            "esac\n",
+        )
+        return rustup
+
+    def build_and_install(self, path: str | None = None) -> tuple[subprocess.CompletedProcess[str], list[str], Path]:
+        prefix = self.tmp / "local"
+        env = {"CARGO_TARGET_DIR": str(self.tmp / "target")}
+        if path is not None:
+            env["PATH"] = path
+        result = self.host.run("binary", "--prefix", str(prefix), env=env)
+        return result, self.host.calls(), prefix / "bin" / "plurxd"
+
+    def test_a_build_runs_on_the_pinned_toolchain_even_when_another_rust_comes_first(self):
+        # Homebrew's `rust` formula puts a cargo AND a rustc on PATH that
+        # ignore rust-toolchain.toml. Calling rustup's cargo is not enough --
+        # cargo runs the first rustc on PATH -- so both stand-ins here fail,
+        # and the build must never reach either of them.
+        self.host.stub("cargo", "exit 97\n")
+        self.host.stub("rustc", "exit 97\n")
+        # rustup and its proxies live in ~/.cargo/bin, later on PATH than
+        # the Homebrew stand-ins, as on the Mac this was found on.
+        cargo_bin = self.host.home / ".cargo" / "bin"
+        self.stub_rustup(cargo_bin, installed=True)
+        result, calls, installed = self.build_and_install(f"{self.host.bin}:{cargo_bin}:{self.host.sysbin}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"Rust {self.pinned_channel()}", result.stdout)
+        self.assertOrdered(calls, "toolchain-cargo build --locked --release -p plurxd", "toolchain-rustc -vV")
+        self.assertFalse([c for c in calls if c.startswith(("cargo ", "rustc "))], "PATH's Rust must not build")
+        self.assertFalse([c for c in calls if c.startswith("rustup toolchain install")], "an installed toolchain is not re-fetched")
+        self.assertIn("comes before rustup on PATH", result.stdout, "the shadowing rustc is named")
+        self.assertTrue(installed.exists())
+
+    def test_a_missing_pinned_toolchain_is_installed_from_the_cargo_home_rustup(self):
+        # rustup is not on PATH at all, only in ~/.cargo/bin (a fresh shell
+        # that never sourced ~/.cargo/env), and the pinned channel is absent.
+        self.stub_rustup(self.host.home / ".cargo" / "bin", installed=False)
+        result, calls, installed = self.build_and_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertOrdered(
+            calls,
+            f"rustup toolchain install {self.pinned_channel()} --profile minimal --no-self-update",
+            "toolchain-cargo build --locked --release -p plurxd",
+        )
+        self.assertTrue(installed.exists())
+
+    def test_without_rustup_the_build_uses_the_cargo_on_path(self):
+        self.host.stub(
+            "cargo",
+            'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+            "printf '#!/bin/sh\\necho plurxd 0.0.0-test\\n' > \"$CARGO_TARGET_DIR/release/plurxd\"\n"
+            'chmod 755 "$CARGO_TARGET_DIR/release/plurxd"\n',
+        )
+        result, calls, installed = self.build_and_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cargo build --locked --release -p plurxd", calls)
+        self.assertTrue(installed.exists())
+
     def test_windows_mode_hands_every_flag_to_the_powershell_installer(self):
         self.host.stub("pwsh", "")
         result = self.host.run("windows", "--uninstall", "--dry-run", "--binary", str(self.host.fake_binary), "--prefix", "C:/plurx")
