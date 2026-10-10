@@ -3746,22 +3746,47 @@ pub async fn has_dovi_reshape() -> bool {
 /// are all used here. Omitting the init used to make every QSV probe fail with
 /// "A hardware device reference is required", even though the real session
 /// supplied that device and the node could run the graph.
-async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
+/// Raster of the Dolby Vision reshape pairing proof. A hardware encoder has a
+/// minimum frame size (AMD VA-API refuses anything under 128x128), so the
+/// earlier 64x64 proof failed on encoders that take every real delivery size
+/// and pinned Dolby Vision sources to x264 on those nodes. The proof encodes
+/// the 1080p delivery raster the reshape actually feeds, as the VA-API Main10
+/// proof already does.
+const DOVI_RESHAPE_PROOF_RASTER: (u32, u32) = (1920, 1080);
+
+fn dovi_reshape_probe_args(encoder: Encoder) -> Vec<String> {
+    let (width, height) = DOVI_RESHAPE_PROOF_RASTER;
     let filter = format!(
-        "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=yuv420p:apply_dovi=1,scale=64:64,format=yuv420p{}",
+        "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=yuv420p:apply_dovi=1,scale={width}:{height},format=yuv420p{}",
         encoder
             .filter_suffix_for(OutputGrade::Sdr)
             .map(|s| format!(",{s}"))
             .unwrap_or_default()
     );
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    args.extend(encoder.init_args());
+    args.extend([
+        "-f".to_owned(),
+        "lavfi".to_owned(),
+        "-i".to_owned(),
+        format!("color=size={width}x{height}:rate=1:color=black"),
+        "-frames:v".to_owned(),
+        "1".to_owned(),
+        "-vf".to_owned(),
+        filter,
+    ]);
+    args.extend(encoder.encode_args(1_000, EffectiveRateControl::Vbr, false, None));
+    args.extend(["-f", "null", "-"].into_iter().map(str::to_owned));
+    args
+}
+
+async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command
-        .args(["-hide_banner", "-loglevel", "error"])
-        .args(encoder.init_args())
-        .args(["-f", "lavfi", "-i", "color=size=64x64:rate=1:color=black"])
-        .args(["-frames:v", "1", "-vf", &filter])
-        .args(encoder.encode_args(1_000, EffectiveRateControl::Vbr, false, None))
-        .args(["-f", "null", "-"])
+        .args(dovi_reshape_probe_args(encoder))
         .kill_on_drop(true);
     tokio::time::timeout(
         Duration::from_secs(20),
@@ -4389,6 +4414,29 @@ async fn probe_burst() -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dovi_reshape_pairing_proof_uses_a_delivery_raster_every_encoder_accepts() {
+        use super::*;
+        for encoder in [
+            Encoder::Software,
+            Encoder::Vaapi,
+            Encoder::Qsv,
+            Encoder::Nvenc,
+            Encoder::VideoToolbox,
+        ] {
+            let args = dovi_reshape_probe_args(encoder);
+            let (width, height) = DOVI_RESHAPE_PROOF_RASTER;
+            // AMD VA-API's floor is 128x128; the proof must not test below
+            // the sizes the reshape is actually delivered at.
+            assert!(width >= 1280 && height >= 720, "{encoder:?}");
+            assert!(args.contains(&format!("color=size={width}x{height}:rate=1:color=black")));
+            let filter = &args[args.iter().position(|a| a == "-vf").expect("filter") + 1];
+            assert!(filter.contains(&format!("apply_dovi=1,scale={width}:{height},")));
+            assert!(!args
+                .iter()
+                .any(|a| a.contains("64x64") || a.contains("scale=64:64")));
+        }
+    }
 
     #[tokio::test]
     async fn held_clock_reporter_bytes_enter_existing_engine_identity_and_publication_fence() {
