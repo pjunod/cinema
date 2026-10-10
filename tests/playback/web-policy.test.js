@@ -4004,11 +4004,18 @@ test("attachment and retirement are what the presenter is told about identity", 
   const fed = [];
   const attach = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration",
-    [shippedSource("beginPlaybackMediaAttachment"), "return beginPlaybackMediaAttachment;"].join("\n"),
+    [shippedSource("clearEffectiveProcessing"), shippedSource("beginPlaybackMediaAttachment"),
+      "return beginPlaybackMediaAttachment;"].join("\n"),
   )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null);
   attach({ attemptId: "a7" });
   assert.deepEqual(fed, [{ attach: "a7" }],
     "every attach on every route runs through here, so every one must say so");
+  // HDR10-E names one attachment's accepted processing; a new attachment
+  // starts without it until its own control exchange reports one.
+  const reattached = { attemptId: "a8", effectiveProcessing: { hdr10_enhanced: true } };
+  attach(reattached);
+  assert.equal(reattached.effectiveProcessing, null,
+    "a new attachment cannot inherit the previous one's processing report");
 
   fed.length = 0;
   const retire = new PlaybackContextFunction(
@@ -5773,6 +5780,8 @@ test("every surface paints the badge from the same four answers", () => {
       shippedSource("sourceDolbyVisionProfile"),
       shippedSource("dynamicRangeReason"),
       shippedSource("dynamicRangeBadge"),
+      shippedSource("effectiveHdrProcessing"),
+      shippedSource("effectiveProcessingDetail"),
       shippedSource("playerRangeBadge"),
       "return {playerRangeBadge};",
     ].join("\n"),
@@ -5816,6 +5825,7 @@ test("a session that lands on a different range repaints the badge", () => {
     "startPlaybackControl",
     [shippedSource("markPlaybackControlSeekExecuted"),
       shippedSource("samplePlaybackPresentationClock"),
+      shippedSource("effectiveHdrProcessing"), shippedSource("clearEffectiveProcessing"),
       shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
   const player = { deliveredRange: "hdr10" };

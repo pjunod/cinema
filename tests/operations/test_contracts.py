@@ -2033,7 +2033,9 @@ assert.equal(context.ACT_TIMER, null);
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
-        self.assertIn("timeout-minutes: 10", fast_jobs["preflight"])
+        # PR #962 raised the main fast lane's preflight to fifteen minutes so
+        # its receipt publications finish; the effort gate keeps ten.
+        self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 10", effort_jobs["preflight"])
         fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")

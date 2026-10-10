@@ -35,6 +35,7 @@
  * @property {boolean} [requestHdr10]      what `/decision` asked the session to preserve; survives reopens
  * @property {string|null} deliveredRange  the grade on the wire (decision, then each session's report)
  * @property {number|null} deliveredDvProfile
+ * @property {any} [effectiveProcessing] the accepted current-generation DV processing report behind HDR10-E, or null
  * @property {boolean} [copyHls]           the HLS session copies the video stream
  * @property {boolean} [vod]               the session answered with a VOD (fixed) playlist
  * @property {string|null} [encoder]       the session's encoder, once one reports
