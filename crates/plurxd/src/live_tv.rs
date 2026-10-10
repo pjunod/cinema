@@ -3610,6 +3610,13 @@ pub(crate) struct LiveTvManager {
     linger_after_warm_reap: AtomicBool,
     #[cfg(test)]
     scratch_scans_started: AtomicU64,
+    /// Test seam: while `true`, every session ledger read started waits for
+    /// `false` before it reads, as a consistent read held across a slow
+    /// leader change does.
+    #[cfg(test)]
+    hold_session_fence_reads: tokio::sync::watch::Sender<bool>,
+    #[cfg(test)]
+    session_fence_reads_started: AtomicU64,
     /// Test seam: every orphan directory removal started from now on hangs,
     /// as `remove_dir_all` on a stalled mount does.
     #[cfg(test)]
@@ -3675,6 +3682,10 @@ impl LiveTvManager {
             linger_after_warm_reap: AtomicBool::new(false),
             #[cfg(test)]
             scratch_scans_started: AtomicU64::new(0),
+            #[cfg(test)]
+            hold_session_fence_reads: tokio::sync::watch::channel(false).0,
+            #[cfg(test)]
+            session_fence_reads_started: AtomicU64::new(0),
             #[cfg(test)]
             hang_orphan_removals: AtomicBool::new(false),
             metrics,
@@ -4511,7 +4522,9 @@ impl LiveTvManager {
     ) -> Result<Response<Body>, LiveTvError> {
         validate_capability_owner(request.capability(), &self.node_id)?;
         let session = self.session(request.capability())?;
-        self.resource_session_fence(&session).await?;
+        // No Store read here (plan L-03): the observer's polled ledger verdict
+        // ends a refused session, and the checks below see that end.
+        self.resource_serving_fence(&session)?;
         {
             let mut state = session
                 .state
@@ -6974,6 +6987,15 @@ async fn run_live_session_inner(
         // filesystem cannot pile up blocking-pool threads, and the tick carries
         // on to the startup and producer-progress timers, which end the session.
         let mut inventory_scan: Option<ScratchScanTask> = None;
+        // The running fence takes the same shape (plan L-03): its ledger read is
+        // a leader-consistent Store read with no deadline of its own, so it runs
+        // on its own task and the tick polls it. Awaited inline, a slow read
+        // stopped the tick, and with it the scratch scans that advance the
+        // publication: the playlist froze while FFmpeg kept producing, and a
+        // player that sees an unchanged playlist for 3.5 target durations gives
+        // up. At most one check is in flight; its verdict ends the session
+        // exactly as the awaited one did.
+        let mut fence_check: Option<SessionFenceTask> = None;
         let observe = async {
             loop {
                 tick.tick().await;
@@ -7208,12 +7230,18 @@ async fn run_live_session_inner(
                         ));
                     }
                 }
+                if fence_check
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+                {
+                    let verdict = fence_check.take().expect("a finished fence check");
+                    verdict.await.map_err(|error| {
+                        LiveTvError::StreamFailed(format!("checking the live-TV fence: {error}"))
+                    })??;
+                }
                 ticks = ticks.wrapping_add(1);
-                if ticks.is_multiple_of(4) {
-                    let owner = manager.upgrade().ok_or_else(|| {
-                        LiveTvError::StreamFailed("live-TV manager stopped".into())
-                    })?;
-                    ensure_session_fence_from_observation(&owner, session).await?;
+                if ticks.is_multiple_of(4) && fence_check.is_none() {
+                    fence_check = Some(spawn_session_fence(manager, session));
                 }
             }
         };
@@ -7240,6 +7268,9 @@ async fn run_live_session_inner(
 
         if let Some(scan) = inventory_scan.take() {
             scan.abort();
+        }
+        if let Some(check) = fence_check.take() {
+            check.abort();
         }
         let terminal = match terminal {
             Ok(Some(_)) if !transport.reserve_seat() => {
@@ -8738,6 +8769,24 @@ async fn linger_after_warm_reap(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
+}
+
+type SessionFenceTask = tokio::task::JoinHandle<Result<(), LiveTvError>>;
+
+/// Start one running-session fence check on its own task, so the session's
+/// tick polls its verdict instead of waiting on the Store for it.
+fn spawn_session_fence(
+    manager: &Weak<LiveTvManager>,
+    session: &Arc<LiveTvSession>,
+) -> SessionFenceTask {
+    let manager = Weak::clone(manager);
+    let session = Arc::clone(session);
+    tokio::spawn(async move {
+        let owner = manager
+            .upgrade()
+            .ok_or_else(|| LiveTvError::StreamFailed("live-TV manager stopped".into()))?;
+        ensure_session_fence_from_observation(&owner, &session).await
+    })
 }
 
 /// Start one inventory scan of a session's scratch on its own task, so the
@@ -12495,6 +12544,178 @@ exec /bin/cat > {sink}"#,
             manager.scratch_scans_started.load(Ordering::Acquire) - before,
             1,
             "one scan in flight from the moment the filesystem hung, never a second"
+        );
+    }
+
+    /// A scripted FFmpeg that keeps producing until its scratch is removed: a
+    /// new one-second segment every 300 ms, a three-segment window, and the
+    /// one deletion-lag segment kept behind it.
+    fn advancing_ffmpeg() -> String {
+        r#"for output do playlist="$output"; done
+directory=${playlist%/*}
+(
+n=1
+while [ -d "$directory" ]; do
+  printf 'segment-%d' "$n" > "$directory/$(printf 'segment-%06d.ts' "$n")"
+  first=1
+  [ "$n" -gt 2 ] && first=$((n - 2))
+  {
+    printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n' "$first"
+    listed=$first
+    while [ "$listed" -le "$n" ]; do
+      printf '#EXTINF:1.000000,\nsegment-%06d.ts\n' "$listed"
+      listed=$((listed + 1))
+    done
+  } > "$playlist.tmp" && /bin/mv "$playlist.tmp" "$playlist"
+  stale=$((first - 2))
+  [ "$stale" -ge 1 ] && /bin/rm -f "$directory/$(printf 'segment-%06d.ts' "$stale")"
+  n=$((n + 1))
+  /bin/sleep 0.3
+done
+) &
+exec /bin/cat > /dev/null"#
+            .to_owned()
+    }
+
+    /// One playlist GET, bounded: before plan L-03 every GET took the
+    /// session's consistent ledger read first.
+    async fn served_playlist(manager: &LiveTvManager, capability: &str) -> bytes::Bytes {
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.resource_local(LiveTvResourceRequest::Playlist {
+                capability: capability.to_owned(),
+            }),
+        )
+        .await
+        .expect("a playlist GET must not wait on the Store")
+        .expect("serve playlist");
+        axum::body::to_bytes(response.into_body(), MAX_PLAYLIST_BYTES as usize)
+            .await
+            .expect("playlist bytes")
+    }
+
+    /// Plan L-03: a session's ledger read that does not return — a consistent
+    /// read held across a slow leader change — must not stop its publication.
+    /// Awaited on the tick, as it used to be, it stopped the scratch scans: the
+    /// playlist froze while FFmpeg kept producing until the player declared it
+    /// stuck, and every playlist GET waited on the same read. The check now
+    /// runs beside the tick, one at a time, and when it finally answers that
+    /// the cluster no longer authorizes the attempt the session still ends.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_ledger_read_keeps_the_playlist_advancing_and_its_refusal_still_ends_the_session(
+    ) {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner) = start_path_fixture(root.path(), &advancing_ffmpeg(), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let request = fixture_request(1);
+        let provisional = tokio::time::timeout(
+            LIVE_TV_TEST_HANG_GUARD,
+            manager.start_local(request.clone()),
+        )
+        .await
+        .expect("start deadline")
+        .expect("published start");
+        manager
+            .activate_local(
+                &LiveTvActivateRequest {
+                    expected_owner_node_id: "node-a".into(),
+                    capability: provisional.capability.clone(),
+                    activation_token: provisional.activation_token.clone(),
+                    config_generation: 1,
+                    source_serving_generation: 0,
+                },
+                "node-a",
+            )
+            .await
+            .expect("activate live TV");
+        let session = manager
+            .session(&provisional.capability)
+            .expect("registered session");
+
+        let before = manager.session_fence_reads_started.load(Ordering::Acquire);
+        manager.hold_session_fence_reads.send_replace(true);
+        let deadline = tokio::time::Instant::now() + LIVE_TV_TEST_HANG_GUARD;
+        while manager.session_fence_reads_started.load(Ordering::Acquire) == before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the running session never checked its ledger"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let held = manager.session_fence_reads_started.load(Ordering::Acquire);
+        let sequence_held = session.state.lock().expect("state").media_sequence;
+        let playlist_held = served_playlist(&manager, &provisional.capability).await;
+
+        // Several fence intervals pass with the read hung.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let sequence = session.state.lock().expect("state").media_sequence;
+        assert!(
+            sequence >= sequence_held + 3,
+            "the publication stopped advancing while the ledger read hung: \
+             {sequence_held} -> {sequence}"
+        );
+        assert_ne!(
+            served_playlist(&manager, &provisional.capability).await,
+            playlist_held,
+            "a playlist GET during the hung read served the frozen playlist"
+        );
+        assert_eq!(
+            manager.session_fence_reads_started.load(Ordering::Acquire),
+            held,
+            "one ledger check in flight from the moment the read hung, never a second"
+        );
+        assert!(!session.cancel.is_cancelled());
+
+        // A settings save moves the generation the ledger is read under, so
+        // the hung read, once it returns, answers that the cluster no longer
+        // authorizes this attempt. The tuner's own lease sees the same change
+        // at its next five-second renewal and closes the transport, which
+        // would end the session first; so the save lands just after a renewal
+        // (the ingest's revision moves on each one).
+        let ingest_revision = || async {
+            manager
+                .resource_snapshot(0, "")
+                .await
+                .expect("ledger snapshot")
+                .records
+                .into_iter()
+                .find_map(|record| match record {
+                    plurx_core::live_tv_resource::Record::Ingest(ingest) => Some(ingest.revision),
+                    _ => None,
+                })
+        };
+        let renewed_from = ingest_revision().await;
+        while ingest_revision().await == renewed_from {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the tuner lease never renewed"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        manager
+            .store
+            .put_settings(&[(keys::LIVE_TV_CONFIG_GENERATION, "2")])
+            .await
+            .expect("a settings save elsewhere");
+        manager.hold_session_fence_reads.send_replace(false);
+        while manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .contains_key(&provisional.capability)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the hung read's refusal must still end the session"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let terminal = session.state.lock().expect("state").terminal_error.clone();
+        assert!(
+            matches!(&terminal, Some(LiveTvError::CapabilityExpired(message)) if message.contains("no longer authorizes")),
+            "{terminal:?}"
         );
     }
 
