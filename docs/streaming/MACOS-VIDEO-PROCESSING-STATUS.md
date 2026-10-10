@@ -48,6 +48,10 @@ cleared before recovery, so everything was rebuilt from the pushed branch
   producer-ownership ledger, where both reviewed histories add together.
   Main changed prepared-output reuse, not decoder selection, so the
   frozen-candidate hardware evidence still describes the tree.
+- **Fourth merge** (`05bf60381`, main #982/#983). Main moved during the first
+  fast-lane run, so the promotion gate refused the stale base. The ledger
+  histories add again; main's DV pixel-proof change leaves the corrected
+  encoder-pairing proof in place.
 
 Remaining work, in order:
 
