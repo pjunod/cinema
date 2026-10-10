@@ -1773,7 +1773,7 @@ impl TranscodeManager {
                     let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
                     let processed_encoder = if worker_encoder == Encoder::Nvenc { Encoder::Nvenc } else { Encoder::Software };
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
-                        source_tick, native_bl, preferences,
+                        source_tick, native_bl, source_clock, preferences,
                         destination, mode, encoder: processed_encoder, runtime_cache: self.runtime_cache.clone(), prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
                         report_revision: std::sync::atomic::AtomicU64::new(0),
                         published_receipt: std::sync::Mutex::new(None) };

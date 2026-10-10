@@ -1049,6 +1049,7 @@ impl Encoding {
                 duration_seconds,
                 "/proc/self/fd/3",
                 "/proc/self/fd/4",
+                self.source_clock,
             )
             .expect("verified reconstructed VOD recipe remains valid");
         }

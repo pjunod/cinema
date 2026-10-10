@@ -1322,6 +1322,10 @@ pub fn vod_pipe_args_with_source_clock(
 /// soundtrack lattice and output codec contract. The caller independently
 /// verifies one source picture per output-grid frame before publishing bytes.
 /// No fps, clone padding or source video decoder may alter that association.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reconstructed recipe binds source, output, timing, both descriptors and the held source clock"
+)]
 pub fn vod_reconstructed_pipe_args(
     source: &MediaFile,
     plan: &ResolvedTranscode,
@@ -1330,6 +1334,7 @@ pub fn vod_reconstructed_pipe_args(
     duration_seconds: f64,
     source_fd: &str,
     audio_fd: &str,
+    source_clock: VodSourceClock,
 ) -> Result<Vec<String>, &'static str> {
     let output = plan
         .completed_reconstructed_output(plan.encoder())
@@ -1342,9 +1347,14 @@ pub fn vod_reconstructed_pipe_args(
         duration_seconds,
         source_fd,
         audio_fd,
+        source_clock,
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reconstructed recipe binds source, output, timing, both descriptors and the held source clock"
+)]
 pub fn vod_completed_reconstructed_pipe_args(
     source: &MediaFile,
     output: &super::CompletedReconstructedOutputPlan<'_>,
@@ -1353,6 +1363,7 @@ pub fn vod_completed_reconstructed_pipe_args(
     duration_seconds: f64,
     source_fd: &str,
     audio_fd: &str,
+    source_clock: VodSourceClock,
 ) -> Result<Vec<String>, &'static str> {
     let plan = output.source_plan();
     if !matches!(
@@ -1368,8 +1379,18 @@ pub fn vod_completed_reconstructed_pipe_args(
     }
     let (width, height) = super::output_size(source, plan.options().target_height)
         .ok_or("reconstructed output raster unavailable")?;
-    let mut args =
-        vod_pipe_args_with_reorder(source, plan, execution, grid, duration_seconds, false);
+    // The source soundtrack keeps the held demux origin the Encoding froze,
+    // exactly as on the ordinary route; the reconstructed video input that
+    // replaces the source decoder below carries its own verified origin.
+    let mut args = vod_pipe_args_with_source_clock(
+        source,
+        plan,
+        execution,
+        grid,
+        duration_seconds,
+        false,
+        source_clock,
+    );
     if args.iter().any(|arg| arg == "-filter_complex") {
         return Err("unsupported reconstructed filter graph");
     }
@@ -1902,6 +1923,7 @@ mod tests {
             0.25,
             "/dev/fd/3",
             "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(0),
         )
         .expect("reconstructed recipe");
         assert_eq!(
@@ -1932,9 +1954,67 @@ mod tests {
             VodFrameGrid::new(24, 1).expect("grid"),
             0.25,
             "/dev/fd/3",
-            "/dev/fd/4"
+            "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(0),
         )
         .is_err());
+    }
+
+    #[test]
+    fn reconstructed_soundtrack_keeps_the_held_source_origin_of_the_ordinary_route() {
+        let (source, ordinary, execution, facts, capabilities) = encoded_recipe_fixture(true);
+        let mut media = ordinary.options().clone();
+        media.input_has_audio = true;
+        media.audio_index = Some(0);
+        let plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(crate::transcode::Encoder::Software, media),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("audio HDR10 recipe");
+        let grid = VodFrameGrid::new(24, 1).expect("grid");
+        let clock = super::VodSourceClock::ReportedOrigin(1_500_000);
+        let offsets = |args: &[String]| {
+            args.windows(2)
+                .filter(|p| p[0] == "-itsoffset")
+                .map(|p| p[1].clone())
+                .collect::<Vec<_>>()
+        };
+        let ordinary =
+            vod_pipe_args_with_source_clock(&source, &plan, &execution, grid, 0.25, false, clock);
+        // Ordinary: one offset on the video input, one on the soundtrack.
+        assert_eq!(offsets(&ordinary), ["-1.500000", "-1.500000"]);
+        let reconstructed = vod_reconstructed_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            grid,
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+            clock,
+        )
+        .expect("reconstructed recipe");
+        // Reconstructed: the RGB video input replaces the source decoder and
+        // its offset; the source soundtrack keeps the ordinary held origin.
+        assert_eq!(offsets(&reconstructed), ["-1.500000"]);
+        let zero = vod_reconstructed_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            grid,
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("zero-origin recipe");
+        assert_eq!(offsets(&zero), ["0.000000"]);
     }
 
     #[test]
@@ -1952,6 +2032,7 @@ mod tests {
             0.25,
             "/dev/fd/3",
             "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(0),
         )
         .expect("reconstructed hardware recipe");
         assert!(args.windows(2).any(|pair| pair == ["-c:v", "hevc_nvenc"]));

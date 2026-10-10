@@ -434,6 +434,8 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) source_offsets: Arc<tokio::sync::Semaphore>,
     pub(crate) source_tick: (u32, u32),
     pub(crate) native_bl: (u32, u32),
+    /// The held demux origin the Encoding froze for its soundtrack.
+    pub(crate) source_clock: plurx_core::transcode::VodSourceClock,
     pub(crate) preferences: plurx_core::transcode::dv_processing::DvPreferences,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
@@ -642,6 +644,7 @@ impl RuntimeRecipe {
                 end_seconds,
                 "/proc/self/fd/3",
                 "/proc/self/fd/4",
+                self.source_clock,
             )
             .map_err(str::to_owned)?;
             let deadline = tokio::time::Instant::now() + self.preparation_budget;
