@@ -731,6 +731,26 @@ struct GraphCase<'a> {
 }
 
 #[cfg(target_os = "linux")]
+impl GraphCase<'_> {
+    /// Raster the graph delivers. Negative controls emit raw 160x90 frames
+    /// and never open an encoder. Encoded tiny controls keep the corpus
+    /// source raster on every backend, because a smaller encoded raster is
+    /// subject to each encoder's minimum frame size (AMD VA-API aligns
+    /// 160x90 to 160x96 and refuses under 128 rows) and would refuse a
+    /// decoder that worked. Inspection still projects the delivered pixels
+    /// to the 160x90 color oracle. UHD output stays 1920x1080.
+    fn output_raster(&self) -> (u32, u32) {
+        if self.negative {
+            (160, 90)
+        } else if self.uhd24 {
+            (1920, 1080)
+        } else {
+            crate::macos_video::p5::SOURCE_RASTER
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 async fn graph_command(
     package: &PackageCapture,
     media: &PreparedMedia,
@@ -785,13 +805,9 @@ async fn graph_command(
         "-dn",
         "-vf",
     ]);
-    let (width, height) = if case.uhd24 && !case.negative {
-        (1920, 1080)
-    } else {
-        (160, 90)
-    };
+    let (width, height) = case.output_raster();
     let mut filter = Pipeline::DoviStrictTonemapx
-        .filters(Some(width), height, Some("dovi"))
+        .filters(Some(i64::from(width)), i64::from(height), Some("dovi"))
         .ok_or("unsupported_renderer")?;
     let mapper = filter.find("tonemapx=").ok_or("unsupported_renderer")?;
     filter.insert_str(mapper, "showinfo@plurx_p5_contract=checksum=0,");
@@ -1033,7 +1049,7 @@ async fn inspect_output(
         crate::macos_video::p5::observe_colors(&decoded.stdout)
             .map_err(|_| "output_colors_failed")?;
     } else {
-        crate::macos_video::p5::observe(&document, &decoded.stdout)
+        crate::macos_video::p5::observe_encoded(&document, &decoded.stdout, case.output_raster())
             .map_err(|_| "output_contract_failed")?;
         crate::macos_video::p5::observe_colors(&decoded.stdout)
             .map_err(|_| "output_colors_failed")?;
@@ -1499,6 +1515,38 @@ async fn qualify_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn encoded_tiny_probes_keep_source_raster_on_every_backend() {
+        use plurx_core::transcode::{DecodeBackend, Encoder};
+        let source: Value =
+            serde_json::from_slice(crate::macos_video::p5::MANIFEST).expect("strict corpus");
+        let raster = crate::macos_video::p5::SOURCE_RASTER;
+        assert_eq!(source["source_shape"], json!([raster.0, raster.1]));
+        for decoder in [DecodeBackend::Software, DecodeBackend::Vaapi] {
+            for encoder in [Encoder::Software, Encoder::Vaapi, Encoder::Qsv] {
+                let case = |uhd24, negative| GraphCase {
+                    bytes: UHD_MEDIA[0].1,
+                    decoder,
+                    encoder,
+                    uhd24,
+                    negative,
+                    seek_seconds: 0,
+                };
+                // One raster for every backend: no device-specific size, and
+                // the encoded tiny raster clears the 128-row hardware minimum
+                // that refused 160x90 (aligned to 160x96) on AMD VA-API.
+                assert_eq!(case(false, false).output_raster(), raster);
+                assert!(raster.0 >= 128 && raster.1 >= 128);
+                // Raw negative controls never open an encoder and stay at
+                // the oracle size their frame-count bound is written for.
+                assert_eq!(case(false, true).output_raster(), (160, 90));
+                assert_eq!(case(true, true).output_raster(), (160, 90));
+                assert_eq!(case(true, false).output_raster(), (1920, 1080));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn cancelled_neutral_generation_does_not_open_package_or_device() {

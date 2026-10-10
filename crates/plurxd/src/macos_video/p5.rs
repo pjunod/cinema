@@ -3,6 +3,13 @@ use super::*;
 use plurx_core::transcode::{EffectiveRateControl, Encoder, OutputGrade, Pipeline, VideoCodec};
 
 pub(crate) const MANIFEST: &[u8] = include_bytes!("../../fixtures/macos-processing/strict-p5.json");
+/// The strict corpus raster, the manifest's `source_shape`. An encoded probe
+/// that downscales below it inherits each encoder's minimum frame size: AMD
+/// VA-API aligns 160x90 to 160x96 and refuses anything under 128 rows, which
+/// reads as "no Dolby support" when the decoder worked. Encoded positive
+/// probes therefore keep this raster, and the delivered pixels are projected
+/// to the independent 160x90 color oracle before they are compared.
+pub(crate) const SOURCE_RASTER: (u32, u32) = (320, 180);
 macro_rules! media {
     ($($name:literal),+ $(,)?) => { &[$(($name, include_bytes!(concat!("../../fixtures/macos-processing/strict_p5_", $name, ".mp4")) as &[u8])),+] };
 }
@@ -390,6 +397,19 @@ pub(crate) fn observe_colors(raw: &[u8]) -> Result<(), ProbeReason> {
 }
 
 pub(crate) fn observe(document: &Value, raw: &[u8]) -> Result<(), ProbeReason> {
+    observe_encoded(document, raw, (160, 90))
+}
+
+/// [`observe`] for a stream encoded at `encoded`. The stream and every frame
+/// must report exactly that raster; `raw` is always the delivered picture
+/// decoded and projected to the 160x90 oracle, so the timing, gray-ramp,
+/// neutral-chroma and color-interpretation checks are the same for every
+/// encoded raster.
+pub(crate) fn observe_encoded(
+    document: &Value,
+    raw: &[u8],
+    encoded: (u32, u32),
+) -> Result<(), ProbeReason> {
     let fail = ProbeReason::OutputContractFailed;
     let stream = &document["streams"][0];
     let frames = document["frames"].as_array().ok_or(fail)?;
@@ -411,7 +431,7 @@ pub(crate) fn observe(document: &Value, raw: &[u8]) -> Result<(), ProbeReason> {
         }
     }
     for frame in std::iter::once(stream).chain(frames) {
-        if frame["width"] != 160 || frame["height"] != 90 {
+        if frame["width"] != encoded.0 || frame["height"] != encoded.1 {
             return Err(fail);
         }
         for (key, expected) in [
@@ -1086,6 +1106,65 @@ mod tests {
             })
             .collect::<Vec<_>>();
         (serde_json::json!({"streams":[stream],"frames":frames}), raw)
+    }
+
+    #[test]
+    fn source_raster_is_the_manifest_source_shape() {
+        let reference: Value = serde_json::from_slice(MANIFEST).expect("valid manifest");
+        assert_eq!(
+            reference["source_shape"],
+            serde_json::json!([SOURCE_RASTER.0, SOURCE_RASTER.1])
+        );
+    }
+
+    #[test]
+    fn encoded_raster_is_checked_exactly_while_pixels_keep_the_oracle_projection() {
+        let (document, raw) = synthetic_observed_output();
+        let reraster = |(width, height): (u32, u32)| {
+            let mut document = document.clone();
+            for key in ["streams", "frames"] {
+                for value in document[key].as_array_mut().expect("observed array") {
+                    value["width"] = serde_json::json!(width);
+                    value["height"] = serde_json::json!(height);
+                }
+            }
+            document
+        };
+        let source = reraster(SOURCE_RASTER);
+        assert_eq!(observe_encoded(&source, &raw, SOURCE_RASTER), Ok(()));
+        // The declared raster is never rewritten to fit: a 160x90 stream is
+        // not a 320x180 one, nor is the hardware-aligned 160x96 a 160x90 one.
+        assert_eq!(
+            observe_encoded(&document, &raw, SOURCE_RASTER),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        assert_eq!(
+            observe_encoded(&reraster((160, 96)), &raw, (160, 90)),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        // The wrapper the macOS graph uses keeps its exact 160x90 contract.
+        assert_eq!(
+            observe(&source, &raw),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        // Pixels still decide: the same corrupt chroma fails at either raster.
+        let mut corrupt = raw.clone();
+        for yy in 32..=34 {
+            for xx in 4..=6 {
+                corrupt[12 * 21600 + 14400 + yy * 80 + xx] = 255;
+            }
+        }
+        assert_eq!(
+            observe_encoded(&source, &corrupt, SOURCE_RASTER),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        // One frame reporting a different raster fails the stream.
+        let mut mixed = source.clone();
+        mixed["frames"][7]["height"] = serde_json::json!(90);
+        assert_eq!(
+            observe_encoded(&mixed, &raw, SOURCE_RASTER),
+            Err(ProbeReason::OutputContractFailed)
+        );
     }
 
     #[test]
