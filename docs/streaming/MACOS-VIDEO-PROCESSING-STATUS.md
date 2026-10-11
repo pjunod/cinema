@@ -67,12 +67,12 @@ cleared before recovery, so everything was rebuilt from the pushed branch
     hardware proofs now share the 1080p raster (`57cd7d45`).
 
   The fixed daemon delivers strict P5 with VA-API decode and encode on
-  Intel, and requalifies on AMD.
+  Intel, and requalifies on AMD. The adversarial review's findings are
+  addressed (`36b9a690`), and the final tree requalifies on Intel.
 
 Remaining work, in order:
 
-1. Adversarial review of `effort/linux-p5-intel-qualification`; address
-   findings, run the fast lane once, merge.
+1. Run the fast lane once on the Intel PR, then merge.
 2. Clean up both nodes' qualification roots and images.
 
 QSV strict graphs stay refused on this image until it stops carrying

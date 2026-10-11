@@ -2252,25 +2252,65 @@ arrives in 0.61 s and the window takes 78.1 s. Three earlier admissions were
 refused and remain recorded: production's own ffmpeg held the GPU twice,
 and a foreign compile left 0.6 GiB of memory once.
 
+**Review round.** One independent adversarial review read the branch. It
+reported one major and four minor findings.
+
+- **Major, partly rejected.** The classifier had been inserted between
+  `graph_refusal`'s doc comment and its `#[cfg]`, which the reviewer said
+  broke non-Linux builds. That part is rejected, because `linux_dolby` is a
+  Linux-only module: a macOS Clippy of plurxd with all targets passes before
+  and after the fix. The item documentation was wrong, though, so the
+  classifier now sits above `graph_refusal`, and its redundant cfgs are
+  removed.
+- **Minor, accepted: the refusal did not say which runtime.** It now names
+  the foreign file as `object`, by file name only, which keeps a stray
+  Media SDK distinguishable from a misdirected VA driver or a preloaded
+  system libavcodec.
+- **Minor, accepted: the raster test could pass if a probe re-inlined its
+  frame size.** A source guard now pins both QSV Main10 probes to the proof
+  builder.
+- **Minor, noted: an operator who forces `qsv` gets the incumbent renderer.**
+  This is recorded above as envelope enforcement, and the backlog follow-up
+  covers it.
+- **Minor, accepted: no non-Linux compile check.** The macOS Clippy run
+  above closes it.
+
+These changes are in `36b9a690`.
+
+**Final tree.** `36b9a690` builds incrementally in 722 s (`plurxd` SHA-256
+`29ef709f…`, debug `.dwp` `97013fbc…`). On the Intel node, with the encoder
+setting left automatic:
+
+- the probe reports both QSV graphs as
+  `foreign_runtime_object · object libmfxhw64.so.1.35`;
+- the session encoder is VA-API, and the strict graph runs with VA-API
+  decode and encode;
+- all 24 frames pass, and the first object arrives in 0.87 s;
+- production is unchanged.
+
 Regressions:
 
 - `crates/plurxd/src/ffmpeg/linux_dolby.rs::a_packaged_role_outside_the_package_is_foreign_not_a_package_mismatch`
+- `crates/plurxd/src/ffmpeg/linux_dolby.rs::a_foreign_runtime_refusal_names_the_file_not_its_directory`
 - `crates/plurxd/src/ffmpeg.rs::hardware_main10_proofs_use_a_raster_every_hardware_encoder_accepts`
+- `crates/plurxd/src/ffmpeg.rs::qsv_main10_probes_take_their_graph_from_the_proof_builder`
 
 These and the surrounding `linux_dolby`, `p5` and proof-raster tests pass
-(23 tests). Pinned Rust 1.97.1 workspace Clippy with denied warnings passes.
-No other unit suite ran.
+(25 tests). Pinned Rust 1.97.1 workspace Clippy with denied warnings passes
+on Linux, and plurxd all-targets Clippy passes on macOS. No other unit suite
+ran.
 
 [Intel strict-P5 evidence](evidence/macos-video-20261008/intel-strict-p5-evidence.tar.gz)
-is 92678 compressed bytes, SHA-256
-`e7d3fccc6747fdaae2d0e104ebb669a808b83bfa882a573027403fadf9b6123c`. It holds
-three neutral JSON records:
+is 107104 compressed bytes, SHA-256
+`f9389ef71402337f2033e2b99f7c0c9d526a90b2ed4a6416b472514cc8978943`. Its
+members were reopened and compared byte-for-byte. It holds three neutral
+JSON records:
 
 - every Intel window, with admission, monitor, raw controls, discovered
   closures, the daemon reports, observations, producer argv and ffmpeg
   timelines;
 - the AMD requalification windows;
-- the daemon build record.
+- both daemon build records.
 
 It also embeds the QSV raster measurement, the foreign-object comparison,
 and the window and driver scripts with their hashes. The two raw windows ran
