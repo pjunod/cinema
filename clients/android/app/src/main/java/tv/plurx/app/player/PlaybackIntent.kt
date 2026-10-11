@@ -1,6 +1,9 @@
 package tv.plurx.app.player
 
+import tv.plurx.app.data.CreateSessionReq
+import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.PlaybackQuality
+import tv.plurx.app.data.PresentationTarget
 import java.util.UUID
 import kotlin.math.abs
 
@@ -75,6 +78,34 @@ class PlaybackIntent(
             tv.plurx.app.data.MediaIntentSelection(selection.quality, selection.codec,
                 selection.dynamicRange, selection.audioTrack, selection.audioOffsetMs, selection.subtitle))
     }
+
+    /** Manual media ownership is negotiated independently of Auto policy. */
+    @Synchronized
+    internal fun bindSessionIntent(
+        body: CreateSessionReq,
+        caps: DeviceCaps,
+        serverProtocol: String?,
+        planProtocol: String?,
+        displayAwareAuto: Boolean,
+        selection: ClientSelection,
+        presentationTarget: PresentationTarget?,
+    ): CreateSessionReq {
+        if (serverProtocol != "route-v1" || planProtocol != "route-v1") return body
+        return body.copy(
+            caps = if (displayAwareAuto) caps.copy(
+                display = caps.display.copy(presentation_target = presentationTarget),
+            ) else caps,
+            intent = mediaIntent(selection),
+            height = if (displayAwareAuto && desiredQuality == PlaybackQuality.Auto)
+                automaticCandidateId?.let {
+                    automaticCandidateHeight?.takeIf { height ->
+                        height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
+                    }
+                } ?: if (automaticCandidateId == null) body.height else null
+            else body.height,
+        )
+    }
+
     private var presentedFrames = 0L
     private var lastAudioPositionMs: Long? = null
     private var audioObservedAtMs = 0L

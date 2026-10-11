@@ -26,6 +26,11 @@ final class AppModel: ObservableObject {
     @Published var homeLoading = true
     @Published var homeError: String?
     @Published var libraryGrouping: LibraryGrouping
+    /// Which optional areas the server has switched on; drives which top-level
+    /// tabs and entries HomeView shows. Starts (and resets) to `.all` so an
+    /// unknown or older server never hides anything, and a failed refresh keeps
+    /// the last answer rather than flapping tabs in and out.
+    @Published var features: ServerFeatures = .all
 
     @Published var audioLang: String
     @Published var subLang: String
@@ -107,7 +112,11 @@ final class AppModel: ObservableObject {
         #else
         let savedOrigin = settings.origin
         #endif
+        #if DEBUG
+        let savedToken = settings.acceptanceBootstrapToken(active: acceptance != nil)
+        #else
         let savedToken = settings.token
+        #endif
         guard !savedOrigin.isEmpty else {
             #if DEBUG
             if acceptance != nil {
@@ -297,6 +306,10 @@ final class AppModel: ObservableObject {
             async let h = requireAPI().hubs()
             async let l = requireAPI().libraries()
             async let soon = requireAPI().comingSoon()
+            // Started with the others; an admin's change to Live TV, DVR,
+            // Shared libraries or Library channels reaches the tab bar on the
+            // next launch, sign-in, foreground or pull-to-refresh.
+            async let loadedFeatures = requireAPI().features()
             let loadedHubs = try await h
             let loadedLibraries = try await l
             hubs = loadedHubs
@@ -306,6 +319,7 @@ final class AppModel: ObservableObject {
             homeLoading = false
 
             comingSoon = (try? await soon)?.entries ?? []
+            if let loaded = try? await loadedFeatures { features = loaded }
 
             // Prime the category/library shelves after the useful first paint,
             // publishing each page the moment it lands so shelves fill in
@@ -420,6 +434,7 @@ final class AppModel: ObservableObject {
         comingSoon = []
         libraries = []
         libraryPreviews = [:]
+        features = .all
         homeLoading = true
         homeError = nil
         authError = message
@@ -436,6 +451,7 @@ final class AppModel: ObservableObject {
         settings.clearServer()
         Session.shared.setCredentials(origin: origin, token: nil)
         userId = nil
+        features = .all
         // Artwork is cached per origin, but the bytes belong to the server that
         // served them; leaving them behind wastes memory the next server will
         // want for its own.

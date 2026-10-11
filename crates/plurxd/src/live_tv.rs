@@ -1625,6 +1625,14 @@ impl LiveTvSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(delivery);
     }
 
+    /// The caption formats this viewer's player decodes, when it said.
+    fn caption_decoders(&self) -> Option<Vec<String>> {
+        self.request
+            .playback
+            .as_ref()
+            .and_then(crate::live_tv_delivery::LivePlaybackRequest::caption_decoders)
+    }
+
     fn channel_with_source_format(&self) -> LiveTvChannel {
         let mut channel = self.channel.clone();
         // `self.channel` can contain a cached observation copied from lineup
@@ -2044,9 +2052,10 @@ pub(crate) struct LiveTvMetrics {
     dvr_sink_failures: [AtomicU64; 3],
     /// Every consistent read of the replicated settings this subsystem makes,
     /// by the site that took it and by outcome, indexed
-    /// `[SettingsReadSite][ok, failed]`. `observer` is the node's 1 Hz
-    /// settings loop: one read per second on every running node, and the only
-    /// read the per-second session fence depends on. `fence` is the direct
+    /// `[SettingsReadSite][ok, failed]`. `observer` is the node's settings
+    /// loop: one read per second while a tuner transport is held, one at boot
+    /// and one per settings-generation change otherwise, and the only read
+    /// the per-second session fence depends on. `fence` is the direct
     /// read the start fence and the pre-publication fence each take, so it
     /// moves with starts rather than with running sessions. `request` is every
     /// other caller of `LiveTvManager::config` — each public and internal
@@ -2058,6 +2067,13 @@ pub(crate) struct LiveTvMetrics {
     /// Session fence ticks by the state of the observation they validated
     /// against: fresh, in grace, expired. Indexed by `FenceFreshness`.
     fence_observations: [AtomicU64; 3],
+    /// Whether the settings observer is parked on a live change source with
+    /// its last reading still proved. While it is, the enabled gauge keeps
+    /// that reading however old it is, because a settings change anywhere
+    /// would have woken the observer; while it is not, the gauge goes stale
+    /// three seconds after the last read, as it always did. So the gauge
+    /// blanks when the bounded proof is lost, not when the node is idle.
+    settings_watched: AtomicBool,
     /// Consumers a shared transport stopped feeding, indexed
     /// `[viewer, recording][backlog, fenced]`: four fixed series.
     consumer_evictions: [[AtomicU64; 2]; 2],
@@ -2211,7 +2227,7 @@ impl LiveTvMetrics {
     /// `site="request"` is API traffic and has no fixed rate.
     fn settings_reads_prometheus(&self) -> String {
         let mut out = String::from(
-            "# HELP plurx_live_tv_settings_reads_total Consistent reads of the replicated Live TV settings, by site (observer: the node's 1 Hz loop the session fence validates against; fence: the direct start and pre-publication fences; request: Live TV API handlers and guide refresh) and outcome.\n\
+            "# HELP plurx_live_tv_settings_reads_total Consistent reads of the replicated Live TV settings, by site (observer: the node's loop the session fence validates against, 1 Hz while a tuner is held; fence: the direct start and pre-publication fences; request: Live TV API handlers and guide refresh) and outcome.\n\
              # TYPE plurx_live_tv_settings_reads_total counter\n",
         );
         for site in SettingsReadSite::ALL {
@@ -3297,6 +3313,58 @@ impl StartPlanSource {
     const LABELS: [&'static str; 4] = ["cold", "joined", "warm_agreed", "warm_disagreed"];
 }
 
+/// What tells a parked settings observer that the replicated settings may
+/// have changed on another node.
+pub(crate) enum SettingsChangeSource {
+    /// Nothing but this process writes the settings (a single-node store), and
+    /// its saves reach `observe_config` themselves. No other process writes
+    /// Live TV settings into a running daemon's SQLite database: `restore`
+    /// runs only while the daemon is stopped, `reset-password` refuses, and
+    /// `refresh-metadata` writes no settings.
+    LocalOnly,
+    /// A replicated store whose Raft log is applied in another process: no
+    /// change signal reaches this one, so the observer reads every interval.
+    Polled,
+    /// This node's in-process Raft watch: a write anywhere in the cluster
+    /// moves the applied index once this replica applies it.
+    Applied(hiqlite::LocalDbRaftMetrics),
+    /// An applied index a test moves by hand.
+    #[cfg(test)]
+    Test(tokio::sync::watch::Receiver<u64>),
+}
+
+impl SettingsChangeSource {
+    fn applied_index(&self) -> Option<u64> {
+        match self {
+            Self::LocalOnly | Self::Polled => None,
+            Self::Applied(metrics) => metrics.snapshot().last_applied_index,
+            #[cfg(test)]
+            Self::Test(applied) => Some(*applied.borrow()),
+        }
+    }
+
+    /// Whether a change made elsewhere would be seen at all.
+    fn live(&self) -> bool {
+        match self {
+            Self::LocalOnly => true,
+            Self::Polled => false,
+            Self::Applied(metrics) => metrics.snapshot().running,
+            #[cfg(test)]
+            Self::Test(_) => true,
+        }
+    }
+
+    /// The next observation; `false` once the source can report none.
+    async fn changed(&mut self) -> bool {
+        match self {
+            Self::LocalOnly | Self::Polled => std::future::pending().await,
+            Self::Applied(metrics) => metrics.wait_for_change().await,
+            #[cfg(test)]
+            Self::Test(applied) => applied.changed().await.is_ok(),
+        }
+    }
+}
+
 /// One node's latest validated reading of the replicated Live TV settings.
 ///
 /// The sessions used to take this reading each, four times a second between
@@ -3314,7 +3382,8 @@ struct FenceObservation {
 /// `plurx_live_tv_settings_reads_total`; every site takes the same read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsReadSite {
-    /// The node's 1 Hz `settings_observer_loop`, which feeds the session fence.
+    /// The node's `settings_observer_loop`, which feeds the session fence:
+    /// 1 Hz while a tuner transport is held, parked otherwise.
     Observer = 0,
     /// The direct start and pre-publication fences (`ensure_session_fence`).
     Fence = 1,
@@ -3369,6 +3438,20 @@ impl FenceObserver {
             config,
             observed_at: tokio::time::Instant::now(),
         })));
+    }
+
+    /// Publish a direct fence read only when nothing fresh is published: the
+    /// observer is parked because nothing was live, or its reads are failing.
+    /// A running observer stays the one publisher, so two reads that finish
+    /// out of order cannot put an older reading over a newer one.
+    fn publish_unless_fresh(&self, config: &LiveTvConfig) {
+        let fresh = self.observed().is_some_and(|observation| {
+            tokio::time::Instant::now().saturating_duration_since(observation.observed_at)
+                <= FENCE_OBSERVATION_FRESH_MAX_AGE
+        });
+        if !fresh {
+            self.publish(config.clone());
+        }
     }
 
     fn observed(&self) -> Option<Arc<FenceObservation>> {
@@ -3585,6 +3668,10 @@ pub(crate) struct LiveTvManager {
     /// The one settings observation every live session on this node validates
     /// against, refreshed by `settings_observer_loop`.
     fence: FenceObserver,
+    /// Wakes a parked `settings_observer_loop` when a transport opens.
+    observer_wake: tokio::sync::Notify,
+    /// What that loop parks on; taken once when it starts.
+    settings_changes: StdMutex<Option<SettingsChangeSource>>,
     /// Sessions that left the registry with a child or a directory still to
     /// confirm gone (plan L-02 §3.4). Held only for bookkeeping: no holder
     /// waits on the filesystem, because each orphan's directory removal runs
@@ -3610,6 +3697,13 @@ pub(crate) struct LiveTvManager {
     linger_after_warm_reap: AtomicBool,
     #[cfg(test)]
     scratch_scans_started: AtomicU64,
+    /// Test seam: while `true`, every session ledger read started waits for
+    /// `false` before it reads, as a consistent read held across a slow
+    /// leader change does.
+    #[cfg(test)]
+    hold_session_fence_reads: tokio::sync::watch::Sender<bool>,
+    #[cfg(test)]
+    session_fence_reads_started: AtomicU64,
     /// Test seam: every orphan directory removal started from now on hangs,
     /// as `remove_dir_all` on a stalled mount does.
     #[cfg(test)]
@@ -3663,6 +3757,8 @@ impl LiveTvManager {
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
             fence: FenceObserver::new(Arc::clone(&metrics)),
+            observer_wake: tokio::sync::Notify::new(),
+            settings_changes: StdMutex::new(Some(SettingsChangeSource::LocalOnly)),
             orphans: tokio::sync::Mutex::new(Vec::new()),
             incarnation,
             #[cfg(test)]
@@ -3675,6 +3771,10 @@ impl LiveTvManager {
             linger_after_warm_reap: AtomicBool::new(false),
             #[cfg(test)]
             scratch_scans_started: AtomicU64::new(0),
+            #[cfg(test)]
+            hold_session_fence_reads: tokio::sync::watch::channel(false).0,
+            #[cfg(test)]
+            session_fence_reads_started: AtomicU64::new(0),
             #[cfg(test)]
             hang_orphan_removals: AtomicBool::new(false),
             metrics,
@@ -3777,9 +3877,12 @@ impl LiveTvManager {
     /// `FENCE_GRACE_MAX_AGE` and then end with a message naming the settings
     /// store. Nothing here decides that — `FenceObserver::validated` does, on
     /// the age of what this last managed to publish.
-    pub(crate) async fn observe_fence(&self) {
+    pub(crate) async fn observe_fence(&self) -> bool {
         match self.config_read_at(SettingsReadSite::Observer).await {
-            Ok(config) => self.fence.publish(config),
+            Ok(config) => {
+                self.fence.publish(config);
+                true
+            }
             Err(error) => {
                 // Nothing is published: the previous observation stays, and
                 // sessions keep validating against it until its age passes
@@ -3790,6 +3893,7 @@ impl LiveTvManager {
                     kind = %error.code(),
                     "Live TV settings observation failed; sessions continue on the last one"
                 );
+                false
             }
         }
     }
@@ -4351,6 +4455,7 @@ impl LiveTvManager {
                         registry
                             .transports
                             .insert(request.channel_id.clone(), Arc::clone(&transport));
+                        self.wake_settings_observer();
                         session.hold_seat_on(Arc::clone(&transport));
                         registry.requests.insert(key.clone(), capability.clone());
                         registry
@@ -4511,7 +4616,9 @@ impl LiveTvManager {
     ) -> Result<Response<Body>, LiveTvError> {
         validate_capability_owner(request.capability(), &self.node_id)?;
         let session = self.session(request.capability())?;
-        self.resource_session_fence(&session).await?;
+        // No Store read here (plan L-03): the observer's polled ledger verdict
+        // ends a refused session, and the checks below see that end.
+        self.resource_serving_fence(&session)?;
         {
             let mut state = session
                 .state
@@ -5361,25 +5468,143 @@ impl LiveTvManager {
         Arc::clone(&self.metrics)
     }
 
-    /// The one settings read this node makes for Live TV, once a second.
+    pub(crate) fn set_settings_changes(&self, changes: SettingsChangeSource) {
+        *self
+            .settings_changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(changes);
+    }
+
+    fn transports_held(&self) -> usize {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .held()
+    }
+
+    /// A transport opened: a parked settings observer starts reading.
+    fn wake_settings_observer(&self) {
+        self.observer_wake.notify_one();
+    }
+
+    /// This node's Live TV settings observation (plan L-02 §3.1).
     ///
-    /// It was already here, driving the `plurx_live_tv_enabled` and
-    /// `plurx_live_tv_device_ready` gauges and the guide-cache generation
-    /// observation. It now also publishes what it read as the session fence's
-    /// observation, which is why the sessions no longer read the store
-    /// themselves. It deliberately does *not* park when nothing is live: those
-    /// gauges go stale after three seconds without a read, so parking would
-    /// trade an operator's view of a node for a read that is already the
-    /// cheapest thing on this loop.
+    /// While a transport is held it takes one consistent read a second and
+    /// publishes it as the session fence's observation, which is why sessions
+    /// do not read the store themselves. While nothing is held nothing
+    /// validates against the observation, so it parks: one read at boot (read
+    /// again each interval until one succeeds), then none until a transport
+    /// opens (whose start fence read is the first
+    /// observation, `ensure_session_fence`) or the settings may have changed
+    /// on another node. A change elsewhere moves this node's applied Raft
+    /// index; the loop then reads `live_tv.config_generation` from its own
+    /// replica, at most once an interval, and takes a consistent read only
+    /// when that generation differs from the one it holds. Every Live TV
+    /// settings save bumps the generation (`http/system.rs`), and a save on
+    /// this node reaches `observe_config` itself. The deinterlace switch is
+    /// saved without a bump, but nothing this observation feeds reads it:
+    /// a start reads the settings directly.
+    ///
+    /// The `plurx_live_tv_enabled` and `plurx_live_tv_device_ready` gauges
+    /// and the guide cache's generation ride on what this loop observes; see
+    /// `LiveTvMetrics::settings_watched` for how they stay current while it
+    /// is parked.
     pub(crate) async fn settings_observer_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        let mut changes = self
+            .settings_changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or(SettingsChangeSource::LocalOnly);
+        // Nothing is proved until a read succeeds, so the first pass reads (the
+        // boot read) and the loop keeps reading at the running cadence until
+        // one succeeds: parking on a failed read would hold the gauges unproved
+        // until some unrelated write moved the applied index.
+        let mut proved = false;
+        let mut applied = None;
+        let mut watch_open = true;
         loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                () = self.observe_fence() => {}
+            if self.transports_held() > 0
+                || !proved
+                || matches!(changes, SettingsChangeSource::Polled)
+            {
+                self.metrics
+                    .settings_watched
+                    .store(false, Ordering::Release);
+                // A consistent read covers every entry applied before it.
+                applied = changes.applied_index();
+                proved = tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    proved = self.observe_fence() => proved,
+                };
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(FENCE_OBSERVATION_INTERVAL) => {}
+                }
+                continue;
             }
+            self.metrics
+                .settings_watched
+                .store(proved && watch_open && changes.live(), Ordering::Release);
             tokio::select! {
+                biased;
                 _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(FENCE_OBSERVATION_INTERVAL) => {}
+                () = self.observer_wake.notified() => {
+                    // The start that opened the transport has just published
+                    // its own read; the running reads begin one interval on.
+                    tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(FENCE_OBSERVATION_INTERVAL) => {}
+                    }
+                }
+                open = changes.changed(), if watch_open => {
+                    if !open {
+                        // No later change can be seen, so the parked reading
+                        // is no longer proved; the gauges age out.
+                        watch_open = false;
+                        continue;
+                    }
+                    if changes.applied_index() == applied {
+                        continue;
+                    }
+                    // One replica read per interval however many entries apply.
+                    tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(FENCE_OBSERVATION_INTERVAL) => {}
+                    }
+                    applied = changes.applied_index();
+                    proved = match plurx_core::store::SettingsStore::local_setting_hint(
+                        &*self.store,
+                        keys::LIVE_TV_CONFIG_GENERATION,
+                    )
+                    .await
+                    {
+                        Ok(value) => {
+                            let generation = value
+                                .and_then(|value| value.parse::<i64>().ok())
+                                .unwrap_or(0);
+                            if self
+                                .fence
+                                .observed()
+                                .is_some_and(|held| held.config.generation == generation)
+                            {
+                                true
+                            } else {
+                                tokio::select! {
+                                    _ = shutdown.cancelled() => return,
+                                    proved = self.observe_fence() => proved,
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                %error,
+                                "Live TV settings generation hint could not be read"
+                            );
+                            false
+                        }
+                    };
+                }
             }
         }
     }
@@ -6181,9 +6406,10 @@ impl LiveTvMetrics {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = tokio::time::Instant::now();
-        let config = projection
-            .config
-            .filter(|(_, _, observed)| now.duration_since(*observed) <= Duration::from_secs(3));
+        let watched = self.settings_watched.load(Ordering::Acquire);
+        let config = projection.config.filter(|(_, _, observed)| {
+            watched || now.duration_since(*observed) <= Duration::from_secs(3)
+        });
         let enabled = match config {
             Some((_, true, _)) => "1",
             Some((_, false, _)) => "0",
@@ -6505,7 +6731,7 @@ fn validate_start_config(
     config.validate_static()?;
     if !config.enabled {
         return Err(LiveTvError::Disabled(
-            "Live TV is disabled in Settings → Developer".into(),
+            "Live TV is disabled in Settings → Live TV".into(),
         ));
     }
     // The configuration is this node's own read (`from_snapshot` names the
@@ -6882,6 +7108,7 @@ async fn run_live_session_inner(
             &source,
             delivery.clone(),
             admission.as_ref().map(|value| value.encoder.label()),
+            session.caption_decoders().as_deref(),
         ));
         let mut transcode_plan = LiveTvTranscodePlan::new(
             &owner.system,
@@ -6974,6 +7201,15 @@ async fn run_live_session_inner(
         // filesystem cannot pile up blocking-pool threads, and the tick carries
         // on to the startup and producer-progress timers, which end the session.
         let mut inventory_scan: Option<ScratchScanTask> = None;
+        // The running fence takes the same shape (plan L-03): its ledger read is
+        // a leader-consistent Store read with no deadline of its own, so it runs
+        // on its own task and the tick polls it. Awaited inline, a slow read
+        // stopped the tick, and with it the scratch scans that advance the
+        // publication: the playlist froze while FFmpeg kept producing, and a
+        // player that sees an unchanged playlist for 3.5 target durations gives
+        // up. At most one check is in flight; its verdict ends the session
+        // exactly as the awaited one did.
+        let mut fence_check: Option<SessionFenceTask> = None;
         let observe = async {
             loop {
                 tick.tick().await;
@@ -7037,6 +7273,7 @@ async fn run_live_session_inner(
                                                 .encoder
                                                 .as_ref()
                                                 .map(|encoder| encoder.label()),
+                                            session.caption_decoders().as_deref(),
                                         ),
                                         None => delivery,
                                     });
@@ -7208,12 +7445,28 @@ async fn run_live_session_inner(
                         ));
                     }
                 }
+                if fence_check
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+                {
+                    let verdict = fence_check.take().expect("a finished fence check");
+                    verdict.await.map_err(|error| {
+                        LiveTvError::StreamFailed(format!("checking the live-TV fence: {error}"))
+                    })??;
+                }
                 ticks = ticks.wrapping_add(1);
                 if ticks.is_multiple_of(4) {
+                    // Only the ledger read is spawned. The local half (serving
+                    // authority, the settings observation's age, and that
+                    // observation against this start) runs here on every fence
+                    // tick, so a hung ledger read cannot also suspend the
+                    // observation's grace or a disable seen by the observer.
                     let owner = manager.upgrade().ok_or_else(|| {
                         LiveTvError::StreamFailed("live-TV manager stopped".into())
                     })?;
-                    ensure_session_fence_from_observation(&owner, session).await?;
+                    if session_fence_local(&owner, session)? && fence_check.is_none() {
+                        fence_check = Some(spawn_session_ledger_fence(manager, session));
+                    }
                 }
             }
         };
@@ -7240,6 +7493,9 @@ async fn run_live_session_inner(
 
         if let Some(scan) = inventory_scan.take() {
             scan.abort();
+        }
+        if let Some(check) = fence_check.take() {
+            check.abort();
         }
         let terminal = match terminal {
             Ok(Some(_)) if !transport.reserve_seat() => {
@@ -7405,6 +7661,9 @@ async fn ensure_session_fence(
         ));
     }
     let config = manager.config_read_at(SettingsReadSite::Fence).await?;
+    // While nothing is live the observer is parked, so this read is the
+    // observation the session's first running fence validates against.
+    manager.fence.publish_unless_fresh(&config);
     validate_start_config(&config, &session.request, &manager.node_id)
 }
 
@@ -7419,10 +7678,29 @@ async fn ensure_session_fence(
 /// happens when that read fails: `FENCE_GRACE_MAX_AGE` on the last validated
 /// observation, then an end that names the settings store rather than the
 /// tuner.
+///
+/// The session tick runs the two halves itself (the local half inline, the
+/// ledger half on its own task); this is the same fence in one call, which
+/// is how the fence tests drive it.
+#[cfg(test)]
 async fn ensure_session_fence_from_observation(
     manager: &LiveTvManager,
     session: &LiveTvSession,
 ) -> Result<(), LiveTvError> {
+    if session_fence_local(manager, session)? {
+        manager.resource_session_fence(session).await
+    } else {
+        Ok(())
+    }
+}
+
+/// The half of the running fence that reads nothing: serving authority, the
+/// settings observation's age (`FENCE_GRACE_MAX_AGE`) and that observation
+/// against this start. `Ok(true)` means the ledger half is due.
+fn session_fence_local(
+    manager: &LiveTvManager,
+    session: &LiveTvSession,
+) -> Result<bool, LiveTvError> {
     if !manager.serving.running(session.owner_serving_generation) {
         return Err(LiveTvError::OwnerUnavailable(
             crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
@@ -7432,11 +7710,11 @@ async fn ensure_session_fence_from_observation(
         // Inside the session grace nothing is served, and the authority's
         // loop ends the session if the loss outlasts it; the ledger and
         // settings checks resume once authority is back.
-        return Ok(());
+        return Ok(false);
     }
     let observation = manager.fence.validated()?;
     validate_start_config(&observation.config, &session.request, &manager.node_id)?;
-    manager.resource_session_fence(session).await
+    Ok(true)
 }
 
 async fn open_tuner_stream(
@@ -8602,11 +8880,18 @@ fn session_source_format(
 /// graph can use its proof; H.264 copy and other source families stay
 /// unadvertised until their own production graph has been proven on this
 /// FFmpeg build.
+///
+/// The reason lists only the proved services this viewer's player decodes
+/// (`decoders`, `LivePlaybackRequest::caption_decoders`); `None` lists them
+/// all, as before the claim existed. hls.js has no CEA-708 decoder and maps
+/// `SERVICE1` onto the text track it made for `CC1`, so advertising both to it
+/// produced one phantom track labelled "English 708".
 fn advertise_proven_captions(
     proofs: &[caption_probe::CaptionProof],
     source: &LiveSourceFacts,
     mut delivery: LiveDeliveryPlan,
     encoder: Option<&str>,
+    decoders: Option<&[String]>,
 ) -> LiveDeliveryPlan {
     if source.video_codec.as_deref() == Some("mpeg2video")
         && delivery.video_action == LiveTrackAction::Encode
@@ -8618,15 +8903,39 @@ fn advertise_proven_captions(
                 && source.height == Some(proof.source_height)
                 && proof.output_height == delivery.output.height
         }) {
-            delivery
-                .reasons
-                .push(crate::live_tv_delivery::LiveDeliveryReason {
-                    code: "captions_advertised".to_owned(),
-                    explanation: proof.services.join(","),
-                });
+            let services = proof
+                .services
+                .iter()
+                .copied()
+                .filter(|service| caption_service_decodable(service, decoders))
+                .collect::<Vec<_>>();
+            if !services.is_empty() {
+                delivery
+                    .reasons
+                    .push(crate::live_tv_delivery::LiveDeliveryReason {
+                        code: "captions_advertised".to_owned(),
+                        explanation: services.join(","),
+                    });
+            }
         }
     }
     delivery
+}
+
+/// Whether a player that decodes `decoders` can show `service`: `CC1`–`CC4`
+/// are CEA-608 channels, `SERVICE1`–`SERVICE63` CEA-708 services.
+fn caption_service_decodable(service: &str, decoders: Option<&[String]>) -> bool {
+    let Some(decoders) = decoders else {
+        return true;
+    };
+    let format = if service.starts_with("CC") {
+        "cea608"
+    } else if service.starts_with("SERVICE") {
+        "cea708"
+    } else {
+        return false;
+    };
+    decoders.iter().any(|decoder| decoder == format)
 }
 
 /// Plan L-02 §3.3: whether the FFmpeg a warm start is already running — the
@@ -8738,6 +9047,25 @@ async fn linger_after_warm_reap(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
+}
+
+type SessionFenceTask = tokio::task::JoinHandle<Result<(), LiveTvError>>;
+
+/// Start one running-session ledger read on its own task, so the session's
+/// tick polls its verdict instead of waiting on the Store for it. The tick
+/// keeps running the local half (`session_fence_local`) meanwhile.
+fn spawn_session_ledger_fence(
+    manager: &Weak<LiveTvManager>,
+    session: &Arc<LiveTvSession>,
+) -> SessionFenceTask {
+    let manager = Weak::clone(manager);
+    let session = Arc::clone(session);
+    tokio::spawn(async move {
+        let owner = manager
+            .upgrade()
+            .ok_or_else(|| LiveTvError::StreamFailed("live-TV manager stopped".into()))?;
+        owner.resource_session_fence(&session).await
+    })
 }
 
 /// Start one inventory scan of a session's scratch on its own task, so the
@@ -11406,6 +11734,208 @@ mod tests {
         }
     }
 
+    /// Plan L-02 §3.1: the settings observer reads only while a transport is
+    /// held. It used to take its leader-consistent read of the whole settings
+    /// table once a second on every node, live or not, to keep two gauges and
+    /// the guide cache's generation current. Those now ride on change
+    /// signals, so an idle node takes no consistent read, its gauges keep what
+    /// it last proved, and they blank only when that proof is lost.
+    /// A proved caption service is advertised only to a player that decodes
+    /// it. hls.js has no CEA-708 decoder and folds `SERVICE1` onto the text
+    /// track it made for `CC1`, so the web client was shown a phantom
+    /// "English 708" in place of CC1's label.
+    #[test]
+    fn advertised_caption_services_follow_the_players_decoders() {
+        let delivery = test_encode_delivery(720);
+        let source = delivery.source.clone();
+        let proof = caption_probe::CaptionProof {
+            encoder: Encoder::Software.label().to_owned(),
+            packaging: delivery.packaging,
+            deinterlace: delivery.deinterlace_output,
+            source_height: source.height.expect("fixture source height"),
+            output_height: delivery.output.height,
+            services: vec!["CC1", "SERVICE1"],
+        };
+        let advertised = |decoders: Option<&[String]>| {
+            advertise_proven_captions(
+                std::slice::from_ref(&proof),
+                &source,
+                delivery.clone(),
+                Some(Encoder::Software.label()),
+                decoders,
+            )
+            .reasons
+            .into_iter()
+            .find(|reason| reason.code == "captions_advertised")
+            .map(|reason| reason.explanation)
+        };
+        assert_eq!(
+            advertised(None).as_deref(),
+            Some("CC1,SERVICE1"),
+            "a player that makes no claim is offered what it always was"
+        );
+        let request: crate::live_tv_delivery::LivePlaybackRequest = serde_json::from_value(
+            serde_json::json!({"v": 1, "caps": {"v": 2, "caption_decoders": ["cea608"]}}),
+        )
+        .expect("the web's live envelope");
+        let hls_js = request.caption_decoders().expect("the web's claim");
+        assert_eq!(advertised(Some(&hls_js)).as_deref(), Some("CC1"));
+        let native = ["cea608".to_owned(), "cea708".to_owned()];
+        assert_eq!(advertised(Some(&native)).as_deref(), Some("CC1,SERVICE1"));
+        assert_eq!(advertised(Some(&[])), None);
+    }
+
+    #[tokio::test]
+    async fn the_settings_observer_reads_only_while_a_transport_is_held() {
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        tokio::time::pause();
+        let observer_reads =
+            |manager: &LiveTvManager| settings_reads(manager, SettingsReadSite::Observer).0;
+        let enabled_gauge = |manager: &LiveTvManager| {
+            let prometheus = manager.metrics.prometheus();
+            prometheus
+                .lines()
+                .find_map(|line| line.strip_prefix("plurx_live_tv_enabled "))
+                .expect("the enabled gauge")
+                .to_owned()
+        };
+        let (applied, changes) = tokio::sync::watch::channel(0u64);
+        manager.set_settings_changes(SettingsChangeSource::Test(changes));
+        let shutdown = CancellationToken::new();
+        let observer = tokio::spawn(Arc::clone(&manager).settings_observer_loop(shutdown.clone()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(observer_reads(&manager), 1, "one observation at boot");
+
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(
+            observer_reads(&manager),
+            1,
+            "a node with nothing live took a consistent settings read"
+        );
+        assert_eq!(
+            enabled_gauge(&manager),
+            "1",
+            "a parked observer's proof keeps the gauge"
+        );
+
+        // A replicated write that leaves the Live TV generation alone costs a
+        // replica read, not a consistent one.
+        applied.send_replace(1);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(observer_reads(&manager), 1);
+        // A save on another node bumps the generation: one consistent read.
+        manager
+            .store
+            .put_settings(&[(keys::LIVE_TV_CONFIG_GENERATION, "2")])
+            .await
+            .expect("a save elsewhere");
+        applied.send_replace(2);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(observer_reads(&manager), 2);
+        assert_eq!(
+            manager
+                .fence
+                .observed()
+                .expect("an observation")
+                .config
+                .generation,
+            2
+        );
+
+        // A transport opens (`start_local` and the DVR wake the observer where
+        // they insert one): once a second while it is held.
+        let session = test_session(root.path().join("live-tv-observed"), 2);
+        let transport = give_own_transport(&manager, &session);
+        manager.wake_settings_observer();
+        tokio::time::sleep(Duration::from_millis(10_500)).await;
+        let live = observer_reads(&manager) - 2;
+        assert!((9..=11).contains(&live), "{live} reads in ten live seconds");
+
+        // Released: the reads stop within one interval.
+        manager
+            .registry
+            .lock()
+            .expect("registry")
+            .transports
+            .clear();
+        drop(transport);
+        tokio::time::sleep(FENCE_OBSERVATION_INTERVAL + Duration::from_millis(500)).await;
+        let released = observer_reads(&manager);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(observer_reads(&manager), released);
+        assert_eq!(enabled_gauge(&manager), "1");
+
+        // The change source closes: no later save could be seen, so the
+        // parked reading is no longer proved and the gauge ages out.
+        drop(applied);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(enabled_gauge(&manager), "NaN");
+        assert_eq!(observer_reads(&manager), released);
+
+        shutdown.cancel();
+        observer.await.expect("the observer loop");
+    }
+
+    /// A failed boot read proves nothing, so the observer must not park on it:
+    /// parked, nothing but an unrelated replicated write would make it read
+    /// again, and the gauges would stay unproved until then. It keeps reading
+    /// at the running cadence until a read succeeds, and only then parks.
+    #[tokio::test]
+    async fn a_failed_boot_read_keeps_the_settings_observer_reading_until_one_succeeds() {
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        tokio::time::pause();
+        let enabled_gauge = |manager: &LiveTvManager| {
+            let prometheus = manager.metrics.prometheus();
+            prometheus
+                .lines()
+                .find_map(|line| line.strip_prefix("plurx_live_tv_enabled "))
+                .expect("the enabled gauge")
+                .to_owned()
+        };
+        let (_applied, changes) = tokio::sync::watch::channel(0u64);
+        manager.set_settings_changes(SettingsChangeSource::Test(changes));
+        manager.test_fail_settings_reads(true);
+        let shutdown = CancellationToken::new();
+        let observer = tokio::spawn(Arc::clone(&manager).settings_observer_loop(shutdown.clone()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            settings_reads(&manager, SettingsReadSite::Observer),
+            (0, 1),
+            "the boot read failed"
+        );
+
+        // Unproved: one read an interval, not parked and not back to back.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let (ok, failed) = settings_reads(&manager, SettingsReadSite::Observer);
+        assert_eq!(ok, 0);
+        assert!(
+            (5..=7).contains(&failed),
+            "{failed} reads in five unproved seconds"
+        );
+        assert_eq!(enabled_gauge(&manager), "NaN");
+
+        // The store answers again: the next read proves the settings, and the
+        // observer parks on that proof.
+        manager.test_fail_settings_reads(false);
+        tokio::time::sleep(FENCE_OBSERVATION_INTERVAL + Duration::from_millis(500)).await;
+        let proved = settings_reads(&manager, SettingsReadSite::Observer);
+        assert_eq!(proved.0, 1, "the first read after recovery succeeded");
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(
+            settings_reads(&manager, SettingsReadSite::Observer),
+            proved,
+            "a proved observer with nothing live parked"
+        );
+        assert_eq!(enabled_gauge(&manager), "1");
+
+        shutdown.cancel();
+        observer.await.expect("the observer loop");
+    }
+
     #[tokio::test]
     async fn a_session_with_no_observation_at_all_is_refused_rather_than_admitted() {
         // "Unknown, continue" is the failure mode this whole fence exists to
@@ -11505,6 +12035,12 @@ mod tests {
             (before.0 + 1, before.1),
             "the start and publication fences must spend a read of their own"
         );
+        // With the observer parked that read is the only recent one, so it is
+        // what the session's first running fence validates against.
+        manager
+            .fence
+            .validated()
+            .expect("the start's own read is published while nothing fresher is");
     }
 
     #[test]
@@ -12496,6 +13032,259 @@ exec /bin/cat > {sink}"#,
             1,
             "one scan in flight from the moment the filesystem hung, never a second"
         );
+    }
+
+    /// A scripted FFmpeg that keeps producing until its scratch is removed: a
+    /// new one-second segment every 300 ms, a three-segment window, and the
+    /// one deletion-lag segment kept behind it.
+    fn advancing_ffmpeg() -> String {
+        r#"for output do playlist="$output"; done
+directory=${playlist%/*}
+(
+n=1
+while [ -d "$directory" ]; do
+  printf 'segment-%d' "$n" > "$directory/$(printf 'segment-%06d.ts' "$n")"
+  first=1
+  [ "$n" -gt 2 ] && first=$((n - 2))
+  {
+    printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n' "$first"
+    listed=$first
+    while [ "$listed" -le "$n" ]; do
+      printf '#EXTINF:1.000000,\nsegment-%06d.ts\n' "$listed"
+      listed=$((listed + 1))
+    done
+  } > "$playlist.tmp" && /bin/mv "$playlist.tmp" "$playlist"
+  stale=$((first - 2))
+  [ "$stale" -ge 1 ] && /bin/rm -f "$directory/$(printf 'segment-%06d.ts' "$stale")"
+  n=$((n + 1))
+  /bin/sleep 0.3
+done
+) &
+exec /bin/cat > /dev/null"#
+            .to_owned()
+    }
+
+    /// One playlist GET, bounded: before plan L-03 every GET took the
+    /// session's consistent ledger read first.
+    async fn served_playlist(manager: &LiveTvManager, capability: &str) -> bytes::Bytes {
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.resource_local(LiveTvResourceRequest::Playlist {
+                capability: capability.to_owned(),
+            }),
+        )
+        .await
+        .expect("a playlist GET must not wait on the Store")
+        .expect("serve playlist");
+        axum::body::to_bytes(response.into_body(), MAX_PLAYLIST_BYTES as usize)
+            .await
+            .expect("playlist bytes")
+    }
+
+    /// An active session from the advancing FFmpeg whose running ledger read
+    /// has started and hangs (plan L-03): the manager, the tuner, the
+    /// capability, the session, and the count of ledger reads started once the
+    /// hung one had.
+    #[cfg(unix)]
+    async fn session_with_a_hung_ledger_read(
+        root: &Path,
+    ) -> (
+        Arc<LiveTvManager>,
+        FixtureTuner,
+        String,
+        Arc<LiveTvSession>,
+        u64,
+    ) {
+        let (manager, tuner) = start_path_fixture(root, &advancing_ffmpeg(), 1).await;
+        std::fs::write(root.join("probe.json"), PROBED_480).expect("probe answer");
+        let request = fixture_request(1);
+        let provisional = tokio::time::timeout(
+            LIVE_TV_TEST_HANG_GUARD,
+            manager.start_local(request.clone()),
+        )
+        .await
+        .expect("start deadline")
+        .expect("published start");
+        manager
+            .activate_local(
+                &LiveTvActivateRequest {
+                    expected_owner_node_id: "node-a".into(),
+                    capability: provisional.capability.clone(),
+                    activation_token: provisional.activation_token.clone(),
+                    config_generation: 1,
+                    source_serving_generation: 0,
+                },
+                "node-a",
+            )
+            .await
+            .expect("activate live TV");
+        let session = manager
+            .session(&provisional.capability)
+            .expect("registered session");
+        let before = manager.session_fence_reads_started.load(Ordering::Acquire);
+        manager.hold_session_fence_reads.send_replace(true);
+        let deadline = tokio::time::Instant::now() + LIVE_TV_TEST_HANG_GUARD;
+        while manager.session_fence_reads_started.load(Ordering::Acquire) == before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the running session never checked its ledger"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let held = manager.session_fence_reads_started.load(Ordering::Acquire);
+        (manager, tuner, provisional.capability, session, held)
+    }
+
+    /// Wait for the tuner's lease to renew (the ingest's revision moves on
+    /// each five-second renewal). A settings or ledger change that lands just
+    /// after one has five seconds before that lease sees it too and closes the
+    /// transport, which would end the session for the lease's reason first.
+    async fn await_ingest_renewal(manager: &LiveTvManager) {
+        let ingest_revision = || async {
+            manager
+                .resource_snapshot(0, "")
+                .await
+                .expect("ledger snapshot")
+                .records
+                .into_iter()
+                .find_map(|record| match record {
+                    plurx_core::live_tv_resource::Record::Ingest(ingest) => Some(ingest.revision),
+                    _ => None,
+                })
+        };
+        let deadline = tokio::time::Instant::now() + LIVE_TV_TEST_HANG_GUARD;
+        let renewed_from = ingest_revision().await;
+        while ingest_revision().await == renewed_from {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the tuner lease never renewed"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Wait until the session is gone from the registry, at most `within`,
+    /// and return how it ended.
+    async fn session_ended_within(
+        manager: &LiveTvManager,
+        capability: &str,
+        session: &LiveTvSession,
+        within: Duration,
+        why: &str,
+    ) -> Option<LiveTvError> {
+        let deadline = tokio::time::Instant::now() + within;
+        while manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .contains_key(capability)
+        {
+            assert!(tokio::time::Instant::now() < deadline, "{why}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        session.state.lock().expect("state").terminal_error.clone()
+    }
+
+    /// Plan L-03: a session's ledger read that does not return — a consistent
+    /// read held across a slow leader change — must not stop its publication.
+    /// Awaited on the tick, as it used to be, it stopped the scratch scans: the
+    /// playlist froze while FFmpeg kept producing until the player declared it
+    /// stuck, and every playlist GET waited on the same read. The ledger read
+    /// now runs beside the tick, one at a time, and when it finally answers
+    /// that the cluster no longer authorizes the attempt the session still
+    /// ends.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_ledger_read_keeps_the_playlist_advancing_and_its_refusal_still_ends_the_session(
+    ) {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner, capability, session, held) =
+            session_with_a_hung_ledger_read(root.path()).await;
+        let sequence_held = session.state.lock().expect("state").media_sequence;
+        let playlist_held = served_playlist(&manager, &capability).await;
+
+        // Several fence intervals pass with the read hung.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let sequence = session.state.lock().expect("state").media_sequence;
+        assert!(
+            sequence >= sequence_held + 3,
+            "the publication stopped advancing while the ledger read hung: \
+             {sequence_held} -> {sequence}"
+        );
+        assert_ne!(
+            served_playlist(&manager, &capability).await,
+            playlist_held,
+            "a playlist GET during the hung read served the frozen playlist"
+        );
+        assert_eq!(
+            manager.session_fence_reads_started.load(Ordering::Acquire),
+            held,
+            "one ledger read in flight from the moment the read hung, never a second"
+        );
+        assert!(!session.cancel.is_cancelled());
+
+        // The ledger alone stops authorizing the attempt: its start is retired,
+        // which no settings observation sees. The hung read, once it returns,
+        // is what has to end the session.
+        await_ingest_renewal(&manager).await;
+        manager
+            .resource_retire(session.request.user_id, &session.request.request_id)
+            .await
+            .expect("the ledger retires the start");
+        manager.hold_session_fence_reads.send_replace(false);
+        let terminal = session_ended_within(
+            &manager,
+            &capability,
+            &session,
+            LIVE_TV_TEST_HANG_GUARD,
+            "the hung read's refusal must still end the session",
+        )
+        .await;
+        assert!(
+            matches!(&terminal, Some(LiveTvError::CapabilityExpired(message)) if message.contains("no longer authorizes")),
+            "{terminal:?}"
+        );
+    }
+
+    /// While the ledger read hangs, the rest of the running fence must not
+    /// hang with it: a settings change the node's observer reads (here another
+    /// node's save moving the generation) still ends the session on the next
+    /// fence tick, inside the observation's designed grace and before the
+    /// ingest lease would have, and without the hung read ever returning.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_settings_change_ends_a_session_whose_ledger_read_is_hung() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner, capability, session, held) =
+            session_with_a_hung_ledger_read(root.path()).await;
+        await_ingest_renewal(&manager).await;
+        manager
+            .store
+            .put_settings(&[(keys::LIVE_TV_CONFIG_GENERATION, "2")])
+            .await
+            .expect("a settings save elsewhere");
+        // One observer interval to read the save and one fence tick to act on
+        // it; the lease's next renewal is five seconds out.
+        let terminal = session_ended_within(
+            &manager,
+            &capability,
+            &session,
+            2 * FENCE_OBSERVATION_INTERVAL + Duration::from_millis(1_500),
+            "a generation change the observer read did not end a session whose ledger read hung",
+        )
+        .await;
+        assert_eq!(
+            terminal.as_ref().map(LiveTvError::code),
+            Some("settings_conflict"),
+            "{terminal:?}"
+        );
+        assert_eq!(
+            manager.session_fence_reads_started.load(Ordering::Acquire),
+            held,
+            "the session ended on the observation, not on a second ledger read"
+        );
+        assert!(*manager.hold_session_fence_reads.borrow());
     }
 
     #[test]

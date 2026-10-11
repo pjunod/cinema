@@ -123,7 +123,7 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
     } else {
         format!(
             "; {learners} unobserved learner(s) reported but not required (no vote; \
-             a measured learner still counts, and promotion needs its own bound)"
+             a learner beyond the bound refuses only its own sessions and promotion)"
         )
     };
     let measured = peers.saturating_sub(learners);
@@ -162,7 +162,7 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
                 RequirementStatus::Unmet
             },
             format!(
-                "{} ms worst |offset| + uncertainty among bounded members; the limit is \
+                "{} ms worst |offset| + uncertainty among bounded voters; the limit is \
                  {CLOCK_OFFSET_REFUSAL_MS} ms",
                 value as f64 / 1_000.0
             ),
@@ -246,6 +246,24 @@ pub(crate) async fn reprobe_macos_video(
             "accepted": true, "report": report,
             "note": "A bounded worker-local compatibility observation is requested; saved preference and running plans are unchanged"
         })),
+    )
+}
+
+/// Neutral admin entry point; saved Mac choices do not govern Linux probing.
+pub(crate) async fn reprobe_video_processing(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let manager = std::sync::Arc::clone(&state.transcode);
+    let cancelled = state.shutdown.clone();
+    let report = serde_json::json!({"macos": manager.macos_video_diagnostics(),
+        "linux_dolby": manager.linux_dolby_diagnostics()});
+    tokio::spawn(async move {
+        manager.reprobe_video_processing(&cancelled).await;
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        Json(serde_json::json!({"accepted": true, "report": report})),
     )
 }
 

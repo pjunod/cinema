@@ -6,6 +6,9 @@
 //! it in one place, once per process, is what keeps the answer consistent —
 //! and keeps a stream from failing to start because one path guessed.
 
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_dolby;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -441,18 +444,24 @@ pub(crate) struct EncodedExecutable {
     pub path: std::path::PathBuf,
     pub digest: String,
     object_version: String,
+    linux_binding: Option<plurx_core::transcode::LinuxDolbyExecutionBinding>,
 }
 
 #[derive(Default)]
 struct ExecutableCaptureCache {
-    executable: Option<EncodedExecutable>,
+    executables: Vec<EncodedExecutable>,
     #[cfg(test)]
     hashes: u64,
 }
 
-// One configured encoder, one retained attestation. Concurrent recipe captures
-// share the hash; every reuse still checks the exact object identity that the
-// production launch and publication fences require.
+/// Retained attestations, one per media tool path. A VOD start captures the
+/// held-source reporter and then the encoder; with a single slot each capture
+/// evicted the other, so every start re-hashed both binaries under this lock.
+const EXECUTABLE_CAPTURE_SLOTS: usize = 8;
+
+// Concurrent captures of one tool share its hash; every reuse still checks the
+// exact object identity that the production launch and publication fences
+// require.
 static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<ExecutableCaptureCache>> =
     std::sync::OnceLock::new();
 
@@ -463,8 +472,8 @@ impl EncodedExecutable {
         &self,
         plan: &plurx_core::transcode::ResolvedTranscode,
     ) -> bool {
-        plan.macos_processing_identity()
-            .is_none_or(|identity| identity.ffmpeg_sha256() == self.digest)
+        plan.captured_processing_ffmpeg_sha256()
+            .is_none_or(|digest| digest == self.digest)
     }
 
     pub(crate) async fn capture_program(program: &str) -> Result<Self, String> {
@@ -492,7 +501,7 @@ impl EncodedExecutable {
         cache: &tokio::sync::Mutex<ExecutableCaptureCache>,
     ) -> Result<Self, String> {
         let mut cache = cache.lock().await;
-        if let Some(captured) = cache.executable.as_ref().filter(|value| value.path == path) {
+        if let Some(captured) = cache.executables.iter().find(|value| value.path == path) {
             let objects = vec![captured.attestation_object()].into();
             if engine_objects_are_current_batch(None, objects).await.0 {
                 return Ok(captured.clone());
@@ -503,21 +512,119 @@ impl EncodedExecutable {
             path,
             digest: hex::encode(digest),
             object_version,
+            linux_binding: None,
         };
         #[cfg(test)]
         {
             cache.hashes += 1;
         }
-        cache.executable = Some(captured.clone());
+        cache
+            .executables
+            .retain(|value| value.path != captured.path);
+        if cache.executables.len() >= EXECUTABLE_CAPTURE_SLOTS {
+            cache.executables.remove(0);
+        }
+        cache.executables.push(captured.clone());
         Ok(captured)
     }
 
     /// Validate this captured canonical launch object; do not follow the
     /// configured alias and silently substitute another executable here.
     pub(crate) async fn is_current(&self) -> bool {
-        engine_objects_are_current_batch(None, vec![self.attestation_object()].into())
-            .await
-            .0
+        engine_objects_are_current_batch_with_linux(
+            None,
+            vec![self.attestation_object()].into(),
+            self.linux_binding.clone(),
+        )
+        .await
+        .0
+    }
+
+    pub(crate) fn bind_linux_plan(
+        self,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+    ) -> Result<Self, String> {
+        let policy = plan.options().strict_dolby.as_ref();
+        if policy.is_none_or(|policy| policy.linux_identity().is_none()) {
+            return Ok(self);
+        }
+        let binding = policy
+            .and_then(|policy| policy.linux_execution_binding())
+            .cloned()
+            .ok_or(
+                "strict_dolby_implementation_changed: Linux plan has no retained execution binding",
+            )?;
+        self.bind_linux_execution(binding)
+    }
+
+    fn bind_linux_execution(
+        mut self,
+        binding: plurx_core::transcode::LinuxDolbyExecutionBinding,
+    ) -> Result<Self, String> {
+        let producer = binding
+            .objects()
+            .iter()
+            .find(|object| {
+                object.kind == plurx_core::transcode::LinuxExecutionObjectKind::ProducerExecutable
+            })
+            .ok_or("strict_dolby_implementation_changed: no retained producer object")?;
+        if producer.path != self.path
+            || producer.version.as_deref() != Some(self.object_version.as_str())
+        {
+            return Err("strict_dolby_implementation_changed: producer loader origin differs from the observed implementation".to_owned());
+        }
+        self.linux_binding = Some(binding);
+        Ok(self)
+    }
+
+    /// Finite preparation retains an already-bound Linux execution object.
+    /// Ordinary capture keeps its incumbent behavior; no active strict plan
+    /// reopens the configured pathname to acquire a newer package implicitly.
+    pub(crate) async fn capture_for_preparation(retained: &Self) -> Result<Self, String> {
+        if retained.linux_binding.is_some() {
+            Ok(retained.clone())
+        } else {
+            Self::capture().await
+        }
+    }
+
+    pub(crate) fn processing_child_env(&self) -> Vec<(&str, &std::ffi::OsStr)> {
+        self.linux_binding
+            .iter()
+            .flat_map(|binding| binding.child_env())
+            .map(|(key, value)| (key.as_str(), std::ffi::OsStr::new(value)))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn validate_source_clock_reporter(
+        &self,
+        path: &std::path::Path,
+        digest: &str,
+    ) -> Result<Option<plurx_core::transcode::LinuxSourceClockAssociation>, String> {
+        use plurx_core::transcode::LinuxExecutionObjectKind;
+        let Some(binding) = self.linux_binding.as_ref() else {
+            return Ok(None);
+        };
+        let association = binding
+            .source_clock()
+            .ok_or("strict_dolby_clock_provenance_missing")?;
+        let matches = binding.objects().iter().any(|object| {
+            object.path == path
+                && match object.kind {
+                    LinuxExecutionObjectKind::NativeReporterExecutable => {
+                        digest == association.native_reporter_digest()
+                    }
+                    LinuxExecutionObjectKind::SealedParserExecutable => {
+                        digest == association.sealed_parser_digest()
+                    }
+                    _ => false,
+                }
+        });
+        if !matches {
+            return Err("strict_dolby_clock_reporter_implementation_mismatch".to_owned());
+        }
+        Ok(Some(association.clone()))
     }
 
     /// The `(path, version)` pair this executable attests.
@@ -571,19 +678,41 @@ pub(crate) fn stage_completed_probe_file(
 /// `work` is the caller's: a session start that is waiting on this probe
 /// passes a realtime class, since the probe runs under a five-second bound
 /// whose miss the viewer sees as a refusal.
+#[cfg(test)]
 pub(crate) async fn held_source_probe_json(
     source: &std::fs::File,
     work: crate::process_control::ChildWork,
 ) -> Result<String, String> {
-    let document = held_source_probe_json_with_limits(
-        source,
+    let reporter = EncodedExecutable::capture_program(&ffprobe_bin()).await?;
+    held_source_probe_json_bound(source, work, &reporter).await
+}
+
+/// The legacy held probe keeps its established bounded child owner but launches
+/// the exact reporter captured before this query, rather than resolving an alias.
+pub(crate) async fn held_source_probe_json_bound(
+    source: &std::fs::File,
+    work: crate::process_control::ChildWork,
+    reporter: &EncodedExecutable,
+) -> Result<String, String> {
+    if !reporter.is_current().await {
+        return Err("held clock reporter changed before query".into());
+    }
+    let command = source_held_probe_command(source, &reporter.path)?;
+    let output = bounded_command_output_cancellable(
+        command,
         ENGINE_PROBE_TIMEOUT,
         ENGINE_PROBE_MAX_BYTES,
         "engine probe",
-        work,
         None,
+        work,
     )
     .await?;
+    if !reporter.is_current().await {
+        return Err("held clock reporter changed during query".into());
+    }
+    let document = String::from_utf8(output.stdout).map_err(|_| "held probe JSON is not UTF-8")?;
+    // The source clock is already bound to reporter bytes above. Preserve the
+    // existing document stamp solely for stored media-fact comparison.
     Ok(stamped_with_this_reporter(document).await)
 }
 
@@ -810,8 +939,9 @@ async fn read_packet_probe_pipe(
 /// caller retains child/job/pipe ownership; this function never spawns.
 pub(crate) fn source_held_probe_command(
     source: &std::fs::File,
+    executable: &std::path::Path,
 ) -> Result<tokio::process::Command, String> {
-    let mut command = tokio::process::Command::new(ffprobe_bin());
+    let mut command = tokio::process::Command::new(executable);
     #[cfg(unix)]
     {
         inherit_file_descriptors(&mut command, &[(source, 3)]);
@@ -2108,6 +2238,47 @@ struct FragmentIndexEngine {
 /// name. Within one daemon, every loaded dependency and (for text burn) every
 /// object of the recipe's frozen Fontconfig environment is still rechecked
 /// before spawning and publication.
+#[cfg(target_os = "macos")]
+async fn clock_package_bytes(
+    path: std::path::PathBuf,
+) -> Result<(Vec<u8>, EncodedExecutable), String> {
+    let metadata = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return Err("clock provenance is not a bounded regular file".into());
+    }
+    let object = EncodedExecutable::capture_at(path.clone()).await?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() > 1024 * 1024 {
+            return Err("clock provenance exceeds its bound".to_owned());
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if hex::encode(Sha256::digest(&bytes)) != object.digest || !object.is_current().await {
+        return Err("clock package provenance changed during capture".into());
+    }
+    Ok((bytes, object))
+}
+
+#[cfg(target_os = "macos")]
+async fn clock_package_document(
+    path: std::path::PathBuf,
+) -> Result<(serde_json::Value, EncodedExecutable), String> {
+    let (bytes, object) = clock_package_bytes(path).await?;
+    let document =
+        serde_json::from_slice(&bytes).map_err(|_| "clock package provenance malformed")?;
+    Ok((document, object))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedEngine {
     pub digest: String,
@@ -2124,6 +2295,151 @@ pub(crate) struct EncodedEngine {
 }
 
 impl EncodedEngine {
+    /// A deployed Mac parser and producer share the validated package's demux
+    /// source/quilt. Legacy pairs retain their exact reporter identity without
+    /// claiming a matched-source package. This adds objects to the existing
+    /// production/publication fence, not a separate package registry.
+    pub(crate) async fn bind_clock_pair(
+        &mut self,
+        reporter: &EncodedExecutable,
+        producer: &EncodedExecutable,
+    ) -> Result<(), String> {
+        self.bind_clock_reporter(reporter).await?;
+        #[cfg(target_os = "macos")]
+        {
+            let root = producer
+                .path
+                .parent()
+                .ok_or("clock producer package parent missing")?;
+            let native_path = root.join("provenance/manifest.json");
+            let parser_path = root.join("provenance/source-parser/manifest.json");
+            if !native_path.exists() && !parser_path.exists() {
+                return Ok(()); // exact legacy reporter, no matched-source claim
+            }
+            // An official baseline with no sealed companion remains a legacy
+            // reporter tuple; a present module cannot downgrade if its manifest
+            // is removed.
+            if native_path.exists()
+                && !parser_path.exists()
+                && !root.join("plurx-source-parser.wasm").exists()
+            {
+                return Ok(());
+            }
+            let (native, native_object) = clock_package_document(native_path).await?;
+            let (parser, parser_object) = clock_package_document(parser_path).await?;
+            const SOURCE: &str = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140";
+            const COMMIT: &str = "253db2a7b0a8045c54ce68ce33d7f601229b1822";
+            for document in [&native, &parser] {
+                if document["source_sha256"].as_str() != Some(SOURCE)
+                    || document["source_commit"].as_str() != Some(COMMIT)
+                {
+                    return Err("clock parser and producer source provenance differ".into());
+                }
+            }
+            let quilt = parser["source_patch_sha256"]
+                .as_object()
+                .ok_or("clock parser quilt provenance missing")?;
+            if quilt.len() != 100
+                || quilt.iter().any(|(name, digest)| {
+                    native["source_recipe_sha256"][format!("debian/patches/{name}")] != *digest
+                })
+            {
+                return Err("clock parser and producer quilt provenance differ".into());
+            }
+            let native_probe = EncodedExecutable::capture_at(root.join("ffprobe")).await?;
+            let module =
+                EncodedExecutable::capture_at(root.join("plurx-source-parser.wasm")).await?;
+            if native["binaries"]["ffmpeg"]["sha256"].as_str() != Some(producer.digest.as_str())
+                || native["binaries"]["ffprobe"]["sha256"].as_str()
+                    != Some(native_probe.digest.as_str())
+                || parser["module_sha256"].as_str() != Some(module.digest.as_str())
+                || native["source_parser"]["sha256"].as_str() != Some(module.digest.as_str())
+                || (reporter.digest != native_probe.digest && reporter.digest != module.digest)
+            {
+                return Err(
+                    "clock reporter/producer images differ from their matched package".into(),
+                );
+            }
+            // Local additions may alter decoding/rendering, never the demux
+            // origin semantics this package association authorizes.
+            if let Some(patches) = native["compiled_source"]["local_patches"].as_object() {
+                for (name, expected) in patches {
+                    let relative = std::path::Path::new(name);
+                    if relative.components().count() != 1 {
+                        return Err("clock package local patch name is unsafe".into());
+                    }
+                    let (patch, object) =
+                        clock_package_bytes(root.join("provenance/local-patches").join(relative))
+                            .await?;
+                    if expected.as_str() != Some(object.digest.as_str()) {
+                        return Err("clock package local patch bytes differ".into());
+                    }
+                    let text =
+                        std::str::from_utf8(&patch).map_err(|_| "clock patch is not text")?;
+                    if text
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("+++ "))
+                        .any(|path| {
+                            path != "/dev/null"
+                                && !path.strip_prefix("b/").is_some_and(|path| {
+                                    path.starts_with("libavcodec/")
+                                        || path.starts_with("libavfilter/")
+                                        || path.starts_with("libavutil/")
+                                        || path == "configure"
+                                })
+                        })
+                    {
+                        return Err(
+                            "clock local patch changes the parser/producer timing contract".into(),
+                        );
+                    }
+                    self.bind_clock_reporter(&object).await?;
+                }
+            }
+            for object in [&native_object, &parser_object, &native_probe, &module] {
+                self.bind_clock_reporter(object).await?;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(association) =
+            producer.validate_source_clock_reporter(&reporter.path, &reporter.digest)?
+        {
+            if !producer.is_current().await {
+                return Err("held Linux source-clock package changed".into());
+            }
+            let mut hash = Sha256::new();
+            hash.update(b"plurx/held-source-clock-linux-package/v1\0");
+            hash.update(self.digest.as_bytes());
+            hash.update(association.capsule_digest().as_bytes());
+            hash.update(association.source_digest().as_bytes());
+            hash.update(reporter.digest.as_bytes());
+            self.digest = hex::encode(hash.finalize());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let _ = producer; // exact reporter; no matched-source package claim
+        Ok(())
+    }
+
+    /// The held timing witness names its actual reporter, not the stored scan.
+    /// Reuse the media object fence for both native and sealed parser images.
+    pub(crate) async fn bind_clock_reporter(
+        &mut self,
+        reporter: &EncodedExecutable,
+    ) -> Result<(), String> {
+        if !reporter.is_current().await {
+            return Err("held source clock reporter changed".into());
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"plurx/held-source-clock-reporter/v1\0");
+        hash.update(self.digest.as_bytes());
+        hash.update(reporter.digest.as_bytes());
+        self.digest = hex::encode(hash.finalize());
+        let mut objects = self.objects.to_vec();
+        objects.push(reporter.attestation_object());
+        self.objects = objects.into();
+        Ok(())
+    }
+
     /// `text_burn` is the runtime cache a text burn's frozen Fontconfig
     /// environment is built under, or `None` for a recipe that burns no text.
     pub async fn capture(text_burn: Option<&std::path::Path>) -> Result<Self, String> {
@@ -2195,7 +2511,13 @@ impl EncodedEngine {
             // loaded media libraries. Probe it for every recipe capture so a
             // newly installed font or rule cannot reuse the old URI identity,
             // then freeze what it found so the producer can see nothing else.
-            let enumeration = font_render_engine_inner(source_config, execution).await;
+            let enumeration = match font_render_engine_inner(source_config, execution, root).await {
+                Ok(enumeration) => enumeration,
+                Err(error) => {
+                    charges.flush();
+                    return Err(error);
+                }
+            };
             charges.add(
                 EngineAttestationKind::Font,
                 EngineAttestationPhase::Spawn,
@@ -2234,6 +2556,7 @@ impl EncodedEngine {
                     fonts: &enumeration.fonts,
                     versions: &versions,
                     listing: &enumeration.listing,
+                    search_path: enumeration.search_path.as_deref(),
                 },
                 execution,
             )
@@ -2297,7 +2620,11 @@ impl EncodedEngine {
     /// answer is unchanged: the batch compares versions with `all`, which
     /// short-circuits on the executable exactly as the caller's `||` did.
     pub async fn is_current_with_executable(&self, executable: &EncodedExecutable) -> bool {
-        self.is_current_charged(Some(executable.attestation_object()))
+        let object = Some(executable.attestation_object());
+        if executable.linux_binding.is_none() {
+            return self.is_current_charged(object).await.0;
+        }
+        self.is_current_charged_with_linux(object, executable.linux_binding.clone())
             .await
             .0
     }
@@ -2309,9 +2636,21 @@ impl EncodedEngine {
         &self,
         executable: Option<(std::path::PathBuf, String)>,
     ) -> (bool, EngineAttestationCharges) {
+        self.is_current_charged_with_linux(executable, None).await
+    }
+
+    async fn is_current_charged_with_linux(
+        &self,
+        executable: Option<(std::path::PathBuf, String)>,
+        linux_binding: Option<plurx_core::transcode::LinuxDolbyExecutionBinding>,
+    ) -> (bool, EngineAttestationCharges) {
         let mut charges = EngineAttestationCharges::default();
-        let (media_current, media_elapsed) =
-            engine_objects_are_current_batch(executable, Arc::clone(&self.objects)).await;
+        let (media_current, media_elapsed) = engine_objects_are_current_batch_with_linux(
+            executable,
+            Arc::clone(&self.objects),
+            linux_binding,
+        )
+        .await;
         charges.add(
             EngineAttestationKind::Media,
             EngineAttestationPhase::Stat,
@@ -2349,6 +2688,12 @@ impl EncodedEngine {
             .iter()
             .flat_map(|environment| environment.child_env())
             .collect()
+    }
+
+    pub(crate) fn font_digest(&self) -> Option<&str> {
+        self.font_env
+            .as_ref()
+            .map(|environment| environment.digest())
     }
 
     #[cfg(test)]
@@ -2460,6 +2805,14 @@ pub(crate) async fn engine_objects_are_current_batch(
     extra: Option<(std::path::PathBuf, String)>,
     objects: Arc<[(std::path::PathBuf, String)]>,
 ) -> (bool, Duration) {
+    engine_objects_are_current_batch_with_linux(extra, objects, None).await
+}
+
+async fn engine_objects_are_current_batch_with_linux(
+    extra: Option<(std::path::PathBuf, String)>,
+    objects: Arc<[(std::path::PathBuf, String)]>,
+    linux_binding: Option<plurx_core::transcode::LinuxDolbyExecutionBinding>,
+) -> (bool, Duration) {
     let started = Instant::now();
     let current = tokio::task::spawn_blocking(move || {
         if let Some((path, expected)) = extra {
@@ -2471,10 +2824,56 @@ pub(crate) async fn engine_objects_are_current_batch(
             }
         }
         engine_objects_are_current(&objects)
+            && linux_binding.as_ref().is_none_or(|binding| {
+                binding
+                    .objects()
+                    .iter()
+                    .all(linux_execution_object_is_current)
+            })
     })
     .await
     .unwrap_or(false);
     (current, started.elapsed())
+}
+
+fn linux_execution_object_is_current(object: &plurx_core::transcode::LinuxExecutionObject) -> bool {
+    use plurx_core::transcode::LinuxExecutionObjectKind;
+    match object.kind {
+        LinuxExecutionObjectKind::AbsentLookup => std::fs::symlink_metadata(&object.path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        LinuxExecutionObjectKind::ProducerExecutable
+        | LinuxExecutionObjectKind::NativeReporterExecutable
+        | LinuxExecutionObjectKind::SealedParserExecutable
+        | LinuxExecutionObjectKind::FollowedFile => {
+            engine_path_version(&object.path).ok().as_ref() == object.version.as_ref()
+        }
+        LinuxExecutionObjectKind::ContentDigest => {
+            use std::io::Read;
+            std::fs::File::open(&object.path).ok().is_some_and(|file| {
+                let mut bytes = Vec::new();
+                file.take(256 * 1024 + 1).read_to_end(&mut bytes).is_ok()
+                    && bytes.len() <= 256 * 1024
+                    && object
+                        .version
+                        .as_ref()
+                        .is_some_and(|expected| hex::encode(Sha256::digest(&bytes)) == *expected)
+            })
+        }
+        LinuxExecutionObjectKind::LookupObject => {
+            #[cfg(unix)]
+            {
+                std::fs::symlink_metadata(&object.path)
+                    .ok()
+                    .and_then(|metadata| engine_object_version(&metadata).ok())
+                    .as_ref()
+                    == object.version.as_ref()
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
+    }
 }
 
 async fn fragment_index_engine_inner() -> FragmentIndexEngine {
@@ -2616,6 +3015,7 @@ async fn fragment_index_engine_with_source(
 /// `fc-list`/`fc-conflist` children and the stat loop over what they named.
 /// The caller charges each series once for the whole attestation.
 struct FontEnumeration {
+    search_path: Option<std::ffi::OsString>,
     engine: FragmentIndexEngine,
     spawn_elapsed: Duration,
     stat_elapsed: Duration,
@@ -2650,7 +3050,8 @@ pub(crate) async fn font_probe_output(
 async fn font_render_engine_inner(
     source_config: Option<&std::path::Path>,
     execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
-) -> FontEnumeration {
+    runtime_cache: &std::path::Path,
+) -> Result<FontEnumeration, String> {
     let probe_started = Instant::now();
     let mut digest = Sha256::new();
     digest.update(b"plurx/font-render/engine-v1\0");
@@ -2660,12 +3061,24 @@ async fn font_render_engine_inner(
     let mut rules: Vec<std::path::PathBuf> = Vec::new();
     let mut listing = String::new();
 
-    let mut font_list = tokio::process::Command::new("fc-list");
+    let live = crate::fontenv::live_config(source_config)?;
+    let list_bin = crate::fontenv::tool_bin("fc-list");
+    let conflist_bin = crate::fontenv::tool_bin("fc-conflist");
+    let mut font_list = tokio::process::Command::new(&list_bin);
     font_list.arg(crate::fontenv::FONT_LISTING_FORMAT);
-    let mut configuration = tokio::process::Command::new("fc-conflist");
-    if let Some(config) = source_config {
-        font_list.env("FONTCONFIG_FILE", config);
-        configuration.env("FONTCONFIG_FILE", config);
+    let mut configuration = tokio::process::Command::new(&conflist_bin);
+    live.apply(&mut font_list);
+    live.apply(&mut configuration);
+    if cfg!(target_os = "macos") {
+        crate::producer_spawn::configure_ffmpeg_runtime(&mut font_list, runtime_cache);
+        crate::producer_spawn::configure_ffmpeg_runtime(&mut configuration, runtime_cache);
+        // The exact bundled query implementations are part of the same font
+        // authority as the rule and face bytes, not an incidental PATH tool.
+        for bin in [&list_bin, &conflist_bin] {
+            if std::path::Path::new(bin).is_absolute() {
+                paths.push(std::path::PathBuf::from(bin));
+            }
+        }
     }
     match font_probe_output(font_list, execution).await {
         Ok(stdout) => {
@@ -2691,8 +3104,11 @@ async fn font_render_engine_inner(
 
     match font_probe_output(configuration, execution).await {
         Ok(stdout) => {
-            digest.update((stdout.len() as u64).to_be_bytes());
-            digest.update(&stdout);
+            // fc-conflist also reports available but inactive rules. Those
+            // files are not consumed by this authority and may appear when a
+            // build prefix or system inventory changes. Bind only the ordered
+            // active rows; their paths and versions remain attested below.
+            hash_active_font_configuration(&mut digest, &stdout);
             for rule in String::from_utf8_lossy(&stdout)
                 .lines()
                 .filter_map(|line| line.strip_prefix("+ "))
@@ -2731,7 +3147,8 @@ async fn font_render_engine_inner(
         digest.update((object_digest.len() as u64).to_be_bytes());
         digest.update(object_digest);
     }
-    FontEnumeration {
+    Ok(FontEnumeration {
+        search_path: live.search,
         engine: FragmentIndexEngine {
             digest: hex::encode(digest.finalize()),
             objects: objects.into(),
@@ -2742,6 +3159,16 @@ async fn font_render_engine_inner(
         rules,
         fonts,
         listing,
+    })
+}
+
+fn hash_active_font_configuration(digest: &mut Sha256, stdout: &[u8]) {
+    digest.update(b"plurx/font-render/active-configuration-v1\0");
+    for line in stdout.split(|byte| *byte == b'\n') {
+        if line.starts_with(b"+ ") {
+            digest.update((line.len() as u64).to_be_bytes());
+            digest.update(line);
+        }
     }
 }
 
@@ -3330,22 +3757,52 @@ pub async fn has_dovi_reshape() -> bool {
 /// are all used here. Omitting the init used to make every QSV probe fail with
 /// "A hardware device reference is required", even though the real session
 /// supplied that device and the node could run the graph.
-async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
+/// Raster of the Dolby Vision reshape pairing proof. A hardware encoder has a
+/// minimum frame size (AMD VA-API refuses anything under 128x128), so the
+/// earlier 64x64 proof failed on encoders that take every real delivery size
+/// and pinned Dolby Vision sources to x264 on those nodes. The proof encodes
+/// the 1080p delivery raster the reshape actually feeds, as the VA-API Main10
+/// proof already does.
+const DOVI_RESHAPE_PROOF_RASTER: (u32, u32) = (1920, 1080);
+
+fn dovi_reshape_probe_args(encoder: Encoder) -> Vec<String> {
+    let (width, height) = DOVI_RESHAPE_PROOF_RASTER;
+    // The production reshape chain itself, at the delivery raster, followed by
+    // the encoder's own upload: the proof cannot drift from what sessions run.
+    let reshape = Pipeline::DoviTonemapx
+        .filters(Some(i64::from(width)), i64::from(height), Some("dovi"))
+        .unwrap_or_default();
     let filter = format!(
-        "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=yuv420p:apply_dovi=1,scale=64:64,format=yuv420p{}",
+        "{reshape}{}",
         encoder
             .filter_suffix_for(OutputGrade::Sdr)
             .map(|s| format!(",{s}"))
             .unwrap_or_default()
     );
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    args.extend(encoder.init_args());
+    args.extend([
+        "-f".to_owned(),
+        "lavfi".to_owned(),
+        "-i".to_owned(),
+        format!("color=size={width}x{height}:rate=1:color=black"),
+        "-frames:v".to_owned(),
+        "1".to_owned(),
+        "-vf".to_owned(),
+        filter,
+    ]);
+    args.extend(encoder.encode_args(1_000, EffectiveRateControl::Vbr, false, None));
+    args.extend(["-f", "null", "-"].into_iter().map(str::to_owned));
+    args
+}
+
+async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command
-        .args(["-hide_banner", "-loglevel", "error"])
-        .args(encoder.init_args())
-        .args(["-f", "lavfi", "-i", "color=size=64x64:rate=1:color=black"])
-        .args(["-frames:v", "1", "-vf", &filter])
-        .args(encoder.encode_args(1_000, EffectiveRateControl::Vbr, false, None))
-        .args(["-f", "null", "-"])
+        .args(dovi_reshape_probe_args(encoder))
         .kill_on_drop(true);
     tokio::time::timeout(
         Duration::from_secs(20),
@@ -3797,19 +4254,65 @@ async fn dovi_probe_output(
 pub async fn dovi_reshape_changes_pixels(
     file: &MediaFile,
     class: crate::process_control::ChildClass,
-) -> bool {
+) -> DoviPixelProof {
     let enabled = dovi_probe_output(file, true, class).await;
     let disabled = dovi_probe_output(file, false, class).await;
-    match (enabled, disabled) {
-        (Ok(enabled), Ok(disabled)) if enabled != disabled => true,
-        (Ok(_), Ok(_)) => {
+    let proof = dovi_pixel_verdict(enabled, disabled);
+    match &proof {
+        DoviPixelProof::Proved => {}
+        DoviPixelProof::Refuted => {
             tracing::warn!(file = %file.path.display(), "Dolby Vision RPU mutation did not change sampled pixels");
-            false
         }
-        (enabled, disabled) => {
-            tracing::warn!(file = %file.path.display(), ?enabled, ?disabled, "could not prove Dolby Vision RPU pixel reshaping");
-            false
+        DoviPixelProof::Inconclusive(reason) => {
+            tracing::warn!(file = %file.path.display(), %reason, "could not prove Dolby Vision RPU pixel reshaping; not recording a verdict");
         }
+    }
+    proof
+}
+
+/// What one per-source Dolby Vision pixel proof established.
+///
+/// Three states, because a probe that did not finish is not evidence about
+/// the source. Only `Proved` and `Refuted` are verdicts a node may remember;
+/// `Inconclusive` — a timeout, a spawn failure, a non-zero exit, an empty
+/// hash list — says the measurement did not happen, and remembering it as
+/// "not Dolby Vision" turned one slow probe on a loaded node into a
+/// permanent 501 for that title until the process restarted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DoviPixelProof {
+    /// Both probes ran and applying the RPU changed the sampled pixels.
+    Proved,
+    /// Both probes ran and the pixels were identical: the RPU is a no-op.
+    Refuted,
+    /// At least one probe did not produce frame hashes.
+    Inconclusive(String),
+}
+
+impl DoviPixelProof {
+    /// The cacheable verdict, if this is one.
+    pub fn verdict(&self) -> Option<bool> {
+        match self {
+            Self::Proved => Some(true),
+            Self::Refuted => Some(false),
+            Self::Inconclusive(_) => None,
+        }
+    }
+}
+
+/// Map the enabled/disabled probe outputs to a proof. Pure, so the mapping
+/// — and above all "an Err is never a verdict" — is tested without ffmpeg.
+pub(crate) fn dovi_pixel_verdict(
+    enabled: Result<Vec<String>, String>,
+    disabled: Result<Vec<String>, String>,
+) -> DoviPixelProof {
+    match (enabled, disabled) {
+        (Ok(enabled), Ok(disabled)) if enabled != disabled => DoviPixelProof::Proved,
+        (Ok(_), Ok(_)) => DoviPixelProof::Refuted,
+        (Err(enabled), Err(disabled)) => DoviPixelProof::Inconclusive(format!(
+            "RPU-applied probe: {enabled}; RPU-ignored probe: {disabled}"
+        )),
+        (Err(error), Ok(_)) => DoviPixelProof::Inconclusive(format!("RPU-applied probe: {error}")),
+        (Ok(_), Err(error)) => DoviPixelProof::Inconclusive(format!("RPU-ignored probe: {error}")),
     }
 }
 
@@ -3973,6 +4476,165 @@ async fn probe_burst() -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dovi_reshape_pairing_proof_uses_a_delivery_raster_every_encoder_accepts() {
+        use super::*;
+        for encoder in [
+            Encoder::Software,
+            Encoder::Vaapi,
+            Encoder::Qsv,
+            Encoder::Nvenc,
+            Encoder::VideoToolbox,
+        ] {
+            let args = dovi_reshape_probe_args(encoder);
+            let (width, height) = DOVI_RESHAPE_PROOF_RASTER;
+            // AMD VA-API's floor is 128x128; the proof must not test below
+            // the sizes the reshape is actually delivered at.
+            assert!(width >= 1280 && height >= 720, "{encoder:?}");
+            assert!(args.contains(&format!("color=size={width}x{height}:rate=1:color=black")));
+            let filter = &args[args.iter().position(|a| a == "-vf").expect("filter") + 1];
+            let production = Pipeline::DoviTonemapx
+                .filters(Some(i64::from(width)), i64::from(height), Some("dovi"))
+                .expect("production reshape chain");
+            assert!(filter.starts_with(&production), "{encoder:?}: {filter}");
+            assert!(filter.contains(&format!("apply_dovi=1,scale={width}:{height},")));
+            assert!(!args
+                .iter()
+                .any(|a| a.contains("64x64") || a.contains("scale=64:64")));
+        }
+    }
+
+    #[tokio::test]
+    async fn held_clock_reporter_bytes_enter_existing_engine_identity_and_publication_fence() {
+        use super::*;
+        let directory = tempfile::tempdir().expect("reporter directory");
+        let path = directory.path().join("clock-reporter");
+        std::fs::write(&path, b"held reporter first version").expect("reporter");
+        let reporter = EncodedExecutable::capture_at(path.clone())
+            .await
+            .expect("capture");
+        let mut engine = EncodedEngine {
+            digest: "initial engine".into(),
+            process_identity: encoded_process_identity().into(),
+            objects: Arc::from([]),
+            font_objects: Arc::from([]),
+            font_env: None,
+        };
+        let before = engine.digest.clone();
+        engine
+            .bind_clock_reporter(&reporter)
+            .await
+            .expect("held reporter binding");
+        assert_ne!(engine.digest, before);
+        assert!(engine.is_current().await);
+        std::fs::write(path, b"held reporter newer version").expect("same-size replacement");
+        assert!(
+            !engine.is_current().await,
+            "old clock evidence cannot publish after its reporter changes"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn held_clock_matched_package_rejects_swapped_module_foreign_reporter_and_demux_patch() {
+        use super::*;
+        let directory = tempfile::tempdir().expect("package");
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("provenance/source-parser")).expect("provenance");
+        std::fs::create_dir_all(root.join("provenance/local-patches")).expect("patch directory");
+        for (name, bytes) in [
+            ("ffmpeg", b"producer".as_slice()),
+            ("ffprobe", b"native reporter".as_slice()),
+            ("plurx-source-parser.wasm", b"sealed parser".as_slice()),
+            ("foreign", b"foreign reporter".as_slice()),
+        ] {
+            std::fs::write(root.join(name), bytes).expect("image");
+        }
+        let producer = EncodedExecutable::capture_at(root.join("ffmpeg"))
+            .await
+            .expect("producer");
+        let native = EncodedExecutable::capture_at(root.join("ffprobe"))
+            .await
+            .expect("native");
+        let module = EncodedExecutable::capture_at(root.join("plurx-source-parser.wasm"))
+            .await
+            .expect("module");
+        let foreign = EncodedExecutable::capture_at(root.join("foreign"))
+            .await
+            .expect("foreign");
+        let quilt: serde_json::Map<String, serde_json::Value> = (0..100)
+            .map(|i| {
+                (
+                    format!("{i:04}-test.patch"),
+                    serde_json::json!("a".repeat(64)),
+                )
+            })
+            .collect();
+        let recipes: serde_json::Map<String, serde_json::Value> = quilt
+            .iter()
+            .map(|(name, digest)| (format!("debian/patches/{name}"), digest.clone()))
+            .collect();
+        let source = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140";
+        let commit = "253db2a7b0a8045c54ce68ce33d7f601229b1822";
+        let mut manifest = serde_json::json!({"source_sha256":source,"source_commit":commit,
+            "source_recipe_sha256":recipes,"binaries":{"ffmpeg":{"sha256":producer.digest},"ffprobe":{"sha256":native.digest}},
+            "source_parser":{"sha256":module.digest},"compiled_source":{"local_patches":{}}});
+        let parser = serde_json::json!({"source_sha256":source,"source_commit":commit,
+            "source_patch_sha256":quilt,"module_sha256":module.digest});
+        let native_path = root.join("provenance/manifest.json");
+        std::fs::write(&native_path, manifest.to_string()).expect("native manifest");
+        std::fs::write(
+            root.join("provenance/source-parser/manifest.json"),
+            parser.to_string(),
+        )
+        .expect("parser manifest");
+        let initial = EncodedEngine {
+            digest: "initial engine".into(),
+            process_identity: encoded_process_identity().into(),
+            objects: Arc::from([]),
+            font_objects: Arc::from([]),
+            font_env: None,
+        };
+        initial
+            .clone()
+            .bind_clock_pair(&module, &producer)
+            .await
+            .expect("matched sealed pair");
+        initial
+            .clone()
+            .bind_clock_pair(&native, &producer)
+            .await
+            .expect("matched native pair");
+        assert!(initial
+            .clone()
+            .bind_clock_pair(&foreign, &producer)
+            .await
+            .is_err());
+        std::fs::write(root.join("plurx-source-parser.wasm"), b"changed parser")
+            .expect("swap module");
+        assert!(initial
+            .clone()
+            .bind_clock_pair(&native, &producer)
+            .await
+            .is_err());
+        std::fs::write(root.join("plurx-source-parser.wasm"), b"sealed parser")
+            .expect("restore bytes");
+        let patch =
+            b"--- a/libavformat/demux.c\n+++ b/libavformat/demux.c\n@@ -1 +1 @@\n-old\n+changed\n";
+        std::fs::write(root.join("provenance/local-patches/timing.patch"), patch)
+            .expect("timing patch");
+        manifest["compiled_source"]["local_patches"]["timing.patch"] =
+            serde_json::json!(hex::encode(Sha256::digest(patch)));
+        std::fs::write(&native_path, manifest.to_string()).expect("updated provenance");
+        assert!(
+            initial
+                .clone()
+                .bind_clock_pair(&native, &producer)
+                .await
+                .is_err(),
+            "rehashed timing changes do not prove parser/producer equivalence"
+        );
+    }
 
     #[tokio::test]
     async fn engine_object_digest_is_reused_per_version_and_rehashed_on_change() {
@@ -5019,6 +5681,269 @@ mod tests {
 
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_clock_pair_requires_bound_reporter_origin_and_retained_capsule() {
+        use plurx_core::transcode::{
+            LinuxDolbyExecutionBinding, LinuxExecutionObject, LinuxExecutionObjectKind,
+            LinuxSourceClockAssociation,
+        };
+        let base = crate::test_tempdir().expect("Linux clock package");
+        let producer_path = base.path().join("ffmpeg");
+        let reporter_path = base.path().join("ffprobe");
+        let parser_path = base.path().join("sealed-parser");
+        let foreign_path = base.path().join("different-origin-ffprobe");
+        let capsule = base.path().join("package.json");
+        for (path, bytes) in [
+            (&producer_path, b"producer".as_slice()),
+            (&reporter_path, b"reporter"),
+            (&parser_path, b"sealed parser"),
+            (&foreign_path, b"reporter"),
+            (&capsule, b"bound capsule"),
+        ] {
+            std::fs::write(path, bytes).expect("clock package object");
+        }
+        let producer = EncodedExecutable::capture_at(producer_path)
+            .await
+            .expect("producer capture");
+        let reporter = EncodedExecutable::capture_at(reporter_path)
+            .await
+            .expect("reporter capture");
+        let parser = EncodedExecutable::capture_at(parser_path)
+            .await
+            .expect("parser capture");
+        let foreign = EncodedExecutable::capture_at(foreign_path)
+            .await
+            .expect("foreign origin capture");
+        let (capsule_digest, capsule_version) =
+            hash_engine_object(&capsule).await.expect("capsule capture");
+        let binding = LinuxDolbyExecutionBinding::new(
+            vec![
+                LinuxExecutionObject {
+                    path: producer.path.clone(),
+                    version: Some(producer.object_version.clone()),
+                    kind: LinuxExecutionObjectKind::ProducerExecutable,
+                },
+                LinuxExecutionObject {
+                    path: reporter.path.clone(),
+                    version: Some(reporter.object_version.clone()),
+                    kind: LinuxExecutionObjectKind::NativeReporterExecutable,
+                },
+                LinuxExecutionObject {
+                    path: parser.path.clone(),
+                    version: Some(parser.object_version.clone()),
+                    kind: LinuxExecutionObjectKind::SealedParserExecutable,
+                },
+                LinuxExecutionObject {
+                    path: capsule.clone(),
+                    version: Some(capsule_version),
+                    kind: LinuxExecutionObjectKind::FollowedFile,
+                },
+            ],
+            vec![],
+        )
+        .expect("clock role binding")
+        .with_source_clock(
+            LinuxSourceClockAssociation::new(
+                hex::encode(capsule_digest),
+                "5".repeat(64),
+                reporter.digest.clone(),
+                parser.digest.clone(),
+            )
+            .expect("matched source witness"),
+        )
+        .expect("reporter roles");
+        let producer = producer
+            .bind_linux_execution(binding)
+            .expect("producer role");
+        let engine = || EncodedEngine {
+            digest: "base engine".into(),
+            process_identity: encoded_process_identity().into(),
+            objects: Arc::from([]),
+            font_objects: Arc::from([]),
+            font_env: None,
+        };
+        let mut valid = engine();
+        valid
+            .bind_clock_pair(&reporter, &producer)
+            .await
+            .expect("actual native reporter association");
+        let mut sealed = engine();
+        sealed
+            .bind_clock_pair(&parser, &producer)
+            .await
+            .expect("actual sealed reporter association");
+        assert_ne!(
+            valid.digest, sealed.digest,
+            "reporter image role remains in the clock identity"
+        );
+        assert_eq!(
+            foreign.digest, reporter.digest,
+            "same bytes are intentionally not enough"
+        );
+        assert!(
+            engine().bind_clock_pair(&foreign, &producer).await.is_err(),
+            "different loader origin cannot claim the package reporter"
+        );
+        let replacement = base.path().join("replacement.json");
+        std::fs::write(&replacement, b"different capsule").expect("changed package");
+        std::fs::rename(replacement, capsule).expect("atomic capsule replacement");
+        assert!(
+            engine()
+                .bind_clock_pair(&reporter, &producer)
+                .await
+                .is_err(),
+            "captured source-package replacement refuses association"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linux_processing_binding_fences_driver_lookup_and_package_replacement() {
+        use plurx_core::transcode::{
+            LinuxDolbyExecutionBinding, LinuxExecutionObject, LinuxExecutionObjectKind,
+        };
+        let base = crate::test_tempdir().expect("Linux processing capture");
+        let encoder = base.path().join("ffmpeg");
+        let driver = base.path().join("driver.so");
+        let alias = base.path().join("iHD_drv_video.so");
+        let shadow = base.path().join("higher-priority-driver.so");
+        std::fs::write(&encoder, b"encoder").expect("encoder bytes");
+        std::fs::write(&driver, b"driver-a").expect("driver bytes");
+        std::os::unix::fs::symlink(&driver, &alias).expect("driver alias");
+        let mut captured = EncodedExecutable::capture_at(encoder)
+            .await
+            .expect("capture encoder");
+        captured.linux_binding = Some(
+            LinuxDolbyExecutionBinding::new(
+                vec![
+                    LinuxExecutionObject {
+                        path: captured.path.clone(),
+                        version: Some(captured.object_version.clone()),
+                        kind: LinuxExecutionObjectKind::ProducerExecutable,
+                    },
+                    LinuxExecutionObject {
+                        path: driver.clone(),
+                        version: Some(engine_path_version(&driver).expect("driver version")),
+                        kind: LinuxExecutionObjectKind::FollowedFile,
+                    },
+                    LinuxExecutionObject {
+                        path: alias.clone(),
+                        version: Some(
+                            engine_object_version(
+                                &std::fs::symlink_metadata(&alias).expect("alias metadata"),
+                            )
+                            .expect("alias version"),
+                        ),
+                        kind: LinuxExecutionObjectKind::LookupObject,
+                    },
+                    LinuxExecutionObject {
+                        path: shadow.clone(),
+                        version: None,
+                        kind: LinuxExecutionObjectKind::AbsentLookup,
+                    },
+                ],
+                vec![("LIBVA_DRIVER_NAME_JELLYFIN".into(), "iHD".into())],
+            )
+            .expect("binding"),
+        );
+        assert!(captured.is_current().await);
+        assert_eq!(
+            captured.processing_child_env()[0].0,
+            "LIBVA_DRIVER_NAME_JELLYFIN"
+        );
+        std::fs::write(&shadow, b"new shadow").expect("higher-priority driver");
+        assert!(
+            !captured.is_current().await,
+            "a newly present lookup must not silently replace the observed driver"
+        );
+        std::fs::remove_file(&shadow).expect("remove shadow");
+        assert!(captured.is_current().await);
+        std::fs::remove_file(&alias).expect("remove alias");
+        std::os::unix::fs::symlink(&driver, &alias).expect("replace alias to identical target");
+        assert!(
+            !captured.is_current().await,
+            "lookup inode changes remain visible even when target content is unchanged"
+        );
+        let replacement = base.path().join("replacement");
+        std::fs::write(&replacement, b"driver-b").expect("replacement driver");
+        std::fs::rename(&replacement, &driver).expect("replace driver");
+        assert!(
+            !captured.is_current().await,
+            "retained package capture cannot recapture a changed driver"
+        );
+    }
+
+    #[tokio::test]
+    async fn linux_processing_retains_finite_preparation_and_refuses_identical_other_loader_origin()
+    {
+        use plurx_core::transcode::{
+            LinuxDolbyExecutionBinding, LinuxExecutionObject, LinuxExecutionObjectKind,
+        };
+        let base = crate::test_tempdir().expect("Linux loader origins");
+        let a = base.path().join("package-a");
+        let b = base.path().join("package-b");
+        std::fs::create_dir(&a).expect("first package");
+        std::fs::create_dir(&b).expect("second package");
+        let a = a.join("ffmpeg");
+        let b = b.join("ffmpeg");
+        std::fs::write(&a, b"identical encoder").expect("first encoder");
+        std::fs::write(&b, b"identical encoder").expect("second encoder");
+        let first = EncodedExecutable::capture_at(a)
+            .await
+            .expect("capture first");
+        let second = EncodedExecutable::capture_at(b)
+            .await
+            .expect("capture second");
+        assert_eq!(
+            first.digest, second.digest,
+            "content equality cannot prove loader-origin equality"
+        );
+        let binding = LinuxDolbyExecutionBinding::new(
+            vec![LinuxExecutionObject {
+                path: first.path.clone(),
+                version: Some(first.object_version.clone()),
+                kind: LinuxExecutionObjectKind::ProducerExecutable,
+            }],
+            vec![],
+        )
+        .expect("captured binding");
+        assert!(second.bind_linux_execution(binding.clone()).is_err());
+        let frozen = first
+            .bind_linux_execution(binding)
+            .expect("original origin");
+        let retained = EncodedExecutable::capture_for_preparation(&frozen)
+            .await
+            .expect("retain finite preparation");
+        assert_eq!(retained.path, frozen.path);
+        assert_eq!(retained.object_version, frozen.object_version);
+        assert!(retained.linux_binding.is_some());
+        assert!(retained.is_current().await);
+    }
+
+    #[tokio::test]
+    async fn alternating_tool_captures_do_not_rehash_each_other() {
+        let base = crate::test_tempdir().expect("tool capture cache");
+        let encoder = base.path().join("encoder");
+        let reporter = base.path().join("reporter");
+        std::fs::write(&encoder, b"encoder").expect("encoder bytes");
+        std::fs::write(&reporter, b"reporter").expect("reporter bytes");
+        let cache = tokio::sync::Mutex::new(ExecutableCaptureCache::default());
+        for _ in 0..3 {
+            EncodedExecutable::capture_at_with_cache(reporter.clone(), &cache)
+                .await
+                .expect("reporter capture");
+            EncodedExecutable::capture_at_with_cache(encoder.clone(), &cache)
+                .await
+                .expect("encoder capture");
+        }
+        assert_eq!(
+            cache.lock().await.hashes,
+            2,
+            "a VOD start's reporter and encoder captures keep both attestations"
+        );
+    }
+
     #[tokio::test]
     async fn encoded_executable_capture_shares_hash_and_rechecks_replacement() {
         let base = crate::test_tempdir().expect("encoder capture cache");
@@ -5320,6 +6245,26 @@ mod tests {
     fn font_inventory_keeps_a_load_tolerant_probe_budget() {
         assert!(FONT_ENGINE_PROBE_TIMEOUT >= Duration::from_secs(30));
         assert!(FONT_ENGINE_PROBE_TIMEOUT > ENGINE_PROBE_TIMEOUT);
+    }
+
+    #[test]
+    fn font_identity_ignores_inactive_configuration_inventory() {
+        fn identity(configuration: &[u8]) -> Vec<u8> {
+            let mut digest = Sha256::new();
+            hash_active_font_configuration(&mut digest, configuration);
+            digest.finalize().to_vec()
+        }
+        let consumed = b"+ /fonts/conf.d/10-hinting.conf: Hinting\n+ /fonts/fonts.conf: Root\n";
+        let with_available = b"- /build/conf.avail/00-unused.conf: Unused\n+ /fonts/conf.d/10-hinting.conf: Hinting\n- /other/99-unused.conf: Other\n+ /fonts/fonts.conf: Root\n";
+        assert_eq!(identity(consumed), identity(with_available));
+        assert_ne!(
+            identity(consumed),
+            identity(b"+ /fonts/conf.d/11-hinting.conf: Hinting\n+ /fonts/fonts.conf: Root\n")
+        );
+        assert_ne!(
+            identity(consumed),
+            identity(b"+ /fonts/fonts.conf: Root\n+ /fonts/conf.d/10-hinting.conf: Hinting\n")
+        );
     }
 
     #[tokio::test]

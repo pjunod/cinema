@@ -14,7 +14,7 @@ use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
     ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, IdentityRepairOutcome,
     IdentityRepairPlan, IdentityRepairSnapshot, ReconcileOutcome, RootFingerprintStatus,
-    SeriesHintOutcome,
+    RootRemovalOutcome, SeriesHintOutcome,
 };
 
 #[async_trait]
@@ -293,14 +293,39 @@ impl FencedPublicationStore for SqliteStore {
     async fn ensure_library_root_fingerprint_fenced(
         &self,
         library_id: i64,
+        configured_paths: &[std::path::PathBuf],
         fingerprint: &str,
         allow_establish: bool,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<RootFingerprintStatus, StoreError> {
+        let configured_paths = crate::store::library_paths_json(configured_paths)?;
         let fingerprint = fingerprint.to_owned();
         self.with_fenced_conn(lease, replacement, move |conn| {
-            ensure_library_root_fingerprint(conn, library_id, &fingerprint, allow_establish)
+            ensure_library_root_fingerprint(
+                conn,
+                library_id,
+                &configured_paths,
+                &fingerprint,
+                allow_establish,
+            )
+        })
+        .await
+    }
+
+    async fn remove_files_outside_library_roots_fenced(
+        &self,
+        library_id: i64,
+        configured_paths: &[std::path::PathBuf],
+        file_ids: &[i64],
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<RootRemovalOutcome, StoreError> {
+        crate::store::root_removal_payload(file_ids)?;
+        let configured_paths = crate::store::library_paths_json(configured_paths)?;
+        let ids = file_ids.to_vec();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            remove_library_files(conn, library_id, &configured_paths, &ids)
         })
         .await
     }
@@ -1253,12 +1278,59 @@ fn upsert_file(
     )?)
 }
 
-fn ensure_library_root_fingerprint(
+/// Shared by the fenced and unfenced SQLite paths, inside the caller's
+/// transaction. `configured_paths` is the JSON of the path set judged.
+pub(super) fn remove_library_files(
     conn: &Connection,
     library_id: i64,
+    configured_paths: &str,
+    file_ids: &[i64],
+) -> Result<RootRemovalOutcome, StoreError> {
+    let current: bool = conn.query_row(
+        &format!("SELECT {}", crate::store::library_paths_are_sql("?1", "?2")),
+        params![library_id, configured_paths],
+        |row| row.get(0),
+    )?;
+    if !current {
+        return Ok(RootRemovalOutcome::ConfigurationChanged);
+    }
+    let mut deleted_files = 0_u64;
+    {
+        let mut delete = conn.prepare_cached(
+            "DELETE FROM files WHERE id = ?1 AND item_id IN \
+             (SELECT id FROM items WHERE library_id = ?2) \
+             AND NOT EXISTS (SELECT 1 FROM dv_conversions d \
+                             WHERE d.file_id = files.id \
+                               AND d.state IN ('running', 'verified'))",
+        )?;
+        for id in file_ids {
+            deleted_files += delete.execute(params![id, library_id])? as u64;
+        }
+    }
+    let pruned_items = super::media::prune_empty_items_in(conn, library_id)?;
+    Ok(RootRemovalOutcome::Applied {
+        deleted_files,
+        pruned_items,
+    })
+}
+
+/// Shared by the fenced and unfenced SQLite paths. `configured_paths` is the
+/// JSON of the path set the scan walked.
+pub(super) fn ensure_library_root_fingerprint(
+    conn: &Connection,
+    library_id: i64,
+    configured_paths: &str,
     fingerprint: &str,
     allow_establish: bool,
 ) -> Result<RootFingerprintStatus, StoreError> {
+    let current: bool = conn.query_row(
+        &format!("SELECT {}", crate::store::library_paths_are_sql("?1", "?2")),
+        params![library_id, configured_paths],
+        |row| row.get(0),
+    )?;
+    if !current {
+        return Ok(RootFingerprintStatus::ConfigurationChanged);
+    }
     let inserted = conn.execute(
         "INSERT INTO library_roots (library_id, fingerprint) SELECT ?1, ?2 WHERE ?3
          ON CONFLICT(library_id) DO NOTHING",

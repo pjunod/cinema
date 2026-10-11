@@ -20,7 +20,19 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `159` — Shared-library playback and controls;
+> Status: **v0.3.0**, build `163` — Continuous Auto costs rungs by their link
+> rate and never holds a rung the link cannot carry (#994); its
+> capability-probe build passed the Android TV series.
+> Build `162` — Home hides the Live TV, Recordings,
+> Library channels and Shared libraries entries (and their remote-navigation
+> stops) while the server has that section switched off (`GET /api/v1/features`);
+> not yet installed on hardware.
+> Build `161` — Developer graduation pass (Enable Live TV
+> is the first card of Settings → Live TV; Prepared replacement is in Playback;
+> the release startup profile status is in About); not yet installed on hardware.
+> Build `160` — Continuous-quality acceptance repairs
+> (Auto decides again after a viewer quality choice; shared-audio EOF evidence).
+> Build `159` — Shared-library playback and controls;
 > not yet installed on hardware.
 > Build `152` — Prepared-video geometry and playback-panel contrast repairs
 > from PR #915; hardware visual acceptance remains pending.
@@ -257,7 +269,7 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > source timeline, and draws them above the unchanged Dolby Vision, HDR, or SDR
 > video. Picture in Picture is unavailable while the overlay is active until
 > physical-device behavior is accepted.
-> HDHomeRun Live TV has dedicated live controls and Settings → Developer
+> HDHomeRun Live TV has dedicated live controls and Settings → Live TV
 > runtime enablement, readiness and exact previous-owner recovery. Its durable
 > token-free marker prevents duplicate starts after interrupted cleanup or app
 > death. DRM, DVR, captions and guide scheduling are not supported.
@@ -269,9 +281,10 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 
 - **HDHomeRun Live TV** — channel selection, pause/resume, mute, fullscreen and
   stop on a dedicated H.264/AAC live player. No library watch-progress writes.
-  Settings → Developer documents the required private IPv4 tuner, committed
-  owner node, compatible fleet, FFmpeg, scratch space and session budget before
-  runtime enablement. [The Live TV plan](../../docs/features/HDHOMERUN-LIVE-TV-PLAN.md)
+  *Enable Live TV* is the first card in Settings → Live TV (it left Developer
+  on 2026-10-10); the screen documents the required private IPv4 tuner,
+  committed owner node, compatible fleet, FFmpeg, scratch space and session
+  budget as advisory readiness beside the switch. [The Live TV plan](../../docs/features/HDHOMERUN-LIVE-TV-PLAN.md)
   records limits and acceptance; source tests are not physical playback proof.
 - **Connect & sign in** to any plurx server by address (`http://10.42.1.10:32400`); the
   session is remembered so the app reconnects silently on next launch.
@@ -327,6 +340,9 @@ recomputed on every decision, because unplugging HDMI changes the answer.
     watch state and the server-side **Trakt** scrobble.
 - **Viewer preferences** remember theme, appearance, poster size, home
   grouping, quality, audio/subtitle language, auto-skip, and autoplay-next.
+  Settings → Playback also holds the device-local *Prepared replacement*
+  switch for quality switching, and Settings → About shows the release startup
+  profile status; both moved out of Developer on 2026-10-10.
 - **App-managed offline video viewing on phones and tablets.** A detail-page action
   creates a durable server preparation request, then Media3's foreground
   `DownloadService` transfers the prepared HLS package into one process-owned,

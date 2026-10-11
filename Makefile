@@ -1565,6 +1565,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/analysis-node-names.test.js
 	@node --test tests/web/analysis-reconciliation.test.js
 	@node tests/web/settings-sections.test.js
+	# HDR10-E appears only for an accepted current-generation processing report.
+	@node --test tests/web/dv-processing-badge.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
@@ -1602,6 +1604,9 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/asset-order.test.js
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
+	@node --test tests/web/continuous-media-worker.test.js
+	@node --test tests/web/hitch-lifecycle.test.js
+	@node --test tests/web/section-nav.test.js
 
 ## ---- packaging & setup -------------------------------------------------
 
@@ -1630,7 +1635,12 @@ version: ## Print the version and git build stamp a build would report
 
 .PHONY: docker
 docker: ## Build the container image
-	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .
+	@set -eu; platform="$${DOCKER_DEFAULT_PLATFORM:-linux/$$(uname -m)}"; \
+	case "$$platform" in linux/amd64|linux/x86_64) \
+	  test -n "$${PLURX_LINUX_DOLBY_PACKAGE:-}" || { echo 'Audited amd64 package required: set PLURX_LINUX_DOLBY_PACKAGE to build-linux-dolby-ffmpeg output' >&2; exit 1; }; \
+	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --source-date-epoch "$(SOURCE_DATE_EPOCH)" ;; \
+	linux/arm64|linux/aarch64) docker build --target runtime --platform linux/arm64 --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest . ;; \
+	*) echo "Unsupported container platform $$platform" >&2; exit 1 ;; esac
 
 .PHONY: container-smoke
 container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container

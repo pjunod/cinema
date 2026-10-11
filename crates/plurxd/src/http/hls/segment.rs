@@ -594,6 +594,34 @@ pub(super) fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiErr
             log("producer_failed", &reason);
             ApiError::typed(StatusCode::BAD_GATEWAY, "producer_failed", &reason)
         }
+        // The deadline expired while the encoder pool refused the permit: no
+        // producer ran, so this is a "not yet", not a 502. On the wire it is
+        // `segment_pending`, the segment wait every client already retries
+        // on an attached playback (the contract's `segment_503_not_yet`);
+        // `transcode_capacity_pending` is a create code there, and no
+        // client's segment table reads it. The precise classification — the
+        // capacity wait and the pool's refusal — stays in the log, the
+        // message and the body's `cause`.
+        VodError::CapacityUnavailable {
+            reason,
+            retry_after,
+        } => {
+            log("transcode_capacity_pending", &reason);
+            ApiError::typed_detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "segment_pending",
+                format!("{reason}; retry in {}s", retry_after.as_secs().max(1)),
+                serde_json::json!({ "cause": "transcode_capacity_pending" }),
+            )
+        }
+        VodError::PublicationFailed(reason) => {
+            log("segment_publication_failed", &reason);
+            ApiError::typed(
+                StatusCode::BAD_GATEWAY,
+                "segment_publication_failed",
+                &reason,
+            )
+        }
         VodError::Gone(cause) => {
             log("media_session_ended", &format!("{cause:?}"));
             ApiError::typed(

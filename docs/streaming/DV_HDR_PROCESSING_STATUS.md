@@ -1,7 +1,8 @@
 # Dolby Vision processing — implementation evidence and remaining work
 
-**Status:** built for supported bounded routes; broader reference and hardware acceptance open ·
-**Updated:** 2026-10-09 · **Integration:** `effort/dv-hdr-processing`
+**Status:** built for supported bounded routes and merged to `main`; full-suite
+qualification, broader reference and hardware acceptance open ·
+**Updated:** 2026-10-10 · **Integration:** merged to `main` as `c96142ac` (#968)
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
 [source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
@@ -25,8 +26,9 @@ regression trailers. These are integration checks, not product qualification.
 Sol 6.1 sessions provide renderer, CPU/authoring and offline measurement work,
 with independent adversarial review. Settings and generation-bound client
 presentation are implemented; normal serving integration and the installed Linux
-helper bundle have bounded local serving evidence in §22. Current-head qualification
-and promotion receipts are recorded on [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968). The [M1 contract](DV_HDR_M1_CONTRACTS.md)
+helper bundle have bounded local serving evidence in §22. The effort merged to
+`main` without a qualification receipt; §23 records which suites have and have
+not passed on the merged tree. The [M1 contract](DV_HDR_M1_CONTRACTS.md)
 initially introduced only additive core types, validation and pure/test-only
 selection; code review approved that bounded Rust diff. On its effort base `03fa9d2`,
 25 focused tests, six compatibility regressions, core all-target checking and
@@ -49,7 +51,7 @@ DV-off validation. Current playback keeps its compatible fallback.
 | M3 routing and cache identity | Built: #964 and follow-ups cover first-window/generation paths, ownership and publication; §22 records actual reports, nonzero windows, seek, AAC and fresh compatible reopen | Exact late-metadata refusal diagnostic remains unproven; physical playback and hardware capacity remain open |
 | M4 settings and HDR10-E badge | Built: settings #937, presentation #941 and accepted-control adoption/clearing #955; §22 verifies actual served-generation reports and compatible fallback. #960 keeps readiness advisory | Physical client/display acceptance; both preferences remain default-off while broader acceptance is open |
 | M5 quality and performance | Matched 24-picture software-decode/NVENC comparison recorded in §16; sustained throughput unresolved | Held-out corpus, matched bitrate, physical playback and full graph performance; current 4K helper is slower than realtime |
-| M6 release qualification | Portable Linux bundle #963 and follow-ups passed ARM64/AMD64 loader/manifest checks; §22 records bounded serving evidence | Exact-head unit, gate and promotion results are retained on [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968); those receipts, not this source ledger, determine qualification |
+| M6 release qualification | Portable Linux bundle #963 and follow-ups passed ARM64/AMD64 loader/manifest checks; §22 records bounded serving evidence | Merged without a qualification receipt. The Rust unit/SQLite, Apple test, web unit and preflight suites and every non-unit lane lack a result on the merged tree; see §23 |
 
 ## 3. Run the bounded offline comparison
 
@@ -139,8 +141,8 @@ request to omit unit tests covered the documentation-only PR.
 Do not use this ledger as a production qualification receipt. HDR10-E
 presentation is implemented, but a source label or saved preference
 cannot enable it: only an accepted current-generation processing report can.
-Native serving acceptance and final promotion remain outstanding. No measured
-universal quality gain is claimed.
+Native serving acceptance remains outstanding, and the promotion merged without
+a qualification receipt (§23). No measured universal quality gain is claimed.
 
 The first comparator slice passes 23 focused regressions:
 
@@ -823,29 +825,138 @@ including failed attempts; credentials and private configuration are excluded.
 A/V agreement uses a 100 ms bound. These are synthetic serving, timing,
 metadata and fallback results, not physical ROG/display acceptance, sustained
 4K throughput, independent reference-picture agreement or Dolby conformance.
-The full-unit campaign and promotion result are recorded on PR #968 against
-its final integrated head; the earlier serving source does not certify later
-main changes. Both optional features remain default-off in Developer settings
+No full-unit campaign or promotion receipt exists for the merged tree (§23);
+the earlier serving source does not certify later main changes. Both optional features remain default-off in Developer settings
 with the broader reference, hardware and metadata limits still visible.
 
 
 ## 23. Qualification evidence stays bound to its source
 
-Promotion [PR #968](http://192.168.4.7:3000/noirr/plurx/pulls/968) retains the
-actual full-unit outcomes, source identities and gate receipts. The first
-Android JVM run passed 1,092 tests with no failures or skips; its combined
-command then failed lint on a pre-existing restricted Activity key API. The
-public Window.Callback correction preserves observation, dispatch and event
-consumption. Only the affected 29 tests and lint ran again, and passed. The
-original failed command receipt is preserved unchanged alongside the passing
-unit outcomes and focused repair. Windows was explicitly waived.
+**Recorded 2026-10-10.** #975 merged into the effort as `f1b2d8df`, and
+promotion PR #968 merged into `main` 61 seconds later as `c96142ac`. Both
+merges and #975's head `c207d37bd` have the same tree, `3a51e941`. A
+tree-determined result (compile, lint, tests) on any of them therefore holds
+for the others; a history check does not carry over, because each merge adds
+its own landing commit.
 
-The first remote campaign stopped in corrective-history preflight, before any
+**This merge did not meet the large-effort rule in `AGENTS.md`**, which
+requires `Main promotion gate` to pass and a qualification receipt to exist
+before a promotion merges. No receipt exists for this tree. The only promotion
+qualification, run 4584 on the earlier candidate `edde1d2e5`, stopped in
+corrective-history preflight. It also reported failures for the replicated
+Store shard graph, shard shadow and Store aggregate, and for the
+transport-recovery campaign. Those jobs either never started (the shard graph
+has no log) or recorded a failure because preflight had failed. None executed
+its suite. The Effort development gate was not dispatched
+for #975, and no CI ran on #968's final head `f1b2d8df` before it merged.
+`validation/qualification.py` binds a manual qualification only to an open,
+unmerged promotion PR, so a receipt for #968 can no longer be produced. Later
+evidence for this code is ordinary evidence on a `main` commit.
+
+### What has passed, and on which source
+
+| Surface | Result | Source | Why it applies to the merged tree |
+|---|---|---|---|
+| Android JVM tests | 1,092 passed; 0 failed, errored or skipped | `238e545e8` | Retention proof attachment 62 binds these outcomes to `edde1d2e5`; #975 changed no Android input. The combined command then failed lint on the existing restricted Activity key API, and that receipt is kept unchanged |
+| Android focused repair | 29 affected tests and lint passed | `696b37ff3` | The public `Window.Callback` correction; #975 changed no Android input |
+| iOS and tvOS | Compiled; tests not run | `238e545e8` | Compilation only, not a test-suite result |
+| Workspace Clippy, `-D warnings` | Passed, Linux all-target, Rust 1.97.1 | `c207d37bd` | Same tree. The first parallel attempt was killed for memory, not for a lint |
+| Tracked commit hook | Passed | `c207d37bd` | Same tree |
+| Corrective-history audit | Passed locally before landing, as reported by the implementing session | `c207d37bd` | Not evidence for `main`'s two landing commits |
+| Focused behaviour regressions | Passed per task PR | Task heads | Named by the `Regression-Test:` lines on #968; not merged-tree evidence |
+
+Windows was explicitly waived for this work and is not claimed to pass.
+
+The only remote campaign stopped in corrective-history preflight, before any
 of the remaining unit suites ran: three client fixes needed source/test anchor
-rows. A separate local Linux compile passed but warnings-denied Clippy found
-six Linux-only DV runtime lint errors. Their correction keeps the same runtime
-behavior: a callback type alias, standard divisibility predicates and narrowly
-justified argument-count annotations. These failures remain recorded; they
-are not successful qualification claims. Subsequent commands and final gate
-results belong to the promotion record, so this document need not change the
-source being qualified just to announce its result.
+rows. A separate local Linux compile passed, but warnings-denied Clippy found
+six Linux-only DV runtime lint errors. #975 added the anchor rows, a callback
+type alias, standard divisibility predicates and two narrowly justified
+argument-count annotations. These changes are intended to be
+behaviour-neutral; no unit suite has run on them. The earlier failures stay
+recorded here and are not qualification claims.
+
+### What the promotion left red on `main`
+
+The policy and contract preflight and the web unit lane, which every `main`
+pull request runs, fail on `c96142ac`. Seven of these failures came from this
+effort, and the record correction that adds this subsection repairs them:
+
+- Release packaging could not find the shipped runtime.
+  `validation/release_dockerfile.py` identified it as the Dockerfile's only
+  `debian:bookworm-slim` stage, and the helper-check stage made a second one.
+  Every release-packaging contract errored. Even with the stage found, a
+  non-digest packaging Dockerfile would have kept the runtime's
+  `COPY --from=dv-processing-helpers` without the stages that produce the
+  bundle. The packager now finds the runtime by its `runtime-assets` name. It
+  keeps exactly the asset stages the runtime copies or mounts from. It refuses
+  a source the output would not define, a path back to the Rust build stage,
+  and a kept stage that can see the daemon's sources.
+- The operator-only FEL helper probe added an ignored test without binding
+  its identity and reason in the known-red contract.
+- The Apple player published `effectiveProcessing` and
+  `effectiveProcessingGeneration` without adding them to the pinned
+  published-surface inventory. They feed the HDR10-E media facts only.
+- `tests/web/dv-processing-badge.test.js` was in no lane's recipe, so the
+  badge tests ran nowhere in CI.
+- Four web and playback suites failed: `web-policy`, `web-control`,
+  `seek-telemetry` and `file-context`. Player functions now call
+  `clearEffectiveProcessing` and `effectiveHdrProcessing`, and the control
+  exchange reads the reporter's `bootstrap`. The harnesses that load those
+  functions in isolation had none of them, and `web-control` stopped partway
+  through its run. They now load the shipped helpers, and the attachment test
+  checks that a new attachment clears the previous report.
+- The API reference claimed 354 routes, counted on an older base; `main`
+  registers 356.
+- Ledger and backlog links named real infrastructure.
+
+A seventh failure predates this effort. The fast-lane preflight contract
+still expected the ten-minute budget that PR #962 had raised to fifteen.
+
+### What has not passed on the merged tree
+
+- **Rust unit and SQLite contracts** (`make ci-rust-gate`): never executed.
+  On `c96142ac`, the `coverage` push job's rustc was killed by SIGKILL while
+  compiling the instrumented `plurxd` test binary. No compiler diagnostic was
+  printed and no test ran. Whether the merged code's size contributed is not
+  established. The same coverage job has failed on every recorded `main` push
+  since at least task 17462. On the previous `main`, `97be91e4`, it ran and
+  failed in `plurx-core` (1 test), `store_contract` (1) and `plurxd`
+  (shared-source, source-actor and several HTTP tests). A failure on the
+  merged tree must be compared with that baseline before it is attributed to
+  this work.
+- **Apple iOS and tvOS test suites**: compiled only.
+- **Web node unit suite** (`make web-unit-check`): not run on the final tree.
+- **Python validation and operations suites and the player node contracts**
+  (the preflight): red on `c96142ac` as described above. Their result on the
+  repaired tree is recorded on the pull request that repairs them.
+
+Full unit suites are now run and repaired in batches outside individual pull
+requests (owner's ruling, 2026-10-10). Whether that ruling also changes the
+`AGENTS.md` promotion rule is the owner's decision. Until a batch run records
+a result on a `main` commit containing `c96142ac`, the suites above stay
+listed here.
+
+Non-unit lanes also have no result for this tree: the replicated Store,
+topology, WAL, daemon and transport-recovery lanes, web layout and VOD browser
+acceptance, Android instrumented tests, amd64 and arm64 package smoke, and the
+aggregate gate. In particular, no Docker build has exercised the repaired
+packaging Dockerfile. Its non-digest form, which package smoke builds, now
+compiles the DV helper bundle inline, as the published runtime image build
+already does. That added build time is unmeasured. Physical display and ROG acceptance, independent
+reference quality and sustained real-time 4K throughput also remain unproven.
+Both preferences stay default-off in Developer settings while these are open.
+
+### Late malformed-metadata diagnostic
+
+One direct-helper run on the retained malformed fixture with the installed
+helper exited 1 in 0.266 seconds. It printed `invalid active area metadata`,
+emitted no completion event and wrote no output. This confirms the helper's
+own guard. It does not prove which path the earlier HTTP attempt failed on,
+so §22's analyzer failure stays as recorded.
+
+The retained artifacts are on #968: the synthetic HTTP acceptance archive
+(attachment 61), the Android retained-outcome proof bound to `edde1d2e5`
+(62), the Android full-run, focused and lint evidence (63) and the late helper
+diagnostic (64). Attachment 62 records its actual source identity. It is not
+relabelled for a later commit.

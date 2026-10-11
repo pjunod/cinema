@@ -700,10 +700,10 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertNotIn("successor.seekTo", commit)
 
     def test_apple_prepared_enablement_is_visible_and_advisory(self) -> None:
-        view = self.read("clients/apple/Sources/LiveTvDeveloperView.swift")
-        section = view.split(
-            'Section("Prepared quality handoff · advisory enablement")', 1
-        )[1].split('Section("Enable Live TV · advisory enablement")', 1)[0]
+        # Graduated to Settings → Playback on 2026-10-10; the switch and its
+        # advisory rows moved together into the handoff details screen.
+        view = self.read("clients/apple/Sources/SettingsView.swift")
+        section = view.split('Section("Prepared quality handoff")', 1)[1]
         self.assertIn('Toggle("Enable two-player prepared handoff"', section)
         self.assertIn("Not met", section)
         self.assertIn("Checked during playback", section)

@@ -41,6 +41,9 @@ access groups. NVIDIA hosts also need NVIDIA Container Toolkit; the container
 receives the video encode/decode libraries automatically. Explicit GPU
 selections remain authoritative. See the [hardware deployment contract](../deploy/README.md#hardware-transcode--recent-intel-gpus)
 for manual configuration, remote engines, and native macOS VideoToolbox.
+On a Mac, the [macOS install guide](../deploy/MACOS.md) walks the whole path
+from a fresh machine: prerequisites, `make install-macos`, privacy grants,
+sleep and upgrades.
 
 Open `http://<host>:32400`, create the admin account, add a library. Library
 paths you type in the UI are **container-side** paths under Docker (e.g.
@@ -433,7 +436,8 @@ its existing idle-maintenance read check.
 ### Backing up and restoring an activated cluster
 
 Set `backup.destination`, `backup.schedule_utc` (UTC `HH:MM`, default `02:30`),
-and `backup.keep` in Settings → Developer. Use a destination on a separately
+and `backup.keep` in Settings → Cluster → Cluster settings → *Portable cluster
+backup*. Use a destination on a separately
 protected mount with at least twice the current state-machine image size free.
 The readiness rows are advisory: an empty destination is what disables the
 schedule, and no missing observation prevents an explicit save or backup.
@@ -2381,7 +2385,8 @@ See [the measurement handoff](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
 for the identified one-hour idle and sixty-second loaded receipt still owed.
 
 Since 2026-10-04 (#793) the observation feeds a clock guard. Settings →
-Developer → *Cluster clock guard* → *Enforce the cluster clock guard* (the
+Cluster → Cluster settings → *Cluster clock guard* → *Enforce the cluster
+clock guard* (the
 replicated setting `cluster.clock_guard_enforced`, default off) decides
 whether it refuses anything; each node re-reads the setting every 10
 seconds, and a node whose read fails keeps its current mode. **Off** (the
@@ -2526,12 +2531,13 @@ that the voter can use replicated storage or sees a leader. The private Ansible
 deployment uses `serial: 1`, fails the whole play on the first node error, and
 now gates each Cinema host on `/readyz`.
 
-**Bounded catalogue reads are the normal replicated read path.** The Developer
-tab's **Local catalogue reads** preference can turn them off or on without
+**Bounded catalogue reads are the normal replicated read path.** The **Local
+catalogue reads** preference in Settings → Cluster → Cluster settings can turn
+them off or on without
 restarting nodes. Its readiness rows are advisory. A saved preference replicates
 like other settings; a node observes it when that entry applies. The original
 `cluster.bounded_replica_reads` option supplies the initial preference (default
-`true`); the saved Developer preference overrides it. The apply-lag budget
+`true`); the saved preference overrides it. The apply-lag budget
 remains `cluster.bounded_replica_max_lag_entries`, default 64.
 
 The optimization covers library browse, item/file lookup, recently-added,
@@ -2550,7 +2556,7 @@ errors discard the local result and use Authority. The preference itself costs
 one local settings lookup inside that proof; it adds no leader round trip.
 Existing multi-statement genre/count and media-shape semantics remain unchanged.
 
-Turn off **Local catalogue reads** in Developer to return eligible reads to
+Turn off **Local catalogue reads** in Settings → Cluster to return eligible reads to
 Authority. This changes no schema or membership. `/readyz` removes a voter whose
 quorum proof is absent or whose apply lag is nonzero; the reader independently
 falls back, so bypassing the proxy does not bypass its consistency checks.
@@ -3164,7 +3170,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts Trakt and sharing outbound credentials. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
 | `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
 | `PLURX_SHARED_CACHE_ID` | `cluster.shared_cache_id` | empty | Stable operator name for that shared filesystem: 1–64 ASCII letters, digits, dots, dashes, or underscores. Every voter mounting the same filesystem must use the same value |
-| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `true` | Initial bounded-read preference; the replicated Developer setting overrides it. Each read proves consistency independently |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `true` | Initial bounded-read preference; the replicated setting (Settings → Cluster → *Local catalogue reads*) overrides it. Each read proves consistency independently |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
 | `PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT` | `cluster.logs_until_snapshot` | `10000` | Snapshot trigger, bounded 1,000–200,000; next restart, identical on every voter; change from the default only with fleet cadence evidence |
@@ -3195,7 +3201,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_LOG_FORMAT` | — | `text` | Console log shape: `text` or `json`. Anything else is `text`. A property of how *this process's* stdout is consumed, not a cluster setting — a node whose journal is scraped by a log pipeline wants `json` and its neighbour may not. Under `json` the ANSI colouring is off whatever the terminal is, because an escape sequence inside a JSON string field is a parse hazard, not a colour |
 | `PLURX_CLUSTER_ACTIVATION_FAILPOINT` | — | — | Test-only activation exit: `after-quiescence` · `after-incoming` · `after-marker` · `after-rename`; each exits `86` |
 | `PLURX_HLS_FORCED_AUTOSELECT` | — | off | **Experiment.** Puts `AUTOSELECT=YES` on forced subtitle renditions. Set `1` to enable |
-| `PLURX_PGS_OVERLAY` | — | off | **Retired as a gate.** The switch is now Settings → Developer → *Serve PGS subtitles as an overlay* (`subtitles.pgs_overlay`). This variable seeds that setting once, on a node that has never been told either way, and does nothing afterwards. Still keep it off until native-client and physical HDR/DV acceptance is complete |
+| `PLURX_PGS_OVERLAY` | — | off | **Retired as a gate.** The switch is now Settings → Playback → *Serve PGS subtitles as an overlay* (`subtitles.pgs_overlay`). This variable seeds that setting once, on a node that has never been told either way, and does nothing afterwards. Still keep it off until native-client and physical HDR/DV acceptance is complete |
 
 ### The HLS master experiment
 
@@ -3416,6 +3422,14 @@ a small library; `0` still disables automatic removal. Above that floor, the
 percentage is a hard ceiling rounded down. A refused scan still records new and
 changed files, but keeps every apparently missing row and reports the refusal
 in library status and logs.
+
+Removing a library path is not a missing-file case, and neither the prune
+bound nor the root identity applies to it. The scan the edit queues removes
+every entry no configured path covers, and the items that leaves empty, once
+it has walked the library's paths without an error — so media moved to a path
+added in the same edit keeps its items and watch state, and a path the scan
+cannot read keeps the old entries until it can. Every complete scan makes the
+same removal, which clears what removals made before this rule left behind.
 
 The limit counts catalog file entries missing from disk, not files still in
 the directory. An empty directory can therefore trigger the limit when the
@@ -3655,17 +3669,15 @@ memory and stops asking, so the subtitle is gone for the rest of the session.
 
 | Runtime setting | Default | Meaning |
 |---|---:|---|
-| `playback.subtitle_not_ready_503` | off | Answer `503` with `Retry-After` for a segment whose whole-track extraction has **failed**, instead of an empty `WEBVTT` body. A track that is merely warming still gets the empty segment |
+| `playback.subtitle_not_ready_503` | — | **Retired; ignored.** Formerly: answer `503` with `Retry-After` for a segment whose whole-track extraction has **failed**, instead of an empty `WEBVTT` body |
 
-The switch is **Settings → Developer → *Refuse a subtitle segment whose
-extraction failed*** (`subtitle_not_ready_503` in the settings API). Leave it
-off until you have watched the failure on the engine you care about: what a
-player does with a refused subtitle segment is unmeasured here, and AVPlayer,
-Media3, and hls.js each decide for themselves how long to retry and whether one
-503 ends the rendition. The card's three readiness rows report `unobservable`
-and never gate the switch, so the only evidence is a real title whose
-extraction genuinely fails — confirm the player comes back to the track rather
-than abandoning it.
+**Retired.** The switch that was **Settings → Developer → *Refuse a subtitle
+segment whose extraction failed*** is gone from Settings, the settings API and
+readiness. A stored `playback.subtitle_not_ready_503` is kept but ignored, and
+a failed extraction always answers the empty `WEBVTT` body: actual AVPlayer
+stayed at time zero through repeated subtitle `503`s while the empty-response
+control kept playing. Caption failure is reported through playback control
+instead of turning into a video transport stall.
 
 ### Stored PGS tracks
 
@@ -3707,8 +3719,8 @@ The pass keeps tracks only while **all** of these hold, checked per pass:
   on. It also requires `ffprobe` (`PLURX_FFPROBE`) to report the same version
   as `ffmpeg` (`PLURX_FFMPEG`): the ordinals come from one and the hard maps are
   resolved by the other. If it fails, the log line
-  `PGS ride-along self-test failed` carries the reason and the Developer row
-  shows it;
+  `PGS ride-along self-test failed` carries the reason and the switch's
+  readiness row in Settings → Maintenance shows it;
 - `<cache>` is on a **local filesystem** (`statfs`: NFS, SMB/CIFS, FUSE, 9p,
   Ceph and AFS are refused, and every non-Linux platform is treated as not
   local), because a blocked stage write would stall the demuxer the index
@@ -3719,8 +3731,8 @@ The pass keeps tracks only while **all** of these hold, checked per pass:
 
 A riding pass that does not build its index is remembered (in memory, per
 file and source) and that file's next pass is a plain index pass, so the
-ride-along can cost a file its stored subtitles but never its index. The
-Developer row counts such files; a restart asks again. The verdict and the
+ride-along can cost a file its stored subtitles but never its index. A
+readiness row on the switch counts such files; a restart asks again. The verdict and the
 publication run after the pass's own future has returned, so a preemption can
 no longer discard a finished index while tracks are being judged. A stored
 track whose file has gone missing is re-extracted on the file's next pass.
@@ -3732,9 +3744,9 @@ chooses its grade without the burn.
 |---|---:|---|
 | `subtitles.stored_sources` | on | One switch for both halves: the index pass keeps PGS tracks, and both consumers read them. Off makes both consumers ignore what is stored at once, discards the tracks of a pass still running when it finishes, and stops later passes keeping any, so a wrong stored track is taken out of service without a redeploy |
 
-The switch is **Settings → Developer → *Keep PGS tracks during indexing and
-read them instead of the source*** (`subtitle_stored_sources` in the settings
-API); its rows show the self-test result, the filesystem check and the
+The switch is **Settings → Maintenance → *Keep and read stored PGS tracks***,
+right after the Stored subtitle tracks panel (`subtitle_stored_sources` in the
+settings API); its rows show the self-test result, the filesystem check and the
 counters, and never gate it. The store is swept on each fragment-index tick: a
 directory whose file row is gone or whose size/mtime moved is deleted, a
 catalog read that fails stops the sweep without deleting, a size cap evicts
@@ -3766,7 +3778,7 @@ product, not only from metrics:
   since #463's review, the local background loop's as well — the default on a
   single-node install — keyed `local-index:<file>:<pipeline>` on this node. A
   row whose pass is also keeping PGS tracks says *Also keeping N PGS tracks · X
-  written*, with a link that lands on the switch on Developer. The byte count is
+  written*, with a link that lands on the switch in Settings → Maintenance. The byte count is
   the stage's size, re-measured at most once a second (the muxer writes a track
   out in I/O-buffer blocks, so a small track can read 0 B until the pass ends);
   a pass that is not riding says nothing, and a row from a peer that predates
@@ -4400,7 +4412,8 @@ and their advisory observations.
 Library scans and refreshes are accepted durably and dispatched on an eligible
 source-readable voter. Their request/result history survives the HTTP node's
 restart. Provider maintenance shares request spacing and cooldowns across
-nodes; adding workers does not multiply that allowance. The Developer card
+nodes; adding workers does not multiply that allowance. The
+`durable_cluster_work` readiness item (`GET /api/v1/developer/readiness`)
 reports this node's artifact and catalogue authority separately. Learners
 retain immutable-result execution only; they cannot become scan/provider
 coordinators through the artifact claim path.
@@ -5014,7 +5027,7 @@ means enrichment has no TMDB key configured — the scan itself succeeded.
 
 Library channels are compiled into every server and client build and are off
 for following playback on a new install. The switch is in **Settings →
-Developer → Library channels**. Its three companion checks answer whether the
+Live TV → Library channels**. Its three companion checks answer whether the
 authoritative Store is readable, whether at least one successfully probed
 movie or episode can be scheduled, and whether deployed clients understand the
 following-session contract. A red or unknown check is advice: it never moves
@@ -5042,7 +5055,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 ```
 
 The settings response exposes `library_channels_enabled`; the normal settings
-update carries the current generation just like every other Developer switch.
+update carries the current generation just like every other settings switch.
 Do not turn a readiness observation into deployment automation that flips the
 setting back off. Explicit administrator intent owns the enabled state.
 
@@ -5170,7 +5183,8 @@ an administrator turns each on, and both are always compiled: there is no
 build variant or code feature flag. Readiness is advisory; it explains what is
 met but never prevents an administrator from moving either enable switch.
 
-The whole surface is **Settings → Developer**. It is there in every build,
+The whole surface is **Settings → Live TV**; *Enable Live TV* is its first
+card (it moved out of Developer on 2026-10-10). It is there in every build,
 including a shipped one, and every mutation on it requires administrator
 access plus the exact current settings generation, so two administrators
 cannot half-apply two configurations.
@@ -5233,7 +5247,7 @@ probing; `POST .../readiness/refresh` probes.
 
 **Readiness does not gate the enable (2026-09-07).** Every check above still
 runs, and the answer is recorded in the log line that accompanies the enable
-and shown on the Developer card — but an unmet check is a sentence, not a
+and shown beside the switch in Settings → Live TV — but an unmet check is a sentence, not a
 refusal. The things that still refuse are structural: an address that is not
 private or link-local, an unresolved previous-owner barrier, a session limit
 or output height outside their ranges, and a stale generation. Those make the
@@ -5299,7 +5313,7 @@ is what you want to see before step 4.
 
 ### Recording: enable, observe and diagnose
 
-Settings → Developer → Recording is the enable surface. Set a recording root
+Settings → Live TV → Recording is the enable surface. Set a recording root
 that the tuner owner can write and every serving node can read, choose how
 many tuner slots remain reserved for viewers, and inspect the named advisory
 checks. The switch remains operable when a check is unmet; a red row is an
@@ -5828,7 +5842,8 @@ types. A typed cycle survives the six-hour unstarted-queue cleanup; playback
 priority cannot pull it forward. `index_retry_window_expired` is terminal until
 an explicit administrator generation.
 
-**Settings → Developer → Content analysis** is the authoritative enable switch.
+**Settings → Analysis → Index analysis** (*Durable analysis queue and shared
+index cache*) is the authoritative enable switch.
 Its media-tool, durable-store, held-source, and compatibility-inventory rows are
 advisory evidence only. An unmet or unavailable row never disables the switch.
 
@@ -5923,7 +5938,7 @@ the loading overlay a few seconds longer, then playback).
 | A GPU tone-map worked and then stopped | The pipeline downgrades once, per session, to the CPU chain and logs it | Look for `pipeline=` on the session's ffmpeg log line: it names what actually ran, not what the box can do |
 | 4K HDR / Dolby Vision won't play | Heavy HEVC is hardware-decoded (Intel too); if the GPU can't decode it and software can't either, the session now fails fast with a clear log line instead of hanging gray | Read `plurxd::transcode` — the last ffmpeg line names the real cause (decode vs tone-map). DV profile 5 is the hardest case |
 | Playback is software when you set `qsv` | The QSV probe was rejected at startup | Read `plurxd::transcode` logs; usually a driver/`/dev/dri` gap |
-| No posters, just filenames | No TMDB key (movies/TV) | Add a key in Settings → Developer (anime needs none) |
+| No posters, just filenames | No TMDB key (movies/TV) | Add a key in Settings → Metadata (anime needs none) |
 | Playing or seeking knocks a Wi-Fi client off the network (loses its IP and can't get another) | An unpaced stream is taking the whole link, starving the client's DHCP renewal of airtime | Lower **Settings → Playback → Delivery speed** to 2×; confirm with a `ping` to the gateway during a seek |
 | 4K starts, then buffers a few seconds in | The session never built a head start — the classic cause was realtime pacing on the copy-video path | Raise **Settings → Playback → Transcode buffering → Head start**; check the stats overlay's Server block for the encode speed |
 | Stutters every 20–40 seconds through a whole film | The encoder cannot keep up: the head start drains at (1 − speed) per second played | Stats overlay (`i`) → Server → encode speed. Below 1× means transcode, not network — pick a lower quality, or check that hardware encoding validated at startup |
@@ -5987,7 +6002,8 @@ metadata immediately removes its old classification from search until a fresh
 classification is saved. SQLite schema 61 and Hiqlite schema 41 store these
 records and corrections; backups/imports preserve them and rebuild their index.
 
-**Settings → Developer → Search settings** offers embedded semantic search,
+**Settings → Metadata → Search and classification → Search settings** offers
+embedded semantic search,
 off by default. Enabling it downloads approximately 91 MB of pinned,
 SHA-256-verified MiniLM model files per node. Candle runs the model on CPU
 inside plurx; there is no inference server. Queries and catalogue text stay
@@ -6009,8 +6025,8 @@ cache. Disable the setting to release model memory; downloaded files remain
 for reuse. Removing this directory while disabled reclaims disk space.
 
 The subject worker retains owner-scoped resumable jobs, publication fences,
-and its existing retention policy. **Settings → Developer → Enable subject
-matching** pauses new local rule evaluations; existing schedules, manual
+and its existing retention policy. **Settings → Live TV → Library channels →
+Enable subject matching** pauses new local rule evaluations; existing schedules, manual
 selection and ordinary title search remain available. It does not control
 the independent optional semantic-search setting.
 

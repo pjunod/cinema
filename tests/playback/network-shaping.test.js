@@ -709,6 +709,65 @@ test("device-run terminates only its owned PID before clean production restore a
   });
 });
 
+test("device-run isolated lab skips absent production app and retains owned cleanup and lease release", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.options.restore_policy = "isolated-lab";
+    fixture.state.rows.delete(10);
+    fixture.dependencies.deviceCommand = async (args) => {
+      const reply = await fixture.command(args);
+      if (args[1] === "info" && args[2] === "apps") {
+        reply.result.apps = reply.result.apps.filter((app) => app.bundleIdentifier !== "tv.plurx.app");
+      }
+      return reply;
+    };
+    fixture.dependencies.restoreDevice = async () => { throw new Error("production restore must not be requested"); };
+    fixture.dependencies.waitForAcceptance = async () => {
+      const receipt = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(receipt.restore_policy, "isolated-lab", "chosen policy is durable before observation");
+      assert.equal(receipt.owned_process.processIdentifier, 77);
+      assert.equal((await deviceLeases(fixture)).length, 1, "non-restoring run still owns a durable lease");
+      return { reason: "test-complete" };
+    };
+    const result = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    const launches = fixture.state.calls.filter((args) => args[2] === "launch");
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0][launches[0].indexOf("--") + 1], "tv.plurx.diagnostic");
+    assert.deepEqual(fixture.state.calls.filter((args) => args[2] === "terminate"), [
+      ["device", "process", "terminate", "--device", fixture.state.canonical, "--pid", "77"],
+    ]);
+    assert.equal(fixture.state.rows.has(77), false);
+    assert.equal(fixture.state.closed, true);
+    assert.equal(result.cleanup.owned_process_absent, true);
+    assert.equal(result.cleanup.status, "verified-absent");
+    assert.equal(result.cleanup.production_restored, false);
+    assert.equal(result.cleanup.production_restore_skipped, "explicit-isolated-lab-policy");
+    assert.equal(result.production_executable_scope, undefined);
+    assert.equal(result.verdict, "passed");
+    assert.deepEqual(await deviceLeases(fixture), []);
+    const durable = JSON.parse(await fsp.readFile(fixture.options.json));
+    assert.equal(durable.restore_policy, "isolated-lab");
+    assert.equal(durable.cleanup.owned_process_absent, true);
+    assert.equal(durable.cleanup.production_restored, false);
+  });
+});
+
+test("device-run isolated lab requires separate QA bundle and explicit known restore policy", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    for (const options of [
+      { ...fixture.options, restore_policy: "unknown" },
+      { ...fixture.options, restore_policy: true },
+      { ...fixture.options, restore_policy: "isolated-lab", bundle_id: undefined },
+      { ...fixture.options, restore_policy: "isolated-lab", bundle_id: "tv.plurx.app" },
+    ]) {
+      await assert.rejects(lab.deviceRunCommand(options, fixture.dependencies), /restore-policy/);
+    }
+    assert.equal(fixture.state.calls.length, 0, "invalid policy fails before device operations");
+    assert.equal(fixture.state.closed, undefined);
+  });
+});
+
 test("device-run awaits injected launch restore and shaper operations with explicit manual height", async () => {
   await withTempDir(async (directory) => {
     const fixture = deviceRunFixture(directory);
@@ -2753,25 +2812,21 @@ test("VOD readiness waits for the exact file built by an indexing pass", () => {
   }, 42), false);
 });
 
-test("actual Auto pressure uses measured peaks and refuses an unsafe two-rung interval", () => {
+test("actual Auto pressure uses the profile's own links, never rates derived from the costs", () => {
   const qualification = require("../../scripts/continuous-quality-qualification");
-  const catalog = [{route: "encode", height: 720, peak_bps: 6160000},
-    {route: "encode", height: 1080, peak_bps: 12160000},
+  const catalog = [{route: "encode", height: 720, peak_bps: 6128000},
+    {route: "encode", height: 1080, peak_bps: 12128000},
     {route: "copy", height: 1080, peak_bps: 999999999}];
   const profile = qualification.autoLinkProfile(catalog);
-  assert.equal(profile.stages.length, 5);
-  assert.equal(profile.stages[0], profile.stages[2]);
-  assert.equal(profile.stages[2], profile.stages[4]);
-  assert.equal(profile.stages[1], profile.stages[3]);
-  assert.ok(profile.stages[1] * 1000 >= profile.low_floor_bps);
-  assert.ok(profile.stages[1] * 1000 < profile.low_ceiling_bps);
-  assert.throws(() => qualification.autoLinkProfile([]), /safe pressure interval/);
+  assert.deepEqual(profile.stages, [100000, 10000, 25000, 10000, 25000]);
+  // A 4x cost error moves no stage; it is refused, because 1080p could then
+  // never recover on the 25 Mb/s link.
+  assert.throws(() => qualification.autoLinkProfile(catalog.map(row =>
+    ({...row, peak_bps: row.peak_bps * 4}))), /upgrade margin/);
+  assert.throws(() => qualification.autoLinkProfile([]), /two costed encoded rungs/);
   assert.throws(() => qualification.autoLinkProfile([
     {route: "encode", height: 720, peak_bps: 1000000},
-    {route: "encode", height: 1080, peak_bps: 1548000}]), /shaper rate resolution/);
-  assert.throws(() => qualification.autoLinkProfile([
-    {route: "encode", height: 720, peak_bps: 9000000},
-    {route: "encode", height: 1080, peak_bps: 10000000}]), /safe pressure interval/);
+    {route: "encode", height: 1080, peak_bps: 1548000}]), /applies no pressure/);
 });
 
 test("encoded-only qualification does not wait for an impossible copy fragment index", () => {

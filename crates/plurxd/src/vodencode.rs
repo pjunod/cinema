@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::SourceIdentity;
 use plurx_core::transcode::{
-    vod_pipe_args_with_reorder, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions,
-    VodFrameGrid,
+    vod_pipe_args_with_source_clock, Pacing, ResolvedTranscode, TranscodeExecution,
+    TranscodeOptions, VodFrameGrid,
 };
 use sha2::{Digest, Sha256};
 
@@ -145,6 +145,23 @@ pub(crate) fn frozen_software_threads(work: &Workload<'_>, budget: usize) -> u32
     work.software_threads().min(budget).max(1) as u32
 }
 
+/// The CPU threads a frozen encoder needs from the software budget before
+/// any admission can succeed, whatever else the pool holds.
+pub(crate) fn frozen_admission_floor(
+    resources: &TranscodeResourceEstimate,
+    software_threads: Option<u32>,
+) -> usize {
+    if resources.hardware_slot {
+        // Hardware output ignores the software encoder cap. Its CPU decode
+        // and filter estimate remains the operative policy floor.
+        resources.cpu_threads
+    } else {
+        resources
+            .cpu_threads
+            .min(software_threads.map_or(resources.cpu_threads, |threads| threads as usize))
+    }
+}
+
 /// Current policy must still allow the frozen encoder. The shared admission
 /// pool owns the conservative pipeline claim and its isolated oversize rule.
 pub(crate) fn try_admit_frozen_bundle(
@@ -156,16 +173,7 @@ pub(crate) fn try_admit_frozen_bundle(
     priority: Priority,
     claim: Option<u64>,
 ) -> Result<crate::admission::TranscodePermit, bool> {
-    let frozen_floor = if resources.hardware_slot {
-        // Hardware output ignores the software encoder cap. Its CPU decode
-        // and filter estimate remains the operative policy floor.
-        resources.cpu_threads
-    } else {
-        resources
-            .cpu_threads
-            .min(software_threads.map_or(resources.cpu_threads, |threads| threads as usize))
-    };
-    if frozen_floor > software_budget {
+    if frozen_admission_floor(resources, software_threads) > software_budget {
         return Err(true);
     }
     admissions
@@ -177,6 +185,7 @@ pub(crate) fn try_admit_frozen_bundle(
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
     pub source_object_version: String,
+    pub source_clock: plurx_core::transcode::VodSourceClock,
     pub plan: ResolvedTranscode,
     /// Worker-selected processing decision frozen with this rendition. A saved
     /// switch or catalog DV label cannot create a selected backend plan.
@@ -418,6 +427,33 @@ pub(crate) struct PermitRefusal {
     /// release anywhere can admit it.
     pub over_budget: bool,
     pub pool: PoolSnapshot,
+}
+
+impl std::fmt::Display for PermitRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:?} priority; hardware {}/{} in use; software {}/{} threads in use; \
+             {} live waiter(s); background {}; {} reservation(s){}",
+            self.priority,
+            self.pool.hardware_used,
+            self.hardware_limit,
+            self.pool.software_used,
+            self.software_budget,
+            self.pool.live_waiting,
+            if self.pool.background_active {
+                "holds a permit"
+            } else {
+                "idle"
+            },
+            self.pool.reservations,
+            if self.over_budget {
+                "; the plan needs more threads than the whole software budget"
+            } else {
+                ""
+            }
+        )
+    }
 }
 
 /// Ordinary producers retain this until their exact process is reaped.
@@ -676,6 +712,7 @@ impl Encoding {
     ) -> Arc<Encoding> {
         Arc::new(Encoding {
             source_object_version: self.source_object_version.clone(),
+            source_clock: self.source_clock,
             plan: self.plan.clone(),
             dv_processing: self.dv_processing.clone(),
             #[cfg(target_os = "linux")]
@@ -870,12 +907,7 @@ impl Encoding {
             hardware_limit,
             software_budget,
             &self.resources(),
-            // The video recipe's software-encoder cap does not bound the AAC
-            // producer: shared audio's fixed estimate is its whole floor.
-            self.shared_audio
-                .is_none()
-                .then_some(self.options.software_threads)
-                .flatten(),
+            self.admission_software_threads(),
             priority,
             claim,
         ) {
@@ -892,6 +924,25 @@ impl Encoding {
             .expect("VOD encoder refusal")
             .take();
         Some(permit)
+    }
+
+    /// The video recipe's software-encoder cap does not bound the AAC
+    /// producer: shared audio's fixed estimate is its whole floor.
+    fn admission_software_threads(&self) -> Option<u32> {
+        self.shared_audio
+            .is_none()
+            .then_some(self.options.software_threads)
+            .flatten()
+    }
+
+    /// `Some(floor)` when no permit can ever be granted under
+    /// `software_budget`: the frozen plan alone needs more CPU threads than
+    /// the whole budget. The same rule admission applies, asked before a
+    /// rendition is named, so such a plan is refused at create instead of
+    /// parking demand on the materialize deadline.
+    pub(crate) fn unadmittable_software_floor(&self, software_budget: usize) -> Option<usize> {
+        let floor = frozen_admission_floor(&self.resources(), self.admission_software_threads());
+        (floor > software_budget).then_some(floor)
     }
 
     pub fn cancel_wait(&self) {
@@ -1014,6 +1065,26 @@ impl Encoding {
             .ok()
     }
 
+    /// The rate this continuous rendition needs from a link: the encoder's
+    /// VBV cap for video, the configured rate for the shared soundtrack. It is
+    /// the same figure the candidate catalog advertises for the encode route,
+    /// split by role. [`Self::continuous_peak_bps`] stays the publication
+    /// ceiling; nothing enforces this value, and it is always below it.
+    pub(crate) fn continuous_sustained_bps(&self) -> Option<u64> {
+        if self.shared_audio.is_some() {
+            return Some(u64::from(self.options.audio_bitrate_kbps) * 1000);
+        }
+        if self.plan.options().input_has_audio
+            || self.options.video_sample_envelope
+                != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+        {
+            return None;
+        }
+        Some(plurx_core::transcode::vbv_maxrate_bps(
+            self.options.video_bitrate_kbps,
+        ))
+    }
+
     pub(crate) fn continuous_object_fits(
         &self,
         plan: &plurx_core::segplan::SegmentPlan,
@@ -1047,6 +1118,7 @@ impl Encoding {
                 duration_seconds,
                 "/proc/self/fd/3",
                 "/proc/self/fd/4",
+                self.source_clock,
             )
             .expect("verified reconstructed VOD recipe remains valid");
         }
@@ -1057,16 +1129,17 @@ impl Encoding {
             let end_seconds = self.grid.shared_audio_end_ticks(duration_ms) as f64
                 / f64::from(plurx_core::transcode::VOD_AUDIO_RATE);
             audio
-                .args(&execution, end_seconds)
+                .args_with_source_clock(&execution, end_seconds, self.source_clock)
                 .expect("frozen soundtrack execution remains valid")
         } else {
-            vod_pipe_args_with_reorder(
+            vod_pipe_args_with_source_clock(
                 file,
                 &self.plan,
                 &execution,
                 self.grid,
                 duration_seconds,
                 self.reorder_frames,
+                self.source_clock,
             )
         }
     }
@@ -1116,6 +1189,7 @@ impl Encoding {
         });
         hash.update((self.source_object_version.len() as u64).to_le_bytes());
         hash.update(self.source_object_version.as_bytes());
+        hash.update(self.source_clock.identity());
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());

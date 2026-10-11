@@ -918,6 +918,108 @@ async fn encoding_shipped_shape() {
     assert_eq!(encoding.admissions.software_in_use(), 0);
 }
 
+/// S-02: a frozen plan this node's software budget can never admit is
+/// refused at create, typed, instead of parking a viewer on the 30 s
+/// materialize deadline for a permit no release can grant.
+#[tokio::test]
+async fn an_encode_the_software_budget_can_never_admit_is_refused_at_create() {
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("manager fixture");
+    let source = plurx_core::testfixtures::source("h264");
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("real source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id =
+        seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let seeded = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
+    store
+        .upsert_file(
+            seeded.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
+            &probe,
+        )
+        .await
+        .expect("attested source metadata");
+    // No software encoder budget at all: every software encode needs at
+    // least one thread, so no release can ever admit one.
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "0")
+        .await
+        .expect("software budget");
+    let file = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("attested");
+    let manager = TranscodeManager::new(
+        store,
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let req = SessionRequest {
+        sdr_master_codecs: None,
+        continuous_media: None,
+        quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
+        request_id: Some("unadmittable-encode".into()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        start_seconds: 0.0,
+        kind: SessionKind::Transcode { height: 240 },
+        ..reopen_request(file_id, "unadmittable-encode", "unused", "unused")
+    };
+    let refused = manager
+        .prepare_vod_encoding(&req, &file)
+        .await
+        .expect_err("an unadmittable plan is refused before any rendition exists");
+    let (code, reason) = crate::transcode::vod_refusal(&refused).expect("typed VOD refusal");
+    assert_eq!(code, "vod_transcode_unavailable", "{refused}");
+    assert!(reason.contains("software encoder budget is 0"), "{reason}");
+    // The public create answers that refusal the way it answers every
+    // `vod_transcode_unavailable`: a VOD-only request is refused typed, and an
+    // ordinary one is served by the retained live engine at once. Neither
+    // parks a VOD rendition on a permit that can never be granted.
+    let vod_only = SessionRequest {
+        vod_only: true,
+        request_id: Some("unadmittable-encode-vod-only".into()),
+        ..req.clone()
+    };
+    let Err(refused) = create_local_vod(&manager, &vod_only, "test").await else {
+        panic!("a VOD-only create cannot fall back");
+    };
+    assert_eq!(
+        crate::transcode::vod_refusal(&refused).map(|(code, _)| code),
+        Some("vod_transcode_unavailable"),
+        "{refused}"
+    );
+    assert!(manager.vod.session_ids().await.is_empty());
+    let recovered = create_local_vod(&manager, &req, "test")
+        .await
+        .expect("an ordinary create uses the live-HLS recovery");
+    assert!(!recovered.vod, "no VOD session was parked");
+    assert!(manager.vod.session_ids().await.is_empty());
+    manager.stop_session(&recovered.session_id, "test").await;
+}
+
 #[tokio::test]
 async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     // An unoptimized test frame keeps a stack slot for every future it awaits.
@@ -1132,6 +1234,13 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
             .continuous_peak_bps(&plan)
             .expect("container-inclusive ceiling");
         assert!(peak > 0);
+        let sustained = encoding
+            .continuous_sustained_bps()
+            .expect("the rate a link must carry");
+        assert!(
+            sustained > 0 && sustained < peak,
+            "a declared link rate never exceeds the publication ceiling"
+        );
         for (index, entry) in plan.entries.iter().enumerate() {
             let bound = u64::try_from(
                 u128::from(peak) * u128::from(entry.duration_ticks)
@@ -1148,6 +1257,17 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
             );
         }
     }
+    assert_eq!(
+        video.continuous_sustained_bps(),
+        Some(plurx_core::transcode::vbv_maxrate_bps(
+            video.options.video_bitrate_kbps
+        )),
+        "video costs its VBV cap, as the catalog advertises the encode route"
+    );
+    assert_eq!(
+        audio.continuous_sustained_bps(),
+        Some(u64::from(audio.options.audio_bitrate_kbps) * 1000)
+    );
     request
         .continuous_media
         .as_mut()

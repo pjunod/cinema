@@ -325,6 +325,11 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         self.assertEqual(shared, ["busy", "failure", "notice", "plan", "playback", "playing", "preparing", "starting", "statusSummary"])
         self.assertEqual(published, [
             "currentMs", "decision", "deliveredDolbyVisionProfile", "deliveredRange",
+            # Not surfaces: the accepted processing report behind the HDR10-E
+            # media badge and the playback generation it belongs to (#968).
+            # They feed media facts only, carry no fault prose, and recovery
+            # only ever clears them.
+            "effectiveProcessing", "effectiveProcessingGeneration",
             "encoder", "finished", "isChangingStream", "isPlaying", "isVOD",
             "knownDurationMs", "lastTTFFMs", "pgsOverlayStatus", "pgsOverlayWindow",
             "playbackControlSummary",

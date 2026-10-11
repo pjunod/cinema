@@ -766,7 +766,7 @@ impl Default for StoreOperationMetrics {
 
 impl StoreOperationMetrics {
     fn saturating_add(target: &AtomicU64, amount: u64) {
-        let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = target.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != u64::MAX).then(|| current.saturating_add(amount))
         });
     }
@@ -5632,6 +5632,18 @@ impl SettingsStore for HiqliteAuthStore {
         Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
     }
 
+    async fn local_setting_hint(&self, key: &str) -> Result<Option<String>, StoreError> {
+        let sql = "SELECT value FROM settings WHERE key = $1";
+        validate_sql(sql)?;
+        // `query_map` reads this node's replica: no leader round trip and no
+        // proposal. See the trait method for why a stale answer is safe.
+        let rows = self
+            .client()
+            .query_map::<SettingValueRow, _>(sql, params!(key))
+            .await?;
+        Ok(rows.into_iter().next().map(|row| row.value))
+    }
+
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let now = self.now()?;
         self.execute_idempotent(
@@ -8732,6 +8744,15 @@ mod tests {
         ] {
             assert!(error.to_string().contains("expected $1, found $2"));
         }
+    }
+
+    #[test]
+    fn first_preparation_seal_uses_canonical_replicated_parameter_order() {
+        // Validate the actual statement sent by the timed replicated writer,
+        // not a stand-in query. SQLite's real seal fixtures separately exercise
+        // the same ordered values and require the exact artifact and owner.
+        validate_sql(crate::store::prepared_output::SEAL)
+            .expect("first-preparation seal must be admitted before replicated IO");
     }
 
     #[test]

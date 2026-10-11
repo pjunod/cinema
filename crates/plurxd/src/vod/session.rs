@@ -122,6 +122,11 @@ pub(super) struct Rendition {
     pub(super) handoff_expiry_armed: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
     pub(super) demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
+    /// The last fragment the output writer received, as (generation epoch,
+    /// plan entry). An expired deadline uses it to tell "the producer
+    /// delivered this entry and publication did not finish" from "the
+    /// producer never delivered it".
+    pub(super) fragment_received: StdMutex<Option<(u64, u32)>>,
 }
 
 /// The points of a [`Rendition`]'s driver that a test observes
@@ -189,6 +194,84 @@ impl RenditionHooks for RenditionTestHooks {
 impl Rendition {
     pub(super) fn kick(&self) {
         self.wake.notify_one();
+    }
+
+    pub(super) fn note_fragment_received(&self, epoch: u64, entry: u32) {
+        *self
+            .fragment_received
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((epoch, entry));
+    }
+
+    /// Classify an expired materialize deadline by what this rendition is
+    /// actually doing, in the order that can be proven: a refused encoder
+    /// permit with no producer, then a delivered but unpublished fragment,
+    /// then the producer itself. `belief` is the producer slot's awaited
+    /// state: a guess here decides capacity against producer.
+    pub(super) fn materialize_verdict(&self, index: u32, belief: Producer) -> MaterializeVerdict {
+        let name = if index == INIT_DEMAND_INDEX {
+            INIT_NAME.to_owned()
+        } else {
+            segment_name(u64::from(index))
+        };
+        let expired = format!(
+            "materializing {name} exceeded the {:.1}s producer deadline",
+            self.materialize_budget.as_secs_f64()
+        );
+        let producer_present =
+            matches!(belief, Producer::Running { .. } | Producer::Stopped { .. });
+        if !producer_present {
+            if let Some(refusal) = self
+                .recipe
+                .encoding
+                .as_ref()
+                .filter(|encoding| encoding.is_waiting())
+                .and_then(|encoding| encoding.last_refusal())
+            {
+                return MaterializeVerdict::Capacity(format!(
+                    "{expired} waiting for an encoder permit; no producer ran for it ({refusal})"
+                ));
+            }
+        }
+        let epoch = self.gen_epoch.load(Relaxed);
+        let received = *self
+            .fragment_received
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let received = received
+            .filter(|(at, _)| *at == epoch)
+            .map(|(_, entry)| entry);
+        if index != INIT_DEMAND_INDEX && received == Some(index) {
+            return MaterializeVerdict::Publication(format!(
+                "{expired}: the producer delivered it, but publication did not complete"
+            ));
+        }
+        let delivered = received.map_or_else(
+            || "it delivered no fragment".to_owned(),
+            |entry| {
+                format!(
+                    "its last delivered fragment was {}",
+                    segment_name(u64::from(entry))
+                )
+            },
+        );
+        MaterializeVerdict::Producer(match belief {
+            Producer::Running { positioned_at, .. } => format!(
+                "{expired}: the producer started at {} did not deliver it; {delivered}",
+                segment_name(u64::from(positioned_at))
+            ),
+            Producer::Stopped {
+                positioned_at,
+                reason,
+                ..
+            } => format!(
+                "{expired}: the producer started at {} is stopped ({reason:?}); {delivered}",
+                segment_name(u64::from(positioned_at))
+            ),
+            Producer::Absent { .. } => {
+                format!("{expired}: no producer is running for it")
+            }
+        })
     }
 
     /// Ask (or keep asking) this producer to hand its permit to `successor`.
@@ -708,6 +791,15 @@ pub(super) struct Session {
 }
 
 impl Session {
+    /// An immutable retained response keeps the viewer's control identity,
+    /// but has no missing bytes for this rendition's producer to generate.
+    pub(super) fn attachment_reader(&self, frontier: u32) -> Reader {
+        let mut reader = Reader::new(frontier);
+        reader.authority_only =
+            self.retained_output.is_some() || self.children.iter().any(|child| child.controlled);
+        reader
+    }
+
     pub(super) fn invalidate_observational_attachment(&self) {
         self.control
             .lock()

@@ -70,7 +70,8 @@ books, and home media.
   default, hearing-impaired/SDH), and chapters.
 - **Incremental rescan:** unchanged files are skipped by size + mtime, so a
   rescan of a large library is cheap. Vanished files are reconciled (the item
-  reflects what's actually on disk).
+  reflects what's actually on disk), and removing a path from a library
+  removes the items under it.
 - **Repairable inspection.** A file whose probe failed — bad permissions, an
   unmounted share, a half-copied download — is retried on every scan, because
   the fixes for all three leave size and mtime untouched and it would otherwise
@@ -909,19 +910,25 @@ qualification is still open. Detail: [OPERATIONS.md](OPERATIONS.md#jellyfin-clie
 [PLAYBACK.md](PLAYBACK.md#jellyfin-clients--the-same-media-owners-another-protocol),
 [JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md).
 
-**Web settings:** Live TV owns tuner enablement, owner recovery, guide
-configuration, recording, library-channel playback and subject matching.
-Playback owns player defaults, chapter thumbnails, and advanced server
-delivery, including Live HLS recovery, protocol compatibility, verified decode
-artifacts and automatic decode recovery. Analysis owns the durable index queue.
-Metadata owns search and classification settings. Maintenance owns Windows
-conversion and runtime readiness alongside Dolby Vision disk conversion.
-Cluster owns automatic transport-recovery guidance.
+**Web settings:** Live TV owns the Live TV enable (its first card), tuner
+configuration, owner recovery, deinterlace cadence, guide configuration,
+recording, library-channel playback and subject matching. Playback owns
+player defaults, chapter thumbnails, quality switching, the second player in
+this browser, the PGS subtitle overlay, and advanced server delivery,
+including Live HLS recovery, protocol compatibility, verified decode
+artifacts and automatic decode recovery. Analysis owns the durable index
+queue and subtitle backfill. Metadata owns search and classification
+settings. Maintenance owns Windows conversion and runtime readiness
+alongside Dolby Vision disk conversion, and stored PGS tracks. Cluster owns
+automatic transport-recovery guidance and, below the health board, a
+*Cluster settings* section: media placement and session takeover, local
+catalogue reads, the clock guard, portable backup and shared subtitle
+tracks. These moved out of Developer on 2026-10-10.
 
 On a standalone server, Cluster shows only “Clustering is not enabled.”
-It does not load or poll cluster membership, operations, or logs. Developer
-omits remote placement and takeover, replica reads, clock enforcement,
-cluster backup, and peer-subtitle cards. Local analysis, storage budgets,
+It does not load or poll cluster membership, operations, or logs, and
+does not draw the Cluster settings section (remote placement and takeover,
+replica reads, clock enforcement, cluster backup, and peer subtitles). Local analysis, storage budgets,
 stored subtitles, Live TV, and sharing between separate Cinemas remain
 available. Presentation follows explicit configuration or persisted network membership,
 not the number of peers currently reachable, and leaves saved settings unchanged.

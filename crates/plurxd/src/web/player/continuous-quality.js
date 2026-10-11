@@ -62,6 +62,11 @@ function continuousQualityResponse(value,request){
   return transition.operation.kind!=='prepare'||(receipt.transaction.intent_revision===transition.operation.intent_revision
     &&receipt.transaction.target_rendition_id===transition.operation.target_rendition_id);
 }
+// The link rate a rendition needs (its encoder cap), declared beside the
+// per-object publication ceiling. A server that predates it declares neither.
+function continuousQualitySustained(row){
+  return row.sustained_bps==null||continuousQualityInteger(row.sustained_bps,1)&&row.sustained_bps<=row.peak_bps;
+}
 function continuousQualityFamily(value){
   if(!value||value.version!==1||!['autonomous_reserved','controlled'].includes(value.mode)||!continuousQualityArtifact(value.family_id)
     ||value.master!=='master.m3u8'||!Array.isArray(value.video)||value.video.length<2||value.video.length>8)return false;
@@ -73,7 +78,7 @@ function continuousQualityFamily(value){
     &&continuousQualityInteger(row.timescale,1)&&row.timescale<=1000000
     &&continuousQualityInteger(row.frame_ticks,1)&&continuousQualityInteger(row.segment_ticks,1)
     &&row.segment_ticks%row.frame_ticks===0&&continuousQualityInteger(row.peak_bps,1)
-    &&row.playlist===`video/${row.rendition_id}/index.m3u8`))return false;
+    &&continuousQualitySustained(row)&&row.playlist===`video/${row.rendition_id}/index.m3u8`))return false;
   if(new Set(rows.map(row=>row.rendition_id)).size!==rows.length
     ||new Set(rows.map(row=>row.candidate_id)).size!==rows.length
     ||new Set(rows.map(row=>`${row.width}x${row.height}`)).size!==rows.length
@@ -82,7 +87,8 @@ function continuousQualityFamily(value){
   const audio=value.audio;
   return audio==null||(continuousQualityArtifact(audio.rendition_id)&&continuousQualityArtifact(audio.init_id)
     &&audio.codec==='mp4a.40.2'&&audio.timescale===48000&&continuousQualityInteger(audio.channels,1)&&audio.channels<=8
-    &&continuousQualityInteger(audio.peak_bps,1)&&audio.playlist===`audio/${audio.rendition_id}/index.m3u8`
+    &&continuousQualityInteger(audio.peak_bps,1)&&continuousQualitySustained(audio)
+    &&audio.playlist===`audio/${audio.rendition_id}/index.m3u8`
     &&!rows.some(row=>row.rendition_id===audio.rendition_id));
 }
 async function continuousQualityFetch(url,body,{signal=null,limit=270336,timeoutMs=14000}={}){
@@ -215,10 +221,18 @@ function continuousQualitySelectionCompatible(player,selection){
   const candidate=continuousQualityCandidate(player,selection);
   return !!candidate&&controller.family.video.some(row=>row.candidate_id===candidate.id);
 }
+// Auto compares a measured link against this cost, so it is the rate each
+// role needs from a link (video plus the shared soundtrack). peak_bps is one
+// object's publication ceiling, several times that rate: costing a rung by it
+// left no lower rung that fitted any ordinary link. It is the cost only when
+// the server declares no sustained rate.
+function continuousQualityLinkRate(row){
+  return row?(row.sustained_bps??row.peak_bps):0;
+}
 function continuousQualityBoundCatalog(catalog,family){
   if(!Array.isArray(catalog)||!family)return catalog;
   const costs=new Map(family.video.map(row=>{
-    const peak=row.peak_bps+(family.audio?.peak_bps||0);
+    const peak=continuousQualityLinkRate(row)+continuousQualityLinkRate(family.audio);
     if(!Number.isSafeInteger(peak)||peak<=0)throw new Error('Continuous delivery budget shape');
     return [row.candidate_id,peak];
   }));
@@ -281,6 +295,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   const protocol=continuousQualityProtocol(bootstrap,{client_instance_id:CONTROL_CLIENT_ID,
     lifetime_id:lifetime,attachment_id:continuousQualityNewIdentity(),family_id:family.family_id},exchange);
   const readers=new Map(),records=new Map(),buffers=new Set(),loaders=new Set();
+  const verifier=continuousMediaVerifier();
   let hls=null,closed=false,mediaDetached=false,transaction=null,revision=0,frontier=0,frameToken=null;
   const pendingAppends=new Map(),pendingDisposals=new Set();
   let disposalTimer=null,seekRevision=0,seekBoundary=null;
@@ -359,7 +374,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     const inspection=read(data);
     if(found.init){
       if(inspection.fragments.length||inspection.initializations.length!==1
-        ||await continuousMediaDigest(inspection.bytes)!==found.row.init_id)throw new Error('Continuous init identity');
+        ||await verifier.digest(inspection.bytes)!==found.row.init_id)throw new Error('Continuous init identity');
       const track=inspection.initializations[0];
       if(track.timescale!==found.row.timescale||(found.type==='video'
         ?track.type!=='vide'||track.width!==found.row.width||track.height!==found.row.height
@@ -367,7 +382,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       readers.set(found.row.rendition_id,read);return null;
     }
     if(!readers.has(found.row.rendition_id))throw new Error('Continuous fragment before verified init');
-    const [facts,artifact]=await Promise.all([continuousSampleFacts(inspection),continuousMediaDigest(inspection.bytes)]);
+    const {facts,artifact}=await verifier.verify(inspection);
     if(facts.timescale!==found.row.timescale||(found.type==='video'
       ?facts.type!=='vide'||facts.width!==found.row.width||facts.height!==found.row.height
       :facts.type!=='soun'||facts.channels!==found.row.channels))throw new Error('Continuous fragment format');
@@ -461,7 +476,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         if(data.byteLength>16*1024*1024)throw new Error('Continuous append payload bound');
         const snapshot=new Uint8Array(data instanceof ArrayBuffer?data:new Uint8Array(data.buffer,data.byteOffset,data.byteLength)).slice();
         const inspection=inspect(snapshot);
-        facts=inspection.fragments.length?continuousSampleFacts(inspection).catch(error=>{note(error);return null;}):Promise.resolve(null);
+        facts=inspection.fragments.length?verifier.facts(inspection,true).catch(error=>{note(error);return null;}):Promise.resolve(null);
       }catch(error){note(error);facts=Promise.resolve(null);}
       const operation={kind:'append',facts,failed:false};pending=operation;
       try{return append(data);}catch(error){if(pending===operation)pending=null;inspect=continuousMediaInspector();throw error;}
@@ -681,7 +696,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     });},
     detached(){
       if(!mediaDetached)return Promise.reject(new Error('Continuous media disposal needs detach receipt'));
-      if(closed)return;closed=true;
+      if(closed)return;closed=true;verifier.close();
       if(disposalTimer!=null){clearTimeout(disposalTimer);disposalTimer=null;}
       if(frameToken!=null)try{video.cancelVideoFrameCallback(frameToken);}catch(e){}
       for(const loader of loaders)loader.abort();loaders.clear();

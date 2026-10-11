@@ -3369,8 +3369,6 @@ async fn profile5_requires_the_probed_software_renderer_pair() {
         .with_dovi_reshape(true);
     manager
         .dovi_proofs
-        .lock()
-        .expect("proof cache")
         .insert(TranscodeManager::dovi_proof_key(&file), true);
     let encoder = manager
         .encoder_for_file(&file, crate::process_control::ChildClass::Background)
@@ -3391,6 +3389,171 @@ async fn profile5_requires_the_probed_software_renderer_pair() {
     assert_eq!(opts.pipeline, Pipeline::DoviTonemapx);
     assert_eq!(opts.tone_map, ToneMap::Tonemapx);
     assert_eq!(manager.auto_height_for_file(Some(&file), None).await, 720);
+}
+
+/// P-02: a Profile 5 pixel proof that did not finish is not a verdict. The
+/// first start's probes fail (the source path does not exist, so ffmpeg
+/// exits non-zero or cannot start at all); that start is refused as
+/// transient, nothing is remembered, and the next start proves and proceeds.
+/// Before the fix the failure was memoized as "not Dolby Vision" and every
+/// later start of the title answered `unsupported_build` until restart.
+#[tokio::test]
+async fn an_unfinished_profile5_pixel_proof_is_transient_and_not_remembered() {
+    use plurx_core::store::SqliteStore;
+    use std::sync::atomic::Ordering;
+
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dovi_reshape(true);
+    let file = profile5_file();
+    assert!(!file.path.exists(), "the stand-in source must be unreadable");
+    let key = TranscodeManager::dovi_proof_key(&file);
+    let hooks = manager.test_hooks();
+
+    let error = manager
+        .encoder_for_file(&file, crate::process_control::ChildClass::Background)
+        .await
+        .expect_err("an unfinished proof must not start the encode");
+    assert!(
+        is_source_proof_pending_error(&error) && is_start_infrastructure_error(&error),
+        "an unfinished proof is the transient start class: {error}"
+    );
+    assert!(unsupported_build_reason(&error).is_none(), "{error}");
+    assert_eq!(manager.dovi_proofs.verdict(&key), None, "nothing remembered");
+    assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 1);
+
+    hooks
+        .dovi_pixel_proof_script
+        .lock()
+        .expect("script")
+        .push_back(crate::ffmpeg::DoviPixelProof::Proved);
+    let encoder = manager
+        .encoder_for_file(&file, crate::process_control::ChildClass::Background)
+        .await
+        .expect("the second start proves and proceeds");
+    assert_eq!(encoder, Encoder::Software);
+    assert_eq!(manager.dovi_proofs.verdict(&key), Some(true));
+    assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 2);
+    manager
+        .encoder_for_file(&file, crate::process_control::ChildClass::Background)
+        .await
+        .expect("the verdict is remembered");
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        2,
+        "a remembered verdict runs no probe"
+    );
+
+    // A refuted proof is a verdict: remembered, and the honest 501.
+    let mut refuted = profile5_file();
+    refuted.mtime = 2;
+    hooks
+        .dovi_pixel_proof_script
+        .lock()
+        .expect("script")
+        .push_back(crate::ffmpeg::DoviPixelProof::Refuted);
+    let error = manager
+        .encoder_for_file(&refuted, crate::process_control::ChildClass::Background)
+        .await
+        .expect_err("a refuted proof refuses");
+    assert!(unsupported_build_reason(&error).is_some(), "{error}");
+    assert_eq!(
+        manager
+            .dovi_proofs
+            .verdict(&TranscodeManager::dovi_proof_key(&refuted)),
+        Some(false)
+    );
+}
+
+/// The advertised ladder's ceiling runs ahead of the session start inside
+/// one create. It reads the remembered pixel verdict and never opens the
+/// proof: it used to run both 30-second probes at the background class, and
+/// once an unfinished proof stopped being memoized the start then ran them a
+/// second time at realtime — up to four probes inside one create, past the
+/// clients' create deadline.
+#[tokio::test]
+async fn the_ladder_ceiling_never_starts_a_dovi_pixel_proof() {
+    use plurx_core::store::SqliteStore;
+    use std::sync::atomic::Ordering;
+
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dovi_reshape(true);
+    let file = profile5_file();
+    let key = TranscodeManager::dovi_proof_key(&file);
+    let hooks = manager.test_hooks();
+
+    let unproven = manager
+        .capability_height_ceiling_for_request(Some(&file), false)
+        .await;
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        0,
+        "the ceiling must not open the pixel proof"
+    );
+    assert_eq!(manager.dovi_proofs.verdict(&key), None);
+
+    // No verdict yet answers what the reshape reaches once proved, the only
+    // outcome in which a rung is served.
+    manager.dovi_proofs.insert(key.clone(), true);
+    assert_eq!(
+        manager
+            .capability_height_ceiling_for_request(Some(&file), false)
+            .await,
+        unproven
+    );
+    assert_eq!(
+        manager.dovi_reshape_encoder_advisory(&file).await,
+        manager
+            .encoder_for_file(&file, crate::process_control::ChildClass::Realtime)
+            .await
+            .expect("proved")
+    );
+    let mut refuted = profile5_file();
+    refuted.mtime = 2;
+    manager
+        .dovi_proofs
+        .insert(TranscodeManager::dovi_proof_key(&refuted), false);
+    assert_eq!(
+        manager.dovi_reshape_encoder_advisory(&refuted).await,
+        Encoder::Software
+    );
+    assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 0);
+}
+
+/// The pure mapping: only two successful probes are a verdict.
+#[test]
+fn dovi_pixel_verdict_never_turns_a_probe_error_into_a_verdict() {
+    use crate::ffmpeg::{dovi_pixel_verdict, DoviPixelProof};
+    let frames = |hash: &str| Ok(vec![hash.to_owned()]);
+    assert_eq!(dovi_pixel_verdict(frames("a"), frames("b")), DoviPixelProof::Proved);
+    assert_eq!(dovi_pixel_verdict(frames("a"), frames("a")), DoviPixelProof::Refuted);
+    for (enabled, disabled) in [
+        (Err("Dolby Vision pixel probe timed out".to_owned()), frames("a")),
+        (frames("a"), Err("starting Dolby Vision pixel probe: ENOENT".to_owned())),
+        (
+            Err("Dolby Vision pixel probe exited 1".to_owned()),
+            Err("Dolby Vision pixel probe timed out".to_owned()),
+        ),
+    ] {
+        let proof = dovi_pixel_verdict(enabled, disabled);
+        assert!(matches!(proof, DoviPixelProof::Inconclusive(_)), "{proof:?}");
+        assert_eq!(proof.verdict(), None);
+    }
+    assert_eq!(DoviPixelProof::Proved.verdict(), Some(true));
+    assert_eq!(DoviPixelProof::Refuted.verdict(), Some(false));
 }
 
 /// The grade predicate and the renderer predicate answer the same
@@ -3622,8 +3785,6 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
     .with_dovi_passthrough(true);
     manager
         .dovi_proofs
-        .lock()
-        .expect("proof cache")
         .insert(TranscodeManager::dovi_proof_key(&file), true);
 
     // Everything proved, and asked for.
@@ -4321,4 +4482,50 @@ async fn macos_launch_binds_frozen_plan_to_canonical_encoder_across_alias_retarg
             .expect("ordinary plan retains existing selection")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn local_vod_text_plan_uses_retained_engine_font_authority() {
+    use plurx_core::transcode::{MacosProcessingAvailability as Availability,
+        MacosProcessingContext, MacosProcessingGraph, MacosProcessingIdentity, SubtitleBurn};
+    let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(store, dir.path().to_owned(), EncoderCaps {
+        videotoolbox: true, ..EncoderCaps::default()
+    }, Pipeline::Cpu).with_decoders(vec!["hevc".to_owned()]);
+    let mut file = profile5_file();
+    file.hdr = None;
+    file.hdr_format = None;
+    file.video_profile = Some("Main".into());
+    file.bit_depth = Some(8);
+    let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+        "codec_name":"hevc","profile":"Main","width":3840,"height":2160,
+        "pix_fmt":"yuv420p","color_transfer":"bt709","color_primaries":"bt709",
+        "color_space":"bt709","color_range":"tv","field_order":"progressive",
+        "sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1",
+        "disposition":{"attached_pic":0}}]});
+    let facts = DecodeFacts::from_ffprobe_json(&probe,
+        TranscodeManager::plan_source_identity(&file).expect("source")).expect("facts");
+    let identity = MacosProcessingIdentity::new("1".repeat(64),"2".repeat(64),"3".repeat(64),
+        "4".repeat(64),"test-os".into(),"arm64".into(),"Apple test SoC".into()).expect("identity");
+    let digest = "a".repeat(64);
+    let context = MacosProcessingContext::new(false, identity.clone(), Availability::Available,
+        Availability::Available).with_graph(MacosProcessingGraph::SdrTextBurn, Availability::Available);
+    manager.macos_video_probe.publish_context_with_fonts_for_test(&context, Some(digest.clone()));
+    manager.apply_macos_video_processing_setting(true).await.expect("saved preference");
+    let options = TranscodeOptions { target_height:1080, pipeline:Pipeline::Cpu,
+        subtitle_burn: Some(SubtitleBurn { subtitle_index:0, bitmap:false }),
+        subtitle_file:Some("/dev/fd/5".into()), ..Default::default() };
+    let selected = manager.resolve_held_movie_plan_facts_with_fonts(&file, &options,
+        Encoder::VideoToolbox, Ok(facts.clone()), Some(&digest)).await.expect("held font plan");
+    assert_eq!(selected.options().pipeline, Pipeline::VtScaleSdr);
+    assert_eq!(selected.macos_processing_identity(), Some(&identity.with_text_fonts(digest.clone())));
+    let frozen = selected.plan_digest();
+    for authority in [None, Some("b".repeat(64))] {
+        let refused = manager.resolve_held_movie_plan_facts_with_fonts(&file, &options,
+            Encoder::VideoToolbox, Ok(facts.clone()), authority.as_deref()).await.expect("CPU plan");
+        assert_eq!(refused.options().pipeline, Pipeline::Cpu);
+        assert_ne!(refused.plan_digest(), frozen);
+    }
+    assert_eq!(selected.plan_digest(), frozen, "new font decisions cannot mutate the retained recipe");
 }

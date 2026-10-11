@@ -21,7 +21,10 @@ supply the required release separation.
 
 Paul's 2026-09-30 clarification, recorded in measurement §1, requires a switch
 only where manual on/off is meaningful. K-06 retains its accepted no-switch
-contract, automatic observation, and separate enforcement release. Developer
+contract, automatic observation, and separate enforcement release. (`main`
+nevertheless has the switch — Developer *Cluster clock guard*,
+`cluster.clock_guard_enforced`, default off, advisory readiness rows; see the
+2026-10-04 note below.) Developer
 facts remain read-only and advisory. Enforcement still waits for the merged
 measurement release and its identified fleet receipt; that substantive evidence
 dependency is unchanged. No rollout or clock-step authorization is implied.
@@ -42,8 +45,8 @@ describe the source they were written against. On `main`:
   (`admit_fenced_removal`, `crates/plurx-core/src/cluster/clock.rs:1359`); and
   `/readyz`, which answers 503 `clock unbounded` after two consecutive
   violating rounds (`clock_readiness_failure`, `crates/plurxd/src/http/mod.rs`).
-- **The switch.** Developer → *Cluster clock guard* → *Enforce the cluster clock
-  guard*, the
+- **The switch.** Settings → Cluster → *Cluster clock guard* → *Enforce the
+  cluster clock guard* (in Developer until 2026-10-10), the
   replicated setting `cluster.clock_guard_enforced`, default off. Each node
   re-reads it every 10 s (`crates/plurxd/src/clock_offset.rs`); a failed read
   keeps the node's current mode. While off, every guarded decision is
@@ -287,8 +290,10 @@ and enforcement itself are untouched; their ruling is separate):
    a stopped learner no longer refuses takeover, the expiry scan and every
    membership change on every node (its OWN routes are still never contested;
    see the review entry below). Voters must still be bounded; a measured
-   learner above 2 s still refuses; fenced removal excuses only unobserved
-   *learner* survivors; and `promote_learner` plus the leader-side Raft
+   learner above 2 s refuses only its own routes and promotion (amended
+   2026-10-10: counting it cluster-wide let a ~9.7 s learner step refuse
+   every voter's expiry scan for ~16 minutes; design §3.3); fenced removal
+   excuses only unobserved *learner* survivors; and `promote_learner` plus the leader-side Raft
    `Promote` admission require the promoted learner's own bound
    (`admit_promotion_for` / `revalidate_promotion_for`). The role comes only
    from the exact applied directory. Focused tests:

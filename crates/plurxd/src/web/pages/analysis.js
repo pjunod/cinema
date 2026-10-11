@@ -236,11 +236,11 @@ function analysisRideAlong(row){
     if(pgsTracks) parts.push(`${pgsTracks} PGS`);
     const read=Number(row.bytes_read||0), total=Number(row.total_bytes||0);
     const amount=total>=1e9?`${(read/1e9).toFixed(1)} of ${(total/1e9).toFixed(1)} GB`:`${fmtBytes(read)||"0 B"}${total?` of ${fmtBytes(total)}`:""}`;
-    return `<div class="analysis-sub">Reading ${esc(row.title||`File ${row.file_id}`)} on ${esc(row.node_id||"this node")} for ${parts.join(" + ")||"subtitle"} tracks · ${amount} · <a href="#/settings/developer/enable-subtitle-sources">cluster subtitle sources setting</a></div>`;
+    return `<div class="analysis-sub">Reading ${esc(row.title||`File ${row.file_id}`)} on ${esc(row.node_id||"this node")} for ${parts.join(" + ")||"subtitle"} tracks · ${amount} · <a href="#/settings/cluster/subclustercard">cluster subtitle sources setting</a></div>`;
   }
   const tracks=Number(row.pgs_tracks||0);
   if(!tracks) return "";
-  return `<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/developer/enable-subtitle-sources" title="Turning stored subtitle tracks off lets this pass finish its index and discards the tracks it kept">stored subtitle tracks setting</a></div>`;
+  return `<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/maintenance/subsrccard" title="Turning stored subtitle tracks off lets this pass finish its index and discards the tracks it kept">stored subtitle tracks setting</a></div>`;
 }
 function analysisLiveProgress(value,names){
   const rows=(value&&value.progress)||[];
@@ -681,6 +681,9 @@ function dvrIndicatorText(value,fresh=dvrOverviewFresh(value,DVR_SHARED.received
 }
 function dvrPaintGlobal(){
   const mount=document.getElementById("dvr-global");if(!mount)return;
+  // The header indicator is part of the Recordings section's nav presence:
+  // with the DVR switch off it stays dark (.dvr-global without .on is hidden).
+  if(!featureVisible("recordings")){mount.className="dvr-global";mount.innerHTML="";mount.title="DVR status";return;}
   const value=DVR_SHARED.overview, fresh=dvrOverviewFresh(value,DVR_SHARED.receivedAt);
   const unavailable=!fresh;
   const text=dvrIndicatorText(value,fresh);

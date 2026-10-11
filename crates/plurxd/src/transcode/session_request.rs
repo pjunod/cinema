@@ -520,6 +520,14 @@ pub struct CandidateExecutionContext {
     pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
 }
 
+/// Current ordinary source-owner selection, private to first preparation.
+/// An unavailable descriptor permits normal production, never cached acquisition.
+#[derive(Clone)]
+pub(crate) struct PreparedVodOwner {
+    pub(crate) node_id: String,
+    pub(crate) source_authority: Option<std::sync::Arc<crate::AppState>>,
+}
+
 /// Versioned worker media role for one continuous family generation.
 /// Legacy request JSON omits this field; older strict workers refuse it rather
 /// than silently materializing a muxed rendition under a video-only identity.

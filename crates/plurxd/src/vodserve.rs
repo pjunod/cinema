@@ -720,7 +720,26 @@ pub(crate) struct VerifiedContinuousFamily {
 }
 
 impl VerifiedContinuousFamily {
+    /// The durable descriptor bound to the session. Its bytes are compared
+    /// exactly on every re-bind and parsed by older nodes during a rolling
+    /// deploy, so it never carries the link rates.
     pub(crate) fn description(&self) -> Result<Vec<u8>, VodError> {
+        self.description_with(false)
+    }
+
+    /// What a client reads: the durable descriptor plus each rendition's
+    /// declared link rate (`sustained_bps`), recomputed from the recipe on
+    /// every serve. Clients cost Auto by it; the ceiling stays `peak_bps`.
+    pub(crate) fn client_description(&self) -> Result<Vec<u8>, VodError> {
+        self.description_with(true)
+    }
+
+    fn description_with(&self, link_rates: bool) -> Result<Vec<u8>, VodError> {
+        let link_rate = |row: &mut serde_json::Value, rate: Option<u64>| {
+            if let (true, Some(rate), Some(row)) = (link_rates, rate, row.as_object_mut()) {
+                row.insert("sustained_bps".into(), rate.into());
+            }
+        };
         let mut video = Vec::new();
         for rung in self.family.video().rungs() {
             let candidate = self.candidates.get(rung.rendition_id()).ok_or_else(|| {
@@ -733,7 +752,7 @@ impl VerifiedContinuousFamily {
                 .ok_or_else(|| {
                     VodError::ProducerFailed("family rung has no delivery budget".into())
                 })?;
-            video.push(serde_json::json!({
+            let mut row = serde_json::json!({
                 "candidate_id": candidate, "rendition_id": rung.rendition_id(),
                 "init_id": rung.init_id(), "width": rung.facts().width,
                 "height": rung.facts().height, "codec": rung.facts().codec,
@@ -741,16 +760,25 @@ impl VerifiedContinuousFamily {
                 "segment_ticks": rung.grid().segment_ticks(),
                 "peak_bps": budget.peak_bps,
                 "playlist": format!("video/{}/index.m3u8", rung.rendition_id()),
-            }));
+            });
+            link_rate(&mut row, budget.sustained_bps);
+            video.push(row);
         }
         let audio = self.family.audio().map(|audio| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "rendition_id": audio.rendition_id(), "init_id": audio.init_id(),
                 "codec": audio.facts().codec, "channels": audio.facts().channels,
                 "timescale": plurx_core::transcode::VOD_AUDIO_RATE,
                 "peak_bps": self.audio_budget.as_ref().map(|budget| budget.peak_bps),
                 "playlist": format!("audio/{}/index.m3u8", audio.rendition_id()),
-            })
+            });
+            link_rate(
+                &mut row,
+                self.audio_budget
+                    .as_ref()
+                    .and_then(|budget| budget.sustained_bps),
+            );
+            row
         });
         let bytes = serde_json::to_vec(&serde_json::json!({
             "version": 1, "family_id": self.family.id(),
@@ -924,6 +952,16 @@ pub enum VodError {
     Pending { retry_after: Duration },
     /// Typed `producer_failed` 502.
     ProducerFailed(String),
+    /// The materialize deadline expired with no producer ever started for
+    /// the entry, because the encoder pool kept refusing its permit. Typed
+    /// `transcode_capacity_pending` 503: a capacity answer, not a failure.
+    CapacityUnavailable {
+        reason: String,
+        retry_after: Duration,
+    },
+    /// The producer delivered the entry's fragment; publication did not make
+    /// it servable within the deadline. Typed `segment_publication_failed` 502.
+    PublicationFailed(String),
     /// 410 — the session ended for good.
     Gone(Terminal),
     /// A wait-pool cap was hit → typed 503, no wait.

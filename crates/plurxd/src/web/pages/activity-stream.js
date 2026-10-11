@@ -315,6 +315,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
     ${activityTabsHtml()}
     <section id="activity-status" ${ME?.is_admin?'role="tabpanel" aria-labelledby="activity-tab-status"':'aria-label="Activity status"'}${ACTIVITY_VIEW.tab!=="status"?" hidden":""}>
+    ${activityBlockedScansHtml(d)}
     <div id="cluster-workers">${clusterWorkersHtml(d)}</div>
     ${section("recordings",`Recording activity · ${recording.length} active`,dvrActivityRows(recording,nodeNames,dvrState),!!DVR_PAGE.selectedId)}
     ${d.analysis?section("analysis","Content analysis",analysisSummaryCard(d.analysis,"activity")+analysisLiveProgress(d.analysis,nodeNames)):""}

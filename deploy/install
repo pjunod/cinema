@@ -12,8 +12,13 @@
 #   deploy/install <auto|linux|macos|windows|docker|binary> [options]
 #
 #   --binary PATH   install this prebuilt plurxd instead of building one
+#                   (a release archive's own plurxd, beside this script, is
+#                   used without it)
 #   --prefix DIR    where the binary goes (default: /usr/local, or the
 #                   Homebrew prefix on macOS); the service unit follows it
+#   --ffmpeg-archive PATH
+#                   macOS: the Jellyfin FFmpeg portable archive, already
+#                   downloaded (offline installs); still checksum-verified
 #   --uninstall     remove the service and the binary; keep data and config
 #   --dry-run       print every command instead of running it
 #
@@ -30,11 +35,12 @@ root=$(cd -P -- "$here/.." && pwd -P)
 mode=auto
 binary=
 prefix=
+ffmpeg_archive=
 uninstall=0
 dry_run=0
 
 usage() {
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 say() { printf '%s\n' "install: $*"; }
@@ -62,14 +68,77 @@ run_root() {
 # this user: Homebrew's bin on Apple Silicon is user-owned, /usr/local/bin is not.
 run_for_dir() {
   local dir=$1; shift
-  # Judge by the nearest ancestor that exists: `install -d /opt/x/bin` needs
-  # root when /opt is root-owned even though /opt/x is not there yet.
-  while [ ! -e "$dir" ] && [ "$dir" != / ]; do dir=$(dirname -- "$dir"); done
-  if [ -w "$dir" ]; then
+  if dir_writable "$dir"; then
     run "$@"
   else
     run_root "$@"
   fi
+}
+
+# Judge by the nearest ancestor that exists: `install -d /opt/x/bin` needs
+# root when /opt is root-owned even though /opt/x is not there yet.
+dir_writable() {
+  local dir=$1
+  while [ ! -e "$dir" ] && [ "$dir" != / ]; do dir=$(dirname -- "$dir"); done
+  [ -w "$dir" ]
+}
+
+# True when replacing or removing the file $1 needs root: the file itself is
+# not writable, or its directory is not (a replace is a rename into it).
+file_needs_root() {
+  if [ -e "$1" ] && [ ! -w "$1" ]; then return 0; fi
+  ! dir_writable "$(dirname -- "$1")"
+}
+
+# `run_for_dir` for a command that replaces or removes the file $1 itself.
+run_for_file() {
+  local file=$1; shift
+  if file_needs_root "$file"; then
+    run_root "$@"
+  else
+    run "$@"
+  fi
+}
+
+# Hand paths a run as root left behind back to the user running this one.
+# macOS sudo keeps HOME, so `sudo make install` writes root-owned files into
+# the user's build tree, cargo cache and Library, and every later run as the
+# user then fails on them. `--top` claims only the directory itself, for a
+# directory that may hold other tools' files (~/Library/LaunchAgents).
+# Paths already the user's are left alone; a run as root claims nothing.
+claim_for_user() {
+  local depth= path uid gid
+  [ "${1:-}" = --top ] && { depth="-maxdepth 0"; shift; }
+  uid=$(id -u); gid=$(id -g)
+  [ "$uid" = 0 ] && return 0
+  for path in "$@"; do
+    [ -e "$path" ] || continue
+    # shellcheck disable=SC2086
+    [ -z "$(find "$path" $depth ! -user "$uid" -print 2>/dev/null | head -1)" ] && continue
+    if [ -n "$depth" ]; then
+      run_root chown "$uid:$gid" "$path"
+    else
+      run_root chown -R "$uid:$gid" "$path"
+    fi
+    [ "$dry_run" = 1 ] || say "gave $path back to uid $uid (an earlier run as root left it root-owned)"
+  done
+}
+
+# Temporary files are removed however the script ends, including a declined
+# sudo prompt under `set -e`.
+temp_files=
+cleanup_temp_files() {
+  local f
+  for f in $temp_files; do rm -f "$f"; done
+}
+trap cleanup_temp_files EXIT
+# `new_temp_file VAR` creates one and stores its path in VAR (not printed,
+# because a command substitution's subshell could not record it for cleanup).
+new_temp_file() {
+  local f
+  f=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+  temp_files="$temp_files $f"
+  printf -v "$1" '%s' "$f"
 }
 
 while [ $# -gt 0 ]; do
@@ -79,6 +148,8 @@ while [ $# -gt 0 ]; do
     --binary=*) binary=${1#--binary=} ;;
     --prefix) shift; [ $# -gt 0 ] || die "--prefix needs a directory"; prefix=$1 ;;
     --prefix=*) prefix=${1#--prefix=} ;;
+    --ffmpeg-archive) shift; [ $# -gt 0 ] || die "--ffmpeg-archive needs a path"; ffmpeg_archive=$1 ;;
+    --ffmpeg-archive=*) ffmpeg_archive=${1#--ffmpeg-archive=} ;;
     --uninstall) uninstall=1 ;;
     --dry-run) dry_run=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -99,20 +170,71 @@ detect_platform() {
 
 # ---- shared steps ----------------------------------------------------------
 
-# The binary this install ships: --binary as given, or a release build of
-# this checkout. `--locked` matches the Dockerfile and the release workflow,
-# so every install path builds the same stamped server.
+# The binary this install ships: --binary as given; else the plurxd a release
+# archive carries beside this script (the macOS archive is the script, the
+# agent template and that binary); else a release build of this checkout.
+# `--locked` matches the Dockerfile and the release workflow, so every install
+# path builds the same stamped server.
 resolve_binary() {
+  if [ -z "$binary" ] && [ -f "$here/plurxd" ]; then
+    binary=$here/plurxd
+    say "installing the plurxd shipped beside this script"
+  fi
   if [ -n "$binary" ]; then
     [ -f "$binary" ] || die "no such file: $binary"
     [ -x "$binary" ] || die "not executable: $binary"
     case $binary in /*) ;; *) binary=$PWD/$binary ;; esac
     return
   fi
-  command -v cargo >/dev/null 2>&1 \
-    || die "cargo is not on PATH; install the Rust toolchain from rust-toolchain.toml, or pass --binary <prebuilt plurxd>"
-  say "building plurxd (release, --locked) in $root"
-  (cd "$root" && run cargo build --locked --release -p plurxd)
+  claim_for_user "${CARGO_TARGET_DIR:-$root/target}" "${CARGO_HOME:-$HOME/.cargo}/registry" "${CARGO_HOME:-$HOME/.cargo}/git"
+  # Build with the toolchain rust-toolchain.toml pins. A rustup `cargo`
+  # honours that file on its own, but a cargo from anywhere else (Homebrew's
+  # `rust` formula, a distro package) ignores it and compiles with whatever
+  # release it is. And `rustup run` alone is not enough: it starts the pinned
+  # cargo without putting that toolchain first on PATH, so cargo still runs
+  # the first `rustc` it finds -- Homebrew's, on a Mac that has both. So when
+  # rustup is present, build with the pinned toolchain's own bin directory
+  # first on PATH and its rustc named outright.
+  local toolchain_file channel rustup_bin toolchain_rustc toolchain_bin path_rustc
+  toolchain_file=$root/rust-toolchain.toml
+  channel=
+  if [ -f "$toolchain_file" ]; then
+    channel=$(sed -n "s/^[[:space:]]*channel[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$toolchain_file" | head -n 1)
+  fi
+  rustup_bin=$(command -v rustup 2>/dev/null || true)
+  if [ -z "$rustup_bin" ] && [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/rustup" ]; then
+    rustup_bin=${CARGO_HOME:-$HOME/.cargo}/bin/rustup
+  fi
+  if [ -n "$rustup_bin" ]; then
+    [ -n "$channel" ] || die "rustup is installed but $toolchain_file names no channel, so the pinned toolchain is unknown"
+    say "building plurxd (release, --locked, Rust $channel) in $root"
+    if [ "$dry_run" = 1 ]; then
+      say "would install Rust $channel through $rustup_bin first if it is missing"
+      toolchain_bin="<bin directory of: rustup which --toolchain $channel rustc>"
+    else
+      # Already installed is the common case: no download, no rustup
+      # self-update, and an offline reinstall keeps working.
+      if ! toolchain_rustc=$(RUSTUP_AUTO_INSTALL=0 "$rustup_bin" which --toolchain "$channel" rustc 2>/dev/null); then
+        run "$rustup_bin" toolchain install "$channel" --profile minimal --no-self-update
+        toolchain_rustc=$(RUSTUP_AUTO_INSTALL=0 "$rustup_bin" which --toolchain "$channel" rustc) \
+          || die "rustup installed Rust $channel but cannot locate its rustc"
+      fi
+      toolchain_bin=$(dirname -- "$toolchain_rustc")
+      # Advisory only: the install is correct either way, but every other
+      # cargo or make invocation on this machine still takes PATH's rustc.
+      path_rustc=$(command -v rustc 2>/dev/null || true)
+      case $path_rustc in
+        ''|"$(dirname -- "$rustup_bin")/rustc"|"$toolchain_bin/rustc") ;;
+        *) say "note: $path_rustc comes before rustup on PATH, so plain cargo and make builds use it rather than Rust $channel (Homebrew: brew uninstall rust)" ;;
+      esac
+    fi
+    (cd "$root" && run env PATH="$toolchain_bin:$PATH" RUSTC="$toolchain_bin/rustc" cargo build --locked --release -p plurxd)
+  else
+    command -v cargo >/dev/null 2>&1 \
+      || die "cargo is not on PATH; install the Rust toolchain from rust-toolchain.toml, or pass --binary <prebuilt plurxd>"
+    say "building plurxd (release, --locked) in $root"
+    (cd "$root" && run cargo build --locked --release -p plurxd)
+  fi
   binary=${CARGO_TARGET_DIR:-$root/target}/release/plurxd
   [ "$dry_run" = 1 ] || [ -x "$binary" ] || die "build produced no $binary"
 }
@@ -192,6 +314,12 @@ install_binary_to() {
   local dir=$1
   run_for_dir "$dir" install -d "$dir"
   run_for_dir "$dir" install -m 0755 "$binary" "$dir/plurxd"
+  # A browser-downloaded release archive passes its quarantine flag on to the
+  # binary it unpacks, and Gatekeeper then refuses to let launchd run it --
+  # the same reason the Jellyfin FFmpeg tools are cleared below.
+  if [ "$mode" = macos ] && command -v xattr >/dev/null 2>&1; then
+    run_for_dir "$dir" xattr -d com.apple.quarantine "$dir/plurxd" 2>/dev/null || true
+  fi
   say "installed $dir/plurxd"
 }
 
@@ -276,10 +404,191 @@ linux_uninstall() {
 
 macos_agent_label=com.plurx.plurxd
 
+# The agent lives in the login user's GUI domain (`gui/<uid>`), so this half
+# of the installer must run as that user. Under sudo `id -u` is 0 and the
+# agent would be bootstrapped into `gui/0`, which launchd refuses ("125:
+# Domain does not support specified action"); macOS sudo also keeps HOME, so
+# the same run leaves root-owned files in the user's Library that every later
+# run then trips over. The steps that do need root ask for it themselves.
+macos_refuse_root() {
+  [ "$(id -u)" != 0 ] && return 0
+  die "run this as your login user, not as root or through sudo: the agent runs in that user's GUI session (launchd gui/<uid>), and the installer asks for sudo itself for the steps that need it"
+}
+
+# In a prefix the user owns (Homebrew's, on Apple Silicon), the binary and
+# the engine are the user's too; a root run's copies are handed back so an
+# upgrade or uninstall does not trip over them. A root-owned prefix such as
+# /usr/local is left as it is: its files are written through sudo anyway.
+macos_claim_prefix() {
+  local dir=$1
+  dir_writable "$dir" || return 0
+  claim_for_user "$dir/plurxd" "$(dirname -- "$dir")/libexec/plurx"
+}
+
+# Put the agent plist $1 in place at $2: mode 0644, owned by the login user,
+# through sudo only when the file or its directory is not writable.
+macos_place_plist() {
+  local src=$1 plist=$2
+  if file_needs_root "$plist"; then
+    run_root install -m 0644 -o "$(id -u)" -g "$(id -g)" "$src" "$plist"
+  else
+    run install -m 0644 "$src" "$plist"
+  fi
+}
+
+# The media engine on macOS is Jellyfin FFmpeg 8.1.3-1, the official portable
+# build: it carries the VideoToolbox, tone-mapping, AC-4 and Dolby Vision
+# pieces the macOS video path is built and qualified against. Homebrew's
+# ffmpeg is a different build and is never used. The release and checksums
+# are the ones scripts/build-macos-video-ffmpeg pins (a test holds the two
+# copies equal); a new pin is a new versioned directory beside the old one.
+jellyfin_ffmpeg_version=8.1.3-1
+jellyfin_ffmpeg_sha256_arm64=22445d7299742749ad2eeb9ce87963d50def0357e45b3e6c7b69987c8365dbf6
+jellyfin_ffmpeg_sha256_x86_64=cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a167b093d4bb6fb
+macos_ffmpeg=
+macos_ffprobe=
+
+# The directory the pinned build lives in: beside the binary's prefix, never
+# on PATH, so nothing else on the Mac picks it up or replaces it.
+macos_ffmpeg_dir() {
+  printf '%s/libexec/plurx/jellyfin-ffmpeg-%s\n' "$(dirname -- "$1")" "$jellyfin_ffmpeg_version"
+}
+
+# The first line of `$1 -version`, read whole so no pipe can cut it short.
+tool_version_line() {
+  [ -x "$1" ] || return 0
+  "$1" -version 2>/dev/null | sed -n 1p || true
+}
+
+# True when $1 is an ffmpeg/ffprobe that reports a Jellyfin build.
+is_jellyfin_tool() {
+  case $(tool_version_line "$1") in *-Jellyfin*) return 0 ;; esac
+  return 1
+}
+
+# True when $1 is exactly the pinned release ("ffmpeg version 8.1.3-Jellyfin").
+is_pinned_jellyfin_tool() {
+  case $(tool_version_line "$1") in *" version ${jellyfin_ffmpeg_version%-*}-Jellyfin"*) return 0 ;; esac
+  return 1
+}
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else die "no shasum or sha256sum to verify the Jellyfin FFmpeg archive with"
+  fi
+}
+
+# Install the pinned Jellyfin FFmpeg for this Mac's architecture into
+# $(macos_ffmpeg_dir), unless that exact build is already there.
+macos_ensure_jellyfin_ffmpeg() {
+  local dir=$1 dest arch target expected name url archive work tool actual
+  dest=$(macos_ffmpeg_dir "$dir")
+  macos_ffmpeg=$dest/ffmpeg
+  macos_ffprobe=$dest/ffprobe
+  if is_pinned_jellyfin_tool "$macos_ffmpeg" && is_pinned_jellyfin_tool "$macos_ffprobe"; then
+    say "Jellyfin FFmpeg $jellyfin_ffmpeg_version already in $dest"
+    return
+  fi
+  arch=$(uname -m)
+  case $arch in
+    arm64) target=macarm64; expected=$jellyfin_ffmpeg_sha256_arm64 ;;
+    x86_64) target=mac64; expected=$jellyfin_ffmpeg_sha256_x86_64 ;;
+    *) die "no Jellyfin FFmpeg build for this Mac's architecture: $arch" ;;
+  esac
+  name=jellyfin-ffmpeg_${jellyfin_ffmpeg_version}_portable_${target}-gpl.tar.xz
+  url=https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v$jellyfin_ffmpeg_version/$name
+  if [ "$dry_run" = 1 ]; then
+    say "would install Jellyfin FFmpeg $jellyfin_ffmpeg_version ($name, sha256 $expected) into $dest"
+    return
+  fi
+  work=$(mktemp -d "${TMPDIR:-/tmp}/plurx-jellyfin-ffmpeg.XXXXXX")
+  if [ -n "$ffmpeg_archive" ]; then
+    [ -f "$ffmpeg_archive" ] || die "no such file: $ffmpeg_archive"
+    archive=$ffmpeg_archive
+  else
+    say "downloading Jellyfin FFmpeg $jellyfin_ffmpeg_version for $arch"
+    archive=$work/$name
+    curl -fL --retry 3 --silent --show-error -o "$archive" "$url" \
+      || { rm -rf "$work"; die "could not download $url (pass --ffmpeg-archive <file> to install from a copy)"; }
+  fi
+  actual=$(sha256_of "$archive")
+  if [ "$actual" != "$expected" ]; then
+    rm -rf "$work"
+    die "$archive is not the pinned Jellyfin FFmpeg $jellyfin_ffmpeg_version for $arch (sha256 $actual, expected $expected)"
+  fi
+  mkdir -p "$work/x"
+  tar -xJf "$archive" -C "$work/x" || { rm -rf "$work"; die "could not unpack $archive"; }
+  for tool in ffmpeg ffprobe; do
+    [ -f "$work/x/$tool" ] || { rm -rf "$work"; die "$archive has no $tool"; }
+  done
+  run_for_dir "$dest" install -d "$dest"
+  for tool in ffmpeg ffprobe; do
+    run_for_dir "$dest" install -m 0755 "$work/x/$tool" "$dest/$tool"
+    # A browser-downloaded archive passes its quarantine flag on to what it
+    # unpacks, and Gatekeeper then refuses to let launchd run the tool.
+    if command -v xattr >/dev/null 2>&1; then xattr -d com.apple.quarantine "$dest/$tool" 2>/dev/null || true; fi
+  done
+  rm -rf "$work"
+  is_pinned_jellyfin_tool "$macos_ffmpeg" && is_pinned_jellyfin_tool "$macos_ffprobe" \
+    || die "the installed $dest/ffmpeg does not run as Jellyfin FFmpeg $jellyfin_ffmpeg_version"
+  say "installed Jellyfin FFmpeg $jellyfin_ffmpeg_version into $dest"
+}
+
+# One <string> value under <key>NAME</key> in EnvironmentVariables.
+plist_env_get() {
+  awk -v key="<key>$2</key>" '
+    index($0, key) { found = 1; next }
+    found && /<string>/ { sub(/.*<string>/, ""); sub(/<\/string>.*/, ""); print; exit }
+  ' "$1" | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g'
+}
+
+# An existing agent is the operator's and keeps every choice they made. The
+# one thing an upgrade corrects is an engine that is not Jellyfin FFmpeg (a
+# Homebrew ffmpeg an older installer wrote, a path that no longer exists):
+# that is repointed at the pinned build. A Jellyfin build they chose stays.
+# Edits are made to a private copy and the copy is put in place once, so the
+# same path works whether or not the agent's file or directory needs root.
+macos_repoint_engine() {
+  local plist=$1 key value current copy changed=0
+  if [ "$dry_run" = 1 ]; then
+    [ -r "$plist" ] || { say "would read $plist through sudo to check its engine"; return; }
+    copy=$plist
+  else
+    new_temp_file copy
+    if [ -r "$plist" ]; then cat "$plist" > "$copy"; else sudo cat "$plist" > "$copy"; fi
+  fi
+  for key in PLURX_FFMPEG PLURX_FFPROBE; do
+    if [ "$key" = PLURX_FFMPEG ]; then value=$macos_ffmpeg; else value=$macos_ffprobe; fi
+    current=$(plist_env_get "$copy" "$key")
+    [ -n "$current" ] || continue
+    if is_jellyfin_tool "$current"; then continue; fi
+    if [ "$dry_run" = 1 ]; then
+      say "would repoint $key in $plist from $current to $value"
+      continue
+    fi
+    if command -v plutil >/dev/null 2>&1; then
+      plutil -replace "EnvironmentVariables.$key" -string "$value" "$copy" \
+        || die "could not update $key in $plist"
+    else
+      local rewritten
+      new_temp_file rewritten
+      awk -v key="<key>$key</key>" -v value="$(printf '%s' "$value" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')" '
+        index($0, key) { found = 1; print; next }
+        found && /<string>/ { sub(/<string>.*<\/string>/, "<string>" value "</string>"); found = 0 }
+        { print }
+      ' "$copy" > "$rewritten" && cat "$rewritten" > "$copy"
+    fi
+    changed=1
+    say "repointed $key from $current (not Jellyfin FFmpeg) to $value"
+  done
+  if [ "$changed" = 1 ]; then macos_place_plist "$copy" "$plist"; fi
+}
+
 macos_render_plist() {
   local dir=$1 out=$2 ffmpeg ffprobe
-  ffmpeg=$(plist_escape "$(command -v ffmpeg || echo /usr/local/bin/ffmpeg)")
-  ffprobe=$(plist_escape "$(command -v ffprobe || echo /usr/local/bin/ffprobe)")
+  ffmpeg=$(plist_escape "$macos_ffmpeg")
+  ffprobe=$(plist_escape "$macos_ffprobe")
   local home dir_escaped
   home=$(plist_escape "$HOME"); dir_escaped=$(plist_escape "$dir")
   # The template's XML comments explain the choices to a human reading the
@@ -303,25 +612,32 @@ macos_install() {
   plist=$agents/$macos_agent_label.plist
   data="$HOME/Library/Application Support/plurx"
   uid=$(id -u)
+  macos_refuse_root
   resolve_binary
-  ensure_ffmpeg
+  macos_claim_prefix "$dir"
+  macos_ensure_jellyfin_ffmpeg "$dir"
   # Boot a running agent out before its binary is replaced. A fresh install
   # has nothing to boot out and that is fine.
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   install_binary_to "$dir"
-  run mkdir -p "$agents" "$data" "$HOME/Library/Logs"
+  claim_for_user --top "$agents"
+  claim_for_user "$plist" "$data" "$HOME/Library/Logs/plurxd.log"
+  [ -d "$agents" ] || run_for_dir "$agents" mkdir -p "$agents"
+  run mkdir -p "$data" "$HOME/Library/Logs"
   # The plist is rendered once. An existing one is the operator's (the
-  # runbook has them plutil -replace tool paths in it), so an upgrade keeps it.
+  # runbook has them plutil -replace tool paths in it), so an upgrade keeps it
+  # and only repoints an engine that is not Jellyfin FFmpeg.
   if [ -f "$plist" ]; then
     say "keeping the existing $plist (edit it with plutil; the template is deploy/$macos_agent_label.plist)"
+    macos_repoint_engine "$plist"
   elif [ "$dry_run" = 1 ]; then
     say "would render $plist from deploy/$macos_agent_label.plist"
   else
     local rendered
-    rendered=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+    new_temp_file rendered
     macos_render_plist "$dir" "$rendered"
     if command -v plutil >/dev/null 2>&1; then plutil -lint "$rendered" >/dev/null || die "rendered plist is not valid: $rendered"; fi
-    mv "$rendered" "$plist"
+    macos_place_plist "$rendered" "$plist"
     say "rendered $plist"
   fi
   run launchctl bootstrap "gui/$uid" "$plist"
@@ -338,10 +654,13 @@ macos_uninstall() {
   installed=$({ sed -n 's|.*<string>\(.*\)/plurxd</string>.*|\1|p' "$plist" 2>/dev/null || true; } | head -1 | sed -e 's/&amp;/\&/g' -e 's/&lt;/</g' -e 's/&gt;/>/g')
   dir=${installed:-$(bin_dir)}
   uid=$(id -u)
+  macos_refuse_root
+  macos_claim_prefix "$dir"
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
-  run rm -f "$plist"
+  run_for_file "$plist" rm -f "$plist"
   run_for_dir "$dir" rm -f "$dir/plurxd"
-  say "removed the agent and $dir/plurxd; kept ~/Library/Application Support/plurx"
+  run_for_dir "$dir" rm -rf "$(dirname -- "$dir")/libexec/plurx"
+  say "removed the agent, $dir/plurxd and its Jellyfin FFmpeg; kept ~/Library/Application Support/plurx"
 }
 
 # ---- windows: the native service, via deploy/install.ps1 ---------------------

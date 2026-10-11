@@ -291,6 +291,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         &crate::admission::Workload::of(&file, options.target_height),
     );
     let encoding = Arc::new(crate::vodencode::Encoding {
+        source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         shared_audio: None,
         candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
@@ -891,6 +892,16 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .iter()
         .all(|rung| rung["candidate_id"].is_string()));
     assert_eq!(description["audio"]["rendition_id"], soundtrack.key);
+    // Clients read each role's link rate beside its publication ceiling.
+    for row in description["video"]
+        .as_array()
+        .expect("rungs")
+        .iter()
+        .chain([&description["audio"]])
+    {
+        let sustained = row["sustained_bps"].as_u64().expect("declared link rate");
+        assert!(sustained > 0 && sustained < row["peak_bps"].as_u64().expect("ceiling"));
+    }
     let verified = serve
         .verified_continuous_family_before(&parent, Instant::now() + Duration::from_secs(5))
         .await
@@ -905,6 +916,15 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .iter()
         .find(|rung| verified.candidates.get(rung.rendition_id()) == Some(&companion_id))
         .expect("companion catalog provenance");
+    // The durable descriptor never carries them: its bytes are compared exactly
+    // on re-bind and parsed by older nodes during a rolling deploy.
+    let durable: plurx_core::store::ContinuousFamilyDescription =
+        serde_json::from_slice(&verified.description().expect("durable bytes"))
+            .expect("the durable shape older nodes parse");
+    assert_eq!(durable.video.len(), 2);
+    assert!(!String::from_utf8(verified.description().expect("durable bytes"))
+        .expect("utf8")
+        .contains("sustained_bps"));
     let intervals = serve
         .quality_ready_before(
             &parent,
@@ -1783,6 +1803,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         .expect_err("a captured old source cannot attach a new object");
     assert!(refused.contains("source changed"), "{refused}");
     let fresh = Arc::new(crate::vodencode::Encoding {
+        source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         shared_audio: None,
         candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
@@ -2096,6 +2117,220 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
         .await
         .expect("final child reap");
     assert_eq!(encoding.admissions.software_in_use(), 0);
+}
+
+/// S-02: the materialize deadline expiring while the encoder pool refuses
+/// the rendition's permit is a capacity answer, not `producer_failed`.
+///
+/// A background permit is held, so live admission is refused (by design:
+/// background yields, live waits). No producer ever runs for the entry. When
+/// the unchanged 30 s deadline expires, the waiter must receive the capacity
+/// outcome with the pool's refusal attached, so the failure record names the
+/// phase that was actually slow.
+#[tokio::test]
+async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_failed() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("capacity verdict");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("one recipe exactly fills the pool");
+    let serve = bare_serve(&base.path().join("renditions"));
+    let plan = encoding.grid.plan(96_000, 0);
+    let rendition = serve
+        .shared
+        .build_rendition(
+            "capacity-verdict",
+            None,
+            Recipe {
+                retained_logical: None,
+                measured_candidate: None,
+                file,
+                audio_index: None,
+                aac: true,
+                audio_delivery: None,
+                video: CopyVideoOptions::new(false, false),
+                source_object_version: Some(encoding.source_object_version.clone()),
+                cluster_cache_key: None,
+                encoding: Some(Arc::clone(&encoding)),
+            },
+            plan,
+            &settings(),
+        )
+        .await
+        .expect("real encoded rendition without an automatic driver");
+    assert_eq!(rendition.materialize_budget, Duration::from_secs(30));
+    rendition.attach_reader("viewer", 0).await;
+    rendition
+        .readers
+        .lock()
+        .await
+        .get_mut("viewer")
+        .expect("reader")
+        .accept_control(1, 0);
+    let background = encoding
+        .admissions
+        .try_admit_software(2, 1, crate::admission::Priority::Background)
+        .expect("background work holds a permit");
+    // The driver pass a viewer's demand triggers: admission is refused.
+    let demand = serve
+        .shared
+        .pool
+        .register(
+            WaitKey {
+                rendition: rendition.key.clone(),
+                index: 0,
+            },
+            "viewer",
+        )
+        .expect("admitted demand");
+    driver_pass(&serve.shared, &rendition).await;
+    drop(demand);
+    assert!(encoding.is_waiting(), "the live start is queued");
+    assert!(
+        encoding
+            .last_refusal()
+            .is_some_and(|refusal| refusal.pool.background_active),
+        "refused because background work holds the permit"
+    );
+    assert!(matches!(
+        rendition.slot.belief().await,
+        Producer::Absent { .. }
+    ));
+
+    tokio::time::pause();
+    let get = {
+        let serve = Arc::clone(&serve);
+        let rendition = Arc::clone(&rendition);
+        tokio::spawn(async move {
+            serve
+                .serve_segment(
+                    &rendition,
+                    "viewer",
+                    0,
+                    Duration::from_secs(120),
+                    Arc::new(crate::meter::Meter::new()),
+                )
+                .await
+        })
+    };
+    tokio::time::advance(Duration::from_secs(31)).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), get)
+        .await
+        .expect("the deadline answers the parked GET")
+        .expect("GET task");
+    match result {
+        Err(VodError::CapacityUnavailable {
+            reason,
+            retry_after,
+        }) => {
+            assert!(reason.contains("30.0s producer deadline"), "{reason}");
+            assert!(reason.contains("waiting for an encoder permit"), "{reason}");
+            assert!(reason.contains("background holds a permit"), "{reason}");
+            assert_eq!(retry_after, MATERIALIZE_EXPIRY_RETAINED);
+        }
+        Err(other) => panic!("expected the capacity verdict, got {other:?}"),
+        Ok(_) => panic!("nothing was produced"),
+    }
+    assert!(
+        rendition.failure().is_none(),
+        "a capacity verdict does not record a producer failure"
+    );
+    drop(background);
+    encoding.cancel_wait();
+}
+
+/// A request that sees the deadline expire before the watchdog records its
+/// verdict classifies from the producer's real state, never a contended
+/// guess. It used to read the slot with `try_belief`, so while a step held
+/// the slot a running producer read as "no producer" and, with a permit wait
+/// in flight on the encoding (an init-head regeneration probes the same
+/// encoding's permit while its producer runs), the expiry answered capacity.
+#[tokio::test]
+async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
+    use futures_util::FutureExt;
+
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("verdict read");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("one recipe exactly fills the pool");
+    let serve = bare_serve(&base.path().join("renditions"));
+    let plan = encoding.grid.plan(96_000, 0);
+    let rendition = serve
+        .shared
+        .build_rendition(
+            "verdict-read",
+            None,
+            Recipe {
+                retained_logical: None,
+                measured_candidate: None,
+                file,
+                audio_index: None,
+                aac: true,
+                audio_delivery: None,
+                video: CopyVideoOptions::new(false, false),
+                source_object_version: Some(encoding.source_object_version.clone()),
+                cluster_cache_key: None,
+                encoding: Some(Arc::clone(&encoding)),
+            },
+            plan,
+            &settings(),
+        )
+        .await
+        .expect("real encoded rendition without an automatic driver");
+    let background = encoding
+        .admissions
+        .try_admit_software(2, 1, crate::admission::Priority::Background)
+        .expect("background work holds a permit");
+    assert!(encoding.try_permit().await.is_none(), "the permit is refused");
+    assert!(encoding.is_waiting() && encoding.last_refusal().is_some());
+    // The rendition's producer is running all the same.
+    let child = tokio::process::Command::new("/bin/sleep")
+        .arg("60")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("a producer that never writes");
+    rendition.slot.attach(child, 0).await;
+
+    let demand = MaterializeDemand {
+        rendition: Arc::clone(&rendition),
+        index: 1,
+        started: Instant::now() - Duration::from_secs(31),
+    };
+    let held = rendition.slot.hold().await;
+    let mut verdict = Box::pin(demand.expired_verdict());
+    assert!(
+        verdict.as_mut().now_or_never().is_none(),
+        "with the slot held, the verdict waits for the real producer state"
+    );
+    drop(held);
+    match verdict.await.expect("the budget is spent") {
+        MaterializeVerdict::Producer(cause) => assert!(
+            cause.contains("the producer started at seg00000.m4s did not deliver it"),
+            "{cause}"
+        ),
+        other => panic!("a running producer is not a capacity wait: {other:?}"),
+    }
+
+    rendition.gen_epoch.fetch_add(1, Relaxed);
+    rendition
+        .slot
+        .perform(
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+            || {},
+        )
+        .await
+        .expect("producer reap");
+    drop(background);
+    encoding.cancel_wait();
 }
 
 #[tokio::test]
@@ -2646,7 +2881,12 @@ async fn encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid() {
         original,
         "reordered bytes need their own rendition"
     );
-    Box::pin(assert_encoded_neighbor_continuity(base.path(), &file, &encoding)).await;
+    Box::pin(assert_encoded_neighbor_continuity(
+        base.path(),
+        &file,
+        &encoding,
+    ))
+    .await;
     let encoding = encoding
         .clone_with_admissions_for_test(crate::admission::Admissions::new())
         .await;

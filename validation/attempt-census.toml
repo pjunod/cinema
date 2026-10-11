@@ -64,7 +64,12 @@ version = 1
 # cannot be advanced, so naming `[.viewerAction]` would drop the retention at
 # the first Pause. `seekGeneration` is the tap's destination, compared the way
 # `seekWhenReady` compares its owner's. Both wait for the record to carry an
-# `Attempt` of its own.
+# `Attempt` of its own. `commitPreparedSuccessor` reads the same record's
+# `seekGeneration` once, after the commit is already owned through the
+# `preparedCommit` fence: the pinned progress destination is settled only while
+# no newer seek replaced it. It is the record's destination, not a snapshot the
+# commit took, so it waits for the same migration.
+"commitPreparedSuccessor::seekState.generation == pin.seekGeneration" = 1
 "retainManualQualityFailure::manualQualityRetention.retained?.viewerEpoch == viewerActionEpoch" = 1
 "retainManualQualityFailure::seekState.generation == retained.seekGeneration" = 1
 "retryNativeSubtitleAfterReadiness::self.viewerActionEpoch == actionEpoch" = 2

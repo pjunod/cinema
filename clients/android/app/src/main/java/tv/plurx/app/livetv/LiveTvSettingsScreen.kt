@@ -28,10 +28,10 @@ import tv.plurx.app.ui.components.TvButton as Button
 import tv.plurx.app.ui.components.TvTextButton as TextButton
 
 /**
- * Settings → Live TV: the tuner, the programme guide, recording and Library
- * channels, in the web's order. These used to sit in Developer; the web moved
- * them here first and Android follows. The Live TV enable switch itself still
- * waits in Developer (see [LiveTvSettingsPlacement.ENABLE_LIVE_TV_GRADUATION]).
+ * Settings → Live TV: the Live TV enable switch, the tuner, the programme
+ * guide, recording and Library channels, in the web's order. These used to sit
+ * in Developer; the web moved them here first and Android follows. The enable
+ * switch is drawn first, with its advisory prerequisites beside it.
  *
  * Always reachable. Administrator authority and generation CAS are
  * server-enforced; every readiness row below is advisory and none of them
@@ -49,10 +49,11 @@ fun LiveTvSettingsScreen(origin: String, onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         TextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
         Text("Live TV", style = MaterialTheme.typography.headlineMedium)
-        Text("Manage your tuner, programme guide, recordings and library channels.")
+        Text("Turn Live TV on or off and manage your tuner, programme guide, recordings and library channels.")
 
         LiveTvSettingsPlacement.liveTvSettings.forEach { card ->
             when (card) {
+                LiveTvSettingsCard.EnableLiveTv -> EnableLiveTvCard(state)
                 LiveTvSettingsCard.HdHomeRun -> HdHomeRunCard(state)
                 LiveTvSettingsCard.ProgrammeGuide -> ProgrammeGuideCard(state)
                 LiveTvSettingsCard.Recording -> RecordingCard(state)
@@ -67,12 +68,35 @@ fun LiveTvSettingsScreen(origin: String, onBack: () -> Unit) {
 }
 
 @Composable
+private fun EnableLiveTvCard(state: LiveTvAdminState) {
+    Text(LiveTvSettingsCard.EnableLiveTv.title, style = MaterialTheme.typography.titleLarge)
+    Text("No special build is needed. Finish the tuner channel scan and reserve a stable private IPv4 address. Keep cluster servers upgraded and clocks synchronized. The tuner is shared by eligible servers.")
+    Text("At least one eligible server needs tuner network access and writable scratch space. Viewers and recordings share channel transports. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
+    Text("ATSC 3.0 may need HEVC and AC-4 decoders your FFmpeg lacks. DRM, rewind and captions are unsupported. Unprotected channels can be scheduled or recorded manually. Readiness tests the output graph, not every broadcast codec, and never gates either switch.")
+    state.saved?.let { settings ->
+        Text(if (settings.live_tv_enabled) "Live TV is enabled" else "Live TV is disabled", style = MaterialTheme.typography.titleMedium)
+        Button(enabled = !state.busy, onClick = { state.write(LiveTvSettingsChange.Enabled(!settings.live_tv_enabled)) }) {
+            Text(if (settings.live_tv_enabled) "Disable Live TV and drain sessions" else "Enable Live TV")
+        }
+    }
+    // The prerequisites as the server last observed them, every row it sent
+    // in the order it sent them — the web card's `/live-tv/readiness` read.
+    // Advisory: no row reaches the button above.
+    state.prerequisites?.let { prerequisites ->
+        prerequisites.checks.forEach { Text("${if (it.ready) "Met" else "Not met"}: ${it.message}") }
+        Text("Advisory only. Unknown or unmet requirements do not prevent enabling.", style = MaterialTheme.typography.bodySmall)
+    } ?: state.prerequisitesError?.let {
+        Text("Readiness unavailable: $it. You can still enable Live TV.")
+    }
+    Button(enabled = !state.busy, onClick = state::refreshPrerequisites) { Text("Refresh Live TV prerequisites") }
+}
+
+@Composable
 private fun HdHomeRunCard(state: LiveTvAdminState) {
     val busy = state.busy
     Text(LiveTvSettingsCard.HdHomeRun.title, style = MaterialTheme.typography.titleLarge)
     Text("One network device shared by eligible cluster servers. Viewers and recordings on the same channel share one tuner stream; a session stays on its selected server and the tuner itself belongs to the cluster.")
-    state.saved?.let { settings ->
-        Text(if (settings.live_tv_enabled) "Live TV is enabled" else "Live TV is disabled", style = MaterialTheme.typography.titleMedium)
+    if (state.saved != null) {
         val editable = !busy
         OutlinedTextField(state.ipv4, { state.ipv4 = it }, label = { Text("Tuner private IPv4") }, enabled = editable, singleLine = true, modifier = Modifier.fillMaxWidth().tvFocusRing())
         Text("Copy the node ID from the server's Settings → Cluster page.")
@@ -87,7 +111,7 @@ private fun HdHomeRunCard(state: LiveTvAdminState) {
             Text("Save configuration")
         }
         Button(enabled = !busy && !state.dirty, onClick = state::checkSavedConfiguration) { Text("Check saved configuration") }
-        Text("Saving preserves enablement and ends streams using the previous configuration. The Live TV on/off switch is in Settings → Developer → Enable Live TV.")
+        Text("Saving preserves enablement and ends streams using the previous configuration. The Live TV on/off switch is under Enable Live TV at the top of this screen.")
     }
     // Every row the server sends, in the order it sent them — never a
     // hand-written subset. `start_recovery` arrived this way without this

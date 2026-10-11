@@ -84,6 +84,8 @@ pub use candidate_recovery::{
     CandidateRecoveryScope,
 };
 mod continuous_family;
+mod prepared_output;
+pub use prepared_output::PreparedOutputSeal;
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(test)]
@@ -1082,16 +1084,17 @@ pub use fragment_index_cluster::{
     AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, SubtitleBackfillCandidate, SubtitleBackfillDiagnostics,
-    SubtitleSourcePublication, SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM,
-    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
-    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
-    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
-    FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS, MAX_ACTIVE_ANALYSIS_REQUESTS,
-    MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS,
-    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS,
-    MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
+    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
+    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+    DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS,
+    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -2357,6 +2360,13 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// single snapshot keeps those values mutually consistent and, on a
     /// replicated backend, avoids paying one linearizable read per field.
     async fn settings_snapshot(&self) -> Result<BTreeMap<String, String>, StoreError>;
+    /// One setting as this node's own replica holds it, read without
+    /// consensus and without a leader round trip.
+    ///
+    /// A hint and never an authorization: a follower may not have applied a
+    /// recent save yet. It tells an idle reader whether a consistent read is
+    /// owed at all; the consistent read stays the only thing that decides.
+    async fn local_setting_hint(&self, key: &str) -> Result<Option<String>, StoreError>;
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError>;
     /// Insert an immutable setting value. Returns false when the key already
     /// exists and leaves the first committed value unchanged.
@@ -3474,9 +3484,13 @@ pub trait MediaStore: Send + Sync + 'static {
     async fn library_file_paths(&self, library_id: i64) -> Result<Vec<(i64, PathBuf)>, StoreError>;
     /// Establish the stable identity of the mounted roots for this library,
     /// or compare a later scanner's observation with cluster truth.
+    /// `configured_paths` is the path set the scan walked; when the library
+    /// no longer has exactly that set the answer is `ConfigurationChanged`
+    /// and nothing is established.
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
     ) -> Result<RootFingerprintStatus, StoreError>;
@@ -3495,6 +3509,19 @@ pub trait MediaStore: Send + Sync + 'static {
         gone_file_ids: &[i64],
         prune_limit: u64,
     ) -> Result<ReconcileOutcome, StoreError>;
+    /// Remove `file_ids` — files of the library that the caller found under
+    /// none of `configured_paths`, which is what an operator removing a
+    /// library path leaves behind — and the items that leaves empty, in one
+    /// transaction, only while the library's paths are still exactly
+    /// `configured_paths`. Unlike [`Self::reconcile_library`] this is not an
+    /// observation of the disk, so neither the root identity nor the prune
+    /// bound applies. At most `MAX_RECONCILE_FILE_IDS` ids per call.
+    async fn remove_files_outside_library_roots(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+    ) -> Result<RootRemovalOutcome, StoreError>;
     async fn delete_files(&self, ids: &[i64]) -> Result<u64, StoreError>;
     /// Remove items left childless/file-less after a scan. Returns rows removed.
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError>;
@@ -3556,7 +3583,14 @@ pub enum RootFingerprintStatus {
     Established,
     Matched,
     Unestablished,
-    Mismatch { expected: String },
+    Mismatch {
+        expected: String,
+    },
+    /// The library's configured paths are no longer the set the scan walked:
+    /// an operator edited them while it ran. Nothing was established or
+    /// compared — an identity taken from the outdated set would refuse every
+    /// later scan of the current one. The scan queued by the edit reconciles.
+    ConfigurationChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3587,6 +3621,52 @@ pub(crate) fn reconcile_payload_refusal(
         requested: gone_file_ids.len() as u64,
         limit: prune_limit.min(MAX_RECONCILE_FILE_IDS as u64),
     })
+}
+
+/// What [`MediaStore::remove_files_outside_library_roots`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootRemovalOutcome {
+    /// The given files were removed — except one a Dolby Vision conversion
+    /// is rewriting, the same exclusion reconcile makes — and with them the
+    /// items left empty.
+    Applied {
+        deleted_files: u64,
+        pruned_items: u64,
+    },
+    /// The library's configured paths are no longer the set the caller
+    /// classified against, or the library is gone. Nothing was removed.
+    ConfigurationChanged,
+}
+
+/// One root removal carries at most as many file ids as one reconcile, for
+/// the same reason: the replicated backend ships them as one JSON payload.
+pub(crate) fn root_removal_payload(file_ids: &[i64]) -> Result<(), StoreError> {
+    if file_ids.len() > MAX_RECONCILE_FILE_IDS {
+        return Err(StoreError::Task(format!(
+            "a root removal carries at most {MAX_RECONCILE_FILE_IDS} file ids, not {}",
+            file_ids.len()
+        )));
+    }
+    Ok(())
+}
+
+/// The JSON a library's `paths` column holds for `paths`.
+pub(crate) fn library_paths_json(paths: &[PathBuf]) -> Result<String, StoreError> {
+    serde_json::to_string(paths).map_err(|error| StoreError::Database(error.to_string()))
+}
+
+/// SQL predicate: library `library`'s configured paths are exactly the set in
+/// the JSON array `paths`. Set equality over the decoded strings, so neither
+/// order nor JSON spelling matters — the root fingerprint ignores order too.
+/// Both arguments are placeholders, spelled for the backend.
+pub(crate) fn library_paths_are_sql(library: &str, paths: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM libraries WHERE libraries.id = {library} \
+           AND NOT EXISTS (SELECT value FROM json_each(libraries.paths) \
+                           EXCEPT SELECT value FROM json_each({paths})) \
+           AND NOT EXISTS (SELECT value FROM json_each({paths}) \
+                           EXCEPT SELECT value FROM json_each(libraries.paths)))"
+    )
 }
 
 #[async_trait]
@@ -4752,6 +4832,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
     async fn ensure_library_root_fingerprint_fenced(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
         lease: &Lease,
@@ -4767,6 +4848,14 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
+    async fn remove_files_outside_library_roots_fenced(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<RootRemovalOutcome, StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn claim_cache_entry_fenced(
         &self,
@@ -4986,6 +5075,12 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Seal only the first private output choice of an unpublished reserved successor.
+    /// Backends without this conditional writer cannot publish first-capture preparations.
+    async fn seal_prepared_output(&self, _seal: &PreparedOutputSeal) -> Result<bool, StoreError> {
+        Ok(false)
+    }
 
     /// Record what a viewer is asking for, and return the ownership that
     /// results.
@@ -5891,6 +5986,7 @@ pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
     watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
     index_status_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    cluster_index_availability_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpStoreOperationCounts {
@@ -5899,6 +5995,16 @@ impl HttpStoreOperationCounts {
     #[must_use]
     pub fn index_status_calls(&self) -> u64 {
         self.index_status_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Batched cluster-artifact availability reads inside this request, on
+    /// either backend: one per
+    /// [`ClusterFragmentIndexStore::cluster_fragment_index_availability`]
+    /// call, whatever the number of probes in it.
+    #[must_use]
+    pub fn cluster_index_availability_calls(&self) -> u64 {
+        self.cluster_index_availability_calls
             .load(std::sync::atomic::Ordering::Relaxed)
     }
     #[must_use]
@@ -5921,11 +6027,10 @@ impl HttpStoreOperationCounts {
     fn record(&self, class_index: usize) {
         use std::sync::atomic::Ordering;
 
-        let _ = self.counts[class_index].fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| (current != u64::MAX).then(|| current.saturating_add(1)),
-        );
+        let _ =
+            self.counts[class_index].try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current != u64::MAX).then(|| current.saturating_add(1))
+            });
     }
 }
 
@@ -5967,6 +6072,14 @@ pub(super) fn record_http_index_status_call() {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
         counts
             .index_status_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+}
+
+pub(super) fn record_http_cluster_index_availability_call() {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
+        counts
+            .cluster_index_availability_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     });
 }

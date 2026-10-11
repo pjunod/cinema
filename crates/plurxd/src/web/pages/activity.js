@@ -44,6 +44,29 @@ function clusterWorkersHtml(d){
       return `<tr><td><button class="ghost sm" data-durable-focus="node-${esc(id)}" onclick="showActivityNode(${esc(JSON.stringify(id))})">${clustered?esc(nodeLabel(names,id)):"This server"}</button></td><td>${esc(status)}<small class="muted">${known?`${esc(w.heavy_in_use)} / ${esc(w.heavy_limit)} occupied`:esc(statuses.has(id)&&statuses.get(id)!=="answered"?activityNodeStatusText(statuses.get(id)):w?"Last capacity report is stale.":"This node has not supplied worker telemetry.")}</small></td><td>${assigned.length?assigned.map(job=>`<button class="ghost sm" data-durable-focus="worker-${esc(job.id)}" data-inspector-focus="job-${esc(job.id)}" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||job.kind.replace(/_/g," "))}</button><small class="muted">${esc(durableStateLabel(job))}${durableLeaseExpired(job)?" · previous owner":" · durable assignment"}</small>`).join(""):known&&w.child_count?`${esc(w.child_count)} child processes`:'<span class="muted">No durable assignment in the latest queue observation.</span>'}</td><td>${known?`${esc(w.software_used)} / ${esc(w.software_limit)}`:"—"}</td><td>${known?`${esc(w.hardware_used)} / ${esc(w.hardware_limit)}`:"—"}</td></tr>`;
     }).join("")}</tbody></table></div><p class="hint">CPU counts are reserved threads, not measured utilization. Unknown capacity is excluded from totals. A free slot still needs compatible work and resource admission.</p>${q.activeTruncated?'<p class="hint">Assignment list is partial: more active jobs exist.</p>':""}<button class="ghost sm" onclick="setActivityTab('jobs')">Open jobs →</button>`;
 }
+// Queued library work that cannot start says why, at the top of Status. The
+// root check runs on the node before it claims, so the reason is a local
+// observation carried on the scan status, never on the durable job row: the
+// queue tile alone ("2 jobs queued") reads as "busy" when nothing will ever
+// run until someone fixes the library's locations.
+function activityBlockedScans(d){
+  return (d.scans||[]).filter(sc=>sc.status?.running&&sc.status?.phase==="queued"&&sc.status?.error);
+}
+function activityBlockedScansHtml(d){
+  const blocked=activityBlockedScans(d),n=blocked.length;
+  if(!n)return "";
+  // In a cluster the root check is the answering node's own: a member that can
+  // read the folders may still run the scan, so the heading says whose
+  // observation this is instead of promising it will never start.
+  const clustered=activityIsClustered(d);
+  const heading=clustered
+    ?(n===1?"This node can’t read a queued library":`This node can’t read ${n} queued libraries`)
+    :(n===1?"A library scan can’t start":`${n} library scans can’t start`);
+  const action=ME?.is_admin
+    ?'<div class="row"><a class="ghost sm" href="#/settings/libraries">Review library locations</a></div>'
+    :'<p class="muted">Ask an administrator to check the library locations.</p>';
+  return `<section class="system-attention" data-activity-blocked-scans><h2>${heading}</h2>${clustered?'<p class="muted">Another node that can read these folders can still run the scan.</p>':""}${blocked.map(sc=>`<p><b>${esc(sc.library)}</b><br>${esc(sc.status.error)}</p>`).join("")}${action}</section>`;
+}
 function setActivityTab(tab){
   ACTIVITY_VIEW.tab=tab==="jobs"&&ME?.is_admin?"jobs":"status";
   for(const name of ["status","jobs"]){const pane=document.getElementById("activity-"+name);if(pane)pane.hidden=name!==ACTIVITY_VIEW.tab;const button=document.getElementById("activity-tab-"+name);if(button)button.setAttribute("aria-selected",String(name===ACTIVITY_VIEW.tab));}

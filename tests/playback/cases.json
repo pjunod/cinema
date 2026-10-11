@@ -95,6 +95,25 @@
         "auto"
       ],
       "opt_in": true
+    },
+    {
+      "id": "continuous-mpeg4-aac-captions-1080",
+      "filename": "continuous-mpeg4-aac-captions-clock-v1.mp4",
+      "builder": "mpeg4_aac_mp4_caption_copy",
+      "source_fixture": "continuous-mpeg4-aac-1080",
+      "frame_clock_version": 1,
+      "duration_seconds": 1800,
+      "description": "Owned copy of existing MPEG4/AAC encoded-clock MP4 with deterministic text captions; packet bytes and timestamps must match",
+      "tags": [
+        "continuous",
+        "transcode",
+        "mpeg4",
+        "aac",
+        "1080p",
+        "sdr",
+        "subtitle-toggle"
+      ],
+      "opt_in": true
     }
   ],
   "suites": {

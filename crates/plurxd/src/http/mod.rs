@@ -180,7 +180,7 @@ impl Default for HttpRouteMetrics {
 
 impl HttpRouteMetrics {
     fn saturating_add(target: &AtomicU64, amount: u64) {
-        let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = target.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != u64::MAX).then(|| current.saturating_add(amount))
         });
     }
@@ -299,7 +299,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/keys/{id}" => 0,
 
         // Home projections.
-        "/api/v1/home/previews" | "/api/v1/hubs" | "/hubs/search" => 1,
+        "/api/v1/home/previews" | "/api/v1/hubs" | "/api/v1/features" | "/hubs/search" => 1,
 
         // Library management, catalogue pages and schedules.
         "/api/v1/libraries"
@@ -927,7 +927,7 @@ const HTTP_BODY_BUCKETS: [(u64, &str); 6] = [
 ];
 
 fn add_saturating(target: &AtomicU64, amount: u64) {
-    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = target.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         (current != u64::MAX).then(|| current.saturating_add(amount))
     });
 }
@@ -1495,6 +1495,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
+        .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
         .route(
             "/subtitle-transcription",
@@ -1509,6 +1510,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/developer/macos-video-processing/reprobe",
             post(developer::reprobe_macos_video),
+        )
+        .route(
+            "/system/video-processing/reprobe",
+            post(developer::reprobe_video_processing),
         )
         .merge(library_channels::collection_router())
         .nest("/library-channels", library_channels::router())
@@ -2288,6 +2293,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             || matches!(
                 path,
                 "/api/v1/me"
+                    | "/api/v1/features"
                     | "/api/v1/auth/login"
                     | "/api/v1/auth/logout"
                     | "/api/v1/activity"
@@ -4397,6 +4403,9 @@ mod tests {
             (Method::POST, internal_auth_revocation::PATH),
             (Method::POST, "/api/v1/auth/login"),
             (Method::POST, "/api/v1/auth/logout"),
+            // Read beside /me so a client signed in to a node under
+            // maintenance still lists only the sections that are on.
+            (Method::GET, "/api/v1/features"),
             (Method::POST, "/api/v1/cluster/election"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b/maintenance"),
             (
@@ -6366,6 +6375,103 @@ mod tests {
                 "a scan key reached {uri} with {status}: {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn features_tell_every_signed_in_viewer_which_sections_to_list() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(&app, get("/api/v1/features", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+        // A viewer cannot read /settings, which is why this projection exists.
+        assert_eq!(
+            call(&app, get("/api/v1/settings", Some(&viewer))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, off) = call(&app, get("/api/v1/features", Some(&viewer))).await;
+        assert_eq!(status, StatusCode::OK, "{off}");
+        assert_eq!(
+            off,
+            json!({"live_tv":false,"recordings":false,"shared_libraries":false,"library_channels":false})
+        );
+        let saved = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"sharing_enabled":true,"library_channels_enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(saved.0, StatusCode::OK, "{}", saved.1);
+        let (_, on) = call(&app, get("/api/v1/features", Some(&viewer))).await;
+        assert_eq!(on["shared_libraries"], true, "{on}");
+        assert_eq!(on["library_channels"], true, "{on}");
+        assert_eq!(on["live_tv"], false, "{on}");
+        assert_eq!(on["recordings"], false, "{on}");
+    }
+
+    #[test]
+    fn features_read_each_switch_with_the_settings_parser() {
+        use plurx_core::store::keys;
+        let snapshot = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            system::FeaturesDto::from_snapshot(&snapshot(&[]), "node-a"),
+            system::FeaturesDto {
+                live_tv: false,
+                recordings: false,
+                shared_libraries: false,
+                library_channels: false,
+            }
+        );
+        assert_eq!(
+            system::FeaturesDto::from_snapshot(
+                &snapshot(&[
+                    (keys::LIVE_TV_ENABLED, "1"),
+                    (keys::DVR_ENABLED, "true"),
+                    (keys::SHARING_ENABLED, "on"),
+                    (keys::LIBRARY_CHANNELS_ENABLED, "1"),
+                ]),
+                "node-a",
+            ),
+            system::FeaturesDto {
+                live_tv: true,
+                recordings: true,
+                shared_libraries: true,
+                library_channels: true,
+            }
+        );
+        // Each switch moves only its own section.
+        let dvr_only =
+            system::FeaturesDto::from_snapshot(&snapshot(&[(keys::DVR_ENABLED, "1")]), "node-a");
+        assert!(dvr_only.recordings && !dvr_only.live_tv);
+        assert!(!dvr_only.shared_libraries && !dvr_only.library_channels);
     }
 
     #[tokio::test]
@@ -20111,6 +20217,75 @@ mod tests {
             .await;
     }
 
+    /// S-05: with VOD switched off (`playback.vod_presentation=0`) the
+    /// rolling engine is the only presentation left, so an ordinary create
+    /// is served by it and attributed to `vod_disabled`. The surface
+    /// contract's `vod_disabled` row (`stopped`, start-only) still has a
+    /// source: the answer reaches a client when the operator has also
+    /// switched live recovery off (and on a VOD-only compatibility request).
+    #[tokio::test]
+    async fn vod_switched_off_is_served_by_the_retained_engine_unless_recovery_is_off() {
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, s.file, 16).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_PRESENTATION, "0")
+            .await
+            .expect("switch VOD off");
+        let reason = crate::transcode::LIVE_RECOVERY_LABELS
+            .iter()
+            .position(|label| *label == "vod_disabled")
+            .expect("vod_disabled is a recovery reason");
+        let before = crate::transcode::live_recovery_snapshot();
+
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "pb-vod-off", "copy": true }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "VOD switched off must not fail playback: {body}"
+        );
+        assert_eq!(body["vod"], false, "{body}");
+        assert!(
+            crate::transcode::live_recovery_snapshot()[reason] > before[reason],
+            "the session is attributed to the switch that chose it"
+        );
+        state
+            .transcode
+            .stop_session(
+                body["session_id"].as_str().expect("session id"),
+                "test cleanup",
+            )
+            .await;
+
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("switch live recovery off");
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "pb-vod-off-no-recovery", "copy": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["code"], "vod_disabled", "{body}");
+    }
+
     /// All four routes at once, each under its own name, from the three places
     /// that actually know: the transcode manager, the progressive registry,
     /// and the direct-play registry that S2 added because nothing else held
@@ -21002,6 +21177,108 @@ mod tests {
             activity["deliveries"][0]["presentation"], "live-recovery",
             "{activity}"
         );
+    }
+
+    /// S-05: an HEVC copy whose source has no parameter-set proof is
+    /// something only VOD cannot build — the VOD copy deletes in-band
+    /// parameter sets and needs the proof that doing so is safe, while the
+    /// rolling copy keeps them. Under the shipped default the start falls
+    /// back to the retained engine instead of answering
+    /// `hevc_configuration_unverified` and failing playback.
+    #[tokio::test]
+    async fn unproven_hevc_copy_uses_live_recovery() {
+        use plurx_core::domain::ProbeResult;
+
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let file = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("file read")
+            .expect("file");
+        std::fs::copy(plurx_core::testfixtures::source("closed-gop"), &file.path)
+            .expect("real HEVC source");
+        let held = std::fs::File::open(&file.path).expect("held fixture source");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
+        let metadata = std::fs::metadata(&file.path).expect("fixture metadata");
+        let mtime = metadata
+            .modified()
+            .expect("fixture mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture after Unix epoch")
+            .as_secs() as i64;
+        state
+            .store
+            .upsert_file(
+                file.item_id,
+                &file.path.to_string_lossy(),
+                i64::try_from(metadata.len()).expect("fixture size"),
+                mtime,
+                &ProbeResult {
+                    duration_ms: Some(12_000),
+                    container: Some("matroska".into()),
+                    video_codec: Some("hevc".into()),
+                    video_profile: Some("Main".into()),
+                    width: Some(640),
+                    height: Some(360),
+                    bit_depth: Some(8),
+                    bitrate: file.bitrate,
+                    audio_streams: file.audio_streams.clone(),
+                    subtitle_streams: file.subtitle_streams.clone(),
+                    raw_json: Some(raw_json),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("refresh fixture probe");
+        assert!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+                .await
+                .expect("setting read")
+                .is_none(),
+            "this asserts the shipped default"
+        );
+
+        let (status, started) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", seeded.file),
+                Some(&admin),
+                json!({
+                    "playback_id": "unproven-hevc-live-recovery",
+                    "request_id": "unproven-hevc-live-recovery-attempt",
+                    "copy": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a missing HEVC proof must not fail playback: {started}"
+        );
+        assert_eq!(started["vod"], false, "{started}");
+
+        let (_, activity) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(
+            activity["deliveries"][0]["presentation"], "live-recovery",
+            "{activity}"
+        );
+        // Do not leave a copy running in this CPU-sensitive binary.
+        state
+            .transcode
+            .stop_session(started["session_id"].as_str().expect("session id"), "test")
+            .await;
     }
 
     /// A file whose subtitle list can express every native-subtitle refusal:

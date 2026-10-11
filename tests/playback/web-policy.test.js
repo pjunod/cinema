@@ -107,13 +107,17 @@ test("future callback metadata cannot seed false backward hitches or erase real 
     {nowMs:1000,currentTime:1,playbackRate:1,nominalSeconds:1/24}),false);
   assert.equal(policy.frameMetadataAheadOfClock({mediaTime:0.8,expectedDisplayTime:1000},
     {nowMs:1000,currentTime:1,nominalSeconds:1/24}),false);
-  const p={},v={requestVideoFrameCallback(){},paused:false,seeking:false,playbackRate:1,currentTime:0,dataset:{}};
+  const p={},v={requestVideoFrameCallback(){},addEventListener(){},removeEventListener(){},
+    paused:false,seeking:false,playbackRate:1,currentTime:0,dataset:{}};
   let next,settled=0;
   const run=new Function('PLAYER','PlaybackPolicy','document','performance','queuePlaybackFrame',
     'playbackOwnsAttachedMedia','settlePlaybackControlSeek','reportRateChase',
     `let PLAYBACK_LIFETIME_HITCHES=0;
      const HITCH_WARMUP=12,HITCH_WINDOW=120,HITCH_NEAR_MS=150,HITCH_GAP_FRAMES=2.5,
        HITCH_SLOW_FACTOR=3,HITCH_LATE_FLOOR_MS=25,HITCH_LATE_FRACTION=0.75;
+     // The detector's per-element pause/play boundary registry is module state
+     // beside it, like the constants above.
+     const HITCH_LIFECYCLE_BOUNDARIES=new WeakMap();
      ${shippedSource('armHitchDetector')}
      // The slice keeps the comment block that trails the declaration, so the
      // call must start on its own line or it is commented out.
@@ -1061,11 +1065,12 @@ test("analysis settings render the numeric retry policy returned by the API", ()
     "analysisSummaryCard",
     "presetOpts",
     "esc",
+    "subtitleBackfillCard",
     [
       shippedSource("setHead"), shippedSource("setCard"), shippedSource("cardHead"),
       shippedSource("togRow"), shippedSource("setCardFoot"), shippedSource("analysisSettingsPanel"),
     ].join("\n") + "\nreturn analysisSettingsPanel;",
-  )(() => "summary", presetOpts, esc);
+  )(() => "summary", presetOpts, esc, () => "");
 
   const html = render(
     {
@@ -4004,11 +4009,18 @@ test("attachment and retirement are what the presenter is told about identity", 
   const fed = [];
   const attach = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration",
-    [shippedSource("beginPlaybackMediaAttachment"), "return beginPlaybackMediaAttachment;"].join("\n"),
+    [shippedSource("clearEffectiveProcessing"), shippedSource("beginPlaybackMediaAttachment"),
+      "return beginPlaybackMediaAttachment;"].join("\n"),
   )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null);
   attach({ attemptId: "a7" });
   assert.deepEqual(fed, [{ attach: "a7" }],
     "every attach on every route runs through here, so every one must say so");
+  // HDR10-E names one attachment's accepted processing; a new attachment
+  // starts without it until its own control exchange reports one.
+  const reattached = { attemptId: "a8", effectiveProcessing: { hdr10_enhanced: true } };
+  attach(reattached);
+  assert.equal(reattached.effectiveProcessing, null,
+    "a new attachment cannot inherit the previous one's processing report");
 
   fed.length = 0;
   const retire = new PlaybackContextFunction(
@@ -5773,6 +5785,8 @@ test("every surface paints the badge from the same four answers", () => {
       shippedSource("sourceDolbyVisionProfile"),
       shippedSource("dynamicRangeReason"),
       shippedSource("dynamicRangeBadge"),
+      shippedSource("effectiveHdrProcessing"),
+      shippedSource("effectiveProcessingDetail"),
       shippedSource("playerRangeBadge"),
       "return {playerRangeBadge};",
     ].join("\n"),
@@ -5816,6 +5830,7 @@ test("a session that lands on a different range repaints the badge", () => {
     "startPlaybackControl",
     [shippedSource("markPlaybackControlSeekExecuted"),
       shippedSource("samplePlaybackPresentationClock"),
+      shippedSource("effectiveHdrProcessing"), shippedSource("clearEffectiveProcessing"),
       shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
   const player = { deliveredRange: "hdr10" };
@@ -6546,6 +6561,12 @@ test("web HLS startup has one bounded manifest policy and terminal precedence", 
   for (const code of policy.HLS_STARTUP_TERMINAL_CODES) {
     assert.equal(policy.hlsStartupResponseAction({ status: 503, code }), "terminal", code);
   }
+  // A segment the producer delivered but publication never made servable is
+  // the same terminal startup answer as the producer failing (502).
+  for (const code of ["producer_failed", "segment_publication_failed"]) {
+    assert.ok(policy.HLS_STARTUP_TERMINAL_CODES.includes(code), code);
+    assert.equal(policy.hlsStartupResponseAction({ status: 502, code }), "terminal", code);
+  }
   assert.equal(policy.hlsStartupResponseAction({ status: 503 }), "retry",
     "a generic 503 may consume the bounded retry but is not called startup");
   assert.equal(policy.hlsStartupResponseAction({ status: 503, code: "startup_timeout" }), "retry");
@@ -7031,6 +7052,22 @@ test("severe route pressure skips intermediate rungs despite voluntary budget",(
   assert.equal(result.emergency,true);
 });
 
+test("link pressure takes the cheapest costed rung when no lower rung fits the link",()=>{
+  const f=routeQualityFixture();
+  const decide=candidates=>policy.decideCandidateTransition({state:{},
+    sample:{...f.sample,cause:"link",stalled:true,runway_ms:1000,transfer:{...f.transfer,bytes:1000000}},
+    candidates,currentId:f.high.id,target:f.target,aspect:16/9});
+  // 8 Mb/s fits neither 1440p (18.16) nor 1080p (12): holding 2160p (30)
+  // keeps the largest deficit, so the cheapest costed rung is taken.
+  const result=decide([f.low,f.middle,f.high]);
+  assert.equal(result.candidate.id,f.low.id);
+  assert.equal(result.emergency,true);
+  assert.equal(decide([{...f.low,peak_bps:null,average_bps:null},f.high]).candidate,null,
+    "an uncosted rung is never chosen for a link cause");
+  assert.equal(decide([{...f.low,peak_bps:31000000,average_bps:31000000},f.high]).candidate,null,
+    "a lower rung that costs more than the current one is no recovery");
+});
+
 test("mild route pressure survives ordinary HLS refills but only moves while draining",()=>{
   const f=routeQualityFixture();
   const args={state:{previousRunwayMs:61000},candidates:[f.low,f.middle,f.high],
@@ -7095,7 +7132,10 @@ test("cold original recovery can try an unproved compatible lower route within m
   assert.equal(result.candidate.id,low.id);
   assert.equal(result.transition,"recover");
   assert.equal(result.candidate.sustainable,false);
-  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate,null);
+  // With the fitting rung undecodable, 1440p (18.16 Mb/s) does not fit the
+  // 14 Mb/s link but is far cheaper than the 50 Mb/s original that is
+  // stalling: the smaller deficit beats holding.
+  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate.id,middle.id);
   assert.equal(policy.decideCandidateTransition({...args,sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
   assert.equal(policy.decideCandidateTransition({...args,candidates:[low,middle,{...f.original,grade:"hdr10"}],
     sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);

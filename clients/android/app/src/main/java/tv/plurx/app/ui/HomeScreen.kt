@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tv.plurx.app.data.Features
 import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.Item
 import tv.plurx.app.data.Library
@@ -82,6 +83,33 @@ private data class HomeCollection(
 )
 
 
+/** The optional sections Home links to from its header, each behind a server switch. */
+internal enum class HomeHeaderSection { LiveTv, Recordings, LibraryChannels, SharedLibraries }
+
+/**
+ * Which optional sections Home shows an entry for. Only the entries are
+ * hidden — the routes stay registered, so a deep link or reminder still lands
+ * on the section's own disabled state.
+ */
+internal fun homeHeaderSections(features: Features): Set<HomeHeaderSection> = buildSet {
+    if (features.live_tv) add(HomeHeaderSection.LiveTv)
+    if (features.recordings) add(HomeHeaderSection.Recordings)
+    if (features.library_channels) add(HomeHeaderSection.LibraryChannels)
+    if (features.shared_libraries) add(HomeHeaderSection.SharedLibraries)
+}
+
+/**
+ * The header's remote-navigation stops, in D-pad order. A hidden section's
+ * key must not stay in the order: linear remote navigation would otherwise
+ * step onto a stop with no control behind it.
+ */
+internal fun homeHeaderRemoteKeys(features: Features): List<String> = buildList {
+    val sections = homeHeaderSections(features)
+    add("home:search")
+    if (HomeHeaderSection.LiveTv in sections) add("home:live")
+    if (HomeHeaderSection.SharedLibraries in sections) add("home:shared")
+}
+
 @Composable
 fun HomeScreen(
     vm: AppViewModel,
@@ -97,6 +125,7 @@ fun HomeScreen(
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
+    val features by vm.features.collectAsStateWithLifecycle()
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
     val posterWidth = (preferences.posterSize.widthDp * formFactor.posterScale()).dp
@@ -115,9 +144,10 @@ fun HomeScreen(
             onOpenLiveTv = onOpenLiveTv,
             onOpenRecordings = onOpenRecordings,
             onOpenLibraryChannels = onOpenLibraryChannels,
+            features = features,
         )
 
-        SharedLibrariesEntry(onOpenSharedLibraries)
+        if (HomeHeaderSection.SharedLibraries in homeHeaderSections(features)) SharedLibrariesEntry(onOpenSharedLibraries)
 
         when {
             // Only a cold start gets a spinner. Once anything has arrived the
@@ -149,7 +179,7 @@ fun HomeScreen(
                     }
                 }
                 RemoteOrder(buildList {
-                    add("home:search"); add("home:live"); add("home:shared")
+                    addAll(homeHeaderRemoteKeys(features))
                     listOf("Continue watching" to continueShelfItems, "Next up" to state.hubs.next_up, "Recently added" to state.hubs.recently_added).forEach { (key, items) -> items.forEach { add("row:" + key + ":item:" + it.id) } }
                     add("choice:Group by")
                     collections.forEach { collection ->
@@ -444,6 +474,7 @@ internal fun HomeTopBar(
     onOpenLiveTv: () -> Unit = {},
     onOpenRecordings: () -> Unit = {},
     onOpenLibraryChannels: () -> Unit = {},
+    features: Features = Features(),
 ) {
     val brand: @Composable () -> Unit = {
         Text(
@@ -469,14 +500,24 @@ internal fun HomeTopBar(
         TvIconButton(onClick = onSearch, modifier = Modifier.remoteAction("home:search", "Search") { onSearch(); RemoteOutcome.Applied }) {
             Icon(Icons.Filled.Search, contentDescription = "Search", tint = Muted)
         }
-        TvIconButton(onClick = onOpenLiveTv, modifier = Modifier.remoteAction("home:live", "Live TV") { onOpenLiveTv(); RemoteOutcome.Applied }) {
-            Icon(Icons.Filled.LiveTv, contentDescription = "Live TV", tint = Muted)
+        // Each optional section's button exists only while the server has
+        // that section switched on. Hiding the Live TV button also drops its
+        // remote action; [homeHeaderRemoteKeys] drops it from the order.
+        val sections = homeHeaderSections(features)
+        if (HomeHeaderSection.LiveTv in sections) {
+            TvIconButton(onClick = onOpenLiveTv, modifier = Modifier.remoteAction("home:live", "Live TV") { onOpenLiveTv(); RemoteOutcome.Applied }) {
+                Icon(Icons.Filled.LiveTv, contentDescription = "Live TV", tint = Muted)
+            }
         }
-        TvIconButton(onClick = onOpenRecordings) {
-            Icon(Icons.Filled.RadioButtonChecked, contentDescription = "Recordings", tint = Muted)
+        if (HomeHeaderSection.Recordings in sections) {
+            TvIconButton(onClick = onOpenRecordings) {
+                Icon(Icons.Filled.RadioButtonChecked, contentDescription = "Recordings", tint = Muted)
+            }
         }
-        TvIconButton(onClick = onOpenLibraryChannels) {
-            Icon(Icons.Filled.VideoLibrary, contentDescription = "Library channels", tint = Muted)
+        if (HomeHeaderSection.LibraryChannels in sections) {
+            TvIconButton(onClick = onOpenLibraryChannels) {
+                Icon(Icons.Filled.VideoLibrary, contentDescription = "Library channels", tint = Muted)
+            }
         }
         if (formFactor != FormFactor.Television) {
             TvIconButton(onClick = onOpenDownloads) {

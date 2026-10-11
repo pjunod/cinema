@@ -356,6 +356,20 @@ impl TranscodeManager {
         Ok(())
     }
 
+    pub(crate) fn linux_dolby_diagnostics(&self) -> serde_json::Value {
+        self.macos_video_probe.linux_diagnostics()
+    }
+
+    pub(crate) async fn reprobe_video_processing(
+        &self,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) {
+        self.macos_video_probe
+            .reprobe_video_processing(cancelled)
+            .await;
+        tracing::info!(target: "plurxd::transcode", "completed node-local video processing compatibility probe");
+    }
+
     pub(crate) async fn reprobe_macos_video(
         &self,
         cancelled: &tokio_util::sync::CancellationToken,
@@ -1110,12 +1124,13 @@ impl TranscodeManager {
         }
         // A Dolby Vision reshape is capped by whichever encoder it can
         // actually reach — hardware when the pairing is proved, software
-        // otherwise — not unconditionally by the software rung.
+        // otherwise — not unconditionally by the software rung. This answer
+        // runs ahead of the session start in the same create, so it reads
+        // the remembered pixel verdict and never opens the proof itself.
         let encoder = match file {
-            Some(file) if Self::needs_dovi_reshape(file) == Ok(true) => self
-                .encoder_for_file(file, crate::process_control::ChildClass::Background)
-                .await
-                .unwrap_or(Encoder::Software),
+            Some(file) if Self::needs_dovi_reshape(file) == Ok(true) => {
+                self.dovi_reshape_encoder_advisory(file).await
+            }
             _ => self.encoder().await,
         };
         capability_height_for_encoder(file, encoder)

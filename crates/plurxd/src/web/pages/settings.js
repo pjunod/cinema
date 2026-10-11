@@ -106,11 +106,11 @@ const SETTINGS_MANIFEST={
   metadata:{required:["settings"],secondary:["libs","developerReadiness"]},
   playback:{required:["settings"],secondary:["developerReadiness"]},
   livetv:{required:["settings"],secondary:["developerReadiness"]},
-  analysis:{required:["settings","analysis"],secondary:[]},
+  analysis:{required:["settings","analysis"],secondary:["developerReadiness"]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
   users:{required:["settings","users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
-  cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness"]},
+  cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
   sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},
   developer:{required:["settings"],secondary:["developerReadiness"]},
@@ -127,6 +127,11 @@ function settingsManifest(tab){
 }
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
+  // Every settings read and save lands here, so this is the one place an
+  // enable switch the admin just flipped reaches the nav: re-read /features
+  // (the nav's only source of truth) in the background. Fire-and-forget, and
+  // a refusal or a missing loader must never fail the save that got here.
+  if(typeof refreshFeatures==="function") void refreshFeatures();
   return value;
 }
 function cacheTrakt(value){
@@ -197,6 +202,15 @@ function patchSettingsSecondary(tab,key,value){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
+  if(tab==="cluster"&&key==="settings"){
+    // The settings cards under the board need the saved settings; the health
+    // board does not, so it never waits for them. Fill only their mount.
+    const mount=document.getElementById("cluster-settings");
+    if(mount) mount.outerHTML=clusterSettingsSection(SETTINGS_DATA);
+    // A link from Analysis names a card in here; the board painted before
+    // the card existed, so land on it now.
+    revealSettingsAnchor(tab);
+  }
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     // Patch only the evidence rows. Re-rendering the entire panel here could
     // overwrite an unsaved setting while diagnostics are still loading.
@@ -227,6 +241,10 @@ function patchSettingsSecondaryError(tab,key,error){
   }
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
+  }
+  if(tab==="cluster"&&key==="settings"){
+    const mount=document.getElementById("cluster-settings");
+    if(mount) mount.outerHTML=clusterSettingsUnavailable(message);
   }
   if(tab==="cluster"&&key==="clusterOps"){
     const mount=document.getElementById("cluster-operations");
@@ -281,6 +299,9 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
     CLUSTER_LOADED=false; forgetJoinToken();
   }
   const tab=settingsTab();
+  // A same-section reload (Refresh nodes) redraws through the loading shell;
+  // carry the kept mounts across it the way renderSettings does a repaint.
+  SETTINGS_PENDING_KEEP=!reset&&SETTINGS_SHOWN_TAB===tab?captureSettingsMounts(tab):null;
   // Leaving a section drops any minted join token: it is bearer material, and
   // the operator who switched away is done with it whether or not they said so.
   if(SETTINGS_SHOWN_TAB!==tab) forgetJoinToken();

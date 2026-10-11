@@ -111,7 +111,12 @@ requested.
    Cluster owns automatic transport-recovery guidance · Developer owns
    compatibility controls and experiments that are not yet fully active or
    tested. The decoder controls were Developer's until 2026-09-28; they now
-   belong to Playback → Advanced server delivery (decision 6).
+   belong to Playback → Advanced server delivery (decision 6). On 2026-10-10
+   Live TV took its enable and deinterlace cadence, Cluster its placement,
+   catalogue-read, clock-guard, backup and shared-subtitle switches, Playback
+   quality switching and the PGS overlay, Maintenance stored PGS tracks and
+   Analysis subtitle backfill (see
+   [the graduation pass](#graduation-pass-2026-10-10)).
 3. **The prototype is a reference, not a base.** The implementation starts
    from current Forgejo `main`; only relevant ideas are ported from the local
    prototype, and unrelated work in the original checkout is left untouched.
@@ -188,41 +193,41 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 
 | Card (web Developer unless marked) | Switch | Owner row / plan | Owner status | Evidence still owed | Decision |
 |---|---|---|---|---|---|
-| Enable Live TV (web, and native Developer on Android, iOS and tvOS) | `live_tv_enabled` | L-02, L-03 ([HDHOMERUN-LIVE-TV-PLAN](HDHOMERUN-LIVE-TV-PLAN.md)) | merged: code; acceptance open | L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) fleet prompts; L-03 M2 capacity offer and caption-positive M4 | (a) stays → Settings → Live TV; the native cards print the web's line word for word and, like the web card, draw every `/live-tv/readiness` row as Met / Not met beside the switch, advisory only |
+| Enable Live TV (web, and native Developer on Android, iOS and tvOS) | `live_tv_enabled` | L-02, L-03 ([HDHOMERUN-LIVE-TV-PLAN](HDHOMERUN-LIVE-TV-PLAN.md)) | merged: code; acceptance open | L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) fleet prompts; L-03 M2 capacity offer and caption-positive M4 | (a) stays → Settings → Live TV; the native cards print the web's line word for word and, like the web card, draw every `/live-tv/readiness` row as Met / Not met beside the switch, advisory only → **graduated 2026-10-10** to Settings → Live TV (web, Android, iOS and tvOS; first card) |
 | Durable cluster work | `vod_index_cluster_cache`, `cache_produce_mins` | [DURABLE-WORK-QUEUE-STATUS](../cluster/DURABLE-WORK-QUEUE-STATUS.md) | merged M1–M3, E0–E3 (`82df7f59e`); deployed in `55aa430fd` to all four nodes on 2026-09-27 | none: the plan calls the queue infrastructure and OPERATIONS says there is no fleet receipt to obtain | **(b) graduated: card removed.** Its two switches were copies of the permanent ones in Analysis (`an-enabled`) and Maintenance (pre-transcoding cadence) |
 | Cinema shared libraries | `sharing_enabled` | [SHARED-LIBRARIES-IMPLEMENTATION](SHARED-LIBRARIES-IMPLEMENTATION.md), S2–S8 | S2–S7 implementation integrated in effort; [completion batch](SHARED-LIBRARIES-STATUS.md) open | two-NAT/Serve/Docker and cluster lifecycle qualification; physical native playback and burn/HDR qualification; S8 qualification receipt | (a) stays → Settings → Sharing after S3–S8 acceptance; readiness never vetoes Save |
-| Cluster media placement | `cluster_media_pool_enabled`, `cluster_session_takeover_enabled` | [CLUSTER-MEDIA-POOL-PLAN](../cluster/CLUSTER-MEDIA-POOL-PLAN.md) | built P0–P8 | physical-device corpus; ten-second takeover budget (§8.8–§8.9) | (a) stays → Settings → Cluster |
-| Local catalogue reads | `bounded_replica_reads` | K-04 | merged: M0–M3 server; web read-after echo and on-by-default preference shipped in `5ba02212f`, deployed | §5.1 lab readout, rolling-upgrade check | (a) stays → Cluster, or removed (Paul's choice) |
+| Cluster media placement | `cluster_media_pool_enabled`, `cluster_session_takeover_enabled` | [CLUSTER-MEDIA-POOL-PLAN](../cluster/CLUSTER-MEDIA-POOL-PLAN.md) | built P0–P8 | physical-device corpus; ten-second takeover budget (§8.8–§8.9) | (a) stays → Settings → Cluster → **graduated 2026-10-10** to Settings → Cluster → Cluster settings |
+| Local catalogue reads | `bounded_replica_reads` | K-04 | merged: M0–M3 server; web read-after echo and on-by-default preference shipped in `5ba02212f`, deployed | §5.1 lab readout, rolling-upgrade check | (a) stays → Cluster, or removed (Paul's choice) → **graduated 2026-10-10** to Settings → Cluster → Cluster settings |
 | Shared storage budgets | storage domains | [DURABLE-WORK-QUEUE-STATUS](../cluster/DURABLE-WORK-QUEUE-STATUS.md) | as durable work: deployed | none | **(b) graduated: moved to Settings → Libraries** beside the roots it names; it is the only editor for the mapping, so it moves rather than goes |
 | CODECS on SDR master playlists (added 2026-10-04) | `playback_sdr_master_codecs` (`playback.sdr_master_codecs`), default off | S-10 ([HONEST-MASTER-PLAYLIST](../streaming/HONEST-MASTER-PLAYLIST.md#the-sdr-codecs-developer-switch)) | SDR `CODECS` implemented; off restores the pre-S-10 master | Apple TV and iPhone device check that every SDR variant is still offered with `CODECS` printed (§5.4) | (a) stays → default on and the switch is removed |
 | Unverified HEVC copy | `hevc_unverified_copy` | [HEVC-COLOR-CORRUPTION-RCA-AND-FIX](../streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md) | proof-before-stripping containment `87ca67c0e` deployed in `55aa430fd` | complete-scan proof for every HEVC title VOD copies | (a) stays → removed, or Playback escape hatch (Paul's choice) |
 | Jellyfin client compatibility | `jellyfin_compatibility_enabled` | [Jellyfin build](../clients/JELLYFIN-COMPATIBILITY-BUILD.md) | J0/J1 integrated; J2 under implementation | frozen-candidate catalog, artwork, playback, tracks, watch and cluster qualification | (a) stays → Settings → Integrations |
 | Mac video processing (2026-10-07) | `macos_video_processing_enabled` (`playback.macos_video_processing_enabled`), default off | [Mac processing status](../streaming/MACOS-VIDEO-PROCESSING-STATUS.md), M0–M6 | integrated on effort at `93658e211`; isolated SDR/HDR VOD bytes observed; independent review active | encoded VOD seek/resume, cancellation/recovery, cache and cluster revalidation, native bound-source planning for normalized continuous VOD, named-display visual checks, target Mac/client startup/concurrency/soak evidence | (a) stays → Playback → Advanced server delivery; saved choice is always accepted, readiness is advisory and graduation preserves explicit values |
-| Live TV deinterlace cadence | `live_tv_deinterlace_output` | S-08 | merged: M1–M4 | M5 media1 QSV/VAAPI qualification | (a) stays → Settings → Live TV |
-| Portable cluster backup | `backup_*` | K-01 | merged: M1–M4; amd64 container smoke passed in run 3205 | M4 arm64 in-lane leg; M5 loss drills, physical restore, RPO/RTO | (a) stays → Settings → Cluster |
-| Seek scratch accounting | none (automatic) | [SEEK-SCRATCH-RESERVATIONS-STATUS](../streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html) | merged and deployed | physical acceptance | (a) stays → card removed |
-| Cluster clock observation (added 2026-09-30) | none (automatic; meaningful-control clarification above) | [K-06 measurement](../cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) | measurement implementation; release review and gate pending | identified measurement fleet receipt, separate enforcement and its acceptance | (a) stays → read-only diagnostics move to Settings → Cluster |
+| Live TV deinterlace cadence | `live_tv_deinterlace_output` | S-08 | merged: M1–M4 | M5 media1 QSV/VAAPI qualification | (a) stays → Settings → Live TV → **graduated 2026-10-10** to Settings → Live TV, after the HDHomeRun tuner card |
+| Portable cluster backup | `backup_*` | K-01 | merged: M1–M4; amd64 container smoke passed in run 3205 | M4 arm64 in-lane leg; M5 loss drills, physical restore, RPO/RTO | (a) stays → Settings → Cluster → **graduated 2026-10-10** to Settings → Cluster → Cluster settings |
+| Seek scratch accounting | none (automatic) | [SEEK-SCRATCH-RESERVATIONS-STATUS](../streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html) | merged and deployed | physical acceptance | (a) stays → card removed → **removed 2026-10-10**; no switch, the behaviour is simply on |
+| Cluster clock observation (added 2026-09-30) | none (automatic; meaningful-control clarification above) | [K-06 measurement](../cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) | measurement implementation; release review and gate pending | identified measurement fleet receipt, separate enforcement and its acceptance | (a) stays → read-only diagnostics move to Settings → Cluster → **graduated 2026-10-10** to Settings → Cluster → Cluster settings (as *Cluster clock guard*) |
 | Adaptive Auto quality | `playback_auto_abr` | A-04, A-05 | A-04 blocked: incomplete D3 matrix; A-05 unclaimed | Safari, HDR and Apple/Android physical traces; native controllers | (a) stays → Playback toggle, or removed (Paul's choice) |
 | Fit Auto to display | `playback_display_aware_auto` (`playback.display_aware_auto`) | [Combined Auto plan](../streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | source implementation in progress; qualification open | source-grade worker proofs, display-fit candidates and physical runtime recovery; D6 fixed or accepted (2026-10-04: readiness rows `auto_abr`, `network_priors`, `local_session_owner`, `ipv4_client` name it — Auto moves up only with network priors on, only on the session's owning node, only for IPv4 clients) | (a) Playback toggle if permanent choice remains useful, otherwise removed |
 | Network priors (added 2026-10-04) | `playback_network_priors` (`playback.network_priors`) | [Combined Auto plan](../streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) §5, D6 | server fold and link-receipt paths built; default off; no Settings control existed before this card | Fit Auto to display graduates and D6 is fixed or accepted; a fleet run showing priors improve cold starts without upgrading into stalls | (a) stays → Paul chooses: Settings → Playback beside Auto quality, or removed if priors become how Auto works |
 | Complete-output preparation (added 2026-10-04) | `vod_output_preparation` (`off` / `copy` / `copy_and_encoded`; no readiness `setting` because the switch walk PUTs booleans) | main-merge defects build, 2026-10-04 | built; default off | a qualified fleet run per kind: jobs drain on every node, Stop cancels, the retained registry stays inside its budget | (a) stays → Paul chooses: Settings → Playback beside the cache budget, or removed if preparation becomes how plurx works |
 | Rolling output retention (added 2026-10-04) | `vod_rolling_retention` | main-merge defects build, 2026-10-04 | built; default off | a qualified fleet run: retention stays inside its headroom on every node and released artifacts are deleted within a tick | (a) stays → Paul chooses: Settings → Playback beside the cache budget, or removed |
-| Prepared quality handoff | `prepared_quality_handoff` | [QUALITY-SWITCH-CONTINUITY-BUILD](../playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | in execution | M2-Android, M1-web, M3; physical-client fleet receipt | (a) stays → Settings → Playback |
-| Second player in this browser | browser-local | same | same | same | (a) stays → moves with prepared handoff |
+| Prepared quality handoff | `prepared_quality_handoff` | [QUALITY-SWITCH-CONTINUITY-BUILD](../playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | in execution | M2-Android, M1-web, M3; physical-client fleet receipt | (a) stays → Settings → Playback → **graduated 2026-10-10** to Settings → Playback |
+| Second player in this browser | browser-local | same | same | same | (a) stays → moves with prepared handoff → **graduated 2026-10-10** to Settings → Playback |
 | Generate subtitles offline | `subtitle-transcription` configuration | [Subtitle completion ledger](../clients/SUBTITLE-RELIABILITY-COMPLETION.md) | active | Real transcription, cancellation, source replacement and caption playback | Permanent controls move to Maintenance |
-| PGS subtitle overlay | `pgs_overlay` | [APPLE-PGS-OVERLAY-ACCEPTANCE](../clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md) | open | Apple and Android physical acceptance | (a) stays → Settings → Playback |
-| Parallel playback subtitle ranges | none (automatic) | K-09 | merged: M0–M5 | fleet evidence of a peer range exchange | (a) stays → card removed |
-| Stored PGS tracks | `subtitle_stored_sources` | K-09 | merged: M0–M5 | fleet and device evidence | (a) stays → Settings → Maintenance |
-| Share stored subtitle tracks | `subtitle_cluster_sources` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Cluster, or removed (Paul's choice) |
-| Backfill subtitle tracks | `subtitle_backfill` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Settings → Analysis |
+| PGS subtitle overlay | `pgs_overlay` | [APPLE-PGS-OVERLAY-ACCEPTANCE](../clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md) | open | Apple and Android physical acceptance | (a) stays → Settings → Playback → **graduated 2026-10-10** to Settings → Playback |
+| Parallel playback subtitle ranges | none (automatic) | K-09 | merged: M0–M5 | fleet evidence of a peer range exchange | (a) stays → card removed → **removed 2026-10-10**; no switch, the behaviour is simply on |
+| Stored PGS tracks | `subtitle_stored_sources` | K-09 | merged: M0–M5 | fleet and device evidence | (a) stays → Settings → Maintenance → **graduated 2026-10-10** to Settings → Maintenance, after the Stored subtitle tracks panel |
+| Share stored subtitle tracks | `subtitle_cluster_sources` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Cluster, or removed (Paul's choice) → **graduated 2026-10-10** to Settings → Cluster → Cluster settings |
+| Backfill subtitle tracks | `subtitle_backfill` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Settings → Analysis → **graduated 2026-10-10** to Settings → Analysis, after the Index analysis card |
 | Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | none the plan names; the fleet observation its Developer line waited on was never recorded and was waived by Paul's approval | **(b) graduated to Settings → Playback** (Paul, 2026-09-28; decision 6) |
 | Verified decode artifacts | `decoder_health_qualified_artifacts` | [DECODER_SELECTION_RECOVERY_STATUS](../DECODER_SELECTION_RECOVERY_STATUS.md) | M0–M7 merged | fleet qualification, which the plan calls optional | **(b) graduated to Playback → Advanced server delivery**, default off (Paul, 2026-09-28; decision 6) |
 | Automatic decode recovery | `automatic_decoder_recovery` | same | M0–M7 merged; off by default | a matched hardware/software retained pair, which is advisory | **(b) graduated to Playback → Advanced server delivery**, default off (Paul, 2026-09-28; decision 6) |
 | Android: Match television refresh rate | display cadence | D-01 | merged: M1–M3 | M0 three-TV measurement, M4, M5 HDMI | (a) stays → Paul chooses: Settings → Playback, or removed |
-| Android: Prepared replacement | device-local | as prepared handoff | as above | as above | (a) stays → moves with prepared handoff to Settings → Playback |
-| Apple: Bounded pause/resume | device-local | M4 item 4 (hold/resume barriers) | built | matched physical Apple TV latency | (a) stays → Paul chooses: Settings → Playback, or removed |
-| Apple: Prepared quality handoff | device-local | as prepared handoff | as above | as above | (a) stays → moves with prepared handoff to Settings → Playback |
-| Android: Release startup profile | none (advisory status) | D-03 M10 ([ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD](../clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) §5.10) | tooling merged (build 136) | the Baseline Profile measured on the Lenovo release APK: five-run cold-start and first-frame medians with and without it (§6) | (a) stays → entry removed; the profile ships in every release build and has no switch |
+| Android: Prepared replacement | device-local | as prepared handoff | as above | as above | (a) stays → moves with prepared handoff to Settings → Playback → **graduated 2026-10-10** to Settings → Playback |
+| Apple: Bounded pause/resume | device-local | M4 item 4 (hold/resume barriers) | built | matched physical Apple TV latency | (a) stays → Paul chooses: Settings → Playback, or removed → **graduated 2026-10-10** to Settings → Playback |
+| Apple: Prepared quality handoff | device-local | as prepared handoff | as above | as above | (a) stays → moves with prepared handoff to Settings → Playback → **graduated 2026-10-10** to Settings → Playback |
+| Android: Release startup profile | none (advisory status) | D-03 M10 ([ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD](../clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) §5.10) | tooling merged (build 136) | the Baseline Profile measured on the Lenovo release APK: five-run cold-start and first-frame medians with and without it (§6) | (a) stays → entry removed; the profile ships in every release build and has no switch → **graduated 2026-10-10** to Settings → About (status only; no switch) |
 | Android and Apple: Library channels, Recording, HDHomeRun Live TV, Programme guide | server settings | web already moved these to Settings → Live TV | — | none: finished settings | **(b) moved in PR #602** (Paul: "fix it") to a native Settings → Live TV screen on Android, iOS and tvOS, in the web's order, reached like Developer; saves and readiness unchanged. The Live TV enable stays in native Developer, as on the web |
 
 Two graduated on 2026-09-28, after the PR's one adversarial review showed
@@ -244,6 +249,71 @@ Enable Live TV, Bounded pause/resume, Prepared quality handoff.
 `LiveTvSettingsPlacementTest` (Android) and `LiveTvTests` (Apple) pin which
 screen draws each server Live TV card and that every native Developer entry
 carries its line.
+
+### Graduation pass, 2026-10-10
+
+Paul, 2026-10-10: *"clean up developer settings; Live TV moves to settings
+permanently; move out the rest that has been in there too long."*
+
+The rule applied to each card:
+
+- **Graduate** — merged, deployed and in use for one to four weeks, where the
+  card was waiting only on a fleet receipt nobody is collecting.
+- **Stay** — added in the last ten days or so, or still under active build.
+- **Remove** — an information-only card with no switch; the behaviour it
+  described is simply on.
+
+Each graduated switch kept its saved key, default, Save and advisory
+readiness rows; only its home in Settings changed. No settings migration was
+needed and no stored choice moved.
+
+| Card | Saved key | New home |
+|---|---|---|
+| Enable Live TV (web) | `live_tv_enabled` | Settings → Live TV, first card (titled "Live TV", toggle "Enable Live TV") |
+| Live TV deinterlace cadence | `live_tv_deinterlace_output` | Settings → Live TV, after the HDHomeRun tuner card |
+| Cluster media placement and session takeover | `cluster_media_pool_enabled`, `cluster_session_takeover_enabled` | Settings → Cluster → Cluster settings |
+| Local catalogue reads | `bounded_replica_reads` | Settings → Cluster → Cluster settings |
+| Cluster clock guard | `cluster_clock_guard_enforced` | Settings → Cluster → Cluster settings |
+| Portable cluster backup | `backup_destination`, `backup_schedule_utc`, `backup_keep` (`backup.*` in config) | Settings → Cluster → Cluster settings |
+| Share stored subtitle tracks | `subtitle_cluster_sources` | Settings → Cluster → Cluster settings |
+| Quality switching | `prepared_quality_handoff` | Settings → Playback, after Chapter thumbnails |
+| Second player in this browser | browser-local | Settings → Playback, beside Quality switching |
+| Serve PGS subtitles as an overlay | `pgs_overlay` | Settings → Playback, beside Quality switching |
+| Keep and read stored PGS tracks | `subtitle_stored_sources` | Settings → Maintenance, after the Stored subtitle tracks panel |
+| Backfill subtitle tracks | `subtitle_backfill` | Settings → Analysis, after the Index analysis card |
+| Android: Enable Live TV | `live_tv_enabled` | Settings → Live TV, first card |
+| Android: Prepared replacement | device-local | Settings → Playback |
+| Android: Release startup profile | none (status) | Settings → About |
+| Apple: Enable Live TV | `live_tv_enabled` | Settings → Live TV, first section |
+| Apple: Bounded pause/resume | device-local | Settings → Playback, with a "Pause/resume and quality handoff readiness" link to its advisory rows |
+| Apple: Prepared quality handoff | device-local | Settings → Playback, under the same readiness link |
+
+*Cluster settings* is a new section below the Cluster health board. It is
+drawn only on a clustered server, as the switches it holds mean nothing on a
+single node. The PGS overlay and quality switching sit in Playback's main
+section, not inside Advanced server delivery: they are viewer-visible
+choices, not delivery tuning.
+
+Two cards were removed outright. Neither had a switch:
+
+- **Seek scratch accounting** — automatic scratch reservations for seeks.
+- **Parallel playback subtitle ranges** — automatic peer range exchange
+  for subtitle tracks.
+
+The server's Live TV refusal now reads *"Live TV is disabled; an
+administrator can enable it in Settings → Live TV"* (it named Settings →
+Developer before).
+
+Still in web Developer: Jellyfin client compatibility, Cinema shared
+libraries, Cinema remote control, Cinema background invitations, Adaptive
+Auto quality, Fit Auto to display, Network priors, Dolby Vision for HDR
+output, FEL preservation, Measured per-title encoding, Reordered VOD frames,
+CODECS on SDR master playlists, Unverified HEVC copy, Complete-output
+preparation, Rolling output retention, Mac video processing, Mac HEVC output
+and Generate subtitles offline. Android Developer keeps Match television
+refresh rate (display cadence), shared libraries and the remotes cards; Apple
+Developer keeps Cinema remotes, Screen invitations and the shared libraries
+card. Each still prints its **Leaves Developer when … Then …** line.
 
 ## Remaining limits — evidence must name what it cannot prove
 

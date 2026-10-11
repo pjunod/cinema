@@ -671,7 +671,7 @@ impl PreparationAllowance {
         if let Some(shared) = self.shared.upgrade() {
             shared
                 .preparation_media
-                .fetch_update(AcqRel, Acquire, |total| total.checked_sub(bytes))
+                .try_update(AcqRel, Acquire, |total| total.checked_sub(bytes))
                 .expect("exact node private ownership");
         }
     }
@@ -686,7 +686,7 @@ impl PreparationAllowance {
         if let Some(shared) = self.shared.upgrade() {
             shared
                 .preparation_media
-                .fetch_update(AcqRel, Acquire, |total| total.checked_sub(media))
+                .try_update(AcqRel, Acquire, |total| total.checked_sub(media))
                 .expect("exact node private ownership");
             shared.retained_artifacts.release_preparation(self.nonce);
         }

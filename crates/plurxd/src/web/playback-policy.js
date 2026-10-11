@@ -1108,6 +1108,7 @@
     "media_owner_lost",
     "media_owner_transition",
     "producer_failed",
+    "segment_publication_failed",
     "producer_exited",
     "producer_ended",
     "session_gone",
@@ -2252,7 +2253,20 @@
     }
     return encodes.at(-1) || null;
   }
-  function decideCandidateTransition({state, sample, candidates, currentId, target = null, aspect = null}) {
+  // Link pressure has already proved the link cannot carry the current rung.
+// The largest lower rung whose cost fits the link is the answer. When none
+// fits, the cheapest costed lower rung is the smallest deficit, provided it
+// costs less than the current rung (demand); otherwise holding is no worse.
+// An uncosted rung is never chosen for a link cause.
+function linkRecoveryCandidate(lower, link, demand) {
+  const costed = lower.filter(candidate => candidate.peak_bps > 0);
+  const fitting = costed.find(candidate => candidate.peak_bps <= link * 0.95);
+  if (fitting) return fitting;
+  const cheapest = costed.reduce((best, candidate) => !best || candidate.peak_bps < best.peak_bps ? candidate : best, null);
+  return cheapest && !(demand > 0 && cheapest.peak_bps >= demand) ? cheapest : null;
+}
+
+function decideCandidateTransition({state, sample, candidates, currentId, target = null, aspect = null}) {
     const now = sample.now_ms;
     const next = {...state, switchTimesMs:(state.switchTimesMs || []).filter(at =>
       at <= now && now - at < 3600000), blockedCandidates:[...(state.blockedCandidates || [])]};
@@ -2303,10 +2317,9 @@
       // Recovery may attempt an unproved compatible encode: requiring an
       // already-running producer makes a cold original impossible to rescue.
       // The owner still bounds preparation and validates the actual successor.
-      const lower = eligible.filter(candidate => area(candidate) < area(current)
-        && (sample.cause !== "link" || candidate.peak_bps > 0 && candidate.peak_bps <= link * 0.95))
+      const lower = eligible.filter(candidate => area(candidate) < area(current))
         .sort((a, b) => area(b) - area(a));
-      chosen = severe ? lower.find(candidate => candidate.peak_bps > 0 && candidate.peak_bps <= link * 0.95) : lower[0];
+      chosen = sample.cause === "link" ? linkRecoveryCandidate(lower, link, demand) : lower[0];
     } else chosen = selectQualityCandidate({candidates:eligible,target,aspect,transfer:sample.transfer,
       allowTrial:!sample.natural_boundary});
     if (!chosen || chosen.id === currentId) {

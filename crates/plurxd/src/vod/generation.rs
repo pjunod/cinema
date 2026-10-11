@@ -626,11 +626,17 @@ pub(super) async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
 /// What a producer for `recipe` adds to its environment: a text burn's frozen
 /// Fontconfig configuration, so the child sees the fonts the recipe captured
 /// and nothing installed since.
-pub(super) fn recipe_child_env(recipe: &Recipe) -> Vec<(&'static str, &std::ffi::OsStr)> {
+pub(super) fn recipe_child_env(recipe: &Recipe) -> Vec<(&str, &std::ffi::OsStr)> {
     recipe
         .encoding
         .as_ref()
-        .map(|encoding| encoding.engine.child_env())
+        .map(|encoding| {
+            let mut env: Vec<(&str, &std::ffi::OsStr)> = encoding.engine.child_env();
+            // The processing binding allows only loader/libVA keys, so it cannot
+            // overwrite the existing frozen Fontconfig authority.
+            env.extend(encoding.executable.processing_child_env());
+            env
+        })
         .unwrap_or_default()
 }
 
@@ -1577,6 +1583,9 @@ impl RenditionSink {
             // ended normally rather than faulted.
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
+        // Delivered, not yet published: what an expired deadline needs to
+        // tell a stuck publication from a producer that never got here.
+        self.rendition.note_fragment_received(self.epoch, entry);
         // Both fences record their own class before returning. vodgen sees
         // only an `io::Error` and wraps it as `Failure::Sink`, which would
         // otherwise be classified `producer_write_failed` — a sink fault,

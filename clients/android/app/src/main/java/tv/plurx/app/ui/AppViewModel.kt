@@ -35,6 +35,7 @@ import tv.plurx.app.data.ViewerPreferences
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.Decision
 import tv.plurx.app.data.DiscoveredServer
+import tv.plurx.app.data.Features
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.Hubs
 import tv.plurx.app.data.Item
@@ -135,6 +136,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _preferences = MutableStateFlow(ViewerPreferences())
     val preferences: StateFlow<ViewerPreferences> = _preferences.asStateFlow()
+
+    /**
+     * Which optional sections the server has switched on (`GET features`).
+     * Starts all-on and is refreshed with every [loadHome], so an admin's
+     * change shows up on pull-to-refresh, Refresh, or the next return home.
+     * A failed fetch keeps the last answer rather than hiding or revealing
+     * anything on a transport blip.
+     */
+    private val _features = MutableStateFlow(Features())
+    val features: StateFlow<Features> = _features.asStateFlow()
     val offlineRecords = OfflineDownloads.records
     val offlineBookRecords = OfflineBooks.records
 
@@ -160,6 +171,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** One dashboard load at a time — a refresh replaces the one in flight. */
     private var homeJob: Job? = null
+    private var featuresJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -334,6 +346,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 username = resp.user.username
                 settings.saveSession(origin, resp.token, resp.user.username, resp.user.id)
                 _phase.value = Phase.Ready
+                // An expired saved login did not pass through connect, so its
+                // capability bootstrap is empty. Refresh after first paint;
+                // an unavailable server must not hold Home on the login screen.
+                viewModelScope.launch { backfillServerIdentity() }
                 // Now, not at connect: the ingress list is signed-in only.
                 refreshClusterIngress()
                 loadHome()
@@ -359,6 +375,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * refresh leaves the previous content up with an error beside it.
      */
     fun loadHome() {
+        loadFeatures()
         homeJob?.cancel()
         _home.value = _home.value.copy(loading = true, error = null)
         homeJob = viewModelScope.launch {
@@ -399,6 +416,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Refresh [features] beside the dashboard. Separate from [homeJob] so a
+     * failed shelf load cannot cancel it and a failed features call cannot
+     * fail the dashboard; any failure (older server, 404, transport) keeps
+     * the last value.
+     */
+    private fun loadFeatures() {
+        featuresJob?.cancel()
+        featuresJob = viewModelScope.launch {
+            catchingUnlessCancelled { api().features() }
+                .onSuccess { _features.value = it }
+        }
+    }
+
+    /**
      * The server signed this device out for sitting unused past its idle
      * window. Land on the login screen with its sentence rather than leave a
      * "HTTP 401" on Home; the saved token is dead, so it goes with it.
@@ -411,6 +442,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         currentUser = null
         currentUserId = null
         _home.value = HomeState()
+        _features.value = Features()
         _authError.value = message
         _phase.value = Phase.NeedLogin
     }
@@ -461,6 +493,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     currentUser = null
                     currentUserId = null
                     _home.value = HomeState()
+                    _features.value = Features()
                     _authError.value = if (confirmed) {
                         "Sign-out was confirmed by the server."
                     } else {
@@ -500,6 +533,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         currentUserId = null
         serverInstanceId = null
         _home.value = HomeState()
+        _features.value = Features()
         viewModelScope.launch { settings.clearServer() }
         _phase.value = Phase.NeedServer
     }
@@ -532,7 +566,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setPlaybackInfoMode(mode: String) = updatePreferences { copy(playbackInfoMode = mode) }
 
     /**
-     * Settings → Developer → "Prepared replacement".
+     * Settings → Playback → "Prepared replacement".
      *
      * The switch is never gated on the requirements shown beside it: they are
      * measurements, and an operator who can read them is better placed than a
@@ -1060,17 +1094,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun backfillServerIdentity() {
-        val info = catchingUnlessCancelled { api().server() }.getOrNull() ?: return
-        serverName = info.name
-        if (serverInstanceId != info.instance_id) invalidateLibraryPager()
-        serverInstanceId = info.instance_id
-        Session.displayModeMatch = info.display_mode_match
-        Session.displayAwareAuto = info.playback_display_aware_auto
-        Session.autoAbr = info.playback_auto_abr
-        Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
-        Session.decoderCompactionContract = info.decoder_compaction_contract
-        settings.saveServerIdentity(origin, info.instance_id)
-        refreshClusterIngress()
+        val expectedOrigin = origin
+        refreshAuthenticatedServerInfo(
+            authorization = Session::playbackAuthorization,
+            fetch = { api().server() },
+            apply = { info ->
+                serverName = info.name
+                if (serverInstanceId != info.instance_id) invalidateLibraryPager()
+                serverInstanceId = info.instance_id
+                Session.displayModeMatch = info.display_mode_match
+                Session.displayAwareAuto = info.playback_display_aware_auto
+                Session.autoAbr = info.playback_auto_abr
+                Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
+                Session.decoderCompactionContract = info.decoder_compaction_contract
+                settings.saveServerIdentity(expectedOrigin, info.instance_id, expectedOrigin = expectedOrigin)
+                refreshClusterIngress()
+            },
+        )
     }
 
     /**
@@ -1098,6 +1138,20 @@ internal fun acceptHlsSessionPresentation(started: HlsStart): HlsStart = started
 private const val LAUNCH_VALIDATION_TIMEOUT_MS = 12_000L
 
 private data class RecoveredServer(val origin: String, val info: Server)
+
+/** Apply a capability response only to the authenticated profile that fetched it. */
+internal suspend fun refreshAuthenticatedServerInfo(
+    authorization: () -> Session.PlaybackAuthorization,
+    fetch: suspend () -> Server,
+    apply: suspend (Server) -> Unit,
+): Boolean {
+    val owner = authorization()
+    if (owner.token == null) return false
+    val info = catchingUnlessCancelled { fetch() }.getOrNull() ?: return false
+    if (authorization() != owner) return false
+    apply(info)
+    return true
+}
 
 internal sealed interface SavedSessionValidation<out T> {
     data class Authenticated<T>(val user: T) : SavedSessionValidation<T>
