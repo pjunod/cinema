@@ -45,8 +45,8 @@ describe the source they were written against. On `main`:
   (`admit_fenced_removal`, `crates/plurx-core/src/cluster/clock.rs:1359`); and
   `/readyz`, which answers 503 `clock unbounded` after two consecutive
   violating rounds (`clock_readiness_failure`, `crates/plurxd/src/http/mod.rs`).
-- **The switch.** Developer → *Cluster clock guard* → *Enforce the cluster clock
-  guard*, the
+- **The switch.** Settings → Cluster → *Cluster clock guard* → *Enforce the
+  cluster clock guard* (in Developer until 2026-10-10), the
   replicated setting `cluster.clock_guard_enforced`, default off. Each node
   re-reads it every 10 s (`crates/plurxd/src/clock_offset.rs`); a failed read
   keeps the node's current mode. While off, every guarded decision is
