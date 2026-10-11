@@ -1,95 +1,1006 @@
 #!/usr/bin/env python3
-"""Serve generated fixed-target media for bounded transport design measurements.
+"""Startup lab: a generated sliding HLS presentation with a separate target and bootstrap.
 
-This isolates client reload and native selection. It does not exercise daemon
-admission, scratch accounting, source identity or actor lifetimes.
+A-M0 of docs/streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md. The lab serves
+generated H.264/AAC fMP4 (2 s closed-GOP segments) to Safari's native player
+and to the shipped hls.js, as a sliding live playlist with two independent
+parameters:
+
+  target     the advertised #EXT-X-TARGETDURATION, which is also the server's
+             publication cadence (a new snapshot is due every target seconds)
+  bootstrap  seconds of media present when the first playlist is released
+
+After release the produced media grows at --rate times real time. Every
+snapshot publishes every completed segment up to a steady published reserve
+ahead of the viewer's reported position (48 s, today's value, which the
+design keeps), never less than one new segment per cycle. Removed segments
+trail the reported position by 30 s. Each run writes a JSON receipt with its
+reload log and the client's events; `--summarize` groups receipts by
+arm x player x rate and writes the A-M0 decision.
+
+It does not exercise the daemon's actor, flow controller, scratch or source
+production. The fixture decides when the first playlist exists, so starting
+earlier is true by construction and is not a criterion.
+
+Modes:
+  --generate-media DIR [--duration S] [--segment S]   make the media
+  --media-dir DIR --evidence-dir DIR [--bind H] [--port N]   serve
+  --summarize DIR [--output FILE] [--min-seconds S]   decide
+  --plan --target T --bootstrap B --rate R            print the snapshots
 """
 import argparse
-import http.server,json,time,threading,uuid,urllib.parse,pathlib,math
-parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--media-dir',type=pathlib.Path,required=True)
-parser.add_argument('--evidence-dir',type=pathlib.Path,required=True)
-parser.add_argument('--port',type=int,default=8765)
-args=parser.parse_args()
-args.evidence_dir.mkdir(parents=True,exist_ok=True)
-ROOT=args.evidence_dir.resolve()
-MEDIA=args.media_dir.resolve()
-HLS=pathlib.Path(__file__).resolve().parent.parent/'crates/plurxd/src/web/hls.min.js'
-runs={}
-run_locks={}
-runs_lock=threading.Lock()
-def persist(run):
- # Caller owns the run lock through mutation, snapshot and atomic replacement.
- target=ROOT/(run['id']+'.json')
- temporary=target.with_suffix('.json.tmp')
- temporary.write_text(json.dumps({k:v for k,v in run.items() if k!='start'},indent=2))
- temporary.replace(target)
-PAGE='''<!doctype html><meta charset="utf-8"><title>Plurx startup transport experiment</title><h1>Generated media startup experiment</h1><p>Generated H264/AAC · 16-second fixed target · completed media only · unqualified harness</p><video muted controls width="480"></video><pre id="status">Starting</pre><script src="/hls.js"></script><script>
-const q=new URLSearchParams(location.search),v=document.querySelector('video'),out=document.querySelector('#status');
-const transport=q.get('transport')||'hlsjs',runway=+(q.get('runway')||32),lead=+(q.get('lead')||7.965),speed=+(q.get('speed')||1.05);
-let id,started=performance.now(),firstFrame=null,samples=0,stalls=0,last=0,progressSeen=false,events=[];
-const record=(event,data={})=>{const entry={event,elapsed_ms:Math.round(performance.now()-started),...data};events.push(entry);if(id)fetch('/report/'+id,{method:'POST',body:JSON.stringify(entry)});};
-v.addEventListener('waiting',()=>{if(progressSeen){stalls++;record('waiting',{position:v.currentTime});}});
-v.addEventListener('error',()=>record('video_error',{code:v.error&&v.error.code}));
-v.addEventListener('loadedmetadata',()=>{record('metadata',{position:v.currentTime});if(transport==='native'&&lead>0)v.currentTime=lead;v.play().catch(e=>record('play_error',{message:e.name}));});
-v.requestVideoFrameCallback(function frame(t,m){if(firstFrame===null){firstFrame=Math.round(performance.now()-started);record('first_frame',{ttff_ms:firstFrame,media_time:m.mediaTime});}v.requestVideoFrameCallback(frame);});
-fetch('/start?'+new URLSearchParams({runway,speed,lead,transport})).then(r=>r.json()).then(r=>{id=r.id;record('attached',{transport,runway,speed,lead});const src='/playlist/'+id+'.m3u8';if(transport==='hlsjs'){const hls=new Hls({startPosition:lead,maxBufferLength:90,backBufferLength:30});hls.on(Hls.Events.ERROR,(_,e)=>record('hls_error',{type:e.type,details:e.details,fatal:e.fatal}));hls.loadSource(src);hls.attachMedia(v);}else v.src=src;});
-setInterval(()=>{const buffered=[];for(let i=0;i<v.buffered.length;i++)buffered.push([v.buffered.start(i),v.buffered.end(i)]);if(v.currentTime>last+.05&&!v.seeking)progressSeen=true;last=v.currentTime;const sample={position:v.currentTime,progress_seen:progressSeen,ready_state:v.readyState,buffered,stalls,first_frame_ms:firstFrame};out.textContent=JSON.stringify({transport,runway,speed,lead,elapsed_seconds:Math.round((performance.now()-started)/1000),...sample,events:events.slice(-8)},null,2);if(++samples<=2000)record('sample',sample);},1000);
+import hashlib
+import http.server
+import json
+import math
+import pathlib
+import re
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import uuid
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+HLS_JS = REPO / 'crates/plurxd/src/web/hls.min.js'
+POLICY_JS = REPO / 'crates/plurxd/src/web/playback-policy.js'
+RUN_SCHEMA = 'plurx.startup-lab.run.v2'
+DECISION_SCHEMA = 'plurx.startup-lab.decision.v1'
+MEDIA_MANIFEST = 'lab-media.json'
+
+# Arms named by the handoff. Any other valid pair is accepted and named t<T>-b<B>.
+NAMED_ARMS = {'control': (16, 48), 'a': (8, 24), 'b': (8, 32), 'c': (6, 18), 'd': (4, 12)}
+DECISION_ARMS = ('a', 'b')
+DECISION_RATES = (1.05, 1.0, 2.0)
+DECISION_PLAYERS = ('safari-native', 'hlsjs')
+DECISION_TEXT = {
+    24000: '8 / 24 clean at every rate → B = 24 000',
+    32000: '8 / 24 not clean, 8 / 32 clean at every rate → B = 32 000',
+    None: 'neither clean → Part A is not built',
+}
+
+# Bounds. A target shorter than the segment cannot carry it; a bootstrap under
+# two targets is below Safari's observed start rule; 124 s is the rolling
+# reserve maximum, so no first snapshot can exceed it.
+TARGET_MAX_S = 20
+BOOTSTRAP_MAX_S = 124
+RATE_MIN = 0.25
+RATE_MAX = 8.0
+
+# Server model (seconds).
+STEADY_RESERVE_S = 48.0      # published lead ahead of the viewer, today's steady reserve
+PRODUCTION_CEILING_S = 124.0  # produced lead ahead of the viewer, the reserve maximum
+BACK_WINDOW_S = 30.0          # removed segments trail the viewer by this much
+DEFAULT_SETUP_S = 3.0         # producer start cost before the bootstrap burst
+DEFAULT_BURST = 8.0           # bootstrap is produced at this multiple of real time
+
+# Receipt rule (seconds). Stated in every receipt and decision.
+PROGRESS_S = 0.5
+FREEZE_S = 2.0
+FREEZE_ADVANCE_S = 0.1
+FORWARD_JUMP_S = 1.0
+BACKWARD_JUMP_S = 0.5
+DEFICIT_MARGIN_S = 2.0
+START_TIMEOUT_S = 120
+DEFAULT_RUN_SECONDS = 1800
+CLIENT_EVENT_CAP = 20000
+SEGMENT_LOG_CAP = 4000
+CLEAN_RULE = (
+    'A run is clean when it presented a first frame and, from then until it '
+    'completed, had: zero stalls (a `waiting` event after the playhead advanced '
+    f'{PROGRESS_S} s past its first-frame position); zero freezes ({FREEZE_S} s '
+    f'or more of wall time with less than {FREEZE_ADVANCE_S} s of playhead '
+    'advance while not paused, seeking or ended); zero position jumps (between '
+    'consecutive 1 s samples, position advance exceeding wall time x '
+    f'playbackRate by more than {FORWARD_JUMP_S} s, or position moving back '
+    f'more than {BACKWARD_JUMP_S} s); zero buffer deficits (a sample after that '
+    f'progress whose forward buffer -- end of the buffered range holding the '
+    f'playhead minus the playhead -- is under {DEFICIT_MARGIN_S} s while the '
+    'served playlist has no ENDLIST); and no fatal player error. A run counts '
+    'only when complete (its page reached the run length, timed out before a '
+    'first frame, or hit a fatal error), was not paused by the browser or the '
+    'operator, and did not exhaust the generated media. A cell is clean when it '
+    'has at least one counted run and every counted run in it is clean.'
+)
+
+
+class ArmError(ValueError):
+    pass
+
+
+def _integral(value, name):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ArmError(f'{name} must be a number, got {value!r}') from None
+    if not math.isfinite(number) or number != int(number):
+        raise ArmError(f'{name} must be a whole number of seconds, got {value!r}')
+    return int(number)
+
+
+def validate_arm(target, bootstrap, rate, segment=2):
+    """Return (target, bootstrap, rate) or raise ArmError naming the broken rule."""
+    target = _integral(target, 'target')
+    bootstrap = _integral(bootstrap, 'bootstrap')
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError):
+        raise ArmError(f'rate must be a number, got {rate!r}') from None
+    if target < segment:
+        raise ArmError(f'target {target} s is shorter than the {segment} s segment')
+    if target > TARGET_MAX_S:
+        raise ArmError(f'target {target} s is above the {TARGET_MAX_S} s bound')
+    if bootstrap < 2 * target:
+        raise ArmError(f'bootstrap {bootstrap} s is under 2 x target ({2 * target} s)')
+    if bootstrap > BOOTSTRAP_MAX_S:
+        raise ArmError(f'bootstrap {bootstrap} s is above the {BOOTSTRAP_MAX_S} s reserve maximum')
+    if bootstrap % segment:
+        raise ArmError(f'bootstrap {bootstrap} s is not a whole number of {segment} s segments')
+    if not math.isfinite(rate) or not RATE_MIN <= rate <= RATE_MAX:
+        raise ArmError(f'rate {rate} is outside {RATE_MIN}..{RATE_MAX}')
+    return target, bootstrap, rate
+
+
+def arm_name(target, bootstrap):
+    for name, pair in NAMED_ARMS.items():
+        if pair == (target, bootstrap):
+            return name
+    return f't{target}-b{bootstrap}'
+
+
+def resolve_arm(arm=None, target=None, bootstrap=None):
+    """An arm name, or an explicit pair. Explicit values win over the name."""
+    if arm:
+        if arm not in NAMED_ARMS:
+            raise ArmError(f'unknown arm {arm!r}; named arms are {", ".join(NAMED_ARMS)}')
+        named_target, named_bootstrap = NAMED_ARMS[arm]
+        target = named_target if target in (None, '') else target
+        bootstrap = named_bootstrap if bootstrap in (None, '') else bootstrap
+    if target in (None, '') or bootstrap in (None, ''):
+        raise ArmError('give an arm name or both target and bootstrap')
+    return target, bootstrap
+
+
+class Clock:
+    """Deterministic publication model; every time is seconds since the run began.
+
+    Snapshots change only on publication ticks, one target apart from release,
+    so every reload inside a tick receives identical bytes.
+    """
+
+    def __init__(self, target, bootstrap, rate, durations, setup_s=DEFAULT_SETUP_S,
+                 burst=DEFAULT_BURST, reserve_s=STEADY_RESERVE_S,
+                 ceiling_s=PRODUCTION_CEILING_S, back_s=BACK_WINDOW_S):
+        self.segment = durations[0]
+        self.target, self.bootstrap, self.rate = validate_arm(target, bootstrap, rate, self.segment)
+        if self.bootstrap / self.segment > len(durations):
+            raise ArmError(f'the media holds {len(durations)} segments, fewer than the bootstrap')
+        self.durations = durations
+        self.ends = []
+        total = 0.0
+        for duration in durations:
+            total += duration
+            self.ends.append(total)
+        self.release_s = setup_s + self.bootstrap / burst
+        self.reserve_s = reserve_s
+        self.ceiling_s = ceiling_s
+        self.back_s = back_s
+        self.tick = -1
+        self.produced_s = 0.0
+        self.count = 0
+        self.first = 0
+
+    def _count_at(self, media_s):
+        return sum(1 for end in self.ends if end <= media_s + 1e-6)
+
+    def snapshot(self, now_s, position_s=None):
+        """The snapshot served at now_s, or None before release.
+
+        position_s is the viewer's latest reported position. Unknown, the
+        model assumes the viewer has played since release at 1x, an upper
+        bound that can only publish more, and removes nothing.
+        """
+        if now_s < self.release_s:
+            return None
+        due = int((now_s - self.release_s) // self.target)
+        while self.tick < due:
+            self.tick += 1
+            tick_at = self.release_s + self.tick * self.target
+            viewer = position_s if position_s is not None else tick_at - self.release_s
+            if self.tick == 0:
+                self.produced_s = float(self.bootstrap)
+                self.count = self._count_at(self.produced_s)
+                continue
+            self.produced_s = min(self.produced_s + self.rate * self.target,
+                                  max(viewer + self.ceiling_s, self.produced_s))
+            produced = self._count_at(self.produced_s)
+            reserve = self._count_at(viewer + self.reserve_s)
+            self.count = max(self.count, min(produced, max(reserve, self.count + 1)))
+            if position_s is not None:
+                behind = self._count_at(max(0.0, position_s - self.back_s))
+                self.first = max(self.first, min(behind, self.count - 1))
+        ended = self.count >= len(self.durations)
+        return {
+            'tick': self.tick,
+            'media_sequence': self.first,
+            'count': self.count,
+            'segments': self.count - self.first,
+            'end_s': round(self.ends[self.count - 1], 3),
+            'ended': ended,
+        }
+
+    def playlist(self, snap, uri):
+        """uri(name) returns the URI for a media file name."""
+        lines = ['#EXTM3U', '#EXT-X-VERSION:7', f'#EXT-X-TARGETDURATION:{self.target}',
+                 f'#EXT-X-MEDIA-SEQUENCE:{snap["media_sequence"]}',
+                 '#EXT-X-START:TIME-OFFSET=0', f'#EXT-X-MAP:URI="{uri("init.mp4")}"']
+        for index in range(snap['media_sequence'], snap['count']):
+            lines.append(f'#EXTINF:{self.durations[index]:.6f},')
+            lines.append(uri(segment_name(index)))
+        if snap['ended']:
+            lines.append('#EXT-X-ENDLIST')
+        return '\n'.join(lines) + '\n'
+
+
+def segment_name(index):
+    return f'seg{index:05d}.m4s'
+
+
+def segment_index(name):
+    match = re.fullmatch(r'seg(\d{5})\.m4s', name)
+    return int(match.group(1)) if match else None
+
+
+def load_media(directory):
+    directory = pathlib.Path(directory).resolve()
+    manifest_path = directory / MEDIA_MANIFEST
+    if not manifest_path.is_file():
+        raise SystemExit(f'{manifest_path} is missing; make the media with --generate-media {directory}')
+    manifest = json.loads(manifest_path.read_text())
+    durations = [float(value) for value in manifest['durations']]
+    missing = [name for name in ['init.mp4'] + [segment_name(i) for i in range(len(durations))]
+               if not (directory / name).is_file()]
+    if missing:
+        raise SystemExit(f'{directory} lacks {len(missing)} media files, first {missing[0]}')
+    return directory, manifest, durations
+
+
+def file_sha256(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+
+# ---------------------------------------------------------------- media
+
+def generate_media(directory, duration, segment):
+    directory = pathlib.Path(directory)
+    if segment < 2 or segment % 2:
+        raise SystemExit('--segment must be an even number of seconds; keyframes are 2 s apart')
+    directory.mkdir(parents=True, exist_ok=True)
+    fps = 30
+    argv = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'lavfi', '-i', f'testsrc=size=640x360:rate={fps}:duration={duration}',
+        '-f', 'lavfi', '-i', f'sine=frequency=440:beep_factor=4:sample_rate=48000:duration={duration}',
+        '-map', '0:v', '-map', '1:a',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-profile:v', 'high', '-pix_fmt', 'yuv420p',
+        '-g', str(2 * fps), '-keyint_min', str(2 * fps), '-sc_threshold', '0', '-bf', '2',
+        '-flags', '+cgop', '-force_key_frames', 'expr:gte(t,n_forced*2)',
+        '-c:a', 'aac', '-b:a', '96k', '-ac', '2',
+        '-f', 'hls', '-hls_time', str(segment), '-hls_playlist_type', 'vod',
+        '-hls_segment_type', 'fmp4', '-hls_flags', 'independent_segments',
+        '-hls_fmp4_init_filename', 'init.mp4',
+        '-hls_segment_filename', str(directory / 'seg%05d.m4s'),
+        str(directory / 'source.m3u8'),
+    ]
+    subprocess.run(argv, check=True)
+    durations = [float(line.split(':', 1)[1].rstrip(','))
+                 for line in (directory / 'source.m3u8').read_text().splitlines()
+                 if line.startswith('#EXTINF:')]
+    odd = [(i, d) for i, d in enumerate(durations[:-1]) if abs(d - segment) > 0.01]
+    if odd:
+        raise SystemExit(f'segment {odd[0][0]} is {odd[0][1]} s, not {segment} s')
+    version = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True).stdout.splitlines()[0]
+    manifest = {
+        'segment_seconds': segment,
+        'segments': len(durations),
+        'durations': durations,
+        'video': f'H.264 High 640x360 {fps} fps, closed GOP, keyframe every 2 s',
+        'audio': 'AAC-LC 48 kHz stereo 96 kb/s',
+        'ffmpeg': version,
+        'argv': argv,
+        'init_sha256': file_sha256(directory / 'init.mp4'),
+    }
+    (directory / MEDIA_MANIFEST).write_text(json.dumps(manifest, indent=2) + '\n')
+    print(f'{len(durations)} segments of {segment} s in {directory}')
+
+
+# ---------------------------------------------------------------- analysis
+
+def derive_player(transport, user_agent, device=''):
+    if device:
+        return f'device:{device}'
+    if transport == 'hlsjs':
+        return 'hlsjs'
+    if transport == 'direct':
+        return 'direct'
+    agent = user_agent or ''
+    safari = 'Safari/' in agent and 'Version/' in agent and not re.search(r'Chrome|Chromium|CriOS|Edg|Firefox', agent)
+    return 'safari-native' if safari else 'native-other'
+
+
+def analyse(run, min_seconds=None):
+    """Derive the rule's quantities from a receipt's raw records.
+
+    The judged window runs from the first frame to the run's end event, or to
+    the first browser pause if one came earlier. A failure inside the window
+    always counts; a run that was paused or exhausted the media without
+    failing is not counted, so neither can hide a failure nor fake a pass.
+    """
+    if min_seconds is None:
+        min_seconds = run.get('run_seconds', DEFAULT_RUN_SECONDS)
+    events = sorted((e for e in run.get('client', []) if isinstance(e.get('client_ms'), (int, float))),
+                    key=lambda e: e['client_ms'])
+    out = {'min_seconds': min_seconds, 'client_events': len(events)}
+    if not events:
+        out.update(complete=False, counted=False, clean=False, reasons=['no client telemetry'])
+        return out
+    offsets = [e['server_ms'] - e['client_ms'] for e in events if isinstance(e.get('server_ms'), (int, float))]
+    offset = min(offsets) if offsets else None
+    first = next((e for e in events if e['event'] == 'first_frame'), None)
+    end = next((e for e in events if e['event'] in ('run_complete', 'start_timeout', 'fatal_error')), None)
+    end_ms = end['client_ms'] if end else math.inf
+    pause = next((e for e in events if e['event'] == 'pause' and first is not None
+                  and first['client_ms'] < e['client_ms'] < end_ms), None)
+    cut_ms = min(end_ms, pause['client_ms']) if pause else end_ms
+    waiting = [e for e in events if e['event'] == 'waiting']
+    out['waiting_events'] = [{'client_ms': e['client_ms'], 'position': e.get('position')} for e in waiting]
+    fatal = [e for e in events if e['client_ms'] <= cut_ms and (
+        e['event'] in ('video_error', 'player_unsupported') or (e['event'] == 'hls_error' and e.get('fatal')))]
+    if first is None:
+        out.update(first_frame=False, ttff_after_first_playlist_ms=None)
+    else:
+        served = run.get('first_playlist_served_ms')
+        out.update(first_frame=True, ttff_source=first.get('source', 'video_frame_callback'),
+                   start_position_s=first.get('position'), clock_offset_ms=offset,
+                   ttff_after_first_playlist_ms=(round(first['client_ms'] + offset - served)
+                                                 if offset is not None and served is not None else None))
+    progress_ms = None
+    if first is not None:
+        base = first.get('position') or 0
+        progress_ms = next((e['client_ms'] for e in events if e['client_ms'] >= first['client_ms']
+                            and isinstance(e.get('position'), (int, float)) and e['position'] >= base + PROGRESS_S),
+                           None)
+    out['progress_ms'] = progress_ms
+
+    def judged(ms):
+        return progress_ms is not None and progress_ms < ms <= cut_ms
+
+    stalls = [e for e in waiting if judged(e['client_ms'])]
+    samples = [e for e in events if e['event'] == 'sample' and isinstance(e.get('position'), (int, float))
+               and first is not None and first['client_ms'] <= e['client_ms'] <= cut_ms]
+    ended_at = run.get('endlist_served_ms')
+    freezes, jumps, deficits = [], [], []
+    anchor, freezing, deficit_open, previous = None, False, False, None
+    for s in samples:
+        moving = not (s.get('paused') or s.get('ended') or s.get('seeking'))
+        if previous is not None and moving and not (previous.get('paused') or previous.get('seeking')):
+            wall = (s['client_ms'] - previous['client_ms']) / 1000 * (previous.get('rate') or 1)
+            moved = s['position'] - previous['position']
+            if moved - wall > FORWARD_JUMP_S or moved < -BACKWARD_JUMP_S:
+                jumps.append({'client_ms': s['client_ms'], 'from': previous['position'],
+                              'to': s['position'], 'wall_s': round(wall, 3)})
+        previous = s
+        if not judged(s['client_ms']):
+            continue
+        if not moving:
+            anchor, freezing = None, False
+        elif anchor is None or s['position'] - anchor['position'] > FREEZE_ADVANCE_S:
+            anchor, freezing = s, False
+        elif not freezing and s['client_ms'] - anchor['client_ms'] >= FREEZE_S * 1000:
+            freezing = True
+            freezes.append({'client_ms': anchor['client_ms'], 'position': s['position']})
+        server_ms = s.get('server_ms')
+        endlisted = ended_at is not None and server_ms is not None and server_ms >= ended_at
+        ahead = s.get('ahead')
+        if not s.get('ended') and not endlisted and isinstance(ahead, (int, float)) and ahead < DEFICIT_MARGIN_S:
+            if not deficit_open:
+                deficits.append({'client_ms': s['client_ms'], 'position': s['position'], 'ahead': ahead})
+            deficit_open = True
+        else:
+            deficit_open = False
+    timed_out = bool(end and end['event'] == 'start_timeout' and first is None)
+    failed = bool(stalls or freezes or jumps or deficits or fatal or timed_out)
+    observed = None
+    if first is not None:
+        last = cut_ms if cut_ms != math.inf else (samples[-1]['client_ms'] if samples else first['client_ms'])
+        observed = round((last - first['client_ms']) / 1000, 3)
+    long_enough = observed is not None and observed >= min_seconds - 1
+    finished = end is not None and end['event'] == 'run_complete'
+    exhausted = ended_at is not None and not (finished and ended_at > (end.get('server_ms') or math.inf))
+    complete = failed or (long_enough and (finished or end is None) and not pause)
+    counted = failed or (complete and not exhausted)
+    reasons = []
+    if timed_out:
+        reasons.append(f'no first frame within {START_TIMEOUT_S} s')
+    if fatal:
+        reasons.append('fatal player error')
+    for name, count in (('stall', len(stalls)), ('freeze', len(freezes)),
+                        ('position jump', len(jumps)), ('buffer deficit', len(deficits))):
+        if count:
+            reasons.append(f'{count} {name}{"s" if count > 1 else ""}')
+    if pause and not failed:
+        reasons.append('paused by the browser or operator before completing; not counted')
+    if exhausted and not failed:
+        reasons.append('the generated media ran out before the run completed; make longer media')
+    if not complete and not pause:
+        reasons.append(f'incomplete: {observed or 0} of {min_seconds} s observed')
+    out.update(
+        stalls=len(stalls), stall_events=[{'client_ms': e['client_ms'], 'position': e.get('position')} for e in stalls],
+        freezes=len(freezes), freeze_events=freezes,
+        position_jumps=len(jumps), jump_events=jumps,
+        buffer_deficits=len(deficits), deficit_events=deficits,
+        fatal_errors=len(fatal),
+        fatal_events=[{k: e.get(k) for k in ('event', 'client_ms', 'type', 'details', 'code')} for e in fatal],
+        browser_pauses=1 if pause else 0, observed_seconds=observed,
+        complete=complete, counted=counted, clean=counted and not failed, reasons=reasons,
+    )
+    return out
+
+
+# ---------------------------------------------------------------- summary
+
+def rate_key(rate):
+    return round(float(rate), 3)
+
+
+def summarize(directory, min_seconds=DEFAULT_RUN_SECONDS):
+    directory = pathlib.Path(directory)
+    receipts = []
+    for path in sorted(directory.glob('*.json')):
+        try:
+            run = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if run.get('schema') != RUN_SCHEMA:
+            continue
+        receipts.append((path, run))
+    cells = {}
+    for path, run in receipts:
+        player = derive_player(run.get('transport'), run.get('user_agent'), run.get('device', ''))
+        key = (run['target'], run['bootstrap'], player, rate_key(run['rate']))
+        metrics = analyse(run, min_seconds)
+        entry = {
+            'id': run['id'], 'file': path.name, 'sha256': file_sha256(path),
+            'user_agent': run.get('user_agent'), 'created_utc': run.get('created_utc'),
+            'counted': metrics['counted'], 'clean': metrics['clean'], 'reasons': metrics['reasons'],
+            'ttff_after_first_playlist_ms': metrics.get('ttff_after_first_playlist_ms'),
+            'ttff_source': metrics.get('ttff_source'),
+            'observed_seconds': metrics.get('observed_seconds'),
+            **{k: metrics.get(k) for k in ('stalls', 'freezes', 'position_jumps', 'buffer_deficits',
+                                           'fatal_errors', 'browser_pauses')},
+            'waiting_events': len(metrics.get('waiting_events', [])),
+            'reloads': len(run.get('reloads', [])),
+        }
+        cells.setdefault(key, []).append(entry)
+    table = []
+    for (target, bootstrap, player, rate), runs in sorted(cells.items()):
+        counted = [r for r in runs if r['counted']]
+        status = 'missing' if not counted else ('clean' if all(r['clean'] for r in counted) else 'not clean')
+        table.append({'arm': arm_name(target, bootstrap), 'target': target, 'bootstrap': bootstrap,
+                      'player': player, 'rate': rate, 'status': status, 'runs': runs})
+    status = {(c['target'], c['bootstrap'], c['player'], c['rate']): c['status'] for c in table}
+    required, missing = [], []
+    for arm in DECISION_ARMS:
+        target, bootstrap = NAMED_ARMS[arm]
+        for player in DECISION_PLAYERS:
+            for rate in DECISION_RATES:
+                label = f'{target} / {bootstrap} {player} {rate:g}x'
+                required.append(label)
+                if status.get((target, bootstrap, player, rate_key(rate)), 'missing') == 'missing':
+                    missing.append(label)
+
+    def arm_clean(arm):
+        target, bootstrap = NAMED_ARMS[arm]
+        return all(status.get((target, bootstrap, p, rate_key(r))) == 'clean'
+                   for p in DECISION_PLAYERS for r in DECISION_RATES)
+
+    acceptance_grade = min_seconds >= DEFAULT_RUN_SECONDS
+    if missing:
+        b_ms, decision = None, None
+        refusal = ('No decision: both target-8 arms need a counted run at every rate on both '
+                   'players. Missing: ' + '; '.join(missing))
+    else:
+        refusal = None
+        b_ms = 24000 if arm_clean('a') else 32000 if arm_clean('b') else None
+        decision = DECISION_TEXT[b_ms]
+    # Runs shorter than the handoff's 30 minutes never name B. What they
+    # would have decided is kept, labelled provisional, for smoke runs.
+    provisional_decision, provisional_b_ms = decision, b_ms
+    if not acceptance_grade and refusal is None:
+        refusal = (f'No decision: runs judged over {min_seconds} s are not acceptance grade '
+                   f'(A-M0 needs {DEFAULT_RUN_SECONDS} s). Provisional: {decision}')
+    if not acceptance_grade:
+        decision, b_ms = None, None
+    return {
+        'schema': DECISION_SCHEMA,
+        'generated_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'evidence_dir': directory.name,
+        'lab_sha256': file_sha256(__file__),
+        'min_seconds': min_seconds,
+        'acceptance_grade': acceptance_grade,
+        'clean_rule': CLEAN_RULE,
+        'required_cells': required,
+        'missing_cells': missing,
+        'decision': decision,
+        'bootstrap_ms': b_ms,
+        'provisional_decision': provisional_decision,
+        'provisional_bootstrap_ms': provisional_b_ms,
+        'refusal': refusal,
+        'cells': table,
+    }
+
+
+def print_summary(result):
+    print(f'{"arm":8} {"T/B":7} {"player":22} {"rate":>5}  {"status":10} runs  ttff ms')
+    for cell in result['cells']:
+        ttff = [r['ttff_after_first_playlist_ms'] for r in cell['runs'] if r['ttff_after_first_playlist_ms'] is not None]
+        print(f'{cell["arm"]:8} {cell["target"]:>2}/{cell["bootstrap"]:<4} {cell["player"]:22} '
+              f'{cell["rate"]:>5g}  {cell["status"]:10} {len(cell["runs"]):>4}  '
+              f'{",".join(str(t) for t in ttff) or "-"}')
+        for run in cell['runs']:
+            if run['reasons']:
+                print(f'    {run["file"]}: {"; ".join(run["reasons"])}')
+    if not result['acceptance_grade']:
+        print(f'NOT ACCEPTANCE GRADE: --min-seconds {result["min_seconds"]} is under {DEFAULT_RUN_SECONDS}')
+    print(result['decision'] or result['refusal'])
+
+
+# ---------------------------------------------------------------- server
+
+INDEX = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Startup lab</title><style>body{{font:16px system-ui;margin:24px;background:#101822;color:#dae6f2}}
+a{{color:#8cc4ff}}td,th{{padding:4px 12px;text-align:left}}</style>
+<h1>Startup lab — target / bootstrap arms</h1>
+<p>Each link opens one page with one player per growth rate ({rates}). Keep the window visible and
+in front until every player says DONE ({minutes} minutes after its first frame). Receipts go to
+the evidence directory the server was started with.</p>
+<table><tr><th>Arm</th><th>Target / bootstrap</th><th>Safari native</th><th>hls.js</th></tr>{rows}</table>
+<p>Any other valid pair: <code>/run?target=T&amp;bootstrap=B&amp;transport=native|hlsjs&amp;rates=1.05,1,2</code>.
+Apple TV: open the native page from this Mac's Safari at this server's LAN address, add
+<code>&amp;device=appletv</code>, and AirPlay the video to the Apple TV; or point an AVPlayer at
+<code>/direct.m3u8?arm=a&amp;rate=1.05&amp;label=&lt;unique&gt;</code>.</p>'''
+
+PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Startup lab {arm}</title>
+<style>body{{font:14px system-ui;margin:16px;background:#101822;color:#dae6f2}}
+.players{{display:flex;flex-wrap:wrap;gap:12px}}.player{{width:330px}}video{{width:320px;background:#000}}
+pre{{white-space:pre-wrap;font-size:12px;margin:4px 0}}</style>
+<h1>Arm {arm}: target {target} s, bootstrap {bootstrap} s, {transport}</h1>
+<p>Generated H.264/AAC, 2 s segments, sliding live playlist. Keep this window visible.</p>
+<div class="players" id="players"></div>
+<script id="cfg" type="application/json">{cfg}</script>
+<script src="/playback-policy.js"></script><script src="/hls.js"></script><script>
+"use strict";
+const cfg=JSON.parse(document.getElementById('cfg').textContent);
+const origin=performance.now(),now=()=>Math.round(performance.now()-origin);
+const policy=window.PlurxPlaybackPolicy&&window.PlurxPlaybackPolicy.HLS_STARTUP;
+function ahead(v){{for(let i=0;i<v.buffered.length;i++){{const s=v.buffered.start(i),e=v.buffered.end(i);
+ if(v.currentTime>=s-0.05&&v.currentTime<=e)return +(e-v.currentTime).toFixed(3);}}return 0;}}
+function ranges(v){{const r=[];for(let i=0;i<Math.min(v.buffered.length,4);i++)r.push([+v.buffered.start(i).toFixed(3),+v.buffered.end(i).toFixed(3)]);return r;}}
+function player(rate){{
+ const box=document.createElement('div');box.className='player';
+ const v=document.createElement('video');v.muted=true;v.playsInline=true;v.controls=true;v.setAttribute('x-webkit-airplay','allow');
+ const out=document.createElement('pre');box.append(v,out);document.getElementById('players').append(box);
+ const st={{id:null,queue:[],first:null,done:false,hls:null,waiting:0,started:now(),playing:null}};
+ const post=e=>fetch('/report/'+st.id,{{method:'POST',body:JSON.stringify(e),keepalive:true}}).catch(()=>{{}});
+ const send=(event,data={{}})=>{{const e={{event,client_ms:now(),...data}};if(st.id)post(e);else st.queue.push(e);}};
+ const finish=(kind,data={{}})=>{{if(st.done)return;st.done=true;send(kind,{{position:v.currentTime,...data}});
+  setTimeout(()=>{{v.pause();if(st.hls)st.hls.destroy();v.removeAttribute('src');v.load();}},500);}};
+ const frame=(t,m)=>{{if(st.first===null){{st.first=now();send('first_frame',{{position:v.currentTime,media_time:m&&m.mediaTime,source:'video_frame_callback'}});}}}};
+ const watchFrame=()=>{{if(st.first===null&&v.requestVideoFrameCallback)v.requestVideoFrameCallback(frame);}};
+ for(const name of ['waiting','playing','pause','seeking','seeked','stalled','ended','loadedmetadata','loadeddata','canplay'])
+  v.addEventListener(name,()=>{{if(name==='waiting')st.waiting++;if(name==='loadeddata'||name==='playing')watchFrame();
+   if(name==='playing'&&st.first===null&&st.playing===null)st.playing={{client_ms:now(),position:v.currentTime}};
+   send(name,{{position:v.currentTime}});}});
+ v.addEventListener('error',()=>{{send('video_error',{{code:v.error&&v.error.code,position:v.currentTime}});finish('fatal_error');}});
+ watchFrame();
+ const params=new URLSearchParams({{target:cfg.target,bootstrap:cfg.bootstrap,rate,transport:cfg.transport,
+  duration:cfg.duration,device:cfg.device,arm:cfg.arm}});
+ fetch('/start?'+params).then(r=>r.ok?r.json():r.text().then(t=>{{throw Error(t);}})).then(r=>{{
+  st.id=r.id;st.queue.splice(0).forEach(post);
+  if(cfg.transport==='hlsjs'){{
+   if(!window.Hls||!Hls.isSupported()){{send('player_unsupported',{{detail:'hls.js MSE'}});finish('fatal_error');return;}}
+   // Mirrors constructHls for a transcode: bufferTargets() gives fwd 60 / back 30.
+   const hls=new Hls({{preferManagedMediaSource:false,maxBufferLength:60,backBufferLength:30,startPosition:-1,
+    ...(policy&&policy.manifest_load_policy?{{manifestLoadPolicy:policy.manifest_load_policy}}:{{}})}});
+   st.hls=hls;hls.on(Hls.Events.ERROR,(_,d)=>{{send('hls_error',{{type:d.type,details:d.details,fatal:!!d.fatal}});if(d.fatal)finish('fatal_error');}});
+   hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(e=>send('play_rejected',{{detail:e.name}})));
+   hls.loadSource(r.playlist);hls.attachMedia(v);
+  }}else{{
+   if(!v.canPlayType('application/vnd.apple.mpegurl')){{send('player_unsupported',{{detail:'native HLS'}});finish('fatal_error');return;}}
+   v.src=r.playlist;v.play().catch(e=>send('play_rejected',{{detail:e.name}}));
+  }}
+ }}).catch(e=>{{out.textContent='Could not start: '+e.message;}});
+ const timer=setInterval(()=>{{
+  if(st.done){{clearInterval(timer);out.textContent='DONE '+out.textContent;return;}}
+  // Safari has been seen never to call requestVideoFrameCallback for native HLS.
+  // Then the first `playing` stands in, once the playhead has really advanced.
+  if(st.first===null&&st.playing&&v.currentTime>=st.playing.position+0.5){{st.first=st.playing.client_ms;
+   send('first_frame',{{position:st.playing.position,source:'playing_fallback',client_ms:st.playing.client_ms}});}}
+  send('sample',{{position:+v.currentTime.toFixed(3),paused:v.paused,ended:v.ended,seeking:v.seeking,
+   ready_state:v.readyState,rate:v.playbackRate,ahead:ahead(v),ranges:ranges(v)}});
+  if(st.first!==null&&now()-st.first>=cfg.duration*1000)finish('run_complete');
+  else if(st.first===null&&now()-st.started>=cfg.start_timeout*1000)finish('start_timeout');
+  out.textContent=JSON.stringify({{rate,run:st.id,first_frame_ms:st.first,position:+v.currentTime.toFixed(1),
+   ahead:ahead(v),waiting:st.waiting,elapsed_s:st.first===null?null:Math.round((now()-st.first)/1000)}});
+ }},1000);
+}}
+for(const rate of cfg.rates)player(rate);
 </script>'''
-class Handler(http.server.BaseHTTPRequestHandler):
- def log_message(self,*args): pass
- def send(self,data,kind='application/json',status=200):
-  if isinstance(data,str): data=data.encode()
-  self.send_response(status);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(data)
- def do_POST(self):
-  run=runs.get(self.path.split('/')[-1]);length=int(self.headers.get('Content-Length','0'))
-  if run is None or length>8192:self.send('{}',status=400);return
-  data=json.loads(self.rfile.read(length))
-  with run_locks[run['id']]:
-   run['client'].append(data)
-   if len(run['client'])>4000:run['client']=run['client'][-4000:]
-   persist(run)
-  self.send('{}')
- def do_GET(self):
-  u=urllib.parse.urlparse(self.path);q=urllib.parse.parse_qs(u.query);p=u.path
-  if p=='/':self.send(PAGE,'text/html');return
-  if p=='/hls.js':self.send(HLS.read_bytes(),'text/javascript');return
-  if p=='/start':
-   runway=int(q.get('runway',['32'])[0]);speed=float(q.get('speed',['1.05'])[0]);id=uuid.uuid4().hex
-   if runway not in (12,16,24,32,48) or speed not in (.95,1.05,1.2,2):self.send('{}',status=400);return
-   run={'id':id,'start':time.monotonic(),'runway':runway,'speed':speed,'transport':q.get('transport',[''])[0],'lead':float(q.get('lead',['0'])[0]),'client':[],'reloads':[]}
-   with runs_lock:
-    run_locks[id]=threading.Lock()
-    runs[id]=run
-   self.send(json.dumps({'id':id}));return
-  if p.startswith('/playlist/'):
-   id=p.split('/')[-1].removesuffix('.m3u8');run=runs.get(id)
-   if run is None:self.send('{}',status=404);return
-   initial=math.ceil((run['runway']+run['lead'])/16)
-   delay=3+initial*16/8
-   remaining=delay-(time.monotonic()-run['start'])
-   if remaining>0:time.sleep(remaining)
-   elapsed=time.monotonic()-run['start']-delay
-   tick=math.floor(elapsed/8)*8
-   # Complete objects become eligible at their truthful 16/speed period.
-   end=min(120,initial+math.floor(tick*run['speed']/16))
-   first=max(0,end-10)
-   text='#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:16\n#EXT-X-MEDIA-SEQUENCE:'+str(first)+'\n#EXT-X-MAP:URI="/media/init.mp4"\n'
-   for i in range(first,end):text+='#EXTINF:16.000000,\n/media/seg%05d.m4s\n'%i
-   if end==120:text+='#EXT-X-ENDLIST\n'
-   with run_locks[id]:
-    run['reloads'].append({'elapsed_ms':round(elapsed*1000),'first':first,'end':end})
-    persist(run)
-   self.send(text,'application/vnd.apple.mpegurl');return
-  if p.startswith('/media/'):
-   file=MEDIA/p.split('/')[-1]
-   if not file.is_file():self.send('{}',status=404);return
-   self.send(file.read_bytes(),'video/mp4');return
-  if p=='/runs':
-   with runs_lock:current=list(runs.values())
-   snapshots=[]
-   for run in current:
-    with run_locks[run['id']]:snapshots.append({k:v for k,v in run.items() if k not in ('start','client')})
-   self.send(json.dumps(snapshots));return
-  self.send('{}',status=404)
-http.server.ThreadingHTTPServer(('127.0.0.1',args.port),Handler).serve_forever()
+
+
+class Lab:
+    def __init__(self, media_dir, evidence_dir, setup_s, burst):
+        self.media_dir, self.manifest, self.durations = load_media(media_dir)
+        self.evidence = pathlib.Path(evidence_dir).resolve()
+        self.evidence.mkdir(parents=True, exist_ok=True)
+        self.setup_s, self.burst = setup_s, burst
+        self.lab_sha = file_sha256(__file__)
+        self.runs, self.clocks, self.locks = {}, {}, {}
+        self.dirty = set()
+        self.lock = threading.Lock()
+        self.write_lock = threading.Lock()
+        self.direct = {}
+
+    def active(self):
+        return sum(1 for run in self.runs.values() if not run.get('finished'))
+
+    def create(self, params, user_agent, mode='page'):
+        target, bootstrap = resolve_arm(params.get('arm'), params.get('target'), params.get('bootstrap'))
+        rate = params.get('rate', '1.05')
+        clock = Clock(target, bootstrap, rate, self.durations, self.setup_s, self.burst)
+        transport = 'direct' if mode == 'direct' else params.get('transport', 'hlsjs')
+        if transport not in ('native', 'hlsjs', 'direct'):
+            raise ArmError(f'transport must be native or hlsjs, got {transport!r}')
+        device = re.sub(r'[^A-Za-z0-9_.-]', '', params.get('device', '') or params.get('label', ''))[:40]
+        seconds = _integral(params.get('duration', DEFAULT_RUN_SECONDS), 'duration')
+        run_id = uuid.uuid4().hex
+        run = {
+            'schema': RUN_SCHEMA, 'id': run_id, 'mode': mode,
+            'created_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'lab_sha256': self.lab_sha,
+            'arm': arm_name(clock.target, clock.bootstrap), 'target': clock.target,
+            'bootstrap': clock.bootstrap, 'rate': clock.rate, 'segment_s': clock.segment,
+            'transport': transport, 'device': device if mode == 'direct' or params.get('device') else '',
+            'user_agent': user_agent, 'run_seconds': seconds,
+            'model': {
+                'release_s': round(clock.release_s, 3), 'setup_s': self.setup_s, 'burst': self.burst,
+                'publication_cadence_s': clock.target, 'steady_reserve_s': clock.reserve_s,
+                'production_ceiling_s': clock.ceiling_s, 'back_window_s': clock.back_s,
+                'media_segments': len(self.durations), 'media_init_sha256': self.manifest.get('init_sha256'),
+            },
+            'rule': {'clean_rule': CLEAN_RULE, 'deficit_margin_s': DEFICIT_MARGIN_S,
+                     'progress_s': PROGRESS_S, 'freeze_s': FREEZE_S, 'forward_jump_s': FORWARD_JUMP_S,
+                     'backward_jump_s': BACKWARD_JUMP_S, 'start_timeout_s': START_TIMEOUT_S},
+            'first_playlist_served_ms': None, 'endlist_served_ms': None,
+            'reloads': [], 'segment_requests': {'count': 0, 'refused': 0, 'log': []},
+            'request_user_agents': {}, 'client': [], 'client_dropped': 0,
+        }
+        run['player'] = derive_player(transport, user_agent, run['device'])
+        with self.lock:
+            run['concurrent_runs_at_start'] = self.active() + 1
+            self.runs[run_id] = run
+            self.clocks[run_id] = (clock, time.monotonic())
+            self.locks[run_id] = threading.Lock()
+            self.dirty.add(run_id)
+        return run
+
+    def elapsed_ms(self, run_id):
+        return round((time.monotonic() - self.clocks[run_id][1]) * 1000)
+
+    def note_agent(self, run, agent):
+        agents = run['request_user_agents']
+        if agent in agents or len(agents) < 8:
+            agents[agent] = agents.get(agent, 0) + 1
+
+    def position(self, run):
+        for event in reversed(run['client']):
+            if event.get('event') == 'sample' and isinstance(event.get('position'), (int, float)):
+                return float(event['position'])
+        return None
+
+    def playlist(self, run_id, agent):
+        run = self.runs[run_id]
+        clock, began = self.clocks[run_id]
+        wait = clock.release_s - (time.monotonic() - began)
+        if wait > 0:
+            time.sleep(wait)
+        with self.locks[run_id]:
+            now_s = time.monotonic() - began
+            snap = clock.snapshot(now_s, self.position(run))
+            text = clock.playlist(snap, lambda name: f'/media/{run_id}/{name}')
+            ms = round(now_s * 1000)
+            if run['first_playlist_served_ms'] is None:
+                run['first_playlist_served_ms'] = ms
+            if snap['ended'] and run['endlist_served_ms'] is None:
+                run['endlist_served_ms'] = ms
+            previous = run['reloads'][-1] if run['reloads'] else None
+            run['reloads'].append({
+                'server_ms': ms, 'since_first_playlist_ms': ms - run['first_playlist_served_ms'],
+                'interval_ms': ms - previous['server_ms'] if previous else None,
+                'tick': snap['tick'], 'media_sequence': snap['media_sequence'],
+                'segments': snap['segments'], 'end_s': snap['end_s'], 'ended': snap['ended'],
+                'changed': previous is None or previous['tick'] != snap['tick'] and (
+                    previous['end_s'] != snap['end_s'] or previous['media_sequence'] != snap['media_sequence']),
+            })
+            self.note_agent(run, agent)
+            self.dirty.add(run_id)
+        return text
+
+    def media(self, run_id, name, agent):
+        run = self.runs[run_id]
+        index = segment_index(name)
+        if name != 'init.mp4' and index is None:
+            return None
+        with self.locks[run_id]:
+            requests = run['segment_requests']
+            clock = self.clocks[run_id][0]
+            if index is not None and index >= clock.count:
+                requests['refused'] += 1
+                self.dirty.add(run_id)
+                return None
+            if index is not None:
+                requests['count'] += 1
+                if len(requests['log']) < SEGMENT_LOG_CAP:
+                    requests['log'].append([self.elapsed_ms(run_id), index])
+            self.note_agent(run, agent)
+            self.dirty.add(run_id)
+        return (self.media_dir / name).read_bytes()
+
+    def report(self, run_id, entry):
+        run = self.runs[run_id]
+        with self.locks[run_id]:
+            entry['server_ms'] = self.elapsed_ms(run_id)
+            if len(run['client']) >= CLIENT_EVENT_CAP:
+                run['client_dropped'] += 1
+            else:
+                run['client'].append(entry)
+            if entry.get('event') in ('run_complete', 'start_timeout', 'fatal_error'):
+                run['finished'] = True
+            self.dirty.add(run_id)
+
+    def persist(self, run_id):
+        run = self.runs[run_id]
+        with self.locks[run_id]:
+            body = dict(run)
+            body['metrics'] = analyse(run)
+            text = json.dumps(body, separators=(',', ':'))
+        target = self.evidence / f'{run_id}.json'
+        temporary = target.with_suffix('.json.tmp')
+        with self.write_lock:
+            temporary.write_text(text)
+            temporary.replace(target)
+
+    def flush(self):
+        with self.lock:
+            pending, self.dirty = self.dirty, set()
+        for run_id in pending:
+            self.persist(run_id)
+
+    def flusher(self):
+        while True:
+            time.sleep(2)
+            self.flush()
+
+
+def make_handler(lab):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def log_message(self, *args):
+            pass
+
+        def send(self, data, kind='application/json', status=200):
+            if isinstance(data, str):
+                data = data.encode()
+            self.send_response(status)
+            self.send_header('Content-Type', kind)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def refuse(self, message, status=400):
+            self.send(json.dumps({'error': message}), status=status)
+
+        def agent(self):
+            return self.headers.get('User-Agent', '')[:300]
+
+        def do_POST(self):
+            run_id = self.path.rsplit('/', 1)[-1]
+            length = int(self.headers.get('Content-Length', '0'))
+            if not self.path.startswith('/report/') or run_id not in lab.runs or length > 16384:
+                self.rfile.read(min(length, 16384))
+                return self.refuse('unknown run or oversized report')
+            try:
+                entry = json.loads(self.rfile.read(length))
+            except json.JSONDecodeError:
+                return self.refuse('report is not JSON')
+            if not isinstance(entry, dict) or not isinstance(entry.get('event'), str):
+                return self.refuse('report needs an event')
+            lab.report(run_id, entry)
+            self.send('{}')
+
+        def do_GET(self):
+            url = urllib.parse.urlparse(self.path)
+            params = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+            path = url.path
+            if path == '/':
+                return self.send(index_page(), 'text/html; charset=utf-8')
+            if path == '/run':
+                try:
+                    return self.send(run_page(params), 'text/html; charset=utf-8')
+                except ArmError as error:
+                    return self.refuse(str(error))
+            if path == '/hls.js':
+                return self.send(HLS_JS.read_bytes(), 'text/javascript')
+            if path == '/playback-policy.js':
+                return self.send(POLICY_JS.read_bytes(), 'text/javascript')
+            if path == '/start':
+                try:
+                    run = lab.create(params, self.agent())
+                except ArmError as error:
+                    return self.refuse(str(error))
+                return self.send(json.dumps({'id': run['id'], 'playlist': f'/playlist/{run["id"]}.m3u8'}))
+            if path == '/direct.m3u8':
+                label = params.get('label', '')
+                if not re.fullmatch(r'[A-Za-z0-9_.-]{1,40}', label):
+                    return self.refuse('direct runs need a unique label of letters, digits, _ . -')
+                with lab.lock:
+                    run_id = lab.direct.get(url.query)
+                if run_id is None:
+                    try:
+                        run_id = lab.create(params, self.agent(), mode='direct')['id']
+                    except ArmError as error:
+                        return self.refuse(str(error))
+                    with lab.lock:
+                        run_id = lab.direct.setdefault(url.query, run_id)
+                return self.send(lab.playlist(run_id, self.agent()), 'application/vnd.apple.mpegurl')
+            if path.startswith('/playlist/'):
+                run_id = path.rsplit('/', 1)[-1].removesuffix('.m3u8')
+                if run_id not in lab.runs:
+                    return self.refuse('unknown run', 404)
+                return self.send(lab.playlist(run_id, self.agent()), 'application/vnd.apple.mpegurl')
+            if path.startswith('/media/'):
+                parts = path.split('/')
+                if len(parts) != 4 or parts[2] not in lab.runs:
+                    return self.refuse('unknown media', 404)
+                body = lab.media(parts[2], parts[3], self.agent())
+                if body is None:
+                    return self.refuse('not published', 404)
+                return self.send(body, 'video/mp4')
+            if path == '/runs':
+                with lab.lock:
+                    ids = list(lab.runs)
+                rows = []
+                for run_id in ids:
+                    run = lab.runs[run_id]
+                    with lab.locks[run_id]:
+                        metrics = analyse(run)
+                        rows.append({k: v for k, v in run.items() if k not in ('client', 'reloads', 'segment_requests')}
+                                    | {'reloads': len(run['reloads']), 'metrics': metrics})
+                return self.send(json.dumps(rows))
+            self.refuse('not found', 404)
+
+    return Handler
+
+
+def index_page():
+    rows = ''.join(
+        f'<tr><td>{name}</td><td>{t} / {b}</td>'
+        f'<td><a href="/run?arm={name}&amp;transport=native">native</a></td>'
+        f'<td><a href="/run?arm={name}&amp;transport=hlsjs">hls.js</a></td></tr>'
+        for name, (t, b) in NAMED_ARMS.items())
+    return INDEX.format(rows=rows, rates=', '.join(f'{r:g}x' for r in DECISION_RATES),
+                        minutes=DEFAULT_RUN_SECONDS // 60)
+
+
+def run_page(params):
+    target, bootstrap = resolve_arm(params.get('arm'), params.get('target'), params.get('bootstrap'))
+    rates = [r for r in params.get('rates', ','.join(f'{r:g}' for r in DECISION_RATES)).split(',') if r]
+    validated = [validate_arm(target, bootstrap, rate) for rate in rates]
+    if not validated:
+        raise ArmError('give at least one rate')
+    transport = params.get('transport', 'native')
+    if transport not in ('native', 'hlsjs'):
+        raise ArmError('transport must be native or hlsjs')
+    device = re.sub(r'[^A-Za-z0-9_.-]', '', params.get('device', ''))[:40]
+    duration = _integral(params.get('duration', DEFAULT_RUN_SECONDS), 'duration')
+    if not 10 <= duration <= 7200:
+        raise ArmError('duration must be 10..7200 s')
+    target, bootstrap = validated[0][0], validated[0][1]
+    cfg = {'arm': arm_name(target, bootstrap), 'target': target, 'bootstrap': bootstrap,
+           'rates': [v[2] for v in validated], 'transport': transport, 'device': device,
+           'duration': duration, 'start_timeout': START_TIMEOUT_S}
+    return PAGE.format(arm=cfg['arm'], target=target, bootstrap=bootstrap, transport=transport,
+                       cfg=json.dumps(cfg).replace('</', '<\\/'))
+
+
+def plan(args):
+    durations = [float(args.segment)] * args.segments
+    clock = Clock(args.target, args.bootstrap, args.rate, durations, args.setup, args.burst)
+    rows = []
+    for tick in range(args.ticks):
+        at = clock.release_s + tick * clock.target
+        position = None if args.position_lag is None else max(0.0, at - clock.release_s - args.position_lag)
+        snap = clock.snapshot(at, position)
+        rows.append({**snap, 'at_s': round(at, 3), 'position_s': position,
+                     'lead_s': None if position is None else round(snap['end_s'] - position, 3)})
+    first = Clock(args.target, args.bootstrap, args.rate, durations, args.setup, args.burst)
+    text = first.playlist(first.snapshot(first.release_s), lambda name: name)
+    print(json.dumps({'arm': arm_name(clock.target, clock.bootstrap), 'target': clock.target,
+                      'bootstrap': clock.bootstrap, 'rate': clock.rate, 'release_s': round(clock.release_s, 3),
+                      'first_playlist': text, 'snapshots': rows}, indent=1))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--generate-media', type=pathlib.Path, metavar='DIR')
+    mode.add_argument('--summarize', type=pathlib.Path, metavar='EVIDENCE_DIR')
+    mode.add_argument('--plan', action='store_true', help='print the snapshot schedule for one arm')
+    parser.add_argument('--media-dir', type=pathlib.Path)
+    parser.add_argument('--evidence-dir', type=pathlib.Path)
+    parser.add_argument('--bind', default='127.0.0.1', help='0.0.0.0 to reach an Apple TV on the LAN')
+    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--setup', type=float, default=DEFAULT_SETUP_S, help='seconds before the bootstrap burst')
+    parser.add_argument('--burst', type=float, default=DEFAULT_BURST, help='bootstrap production multiple')
+    parser.add_argument('--duration', type=int, default=2400, help='generated media seconds')
+    parser.add_argument('--segment', type=int, default=2, help='generated segment seconds')
+    parser.add_argument('--output', type=pathlib.Path, help='decision file (default EVIDENCE_DIR/decision.json)')
+    parser.add_argument('--min-seconds', type=int, default=DEFAULT_RUN_SECONDS)
+    parser.add_argument('--arm', choices=list(NAMED_ARMS))
+    parser.add_argument('--target')
+    parser.add_argument('--bootstrap')
+    parser.add_argument('--rate', default='1.05')
+    parser.add_argument('--ticks', type=int, default=8)
+    parser.add_argument('--segments', type=int, default=1200)
+    parser.add_argument('--position-lag', type=float, help='plan: viewer position = time since release - lag')
+    args = parser.parse_args(argv)
+    if args.generate_media:
+        return generate_media(args.generate_media, args.duration, args.segment)
+    if args.summarize:
+        result = summarize(args.summarize, args.min_seconds)
+        output = args.output or args.summarize / 'decision.json'
+        output.write_text(json.dumps(result, indent=1) + '\n')
+        print_summary(result)
+        print(f'decision receipt: {output}')
+        return 0 if result['decision'] else 2
+    try:
+        if args.plan:
+            args.target, args.bootstrap = resolve_arm(args.arm, args.target, args.bootstrap)
+            return plan(args)
+    except ArmError as error:
+        parser.exit(2, f'invalid arm: {error}\n')
+    if not args.media_dir or not args.evidence_dir:
+        parser.error('serving needs --media-dir and --evidence-dir')
+    lab = Lab(args.media_dir, args.evidence_dir, args.setup, args.burst)
+    server = http.server.ThreadingHTTPServer((args.bind, args.port), make_handler(lab))
+    server.daemon_threads = True
+    threading.Thread(target=lab.flusher, daemon=True).start()
+    print(f'startup lab listening on http://{args.bind}:{server.server_address[1]}/', flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        lab.flush()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

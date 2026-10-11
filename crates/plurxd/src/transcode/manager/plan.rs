@@ -987,7 +987,7 @@ impl TranscodeManager {
     /// refused as transient ([`source_proof_pending_error`]), so the next
     /// start measures again. Only callers that need the verdict to do the
     /// work call this; an advisory answer reads the remembered verdict
-    /// ([`Self::dovi_reshape_encoder_advisory`]).
+    /// ([`Self::dovi_reshape_encoder_advisory_with_preference`]).
     async fn require_dovi_renderer(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -1336,6 +1336,34 @@ impl TranscodeManager {
         .await
     }
 
+    /// [`Self::encoder_and_grade_for`], from `preference` when the caller
+    /// already holds the HWACCEL value and from the store when it does not.
+    pub(super) async fn encoder_and_grade_preferring(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        requested: bool,
+        target_height: i64,
+        subtitle_burn: bool,
+        preference: Option<&str>,
+    ) -> Result<(Encoder, OutputGrade), String> {
+        match preference {
+            Some(preference) => {
+                self.encoder_and_grade_for_with_preference(
+                    file,
+                    requested,
+                    target_height,
+                    subtitle_burn,
+                    preference,
+                )
+                .await
+            }
+            None => {
+                self.encoder_and_grade_for(file, requested, target_height, subtitle_burn)
+                    .await
+            }
+        }
+    }
+
     pub(super) async fn encoder_and_grade_for_with_preference(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -1454,23 +1482,20 @@ impl TranscodeManager {
     /// refused outright at the start, whatever the ladder said). A refuted
     /// source, or a node without the renderer, reports software, which is
     /// what the probing path answered for either.
-    pub(super) async fn dovi_reshape_encoder_advisory(
+    ///
+    /// The caller holds the [`keys::HWACCEL`] preference (a create's planning
+    /// snapshot), so this reads nothing but the remembered verdict.
+    pub(super) async fn dovi_reshape_encoder_advisory_with_preference(
         &self,
         file: &plurx_core::domain::MediaFile,
+        requested: &str,
     ) -> Encoder {
         if !self.dovi_reshape
             || self.dovi_proofs.verdict(&Self::dovi_proof_key(file)) == Some(false)
         {
             return Encoder::Software;
         }
-        let requested = self
-            .store
-            .get_setting(keys::HWACCEL)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        self.dovi_reshape_encoder(&requested).await
+        self.dovi_reshape_encoder(requested).await
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -19793,6 +19793,17 @@ async fn playback_planning_snapshot_retains_one_source_and_settings_revision() {
         );
         assert_eq!(before.settings["playback.fixture"], "before", "{backend}");
         assert_eq!(before.settings["transcode.fixture"], "encoder", "{backend}");
+        // The item title rides in the same statement, for session starts
+        // that would otherwise read the item for attribution alone.
+        assert_eq!(before.item_title.as_deref(), Some("planning"), "{backend}");
+        let bare = store
+            .playback_planning_snapshot(file, &[])
+            .await
+            .expect("keyless snapshot")
+            .expect("known source");
+        assert!(bare.settings.is_empty(), "{backend}: no keys, no settings");
+        assert_eq!(bare.file.id, file, "{backend}");
+        assert_eq!(bare.item_title.as_deref(), Some("planning"), "{backend}");
         store
             .put_setting("jobs.fixture", "history")
             .await
@@ -35970,6 +35981,12 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
     check_summary(summary, "Authority");
     assert_watch_read_path(&store, false, "Authority summary is one consistent read");
     assert_eq!(request.watch_reads(), 1, "summary: one counted watch read");
+    // The same timer that counts the operation sums its wall time into the
+    // request, which the create path logs as `store_ms`.
+    assert!(
+        request.snapshot()[1] >= 1 && request.store_time() > std::time::Duration::ZERO,
+        "a counted Authority read adds its own time to the request"
+    );
 
     store.validation_reset_operation_counts();
     let request = plurx_core::store::HttpStoreOperationCounts::default();
