@@ -601,6 +601,7 @@ pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response
             user_id,
             owner,
             adoption,
+            request.expected_predecessor_owner_epoch,
             deadline.into(),
         )
         .await

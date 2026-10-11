@@ -1,6 +1,8 @@
 package tv.plurx.app.player
 
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
@@ -21,7 +23,7 @@ internal class ContinuousReservations(
     private var wanted = video.single { it.text("rendition_id") == initialRendition }
     private var transaction: String? = null
     private var automatic = false
-    /** The previous choice was restored after [failedRow] failed. [cancelProven]
+    /** The previous choice was restored, or never left, after [failedRow] failed. [cancelProven]
      * says whether the target was also proven cancelled before any exposure;
      * either way the change that asked for it is over. */
     data class Retained(val failedRow: JsonObject, val request: Long, val cancelProven: Boolean = true)
@@ -30,6 +32,14 @@ internal class ContinuousReservations(
     private data class FailedChange(val row: JsonObject, val previous: Previous, val through: Long,
         val transaction: String?, val wasPresented: Boolean)
     private var failedChange: FailedChange? = null
+    /** Changes cancelled while they waited for this owner. Each changed
+     * nothing, so the previous choice stands; they are written without the
+     * lock because their callers never held it. A directed change (positive
+     * request) and an Auto decision (negative request) can both be waiting,
+     * so each kind keeps its own record. Within a kind only the newest can
+     * still settle anything: a newer tap supersedes the older change, and a
+     * newer Auto decision takes a new request the controller matches. */
+    private val unreached = ConcurrentHashMap<Boolean, Retained>()
 
     suspend fun initial(through: Long, automatic: Boolean) = lock.withLock {
         this.automatic = automatic
@@ -38,9 +48,24 @@ internal class ContinuousReservations(
 
     /** The caller must establish actual supported formats before a new target
      * is prepared. This retains the previous choice when that proof is absent. */
-    suspend fun change(rendition: String, through: Long, automatic: Boolean, supported: Set<String>, request: Long = 0): Boolean = lock.withLock {
-        val next = video.singleOrNull { it.text("rendition_id") == rendition } ?: return@withLock false
-        if (rendition !in supported) return@withLock false
+    suspend fun change(rendition: String, through: Long, automatic: Boolean, supported: Set<String>, request: Long = 0): Boolean {
+        val next = video.singleOrNull { it.text("rendition_id") == rendition } ?: return false
+        if (rendition !in supported) return false
+        // A change that ends without an answer must still reach recovery,
+        // which reports it settled. One cancelled while another owner held
+        // the lock (a reservation's exchange, a recovery) recorded nothing,
+        // so recovery reported nothing and the caller's uncertain change
+        // stayed pending, holding Auto, for the rest of the title.
+        try { lock.lock() } catch (cancelled: CancellationException) {
+            unreached.merge(request < 0, Retained(next, request)) { old, new ->
+                if (Math.abs(new.request) >= Math.abs(old.request)) new else old
+            }
+            throw cancelled
+        }
+        return try { changeOwned(next, through, automatic, request) } finally { lock.unlock() }
+    }
+
+    private suspend fun changeOwned(next: JsonObject, through: Long, automatic: Boolean, request: Long): Boolean {
         val previous = wanted
         val previousAutomatic = this.automatic
         val wasPresented = protocol.ledger?.get("transactions")?.jsonArray.orEmpty().any {
@@ -56,7 +81,7 @@ internal class ContinuousReservations(
             this.automatic = automatic
             reserveWindow(through)
             if (next != previous && wasPresented) optionalPrevious = Previous(previous, previousAutomatic, request)
-            true
+            return true
         } catch (error: Exception) {
             failedChange = FailedChange(next, Previous(previous, previousAutomatic, request), through, transaction, wasPresented)
             wanted = previous
@@ -69,6 +94,8 @@ internal class ContinuousReservations(
     }
 
     suspend fun recoverFailedChange(): Retained? = lock.withLock {
+        // One report per call; the pump's successive passes drain the rest.
+        unreached.keys.firstNotNullOfOrNull { unreached.remove(it) }?.let { return@withLock it }
         val failed = failedChange ?: return@withLock null
         protocol.settlePending()
         protocol.snapshot()
