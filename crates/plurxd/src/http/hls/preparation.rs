@@ -1743,7 +1743,7 @@ pub(super) async fn process_preparation_candidate(
 /// side is unprotected.
 const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_MS as i64 + 30_000;
 pub(super) const PREPARATION_STORE_BUDGET: Duration = Duration::from_secs(5);
-const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
+pub(super) const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 
 /// M6 §3.4 — stage the successor the decision just admitted.
 ///
@@ -1780,6 +1780,33 @@ pub(super) struct AcceptedAsk {
     pub(super) planning_cancellation: Option<tokio_util::sync::CancellationToken>,
     pub(super) planning_registration: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) quality_intent: Option<QualityIntentIdentity>,
+}
+
+/// Whether this successor reserves first-preparation output capture
+/// (`prepared_output_capture_pending`).
+///
+/// Only a primed VOD successor captures, and a remote owner must advertise
+/// that it seals capture. A peer that predates it answers PREPARE with a full
+/// uncaptured attachment; the origin's durable re-check
+/// (`prepared_prime_is_ready`) then refuses the still-pending row, so the
+/// whole prime — up to the 45 s budget of encode work — is spent for nothing,
+/// on every routed change while a rolling upgrade is in progress. Left
+/// unstamped, the same peer primes the ordinary uncaptured attachment the
+/// origin accepts, which is the behaviour before capture existed. This is the
+/// negotiation `media_pool.retained_output_receiver` already does for START.
+pub(super) async fn successor_owner_captures_output(
+    state: &AppState,
+    successor_owner: &str,
+    presentation: crate::transcode::Presentation,
+    prime_worker: bool,
+) -> bool {
+    prime_worker
+        && presentation == crate::transcode::Presentation::Vod
+        && (successor_owner == state.node_id
+            || state
+                .media_pool
+                .prepared_output_capture_receiver(successor_owner)
+                .await)
 }
 
 #[cfg(test)]
@@ -2041,7 +2068,14 @@ pub(super) async fn stage_prepared_successor_with_prime(
         Ok(value) => value,
         Err(_) => return,
     };
-    if staged_request.presentation == crate::transcode::Presentation::Vod && prime_worker {
+    let captures_output = successor_owner_captures_output(
+        state,
+        successor_owner,
+        staged_request.presentation,
+        prime_worker,
+    )
+    .await;
+    if captures_output {
         response_value
             .as_object_mut()
             .expect("StartResponse object")
@@ -2231,6 +2265,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
                                     local_user_id,
                                     owner,
                                     adoption,
+                                    Some(preparation.expected_predecessor_owner_epoch),
                                     prime_deadline,
                                 )
                                 .await
@@ -2252,6 +2287,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
                                     user_id: local_user_id,
                                 },
                             expected_owner_epoch: 1,
+                            // Only a capture receiver understands the field.
+                            expected_predecessor_owner_epoch: captures_output
+                                .then_some(preparation.expected_predecessor_owner_epoch),
                         },
                         prime_deadline.into(),
                     )

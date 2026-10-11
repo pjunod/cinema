@@ -554,7 +554,7 @@ function completeHlsStartup(player){
   clearTimeout(player.stallTimer); player.stallTimer=null;
   reportTtff();
   clientLog(Object.assign({level:'info',event:'hls_startup_presenting',
-    detail:`manifest=${episode.manifestState};media=${episode.mediaLoaded?'yes':'no'}`,
+    detail:`manifest=${episode.manifestState};level=${episode.levelState};media=${episode.mediaLoaded?'yes':'no'}`,
     message:`HLS startup presented after ${Math.round(performance.now()-episode.startedAt)}ms`},
     playbackContext()));
   return true;
@@ -583,6 +583,14 @@ function diagnoseHlsStartup(player){
   if(episode?.transport==='native'&&episode.native.attached) return {
     title:'Playback did not start.',
     detail:'The native playlists were ready, but no presentation progress was observed. The decoder cause is not known.'};
+  // A parsed master names no segments. hls.js requests fragments only from a
+  // loaded level playlist, so missing media is not the cause until it loads.
+  if(episode&&episode.transport!=='native'&&!episode.mediaLoaded&&episode.levelState!=='loaded'){
+    const status=episode.levelState==='failed'&&failure&&failure.status;
+    return {title:'The video playlist could not be loaded.',
+      detail:episode.levelState==='failed'&&failure&&failure.message?failure.message:
+        `The stream playlist loaded, but the video playlist did not load before the startup deadline${status?` (HTTP ${status})`:''}.`};
+  }
   if(episode&&!episode.mediaLoaded) return {
     title:'The video data did not arrive in time.',
     detail:'The playlist loaded, but no media arrived before the startup deadline.'};
@@ -887,8 +895,11 @@ function createHlsStartupLoader(StockLoader,episode){
         }
         this.plurxRequestOrdinal=++episode.dispatches;
         // Level playlists also cross this gate. They do not undo a parsed
-        // master, which an early Pause/Play must resume without loadSource.
-        if(episode.manifestState!=='parsed') episode.manifestState='loading';
+        // master, which an early Pause/Play must resume without loadSource;
+        // their own readiness is the separate level state.
+        if(context.type==='level'){
+          if(episode.levelState!=='loaded') episode.levelState='loading';
+        }else if(episode.manifestState!=='parsed') episode.manifestState='loading';
         episode.requestStartedAt=performance.now();
         clientLog(Object.assign({level:'info',event:'hls_manifest_dispatch',
           ordinal:this.plurxRequestOrdinal,
@@ -911,10 +922,12 @@ function createHlsStartupLoader(StockLoader,episode){
           if(!failure) observeStreamFailureResponse(xhr,evidence,()=>
             hlsStartupCurrent(episode.player,episode)
             &&this.plurxIntentGeneration===(episode.player.controlIntentGeneration||0)).catch(()=>{});
+          const level=context.type==='level';
+          if(level&&episode.levelState!=='loaded') episode.levelState='failed';
           episode.latestFailure=failure||{status:xhr.status,code:null,
             message:(xhr.status===401||xhr.status===403)
               ?'Sign in again before retrying playback.'
-              :`The manifest request failed with HTTP ${xhr.status}.`,
+              :`The ${level?'video playlist':'manifest'} request failed with HTTP ${xhr.status}.`,
             at:Date.now(),attachment:episode.player.mediaAttachment,
             request_ordinal:this.plurxRequestOrdinal};
           if(PlaybackPolicy.hlsStartupResponseAction({status:xhr.status,
@@ -1026,7 +1039,7 @@ function hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt,transpo
     native:transport==='native'?{execution:0,attached:false,busy:false,reloadUsed:false,
       classifying:false,retries:0,metadataListener:null,deadlineTimer:null}:null,
     startAt:Math.max(0,Number(startAt)||0),hls:null,state:'active',
-    manifestState:'unknown',mediaLoaded:false,decoderFailed:false,
+    manifestState:'unknown',levelState:'unknown',mediaLoaded:false,decoderFailed:false,
     startedAt:performance.now(),
     deadlineMs:performance.now()+PlaybackPolicy.HLS_STARTUP.cold_deadline_ms,
     dispatches:0,loaders:new Set(),latestFailure:null,
@@ -1162,6 +1175,7 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
   // session that later cuts a longer one re-tunes again.
   if(Hls.Events.LEVEL_LOADED) hls.on(Hls.Events.LEVEL_LOADED,(_,d)=>{
     if(!observesCurrent()) return;
+    startup.levelState='loaded';
     // A retry that loaded the playlist succeeded. Its earlier 503 is stale
     // now, not after an arbitrary wall-clock TTL; otherwise an unrelated
     // later fatal is confidently mislabeled "Still preparing".

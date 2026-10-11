@@ -175,6 +175,9 @@ struct Limits {
     probes: usize,
     inflight: usize,
     entries: usize,
+    /// Whether this cache's answers and probes are item detail's, and so
+    /// belong in the `plurx_storage_availability_*` series.
+    detail_metrics: bool,
 }
 
 impl Default for Limits {
@@ -183,6 +186,7 @@ impl Default for Limits {
             probes: PROBES,
             inflight: MAX_INFLIGHT,
             entries: ENTRIES,
+            detail_metrics: true,
         }
     }
 }
@@ -202,8 +206,28 @@ pub struct AvailabilityCache {
 
 impl AvailabilityCache {
     pub fn new() -> Arc<Self> {
+        Self::with_limits(Limits::default())
+    }
+
+    /// A private cache for a library-wide walk (the index coverage report).
+    ///
+    /// Separate from item detail's on purpose: a walk stats every file on
+    /// every mount, and sharing detail's probe permits would let one click
+    /// queue thousands of stats in front of a viewer's page — or, on a hung
+    /// mount, hold every permit detail has. `probes` bounds this walk's
+    /// blocked workers instead, and its answers stay out of detail's metrics.
+    pub fn for_walk(probes: usize, entries: usize) -> Arc<Self> {
+        Self::with_limits(Limits {
+            probes: probes.max(1),
+            inflight: MAX_INFLIGHT,
+            entries: entries.max(1),
+            detail_metrics: false,
+        })
+    }
+
+    fn with_limits(limits: Limits) -> Arc<Self> {
         Self::with_stat_probe(
-            Limits::default(),
+            limits,
             Arc::new(|path| {
                 Box::pin(async move {
                     match tokio::fs::metadata(path).await {
@@ -257,6 +281,18 @@ impl AvailabilityCache {
     /// Start all uncached stats before waiting. A stale but still honest
     /// observation answers immediately while its refresh continues.
     pub async fn observe_many(self: &Arc<Self>, paths: &[PathBuf]) -> Vec<Observation> {
+        self.observe_many_within(paths, REQUEST_BUDGET).await
+    }
+
+    /// [`Self::observe_many`] with the caller's wait instead of the detail
+    /// page's. A library-wide reader (the index coverage report) waits longer
+    /// per batch so a cold cache answers rather than reading `Unknown`; the
+    /// probe concurrency and in-flight caps are the same either way.
+    pub async fn observe_many_within(
+        self: &Arc<Self>,
+        paths: &[PathBuf],
+        budget: Duration,
+    ) -> Vec<Observation> {
         let mut answers = Vec::with_capacity(paths.len());
         let mut pending = Vec::new();
         for (index, path) in paths.iter().enumerate() {
@@ -270,7 +306,7 @@ impl AvailabilityCache {
         if !pending.is_empty() {
             // One page budget, not 250 ms multiplied by audiobook part count.
             let _ = tokio::time::timeout(
-                REQUEST_BUDGET,
+                budget,
                 join_all(pending.iter_mut().map(|(_, receiver)| async move {
                     if receiver.borrow().is_none() {
                         let _ = receiver.changed().await;
@@ -285,13 +321,15 @@ impl AvailabilityCache {
             }
         }
 
-        for answer in &answers {
-            let slot = match answer.state {
-                Availability::Available => 0,
-                Availability::Unavailable => 1,
-                Availability::Unknown => 2,
-            };
-            ANSWERS[slot].fetch_add(1, Ordering::Relaxed);
+        if self.limits.detail_metrics {
+            for answer in &answers {
+                let slot = match answer.state {
+                    Availability::Available => 0,
+                    Availability::Unavailable => 1,
+                    Availability::Unknown => 2,
+                };
+                ANSWERS[slot].fetch_add(1, Ordering::Relaxed);
+            }
         }
         answers
     }
@@ -343,7 +381,9 @@ impl AvailabilityCache {
         let path = path.to_path_buf();
         let (sender, receiver) = watch::channel(None);
         inner.inflight.insert(path.clone(), receiver.clone());
-        INFLIGHT.fetch_add(1, Ordering::Relaxed);
+        if self.limits.detail_metrics {
+            INFLIGHT.fetch_add(1, Ordering::Relaxed);
+        }
         drop(inner);
         let cache = Arc::clone(self);
         tokio::spawn(async move { cache.run_probe(path, sender).await });
@@ -378,10 +418,12 @@ impl AvailabilityCache {
             }
         };
         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-        PROBE_SUM_US.fetch_add(elapsed_us, Ordering::Relaxed);
-        for (bucket, count) in PROBE_BUCKETS_US.iter().zip(&PROBE_COUNTS) {
-            if elapsed_us <= *bucket {
-                count.fetch_add(1, Ordering::Relaxed);
+        if self.limits.detail_metrics {
+            PROBE_SUM_US.fetch_add(elapsed_us, Ordering::Relaxed);
+            for (bucket, count) in PROBE_BUCKETS_US.iter().zip(&PROBE_COUNTS) {
+                if elapsed_us <= *bucket {
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         let (state, stat) = match probed {
@@ -425,7 +467,9 @@ impl AvailabilityCache {
             }
             inner.inflight.remove(&path);
         }
-        INFLIGHT.fetch_sub(1, Ordering::Relaxed);
+        if self.limits.detail_metrics {
+            INFLIGHT.fetch_sub(1, Ordering::Relaxed);
+        }
         let _ = sender.send(Some(observation));
     }
 }
@@ -482,6 +526,7 @@ mod tests {
                 probes: 1,
                 inflight: 2,
                 entries: 2,
+                detail_metrics: true,
             },
             probe,
         )
@@ -563,6 +608,7 @@ mod tests {
                 probes: 1,
                 inflight: 1,
                 entries: 2,
+                detail_metrics: true,
             },
             Arc::new(move |_| {
                 let held = Arc::clone(&held);
@@ -593,6 +639,7 @@ mod tests {
                 probes: 1,
                 inflight: 1,
                 entries: 2,
+                detail_metrics: true,
             },
             Arc::new(move |path| {
                 seen.fetch_add(1, Ordering::Relaxed);
