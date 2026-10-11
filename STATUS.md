@@ -18,9 +18,12 @@ away). Now: the probe reads the build's device types and filters and reports
 what it cannot express as not available; CUDA, OpenCL and Metal-on-PQ take
 the CPU chain's operator from one source that also keys plan identity; the
 Metal graph is the first VideoToolbox candidate (≈2.2× the CPU chain within
-10.3 levels); and the Mac context offers its HDR10 Metal graphs only when
-that parity passed. HLG through Metal is unchanged. Use still goes through
-Mac video processing in Developer.
+10.3 levels), and a pass ends the race with node routing left on the CPU
+chain; and the Mac context offers its HDR10 Metal graphs only when that
+parity passed. GPU graphs now get the CPU chain's peak. HLG through Metal is
+unchanged. Use still goes through Mac video processing in Developer. Plan
+identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
+included) are made once more under new keys.
 
 ## Live TV station logos on Apple TV, iOS and Android
 

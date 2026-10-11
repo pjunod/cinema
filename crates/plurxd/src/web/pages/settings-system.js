@@ -72,17 +72,18 @@ function buildLabel(){
 // Rejected candidates remain available in a collapsed disclosure, so a working
 // GPU selection is not buried under diagnostics from the other probes.
 //
-// The Metal graph is proved here like any other but reaches sessions only
-// through Mac video processing, so on a Mac the HDR line follows that context:
-// green when it is on and has observed the graph, otherwise CPU with a note
-// saying the Metal graph matched the CPU picture and where it is turned on.
+// The Metal graph is proved here like any other, but sessions reach it only
+// through Mac video processing, so node selection stays on the CPU chain when
+// it passes. The HDR line follows that context: green Metal when it is on and
+// has observed the graph; otherwise the node's own selection, with a note that
+// Metal matched the CPU picture and what it is waiting on.
 function toneMapHtml(tm, mac){
   if(!tm) return `<span class="muted">—</span>`;
   const verdicts=tm.verdicts||[];
-  const viaMac = tm.selected==="vt_tonemap_metal";
-  const macMetal = mac && mac.hdr10_metal || {};
-  const macReady = !!(mac && mac.enabled && macMetal.availability==="available");
-  const gpu = tm.selected && tm.selected!=="cpu" && (!viaMac || macReady);
+  const metal=verdicts.find(v=>v.pipeline==="vt_tonemap_metal"&&v.passed);
+  const macMetal=mac&&mac.hdr10_metal||{};
+  const macReady=!!(metal&&mac&&mac.enabled&&macMetal.availability==="available");
+  const gpu=macReady||!!(tm.selected&&tm.selected!=="cpu");
   // Everything the probe rejected. The CPU chain is the reference the others
   // are measured against rather than a candidate, so it never appears as one —
   // "CPU tone-map: 1.0× — not selected" is a line that tells nobody anything.
@@ -91,8 +92,8 @@ function toneMapHtml(tm, mac){
   const rejected=verdicts.filter(v=>!v.passed && !v.unavailable && v.pipeline!==tm.selected);
   const unavailable=verdicts.filter(v=>v.unavailable);
   const head = gpu
-    ? `<span style="color:var(--good)">${esc(tm.selected_label)}</span>`
-    : esc(viaMac ? "CPU tone-map" : (tm.selected_label||"CPU tone-map"));
+    ? `<span style="color:var(--good)">${esc(macReady?metal.label:tm.selected_label)}</span>`
+    : esc(tm.selected_label||"CPU tone-map");
   if(!tm.ran){
     // Not probed is not the same as everything failing, and the reason says
     // which — usually "software encoder", where a GPU graph would have to
@@ -104,13 +105,18 @@ function toneMapHtml(tm, mac){
   // whole point of this line: everything still plays, 4K just stays slow, and
   // without this there is nothing on screen to distinguish a box with no GPU
   // tone-map from one whose driver refused the graph.
-  const proved=verdicts.find(v=>v.pipeline===tm.selected);
-  const speed=proved && Number.isFinite(proved.speedup) ? ` at ${proved.speedup.toFixed(2)}× the CPU chain` : "";
-  const note = viaMac && !macReady
-    ? ` <span class="muted">— ${esc(tm.selected_label)} matched the CPU picture${speed}; ${mac && mac.enabled
-        ? `Mac video processing has not observed it (${esc(macMetal.reason||"pending")})`
-        : "HDR uses it once Mac video processing is on in Settings → Developer"}</span>`
-    : !gpu && rejected.length ? ` <span class="muted">— fell back</span>` : "";
+  let note="";
+  if(metal&&!macReady){
+    const speed=Number.isFinite(metal.speedup)?` at ${metal.speedup.toFixed(2)}× the CPU chain`:"";
+    const waiting=!(mac&&mac.enabled)
+      ? "HDR uses it once Mac video processing is on in Settings → Developer"
+      : macMetal.availability==="unavailable"
+        ? `Mac video processing reports it unavailable (${esc(macMetal.reason||"unknown")})`
+        : "Mac video processing is still checking it";
+    note=` <span class="muted">— ${esc(metal.label)} matched the CPU picture${speed}; ${waiting}</span>`;
+  } else if(!gpu && rejected.length){
+    note=` <span class="muted">— fell back</span>`;
+  }
   const rows=rejected.concat(unavailable).map(v=>
     `<div class="muted" style="font-size:12px">${esc(v.label)}: ${esc(v.rejected||"rejected")}</div>`
   ).join("");
@@ -298,7 +304,7 @@ function systemPanel(sys,playbackEvents){
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
         <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>
         <dt>Transcoder</dt><dd>${esc(sys.encoder_selected)} <span class="muted">(preference: ${esc(sys.hwaccel_pref)})</span></dd>
-        <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map)}</dd>
+        <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map, sys.macos_video_processing)}</dd>
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
         <dt>On this node</dt><dd><div class="system-now">
           <div class="system-now-counts">${sys.active_transcodes} managed transcode/remux session${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>

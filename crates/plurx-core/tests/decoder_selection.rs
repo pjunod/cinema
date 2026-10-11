@@ -481,7 +481,12 @@ fn macos_processing_rolling_and_vod_share_frozen_color_graph() {
         12.0,
     );
     let graph = Pipeline::VtToneMapMetal
-        .filters(Some(1920), 1080, Some("hdr10"))
+        .filters_at_peak(
+            Some(1920),
+            1080,
+            Some("hdr10"),
+            Some(plan.options().tone_map_peak_nits),
+        )
         .expect("graph");
     for args in [&rolling, &vod] {
         assert!(args
@@ -551,7 +556,12 @@ fn macos_processing_continuous_vod_retains_the_existing_avc_envelope() {
             12.0,
         );
         let renderer = pipeline
-            .filters(Some(1920), 1080, Some(if hdr { "hdr10" } else { "sdr" }))
+            .filters_at_peak(
+                Some(1920),
+                1080,
+                Some(if hdr { "hdr10" } else { "sdr" }),
+                Some(plan.options().tone_map_peak_nits),
+            )
             .expect("renderer");
         for args in [&rolling, &vod] {
             for (flag, value) in [

@@ -234,6 +234,13 @@ impl MacosVideoProbe {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// A probe for a new runtime cache, carrying this process's boot parity.
+    pub(crate) fn rebuilt(&self, runtime_cache: PathBuf) -> Self {
+        let probe = Self::new(runtime_cache);
+        probe.set_pq_tone_map_parity(self.pq_tone_map_parity());
+        probe
+    }
+
     /// Recorded before the first reprobe; every later generation applies it.
     pub(crate) fn set_pq_tone_map_parity(&self, parity: CpuParity) {
         *self
@@ -2151,8 +2158,12 @@ mod tests {
     fn the_parity_survives_the_probe_being_rebuilt_for_the_cache_layout() {
         let probe = MacosVideoProbe::new(PathBuf::from("unused-runtime-cache"));
         assert_eq!(probe.pq_tone_map_parity(), CpuParity::NotMeasured);
-        probe.set_pq_tone_map_parity(CpuParity::Passed);
-        assert_eq!(probe.pq_tone_map_parity(), CpuParity::Passed);
+        for parity in [CpuParity::Passed, CpuParity::Failed] {
+            probe.set_pq_tone_map_parity(parity);
+            let rebuilt = probe.rebuilt(PathBuf::from("final-runtime-cache"));
+            assert_eq!(rebuilt.pq_tone_map_parity(), parity);
+            assert_eq!(rebuilt.runtime_cache, PathBuf::from("final-runtime-cache"));
+        }
     }
 
     #[test]

@@ -325,11 +325,8 @@ impl TranscodeManager {
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
-        let parity = self.macos_video_probe.pq_tone_map_parity();
-        self.macos_video_probe = Arc::new(crate::macos_video::MacosVideoProbe::new(
-            self.runtime_cache.clone(),
-        ));
-        self.macos_video_probe.set_pq_tone_map_parity(parity);
+        self.macos_video_probe =
+            Arc::new(self.macos_video_probe.rebuilt(self.runtime_cache.clone()));
         self.subtitle_cache = subtitle_cache;
         self.subtitle_membership = cluster_membership.clone();
         // Renditions are durable state — admitted ones are the copy cache the
@@ -691,16 +688,8 @@ impl TranscodeManager {
         let session_pressure_limit = hardware_slots_max
             .saturating_add((software_threads_max / 2).max(1))
             .max(1);
-        // A graph sessions reach only through the macOS context is advertised
-        // by that context below, when it is enabled and observed. Node routing
-        // sends such sessions to the CPU chain, so that is what it offers.
-        let routed = if self.pipeline.requires_macos_context() {
-            Pipeline::Cpu
-        } else {
-            self.pipeline
-        };
         let mut tone_map_pipelines = if capabilities.tone_map {
-            vec![routed.name().to_owned()]
+            vec![self.pipeline.name().to_owned()]
         } else {
             Vec::new()
         };

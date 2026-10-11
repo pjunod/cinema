@@ -5959,8 +5959,12 @@ speed declines only that candidate. Subtitle burns still download the mapped
 SDR frames for composition and upload them to the encoder afterward.
 
 With a VideoToolbox encoder (an Apple Silicon node) the probe tries the Metal
-tone-map (`vt_tonemap_metal`) first, then OpenCL, under the same picture and
-speed checks. A candidate this FFmpeg build cannot express — the macOS
+tone-map (`vt_tonemap_metal`) first, under the same picture and speed checks;
+OpenCL is tried only if Metal fails. A passing Metal graph ends the race with
+the node's own routing left on the CPU chain, because Mac video processing
+takes over exactly the sessions the node would send to the CPU chain. GPU
+graphs are given the same peak as the CPU chain (MaxCLL, else mastering
+maximum, else 1,000 nits). A candidate this FFmpeg build cannot express — the macOS
 Jellyfin build has no Vulkan and no libplacebo — is listed as *not available
 on this platform* and never run, so it neither shows an allocation error nor
 makes a CPU result a fallback. Sessions reach the Metal graph only through

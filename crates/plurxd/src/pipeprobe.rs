@@ -612,8 +612,17 @@ where
         let passed = verdict.passed;
         verdicts.push(verdict);
         if passed {
-            selected = candidate;
-            break; // candidates are in preference order; the first proof wins
+            // Candidates are in preference order; the first proof wins. A
+            // graph sessions reach only through the macOS context is proved
+            // here for that context and ends the race too — it is this
+            // encoder's platform path — but node routing keeps the CPU chain:
+            // the context takes over only sessions the node would send to the
+            // CPU chain, so selecting a vendor-neutral graph beside it would
+            // take the very sessions it exists to route.
+            if !candidate.requires_macos_context() {
+                selected = candidate;
+            }
+            break;
         }
     }
 
@@ -630,6 +639,14 @@ where
         tracing::info!(
             pipeline = selected.name(),
             "tone-map runs on the GPU for HDR10 sources"
+        );
+    } else if let Some(proved) = verdicts.iter().find(|v| {
+        v.passed && Pipeline::parse(&v.pipeline).is_some_and(Pipeline::requires_macos_context)
+    }) {
+        tracing::info!(
+            pipeline = %proved.pipeline,
+            "the platform tone-map graph matched the CPU reference; HDR sessions use it \
+             through Mac video processing and otherwise the CPU chain"
         );
     } else {
         tracing::info!(
@@ -848,7 +865,9 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
     args.push("-i".into());
     args.push(fixture.to_string_lossy().into_owned());
 
-    let mut vf = match candidate.filters(None, PROBE_HEIGHT, Some("hdr10")) {
+    // At the CPU reference's 1,000-nit policy peak, as production passes the
+    // source's peak to both.
+    let mut vf = match candidate.filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(1_000)) {
         Some(g) => g,
         // The CPU reference: the tone map `video_filters` builds for an
         // HDR10 source at the 1,000-nit policy peak, taken from the one
@@ -1519,6 +1538,47 @@ mod tests {
         assert!(Inventory::from_listings(MACOS_HWACCELS, "").is_none());
     }
 
+    /// The production listing read: the two flags, stdout and stderr merged.
+    #[tokio::test]
+    async fn the_default_inventory_reads_both_listings_through_the_spawn_seam() {
+        struct Listings(std::cell::RefCell<Vec<Vec<String>>>);
+        impl Tools for Listings {
+            async fn ffmpeg(
+                &self,
+                args: Vec<String>,
+                stdout: Stdout,
+            ) -> Result<std::process::Output, String> {
+                assert_eq!(stdout, Stdout::Capture);
+                self.0.borrow_mut().push(args.clone());
+                match args.last().map(String::as_str) {
+                    // Older builds print the device list on stderr.
+                    Some("-hwaccels") => Ok(std::process::Output {
+                        status: exit_status(0),
+                        stdout: Vec::new(),
+                        stderr: MACOS_HWACCELS.as_bytes().to_vec(),
+                    }),
+                    Some("-filters") => ok_output(MACOS_FILTERS),
+                    _ => Err("unexpected".to_owned()),
+                }
+            }
+            async fn ffprobe(&self, _: Vec<String>) -> Result<std::process::Output, String> {
+                Err("unused".to_owned())
+            }
+        }
+        let tools = Listings(std::cell::RefCell::new(Vec::new()));
+        let inventory = tools.inventory().await.expect("both listings read");
+        assert!(inventory
+            .missing(&args_for(Pipeline::Libplacebo, Encoder::VideoToolbox))
+            .is_some());
+        assert_eq!(
+            *tools.0.borrow(),
+            vec![
+                vec!["-hide_banner".to_owned(), "-hwaccels".to_owned()],
+                vec!["-hide_banner".to_owned(), "-filters".to_owned()]
+            ]
+        );
+    }
+
     #[test]
     fn graph_filter_names_ignore_commas_inside_quoted_arguments() {
         assert_eq!(
@@ -1550,7 +1610,7 @@ mod tests {
         assert_eq!(
             Some(vf.as_str()),
             Pipeline::VtToneMapMetal
-                .filters(None, PROBE_HEIGHT, Some("hdr10"))
+                .filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(1_000))
                 .as_deref()
         );
         assert!(
@@ -1581,10 +1641,15 @@ mod tests {
             |p| async move { r.run(p) },
         )
         .await;
-        assert_eq!(report.selected(), Pipeline::VtToneMapMetal);
+        assert_eq!(
+            report.selected(),
+            Pipeline::Cpu,
+            "node routing cannot run the Metal graph; the Mac context does"
+        );
         assert_eq!(
             *wins.asked.borrow(),
-            vec![Pipeline::Cpu, Pipeline::VtToneMapMetal]
+            vec![Pipeline::Cpu, Pipeline::VtToneMapMetal],
+            "a proved platform graph ends the race"
         );
         assert_eq!(report.parity(Pipeline::VtToneMapMetal), CpuParity::Passed);
         assert_eq!(

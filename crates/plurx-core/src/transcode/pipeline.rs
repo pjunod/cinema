@@ -157,6 +157,10 @@ pub enum Pipeline {
     Cpu,
 }
 
+/// The CPU chain's operator in the Jellyfin GPU filters' terms: Hable on the
+/// brightest channel with no desaturation. See [`Pipeline::tone_map_terms`].
+const CPU_MATCHED_TONE_MAP_TERMS: &str = "tonemap=hable:tonemap_mode=max:desat=0";
+
 /// Every pipeline the probe may consider, best first.
 ///
 /// [`Pipeline::pairs_with`] narrows it per encoder, so each family sees its own
@@ -527,7 +531,30 @@ impl Pipeline {
         height: i64,
         hdr_format: Option<&str>,
     ) -> Option<String> {
+        self.filters_at_peak(width, height, hdr_format, None)
+    }
+
+    /// [`Pipeline::filters`] with the source's peak, in nits, threaded into
+    /// the graphs that take the CPU chain's operator — the same peak the CPU
+    /// chain is given (MaxCLL, else mastering maximum, else 1,000), in the
+    /// same unit. Without it Jellyfin's filters read the peak from frame
+    /// metadata and fall back to their own default for an untagged source: a
+    /// different curve from the CPU chain's under the same operator. HLG and
+    /// graphs without the controls ignore it.
+    pub fn filters_at_peak(
+        self,
+        width: Option<i64>,
+        height: i64,
+        hdr_format: Option<&str>,
+        peak_nits: Option<u32>,
+    ) -> Option<String> {
         let hdr = hdr_format.is_some();
+        let mapping = self.tone_map_terms(hdr_format).map(|terms| {
+            match peak_nits.filter(|_| terms == CPU_MATCHED_TONE_MAP_TERMS) {
+                Some(nits) => format!("{terms}:peak={}", f64::from(nits) / 100.0),
+                None => terms.to_owned(),
+            }
+        });
         let w = width.map_or_else(|| "-1".to_owned(), |w| w.to_string());
         Some(match self {
             Pipeline::VtScaleSdr => format!("scale_vt=w={w}:h={height}:format=nv12"),
@@ -536,15 +563,13 @@ impl Pipeline {
                 "scale_vt=w={w}:h={height}:format=p010le,\
                  tonemap_videotoolbox={terms}:transfer=bt709:matrix=bt709:\
                  primaries=bt709:range=tv:format=nv12:apply_dovi=0",
-                terms = self
-                    .tone_map_terms(hdr_format)
-                    .expect("the Metal graph always maps")
+                terms = mapping.as_deref().expect("the Metal graph always maps")
             ),
             Pipeline::Cpu => return None,
             Pipeline::TonemapCuda => {
                 let w = width.map_or_else(|| "-2".to_owned(), |w| w.to_string());
                 let scale = format!("scale_cuda=w={w}:h={height}");
-                if let Some(terms) = self.tone_map_terms(hdr_format) {
+                if let Some(terms) = mapping.as_deref() {
                     format!("tonemap_cuda={terms}:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,{scale}")
                 } else {
                     format!("{scale}:format=nv12")
@@ -601,7 +626,7 @@ impl Pipeline {
                     Some(w) => format!("scale={w}:{height}"),
                     None => format!("scale=-2:'min({height},ih)'"),
                 };
-                if let Some(terms) = self.tone_map_terms(hdr_format) {
+                if let Some(terms) = mapping.as_deref() {
                     format!(
                         "{scale},format=p010,hwupload,\
                          tonemap_opencl={terms}:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12,\
@@ -682,7 +707,8 @@ impl Pipeline {
     ///
     /// For PQ input every graph with the controls takes the CPU reference's
     /// operator ([`super::zscale_tone_map_filter`]: Hable on the brightest
-    /// channel, no desaturation). Naming the curve alone is not enough: the
+    /// channel, no desaturation), and [`Pipeline::filters_at_peak`] adds the
+    /// CPU chain's peak. Naming the curve alone is not enough: the
     /// Jellyfin filters default `tonemap_mode` to `auto`, which picks ITP on
     /// capable GPUs, and leave desaturation on — a different picture behind
     /// the same operator name. That is what put an Apple Silicon node's
@@ -694,7 +720,7 @@ impl Pipeline {
     /// reference white under that treatment, and the boot probe's PQ fixture
     /// says nothing about an HLG curve.
     pub fn tone_map_terms(self, hdr_format: Option<&str>) -> Option<&'static str> {
-        const CPU_MATCHED: &str = "tonemap=hable:tonemap_mode=max:desat=0";
+        const CPU_MATCHED: &str = CPU_MATCHED_TONE_MAP_TERMS;
         match self {
             Pipeline::VtToneMapMetal if hdr_format == Some("hlg") => {
                 Some("tonemap=bt2390:tonemap_mode=itp")
@@ -1008,6 +1034,26 @@ mod tests {
                 );
             }
         }
+        for pipeline in [
+            Pipeline::TonemapCuda,
+            Pipeline::TonemapOpencl,
+            Pipeline::VtToneMapMetal,
+        ] {
+            let graph = pipeline
+                .filters_at_peak(Some(1920), 1080, Some("hdr10"), Some(4_000))
+                .expect("graph");
+            assert!(
+                graph.contains("=tonemap=hable:tonemap_mode=max:desat=0:peak=40:"),
+                "the CPU chain's peak, in its unit (cf. {cpu}): {graph}"
+            );
+        }
+        let hlg_at_peak = Pipeline::VtToneMapMetal
+            .filters_at_peak(Some(1920), 1080, Some("hlg"), Some(4_000))
+            .expect("graph");
+        assert!(
+            !hlg_at_peak.contains("peak="),
+            "HLG keeps its pinned treatment: {hlg_at_peak}"
+        );
         let hlg = Pipeline::VtToneMapMetal.tone_map_terms(Some("hlg"));
         assert_eq!(hlg, Some("tonemap=bt2390:tonemap_mode=itp"));
         let graph = Pipeline::VtToneMapMetal
