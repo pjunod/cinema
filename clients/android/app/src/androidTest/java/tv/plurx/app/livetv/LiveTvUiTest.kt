@@ -238,10 +238,13 @@ class LiveTvUiTest {
         assertEquals(emptyList<String>(), unexpectedPaths.toList())
     }
 
-    @Test fun developerEnableIsASeparateGenerationBoundAction() {
-        compose.setContent { PlurxTheme { LiveTvDeveloperScreen(origin) {} } }
-        awaitText("Enable Live TV")
-        compose.onNodeWithText("Enable Live TV").performScrollTo().performClick()
+    // Enable Live TV graduated from Developer to Settings → Live TV, where it
+    // is the first card. Its title and its button now share the words "Enable
+    // Live TV", so the button is the node that has a click action.
+    @Test fun liveTvSettingsEnableIsASeparateGenerationBoundAction() {
+        compose.setContent { PlurxTheme { LiveTvSettingsScreen(origin) {} } }
+        awaitText("Live TV is disabled")
+        compose.onNode(hasText("Enable Live TV") and hasClickAction()).performScrollTo().performClick()
         awaitText("Disable Live TV and drain sessions")
         assertEquals(1, requests.count { it.startsWith("PUT /api/v1/settings ") })
         assertTrue(requests.none { it.startsWith("POST ") })

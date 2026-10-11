@@ -1065,11 +1065,12 @@ test("analysis settings render the numeric retry policy returned by the API", ()
     "analysisSummaryCard",
     "presetOpts",
     "esc",
+    "subtitleBackfillCard",
     [
       shippedSource("setHead"), shippedSource("setCard"), shippedSource("cardHead"),
       shippedSource("togRow"), shippedSource("setCardFoot"), shippedSource("analysisSettingsPanel"),
     ].join("\n") + "\nreturn analysisSettingsPanel;",
-  )(() => "summary", presetOpts, esc);
+  )(() => "summary", presetOpts, esc, () => "");
 
   const html = render(
     {
