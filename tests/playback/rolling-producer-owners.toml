@@ -4497,11 +4497,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the cap, one across it and one long hold, then the shutdown token. Production
 # adds no timer: the follower's existing 10 s interval reads the held answer's
 # age.
+# PR #1021 remote-expiry regression: +2 cfg(test)-only sleeps in remote/owner.rs.
+# authorize_session and refresh_authority await their injected finite latency
+# within the same test-owned perform future. tokio::join! owns both futures;
+# cancellation drops both, with no detached task, producer or process.
+# The fixtures use 275/550 ms delays to prove fresh delivery and unchanged
+# queue expiry. Production adds no timer and retains all existing lifetimes.
 # +12 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
 # #978: +1, test-only. The prepared-owner catalog regression in chunk_06.rs
 # bounds its own wait with one tokio::time::timeout, so a regression to the
 # 45 s prime deadline fails instead of hanging.
-expected_occurrences = 1725
+expected_occurrences = 1727
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4931,7 +4937,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same `true` child, constructed with
 # `std::process::Command::new` so it is not registered at spawn.
 # +2 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
-expected_occurrences = 262
+# Shared-read indexing (+1, test-only): the fragindex differential builds its
+# plain HEVC fixture with one `Command::new(ffmpeg)` it runs to completion
+# with `.output()`; it owns no producer.
+expected_occurrences = 263
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5546,7 +5555,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # fallback itself launches nothing.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's `.spawn()`; not a second
 # child.
-expected_occurrences = 749
+# Shared-read indexing (+1, test-only): that fixture command's `.output()`,
+# awaited to completion in the test.
+expected_occurrences = 750
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

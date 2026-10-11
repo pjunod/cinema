@@ -1,0 +1,8 @@
+[Unit]
+Description=Recover managed local Forgejo runner VMs and daemons
+After=incus.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/plurx-runner-watchdog
+TimeoutStartSec=360

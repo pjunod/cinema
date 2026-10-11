@@ -17,6 +17,7 @@
 set -euo pipefail
 
 BUDGET_GB=${PLURX_JANITOR_BUDGET_GB:-20}
+RESERVE_GB=${PLURX_JANITOR_RESERVE_GB:-25}
 QUIET_SECONDS=${PLURX_JANITOR_QUIET_SECONDS:-120}
 STATE_DIR=${PLURX_JANITOR_STATE_DIR:-/var/db/plurx-ci-janitor}
 DAEMON_DIR=${PLURX_JANITOR_DAEMON_DIR:-/Library/LaunchDaemons}
@@ -46,23 +47,35 @@ done
 [[ "$BUDGET_GB" =~ ^[1-9][0-9]*$ ]] || {
   echo "plurx-ci-janitor: budget must be whole gigabytes" >&2; exit 2
 }
+[[ "$RESERVE_GB" =~ ^[1-9][0-9]*$ ]] || exit 2
 
 say() { printf 'plurx-ci-janitor: %s\n' "$*"; }
 
-# The reserve the in-job pruners keep, unchanged: 20 % of the filesystem, with a
-# 10 GiB minimum capped at a quarter of it so it can never exceed the disk.
+# Keep the job's actual disk requirement. A percentage of a large shared Mac
+# volume caused hourly resets of empty caches without freeing any space.
 floor_kb_for() {
-  local filesystem_kb percent minimum quarter
-  filesystem_kb=$(df -Pk "$1" | awk 'NR == 2 { print $2 }')
-  percent=$(((filesystem_kb + 4) / 5))
-  minimum=$((10 * 1024 * 1024))
-  quarter=$(((filesystem_kb + 3) / 4))
-  [ "$minimum" -le "$quarter" ] || minimum=$quarter
-  [ "$percent" -ge "$minimum" ] && { echo "$percent"; return; }
-  echo "$minimum"
+  echo "$((RESERVE_GB * 1024 * 1024))"
 }
 
 available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
+
+# bootstrap may briefly fail while launchd finishes a bootout. Check the
+# service, retry boundedly, and expose permanent failures to launchd/operator.
+restore_daemon() {
+  local label plist attempt
+  label=$1; plist=$2
+  for attempt in 1 2 3 4 5; do
+    launchctl print "system/$label" >/dev/null 2>&1 && return 0
+    launchctl bootstrap system "$plist" >/dev/null 2>&1 || true
+    launchctl print "system/$label" >/dev/null 2>&1 && return 0
+    sleep "${PLURX_JANITOR_RETRY_SECONDS:-1}"
+  done
+  say "ERROR: $label could not be loaded; recovery will retry on the next pass" >&2
+  return 1
+}
+
+pending_label=; pending_plist=
+trap 'if [ -n "$pending_label" ]; then restore_daemon "$pending_label" "$pending_plist" || true; fi' EXIT
 
 # `plutil -convert json` rather than PlistBuddy, because it is on PATH and so a
 # contract test can substitute it. The runner's own plist is the authority on
@@ -117,7 +130,7 @@ daemon_is_idle() {
 }
 
 reset_cache() {
-  local label plist dir used_kb
+  local label plist dir used_kb deleted
   label=$1; plist=$2; dir=$3; used_kb=$4
 
   if ! daemon_is_idle "$label" "$(dirname -- "$dir")"; then
@@ -132,12 +145,25 @@ reset_cache() {
   # Whatever happens next, the runner comes back. A janitor that leaves a
   # runner unloaded has taken the only Apple slot out of the fleet, which is
   # worse than the disk it was reclaiming.
-  trap 'launchctl bootstrap system "$plist" >/dev/null 2>&1 || true' RETURN
+  pending_label=$label; pending_plist=$plist
+  deleted=true
   say "unloading $label"
-  launchctl bootout "system/$label" >/dev/null 2>&1 || true
-  rm -rf -- "$dir"
-  launchctl bootstrap system "$plist"
-  trap - RETURN
+  if ! launchctl bootout "system/$label" >/dev/null 2>&1; then
+    say "could not unload $label; keeping its cache"
+    pending_label=; pending_plist=
+    return 0
+  fi
+  if ! rm -rf -- "$dir"; then
+    say "could not fully delete $dir; restoring the runner anyway"
+    failures=$((failures + 1))
+    deleted=false
+  fi
+  if ! restore_daemon "$label" "$plist"; then
+    failures=$((failures + 1))
+    return 0
+  fi
+  pending_label=; pending_plist=
+  [ "$deleted" = true ] || return 0
   say "reset $dir, reclaimed $((used_kb / 1024 / 1024))G, $label loaded again"
   reclaimed_kb=$((reclaimed_kb + used_kb))
   reset_count=$((reset_count + 1))
@@ -148,6 +174,8 @@ reclaimed_kb=0
 instances=0
 over_budget=0
 reset_count=0
+recovered=0
+failures=0
 
 for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
   [ -f "$plist" ] || continue
@@ -161,10 +189,28 @@ for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
   # The same refusal as on Linux, and for the same reason: this deletes a
   # directory whole, so the path check is the entire safety argument.
   case "$dir" in */*runner*/cache) ;; *) continue ;; esac
-  [ ! -L "$dir" ] && [ -d "$dir" ] || continue
+  [ ! -L "$dir" ] || continue
+  # Intentional maintenance is persistent: never undo launchctl disable.
+  if launchctl print-disabled system 2>/dev/null | grep -F "\"$label\" => true" >/dev/null; then
+    say "$label is disabled for maintenance"
+    continue
+  fi
+  instances=$((instances + 1))
+  # Recovery precedes cache inspection. A failed reset removed the cache and
+  # made the old script skip this runner forever while reporting success.
+  if ! launchctl print "system/$label" >/dev/null 2>&1; then
+    if [ "$dry_run" = true ]; then
+      say "would recover unloaded $label"
+    elif restore_daemon "$label" "$plist"; then
+      recovered=$((recovered + 1))
+      say "recovered unloaded $label"
+    else
+      failures=$((failures + 1))
+    fi
+  fi
+  [ -d "$dir" ] || continue
   [ -f "$dir/bolt.db" ] || [ -d "$dir/cache" ] || continue
 
-  instances=$((instances + 1))
   used_kb=$(du -sk "$dir" | awk '{ print $1 }')
   floor_kb=$(floor_kb_for "$dir")
   available_kb=$(available_kb_for "$dir")
@@ -175,6 +221,10 @@ for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
     continue
   fi
   over_budget=$((over_budget + 1))
+  if [ "$used_kb" -lt 1048576 ]; then
+    say "$label: disk below reserve but cache below 1G; no useful reset"
+    continue
+  fi
   reset_cache "$label" "$plist" "$dir" "$used_kb"
 done
 
@@ -182,9 +232,10 @@ done
 # both of these report "pauls", which names neither of them.
 if [ "$dry_run" != true ]; then
   mkdir -p "$STATE_DIR"
-  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"reclaimed_gb":%d,"budget_gb":%d}\n' \
+  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"reclaimed_gb":%d,"budget_gb":%d,"recovered":%d,"failures":%d,"reserve_gb":%d}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" \
     "$instances" "$over_budget" "$reset_count" \
-    "$((reclaimed_kb / 1024 / 1024))" "$BUDGET_GB" > "$STATE_DIR/last-run.json"
+    "$((reclaimed_kb / 1024 / 1024))" "$BUDGET_GB" "$recovered" "$failures" "$RESERVE_GB" > "$STATE_DIR/last-run.json"
 fi
 say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $((reclaimed_kb / 1024 / 1024))G reclaimed"
+[ "$failures" -eq 0 ]
