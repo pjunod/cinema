@@ -4226,7 +4226,8 @@ pub async fn update_settings(
             )
             .await?;
         // Apply on this node now; every other node picks the replicated value
-        // up on its next enforcement refresh (`clock_offset::run`).
+        // up on its next enforcement look after it applies the save
+        // (`clock_offset::follow_stored_enforcement`).
         state.membership.clock_guard().set_enforced(enabled);
     }
     if let Some(mode) = &req.sub_mode {

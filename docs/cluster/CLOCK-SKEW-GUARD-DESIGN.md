@@ -814,11 +814,15 @@ design above is unchanged; this note records the code on `main` since
 `4cfd1bdd1` (#793). `main` has a Developer switch, *Enforce the cluster clock
 guard* on the *Cluster clock guard* card, stored as the replicated setting `cluster.clock_guard_enforced`
 (`crates/plurx-core/src/store/mod.rs`, read with `stored_switch(.., false)`,
-so missing is off). Each node applies it to its own guard from a 10-second
-poll of that row (`CLOCK_ENFORCEMENT_REFRESH` and `apply_stored_enforcement`
-in `crates/plurxd/src/clock_offset.rs`); a node whose read fails keeps its
-current mode, so voters can run different policies for up to one poll or
-longer — the state this section rules out. While it is off, every guarded
+so missing is off). Each node applies it to its own guard: one consistent
+read at start, then a look every 10 seconds that costs a consistent read only
+when this node's replica has applied an entry and its own copy of the row
+then disagrees with the value held (`CLOCK_ENFORCEMENT_REFRESH` and
+`follow_stored_enforcement` in `crates/plurxd/src/clock_offset.rs`; since
+2026-10-10, before which every look was a consistent read). A node whose read
+fails keeps its current mode, so voters can run different policies for up to
+one look after the save is applied there, or longer — the state this section
+rules out. While it is off, every guarded
 decision is admitted and what would have been refused is counted in
 `plurx_cluster_clock_advisory_refusals_total`; while it is on, the guard
 refuses takeover, the expired-session scan and membership changes when the

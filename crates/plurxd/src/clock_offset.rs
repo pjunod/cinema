@@ -1,10 +1,13 @@
 //! One serialized full-roster clock observation owner per daemon.
+use crate::settings_changes::{Proved, SettingsChangeSource};
 use crate::state::AppState;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::clock::{ClockDecisionTicket, PeerClockOffset, CLOCK_OBSERVATION_MAX_AGE};
 use plurx_core::cluster::membership::{
     normalize_internal_http_base, ClockLeadershipIdentity, ClockPeerRoster, MembershipManager,
 };
+use plurx_core::error::StoreError;
+use plurx_core::store::Store;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -594,42 +597,96 @@ impl Filter {
     }
 }
 
-/// How often a node re-reads the replicated enforcement switch, so a change
+/// How often a node looks at the replicated enforcement switch, so a change
 /// saved on another node reaches this node's guard without a restart.
 const CLOCK_ENFORCEMENT_REFRESH: Duration = Duration::from_secs(10);
 
-/// Apply the stored enforcement switch to this node's guard, parsed by the
-/// same `stored_switch` as the settings page (missing is off). A failed read
-/// keeps the current mode, so an unreadable store never turns enforcement on.
-pub(crate) async fn apply_stored_enforcement(state: &AppState) {
-    match state
-        .store
-        .get_setting(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
-        .await
-    {
-        Ok(value) => state
-            .membership
-            .clock_guard()
-            .set_enforced(plurx_core::store::stored_switch(value.as_deref(), false)),
-        Err(error) => {
-            tracing::debug!(%error, "clock guard enforcement setting unreadable; keeping current mode");
+/// The Store reads that follow the enforcement switch, parsed by the same
+/// `stored_switch` as the settings page (missing is off): an authority read
+/// on the replicated backend, and the value this node's own replica holds,
+/// which only says whether that authority read is owed.
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+pub(crate) trait EnforcementSwitch: Send + Sync {
+    async fn enforcement(&self) -> Result<bool, StoreError>;
+    async fn enforcement_hint(&self) -> Result<bool, StoreError>;
+}
+
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl<T: Store + ?Sized> EnforcementSwitch for T {
+    async fn enforcement(&self) -> Result<bool, StoreError> {
+        let value = self
+            .get_setting(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
+            .await?;
+        Ok(plurx_core::store::stored_switch(value.as_deref(), false))
+    }
+
+    async fn enforcement_hint(&self) -> Result<bool, StoreError> {
+        let value = self
+            .local_setting_hint(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
+            .await?;
+        Ok(plurx_core::store::stored_switch(value.as_deref(), false))
+    }
+}
+
+/// Follow the stored enforcement switch into this node's guard: applied at
+/// once, then looked at every refresh.
+///
+/// Each look used to be a consistent read, 8,640 a day per node for a switch
+/// that is almost never saved. A proved value is now held while this
+/// replica's applied index has not moved, and while its own copy of the
+/// switch agrees after the index moves (`SettingsChangeSource::confirms`);
+/// only a disagreement costs the consistent read. The settings route is the
+/// only writer, it applies a save on its own node at once, and every save is
+/// a Raft entry that moves each node's applied index. Without a change source
+/// that reports saves made elsewhere, every look reads, as before. A failed
+/// read keeps the current mode, so an unreadable store never turns
+/// enforcement on, and holds nothing, so the next look reads again.
+async fn follow_stored_enforcement<S, F>(
+    store: &S,
+    changes: SettingsChangeSource,
+    set_enforced: F,
+    shutdown: tokio_util::sync::CancellationToken,
+) where
+    S: EnforcementSwitch + ?Sized,
+    F: Fn(bool),
+{
+    let mut interval = tokio::time::interval(CLOCK_ENFORCEMENT_REFRESH);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut held: Option<Proved<bool>> = None;
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            _ = interval.tick() => {}
         }
+        if let Some(held) = held.as_mut() {
+            if changes.confirms(held, || store.enforcement_hint()).await {
+                continue;
+            }
+        }
+        let mark = changes.mark();
+        held = match store.enforcement().await {
+            Ok(enforced) => {
+                set_enforced(enforced);
+                Some(mark.proved(enforced))
+            }
+            Err(error) => {
+                tracing::debug!(%error, "clock guard enforcement setting unreadable; keeping current mode");
+                None
+            }
+        };
     }
 }
 
 pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
     // The store is readable here (startup stays advisory because it is not):
     // apply the stored switch immediately, then keep following it.
-    let enforcement = async {
-        let mut interval = tokio::time::interval(CLOCK_ENFORCEMENT_REFRESH);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                () = shutdown.cancelled() => break,
-                _ = interval.tick() => apply_stored_enforcement(&state).await,
-            }
-        }
-    };
+    let guard = state.membership.clock_guard();
+    let enforcement = follow_stored_enforcement(
+        state.store.as_ref(),
+        state.settings_changes.clone(),
+        |enforced| guard.set_enforced(enforced),
+        shutdown.clone(),
+    );
     tokio::join!(state.clock_observer.run(shutdown.clone()), enforcement);
 }
 
@@ -774,6 +831,141 @@ async fn observation_round(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The enforcement switch as a consistent read returns it (`stored`) and
+    /// as this node's replica holds it (`replica`).
+    #[derive(Default)]
+    struct Enforcement {
+        stored: std::sync::atomic::AtomicBool,
+        replica: std::sync::atomic::AtomicBool,
+        failing: std::sync::atomic::AtomicBool,
+        reads: std::sync::atomic::AtomicU64,
+    }
+
+    impl Enforcement {
+        fn save(&self, enforced: bool) {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.stored.store(enforced, SeqCst);
+            self.replica.store(enforced, SeqCst);
+        }
+
+        fn reads(&self) -> u64 {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
+    impl EnforcementSwitch for Enforcement {
+        async fn enforcement(&self) -> Result<bool, StoreError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.reads.fetch_add(1, SeqCst);
+            if self.failing.load(SeqCst) {
+                return Err(StoreError::Database("quorum unavailable".into()));
+            }
+            Ok(self.stored.load(SeqCst))
+        }
+
+        async fn enforcement_hint(&self) -> Result<bool, StoreError> {
+            Ok(self.replica.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    /// K-03 regression: ten idle minutes of unrelated applied entries cost
+    /// the boot read and nothing else (the old follower read every 10 s:
+    /// sixty reads); a save made on another node reaches the guard within
+    /// one refresh of being applied here, for one consistent read.
+    #[tokio::test(start_paused = true)]
+    async fn the_enforcement_follower_reads_only_when_the_switch_may_have_changed() {
+        let store = Enforcement::default();
+        let mode = std::sync::Mutex::new(None);
+        let (applied, changes) = watch::channel(1u64);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let follower = follow_stored_enforcement(
+            &store,
+            SettingsChangeSource::Test(changes),
+            |enforced| *mode.lock().expect("mode") = Some(enforced),
+            shutdown.clone(),
+        );
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert_eq!(store.reads(), 1, "the boot read");
+            assert_eq!(*mode.lock().expect("mode"), Some(false));
+            for _ in 0..120 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                applied.send_modify(|index| *index += 1);
+            }
+            assert_eq!(store.reads(), 1, "idle minutes cost no consistent read");
+
+            store.save(true);
+            applied.send_modify(|index| *index += 1);
+            tokio::time::sleep(CLOCK_ENFORCEMENT_REFRESH).await;
+            assert_eq!(*mode.lock().expect("mode"), Some(true));
+            assert_eq!(store.reads(), 2, "a save elsewhere costs one read");
+            tokio::time::sleep(CLOCK_ENFORCEMENT_REFRESH * 30).await;
+            assert_eq!(store.reads(), 2, "and is then held");
+            shutdown.cancel();
+        };
+        tokio::join!(follower, driver);
+    }
+
+    /// A failed read keeps the current mode and is read again on the next
+    /// refresh until one succeeds; without a change source every refresh
+    /// reads, as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_enforcement_read_keeps_the_mode_and_reads_each_refresh_until_proved() {
+        let store = Enforcement::default();
+        store.save(true);
+        store
+            .failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mode = std::sync::Mutex::new(None);
+        let (applied, changes) = watch::channel(1u64);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let follower = follow_stored_enforcement(
+            &store,
+            SettingsChangeSource::Test(changes),
+            |enforced| *mode.lock().expect("mode") = Some(enforced),
+            shutdown.clone(),
+        );
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            tokio::time::sleep(CLOCK_ENFORCEMENT_REFRESH * 5).await;
+            assert_eq!(store.reads(), 6, "one read a refresh while unreadable");
+            assert_eq!(*mode.lock().expect("mode"), None, "the mode is kept");
+            store
+                .failing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(CLOCK_ENFORCEMENT_REFRESH).await;
+            assert_eq!(*mode.lock().expect("mode"), Some(true));
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                applied.send_modify(|index| *index += 1);
+            }
+            assert_eq!(store.reads(), 7, "the first success is held");
+            shutdown.cancel();
+        };
+        tokio::join!(follower, driver);
+
+        let polled = Enforcement::default();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let follower = follow_stored_enforcement(
+            &polled,
+            SettingsChangeSource::Polled,
+            |_| {},
+            shutdown.clone(),
+        );
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            tokio::time::sleep(CLOCK_ENFORCEMENT_REFRESH * 5).await;
+            assert_eq!(
+                polled.reads(),
+                6,
+                "an unwatched switch is read every refresh"
+            );
+            shutdown.cancel();
+        };
+        tokio::join!(follower, driver);
+    }
 
     #[test]
     fn k06_clock_observer_single_owner_and_bounded_coalescing() {

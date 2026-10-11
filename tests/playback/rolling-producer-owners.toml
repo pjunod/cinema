@@ -4435,7 +4435,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # no spawn) and the unwatched-cadence test's one sleep past the 60 s off
 # hold. Production adds no timer: the off sleep gains a select arm on the
 # applied-index watch that the gate already owns, and no task.
-expected_occurrences = 1693
+# K-03 clock-enforcement follower on the same signals: +10, test-only, in
+# clock_offset::tests. Each test joins the follower with a driver future
+# (no spawn) whose paused-time sleeps (three 1 ms settles, two 5 s
+# applied-entry paces, and five whole-refresh waits) observe the follower
+# and then cancel its shutdown token. Production is net zero: the follower's
+# one 10 s Skip-mode `tokio::time::interval` moved from `run` into
+# `follow_stored_enforcement`, still ended by the same shutdown token.
+expected_occurrences = 1703
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
