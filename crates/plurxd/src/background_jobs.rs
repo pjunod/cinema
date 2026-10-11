@@ -1815,6 +1815,150 @@ pub(crate) async fn claim_fragment(
     Ok(None)
 }
 
+/// The queued builds of a fragment's other copy identities: same file, same
+/// attested source, a pipeline in `pipelines` (shared-read §5.5).
+///
+/// Walks the same candidate pages [`claim_fragment`] reads — no new store
+/// query. With `claim` false it only reports which are queued, so the lead's
+/// pass can build them from its one read. With `claim` true, which the worker
+/// does once the lead has settled and released its source reservation, each
+/// is CAS-claimed under a fence and heartbeat of its own, exactly as a claim
+/// of its own would be, so its prebuilt index is published under that fence.
+/// A candidate another worker took first, or one in `excluded`, is left where
+/// it is; it is still built the old way.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn fragment_siblings(
+    store: Arc<dyn Store>,
+    authority: Arc<dyn ClusterJobAuthority>,
+    node: &str,
+    lead: &plurx_core::store::ClusterFragmentIndexJob,
+    pipelines: &[String],
+    excluded: &[String],
+    worker: &FragmentPipeline<'_>,
+    claim: bool,
+) -> Result<
+    Vec<(
+        plurx_core::store::ClusterFragmentIndexJob,
+        Option<ActiveBackgroundJob>,
+    )>,
+    StoreError,
+> {
+    use plurx_core::store::background_jobs::{
+        CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
+    };
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    let mut found: Vec<(
+        plurx_core::store::ClusterFragmentIndexJob,
+        Option<ActiveBackgroundJob>,
+    )> = Vec::new();
+    if pipelines.is_empty() || !authority.may_execute_job(JobKind::FragmentIndexBuild).await {
+        return Ok(found);
+    }
+    let mut cursor = None;
+    for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
+        let page = store
+            .job_candidates(CandidateQuery {
+                node_id: node.into(),
+                kinds: vec![JobKind::FragmentIndexBuild],
+                after: cursor,
+                now_ms: unix_ms()?,
+                limit: MAX_PAGE_SIZE,
+            })
+            .await?;
+        for candidate in page.jobs {
+            if found.len() >= pipelines.len() {
+                return Ok(found);
+            }
+            let Ok(payload) = candidate.supported_payload() else {
+                continue;
+            };
+            let JobPayload::FragmentIndexBuild {
+                file_id,
+                source_sha256,
+                cache_key,
+                pipeline_digest,
+                ..
+            } = &payload
+            else {
+                continue;
+            };
+            if *file_id != lead.file_id
+                || *source_sha256 != lead.source_sha256
+                || *cache_key == lead.cache_key
+                || !pipelines.contains(pipeline_digest)
+                || found
+                    .iter()
+                    .any(|(job, _)| job.pipeline_sha256 == *pipeline_digest)
+                || excluded.contains(cache_key)
+                || !fragment_candidate_compatible(store.as_ref(), &payload, worker).await?
+            {
+                continue;
+            }
+            if !claim {
+                found.push((
+                    plurx_core::store::background_jobs_fragment_admission::projection(
+                        &candidate, None,
+                    )?,
+                    None,
+                ));
+                continue;
+            }
+            let now_ms = unix_ms()?;
+            let request = ClaimJob {
+                job_id: candidate.id.clone(),
+                expected_revision: candidate.revision,
+                node_id: node.into(),
+                boot_id: boot.clone(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::FragmentIndexBuild,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            };
+            let Some((job, deadline)) =
+                claim_with_resolution(store.as_ref(), &candidate, request).await?
+            else {
+                continue;
+            };
+            let Some(token) = job.token.clone() else {
+                continue;
+            };
+            let projection = match plurx_core::store::background_jobs_fragment_admission::projection(
+                &job, None,
+            ) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    store
+                        .settle_job(SettleJob {
+                            token,
+                            settlement: JobSettlement::Fail {
+                                error_code: "artifact_metadata_missing".into(),
+                            },
+                            now_ms: unix_ms()?,
+                        })
+                        .await?;
+                    tracing::warn!(%error, "sibling fragment metadata disappeared before publication");
+                    continue;
+                }
+            };
+            let active = ActiveBackgroundJob::start(
+                Arc::clone(&store),
+                Arc::clone(&authority),
+                token,
+                deadline,
+                JobKind::FragmentIndexBuild,
+            )?;
+            found.push((projection, Some(active)));
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(found)
+}
+
 /// Bounded, node-local eligibility observations. They never settle durable work:
 /// another member may have a readable mount while this one does not.
 #[derive(Default)]
@@ -2128,6 +2272,220 @@ mod tests {
         CancelJob, EnqueueJob, JobKind, JobPayload, JobRequest, JobState,
     };
     use plurx_core::store::SqliteStore;
+
+    /// Co-claim (shared-read §5.5): the lead's queued siblings — same file,
+    /// same attested source, a pipeline of the file — are claimed under fences
+    /// of their own; another file's build, a pipeline the caller did not ask
+    /// for, and a sibling already claimed are left alone.
+    #[tokio::test]
+    async fn sibling_builds_of_the_same_source_are_found_and_claimed_by_their_own_fences() {
+        use plurx_core::domain::{
+            DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult,
+        };
+        use plurx_core::store::NewClusterFragmentIndexJob;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "co-claim".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/media".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let mut files = Vec::new();
+        for title in ["lead", "other"] {
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let id = store
+                .upsert_file(
+                    item,
+                    &format!("/media/{title}.mkv"),
+                    4_096,
+                    100,
+                    &ProbeResult {
+                        video_codec: Some("hevc".into()),
+                        duration_ms: Some(1_000),
+                        hdr: Some("dolby_vision".into()),
+                        dolby_vision: DolbyVisionFacts {
+                            profile: Some(7),
+                            level: Some(6),
+                            bl_compat_id: Some(6),
+                            el_present: Some(true),
+                            rpu_present: Some(true),
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("file");
+            files.push(store.get_file(id).await.expect("read").expect("file"));
+        }
+        let engine = "cd".repeat(32);
+        let source = "ab".repeat(32);
+        let now = unix_ms().expect("clock");
+        let worker = FragmentPipeline {
+            engine_sha256: &engine,
+            have_dovi: true,
+            convert_dolby_vision: true,
+        };
+        let mut keys = Vec::new();
+        for file in &files {
+            let identities = crate::state::fragment_index_video_identity_options(
+                store.as_ref(),
+                file,
+                true,
+                true,
+            )
+            .await
+            .expect("identities");
+            assert_eq!(identities.len(), 3);
+            let mut file_keys = Vec::new();
+            for (video, _) in identities {
+                let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
+                let cache_key = plurx_core::store::cluster_fragment_index_key(
+                    file.id, file.size, file.mtime, &source, &pipeline,
+                )
+                .expect("key");
+                assert!(store
+                    .enqueue_cluster_fragment_index(&NewClusterFragmentIndexJob {
+                        cache_key: cache_key.clone(),
+                        file_id: file.id,
+                        source_size: file.size,
+                        source_mtime: file.mtime,
+                        source_sha256: source.clone(),
+                        pipeline_sha256: pipeline.clone(),
+                        priority: "normal".into(),
+                        trigger: "background".into(),
+                        target_node_id: "node-a".into(),
+                        not_before_ms: now,
+                        created_at_ms: now,
+                    })
+                    .await
+                    .expect("enqueue"));
+                file_keys.push((cache_key, pipeline));
+            }
+            keys.push(file_keys);
+        }
+        let lead = store
+            .cluster_fragment_index_job(&keys[0][0].0, "node-a")
+            .await
+            .expect("read")
+            .expect("lead job");
+        let authority: Arc<dyn ClusterJobAuthority> = Arc::new(UnclusteredJobAuthority);
+        // Every enqueued build is a candidate this worker can execute.
+        let page = store
+            .job_candidates(plurx_core::store::background_jobs::CandidateQuery {
+                node_id: "node-a".into(),
+                kinds: vec![JobKind::FragmentIndexBuild],
+                after: None,
+                now_ms: unix_ms().expect("clock"),
+                limit: plurx_core::store::background_jobs::MAX_PAGE_SIZE,
+            })
+            .await
+            .expect("candidates");
+        assert_eq!(page.jobs.len(), 6, "every enqueued build is a candidate");
+        for candidate in &page.jobs {
+            let payload = candidate.supported_payload().expect("payload");
+            assert!(
+                fragment_candidate_compatible(store.as_ref(), &payload, &worker)
+                    .await
+                    .expect("compatible"),
+                "{payload:?}"
+            );
+        }
+        assert!(authority.may_execute_job(JobKind::FragmentIndexBuild).await);
+        // Only the converted identity is asked for: the preserved one stays.
+        // Pipelines name the recipe, not the file, so the other file's
+        // converted build has the same pipeline and must still be left alone.
+        assert_eq!(keys[0][2].1, keys[1][2].1);
+        let asked = vec![keys[0][2].1.clone()];
+        // A look claims nothing.
+        let queued = fragment_siblings(
+            Arc::clone(&store),
+            Arc::clone(&authority),
+            "node-a",
+            &lead,
+            &asked,
+            &[],
+            &worker,
+            false,
+        )
+        .await
+        .expect("look");
+        assert_eq!(
+            queued
+                .iter()
+                .map(|(job, active)| (job.cache_key.clone(), active.is_some()))
+                .collect::<Vec<_>>(),
+            [(keys[0][2].0.clone(), false)],
+            "only the lead file's asked-for sibling, unclaimed"
+        );
+        let claimed = fragment_siblings(
+            Arc::clone(&store),
+            Arc::clone(&authority),
+            "node-a",
+            &lead,
+            &asked,
+            &[],
+            &worker,
+            true,
+        )
+        .await
+        .expect("co-claim");
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|(job, _)| job.cache_key.clone())
+                .collect::<Vec<_>>(),
+            [keys[0][2].0.clone()],
+            "only the lead file's asked-for sibling"
+        );
+        // While that claim holds the storage domain's background source
+        // slot, the preserved sibling cannot be claimed beside it — the
+        // second slot is the store's for live demand. That is why the worker
+        // claims and settles siblings one at a time.
+        let beside = fragment_siblings(
+            Arc::clone(&store),
+            Arc::clone(&authority),
+            "node-a",
+            &lead,
+            &[keys[0][1].1.clone()],
+            &[],
+            &worker,
+            true,
+        )
+        .await
+        .expect("claim beside");
+        assert!(beside.is_empty(), "a second background reader was admitted");
+        // Claimed once: a second walk finds nothing left to take.
+        let again = fragment_siblings(
+            Arc::clone(&store),
+            Arc::clone(&authority),
+            "node-a",
+            &lead,
+            &asked,
+            &[],
+            &worker,
+            true,
+        )
+        .await
+        .expect("co-claim again");
+        assert!(again.is_empty());
+        for (_, active) in claimed {
+            active.expect("claimed").finish().await;
+        }
+    }
 
     #[tokio::test]
     async fn library_readiness_rejects_observations_of_superseded_roots() {

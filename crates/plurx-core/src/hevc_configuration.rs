@@ -394,6 +394,52 @@ mod tests {
             assert!(!proof.permits("replaced-source"));
         }
     }
+    /// A shared index pass writes several outputs from one demuxer and
+    /// traces only the first. The other outputs' log lines, the muxers'
+    /// banners and the progress line land between the trace's fields, and
+    /// must not change the proof.
+    #[test]
+    fn other_outputs_lines_between_trace_fields_do_not_change_the_proof() {
+        let mut clean = Trace::default();
+        clean.feed(fixture().as_bytes());
+        let clean = clean.finish("source".into(), 0);
+        assert!(clean.permits("source"));
+        let noisy: String = fixture()
+            .lines()
+            .flat_map(|line| {
+                [
+                    format!("{line}\n"),
+                    "[out#1/mp4 @ 0x2] video:1kB audio:0kB subtitle:0kB\n".to_owned(),
+                    "[hevc_mp4toannexb @ 0x3] packet processed\n".to_owned(),
+                    "frame=   10 fps=0.0 q=-1.0 size=       1kB time=00:00:00.41 speed=N/A\r"
+                        .to_owned(),
+                ]
+            })
+            .collect();
+        let mut trace = Trace::default();
+        for chunk in noisy.as_bytes().chunks(5) {
+            trace.feed(chunk);
+        }
+        assert_eq!(trace.finish("source".into(), 0), clean);
+    }
+
+    /// The mutation the shared pass's argv rules out: a trace on every
+    /// output interleaves two traces into one parser, which must refuse
+    /// rather than prove whichever it happened to assemble.
+    #[test]
+    fn two_traces_interleaved_into_one_stderr_are_refused() {
+        let first = fixture();
+        let second = first.replace("@ 0x1]", "@ 0x2]");
+        let interleaved: String = first
+            .lines()
+            .zip(second.lines())
+            .flat_map(|(a, b)| [format!("{a}\n"), format!("{b}\n")])
+            .collect();
+        let mut trace = Trace::default();
+        trace.feed(interleaved.as_bytes());
+        assert!(!trace.finish("source".into(), 0).permits("source"));
+    }
+
     #[test]
     fn peer_proof_requires_full_digest_and_preserves_refusals() {
         let mut trace = Trace::default();

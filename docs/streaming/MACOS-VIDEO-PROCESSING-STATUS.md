@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups qualified; AMD raw and normal-API strict-P5 qualified; Intel pending approval; combined review/landing in progress · **Updated:** 2026-10-10 · **Owner:** Claude (continuing the managed effort after the 2026-10-09 session ended) · **Integration:** `effort/video-processing-followups`.
+**Status:** Mac follow-ups in `main` (PR #993); AMD and Intel strict-P5 qualified; Intel fixes open on `effort/linux-p5-intel-qualification` · **Updated:** 2026-10-11 · **Owner:** Claude · **Integration:** `effort/linux-p5-intel-qualification`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -53,16 +53,31 @@ cleared before recovery, so everything was rebuilt from the pushed branch
   histories add again; main's DV pixel-proof change leaves the corrected
   encoder-pairing proof in place.
 
+- **Landed.** The follow-ups merged into `main` as `72bdacc6` (PR #993,
+  which superseded #980 once that PR's receipt history became unreadable).
+  Main moved twice more during the fast lane, and both merges were clean.
+- **Intel qualified** (2026-10-11, owner-approved transfer;
+  [§45](MACOS-VIDEO-PROCESSING-EVIDENCE.md#45-intel-strict-p5-qualification-and-its-two-root-causes--2026-10-11)).
+  Raw strict graphs pass 32/32 with VA-API and with QSV encode. The landed
+  daemon's probe admitted nothing on Intel, which exposed two root causes:
+  - QSV discovery loads the image's Debian Media SDK beside the packaged
+    one, and a file-name match made that fatal for the whole generation.
+    Such a graph now refuses only itself (`766a3fd3`).
+  - Both QSV Main10 proofs used a 64×64 frame that QSV HEVC rejects. All
+    hardware proofs now share the 1080p raster (`57cd7d45`).
+
+  The fixed daemon delivers strict P5 with VA-API decode and encode on
+  Intel, and requalifies on AMD. The adversarial review's findings are
+  addressed (`36b9a690`), and the final tree requalifies on Intel.
+
 Remaining work, in order:
 
-1. Run the fast lane once on PR #980 (rerunning only failures), then merge.
-2. Clean up.
+1. Run the fast lane once on the Intel PR, then merge.
+2. Clean up both nodes' qualification roots and images.
 
-Intel qualification waits for the owner's explicit approval to copy the
-observer image to the Intel node. It stays open and is not inferred from
-AMD; each node's own probe decides availability. On 2026-10-10 the user
-directed this session to own the fast lane and merge, superseding the
-earlier merge-coordinator hand-off.
+QSV strict graphs stay refused on this image until it stops carrying
+Debian's `libmfx1`; see the backlog. Each node's own probe decides
+availability; nothing is inferred across devices.
 
 On 2026-10-08 the user explicitly promoted GPU subtitle compositing,
 non-Mac Profile 5 hardware decoding and the caption-bearing file-VOD
@@ -78,7 +93,7 @@ merged tree passes pinned all-target compilation and the normal tracked hook.
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | All eight raw graph comparisons, merged `c10f16f0` text API and one complete performance campaign pass; wall time is 13.02–31.14% lower and child CPU/frame 49.90–81.73% lower | Preserve exact evidence through combined review and landing |
-| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | AMD raw graphs pass 32/32. On the shipping image, the corrected daemon's own probe admits the package, and normal-API delivery runs the strict graph with VA-API decode and encode. Fixed on the way: the probe raster, the progress-meter splice, refusal attribution and the 64×64 DV encoder-pairing proof | Intel window (transfer approval pending) |
+| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | AMD and Intel raw graphs pass 32/32 (Intel with VA-API and QSV encode). On the shipping image, the daemon's own probe admits the package on both, and normal-API delivery runs the strict graph with VA-API decode and encode. Fixed on the way: the probe raster, the progress-meter splice, refusal attribution, the 64×64 DV encoder-pairing proof, a foreign Media SDK failing the whole Intel probe, and 64×64 QSV Main10 proofs | QSV strict graphs once the image drops Debian `libmfx1` |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on `2139fa9c`; the merged `c10f16f0` MPEG-2 case also passes unchanged caption/picture assertions and clean shutdown | Preserve evidence through combined review/landing; broader DVR and client presentation remain separate |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner

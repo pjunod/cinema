@@ -2688,20 +2688,74 @@ pub fn copy_index_pipe_args(source: &MediaFile, video: CopyVideoOptions) -> Vec<
 /// The index pipe with an explicitly named input. Cluster index workers use a
 /// fixed inherited descriptor here, keeping the file they attested attached
 /// to ffmpeg even if the pathname is replaced before the child opens it.
+///
+/// This argv is an identity, not just a command: `pipeline_digest_for_transform`
+/// hashes it into every cluster cache key. It is the one-identity case of
+/// [`copy_index_shared_args_with_input`], and a test holds the two equal.
 pub fn copy_index_pipe_args_with_input(
     source: &MediaFile,
     input: &str,
     video: CopyVideoOptions,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    copy_index_shared_args_with_input(source, input, &[video])
+}
+
+/// One index pass that writes several copy identities from one read of the
+/// input: the global options and `-i` once, then one output block per
+/// identity. `videos[0]` writes to `pipe:1` and carries the HEVC header trace;
+/// `videos[i]` writes to `pipe:{3 + i}` — fds 4, 5, … — and carries none.
+///
+/// Every option after `-i` is an output option, so each block is byte for
+/// byte what the one-identity argv emits after `-i`, with only its URL
+/// changed and, on every block but the first, no `trace_headers`. The trace
+/// reads the packets before any other filter in the chain, so it describes
+/// the source's parameter sets, which every identity of the file shares; one
+/// trace on stderr is one proof. A trace per block would interleave N traces
+/// into one parser.
+pub fn copy_index_shared_args_with_input(
+    source: &MediaFile,
+    input: &str,
+    videos: &[CopyVideoOptions],
+) -> Vec<String> {
+    let hevc = matches!(source.video_codec.as_deref(), Some("hevc" | "h265"));
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        if hevc { "info" } else { "error" }.into(),
+    ];
+    if hevc {
+        args.push("-xerror".into());
+    }
     args.push("-i".into());
     args.push(input.to_owned());
-    args.push("-map_chapters".into());
-    args.push("-1".into());
-    args.push("-map".into());
-    args.push("0:v:0?".into());
-    args.push("-an".into());
-    args.push("-sn".into());
+    for (at, video) in videos.iter().enumerate() {
+        let url = if at == 0 {
+            "pipe:1".to_owned()
+        } else {
+            format!("pipe:{}", 3 + at)
+        };
+        args.extend(copy_index_output_args(source, *video, &url, at == 0));
+    }
+    args
+}
+
+/// One identity's output block of the index pipe, writing to `url`. `trace`
+/// prepends `trace_headers` to an HEVC block's bitstream filters; see
+/// [`copy_index_shared_args_with_input`] for why only one block carries it.
+pub fn copy_index_output_args(
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    url: &str,
+    trace: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-map_chapters".into(),
+        "-1".into(),
+        "-map".into(),
+        "0:v:0?".into(),
+        "-an".into(),
+        "-sn".into(),
+    ];
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
     args.extend(
         [
@@ -2713,14 +2767,12 @@ pub fn copy_index_pipe_args_with_input(
             "0",
             "-f",
             "mp4",
-            "pipe:1",
         ]
         .iter()
         .map(|s| s.to_string()),
     );
-    if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
-        args[2] = "info".to_owned();
-        args.insert(3, "-xerror".to_owned());
+    args.push(url.to_owned());
+    if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
             args[index + 1] = format!("trace_headers,{}", args[index + 1]);
         } else {
@@ -6012,6 +6064,149 @@ mod index_pipe_tests {
             return false;
         }
         (0..=haystack.len() - needle.len()).any(|i| &haystack[i..i + needle.len()] == needle)
+    }
+
+    /// The one-identity argv as it stood before the shared builder existed,
+    /// frozen. `pipeline_digest_for_transform` hashes the live builder's
+    /// output into every cluster cache key, so a drift here would re-key
+    /// every index on the fleet.
+    fn frozen_copy_index_pipe_args_with_input(
+        source: &MediaFile,
+        input: &str,
+        video: CopyVideoOptions,
+    ) -> Vec<String> {
+        let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+        args.push("-i".into());
+        args.push(input.to_owned());
+        args.push("-map_chapters".into());
+        args.push("-1".into());
+        args.push("-map".into());
+        args.push("0:v:0?".into());
+        args.push("-an".into());
+        args.push("-sn".into());
+        args.extend(strip_plurx_markers(&copy_video_args(source, video)));
+        args.extend(
+            [
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+                "-use_editlist",
+                "0",
+                "-f",
+                "mp4",
+                "pipe:1",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+        if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+            args[2] = "info".to_owned();
+            args.insert(3, "-xerror".to_owned());
+            if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
+                args[index + 1] = format!("trace_headers,{}", args[index + 1]);
+            } else {
+                let at = args.len() - 1;
+                args.splice(at..at, ["-bsf:v".to_owned(), "trace_headers".to_owned()]);
+            }
+        }
+        args
+    }
+
+    fn every_copy_option() -> Vec<CopyVideoOptions> {
+        let mut options = Vec::new();
+        for bits in 0..32_u8 {
+            options.push(
+                CopyVideoOptions::new(bits & 1 != 0, bits & 2 != 0)
+                    .with_parameter_set_promotion(bits & 4 != 0)
+                    .with_dolby_vision_conversion(bits & 8 != 0)
+                    .with_parameter_set_retention(bits & 16 != 0),
+            );
+        }
+        options
+    }
+
+    fn index_fixture_files() -> Vec<MediaFile> {
+        let mut files = Vec::new();
+        for (hdr, profile, codec) in [
+            (Some("dolby_vision"), Some(5), "hevc"),
+            (Some("dolby_vision"), Some(7), "hevc"),
+            (Some("dolby_vision"), Some(8), "hevc"),
+            (Some("hdr10"), None, "hevc"),
+            (None, None, "hevc"),
+            (None, None, "h264"),
+        ] {
+            let mut file = hevc_dv();
+            file.hdr = hdr.map(str::to_owned);
+            file.hdr_format = profile.map(|profile| format!("Profile {profile}"));
+            file.dolby_vision.profile = profile;
+            file.video_codec = Some(codec.to_owned());
+            files.push(file);
+        }
+        files
+    }
+
+    #[test]
+    fn the_one_identity_index_argv_is_unchanged_by_the_shared_builder() {
+        for file in index_fixture_files() {
+            for video in every_copy_option() {
+                assert_eq!(
+                    copy_index_pipe_args_with_input(&file, "/dev/fd/3", video),
+                    frozen_copy_index_pipe_args_with_input(&file, "/dev/fd/3", video),
+                    "{:?} {video:?}",
+                    file.hdr
+                );
+                assert_eq!(
+                    copy_index_pipe_args(&file, video),
+                    frozen_copy_index_pipe_args_with_input(
+                        &file,
+                        &file.path.to_string_lossy(),
+                        video
+                    ),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_shared_index_pass_is_one_input_then_each_identitys_own_block() {
+        for file in index_fixture_files() {
+            let options = every_copy_option();
+            for pair in options.windows(3) {
+                let shared = copy_index_shared_args_with_input(&file, "/dev/fd/3", pair);
+                let lead = frozen_copy_index_pipe_args_with_input(&file, "/dev/fd/3", pair[0]);
+                // The lead is today's whole argv, byte for byte.
+                assert_eq!(shared[..lead.len()], lead[..]);
+                // Each sibling is its own one-identity block after `-i`, with
+                // its own pipe and no header trace.
+                let mut at = lead.len();
+                for (n, video) in pair.iter().enumerate().skip(1) {
+                    let alone = frozen_copy_index_pipe_args_with_input(&file, "/dev/fd/3", *video);
+                    let input = alone.iter().position(|arg| arg == "-i").expect("-i") + 2;
+                    let mut block: Vec<String> = alone[input..].to_vec();
+                    *block.last_mut().expect("url") = format!("pipe:{}", 3 + n);
+                    if let Some(bsf) = block.iter().position(|arg| arg == "-bsf:v") {
+                        if block[bsf + 1] == "trace_headers" {
+                            block.drain(bsf..bsf + 2);
+                        } else if let Some(rest) = block[bsf + 1].strip_prefix("trace_headers,") {
+                            block[bsf + 1] = rest.to_owned();
+                        }
+                    }
+                    assert_eq!(shared[at..at + block.len()], block[..], "{video:?}");
+                    at += block.len();
+                }
+                assert_eq!(at, shared.len());
+                assert_eq!(
+                    shared
+                        .iter()
+                        .filter(|arg| arg.contains("trace_headers"))
+                        .count(),
+                    usize::from(matches!(file.video_codec.as_deref(), Some("hevc"))),
+                    "one trace, on the lead"
+                );
+                assert_eq!(shared.iter().filter(|arg| *arg == "-i").count(), 1);
+            }
+        }
     }
 }
 
