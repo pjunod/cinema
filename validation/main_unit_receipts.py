@@ -204,11 +204,27 @@ def restore(api, scope, current_run, applicability):
     adopted, with one line saying why. A success inherited from an earlier
     run is kept only when that run's own journal was adopted and recorded it.
     """
-    artifacts = api.pages('/actions/artifacts', {'name': key(scope)})
-    require(not any(artifact.get('run_id') == current_run for artifact in artifacts),
-            'Attempt already executed')
-    runs = api.pages('/actions/runs', {'workflow_id': WORKFLOW,
-                                     'ref': f"refs/pull/{scope['pr']}/head"}, 'workflow_runs')
+    try:
+        artifacts = api.pages('/actions/artifacts', {'name': key(scope)})
+    except receipts.IntegrityError:
+        raise
+    except adoption.UNADOPTABLE as error:
+        # GITHUB_RUN_ATTEMPT (checked in main) still guards against a re-run.
+        print(f'Prior journals unavailable — {adoption.reason(error)}; nothing adopted, every test runs')
+        applicability.finish({})
+        return {}
+    if any(artifact.get('run_id') == current_run for artifact in artifacts):
+        raise receipts.IntegrityError('Attempt already executed')
+    try:
+        runs = api.pages('/actions/runs', {'workflow_id': WORKFLOW,
+                                         'ref': f"refs/pull/{scope['pr']}/head"}, 'workflow_runs')
+    except receipts.IntegrityError:
+        raise
+    except adoption.UNADOPTABLE as error:
+        # Journals cannot be bound to their runs without the listing.
+        print(f'Prior runs unavailable — {adoption.reason(error)}; nothing adopted, every test runs')
+        applicability.finish({})
+        return {}
     listed, finals = {}, {}
     for prior in runs:
         listed.setdefault(prior.get('id'), []).append(prior)
@@ -224,8 +240,10 @@ def restore(api, scope, current_run, applicability):
     for rid, authenticate in attempts:
         try:
             journals.append((rid, authenticate()))
+        except receipts.IntegrityError:
+            raise
         except adoption.UNADOPTABLE as error:
-            print(f'run {rid}: journal not adopted — {error}; its tests run again')
+            print(f'run {rid}: journal not adopted — {adoption.reason(error)}; its tests run again')
     trusted = {(test, rid, journal['commit']) for rid, journal in journals
                for test, value in journal['passes'].items()
                if value == {'run': rid, 'commit': journal['commit']}}
@@ -294,10 +312,27 @@ def execute(journal, path, suites=None):
     """Keep main unittest semantics: a legitimate skip is not a cached pass."""
     require(journal.get('applicability_commit') == journal['commit'], 'Missing current-source prepare')
     if suites is None:
+        # Only rechecked passes may skip a test. A pass whose recheck cannot
+        # complete (say, a transient git failure reading its old source) is
+        # withdrawn and executes; it never refuses the run. Withdrawing it
+        # also means this run's final journal will not be adopted later,
+        # because it no longer carries every record its start marker did.
         applicability = receipts.SourceApplicability(journal['commit'])
-        applicable = {test: value for test, value in journal['passes'].items() if applicability(test, value)}
+        applicable = {}
+        for test, value in journal['passes'].items():
+            try:
+                if applicability(test, value):
+                    applicable[test] = value
+            except receipts.IntegrityError:
+                raise
+            except adoption.UNADOPTABLE as error:
+                print(f'Recheck incomplete for {test} — {adoption.reason(error)}; it executes')
         applicability.finish(applicable)
-        require(applicable == journal['passes'], 'Prepared passes are no longer applicable')
+        withdrawn = sorted(set(journal['passes']) - set(applicable))
+        if withdrawn:
+            print(f'{len(withdrawn)} prepared passes could not be rechecked; they execute: ' + ', '.join(withdrawn))
+            journal['passes'] = applicable
+            receipts.atomic_json(path, journal)
     require(not journal['fixture_errors'], 'Unresolved fixture errors')
     inventories = {name: list(suites[name]) if suites is not None else receipts.discover(name)
                    for name in receipts.SUITES}

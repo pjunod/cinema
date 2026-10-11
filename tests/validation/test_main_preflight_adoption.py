@@ -47,7 +47,7 @@ class Ledger:
         self.jobs[99] = [{"id": 990, "run_id": 99, "repo_id": 1, "attempt": 1, "name": adoption.JOB,
                           "status": "running"}]
 
-    def run(self, rid, commit, own=(), inherited=None):
+    def run(self, rid, commit, own=(), inherited=None, skipped=()):
         pull = {"number": 7, "draft": False, "state": "open", "head": {"repo": REPO, "sha": commit},
                 "base": {"repo": REPO, "ref": "main"}}
         self.runs[rid] = {"id": rid, "repository": REPO, "commit_sha": commit, "workflow_id": "main-fast-lane.yml",
@@ -57,15 +57,19 @@ class Ledger:
         self.jobs[rid] = [job]
         records = {identity: {"commit": commit, "run": rid, "job": job["id"], "attempt": 1,
                               "outcome": "success", "environment": ENV, "inputs": DIGEST} for identity in own}
+        skips = {identity: {**record, "outcome": "skipped"} for identity, record in
+                 ((identity, {"commit": commit, "run": rid, "job": job["id"], "attempt": 1,
+                              "environment": ENV, "inputs": DIGEST}) for identity in skipped)}
         start = {"version": 1, "scope": SCOPE, "run": rid, "commit": commit, "job": job["id"], "attempt": 1,
                  "environment": ENV, "producer_blob": "producer-" + commit, "manifest_blob": "manifest-" + commit,
                  "outcomes": dict(inherited or {}), "skips": {}, "phase_errors": []}
-        final = dict(start, outcomes={**start["outcomes"], **records})
+        final = dict(start, outcomes={**start["outcomes"], **records}, skips=skips)
         start_artifact = self.publish(f"{NAME}-start-{rid}", rid, start)
         self.publish(NAME, rid, final)
         self.logs[rid] = [f"{commit}:refs/remotes/pull/7/head",
                           f"Artifact {start_artifact['name']} has been successfully uploaded!",
                           *(adoption.outcome_event(identity, record) for identity, record in records.items()),
+                          *(adoption.outcome_event(identity, record) for identity, record in skips.items()),
                           f"Artifact {NAME} has been successfully uploaded!"]
         return final
 
@@ -101,10 +105,12 @@ class Ledger:
         if arguments[0] == "show" and arguments[1].endswith("main-fast-lane.yml"):
             return WORKFLOW
         if arguments[0] == "show" and arguments[1].endswith(str(adoption.MANIFEST)):
-            return json.dumps({"version": 1, "families": FAMILIES})
+            return json.dumps({"version": 1, "families": getattr(self, "families", FAMILIES)})
         if arguments[0] == "rev-parse":
             commit, path = arguments[1].split(":", 1)
             return ("manifest-" if path == str(adoption.MANIFEST) else "producer-") + commit
+        if arguments[0] == "ls-tree":
+            return "tests/validation/test_fixture.py"
         return ""
 
 
@@ -158,7 +164,7 @@ class MainPreflightAdoptionCase(unittest.TestCase):
         # means "not adopted" rather than the crash PR #997 hit.
         adopted, _, output = prepare(ledger, available=lambda commit: True)
         self.assertEqual(adopted, {})
-        self.assertIn("run 10: preflight journal not adopted — Command", output)
+        self.assertIn("run 10: preflight journal not adopted — CalledProcessError: Command", output)
 
     def test_inherited_outcome_is_kept_only_when_its_originating_journal_is_adopted(self):
         ledger = Ledger()
@@ -210,6 +216,14 @@ class MainPreflightAdoptionCase(unittest.TestCase):
             # origin and declared-input checks stand between them and adoption.
             "own record from another job": lambda l: logged(l, job=111),
             "own record with other inputs": lambda l: logged(l, inputs="0" * 64),
+            "own skip from another job": lambda l: (l.final(11)["skips"][THREE].update(job=111),
+                                                    l.logs[11].__setitem__(3, adoption.outcome_event(
+                                                        THREE, l.final(11)["skips"][THREE]))),
+            "own skip event missing": lambda l: l.logs[11].pop(3),
+            "start journal with an unknown field": lambda l: l.start(11).update(unknown=True),
+            "start journal with a malformed skip": lambda l: l.start(11)["skips"].update({THREE: {}}),
+            "final journal is not a mapping": lambda l: l.blobs.__setitem__(
+                [item for item in l.artifacts if item["name"] == NAME and item["run_id"] == 11][0]["id"], []),
             "skip recorded as success": lambda l: record(l, outcome="skipped"),
             "start positive dropped from final": lambda l: l.start(11)["outcomes"].update(
                 {THREE: dict(l.final(11)["outcomes"][TWO])}),
@@ -217,8 +231,9 @@ class MainPreflightAdoptionCase(unittest.TestCase):
         }
         baseline = Ledger()
         baseline.run(10, X, own=[ONE])
-        baseline.run(11, Y, own=[TWO])
+        baseline.run(11, Y, own=[TWO], skipped=[THREE])
         self.assertEqual(set(prepare(baseline)[0]), {ONE, TWO})
+        self.assertEqual(set(prepare(baseline)[1]["skips"]), {THREE})
         for name, mutation in mutations.items():
             ledger = copy.deepcopy(baseline)
             mutation(ledger)
@@ -244,6 +259,52 @@ class MainPreflightAdoptionCase(unittest.TestCase):
         ledger.jobs[99][0]["attempt"] = 2
         with self.assertRaisesRegex(ReceiptError, "Current job identity unavailable"):
             prepare(ledger)
+
+    def test_current_source_integrity_failure_during_candidate_filtering_refuses(self):
+        unit = "validation:test_fixture.Case.test_one"
+        families = FAMILIES + [{"id_prefix": unit, "inputs": ["tests/validation/test_fixture.py"], "reason": "unit"}]
+        ledger = Ledger()
+        ledger.families = families
+        ledger.run(10, X, own=[unit])
+        class Source:
+            error = adoption.IntegrityError("Current unit worktree differs from dispatched Git source")
+            def __init__(self, commit): pass
+            def fingerprint(self, commit, identity): raise self.error
+            def finish(self, passes): pass
+        with mock.patch.object(adoption, "SourceApplicability", Source):
+            with self.assertRaisesRegex(adoption.IntegrityError, "worktree differs"):
+                prepare(ledger, families=families)
+            Source.error = ReceiptError("Unsupported dynamic unit discovery")
+            adopted, _, output = prepare(ledger, families=families)
+        self.assertEqual(adopted, {})
+        self.assertIn(f"Not adopted: {unit} — Unsupported dynamic unit discovery", output)
+
+    def test_unlisted_history_adopts_nothing_and_names_unexpected_error_types(self):
+        ledger = Ledger()
+        ledger.run(10, X, own=[ONE])
+        listing = ledger.pages
+        def broken(path, query=None, field=None):
+            if path == "/actions/artifacts" and query["name"] == NAME:
+                raise ReceiptError("Evidence pagination limit reached")
+            return listing(path, query, field)
+        ledger.pages = broken
+        adopted, journal, output = prepare(ledger)
+        self.assertEqual((adopted, journal["outcomes"]), ({}, {}))
+        self.assertIn("Prior preflight journals unavailable — Evidence pagination limit reached", output)
+        ledger = Ledger()
+        ledger.run(10, X, own=[ONE])
+        ledger.final(10)["outcomes"][ONE] = 5  # a record that is not a mapping
+        adopted, _, output = prepare(ledger)
+        self.assertEqual(adopted, {})
+        self.assertRegex(output, r"run 10: preflight journal not adopted — (TypeError|AttributeError): ")
+        ledger = Ledger()
+        ledger.run(10, X, own=[ONE])
+        def truncated(path, query=None):
+            raise adoption.http.client.IncompleteRead(b"partial", 10)
+        ledger.bytes = truncated
+        adopted, _, output = prepare(ledger)
+        self.assertEqual(adopted, {})
+        self.assertIn("run 10: preflight journal not adopted — IncompleteRead", output)
 
     def test_split_receipt_workflow_has_one_python_executor_and_distinct_node_receipts(self):
         commands = ['python3 -m validation.main_unit_receipts prepare',

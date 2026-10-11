@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import fnmatch
+import http.client
 import json
 import os
 import platform
@@ -23,14 +24,25 @@ import unittest
 import zipfile
 from typing import Mapping
 
-from validation.python_unit_receipts import (API, ReceiptError, SourceApplicability,
+from validation.python_unit_receipts import (API, IntegrityError, ReceiptError, SourceApplicability,
     artifact_json, atomic_json, bounded_json, discover, positive, require, test_source_path)
 
 
 # Every way a prior journal can fail to authenticate. Each means "not adopted"
 # and never refuses the lane; programming errors outside this set still raise.
-UNADOPTABLE = (ReceiptError, subprocess.SubprocessError, OSError, KeyError, IndexError,
-               TypeError, ValueError, AttributeError, zipfile.BadZipFile)
+# IntegrityError (the current run is unsafe) is a ReceiptError, so every
+# handler re-raises it first.
+UNADOPTABLE = (ReceiptError, subprocess.SubprocessError, OSError, http.client.HTTPException,
+               KeyError, IndexError, TypeError, ValueError, AttributeError, zipfile.BadZipFile)
+
+
+def reason(error):
+    """A ReceiptError states its own reason; anything else names its type.
+
+    A TypeError or AttributeError may be a bug in this module rather than a
+    bad journal, so the printed line always shows which it was.
+    """
+    return str(error) if isinstance(error, ReceiptError) else f"{type(error).__name__}: {error}"
 JOB = "fast policy and contract preflight"
 
 
@@ -372,6 +384,8 @@ def authenticate_journal(api, scope, artifact, env, candidates, skipped_history)
             try:
                 require_record_origin(record, journal, candidates.get(identity))
                 declared(identity, record)
+            except IntegrityError:
+                raise
             except UNADOPTABLE:
                 dropped += 1
                 continue
@@ -384,6 +398,8 @@ def authenticate_journal(api, scope, artifact, env, candidates, skipped_history)
         else:
             try:
                 require_record_origin(record, journal, skipped_history.get(identity))
+            except IntegrityError:
+                raise
             except UNADOPTABLE:
                 continue
         skips[identity] = record
@@ -402,9 +418,17 @@ def prepare(output_key="receipt_key"):
     current_jobs = api.pages(f"/actions/runs/{run_id}/jobs")
     current_job = [job for job in current_jobs if job["name"] == JOB]
     require(len(current_job) == 1 and current_job[0]["attempt"] == 1, "Current job identity unavailable")
-    artifacts = api.pages("/actions/artifacts", {"name": name})
-    require(not any(artifact.get("run_id") == run_id for artifact in artifacts),
-            "Current run already has a journal")
+    try:
+        artifacts = api.pages("/actions/artifacts", {"name": name})
+    except IntegrityError:
+        raise
+    except UNADOPTABLE as error:
+        # Without the listing nothing can be adopted; GITHUB_RUN_ATTEMPT
+        # (checked in api_context) still guards against a re-run.
+        print(f"Prior preflight journals unavailable — {reason(error)}; nothing adopted, every test runs")
+        artifacts = []
+    if any(artifact.get("run_id") == run_id for artifact in artifacts):
+        raise IntegrityError("Current run already has a journal")
     by_run = {}
     for artifact in artifacts:
         by_run.setdefault(artifact.get("run_id"), []).append(artifact)
@@ -416,8 +440,10 @@ def prepare(output_key="receipt_key"):
             require(len(by_run[rid]) == 1, "several final journals for one run")
             outcomes, skips, dropped = authenticate_journal(
                 api, scope, by_run[rid][0], env, candidates, skipped_history)
+        except IntegrityError:
+            raise
         except UNADOPTABLE as error:
-            print(f"run {rid}: preflight journal not adopted — {error}; its tests run again")
+            print(f"run {rid}: preflight journal not adopted — {reason(error)}; its tests run again")
             continue
         if dropped:
             print(f"run {rid}: {dropped} inherited outcomes not adopted — their originating journal was not adopted")
@@ -437,10 +463,12 @@ def prepare(output_key="receipt_key"):
             same = record["environment"] == env and input_digest(commit, row) == input_digest(record["commit"], row)
             if not identity.startswith("node:"):
                 same = source(identity, {"commit": record["commit"], "run": record["run"]}) and same
+        except IntegrityError:
+            raise  # The current worktree is not the dispatched source.
         except UNADOPTABLE as error:
             # An unknown witness or unreadable source proves nothing either
             # way about the current control; executing it is always safe.
-            print(f"Not adopted: {identity} — {error}; it runs again")
+            print(f"Not adopted: {identity} — {reason(error)}; it runs again")
             continue
         if same:
             adopted[identity] = {**record, "inputs": input_digest(record["commit"], row)}

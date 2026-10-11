@@ -27,10 +27,10 @@ def zipped(value):
     return buffer.getvalue()
 
 
-def framed(commit, *journals):
+def framed(commit, *journals, checkout=(None, None, 'triggered by event: pull_request')):
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        print(commit, commit, 'triggered by event: pull_request', sep='\n')
+        print(*(line or commit for line in checkout), sep='\n')
         for phase, journal in zip(('start', 'final'), journals):
             main.emit_snapshot(journal, phase)
     return output.getvalue().encode()
@@ -188,6 +188,90 @@ class MainUnitReceiptsCase(unittest.TestCase):
         passes, output = restore(history)
         self.assertEqual(passes, {})
         self.assertIn('run 10: journal not adopted', output)
+        # A complete pair still needs the job to have checked out exactly this
+        # commit for this pull request.
+        for checkout in ((None, 'checkout', 'triggered by event: pull_request'),
+                         (None, None, 'triggered by event: push')):
+            history.logs[10] = framed(X, start, journal, checkout=checkout)
+            with self.subTest(checkout=checkout):
+                passes, output = restore(history)
+                self.assertEqual(passes, {})
+                self.assertIn('run 10: journal not adopted — log lacks exact-source checkout evidence', output)
+
+    def test_unlisted_history_adopts_nothing_and_names_unexpected_error_types(self):
+        import http.client
+        for path in ('/actions/artifacts', '/actions/runs'):
+            history = History()
+            history.run(10, X, own=[ONE])
+            listing = history.pages
+            def broken(page, query=None, field=None, path=path):
+                if page == path:
+                    raise ReceiptError('Evidence pagination limit reached')
+                return listing(page, query, field)
+            history.pages = broken
+            with self.subTest(listing=path):
+                passes, output = restore(history)
+                self.assertEqual(passes, {})
+                self.assertIn('unavailable — Evidence pagination limit reached; nothing adopted, every test runs', output)
+        history = History()
+        history.run(10, X, own=[ONE])
+        history.runs[0]['event_payload'] = 5  # metadata of an unexpected shape
+        passes, output = restore(history)
+        self.assertEqual(passes, {})
+        self.assertRegex(output, r'run 10: journal not adopted — (TypeError|AttributeError): ')
+        history = History()
+        history.run(10, X, own=[ONE])
+        def truncated(path, query=None):
+            raise http.client.IncompleteRead(b'partial', 10)
+        history.bytes = truncated
+        passes, output = restore(history)
+        self.assertEqual(passes, {})
+        self.assertIn('run 10: journal not adopted — IncompleteRead', output)
+
+    def test_integrity_errors_are_never_downgraded_to_not_adopted(self):
+        history = History()
+        history.run(10, X, own=[ONE])
+        for target in ('preflight_job', 'listed_run'):
+            with self.subTest(target=target), \
+                 patch.object(main, target, side_effect=main.receipts.IntegrityError('current run unsafe')), \
+                 self.assertRaisesRegex(main.receipts.IntegrityError, 'current run unsafe'):
+                restore(history)
+
+    def test_run_step_executes_passes_whose_recheck_cannot_complete(self):
+        class Fixture(unittest.TestCase):
+            ran = []
+            def test_kept(self): raise AssertionError('a rechecked pass must not execute')
+            def test_unreadable(self): self.ran.append('unreadable')
+            def test_changed(self): self.ran.append('changed')
+        suites = {name: [Fixture('test_kept'), Fixture('test_unreadable'), Fixture('test_changed')]
+                  for name in main.receipts.SUITES}
+        commit = 'd' * 40
+        cached = {name + ':' + test.id(): {'run': 3, 'commit': X} for name in suites for test in suites[name]}
+        class Recheck:
+            error = main.subprocess.TimeoutExpired(['git', 'cat-file'], 5)
+            def __init__(self, commit): pass
+            def __call__(self, test, value):
+                if test.endswith('test_unreadable'): raise self.error
+                return test.endswith('test_kept')
+            def finish(self, passes): pass
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(main.receipts, 'SourceApplicability', Recheck), \
+             patch.object(main.receipts, 'discover', side_effect=lambda name: suites[name]):
+            path = Path(directory) / 'receipt.json'
+            journal = {'version': main.receipts.VERSION, 'scope': SCOPE, 'commit': commit, 'run': 4,
+                       'applicability_commit': commit, 'passes': dict(cached), 'fixture_errors': [], 'complete': False}
+            self.assertEqual(main.execute(journal, path), 0)
+            self.assertEqual(sorted(Fixture.ran), ['changed', 'changed', 'unreadable', 'unreadable'])
+            self.assertEqual({test: value['run'] for test, value in journal['passes'].items()},
+                             {test: 3 if test.endswith('test_kept') else 4 for test in cached})
+            Recheck.error = main.receipts.IntegrityError('Current unit worktree differs from dispatched Git source')
+            journal.update(passes=dict(cached), complete=False)
+            with self.assertRaises(main.receipts.IntegrityError):
+                main.execute(journal, path)
+            # Without a current-source prepare nothing may be skipped at all.
+            journal.update(passes=dict(cached), applicability_commit=X)
+            with self.assertRaisesRegex(ReceiptError, 'Missing current-source prepare'):
+                main.execute(journal, path)
 
     def test_current_run_integrity_still_refuses(self):
         history = History()
