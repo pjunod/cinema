@@ -20,7 +20,7 @@ use crate::store::{
     item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
     IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
     IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome,
-    RootFingerprintStatus, SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX,
+    RootFingerprintStatus, RootRemovalOutcome, SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX,
     IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
     IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
@@ -2446,34 +2446,20 @@ impl MediaStore for SqliteStore {
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
     ) -> Result<RootFingerprintStatus, StoreError> {
+        let configured_paths = crate::store::library_paths_json(configured_paths)?;
         let fingerprint = fingerprint.to_owned();
         self.with_conn(move |conn| {
-            let inserted = conn.execute(
-                "INSERT INTO library_roots (library_id, fingerprint) SELECT ?1, ?2 WHERE ?3 \
-                 ON CONFLICT(library_id) DO NOTHING",
-                params![library_id, fingerprint, allow_establish],
-            )?;
-            if inserted == 1 {
-                return Ok(RootFingerprintStatus::Established);
-            }
-            let expected: Option<String> = conn
-                .query_row(
-                    "SELECT fingerprint FROM library_roots WHERE library_id = ?1",
-                    params![library_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let Some(expected) = expected else {
-                return Ok(RootFingerprintStatus::Unestablished);
-            };
-            if expected == fingerprint {
-                Ok(RootFingerprintStatus::Matched)
-            } else {
-                Ok(RootFingerprintStatus::Mismatch { expected })
-            }
+            super::publication::ensure_library_root_fingerprint(
+                conn,
+                library_id,
+                &configured_paths,
+                &fingerprint,
+                allow_establish,
+            )
         })
         .await
     }
@@ -2588,6 +2574,25 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn remove_files_outside_library_roots(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+    ) -> Result<RootRemovalOutcome, StoreError> {
+        crate::store::root_removal_payload(file_ids)?;
+        let configured_paths = crate::store::library_paths_json(configured_paths)?;
+        let ids = file_ids.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let outcome =
+                super::publication::remove_library_files(&tx, library_id, &configured_paths, &ids)?;
+            tx.commit()?;
+            Ok(outcome)
+        })
+        .await
+    }
+
     async fn reset_library_root_fingerprint(&self, library_id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| {
             Ok(conn.execute(
@@ -2629,46 +2634,53 @@ impl MediaStore for SqliteStore {
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError> {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let mut removed = 0u64;
-            // Bottom-up: file-less leaves, then empty seasons, then empty shows.
-            removed += tx.execute(
-                "DELETE FROM items
-                 WHERE library_id = ?1 AND kind IN ('movie','episode','video','photo','book','audiobook')
-                   AND id NOT IN (SELECT item_id FROM files)",
-                params![library_id],
-            )? as u64;
-            removed += tx.execute(
-                "DELETE FROM items WHERE library_id = ?1 AND kind = 'season'
-                 AND id NOT IN (SELECT parent_id FROM items
-                                WHERE kind = 'episode' AND parent_id IS NOT NULL)",
-                params![library_id],
-            )? as u64;
-            removed += tx.execute(
-                "DELETE FROM items WHERE library_id = ?1 AND kind = 'show'
-                 AND id NOT IN (SELECT parent_id FROM items
-                                WHERE kind = 'season' AND parent_id IS NOT NULL)",
-                params![library_id],
-            )? as u64;
-            // Folders nest arbitrarily deep, so one pass only strips the
-            // innermost layer: delete a whole subtree of files and the empty
-            // chain above it has to go too. Loop until a pass removes nothing.
-            loop {
-                let pass = tx.execute(
-                    "DELETE FROM items WHERE library_id = ?1 AND kind = 'folder'
-                     AND id NOT IN (SELECT parent_id FROM items
-                                    WHERE parent_id IS NOT NULL)",
-                    params![library_id],
-                )? as u64;
-                removed += pass;
-                if pass == 0 {
-                    break;
-                }
-            }
+            let removed = prune_empty_items_in(&tx, library_id)?;
             tx.commit()?;
             Ok(removed)
         })
         .await
     }
+}
+
+/// Remove a library's items left without files, bottom-up, inside the
+/// caller's transaction. Returns rows removed.
+pub(super) fn prune_empty_items_in(tx: &Connection, library_id: i64) -> Result<u64, StoreError> {
+    let mut removed = 0u64;
+    // Bottom-up: file-less leaves, then empty seasons, then empty shows.
+    removed += tx.execute(
+        "DELETE FROM items
+         WHERE library_id = ?1 AND kind IN ('movie','episode','video','photo','book','audiobook')
+           AND id NOT IN (SELECT item_id FROM files)",
+        params![library_id],
+    )? as u64;
+    removed += tx.execute(
+        "DELETE FROM items WHERE library_id = ?1 AND kind = 'season'
+         AND id NOT IN (SELECT parent_id FROM items
+                        WHERE kind = 'episode' AND parent_id IS NOT NULL)",
+        params![library_id],
+    )? as u64;
+    removed += tx.execute(
+        "DELETE FROM items WHERE library_id = ?1 AND kind = 'show'
+         AND id NOT IN (SELECT parent_id FROM items
+                        WHERE kind = 'season' AND parent_id IS NOT NULL)",
+        params![library_id],
+    )? as u64;
+    // Folders nest arbitrarily deep, so one pass only strips the
+    // innermost layer: delete a whole subtree of files and the empty
+    // chain above it has to go too. Loop until a pass removes nothing.
+    loop {
+        let pass = tx.execute(
+            "DELETE FROM items WHERE library_id = ?1 AND kind = 'folder'
+             AND id NOT IN (SELECT parent_id FROM items
+                            WHERE parent_id IS NOT NULL)",
+            params![library_id],
+        )? as u64;
+        removed += pass;
+        if pass == 0 {
+            break;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

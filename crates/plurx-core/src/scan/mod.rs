@@ -24,7 +24,9 @@ use walkdir::WalkDir;
 
 use crate::domain::{Item, ItemKind, Library, LibraryKind, MetadataPatch, NewItem, ProbeResult};
 use crate::error::{ProbeError, StoreError};
-use crate::store::{PublicationStore, ReconcileOutcome, RootFingerprintStatus, Store};
+use crate::store::{
+    PublicationStore, ReconcileOutcome, RootFingerprintStatus, RootRemovalOutcome, Store,
+};
 
 /// A cancelled census must never reach reconcile, even if its last page was
 /// empty. Blocking walkers and bounded probe children are joined by their
@@ -763,22 +765,27 @@ pub async fn scan_library_with_publication_and_prune_limit(
     let mut seen: HashSet<String> = HashSet::new();
     // Capture the configured path-set identity before walking. A root that
     // vanishes mid-scan must produce one bounded refusal, not a successful
-    // walk followed by a fatal error and an immediate full retry.
+    // walk followed by a fatal error and an immediate full retry. The same
+    // canonical read gives the spellings a catalogued path can carry (see
+    // `superseded_paths`).
     let fingerprint_paths = library.paths.clone();
-    let fingerprint =
-        match tokio::task::spawn_blocking(move || library_root_fingerprint(&fingerprint_paths))
-            .await
-            .map_err(|error| {
-                StoreError::Task(format!("library root fingerprint task failed: {error}"))
-            })? {
-            Ok(fingerprint) => Some(fingerprint),
-            Err(error) => {
-                report.note(format!(
+    let (fingerprint, spellings) = match tokio::task::spawn_blocking(move || {
+        (
+            library_root_fingerprint(&fingerprint_paths),
+            root_spellings(&fingerprint_paths),
+        )
+    })
+    .await
+    .map_err(|error| StoreError::Task(format!("library root fingerprint task failed: {error}")))?
+    {
+        (Ok(fingerprint), spellings) => (Some(fingerprint), spellings),
+        (Err(error), _) => {
+            report.note(format!(
                 "vanished-file cleanup skipped: library root identity could not be read: {error}"
             ));
-                None
-            }
-        };
+            (None, None)
+        }
+    };
 
     // Collect candidate files first, then process each.
     // A root that is missing or unreadable is a loud, actionable problem — the
@@ -874,10 +881,22 @@ pub async fn scan_library_with_publication_and_prune_limit(
     check_scan_cancellation()?;
     if walk_errors == 0 {
         let known = store.library_file_paths(library.id).await?;
-        let known_count = known.len();
+        // Entries a configuration change left behind, as opposed to files
+        // that vanished: under none of the library's paths now (an operator
+        // removed the path they were under), or the same file this walk
+        // recorded under another spelling of its path. Neither is evidence of
+        // a lost mount, so neither counts against the prune bound or the
+        // identity's establishment. They go once the identity checks out —
+        // after the walk, which has already re-attached media moved to a
+        // newly added path to its items, keeping identity and watch state.
+        let superseded = superseded_paths(&known, &seen, spellings.as_deref());
+        let superseded_ids: HashSet<i64> = superseded.iter().copied().collect();
+        let known_count = known.len() - superseded.len();
         let gone: Vec<i64> = known
             .into_iter()
-            .filter(|(_, p)| !seen.contains(&p.to_string_lossy().into_owned()))
+            .filter(|(id, p)| {
+                !superseded_ids.contains(id) && !seen.contains(p.to_string_lossy().as_ref())
+            })
             .map(|(id, _)| id)
             .collect();
         let Some(fingerprint) = fingerprint else {
@@ -892,22 +911,27 @@ pub async fn scan_library_with_publication_and_prune_limit(
         let root_status = store
             .ensure_library_root_fingerprint(
                 library.id,
+                &library.paths,
                 &fingerprint,
                 known_count == 0 || (!seen.is_empty() && (gone.len() as u64) <= prune_limit),
             )
             .await?;
         match root_status {
             RootFingerprintStatus::Established | RootFingerprintStatus::Matched => {
+                // An edit that landed since the walk leaves nothing for this
+                // scan to judge: what it walked is no longer the library.
+                let current = remove_superseded(store, library, &superseded, &mut report).await?;
+                let gone: &[i64] = if current { &gone } else { &[] };
                 match store
-                    .reconcile_library(library.id, &fingerprint, &gone, prune_limit)
+                    .reconcile_library(library.id, &fingerprint, gone, prune_limit)
                     .await?
                 {
                     ReconcileOutcome::Applied {
                         deleted_files,
                         pruned_items,
                     } => {
-                        report.removed_files = deleted_files as usize;
-                        report.pruned_items = pruned_items as usize;
+                        report.removed_files += deleted_files as usize;
+                        report.pruned_items += pruned_items as usize;
                     }
                     ReconcileOutcome::RefusedRoot { expected } => {
                         report.errors += 1;
@@ -954,6 +978,9 @@ pub async fn scan_library_with_publication_and_prune_limit(
                         .to_owned(),
                 );
             }
+            RootFingerprintStatus::ConfigurationChanged => {
+                report.note(CONFIGURATION_CHANGED_NOTE.to_owned());
+            }
             RootFingerprintStatus::Unestablished => {
                 report.errors += 1;
                 tracing::error!(
@@ -971,7 +998,8 @@ pub async fn scan_library_with_publication_and_prune_limit(
     } else {
         report.note(
             "vanished-file cleanup skipped: some library paths were missing or unreadable, \
-             so absent files were kept rather than removed"
+             so absent files were kept rather than removed, and so were entries under paths \
+             no longer in the library"
                 .to_owned(),
         );
     }
@@ -1033,6 +1061,98 @@ pub async fn library_root_available(root: &Path) -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+/// What a scan reports when the library's paths were edited while it ran.
+const CONFIGURATION_CHANGED_NOTE: &str =
+    "the library's paths changed while this scan ran, so it removed nothing from the catalog; \
+     the scan queued by that change covers the new paths";
+
+/// Remove `superseded` (see [`superseded_paths`]) in payload-sized batches.
+/// `false`, with a note, when the library's paths changed under the scan.
+async fn remove_superseded(
+    store: &PublicationStore<'_>,
+    library: &Library,
+    superseded: &[i64],
+    report: &mut ScanReport,
+) -> Result<bool, StoreError> {
+    for batch in superseded.chunks(crate::store::MAX_RECONCILE_FILE_IDS) {
+        match store
+            .remove_files_outside_library_roots(library.id, &library.paths, batch)
+            .await?
+        {
+            RootRemovalOutcome::Applied {
+                deleted_files,
+                pruned_items,
+            } => {
+                report.removed_files += deleted_files as usize;
+                report.pruned_items += pruned_items as usize;
+            }
+            RootRemovalOutcome::ConfigurationChanged => {
+                report.note(CONFIGURATION_CHANGED_NOTE.to_owned());
+                return Ok(false);
+            }
+        }
+    }
+    if !superseded.is_empty() {
+        tracing::info!(
+            library = %library.name,
+            superseded = superseded.len(),
+            removed = report.removed_files,
+            pruned = report.pruned_items,
+            "removed catalog entries a library path change left behind"
+        );
+    }
+    Ok(true)
+}
+
+/// Every spelling of `roots` a catalogued path can start with, lexically
+/// normalised: each root as configured and as canonicalised here. `None`
+/// when there are no roots or a root does not resolve. Blocking.
+fn root_spellings(roots: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    if roots.is_empty() {
+        return None;
+    }
+    let mut spellings = Vec::with_capacity(roots.len() * 2);
+    for root in roots {
+        spellings.push(lexical(root));
+        spellings.push(lexical(&root.canonicalize().ok()?));
+    }
+    Some(spellings)
+}
+
+/// The ids of `known` rows a configuration change left behind: not walked
+/// this time (`seen` holds the walked spellings) and either the same path as
+/// a walked file in another spelling, or — when `spellings` is known — under
+/// none of the library's roots. Paths compare component by component, so
+/// `/media//tv/x` is `/media/tv/x` and `/media/tv2/x` is not under
+/// `/media/tv`. Without `spellings` (a root that does not resolve here) no
+/// row is judged outside: one a targeted scan recorded under that root's
+/// canonical spelling could not be told from one outside every root.
+fn superseded_paths(
+    known: &[(i64, PathBuf)],
+    seen: &HashSet<String>,
+    spellings: Option<&[PathBuf]>,
+) -> Vec<i64> {
+    let walked: HashSet<PathBuf> = seen.iter().map(|path| lexical(Path::new(path))).collect();
+    known
+        .iter()
+        .filter(|(_, path)| {
+            if seen.contains(path.to_string_lossy().as_ref()) {
+                return false;
+            }
+            let path = lexical(path);
+            walked.contains(&path)
+                || spellings.is_some_and(|roots| !roots.iter().any(|root| path.starts_with(root)))
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// `path` with repeated separators, `.` components and a trailing separator
+/// gone — what [`Path::components`] already treats as equal.
+fn lexical(path: &Path) -> PathBuf {
+    path.components().collect()
 }
 
 /// Stable identity for the configured root set.
@@ -2793,8 +2913,27 @@ mod tests {
         assert!(store.get_file(file_id).await.expect("kept row").is_some());
     }
 
+    async fn set_paths(store: &SqliteStore, lib: &Library, paths: Vec<PathBuf>) -> Library {
+        store
+            .update_library(
+                lib.id,
+                &NewLibrary {
+                    name: lib.name.clone(),
+                    kind: lib.kind,
+                    paths,
+                    anime: lib.anime,
+                },
+            )
+            .await
+            .expect("update paths")
+            .expect("library")
+    }
+
+    /// Replacing a library's path with another is removing the old one: its
+    /// entries leave the catalog even though the new path is empty. (A mount
+    /// replaced *at the same path* is still the root identity's business.)
     #[tokio::test]
-    async fn a_different_present_root_commits_no_delete() {
+    async fn replacing_a_library_path_removes_the_old_paths_entries() {
         let store = SqliteStore::open_in_memory().expect("store");
         let original = tempfile::tempdir().expect("original root");
         let replacement = tempfile::tempdir().expect("replacement root");
@@ -2802,31 +2941,438 @@ mod tests {
         let lib = movie_library(&store, original.path()).await;
         scan_library(&store, &lib).await.expect("initial scan");
         let file_id = store.library_file_paths(lib.id).await.expect("file paths")[0].0;
-        let replacement_library = store
-            .update_library(
-                lib.id,
-                &NewLibrary {
-                    name: lib.name.clone(),
-                    kind: lib.kind,
-                    paths: vec![replacement.path().to_path_buf()],
-                    anime: lib.anime,
-                },
-            )
-            .await
-            .expect("update root")
-            .expect("library");
+        let replacement_library =
+            set_paths(&store, &lib, vec![replacement.path().to_path_buf()]).await;
 
         let report = scan_library(&store, &replacement_library)
             .await
-            .expect("stale-root scan");
+            .expect("replaced-root scan");
+        assert_eq!(report.removed_files, 1);
+        assert_eq!(report.pruned_items, 1);
+        assert!(
+            !report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("cleanup skipped")),
+            "problems: {:?}",
+            report.problems
+        );
+        assert!(store.get_file(file_id).await.expect("row read").is_none());
+    }
+
+    /// The reported bug: a removed path holding more files than the prune
+    /// bound used to leave every entry behind and the library with no root
+    /// identity, so no vanished-file cleanup ever ran for it again.
+    #[tokio::test]
+    async fn removing_a_library_path_removes_its_items_whatever_the_prune_bound() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let kept = tempfile::tempdir().expect("kept root");
+        let removed = tempfile::tempdir().expect("removed root");
+        let kept_file = write_fake_video(kept.path(), "Heat (1995).mkv").await;
+        for index in 0..5 {
+            write_fake_video(removed.path(), &format!("Removed {index} (2001).mkv")).await;
+        }
+        let lib = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![kept.path().to_path_buf(), removed.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("lib");
+        scan_library(&store, &lib).await.expect("initial scan");
+        assert_eq!(
+            store.library_file_paths(lib.id).await.expect("paths").len(),
+            6
+        );
+
+        let lib = set_paths(&store, &lib, vec![kept.path().to_path_buf()]).await;
+        let report = scan_library_with_progress_and_prune_percent(
+            &store,
+            &lib,
+            None,
+            crate::config::DEFAULT_SCAN_PRUNE_PERCENT,
+        )
+        .await
+        .expect("rescan");
+        assert_eq!(report.removed_files, 5);
+        assert_eq!(report.pruned_items, 5);
+        assert!(
+            !report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("cleanup skipped")),
+            "problems: {:?}",
+            report.problems
+        );
+        let remaining = store.library_file_paths(lib.id).await.expect("paths");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].1.canonicalize().expect("kept file"), kept_file);
+        assert_eq!(
+            store
+                .ensure_library_root_fingerprint(
+                    lib.id,
+                    &lib.paths,
+                    &library_root_fingerprint(&lib.paths).expect("fingerprint"),
+                    false,
+                )
+                .await
+                .expect("root identity"),
+            RootFingerprintStatus::Matched,
+            "the scan of the remaining path re-established the library's identity"
+        );
+    }
+
+    /// The store applies a removal only to the path set it was judged
+    /// against; once the library's paths have moved on it removes nothing.
+    #[tokio::test]
+    async fn the_store_removal_applies_only_to_the_current_paths() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let kept = tempfile::tempdir().expect("kept root");
+        let removed = tempfile::tempdir().expect("removed root");
+        write_fake_video(kept.path(), "Heat (1995).mkv").await;
+        write_fake_video(removed.path(), "Ronin (1998).mkv").await;
+        let both = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![kept.path().to_path_buf(), removed.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("lib");
+        scan_library(&store, &both).await.expect("initial scan");
+        let removed_file = store
+            .library_file_paths(both.id)
+            .await
+            .expect("paths")
+            .into_iter()
+            .find(|(_, path)| path.starts_with(removed.path()))
+            .expect("removed-root file")
+            .0;
+
+        let one = set_paths(&store, &both, vec![kept.path().to_path_buf()]).await;
+        assert_eq!(
+            store
+                .remove_files_outside_library_roots(both.id, &both.paths, &[removed_file])
+                .await
+                .expect("stale removal"),
+            RootRemovalOutcome::ConfigurationChanged
+        );
+        assert_eq!(
+            store
+                .library_file_paths(both.id)
+                .await
+                .expect("paths")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .remove_files_outside_library_roots(one.id, &one.paths, &[removed_file])
+                .await
+                .expect("removal"),
+            RootRemovalOutcome::Applied {
+                deleted_files: 1,
+                pruned_items: 1
+            }
+        );
+        let remaining = store.library_file_paths(one.id).await.expect("paths");
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].1.starts_with(kept.path()));
+    }
+
+    /// A replacement path the scan cannot read may be where the media moved:
+    /// the old entries stay until a scan has walked it.
+    #[tokio::test]
+    async fn an_unreadable_new_path_keeps_the_old_paths_entries() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let old = tempfile::tempdir().expect("old root");
+        write_fake_video(old.path(), "Heat (1995).mkv").await;
+        let lib = movie_library(&store, old.path()).await;
+        scan_library(&store, &lib).await.expect("initial scan");
+        let missing = old.path().join("not-mounted-yet");
+        let lib = set_paths(&store, &lib, vec![missing]).await;
+
+        let report = scan_library(&store, &lib).await.expect("rescan");
         assert_eq!(report.removed_files, 0);
         assert_eq!(report.pruned_items, 0);
-        assert_eq!(report.errors, 1);
-        assert!(report
-            .problems
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("paths no longer in the library")),
+            "problems: {:?}",
+            report.problems
+        );
+        assert_eq!(
+            store.library_file_paths(lib.id).await.expect("paths").len(),
+            1
+        );
+    }
+
+    /// Re-spelling a path (`dir//` → `dir`) re-records every file under the
+    /// new spelling; the old rows are that configuration change's leftovers,
+    /// not vanished files, so they go whatever the prune bound, the items
+    /// keep their identity, and cleanup stays healthy afterwards.
+    #[tokio::test]
+    async fn a_respelled_library_path_keeps_its_items_and_drops_the_old_rows() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("root");
+        for index in 0..12 {
+            write_fake_video(dir.path(), &format!("Respelled {index} (2002).mkv")).await;
+        }
+        let respelled = PathBuf::from(format!("{}//", dir.path().display()));
+        let lib = movie_library(&store, &respelled).await;
+        scan_library(&store, &lib).await.expect("initial scan");
+        let mut items = Vec::new();
+        for (file, _) in store.library_file_paths(lib.id).await.expect("paths") {
+            items.push(
+                store
+                    .get_file(file)
+                    .await
+                    .expect("file")
+                    .expect("row")
+                    .item_id,
+            );
+        }
+        items.sort_unstable();
+
+        let lib = set_paths(&store, &lib, vec![dir.path().to_path_buf()]).await;
+        let report = scan_library_with_progress_and_prune_percent(
+            &store,
+            &lib,
+            None,
+            crate::config::DEFAULT_SCAN_PRUNE_PERCENT,
+        )
+        .await
+        .expect("rescan");
+        assert_eq!(report.removed_files, 12);
+        assert_eq!(report.pruned_items, 0);
+        assert!(
+            !report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("cleanup skipped")),
+            "problems: {:?}",
+            report.problems
+        );
+        let mut survivors = Vec::new();
+        for (file, path) in store.library_file_paths(lib.id).await.expect("paths") {
+            assert!(!path.to_string_lossy().contains("//"), "{path:?}");
+            survivors.push(
+                store
+                    .get_file(file)
+                    .await
+                    .expect("file")
+                    .expect("row")
+                    .item_id,
+            );
+        }
+        survivors.sort_unstable();
+        assert_eq!(survivors, items);
+    }
+
+    /// A node whose mounted roots do not match the identity the cluster
+    /// recorded judges nothing, configuration leftovers included: its view of
+    /// which spelling is "outside" is exactly what is in doubt.
+    #[tokio::test]
+    async fn a_mismatched_root_identity_keeps_entries_outside_the_paths() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("root");
+        write_fake_video(dir.path(), "Heat (1995).mkv").await;
+        let lib = movie_library(&store, dir.path()).await;
+        scan_library(&store, &lib).await.expect("initial scan");
+        let (file, _) = store.library_file_paths(lib.id).await.expect("paths")[0].clone();
+        let item = store
+            .get_file(file)
+            .await
+            .expect("file")
+            .expect("row")
+            .item_id;
+        let elsewhere = store
+            .upsert_file(
+                item,
+                "/another-node/movies/Heat (1995).mkv",
+                1,
+                1,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("row recorded elsewhere");
+        assert!(store
+            .reset_library_root_fingerprint(lib.id)
+            .await
+            .expect("reset"));
+        assert_eq!(
+            store
+                .ensure_library_root_fingerprint(lib.id, &lib.paths, "another-node", true)
+                .await
+                .expect("other identity"),
+            RootFingerprintStatus::Established
+        );
+
+        let report = scan_library(&store, &lib).await.expect("rescan");
+        assert_eq!(report.removed_files, 0);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("does not match")),
+            "problems: {:?}",
+            report.problems
+        );
+        assert!(store.get_file(elsewhere).await.expect("row").is_some());
+    }
+
+    /// Media moved to a path added in the same edit keeps its item: the
+    /// removal waits for the walk, which re-attaches the moved file first.
+    #[tokio::test]
+    async fn moving_media_to_a_new_library_path_keeps_its_item() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let old = tempfile::tempdir().expect("old root");
+        let new = tempfile::tempdir().expect("new root");
+        write_fake_video(old.path(), "Heat (1995).mkv").await;
+        let lib = movie_library(&store, old.path()).await;
+        scan_library(&store, &lib).await.expect("initial scan");
+        let (old_file, _) = store.library_file_paths(lib.id).await.expect("paths")[0].clone();
+        let item = store
+            .get_file(old_file)
+            .await
+            .expect("file")
+            .expect("row")
+            .item_id;
+
+        let moved = write_fake_video(new.path(), "Heat (1995).mkv").await;
+        let lib = set_paths(&store, &lib, vec![new.path().to_path_buf()]).await;
+        let report = scan_library(&store, &lib).await.expect("rescan");
+        assert_eq!(report.removed_files, 1, "problems: {:?}", report.problems);
+        assert_eq!(
+            report.pruned_items, 0,
+            "the item survives with its new file"
+        );
+        let remaining = store.library_file_paths(lib.id).await.expect("paths");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].1.canonicalize().expect("moved"), moved);
+        let file = store
+            .get_file(remaining[0].0)
+            .await
+            .expect("file")
+            .expect("row");
+        assert_eq!(file.item_id, item);
+    }
+
+    /// A scan that began before the library's paths were edited must not
+    /// record the old path set's identity: every scan of the new set would
+    /// then be refused as a mount mismatch, and cleanup would stop for good.
+    #[tokio::test]
+    async fn a_scan_of_outdated_paths_neither_removes_nor_establishes() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let first = tempfile::tempdir().expect("first root");
+        let added = tempfile::tempdir().expect("added root");
+        write_fake_video(first.path(), "Heat (1995).mkv").await;
+        write_fake_video(added.path(), "Ronin (1998).mkv").await;
+        let stale = movie_library(&store, first.path()).await;
+        let current = set_paths(
+            &store,
+            &stale,
+            vec![first.path().to_path_buf(), added.path().to_path_buf()],
+        )
+        .await;
+
+        let report = scan_library(&store, &stale).await.expect("stale scan");
+        assert_eq!(report.removed_files, 0);
+        assert!(
+            !report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("cleanup skipped")),
+            "problems: {:?}",
+            report.problems
+        );
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("paths changed while this scan ran")),
+            "problems: {:?}",
+            report.problems
+        );
+        assert_eq!(
+            store
+                .ensure_library_root_fingerprint(
+                    stale.id,
+                    &stale.paths,
+                    &library_root_fingerprint(&stale.paths).expect("fingerprint"),
+                    true,
+                )
+                .await
+                .expect("stale identity"),
+            RootFingerprintStatus::ConfigurationChanged
+        );
+
+        let report = scan_library(&store, &current).await.expect("current scan");
+        assert!(
+            !report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("cleanup skipped")),
+            "problems: {:?}",
+            report.problems
+        );
+        assert_eq!(
+            store
+                .library_file_paths(current.id)
+                .await
+                .expect("paths")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn superseded_paths_compare_components_in_every_recorded_spelling() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let real = dir.path().join("real-tv");
+        std::fs::create_dir(&real).expect("real root");
+        #[cfg(unix)]
+        let root = {
+            let link = dir.path().join("tv");
+            std::os::unix::fs::symlink(&real, &link).expect("symlinked root");
+            link
+        };
+        #[cfg(not(unix))]
+        let root = real.clone();
+        let spellings = root_spellings(std::slice::from_ref(&root)).expect("resolves");
+        let canonical = real.canonicalize().expect("canonical");
+        let known = vec![
+            (1, root.join("Show/S01E01.mkv")),
+            (
+                2,
+                PathBuf::from(format!("{}//Show/S01E02.mkv", root.display())),
+            ),
+            (3, canonical.join("Show/S01E03.mkv")),
+            (
+                4,
+                PathBuf::from(format!("{}2/Show/S01E01.mkv", root.display())),
+            ),
+            (5, dir.path().join("elsewhere/x.mkv")),
+            (
+                6,
+                PathBuf::from(format!("{}//Show/S01E04.mkv", root.display())),
+            ),
+        ];
+        let seen: HashSet<String> = [root.join("Show/S01E01.mkv"), root.join("Show/S01E04.mkv")]
             .iter()
-            .any(|problem| problem.contains("no recorded root identity")));
-        assert!(store.get_file(file_id).await.expect("kept row").is_some());
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            superseded_paths(&known, &seen, Some(spellings.as_slice())),
+            vec![4, 5, 6]
+        );
+        assert_eq!(superseded_paths(&known, &seen, None), vec![6]);
+        assert!(root_spellings(&[dir.path().join("missing")]).is_none());
     }
 
     #[tokio::test]
