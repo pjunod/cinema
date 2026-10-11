@@ -3966,16 +3966,13 @@ impl MediaSessionStore for SqliteStore {
         now_ms: i64,
         after: Option<MediaSessionTakeoverCursor>,
         limit: usize,
-    ) -> Result<Vec<MediaSessionRoute>, StoreError> {
+    ) -> Result<crate::domain::TakeoverInventory, StoreError> {
         if now_ms < 0 {
             return Err(StoreError::Task(
                 "invalid media-session takeover inventory time".to_owned(),
             ));
         }
         let limit = i64::try_from(limit.min(MAX_TAKEOVER_CANDIDATES)).unwrap_or(0);
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
         let (has_cursor, after_lease_expires_at_ms, after_incarnation_id) = match after {
             Some(after) => {
                 if after.lease_expires_at_ms < 0 || after.incarnation_id.is_empty() {
@@ -3987,6 +3984,10 @@ impl MediaSessionStore for SqliteStore {
             }
             None => (0_i64, 0_i64, String::new()),
         };
+        self.note_settings_read(&[
+            crate::store::keys::CLUSTER_MEDIA_POOL_ENABLED,
+            crate::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+        ]);
         self.with_read(move |conn| {
             let route_cols = route_projection(conn)?;
             let owner_column = if route_cols == PRINCIPAL_ROUTE_COLS {
@@ -3994,8 +3995,14 @@ impl MediaSessionStore for SqliteStore {
             } else {
                 "user_id"
             };
+            // The switch pair is read by the statement that lists the page,
+            // as on the replicated twin, which says why.
             let mut statement = conn.prepare(&format!(
-                "SELECT {route_cols} FROM media_sessions
+                "SELECT page.*, gate.takeover_enabled FROM
+                  (SELECT EXISTS (SELECT 1 FROM settings WHERE key = ?7 AND value = '1')
+                      AND EXISTS (SELECT 1 FROM settings WHERE key = ?8 AND value = '1')
+                      AS takeover_enabled) gate
+                  LEFT JOIN (SELECT {route_cols} FROM media_sessions
                   WHERE state = 'active' AND lease_expires_at_ms <= ?1
                     AND publication_ready_at_ms != ?6
                     -- A draining predecessor is not work to inherit. Its
@@ -4013,10 +4020,14 @@ impl MediaSessionStore for SqliteStore {
                         AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                     AND (?2 = 0 OR lease_expires_at_ms > ?3
                       OR (lease_expires_at_ms = ?3 AND incarnation_id > ?4))
-                  ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?5",
+                  ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?5) page
+                  ON gate.takeover_enabled
+                  ORDER BY page.lease_expires_at_ms, page.incarnation_id",
                 route_cols = route_cols
             ))?;
-            let routes = statement
+            // The gate is the last column; route_from_row reads the page's.
+            let gate = statement.column_count() - 1;
+            let rows = statement
                 .query_map(
                     params![
                         now_ms,
@@ -4025,11 +4036,27 @@ impl MediaSessionStore for SqliteStore {
                         after_incarnation_id,
                         limit,
                         MEDIA_SESSION_PUBLICATION_BLOCKED,
+                        crate::store::keys::CLUSTER_MEDIA_POOL_ENABLED,
+                        crate::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
                     ],
-                    route_from_row,
+                    |row| {
+                        let enabled = row.get::<_, i64>(gate)? != 0;
+                        let route = match row.get::<_, Option<String>>(0)? {
+                            Some(_) => Some(route_from_row(row)?),
+                            None => None,
+                        };
+                        Ok((enabled, route))
+                    },
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(routes)
+            let enabled = rows.first().is_some_and(|(enabled, _)| *enabled);
+            Ok(if enabled {
+                crate::domain::TakeoverInventory::Expired(
+                    rows.into_iter().filter_map(|(_, route)| route).collect(),
+                )
+            } else {
+                crate::domain::TakeoverInventory::Disabled
+            })
         })
         .await
     }
@@ -6527,10 +6554,21 @@ mod sharing_route_decoder_tests {
                 owned.is_empty(),
                 "Shared actors are outside the Local lease loop"
             );
+            crate::store::SettingsStore::put_settings(
+                &store,
+                &[
+                    (crate::store::keys::CLUSTER_MEDIA_POOL_ENABLED, "1"),
+                    (crate::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED, "1"),
+                ],
+            )
+            .await
+            .expect("enable session takeover");
             let expired = store
                 .expired_media_sessions(9000, None, 64)
                 .await
-                .expect("expired inventory");
+                .expect("expired inventory")
+                .into_expired()
+                .expect("both takeover switches are on");
             assert_eq!(expired.len(), 1);
             assert_eq!(expired[0].principal, owners[1]);
             store.with_conn(|conn| {

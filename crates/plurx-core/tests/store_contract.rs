@@ -1991,6 +1991,21 @@ async fn confirm_media_activation(
 }
 
 /// Establish one current session for a playback, and return its activation.
+/// Both takeover switches on. The expiry inventory reads them in its own
+/// statement and answers `Disabled` while either is off.
+async fn enable_session_takeover(store: &dyn Store, backend: &str) {
+    store
+        .put_settings(&[
+            (plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED, "1"),
+            (
+                plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                "1",
+            ),
+        ])
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: enable session takeover: {error}"));
+}
+
 async fn current_media_session(
     store: &dyn Store,
     user_id: i64,
@@ -3995,6 +4010,7 @@ async fn hiqlite_media_session_rejoin_classifies_a_post_proposal_abort() {
 #[tokio::test]
 async fn media_session_commit_advances_the_exact_expected_pointer_once() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let user = store
             .create_user("staged-commit-user", "hash", false)
             .await
@@ -4122,6 +4138,8 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
                 .expired_media_sessions(1_000_000, None, 16)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: takeover inventory: {error}"))
+                .into_expired()
+                .expect("both takeover switches are on")
                 .iter()
                 .all(|route| route.incarnation_id != predecessor),
             "{backend}: a draining predecessor is not work to inherit"
@@ -5364,6 +5382,7 @@ async fn media_session_maintenance_reaps_an_abandoned_preparation() {
 #[tokio::test]
 async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let user = store
             .create_user("activation-settle-user", "hash", false)
             .await
@@ -5466,6 +5485,8 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .expired_media_sessions(300, None, 16)
             .await
             .unwrap_or_else(|error| panic!("{backend}: list blocked takeover inventory: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on")
             .is_empty());
         assert!(store
             .claim_media_session_takeover(&MediaSessionTakeover {
@@ -5857,6 +5878,8 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                 .expired_media_sessions(401, None, 16)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: list finite takeover: {error}"))
+                .into_expired()
+                .expect("both takeover switches are on")
                 .iter()
                 .filter(|route| route.incarnation_id == finite_incarnation)
                 .count(),
@@ -6487,6 +6510,7 @@ async fn monotone_lease_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn media_session_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let first_user = store
             .create_user("session-user-a", "hash", false)
             .await
@@ -7408,7 +7432,9 @@ async fn media_session_contract_runs_through_dyn_store() {
         let expired = store
             .expired_media_sessions(399, None, 64)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on");
         let expired_b = expired
             .iter()
             .find(|route| route.session_id == session_b)
@@ -7751,6 +7777,7 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
 #[tokio::test]
 async fn ending_a_taken_over_session_acts_on_the_current_owner() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let user = store
             .create_user("takeover-end-user", "hash", false)
             .await
@@ -7919,6 +7946,8 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
                 .expired_media_sessions(4_000, None, 64)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: post-end inventory: {error}"))
+                .into_expired()
+                .expect("both takeover switches are on")
                 .iter()
                 .all(|route| route.incarnation_id != incarnation),
             "{backend}: an ended incarnation is not offered for takeover"
@@ -7945,6 +7974,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
 #[tokio::test]
 async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_page() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let user = store
             .create_user("session-expiry-cursor-user", "hash", false)
             .await
@@ -7985,7 +8015,9 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
         let first = store
             .expired_media_sessions(1_000, None, 16)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: first cursor page: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: first cursor page: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on");
         assert_eq!(first.len(), 16, "{backend}");
         let second = store
             .expired_media_sessions(
@@ -7994,7 +8026,9 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
                 16,
             )
             .await
-            .unwrap_or_else(|error| panic!("{backend}: second cursor page: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: second cursor page: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on");
         assert_eq!(second.len(), 16, "{backend}");
         let third = store
             .expired_media_sessions(
@@ -8003,7 +8037,9 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
                 16,
             )
             .await
-            .unwrap_or_else(|error| panic!("{backend}: third cursor page: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: third cursor page: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on");
         assert_eq!(third.len(), 1, "{backend}");
 
         let routes = first
@@ -8027,6 +8063,116 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
                     < (pair[1].lease_expires_at_ms, pair[1].incarnation_id.as_str())
             }),
             "{backend}: pages preserve the documented keyset ordering"
+        );
+    })
+    .await;
+}
+
+/// A node's own view of the takeover switches lags a disable saved on another
+/// node until its replica applies the save. The inventory reads both switches
+/// in its own statement, so while either is off it answers `Disabled` however
+/// many routes have expired: a caller still holding an "on" gets nothing to
+/// contest, and no route moves.
+#[tokio::test]
+async fn the_takeover_inventory_is_refused_while_either_switch_is_off() {
+    use plurx_core::domain::TakeoverInventory;
+    use plurx_core::store::keys::{CLUSTER_MEDIA_POOL_ENABLED, CLUSTER_SESSION_TAKEOVER_ENABLED};
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("takeover-switch-gate-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create gate user: {error}"));
+        let incarnation_id = uuid::Uuid::from_u128(0x6000).to_string();
+        let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
+            expected_desired_revision: None,
+            incarnation_id: incarnation_id.clone(),
+            session_id: uuid::Uuid::from_u128(0x6001).to_string(),
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
+            playback_id: "takeover-switch-gate".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "e".repeat(64),
+            owner_node_id: "gate-owner".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 100,
+            lease_expires_at_ms: 200,
+        };
+        store
+            .activate_media_session(&activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed gate route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: gate route must activate"));
+        confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        let inventory = || async {
+            store
+                .expired_media_sessions(1_000, None, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: takeover inventory: {error}"))
+        };
+
+        assert_eq!(
+            inventory().await,
+            TakeoverInventory::Disabled,
+            "{backend}: neither saved"
+        );
+        for (key, value) in [
+            (CLUSTER_MEDIA_POOL_ENABLED, "1"),
+            (CLUSTER_SESSION_TAKEOVER_ENABLED, "0"),
+        ] {
+            store
+                .put_setting(key, value)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: save {key}: {error}"));
+            assert_eq!(
+                inventory().await,
+                TakeoverInventory::Disabled,
+                "{backend}: {key}={value} leaves takeover off"
+            );
+        }
+        store
+            .put_setting(CLUSTER_SESSION_TAKEOVER_ENABLED, "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enable takeover: {error}"));
+        let listed = inventory()
+            .await
+            .into_expired()
+            .unwrap_or_else(|| panic!("{backend}: both switches on"));
+        assert_eq!(
+            listed
+                .iter()
+                .map(|route| route.incarnation_id.as_str())
+                .collect::<Vec<_>>(),
+            [incarnation_id.as_str()],
+            "{backend}: the expired route is listed once both are on"
+        );
+
+        // A disable saved after an "on" was proved: whatever the caller
+        // still holds, the authority refuses the page.
+        store
+            .put_setting(CLUSTER_MEDIA_POOL_ENABLED, "0")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: disable media pool: {error}"));
+        assert_eq!(
+            inventory().await,
+            TakeoverInventory::Disabled,
+            "{backend}: disabled again"
+        );
+        let route = store
+            .media_session_route_by_incarnation(&incarnation_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read gate route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: gate route exists"));
+        assert_eq!(
+            (route.owner_node_id.as_str(), route.owner_epoch),
+            ("gate-owner", listed[0].owner_epoch),
+            "{backend}: no route moved"
         );
     })
     .await;

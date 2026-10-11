@@ -71,10 +71,22 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
                 owned.is_empty(),
                 "Shared actors are outside the Local lease loop"
             );
+            store
+                .put_settings(&[
+                    (plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED, "1"),
+                    (
+                        plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                        "1",
+                    ),
+                ])
+                .await
+                .expect("enable session takeover");
             let expired = store
                 .expired_media_sessions(9001, None, 10)
                 .await
-                .expect("shared takeover inventory");
+                .expect("shared takeover inventory")
+                .into_expired()
+                .expect("both takeover switches are on");
             assert_eq!(expired.len(), 2);
             for lease in &expired {
                 assert!(matches!(lease.principal, PlaybackPrincipal::Sharing { .. }));

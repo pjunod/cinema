@@ -5469,12 +5469,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// exclusive keyset cursor in `(lease_expires_at_ms, incarnation_id)`
     /// order, allowing a bounded caller to make progress past routes it must
     /// refuse without mutating those still-authoritative routes.
+    ///
+    /// The same statement reads both takeover switches and answers
+    /// [`TakeoverInventory::Disabled`](crate::domain::TakeoverInventory) when
+    /// either is off, so a caller whose own view of the switches is stale
+    /// cannot start work the authority has switched off.
     async fn expired_media_sessions(
         &self,
         now_ms: i64,
         after: Option<crate::domain::MediaSessionTakeoverCursor>,
         limit: usize,
-    ) -> Result<Vec<MediaSessionRoute>, StoreError>;
+    ) -> Result<crate::domain::TakeoverInventory, StoreError>;
 
     /// Atomically transfer an exact expired owner epoch and its lease fence.
     /// A racing survivor, delete, renewal, or maintenance pass makes the CAS

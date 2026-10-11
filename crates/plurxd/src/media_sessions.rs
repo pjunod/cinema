@@ -5449,6 +5449,13 @@ impl<T: Store + ?Sized> TakeoverSwitches for T {
 ///   disagrees with the held answer: a save on any node is seen once this
 ///   node applies it, for one consistent read. The settings route is the
 ///   only writer of either switch, and every write it makes is a Raft entry;
+/// - the authority refuses the inventory ([`Self::refused_by_authority`]). A
+///   held "on" can outlive a disable saved elsewhere for as long as this
+///   replica takes to apply it, but it cannot start work: the inventory read
+///   an enabled tick makes before any offer or spawn reads both switches in
+///   its own statement on the leader and answers `Disabled`. Only an attempt
+///   already past that read when the disable commits can still reach its
+///   CAS, within its `TAKEOVER_DEADLINE`, as before the switches were held;
 /// - the change source cannot report a save made elsewhere: an "on" is then
 ///   re-read every tick and an "off" held for at most 60 s, as before.
 ///
@@ -5524,6 +5531,16 @@ impl TakeoverGate {
         }
     }
 
+    /// The authority refused the inventory because a switch is off there:
+    /// whatever was held is stale, so drop it and prove the switches again on
+    /// the next tick, which then holds the "off" and sleeps the idle period.
+    pub(crate) fn refused_by_authority(&mut self) {
+        tracing::debug!(
+            "media-session takeover refused: a takeover switch is off at the authority"
+        );
+        self.held = None;
+    }
+
     /// Wait for the loop's next tick and say whether takeover may run on it.
     ///
     /// On: one `TAKEOVER_INTERVAL` tick, exactly as before. Off (the fleet
@@ -5576,13 +5593,17 @@ struct ExpiryScanPage {
 /// route is skipped (not expired, not taken over) until its owner is measured
 /// within the bound or leaves the roster; advisory, it is contested as before
 /// and the refusal is counted.
+///
+/// `Ok(None)` is the authority's refusal: the inventory reads both takeover
+/// switches in its own statement and one of them is off there, whatever this
+/// node's gate held (see [`TakeoverGate::refused_by_authority`]).
 async fn clock_guarded_expiry_scan<Q, F>(
     clock: &ClusterClockGuard,
     query: Q,
-) -> Result<ExpiryScanPage, String>
+) -> Result<Option<ExpiryScanPage>, String>
 where
     Q: FnOnce(i64) -> F,
-    F: Future<Output = Result<Vec<MediaSessionRoute>, StoreError>>,
+    F: Future<Output = Result<plurx_core::domain::TakeoverInventory, StoreError>>,
 {
     let ticket = clock
         .acquire_for(ClockDecision::ExpiryScan)
@@ -5590,10 +5611,13 @@ where
     // One original caller timestamp, not a fresh wall read after the Store
     // await. Discard the entire page on invalidation, leaving its keyset
     // cursor unchanged so a later healthy tick can reconsider it.
-    let routes = tokio::time::timeout(Duration::from_secs(3), query(ticket.now_ms()))
+    let inventory = tokio::time::timeout(Duration::from_secs(3), query(ticket.now_ms()))
         .await
         .map_err(|_| "media-session expiry inventory timed out".to_owned())?
         .map_err(|error| error.to_string())?;
+    let Some(routes) = inventory.into_expired() else {
+        return Ok(None);
+    };
     clock
         .revalidate_for(ClockDecision::ExpiryScan, &ticket)
         .map_err(|cause| format!("media-session expiry clock refused: {cause:?}"))?;
@@ -5613,10 +5637,10 @@ where
                 .is_ok()
         })
         .collect();
-    Ok(ExpiryScanPage {
+    Ok(Some(ExpiryScanPage {
         contestable,
         cursor,
-    })
+    }))
 }
 
 pub(crate) async fn takeover_loop(state: AppState) {
@@ -5643,7 +5667,15 @@ pub(crate) async fn takeover_loop(state: AppState) {
         })
         .await
         {
-            Ok(page) => page,
+            Ok(Some(page)) => page,
+            // The gate held an "on" that the authority no longer has: a
+            // disable saved elsewhere that this replica has not applied yet.
+            // Off for this tick, exactly as a gate reading "off" would be.
+            Ok(None) => {
+                gate.refused_by_authority();
+                scan_cursor = None;
+                continue;
+            }
             Err(error) => {
                 tracing::debug!(%error, "media-session takeover inventory unavailable");
                 continue;
@@ -6770,7 +6802,9 @@ mod tests {
             let result = clock_guarded_expiry_scan(&clock, |now_ms| async move {
                 called_ref.fetch_add(1, Ordering::Relaxed);
                 assert!(now_ms > 0);
-                Ok(vec![media_route("expired-clock-fixture")])
+                Ok(plurx_core::domain::TakeoverInventory::Expired(vec![
+                    media_route("expired-clock-fixture"),
+                ]))
             })
             .await;
             assert_eq!(result.is_ok(), allowed, "{offset:?}");
@@ -6778,17 +6812,19 @@ mod tests {
         }
         for clock in [Arc::new(ClusterClockGuard::new(false)), clock_fixture(None)] {
             clock.roster(&[]);
-            assert!(
-                clock_guarded_expiry_scan(&clock, |_| async { Ok(Vec::new()) })
-                    .await
-                    .is_ok()
-            );
+            assert!(clock_guarded_expiry_scan(&clock, |_| async {
+                Ok(plurx_core::domain::TakeoverInventory::Expired(Vec::new()))
+            })
+            .await
+            .is_ok());
         }
         let clock = clock_fixture(Some((0, 1_000)));
         let error = clock_guarded_expiry_scan(&clock, |_| async {
             tokio::task::yield_now().await;
             clock.roster_failed();
-            Ok(vec![media_route("must-not-advance-cursor")])
+            Ok(plurx_core::domain::TakeoverInventory::Expired(vec![
+                media_route("must-not-advance-cursor"),
+            ]))
         })
         .await
         .expect_err("discard a page invalidated during the Store await");
@@ -6798,7 +6834,7 @@ mod tests {
         ));
         let clock = clock_fixture(Some((0, 1_000)));
         assert!(clock_guarded_expiry_scan(&clock, |_| {
-            std::future::pending::<Result<Vec<MediaSessionRoute>, StoreError>>()
+            std::future::pending::<Result<plurx_core::domain::TakeoverInventory, StoreError>>()
         })
         .await
         .expect_err("existing inventory timeout remains finite")
@@ -6818,7 +6854,7 @@ mod tests {
             let called_ref = &called;
             assert!(clock_guarded_expiry_scan(&clock, |_| async move {
                 called_ref.fetch_add(1, Ordering::Relaxed);
-                Ok(Vec::new())
+                Ok(plurx_core::domain::TakeoverInventory::Expired(Vec::new()))
             })
             .await
             .is_ok());
@@ -6930,13 +6966,14 @@ mod tests {
         };
         let page = || {
             let routes = vec![voter_route.clone(), learner_route.clone()];
-            async move { Ok(routes) }
+            async move { Ok(plurx_core::domain::TakeoverInventory::Expired(routes)) }
         };
 
         let clock = learner_clock_fixture(&[2, 3], true);
         let scanned = clock_guarded_expiry_scan(&clock, |_| page())
             .await
-            .expect("every voter is bounded");
+            .expect("every voter is bounded")
+            .expect("takeover enabled");
         assert_eq!(
             scanned
                 .contestable
@@ -6970,7 +7007,8 @@ mod tests {
         let clock = learner_clock_fixture(&[2, 3, 4], true);
         let scanned = clock_guarded_expiry_scan(&clock, |_| page())
             .await
-            .expect("bounded");
+            .expect("bounded")
+            .expect("takeover enabled");
         assert_eq!(scanned.contestable.len(), 2);
         assert!(acquire_takeover_clock(&clock, &learner_route.owner_node_id).is_ok());
 
@@ -6978,7 +7016,8 @@ mod tests {
         let clock = learner_clock_fixture(&[2, 3], false);
         let scanned = clock_guarded_expiry_scan(&clock, |_| page())
             .await
-            .expect("advisory");
+            .expect("advisory")
+            .expect("takeover enabled");
         assert_eq!(scanned.contestable.len(), 2);
         assert!(acquire_takeover_clock(&clock, &learner_route.owner_node_id).is_ok());
         let metrics = clock.prometheus();
@@ -6995,10 +7034,22 @@ mod tests {
 
         // An empty page ends the pass.
         let clock = learner_clock_fixture(&[2, 3], true);
-        let scanned = clock_guarded_expiry_scan(&clock, |_| async { Ok(Vec::new()) })
-            .await
-            .expect("bounded");
+        let scanned = clock_guarded_expiry_scan(&clock, |_| async {
+            Ok(plurx_core::domain::TakeoverInventory::Expired(Vec::new()))
+        })
+        .await
+        .expect("bounded")
+        .expect("takeover enabled");
         assert!(scanned.contestable.is_empty() && scanned.cursor.is_none());
+
+        // A switch off at the authority refuses the page, before any
+        // admission, whatever the caller's gate held.
+        let scanned = clock_guarded_expiry_scan(&clock, |_| async {
+            Ok(plurx_core::domain::TakeoverInventory::Disabled)
+        })
+        .await
+        .expect("an off switch is an answer, not an error");
+        assert!(scanned.is_none());
     }
 
     pub(super) fn valid_start_request() -> RemoteStartRequest {
@@ -11063,6 +11114,39 @@ mod takeover_gate_tests {
     /// value `Switches::set` already put in the replica.
     fn apply_entry(applied: &tokio::sync::watch::Sender<u64>) {
         applied.send_modify(|index| *index += 1);
+    }
+
+    /// A disable saved on another node that this replica has not applied:
+    /// the gate still holds its "on" (its replica agrees with it), so the
+    /// authority's inventory is what refuses (`TakeoverInventory::Disabled`,
+    /// store contract
+    /// `the_takeover_inventory_is_refused_while_either_switch_is_off`). The
+    /// refusal drops the held answer: the next tick costs one consistent
+    /// read, which proves the "off", and the gate then holds it.
+    #[tokio::test(start_paused = true)]
+    async fn an_authority_refusal_drops_a_stale_on_and_reproves() {
+        let switches = Switches::default();
+        switches.set(true);
+        let (mut gate, _signal, applied) = watched_gate();
+        let mut interval = takeover_interval();
+        assert!(gate.wait_for_tick(&mut interval, &switches).await);
+        assert_eq!(switches.reads(), 1);
+
+        switches.on.store(false, Ordering::SeqCst);
+        apply_entry(&applied);
+        assert!(
+            gate.wait_for_tick(&mut interval, &switches).await,
+            "a replica that has not applied the disable still agrees with the held on"
+        );
+        assert_eq!(switches.reads(), 1);
+
+        gate.refused_by_authority();
+        assert!(!gate.wait_for_tick(&mut interval, &switches).await);
+        assert_eq!(switches.reads(), 2, "the refusal costs one consistent read");
+        for _ in 0..30 {
+            assert!(!gate.wait_for_tick(&mut interval, &switches).await);
+        }
+        assert_eq!(switches.reads(), 2, "and the proved off is then held");
     }
 
     /// K-03 regression: an enabled gate on a node with nothing happening to

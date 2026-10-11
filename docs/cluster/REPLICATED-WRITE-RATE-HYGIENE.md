@@ -229,7 +229,15 @@ its own replica's switches (a local read, no consensus) with the held
 answer and takes one consistent read only when they differ. A save on any
 node is therefore acted on within one tick of this node applying it. The
 settings route is the only writer of either switch and every write it makes
-is a Raft entry. Where no change made elsewhere could be seen (a replicated
+is a Raft entry. A node slow to apply a disable saved elsewhere keeps its
+"on" until it does, but can start no takeover work on it: the inventory read
+an enabled tick makes, a consistent read on the leader and the step before
+any offer or spawn, reads both switches in the same statement and answers
+`TakeoverInventory::Disabled` while either is off (2026-10-11); the gate then
+drops what it held and proves the switches again. Only an attempt already
+past its inventory read when the disable commits can still reach its CAS,
+within its 8 s `TAKEOVER_DEADLINE`, as it could when every tick re-read the
+pair. Where no change made elsewhere could be seen (a replicated
 store applied in another process, or a stopped Raft watch) the old cadence
 stands: an "on" is re-read every tick, an "off" held for at most 60 s. A
 failed read holds nothing and is retried on the idle cadence. It does **not** become a singleton:
@@ -568,7 +576,11 @@ records them here so review can overrule them:
    every tick. Since 2026-10-10 an "on" is held again, but only between
    change signals: a local write invalidates it, and a save elsewhere does
    once this replica applies it, so neither a local nor a remote disable is
-   held past one tick of being applied here.)
+   held past one tick of being applied here. Apply lag has no upper bound,
+   so the hold is not what enforces a disable: the takeover inventory reads
+   both switches on the leader in its own statement and refuses while either
+   is off, so a node still holding "on" starts nothing, and an attempt
+   already under way finishes or fails within its 8 s deadline, as before.)
 
 ---
 
