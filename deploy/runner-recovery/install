@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$(id -u)" -eq 0 ] || { echo 'install: run as root' >&2; exit 1; }
+[ "$#" -eq 1 ] || { echo 'usage: install <host-specific runner-vms.json>' >&2; exit 2; }
+here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+install -d /etc/plurx-ci
+install -m 0644 "$1" /etc/plurx-ci/runner-vms.json
+install -m 0755 "$here/plurx-runner-watchdog" /usr/local/sbin/plurx-runner-watchdog
+install -m 0644 "$here/plurx-runner-watchdog.service" "$here/plurx-runner-watchdog.timer" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now plurx-runner-watchdog.timer
+systemctl start plurx-runner-watchdog.service

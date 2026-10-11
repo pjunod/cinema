@@ -1,6 +1,6 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
-**Status:** live · **Reconciled:** 2026-09-20
+**Status:** live · **Reconciled:** 2026-10-11
 
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
@@ -8,6 +8,72 @@ deletes them, and what to do when a runner fills anyway*.
 
 Read this before adding a cache to any workflow, and before believing a
 `ld terminated with signal 7 [Bus error]` in a CI log.
+
+## Runner recovery and memory budgets
+
+The October 11 outage had three causes: host OOMs killed runner VMs;
+online daemons lacked labels needed by merge jobs; and the Apple janitor
+unloaded a runner whose bootstrap failed. Coverage then occupied the scarce
+general/high-cpu pool while six more measurements waited behind it.
+
+| Surface | Operating contract since 2026-10-11 |
+|---|---|
+| `lab6` and `lab4` | Two 8 GiB runner VMs per host, one active Forgejo daemon per VM. Duplicate `lab6` daemons are disabled. |
+| Host user workloads | `user-1000.slice`: `MemoryHigh=4G`, `MemoryMax=6G`, `MemorySwapMax=4G`; this limits all operator processes in that slice, including direct compiles. Docker production services have separate cgroups. |
+| `lab4` swap | The existing 8 GiB swap file is activated and restored in fstab; no new disk allocation. |
+| General VM jobs | Runner container options: `--cpus 3 --memory 6g --memory-swap 8g --pids-limit 4096`; two Cargo jobs and two Rust test threads. Host-mode runner services also have a 6 GiB cgroup cap and 300% CPU quota. |
+| Coverage | Reserved `lab6` second VM, `ci-coverage` label only, two CPUs and 6 GiB memory. Manual dispatch replaces push-triggered coverage. |
+| `lab3` | Both runner VMs retired, `boot.autostart=false`; neither belongs to a recovery allowlist. Production and observability retain its disk. |
+| Apple janitor | Fixed 25 GiB job reserve, no reset for a cache below 1 GiB, verified bounded bootstrap retries, unloaded-daemon recovery before cache inspection, five-minute checks. Intentional `launchctl disable` is respected. |
+
+An oversized compiler can now fail inside its own budget instead of removing
+an entire runner from the fleet. `--memory-swap` is a ceiling, not a promise
+that a guest has swap. The VM's 8 GiB allocation remains the outer boundary.
+
+The host user budget is persistent systemd configuration:
+
+```bash
+sudo systemctl set-property user-1000.slice MemoryHigh=4G MemoryMax=6G MemorySwapMax=4G
+```
+
+Each guest runner's `config.yml` keeps `capacity: 1`,
+`shutdown_timeout: 30m`, `CARGO_BUILD_JOBS: "2"` and `RUST_TEST_THREADS: "2"`
+under `runner.envs`, plus the table's resource flags under `container.options`.
+Its `20-resource-budget.conf` systemd drop-in sets `MemoryHigh=5G`,
+`MemoryMax=6G`, `MemorySwapMax=2G`, `CPUQuota=300%` (200% for coverage),
+`Restart=always`, `RestartSec=5` and `TimeoutStopSec=30min`. Request a graceful
+restart after changing configuration; do not reboot a VM with a live job.
+
+[`deploy/runner-recovery/`](../../deploy/runner-recovery/) installs a
+two-minute watchdog on each VM host. Supply a host-specific JSON shaped like
+[`runner-vms.example.json`](../../deploy/runner-recovery/runner-vms.example.json):
+
+```bash
+sudo bash deploy/runner-recovery/install /path/to/runner-vms.json
+systemctl status plurx-runner-watchdog.timer --no-pager
+cat /var/lib/plurx-runner-watchdog/state.json
+```
+
+Only listed local VMs are eligible. A stopped VM boots when available memory
+exceeds its entire configured allocation plus 4 GiB host reserve; an allocation
+different from the JSON is an error. Restarts have a ten-minute cooldown and
+a ceiling of three attempts per hour. Setting `boot.autostart=false` suspends
+recovery for maintenance. Active, starting and draining daemons are never
+restarted; inactive or failed daemons are started inside a running guest.
+
+**How to read it:** `errors: []` and `deferred: []` are healthy. A repeated
+`insufficient host memory` needs workload placement, not another daemon.
+`restart backoff` means repeated VM loss needs investigation. A failed guest
+agent probe is reported and retried on the next pass without rebooting a live
+VM. Source regressions are in
+[`test_runner_recovery.py`](../../tests/operations/test_runner_recovery.py) and
+[`test_ci_janitor.py`](../../tests/operations/test_ci_janitor.py).
+
+The live October 11 repair restored all three killed VMs and the Air daemon,
+canceled the running coverage measurement and its six queued successors, and
+disabled automatic coverage in Forgejo during the workflow transition. The
+workflow should be enabled after the manual-only definition lands; enabling
+the old push-triggered definition would recreate the queue.
 
 ## A full runner does not report a full disk
 

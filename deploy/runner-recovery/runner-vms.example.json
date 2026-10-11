@@ -1,0 +1,8 @@
+{
+  "project": "github-runners",
+  "reserve_gib": 4,
+  "runners": [
+    {"vm": "gha-lab6-general-01", "unit": "forgejo-runner-gha-lab6-general-01.service", "memory_gib": 8},
+    {"vm": "gha-lab6-general-02", "unit": "forgejo-runner-gha-lab6-general-02.service", "memory_gib": 8}
+  ]
+}
