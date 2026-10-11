@@ -328,6 +328,19 @@ struct SessionDir {
 }
 
 impl SessionDir {
+    /// Did this session's lifecycle end under the writer?
+    ///
+    /// Teardown removes the directory, but retirement fences the scratch
+    /// allocation first, and a writer parked on a grant is woken by that
+    /// fence while the directory still exists. A viewer's DELETE lands
+    /// exactly there, so the fence is the same session ending — cancellation,
+    /// not a write fault — and a missing file in a live, unfenced directory
+    /// still is one.
+    async fn torn_down(&self) -> bool {
+        self.grants.as_ref().is_some_and(WriteGrants::fenced)
+            || session_directory_gone(&self.dir).await
+    }
+
     fn new(
         dir: PathBuf,
         gate_secs: u32,
@@ -737,7 +750,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                 let counts = segmenter
                     .as_ref()
                     .map_or_else(SegmentCounts::default, Segmenter::counts);
-                if session_directory_gone(&out.dir).await {
+                if out.torn_down().await {
                     tracing::debug!(session = %crate::transcode::session_log_id(session_id), "copy segmenter pipe closed after session teardown: {e}");
                     return Outcome::Cancelled(counts);
                 }
@@ -1009,7 +1022,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                             ));
                         }
                         if let Err(e) = out.write_init(&init).await {
-                            return if session_directory_gone(&out.dir).await {
+                            return if out.torn_down().await {
                                 Outcome::Cancelled(SegmentCounts::default())
                             } else {
                                 Outcome::ReaderFailed {
@@ -1032,7 +1045,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                                 if let PublishError::Contract(reason) = e {
                                     return Outcome::Unsupported(reason);
                                 }
-                                return if session_directory_gone(&out.dir).await {
+                                return if out.torn_down().await {
                                     tracing::debug!(
                                         session = %crate::transcode::session_log_id(session_id),
                                         "session directory went away mid-write; stopping"
@@ -1150,7 +1163,7 @@ async fn finish(
                         if let PublishError::Contract(reason) = e {
                             return Outcome::Unsupported(reason);
                         }
-                        if session_directory_gone(&out.dir).await {
+                        if out.torn_down().await {
                             tracing::debug!(
                                 session = %crate::transcode::session_log_id(session_id),
                                 "session directory went away before the final segment; stopping"
@@ -1178,7 +1191,7 @@ async fn finish(
             }
         }
         if let Err(e) = out.write_endlist().await {
-            return if session_directory_gone(&out.dir).await {
+            return if out.torn_down().await {
                 Outcome::Cancelled(seg.counts())
             } else {
                 Outcome::ReaderFailed {
@@ -1203,7 +1216,7 @@ async fn finish(
                 };
             }
             Err(e) => {
-                if session_directory_gone(&out.dir).await {
+                if out.torn_down().await {
                     return Outcome::Cancelled(seg.counts());
                 }
                 return Outcome::ReaderFailed {
@@ -2355,6 +2368,66 @@ mod tests {
             matches!(outcome, Outcome::Cancelled(_)),
             "session teardown became producer failure: {outcome:?}"
         );
+    }
+
+    /// Lab F8 (2026-10-11): a viewer's DELETE fences the session's scratch
+    /// allocation, and a writer parked on a grant wakes to "retired while
+    /// waiting for scratch capacity" before teardown removes the directory.
+    /// That was logged as `copy segmenter reader failed` at ERROR on every
+    /// ordinary release of a rolling session.
+    #[tokio::test(start_paused = true)]
+    async fn retirement_while_waiting_for_scratch_is_cancellation() {
+        let starved = |retire: bool| {
+            let ledger = crate::scratch_ledger::ScratchLedger::new();
+            let permit = ledger.reserve(1_000, 1_000).expect("admission");
+            let grants = WriteGrants::new(
+                std::sync::Arc::clone(&ledger),
+                permit.key(),
+                std::sync::Arc::new(std::sync::atomic::AtomicI64::new(1_000)),
+                0,
+            );
+            if retire {
+                ledger.begin_retirement(permit.key()).expect("a live key");
+            }
+            (grants, permit)
+        };
+        let feed = pipe("clean-cra");
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let (grants, _permit) = starved(true);
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+            Some(grants),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Cancelled(_)),
+            "retirement during a grant wait became producer failure: {outcome:?}"
+        );
+
+        // The same starved writer with nobody retiring it is a real failure:
+        // the session could never publish, and that stays loud.
+        let dir = crate::test_tempdir().expect("tempdir");
+        let (grants, _permit) = starved(false);
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+            Some(grants),
+        )
+        .await;
+        let Outcome::ReaderFailed { reason, .. } = outcome else {
+            panic!("an unretired starved writer must stay a reader failure: {outcome:?}");
+        };
+        assert!(reason.contains("rolling_insufficient_capacity"), "{reason}");
     }
 
     /// The pipe arrives in whatever pieces the kernel felt like, and a
