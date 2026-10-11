@@ -138,4 +138,86 @@ class ContinuousReservationsTest {
         assertEquals("c".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
 
     }
+
+    @Test fun aChangeCancelledWhileWaitingForTheOwnerIsReportedRetained() = runBlocking {
+        fun row(height: Int, id: String, candidate: String) = buildJsonObject {
+            put("candidate_id", candidate.repeat(32)); put("rendition_id", id.repeat(64)); put("init_id", "d".repeat(64))
+            put("codec", "avc1.640032"); put("width", if (height == 720) 1280 else 1920); put("height", height)
+            put("timescale", 24); put("frame_ticks", 1); put("segment_ticks", 48); put("peak_bps", 1_000_000)
+            put("playlist", "video/${id.repeat(64)}/index.m3u8")
+        }
+        val low = row(720, "b", "1"); val high = row(1080, "c", "2")
+        val family = buildJsonObject {
+            put("version", 1); put("mode", "controlled"); put("family_id", "a".repeat(64)); put("master", "master.m3u8")
+            put("video", JsonArray(listOf(low, high)))
+        }
+        val requests = mutableListOf<JsonObject>()
+        var sequence = 0L
+        var revision = 0L
+        var ledgerRevision = 0L
+        var tx: JsonObject? = null
+        var holdHigh = false
+        val holderEntered = CompletableDeferred<Unit>()
+        val holderReleased = CompletableDeferred<Unit>()
+        val protocol = ContinuousQualityProtocol(identity, { request ->
+            requests += request
+            val transition = request.obj("transition")
+            val operation = transition?.obj("operation")
+            if (holdHigh && operation?.text("kind") == "prepare" && operation.text("target_rendition_id") == "c".repeat(64)) {
+                holdHigh = false
+                holderEntered.complete(Unit)
+                holderReleased.await()
+            }
+            if (operation?.text("kind") == "prepare") {
+                revision = requireNotNull(operation.number("intent_revision"))
+                val start = requireNotNull(request.obj("frontier")?.number("through_tick"))
+                val pin = buildJsonObject {
+                    put("artifact_id", "e".repeat(64)); put("rendition_id", operation.getValue("target_rendition_id"))
+                    put("timescale", 24); put("from_tick", start); put("through_tick", start + 48); put("byte_length", 1000)
+                }
+                tx = buildJsonObject {
+                    put("transaction_id", transition.getValue("transaction_id")); put("intent_revision", revision)
+                    put("target_rendition_id", operation.getValue("target_rendition_id")); put("state", "ready")
+                    put("intent_superseded", false); put("cancel_requested", false); put("ever_appended", false)
+                    put("ready", JsonArray(listOf(pin))); put("reserved", JsonArray(emptyList()))
+                    put("appended", JsonArray(emptyList())); put("disposed", JsonArray(emptyList()))
+                }
+            }
+            if (operation?.text("kind") == "scheduled") tx = JsonObject(requireNotNull(tx) + mapOf(
+                "state" to JsonPrimitive("scheduled"), "reserved" to operation.getValue("intervals")))
+            if (transition != null) sequence = requireNotNull(transition.number("sequence"))
+            val ledger = JsonObject(identity + mapOf("accepted_sequence" to JsonPrimitive(sequence),
+                "latest_intent_revision" to JsonPrimitive(revision), "transactions" to JsonArray(listOfNotNull(tx))))
+            buildJsonObject {
+                identity.forEach { (key, value) -> put(key, value) }; put("revision", ++ledgerRevision); put("ledger", ledger)
+                if (transition != null) put("receipt", JsonObject(identity + mapOf(
+                    "accepted_sequence" to JsonPrimitive(sequence), "transaction" to requireNotNull(tx))))
+            }
+        })
+        val selection = ContinuousVideoSelection(family, protocol)
+        val reservations = ContinuousReservations(family, protocol, selection, "b".repeat(64)) { _, _ -> true }
+        val supported = setOf("b".repeat(64), "c".repeat(64))
+        reservations.initial(0, false)
+        // One change owns the reservations, its exchange still in flight.
+        holdHigh = true
+        val holder = async(start = CoroutineStart.UNDISPATCHED) { reservations.change("c".repeat(64), 48, false, supported, 7) }
+        holderEntered.await()
+        // A second change waits behind it and its caller gives up first, the
+        // way the controller's 12 s timeout does. It never reached the owner.
+        val waiting = launch(start = CoroutineStart.UNDISPATCHED) { reservations.change("b".repeat(64), 96, false, supported, 9) }
+        assertTrue(waiting.isActive)
+        waiting.cancelAndJoin()
+        holderReleased.complete(Unit)
+        assertTrue(holder.await())
+        val settled = requests.size
+        // The caller reported that change uncertain and waits for recovery
+        // to settle it. Nothing changed, so it is retained without a request.
+        val retained = reservations.recoverFailedChange()
+        assertEquals(low, retained?.failedRow)
+        assertEquals(9L, retained?.request)
+        assertTrue(requireNotNull(retained).cancelProven)
+        assertEquals(settled, requests.size)
+        assertEquals("c".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
+        assertNull(reservations.recoverFailedChange())
+    }
 }
