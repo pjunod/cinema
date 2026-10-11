@@ -90,7 +90,62 @@ pub(super) struct MaterializeClock {
     pub(super) owners: usize,
     pub(super) retry_pending: bool,
     pub(super) watchdog: Option<tokio::task::AbortHandle>,
+    /// What the deadline found when it expired. Recorded once, so the parked
+    /// waiters and every retry inside the same episode get the same answer.
+    pub(super) verdict: Option<MaterializeVerdict>,
 }
+
+/// Which phase an expired materialize deadline actually caught.
+///
+/// The deadline used to call every expiry a producer failure, including one
+/// where the encoder pool had refused the permit and no producer ever ran,
+/// which left a failure record that could not name the slow phase. The clock
+/// and its budget are unchanged; only the verdict reads the rendition's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MaterializeVerdict {
+    /// The rendition is waiting for an encoder permit the pool refused; no
+    /// producer is running for the entry.
+    Capacity(String),
+    /// A producer ran (or none was started for another reason) and the entry
+    /// never arrived from it.
+    Producer(String),
+    /// The producer delivered the entry's fragment; publication did not make
+    /// it servable.
+    Publication(String),
+}
+
+impl MaterializeVerdict {
+    pub(super) fn message(&self) -> &str {
+        match self {
+            Self::Capacity(message) | Self::Producer(message) | Self::Publication(message) => {
+                message
+            }
+        }
+    }
+
+    pub(super) fn wait_outcome(&self) -> WaitOutcome {
+        match self.clone() {
+            Self::Capacity(message) => WaitOutcome::CapacityUnavailable(message),
+            Self::Producer(message) => WaitOutcome::ProducerFailed(message),
+            Self::Publication(message) => WaitOutcome::PublicationFailed(message),
+        }
+    }
+
+    pub(super) fn into_error(self) -> VodError {
+        match self {
+            Self::Capacity(reason) => VodError::CapacityUnavailable {
+                reason,
+                retry_after: MATERIALIZE_EXPIRY_RETAINED,
+            },
+            Self::Producer(message) => VodError::ProducerFailed(message),
+            Self::Publication(message) => VodError::PublicationFailed(message),
+        }
+    }
+}
+
+/// How long an expired episode keeps answering with its verdict before an
+/// abandoned clock is forgotten and a later GET starts a new episode.
+pub(super) const MATERIALIZE_EXPIRY_RETAINED: Duration = PENDING_RETRY_AFTER.saturating_mul(2);
 
 impl Drop for MaterializeClock {
     fn drop(&mut self) {
@@ -120,8 +175,30 @@ impl MaterializeDemand {
         }
     }
 
-    pub(super) fn expired(&self) -> bool {
-        self.started.elapsed() >= self.rendition.materialize_budget
+    /// `None` while the episode's budget runs; afterwards the verdict the
+    /// watchdog recorded, or -- when a request observes expiry before the
+    /// watchdog task has run -- the same classification read now, from the
+    /// same awaited producer state the watchdog reads. A contended
+    /// `try_belief` used to stand in for it and read as "no producer", which
+    /// answered capacity over a producer that was running whenever the
+    /// encoding also had a permit wait in flight.
+    pub(super) async fn expired_verdict(&self) -> Option<MaterializeVerdict> {
+        if self.started.elapsed() < self.rendition.materialize_budget {
+            return None;
+        }
+        let recorded = self
+            .rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .get(&self.index)
+            .filter(|clock| clock.started == self.started)
+            .and_then(|clock| clock.verdict.clone());
+        if recorded.is_some() {
+            return recorded;
+        }
+        let belief = self.rendition.slot.belief().await;
+        Some(self.rendition.materialize_verdict(self.index, belief))
     }
 }
 

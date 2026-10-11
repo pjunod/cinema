@@ -3797,19 +3797,65 @@ async fn dovi_probe_output(
 pub async fn dovi_reshape_changes_pixels(
     file: &MediaFile,
     class: crate::process_control::ChildClass,
-) -> bool {
+) -> DoviPixelProof {
     let enabled = dovi_probe_output(file, true, class).await;
     let disabled = dovi_probe_output(file, false, class).await;
-    match (enabled, disabled) {
-        (Ok(enabled), Ok(disabled)) if enabled != disabled => true,
-        (Ok(_), Ok(_)) => {
+    let proof = dovi_pixel_verdict(enabled, disabled);
+    match &proof {
+        DoviPixelProof::Proved => {}
+        DoviPixelProof::Refuted => {
             tracing::warn!(file = %file.path.display(), "Dolby Vision RPU mutation did not change sampled pixels");
-            false
         }
-        (enabled, disabled) => {
-            tracing::warn!(file = %file.path.display(), ?enabled, ?disabled, "could not prove Dolby Vision RPU pixel reshaping");
-            false
+        DoviPixelProof::Inconclusive(reason) => {
+            tracing::warn!(file = %file.path.display(), %reason, "could not prove Dolby Vision RPU pixel reshaping; not recording a verdict");
         }
+    }
+    proof
+}
+
+/// What one per-source Dolby Vision pixel proof established.
+///
+/// Three states, because a probe that did not finish is not evidence about
+/// the source. Only `Proved` and `Refuted` are verdicts a node may remember;
+/// `Inconclusive` — a timeout, a spawn failure, a non-zero exit, an empty
+/// hash list — says the measurement did not happen, and remembering it as
+/// "not Dolby Vision" turned one slow probe on a loaded node into a
+/// permanent 501 for that title until the process restarted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DoviPixelProof {
+    /// Both probes ran and applying the RPU changed the sampled pixels.
+    Proved,
+    /// Both probes ran and the pixels were identical: the RPU is a no-op.
+    Refuted,
+    /// At least one probe did not produce frame hashes.
+    Inconclusive(String),
+}
+
+impl DoviPixelProof {
+    /// The cacheable verdict, if this is one.
+    pub fn verdict(&self) -> Option<bool> {
+        match self {
+            Self::Proved => Some(true),
+            Self::Refuted => Some(false),
+            Self::Inconclusive(_) => None,
+        }
+    }
+}
+
+/// Map the enabled/disabled probe outputs to a proof. Pure, so the mapping
+/// — and above all "an Err is never a verdict" — is tested without ffmpeg.
+pub(crate) fn dovi_pixel_verdict(
+    enabled: Result<Vec<String>, String>,
+    disabled: Result<Vec<String>, String>,
+) -> DoviPixelProof {
+    match (enabled, disabled) {
+        (Ok(enabled), Ok(disabled)) if enabled != disabled => DoviPixelProof::Proved,
+        (Ok(_), Ok(_)) => DoviPixelProof::Refuted,
+        (Err(enabled), Err(disabled)) => DoviPixelProof::Inconclusive(format!(
+            "RPU-applied probe: {enabled}; RPU-ignored probe: {disabled}"
+        )),
+        (Err(error), Ok(_)) => DoviPixelProof::Inconclusive(format!("RPU-applied probe: {error}")),
+        (Ok(_), Err(error)) => DoviPixelProof::Inconclusive(format!("RPU-ignored probe: {error}")),
     }
 }
 

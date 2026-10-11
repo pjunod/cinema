@@ -952,6 +952,16 @@ pub enum VodError {
     Pending { retry_after: Duration },
     /// Typed `producer_failed` 502.
     ProducerFailed(String),
+    /// The materialize deadline expired with no producer ever started for
+    /// the entry, because the encoder pool kept refusing its permit. Typed
+    /// `transcode_capacity_pending` 503: a capacity answer, not a failure.
+    CapacityUnavailable {
+        reason: String,
+        retry_after: Duration,
+    },
+    /// The producer delivered the entry's fragment; publication did not make
+    /// it servable within the deadline. Typed `segment_publication_failed` 502.
+    PublicationFailed(String),
     /// 410 — the session ended for good.
     Gone(Terminal),
     /// A wait-pool cap was hit → typed 503, no wait.

@@ -435,7 +435,15 @@ also_in = ["crates/plurxd/src/transcode"]
 # ResponseOwner to VodServe::end_for_owner. The task owns only that owner and
 # the serve handle, ends nothing when the session already holds a replacement
 # incarnation, and exits after the existing bounded TerminalCleanup wait.
-expected_occurrences = 114
+# Acceptance root-cause batch: +1 in transcode/dovi_proofs.rs. DoviProofs::prove
+# runs a Profile 5 pixel proof in its own task so a start that stops waiting
+# neither cancels it for the callers joined to the same flight nor leaves a
+# half-finished flight. The task owns only the ledger Arc, the watch sender and
+# the probe, which is two dovi_probe_output children, each 30 s-bounded,
+# kill_on_drop and registered through output_job_owned. A panic is caught and
+# answers Inconclusive; the verdict and the flight-slot removal are one locked
+# step, so the task always ends its flight and settles every waiter.
+expected_occurrences = 115
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -568,7 +576,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # every 25 ms, inside a 30 s `tokio::time::timeout`, for a link or a
 # publication the session under test is already producing. Test-only; they own
 # no producer and decide nothing.
-expected_occurrences = 76
+# Acceptance root-cause batch: +1 in transcode/tests/chunk_05.rs. The burst
+# branch polls every 50 ms, inside a 30 s `tokio::time::timeout`, for the
+# session's first served snapshot before its playlist request. Test-only; it
+# owns no producer and decides nothing.
+expected_occurrences = 77
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -2875,7 +2887,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # DV/subtitle main union; measured by the focused ownership census.
 # #844: +1, the FirstPreparationCleanup drop task reviewed under
 # `all-detached-tokio-tasks`.
-expected_occurrences = 929
+# Acceptance root-cause batch: +6. Production +2: dovi_proofs.rs's pixel-proof
+# flight task (reviewed under `all-detached-tokio-tasks`), and live_tv.rs's
+# spawn_session_ledger_fence. That one replaces the running tick's awaited
+# ledger read: at most one is in flight per session (`fence_check`), it holds a
+# Weak manager and the session Arc and does the one read, the tick takes its
+# verdict when finished, and every observer exit (including `?` and cancel)
+# reaches the `check.abort()` beside the existing inventory-scan abort in
+# run_live_session_inner. Test-only +4: the two live_tv.rs settings-observer
+# tests spawn settings_observer_loop and cancel then await it; vod/tests/
+# chunk_03.rs and vodencode_tests.rs each spawn one parked serve_segment GET
+# that the test awaits inside a 5 s timeout after advancing paused time.
+expected_occurrences = 935
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3096,7 +3119,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # PR #947 ownership additions above; neither history is discarded.
 # DV adds its awaited/reaped held-descriptor probe child; subtitle main adds
 # its joined stack-sized cached-owner fixture thread. Both owners are retained.
-expected_occurrences = 66
+# Acceptance root-cause batch: +2 test-only `/bin/sleep 60` producer
+# children (vod/tests/chunk_03.rs a_running_producer_that_never_delivers_
+# still_answers_producer_failed and its vodencode_tests.rs expired-verdict
+# counterpart). Each is attached to the rendition's ProducerSlot and reaped
+# by Step::Terminate before the test ends; kill_on_drop is the unwind backstop.
+expected_occurrences = 68
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4391,7 +4419,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # second timeout_at on the same deadline for Auto entry's own receipt
 # registration; create.rs bounds the prepared-output seal by the caller's
 # absolute prime deadline. Neither adds a timer owner.
-expected_occurrences = 1667
+# Acceptance root-cause batch: +24. Production +2 net in live_tv.rs
+# settings_observer_loop: the one running-cadence sleep becomes three
+# FENCE_OBSERVATION_INTERVAL sleeps (running read, after a transport wake, and
+# the one-replica-read-per-interval pace on an applied-index change), each in a
+# select with the loop's shutdown token. Test-only +22: eighteen in live_tv.rs
+# tests (paused-time observer park/recovery sleeps; the bounded playlist GET and
+# start timeouts; deadline-guarded polls for the held ledger read and the
+# session end; the hung-read interval sleep), two in transcode/tests/chunk_05.rs
+# (the first-snapshot poll and its 30 s bound), and one 5 s timeout each in
+# vod/tests/chunk_03.rs and vodencode_tests.rs around the parked GET.
+expected_occurrences = 1691
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4810,7 +4848,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # constructs the committed HDR10/P5 control; the synchronous fixture collector
 # owns and reaps it. No production process constructor is added.
 # DV/subtitle main union; measured by the focused ownership census.
-expected_occurrences = 254
+# Acceptance root-cause batch: +2, the test-only `/bin/sleep 60` producer
+# children reviewed under method-spawn; ProducerSlot reaps both.
+expected_occurrences = 256
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5418,7 +5458,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # DV/subtitle main union; measured by the focused ownership census.
 # #844: +1 false positive. A create.rs test reads `response.status()` from
 # prepare_authorized; no process is launched.
-expected_occurrences = 743
+# Acceptance root-cause batch: +2, the `.spawn()` of the same two test-only
+# sleep producers reviewed under method-spawn; no production launch is added.
+expected_occurrences = 745
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5902,7 +5944,9 @@ pattern = "kill_on_drop\\s*\\("
 # kill_on_drop is only a panic/unwind backstop, never settlement evidence.
 # PR #947 after integrating main 1088d7529: base 101; repair delta +0.
 # No repair delta; preserve current main's already reconciled fixture owners.
-expected_occurrences = 101
+# Acceptance root-cause batch: +2 unwind guards on the same two test-only
+# sleep producers; normal settlement is Step::Terminate's confirmed reap.
+expected_occurrences = 103
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

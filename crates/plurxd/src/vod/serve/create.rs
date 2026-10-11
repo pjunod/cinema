@@ -1704,8 +1704,8 @@ impl ReservedSourceVodRendition {
             {
                 return Err("Source physical identity changed before readiness".into());
             }
-            if demand.expired() {
-                return Err("materializing init.mp4 exceeded the producer deadline".into());
+            if let Some(verdict) = demand.expired_verdict().await {
+                return Err(verdict.message().to_owned());
             }
             if let Some(registration) = self.owner.registered_readiness() {
                 let identity = self

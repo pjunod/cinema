@@ -233,7 +233,12 @@ pub(super) async fn exact_hls_context_at(
             ..
         }) => return Err(HlsInitInspectionError::unavailable()),
         Some(crate::transcode::VodResponsePublication {
-            result: Err(error @ crate::vodserve::VodError::ProducerFailed(_)),
+            result:
+                Err(
+                    error @ (crate::vodserve::VodError::ProducerFailed(_)
+                    | crate::vodserve::VodError::CapacityUnavailable { .. }
+                    | crate::vodserve::VodError::PublicationFailed(_)),
+                ),
             ..
         })
         | Some(crate::transcode::VodResponsePublication {

@@ -694,6 +694,9 @@ Do not replace the exact path with `/mnt` or another broad media root.
 
 ## Run as a service — launchd (macOS)
 
+Setting up a Mac from scratch? Follow the step-by-step
+[macOS install guide](MACOS.md); this section is the reference behind it.
+
 Runs plurxd as a **LaunchAgent** in your login session — start-at-login, restart
 on crash. A user agent rather than a boot-time system daemon on purpose:
 VideoToolbox hardware transcoding needs a logged-in GUI session, which a daemon
@@ -705,8 +708,11 @@ One command from the repository root:
 make install          # or: make install-macos
 ```
 
-It builds `plurxd` from this checkout, installs ffmpeg with Homebrew when it
-is missing, puts the binary in the Homebrew prefix (no sudo on Apple Silicon;
+It builds `plurxd` from this checkout, installs the pinned **Jellyfin FFmpeg
+8.1.3-1** portable build (checksum-verified, into
+`<prefix>/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/`; Homebrew's ffmpeg is never
+used — see the [macOS guide](MACOS.md#the-media-engine-jellyfin-ffmpeg-813-1)),
+puts the binary in the Homebrew prefix (no sudo on Apple Silicon;
 `--prefix` in `INSTALL_FLAGS` chooses another), renders the agent plist with
 your home directory and the real `plurxd`/`ffmpeg`/`ffprobe` paths, bootstraps
 and starts it, then waits for `/readyz` and prints the version the server
@@ -732,16 +738,20 @@ user-session hardware policy cannot be inferred safely.
 By hand, the same install is:
 
 ```sh
-# 1. Install the binary + ffmpeg (Homebrew satisfies the runtime dep)
-brew install ffmpeg
+# 1. Install the binary + Jellyfin FFmpeg 8.1.3-1 (macarm64 on Apple Silicon,
+#    mac64 on Intel; check the SHA-256 against deploy/MACOS.md)
 sudo install -m755 plurxd /usr/local/bin/plurxd     # /opt/homebrew/bin on Apple Silicon
+JF=/usr/local/libexec/plurx/jellyfin-ffmpeg-8.1.3-1
+curl -fLO https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-1/jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz
+shasum -a 256 jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz
+sudo mkdir -p "$JF" && sudo tar -xJf jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz -C "$JF"
 
 # 2. Fill in your username + real binary paths, drop the agent into place
 mkdir -p ~/Library/LaunchAgents "$HOME/Library/Application Support/plurx"
 sed -e "s|YOUR_USERNAME|$USER|g" \
     -e "s|/usr/local/bin/plurxd|$(command -v plurxd)|" \
-    -e "s|/usr/local/bin/ffmpeg|$(command -v ffmpeg)|" \
-    -e "s|/usr/local/bin/ffprobe|$(command -v ffprobe)|" \
+    -e "s|/usr/local/bin/ffmpeg|$JF/ffmpeg|" \
+    -e "s|/usr/local/bin/ffprobe|$JF/ffprobe|" \
     deploy/com.plurx.plurxd.plist > ~/Library/LaunchAgents/com.plurx.plurxd.plist
 
 # 3. Load, enable, and start it (modern launchctl)

@@ -1084,16 +1084,17 @@ pub use fragment_index_cluster::{
     AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, SubtitleBackfillCandidate, SubtitleBackfillDiagnostics,
-    SubtitleSourcePublication, SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM,
-    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
-    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
-    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
-    FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS, MAX_ACTIVE_ANALYSIS_REQUESTS,
-    MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS,
-    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS,
-    MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
+    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
+    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+    DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS,
+    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -2359,6 +2360,13 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// single snapshot keeps those values mutually consistent and, on a
     /// replicated backend, avoids paying one linearizable read per field.
     async fn settings_snapshot(&self) -> Result<BTreeMap<String, String>, StoreError>;
+    /// One setting as this node's own replica holds it, read without
+    /// consensus and without a leader round trip.
+    ///
+    /// A hint and never an authorization: a follower may not have applied a
+    /// recent save yet. It tells an idle reader whether a consistent read is
+    /// owed at all; the consistent read stays the only thing that decides.
+    async fn local_setting_hint(&self, key: &str) -> Result<Option<String>, StoreError>;
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError>;
     /// Insert an immutable setting value. Returns false when the key already
     /// exists and leaves the first committed value unchanged.
@@ -5899,6 +5907,7 @@ pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
     watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
     index_status_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    cluster_index_availability_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpStoreOperationCounts {
@@ -5907,6 +5916,16 @@ impl HttpStoreOperationCounts {
     #[must_use]
     pub fn index_status_calls(&self) -> u64 {
         self.index_status_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Batched cluster-artifact availability reads inside this request, on
+    /// either backend: one per
+    /// [`ClusterFragmentIndexStore::cluster_fragment_index_availability`]
+    /// call, whatever the number of probes in it.
+    #[must_use]
+    pub fn cluster_index_availability_calls(&self) -> u64 {
+        self.cluster_index_availability_calls
             .load(std::sync::atomic::Ordering::Relaxed)
     }
     #[must_use]
@@ -5975,6 +5994,14 @@ pub(super) fn record_http_index_status_call() {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
         counts
             .index_status_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+}
+
+pub(super) fn record_http_cluster_index_availability_call() {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
+        counts
+            .cluster_index_availability_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     });
 }

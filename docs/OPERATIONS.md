@@ -41,6 +41,9 @@ access groups. NVIDIA hosts also need NVIDIA Container Toolkit; the container
 receives the video encode/decode libraries automatically. Explicit GPU
 selections remain authoritative. See the [hardware deployment contract](../deploy/README.md#hardware-transcode--recent-intel-gpus)
 for manual configuration, remote engines, and native macOS VideoToolbox.
+On a Mac, the [macOS install guide](../deploy/MACOS.md) walks the whole path
+from a fresh machine: prerequisites, `make install-macos`, privacy grants,
+sleep and upgrades.
 
 Open `http://<host>:32400`, create the admin account, add a library. Library
 paths you type in the UI are **container-side** paths under Docker (e.g.

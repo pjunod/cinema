@@ -2351,6 +2351,11 @@ impl SettingsStore for SqliteStore {
         }).await
     }
 
+    async fn local_setting_hint(&self, key: &str) -> Result<Option<String>, StoreError> {
+        // One database, so this node's copy is the copy.
+        self.get_setting(key).await
+    }
+
     async fn settings_snapshot(
         &self,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {

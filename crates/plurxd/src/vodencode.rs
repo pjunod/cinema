@@ -145,6 +145,23 @@ pub(crate) fn frozen_software_threads(work: &Workload<'_>, budget: usize) -> u32
     work.software_threads().min(budget).max(1) as u32
 }
 
+/// The CPU threads a frozen encoder needs from the software budget before
+/// any admission can succeed, whatever else the pool holds.
+pub(crate) fn frozen_admission_floor(
+    resources: &TranscodeResourceEstimate,
+    software_threads: Option<u32>,
+) -> usize {
+    if resources.hardware_slot {
+        // Hardware output ignores the software encoder cap. Its CPU decode
+        // and filter estimate remains the operative policy floor.
+        resources.cpu_threads
+    } else {
+        resources
+            .cpu_threads
+            .min(software_threads.map_or(resources.cpu_threads, |threads| threads as usize))
+    }
+}
+
 /// Current policy must still allow the frozen encoder. The shared admission
 /// pool owns the conservative pipeline claim and its isolated oversize rule.
 pub(crate) fn try_admit_frozen_bundle(
@@ -156,16 +173,7 @@ pub(crate) fn try_admit_frozen_bundle(
     priority: Priority,
     claim: Option<u64>,
 ) -> Result<crate::admission::TranscodePermit, bool> {
-    let frozen_floor = if resources.hardware_slot {
-        // Hardware output ignores the software encoder cap. Its CPU decode
-        // and filter estimate remains the operative policy floor.
-        resources.cpu_threads
-    } else {
-        resources
-            .cpu_threads
-            .min(software_threads.map_or(resources.cpu_threads, |threads| threads as usize))
-    };
-    if frozen_floor > software_budget {
+    if frozen_admission_floor(resources, software_threads) > software_budget {
         return Err(true);
     }
     admissions
@@ -418,6 +426,33 @@ pub(crate) struct PermitRefusal {
     /// release anywhere can admit it.
     pub over_budget: bool,
     pub pool: PoolSnapshot,
+}
+
+impl std::fmt::Display for PermitRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:?} priority; hardware {}/{} in use; software {}/{} threads in use; \
+             {} live waiter(s); background {}; {} reservation(s){}",
+            self.priority,
+            self.pool.hardware_used,
+            self.hardware_limit,
+            self.pool.software_used,
+            self.software_budget,
+            self.pool.live_waiting,
+            if self.pool.background_active {
+                "holds a permit"
+            } else {
+                "idle"
+            },
+            self.pool.reservations,
+            if self.over_budget {
+                "; the plan needs more threads than the whole software budget"
+            } else {
+                ""
+            }
+        )
+    }
 }
 
 /// Ordinary producers retain this until their exact process is reaped.
@@ -870,12 +905,7 @@ impl Encoding {
             hardware_limit,
             software_budget,
             &self.resources(),
-            // The video recipe's software-encoder cap does not bound the AAC
-            // producer: shared audio's fixed estimate is its whole floor.
-            self.shared_audio
-                .is_none()
-                .then_some(self.options.software_threads)
-                .flatten(),
+            self.admission_software_threads(),
             priority,
             claim,
         ) {
@@ -892,6 +922,25 @@ impl Encoding {
             .expect("VOD encoder refusal")
             .take();
         Some(permit)
+    }
+
+    /// The video recipe's software-encoder cap does not bound the AAC
+    /// producer: shared audio's fixed estimate is its whole floor.
+    fn admission_software_threads(&self) -> Option<u32> {
+        self.shared_audio
+            .is_none()
+            .then_some(self.options.software_threads)
+            .flatten()
+    }
+
+    /// `Some(floor)` when no permit can ever be granted under
+    /// `software_budget`: the frozen plan alone needs more CPU threads than
+    /// the whole budget. The same rule admission applies, asked before a
+    /// rendition is named, so such a plan is refused at create instead of
+    /// parking demand on the materialize deadline.
+    pub(crate) fn unadmittable_software_floor(&self, software_budget: usize) -> Option<usize> {
+        let floor = frozen_admission_floor(&self.resources(), self.admission_software_threads());
+        (floor > software_budget).then_some(floor)
     }
 
     pub fn cancel_wait(&self) {
