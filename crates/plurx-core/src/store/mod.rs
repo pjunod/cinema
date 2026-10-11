@@ -5929,11 +5929,10 @@ impl HttpStoreOperationCounts {
     fn record(&self, class_index: usize) {
         use std::sync::atomic::Ordering;
 
-        let _ = self.counts[class_index].try_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| (current != u64::MAX).then(|| current.saturating_add(1)),
-        );
+        let _ =
+            self.counts[class_index].try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current != u64::MAX).then(|| current.saturating_add(1))
+            });
     }
 }
 
