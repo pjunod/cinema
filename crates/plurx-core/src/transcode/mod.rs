@@ -49,9 +49,10 @@ pub use dolby::{
 };
 pub use encoder::{
     benchmark_encoder, detect_encoders, detect_video_decoders, validate_quality_rate_control,
-    validate_quality_rate_control_yielding, CompletedReconstructedOutputContract,
-    EffectiveRateControl, Encoder, EncoderCaps, OutputCodecContract, OutputGrade,
-    QualityRateControlValidation, QualityRc, RateMode, VideoCodec,
+    validate_quality_rate_control_yielding, vbv_maxrate_bps, vbv_maxrate_kbps,
+    CompletedReconstructedOutputContract, EffectiveRateControl, Encoder, EncoderCaps,
+    OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
+    VideoCodec,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
