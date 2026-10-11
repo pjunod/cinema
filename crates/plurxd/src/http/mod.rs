@@ -520,6 +520,9 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/system/library-shape"
         | "/api/v1/system/storage"
         | "/api/v1/system/transcoder"
+        | "/api/v1/system/tone-map/census"
+        | "/api/v1/system/tone-map/census/stop"
+        | "/api/v1/system/tone-map/census/stills/{name}"
         | "/api/v1/system/search-index/rebuild"
         | "/api/v1/client-log"
         | "/api/v1/coming-soon"
@@ -1761,6 +1764,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/system/transcoder",
             put(system::update_hardware_preference).post(system::optimize_transcoder),
+        )
+        .route(
+            "/system/tone-map/census",
+            get(system::tone_map_census).post(system::start_tone_map_census),
+        )
+        .route(
+            "/system/tone-map/census/stop",
+            post(system::stop_tone_map_census),
+        )
+        .route(
+            "/system/tone-map/census/stills/{name}",
+            get(system::tone_map_census_still),
         )
         .route(
             "/system/search-index/rebuild",
@@ -12312,6 +12327,56 @@ mod tests {
         let app = test_app();
         let (status, _) = call(&app, post("/api/v1/system/storage", None, json!({}))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The tone-map census routes are admin-only, and an idle node reports an
+    /// idle census with its storage key and no result — in its own route and
+    /// inside `/system` as `tone_map.census`. Nothing here starts a run: that
+    /// spawns real ffmpeg and is covered in `pipeprobe::census`.
+    #[tokio::test]
+    async fn tone_map_census_routes_are_admin_only_and_report_idle() {
+        let app = test_app();
+        for request in [
+            get("/api/v1/system/tone-map/census", None),
+            post("/api/v1/system/tone-map/census", None, json!({})),
+            post("/api/v1/system/tone-map/census/stop", None, json!({})),
+            get(
+                "/api/v1/system/tone-map/census/stills/cpu-maxcll-1000.png",
+                None,
+            ),
+        ] {
+            let (status, _) = call(&app, request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let admin = setup_admin(&app).await;
+        let (status, census) =
+            call(&app, get("/api/v1/system/tone-map/census", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(census["state"], "idle");
+        assert!(census["result"].is_null());
+        assert!(census["key"]["encoder_family"].is_string());
+        let (_, sys) = call(&app, get("/api/v1/system", Some(&admin))).await;
+        assert_eq!(sys["tone_map"]["census"], census);
+        let (status, stopped) = call(
+            &app,
+            post(
+                "/api/v1/system/tone-map/census/stop",
+                Some(&admin),
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stopped["state"], "idle", "stopping nothing changes nothing");
+        let (status, _) = call(
+            &app,
+            get(
+                "/api/v1/system/tone-map/census/stills/..%2Fcensus.json",
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

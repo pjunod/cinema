@@ -821,6 +821,10 @@ pub struct AppState {
     /// the numbers are worth having, but not at the price of a server that
     /// will not answer until a sleeping array has spun up.
     pub storage: Arc<tokio::sync::RwLock<crate::storeprobe::StorageReport>>,
+    /// The operator-run tone-map census (`pipeprobe::census`): at most one
+    /// run, its live status and the node's stored result. Process-local; it
+    /// starts only from Settings → System and never on its own.
+    pub(crate) tone_map_census: Arc<crate::pipeprobe::ToneMapCensus>,
     /// Keeps the click path off the NAS, and announces a start once playback
     /// is real rather than once a decision has been made.
     pub availability: Arc<crate::playstart::AvailabilityCache>,
@@ -1299,6 +1303,7 @@ impl AppState {
             watched,
             progress,
             storage: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            tone_map_census: Default::default(),
             availability: Arc::new(crate::playstart::AvailabilityCache::new()),
             detail_availability: crate::availability::AvailabilityCache::new(),
             index_coverage: Arc::default(),

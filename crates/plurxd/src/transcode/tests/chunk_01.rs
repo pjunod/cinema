@@ -3515,7 +3515,9 @@ async fn the_ladder_ceiling_never_starts_a_dovi_pixel_proof() {
         unproven
     );
     assert_eq!(
-        manager.dovi_reshape_encoder_advisory(&file).await,
+        manager
+            .dovi_reshape_encoder_advisory_with_preference(&file, "")
+            .await,
         manager
             .encoder_for_file(&file, crate::process_control::ChildClass::Realtime)
             .await
@@ -3527,7 +3529,9 @@ async fn the_ladder_ceiling_never_starts_a_dovi_pixel_proof() {
         .dovi_proofs
         .insert(TranscodeManager::dovi_proof_key(&refuted), false);
     assert_eq!(
-        manager.dovi_reshape_encoder_advisory(&refuted).await,
+        manager
+            .dovi_reshape_encoder_advisory_with_preference(&refuted, "")
+            .await,
         Encoder::Software
     );
     assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 0);
