@@ -1,0 +1,1053 @@
+{
+ "schema": "continuous-browser-campaign-extract-v1",
+ "note": "Extracted from full qualification receipts on the lab host; sha256 binds each source.",
+ "runs": [
+  {
+   "receipt": "chrome-4f18b67c9-full20-1.json",
+   "sha256": "24644ddca99f9ef64e30d623b9f6d5e847f3d1960ac597100a6a76646e245dcb",
+   "browser": {
+    "browser": "Chrome",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "caps": {
+     "vcodec": "h264,av1,vp9,vp8",
+     "acodec": "aac,mp3,opus,flac",
+     "container": "mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav",
+     "hdr": 0,
+     "dv": 0,
+     "dvprofile": "",
+     "hdrDisplay": false,
+     "maxheight": null,
+     "hdr10t": 0,
+     "progressiveHevcSampleEntries": [],
+     "hlsHevcSampleEntries": []
+    },
+    "caps_q": "vcodec=h264,av1,vp9,vp8&acodec=aac,mp3,opus,flac&container=mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav&hdr=0&dv=0&dvprofile=&hdr10t=0",
+    "native_hls": false,
+    "mse": true
+   },
+   "cpu_topology": "shared CPUs",
+   "summary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0
+   },
+   "fatal_error": null,
+   "quality_cycle": {
+    "evidence_scope": "browser_video_partial",
+    "switches": 15,
+    "video_gap_p95_ms": 50.10000000009313,
+    "video_gap_max_ms": 50.10000000009313,
+    "callback_gap_p95_ms": 66.66400000010617
+   },
+   "changes": [
+    {
+     "change": 0,
+     "quality": "720",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      2.166666,
+      2.208333
+     ],
+     "gap_presented_frames": [
+      53,
+      54
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 0.21,
+     "to_position_seconds": 6.041666,
+     "ready_ms": 5826
+    },
+    {
+     "change": 1,
+     "quality": "1080",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      44.666666,
+      44.708333
+     ],
+     "gap_presented_frames": [
+      1073,
+      1074
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 6.376,
+     "to_position_seconds": 68,
+     "ready_ms": 61608
+    },
+    {
+     "change": 2,
+     "quality": "720",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      69.333333,
+      69.375
+     ],
+     "gap_presented_frames": [
+      1665,
+      1666
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 68.337,
+     "to_position_seconds": 130.041666,
+     "ready_ms": 61694
+    },
+    {
+     "change": 3,
+     "quality": "1080",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      130.583333,
+      130.625
+     ],
+     "gap_presented_frames": [
+      3135,
+      3136
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 130.373,
+     "to_position_seconds": 192.083333,
+     "ready_ms": 61706
+    },
+    {
+     "change": 4,
+     "quality": "720",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      192.375,
+      192.416666
+     ],
+     "gap_presented_frames": [
+      4618,
+      4619
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 192.408,
+     "to_position_seconds": 254.125,
+     "ready_ms": 61701
+    },
+    {
+     "change": 5,
+     "quality": "1080",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      259.875,
+      259.916666
+     ],
+     "gap_presented_frames": [
+      6238,
+      6239
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 254.427,
+     "to_position_seconds": 316.041666,
+     "ready_ms": 61596
+    },
+    {
+     "change": 6,
+     "quality": "720",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      317.708333,
+      317.75
+     ],
+     "gap_presented_frames": [
+      7626,
+      7627
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 316.381,
+     "to_position_seconds": 378.041666,
+     "ready_ms": 61657
+    },
+    {
+     "change": 7,
+     "quality": "1080",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      380,
+      380.041666
+     ],
+     "gap_presented_frames": [
+      9121,
+      9122
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 378.39,
+     "to_position_seconds": 440.041666,
+     "ready_ms": 61645
+    },
+    {
+     "change": 8,
+     "quality": "720",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      442.25,
+      442.291666
+     ],
+     "gap_presented_frames": [
+      10615,
+      10616
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 440.376,
+     "to_position_seconds": 502.083333,
+     "ready_ms": 61690
+    },
+    {
+     "change": 9,
+     "quality": "1080",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      524.416666,
+      524.458333
+     ],
+     "gap_presented_frames": [
+      12587,
+      12588
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 502.391,
+     "to_position_seconds": 564.083333,
+     "ready_ms": 61672
+    },
+    {
+     "change": 10,
+     "quality": "720",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      570.25,
+      570.291666
+     ],
+     "gap_presented_frames": [
+      13687,
+      13688
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 564.398,
+     "to_position_seconds": 626.125,
+     "ready_ms": 61714
+    },
+    {
+     "change": 11,
+     "quality": "1080",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      627.875,
+      627.916666
+     ],
+     "gap_presented_frames": [
+      15070,
+      15071
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 626.431,
+     "to_position_seconds": 688.125,
+     "ready_ms": 61661
+    },
+    {
+     "change": 12,
+     "quality": "720",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      690.625,
+      690.666666
+     ],
+     "gap_presented_frames": [
+      16576,
+      16577
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 688.408,
+     "to_position_seconds": 750.041666,
+     "ready_ms": 61598
+    },
+    {
+     "change": 13,
+     "quality": "1080",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      753.875,
+      753.916666
+     ],
+     "gap_presented_frames": [
+      18094,
+      18095
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 750.37,
+     "to_position_seconds": 812.083333,
+     "ready_ms": 61684
+    },
+    {
+     "change": 14,
+     "quality": "720",
+     "video_gap_ms": 50.1,
+     "callback_gap_ms": 66.66,
+     "gap_media_time": [
+      812.75,
+      812.791666
+     ],
+     "gap_presented_frames": [
+      19507,
+      19508
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 812.388,
+     "to_position_seconds": 874.041666,
+     "ready_ms": 61631
+    }
+   ]
+  },
+  {
+   "receipt": "firefox-4f18b67c9-full20-1.json",
+   "sha256": "131cb6cef8afd7cca907cf0d4c82ac50dc069fe1eaa3085af131e021f7323d5e",
+   "browser": {
+    "browser": "Firefox",
+    "caps": {
+     "acodec": "aac,mp3,opus,flac",
+     "container": "mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav",
+     "dv": 0,
+     "dvprofile": "",
+     "hdr": 0,
+     "hdr10t": 0,
+     "hdrDisplay": false,
+     "hlsHevcSampleEntries": [
+      "hvc1"
+     ],
+     "maxheight": 2160,
+     "progressiveHevcSampleEntries": [
+      "hvc1",
+      "hev1"
+     ],
+     "vcodec": "h264,hevc,hevc10,av1,vp9,vp8"
+    },
+    "caps_q": "vcodec=h264,hevc,hevc10,av1,vp9,vp8&acodec=aac,mp3,opus,flac&container=mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav&hdr=0&dv=0&dvprofile=&maxheight=2160&hdr10t=0",
+    "mse": true,
+    "native_hls": false,
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
+   },
+   "cpu_topology": "shared CPUs",
+   "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1
+   },
+   "fatal_error": null,
+   "quality_cycle": {
+    "evidence_scope": "browser_video_partial",
+    "switches": 15,
+    "video_gap_p95_ms": 166.85999999999967,
+    "video_gap_max_ms": 166.85999999999967,
+    "callback_gap_p95_ms": 150.1800000000003
+   },
+   "changes": [
+    {
+     "change": 0,
+     "quality": "720",
+     "video_gap_ms": 166.86,
+     "callback_gap_ms": 150.18,
+     "gap_media_time": [
+      4.041666,
+      4.208333
+     ],
+     "gap_presented_frames": [
+      98,
+      102
+     ],
+     "dropped_frames": 5,
+     "from_position_seconds": 0.207,
+     "to_position_seconds": 6.25,
+     "ready_ms": 6027
+    },
+    {
+     "change": 1,
+     "quality": "1080",
+     "video_gap_ms": 83.92,
+     "callback_gap_ms": 83.9,
+     "gap_media_time": [
+      34.916666,
+      35
+     ],
+     "gap_presented_frames": [
+      856,
+      858
+     ],
+     "dropped_frames": 2,
+     "from_position_seconds": 6.628,
+     "to_position_seconds": 54.083333,
+     "ready_ms": 47429
+    },
+    {
+     "change": 2,
+     "quality": "720",
+     "video_gap_ms": 83.9,
+     "callback_gap_ms": 83.92,
+     "gap_media_time": [
+      68.666666,
+      68.75
+     ],
+     "gap_presented_frames": [
+      1666,
+      1668
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 54.459,
+     "to_position_seconds": 116.083333,
+     "ready_ms": 61597
+    },
+    {
+     "change": 3,
+     "quality": "1080",
+     "video_gap_ms": 83.88,
+     "callback_gap_ms": 83.86,
+     "gap_media_time": [
+      172.5,
+      172.583333
+     ],
+     "gap_presented_frames": [
+      4158,
+      4160
+     ],
+     "dropped_frames": 2,
+     "from_position_seconds": 116.385,
+     "to_position_seconds": 178.083333,
+     "ready_ms": 61687
+    },
+    {
+     "change": 4,
+     "quality": "720",
+     "video_gap_ms": 84.06,
+     "callback_gap_ms": 84.02,
+     "gap_media_time": [
+      215.666666,
+      215.75
+     ],
+     "gap_presented_frames": [
+      5194,
+      5196
+     ],
+     "dropped_frames": 5,
+     "from_position_seconds": 178.459,
+     "to_position_seconds": 240.083333,
+     "ready_ms": 61617
+    },
+    {
+     "change": 5,
+     "quality": "1080",
+     "video_gap_ms": 83.94,
+     "callback_gap_ms": 83.96,
+     "gap_media_time": [
+      292.833333,
+      292.916666
+     ],
+     "gap_presented_frames": [
+      7046,
+      7048
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 240.417,
+     "to_position_seconds": 302.083333,
+     "ready_ms": 61628
+    },
+    {
+     "change": 6,
+     "quality": "720",
+     "video_gap_ms": 84.08,
+     "callback_gap_ms": 84.06,
+     "gap_media_time": [
+      323.25,
+      323.333333
+     ],
+     "gap_presented_frames": [
+      7776,
+      7778
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 302.392,
+     "to_position_seconds": 364.083333,
+     "ready_ms": 61664
+    },
+    {
+     "change": 7,
+     "quality": "1080",
+     "video_gap_ms": 83.78,
+     "callback_gap_ms": 99.62,
+     "gap_media_time": [
+      365.333333,
+      365.416666
+     ],
+     "gap_presented_frames": [
+      8786,
+      8788
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 364.417,
+     "to_position_seconds": 426.083333,
+     "ready_ms": 61650
+    },
+    {
+     "change": 8,
+     "quality": "720",
+     "video_gap_ms": 83.84,
+     "callback_gap_ms": 83.84,
+     "gap_media_time": [
+      441.833333,
+      441.916666
+     ],
+     "gap_presented_frames": [
+      10622,
+      10624
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 426.375,
+     "to_position_seconds": 488.083333,
+     "ready_ms": 61685
+    },
+    {
+     "change": 9,
+     "quality": "1080",
+     "video_gap_ms": 84.04,
+     "callback_gap_ms": 84.06,
+     "gap_media_time": [
+      516.666666,
+      516.75
+     ],
+     "gap_presented_frames": [
+      12418,
+      12420
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 488.459,
+     "to_position_seconds": 550.083333,
+     "ready_ms": 61612
+    },
+    {
+     "change": 10,
+     "quality": "720",
+     "video_gap_ms": 83.86,
+     "callback_gap_ms": 83.86,
+     "gap_media_time": [
+      609.5,
+      609.583333
+     ],
+     "gap_presented_frames": [
+      14646,
+      14648
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 550.421,
+     "to_position_seconds": 612.125,
+     "ready_ms": 61684
+    },
+    {
+     "change": 11,
+     "quality": "1080",
+     "video_gap_ms": 83.94,
+     "callback_gap_ms": 99.88,
+     "gap_media_time": [
+      631.583333,
+      631.666666
+     ],
+     "gap_presented_frames": [
+      15176,
+      15178
+     ],
+     "dropped_frames": 4,
+     "from_position_seconds": 612.459,
+     "to_position_seconds": 674.083333,
+     "ready_ms": 61595
+    },
+    {
+     "change": 12,
+     "quality": "720",
+     "video_gap_ms": 83.94,
+     "callback_gap_ms": 83.94,
+     "gap_media_time": [
+      692.333333,
+      692.416666
+     ],
+     "gap_presented_frames": [
+      16634,
+      16636
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 674.412,
+     "to_position_seconds": 736.083333,
+     "ready_ms": 61636
+    },
+    {
+     "change": 13,
+     "quality": "1080",
+     "video_gap_ms": 83.88,
+     "callback_gap_ms": 83.88,
+     "gap_media_time": [
+      791.583333,
+      791.666666
+     ],
+     "gap_presented_frames": [
+      19016,
+      19018
+     ],
+     "dropped_frames": 2,
+     "from_position_seconds": 736.417,
+     "to_position_seconds": 798.083333,
+     "ready_ms": 61655
+    },
+    {
+     "change": 14,
+     "quality": "720",
+     "video_gap_ms": 83.9,
+     "callback_gap_ms": 83.9,
+     "gap_media_time": [
+      804.083333,
+      804.166666
+     ],
+     "gap_presented_frames": [
+      19316,
+      19318
+     ],
+     "dropped_frames": 3,
+     "from_position_seconds": 798.435,
+     "to_position_seconds": 860.083333,
+     "ready_ms": 61630
+    }
+   ]
+  },
+  {
+   "receipt": "firefox-a1b94d607-cpusep.json",
+   "sha256": "0b309132bec60c71a93538f1cebed39ab84a4db4748824f6c190c0095f35c926",
+   "browser": {
+    "browser": "Firefox",
+    "caps": {
+     "acodec": "aac,mp3,opus,flac",
+     "container": "mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav",
+     "dv": 0,
+     "dvprofile": "",
+     "hdr": 0,
+     "hdr10t": 0,
+     "hdrDisplay": false,
+     "hlsHevcSampleEntries": [
+      "hvc1"
+     ],
+     "maxheight": 2160,
+     "progressiveHevcSampleEntries": [
+      "hvc1",
+      "hev1"
+     ],
+     "vcodec": "h264,hevc,hevc10,av1,vp9,vp8"
+    },
+    "caps_q": "vcodec=h264,hevc,hevc10,av1,vp9,vp8&acodec=aac,mp3,opus,flac&container=mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav&hdr=0&dv=0&dvprofile=&maxheight=2160&hdr10t=0",
+    "mse": true,
+    "native_hls": false,
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
+   },
+   "cpu_topology": "browser 0-3,8,9; daemon+FFmpeg 4-7,10-15",
+   "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1
+   },
+   "fatal_error": null,
+   "quality_cycle": {
+    "evidence_scope": "browser_video_partial",
+    "switches": 15,
+    "video_gap_p95_ms": 450.29999999993015,
+    "video_gap_max_ms": 450.29999999993015,
+    "callback_gap_p95_ms": 433.6399999998975
+   },
+   "changes": [
+    {
+     "change": 0,
+     "quality": "720",
+     "video_gap_ms": 83.34,
+     "callback_gap_ms": 83.34,
+     "gap_media_time": [
+      0.5,
+      0.583333
+     ],
+     "gap_presented_frames": [
+      13,
+      15
+     ],
+     "dropped_frames": 5,
+     "from_position_seconds": 0.042,
+     "to_position_seconds": 4.125,
+     "ready_ms": 4049
+    },
+    {
+     "change": 1,
+     "quality": "1080",
+     "video_gap_ms": 83.78,
+     "callback_gap_ms": 83.78,
+     "gap_media_time": [
+      14.583333,
+      14.666666
+     ],
+     "gap_presented_frames": [
+      359,
+      361
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 4.475,
+     "to_position_seconds": 30.125,
+     "ready_ms": 25599
+    },
+    {
+     "change": 2,
+     "quality": "720",
+     "video_gap_ms": 100.62,
+     "callback_gap_ms": 117.3,
+     "gap_media_time": [
+      77.333333,
+      77.416666
+     ],
+     "gap_presented_frames": [
+      1865,
+      1867
+     ],
+     "dropped_frames": 2,
+     "from_position_seconds": 30.393,
+     "to_position_seconds": 92.083333,
+     "ready_ms": 61669
+    },
+    {
+     "change": 3,
+     "quality": "1080",
+     "video_gap_ms": 83.88,
+     "callback_gap_ms": 83.88,
+     "gap_media_time": [
+      117,
+      117.083333
+     ],
+     "gap_presented_frames": [
+      2817,
+      2819
+     ],
+     "dropped_frames": 2,
+     "from_position_seconds": 92.375,
+     "to_position_seconds": 154.125,
+     "ready_ms": 61733
+    },
+    {
+     "change": 4,
+     "quality": "720",
+     "video_gap_ms": 99.52,
+     "callback_gap_ms": 99.52,
+     "gap_media_time": [
+      158.166666,
+      158.25
+     ],
+     "gap_presented_frames": [
+      3805,
+      3807
+     ],
+     "dropped_frames": 7,
+     "from_position_seconds": 154.45,
+     "to_position_seconds": 216.083333,
+     "ready_ms": 61611
+    },
+    {
+     "change": 5,
+     "quality": "1080",
+     "video_gap_ms": 116.84,
+     "callback_gap_ms": 133.5,
+     "gap_media_time": [
+      216.708333,
+      216.833333
+     ],
+     "gap_presented_frames": [
+      5219,
+      5222
+     ],
+     "dropped_frames": 4,
+     "from_position_seconds": 216.459,
+     "to_position_seconds": 278.083333,
+     "ready_ms": 61618
+    },
+    {
+     "change": 6,
+     "quality": "720",
+     "video_gap_ms": 132.9,
+     "callback_gap_ms": 132.9,
+     "gap_media_time": [
+      281.25,
+      281.041666
+     ],
+     "gap_presented_frames": [
+      6768,
+      6769
+     ],
+     "dropped_frames": 6,
+     "from_position_seconds": 278.481,
+     "to_position_seconds": 340.083333,
+     "ready_ms": 61591
+    },
+    {
+     "change": 7,
+     "quality": "1080",
+     "video_gap_ms": 84.02,
+     "callback_gap_ms": 84,
+     "gap_media_time": [
+      341.666666,
+      341.75
+     ],
+     "gap_presented_frames": [
+      8224,
+      8226
+     ],
+     "dropped_frames": 1,
+     "from_position_seconds": 340.378,
+     "to_position_seconds": 402.083333,
+     "ready_ms": 61688
+    },
+    {
+     "change": 8,
+     "quality": "720",
+     "video_gap_ms": 83.92,
+     "callback_gap_ms": 83.94,
+     "gap_media_time": [
+      409.666666,
+      409.75
+     ],
+     "gap_presented_frames": [
+      9856,
+      9858
+     ],
+     "dropped_frames": 4,
+     "from_position_seconds": 402.393,
+     "to_position_seconds": 464.125,
+     "ready_ms": 61701
+    },
+    {
+     "change": 9,
+     "quality": "1080",
+     "video_gap_ms": 83.84,
+     "callback_gap_ms": 83.84,
+     "gap_media_time": [
+      498.583333,
+      498.666666
+     ],
+     "gap_presented_frames": [
+      11990,
+      11992
+     ],
+     "dropped_frames": 2,
+     "from_position_seconds": 464.432,
+     "to_position_seconds": 526.083333,
+     "ready_ms": 61597
+    },
+    {
+     "change": 10,
+     "quality": "720",
+     "video_gap_ms": 84.12,
+     "callback_gap_ms": 84.12,
+     "gap_media_time": [
+      558.833333,
+      558.916666
+     ],
+     "gap_presented_frames": [
+      13436,
+      13438
+     ],
+     "dropped_frames": 1,
+     "from_position_seconds": 526.468,
+     "to_position_seconds": 588.125,
+     "ready_ms": 61634
+    },
+    {
+     "change": 11,
+     "quality": "1080",
+     "video_gap_ms": 100.08,
+     "callback_gap_ms": 100.08,
+     "gap_media_time": [
+      597.166666,
+      597.25
+     ],
+     "gap_presented_frames": [
+      14356,
+      14358
+     ],
+     "dropped_frames": 1,
+     "from_position_seconds": 588.503,
+     "to_position_seconds": 650.083333,
+     "ready_ms": 61554
+    },
+    {
+     "change": 12,
+     "quality": "720",
+     "video_gap_ms": 450.3,
+     "callback_gap_ms": 433.64,
+     "gap_media_time": [
+      693.958333,
+      694.416666
+     ],
+     "gap_presented_frames": [
+      16679,
+      16690
+     ],
+     "dropped_frames": 4,
+     "from_position_seconds": 650.417,
+     "to_position_seconds": 712.125,
+     "ready_ms": 61677
+    },
+    {
+     "change": 13,
+     "quality": "1080",
+     "video_gap_ms": 83.8,
+     "callback_gap_ms": 83.8,
+     "gap_media_time": [
+      712.666666,
+      712.75
+     ],
+     "gap_presented_frames": [
+      17128,
+      17130
+     ],
+     "dropped_frames": 0,
+     "from_position_seconds": 712.405,
+     "to_position_seconds": 774.083333,
+     "ready_ms": 61664
+    },
+    {
+     "change": 14,
+     "quality": "720",
+     "video_gap_ms": 84.06,
+     "callback_gap_ms": 84.04,
+     "gap_media_time": [
+      777.416666,
+      777.5
+     ],
+     "gap_presented_frames": [
+      18682,
+      18684
+     ],
+     "dropped_frames": 1,
+     "from_position_seconds": 774.416,
+     "to_position_seconds": 836.041666,
+     "ready_ms": 61606
+    }
+   ]
+  }
+ ],
+ "firefox_a1b94d607_change12_window": {
+  "clock": "lab host local time; gap estimated at 16:54:55.9 UTC from the request epoch plus film offset",
+  "mpstat_browser_cpus": [
+   "04:54:53 PM    0   24.24   46.46    8.08    1.01    0.00    1.01    0.00    0.00    0.00   19.19",
+   "04:54:53 PM    1   26.00   43.00    6.00    2.00    0.00    1.00    0.00    0.00    0.00   22.00",
+   "04:54:53 PM    2   28.57   39.80   15.31    1.02    0.00    0.00    0.00    0.00    0.00   15.31",
+   "04:54:53 PM    3   17.53   56.70   11.34    0.00    0.00    0.00    0.00    0.00    0.00   14.43",
+   "04:54:53 PM    8   10.00   69.00    7.00    1.00    0.00    1.00    0.00    0.00    0.00   12.00",
+   "04:54:53 PM    9   35.35   38.38   13.13    0.00    0.00    1.01    0.00    0.00    0.00   12.12",
+   "04:54:53 PM  CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle",
+   "04:54:54 PM    0   20.62   48.45   11.34    1.03    0.00    1.03    0.00    0.00    0.00   17.53",
+   "04:54:54 PM    1   23.71   42.27   10.31    0.00    0.00    0.00    0.00    0.00    0.00   23.71",
+   "04:54:54 PM    2   18.00   48.00   15.00    0.00    0.00    1.00    0.00    0.00    0.00   18.00",
+   "04:54:54 PM    3   31.63   35.71    8.16    1.02    0.00    0.00    0.00    0.00    0.00   23.47",
+   "04:54:54 PM    8   29.17   46.88    6.25    2.08    0.00    1.04    0.00    0.00    0.00   14.58",
+   "04:54:54 PM    9   25.25   42.42   12.12    4.04    0.00    0.00    0.00    0.00    0.00   16.16",
+   "04:54:54 PM  CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle",
+   "04:54:55 PM    0   20.62   38.14   10.31    6.19    0.00    0.00    0.00    0.00    0.00   24.74",
+   "04:54:55 PM    1   29.00   26.00   12.00    3.00    0.00    1.00    0.00    0.00    0.00   29.00",
+   "04:54:55 PM    2   14.14   43.43   18.18    1.01    0.00    0.00    0.00    0.00    0.00   23.23",
+   "04:54:55 PM    3   23.16   24.21   12.63    3.16    0.00    1.05    0.00    0.00    0.00   35.79",
+   "04:54:55 PM    8   23.53   33.33   25.49    0.98    0.00    1.96    0.00    0.00    0.00   14.71",
+   "04:54:55 PM    9   48.48   26.26    5.05    2.02    0.00    0.00    0.00    0.00    0.00   18.18",
+   "04:54:55 PM  CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle",
+   "04:54:56 PM    0   43.88   19.39   15.31    2.04    0.00    0.00    0.00    0.00    0.00   19.39",
+   "04:54:56 PM    1   22.68   40.21   11.34    0.00    0.00    0.00    0.00    0.00    0.00   25.77",
+   "04:54:56 PM    2    0.00   96.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    4.00",
+   "04:54:56 PM    3   28.57   37.76    6.12    0.00    0.00    0.00    0.00    0.00    0.00   27.55",
+   "04:54:56 PM    8   35.05   34.02   12.37    0.00    0.00    1.03    0.00    0.00    0.00   17.53",
+   "04:54:56 PM    9   17.71   53.12   12.50    1.04    0.00    0.00    0.00    0.00    0.00   15.62",
+   "04:54:56 PM  CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle",
+   "04:54:57 PM    0   30.00   19.00   27.00    1.00    0.00    1.00    0.00    0.00    0.00   22.00",
+   "04:54:57 PM    1   39.00   21.00    9.00    2.00    0.00    1.00    0.00    0.00    0.00   28.00",
+   "04:54:57 PM    2    2.00   94.00    2.00    0.00    0.00    0.00    0.00    0.00    0.00    2.00",
+   "04:54:57 PM    3   22.68   34.02   19.59    1.03    0.00    0.00    0.00    0.00    0.00   22.68",
+   "04:54:57 PM    8   35.71   38.78    8.16    1.02    0.00    1.02    0.00    0.00    0.00   15.31",
+   "04:54:57 PM    9   36.36   32.32   10.10    1.01    0.00    1.01    0.00    0.00    0.00   19.19",
+   "04:54:57 PM  CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle",
+   "04:54:58 PM    0   21.43   22.45   36.73    1.02    0.00    0.00    0.00    0.00    0.00   18.37",
+   "04:54:58 PM    1   24.24   22.22   29.29    7.07    0.00    0.00    0.00    0.00    0.00   17.17",
+   "04:54:58 PM    2    7.07   85.86    2.02    0.00    0.00    0.00    0.00    0.00    0.00    5.05",
+   "04:54:58 PM    3   20.00   31.00   13.00   10.00    0.00    1.00    0.00    0.00    0.00   25.00",
+   "04:54:58 PM    8   48.48   25.25    4.04    2.02    0.00    1.01    0.00    0.00    0.00   19.19",
+   "04:54:58 PM    9   33.00   32.00   17.00    2.00    0.00    1.00    0.00    0.00    0.00   15.00",
+   "04:54:58 PM  CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle"
+  ],
+  "pidstat": [
+   "04:54:53 PM  1000    984552   13.00   12.00    0.00    0.00   25.00    14  plurxd",
+   "04:54:53 PM  1000   1004413   16.00    1.00    0.00    0.00   17.00     5  plurxd",
+   "04:54:53 PM  1000   1011520   73.00    1.00    0.00    1.00   74.00     8  firefox-esr",
+   "04:54:53 PM  1000   1011818   22.00    3.00    0.00    6.00   25.00     9  Isolated Web Co",
+   "04:54:53 PM  1000   1073745   27.00    9.00    0.00    0.00   36.00     4  plurxd",
+   "04:54:53 PM  1000   1078800   17.00    3.00    0.00    0.00   20.00    10  plurxd",
+   "04:54:53 PM  1000   1081451   63.00   14.00    0.00    0.00   77.00     1  ffmpeg",
+   "04:54:53 PM  1000   1082542  762.00   34.00    0.00    0.00  796.00    13  ffmpeg",
+   "04:54:54 PM  1000    984552   13.86   12.87    0.00    0.00   26.73    14  plurxd",
+   "04:54:54 PM  1000   1004413   13.86    0.99    0.00    0.00   14.85     5  plurxd",
+   "04:54:54 PM  1000   1011520   74.26    1.98    0.00    1.98   76.24     9  firefox-esr",
+   "04:54:54 PM  1000   1011818   25.74    2.97    0.00    3.96   28.71     1  Isolated Web Co",
+   "04:54:54 PM  1000   1073745   22.77    5.94    0.00    0.00   28.71     4  plurxd",
+   "04:54:54 PM  1000   1077512   23.76    0.00    0.00    0.00   23.76    11  ffmpeg",
+   "04:54:54 PM  1000   1078800   10.89    1.98    0.00    0.00   12.87    15  plurxd",
+   "04:54:54 PM  1000   1081451   79.21   16.83    0.00    0.00   96.04    12  ffmpeg",
+   "04:54:54 PM  1000   1082773   79.21   39.60    0.00    0.00  118.81     1  ffmpeg",
+   "04:54:55 PM  1000    984552   10.00   10.00    0.00    0.00   20.00    14  plurxd",
+   "04:54:55 PM  1000   1004413   21.00    3.00    0.00    0.00   24.00     5  plurxd",
+   "04:54:55 PM  1000   1011520   80.00    2.00    0.00    1.00   82.00     8  firefox-esr",
+   "04:54:55 PM  1000   1011818   21.00    2.00    0.00    5.00   23.00     9  Isolated Web Co",
+   "04:54:55 PM  1000   1073745   25.00    6.00    0.00    0.00   31.00     4  plurxd",
+   "04:54:55 PM  1000   1077512  266.00    4.00    0.00    2.00  270.00     4  ffmpeg",
+   "04:54:55 PM  1000   1078800   17.00    3.00    0.00    0.00   20.00    15  plurxd",
+   "04:54:55 PM  1000   1081451   54.00   24.00    0.00    0.00   78.00     4  ffmpeg",
+   "04:54:55 PM  1000   1082773  340.00   25.00    0.00    0.00  365.00     0  ffmpeg",
+   "04:54:55 PM  1000   1082837  162.00   13.00    0.00    1.00  175.00     5  ffmpeg",
+   "04:54:56 PM  1000    984552   14.00   15.00    0.00    0.00   29.00    14  plurxd",
+   "04:54:56 PM  1000   1004413    6.00    1.00    0.00    0.00    7.00     5  plurxd",
+   "04:54:56 PM  1000   1011520   78.00    1.00    0.00    1.00   79.00     1  firefox-esr",
+   "04:54:56 PM  1000   1011818   16.00    2.00    0.00   19.00   18.00     8  Isolated Web Co",
+   "04:54:56 PM  1000   1073745   44.00    6.00    0.00    0.00   50.00     4  plurxd",
+   "04:54:56 PM  1000   1077512  178.00    9.00    0.00    0.00  187.00     5  ffmpeg",
+   "04:54:56 PM  1000   1078800   30.00    3.00    0.00    0.00   33.00    15  plurxd",
+   "04:54:56 PM  1000   1081451   68.00   16.00    0.00    0.00   84.00     6  ffmpeg",
+   "04:54:56 PM  1000   1082773  429.00   20.00    0.00    0.00  449.00     5  ffmpeg",
+   "04:54:56 PM  1000   1082837  191.00    2.00    0.00    0.00  193.00     5  ffmpeg",
+   "04:54:57 PM  1000    984552   18.00   17.00    0.00    0.00   35.00    14  plurxd",
+   "04:54:57 PM   999    998363    1.00    0.00    0.00    0.00    1.00     4  plurxd",
+   "04:54:57 PM  1000   1004413   20.00    2.00    0.00    0.00   22.00     5  plurxd",
+   "04:54:57 PM  1000   1011520   90.00    2.00    0.00    3.00   92.00     9  firefox-esr",
+   "04:54:57 PM  1000   1011818   21.00    3.00    0.00   26.00   24.00     8  Isolated Web Co",
+   "04:54:57 PM  1000   1073745   29.00    3.00    0.00    0.00   32.00     4  plurxd",
+   "04:54:57 PM  1000   1077512  244.00   10.00    0.00    1.00  254.00     4  ffmpeg",
+   "04:54:57 PM  1000   1078800   18.00    2.00    0.00    0.00   20.00    15  plurxd",
+   "04:54:57 PM  1000   1081451   82.00   18.00    0.00    0.00  100.00     4  ffmpeg",
+   "04:54:57 PM  1000   1082773  363.00   65.00    0.00    0.00  428.00     9  ffmpeg",
+   "04:54:57 PM  1000   1082837  190.00   10.00    0.00    0.00  200.00     8  ffmpeg",
+   "04:54:58 PM  1000    984552   11.00    9.00    0.00    0.00   20.00    14  plurxd",
+   "04:54:58 PM  1000   1004413   17.00    2.00    0.00    0.00   19.00     5  plurxd",
+   "04:54:58 PM  1000   1011520   78.00    3.00    0.00    2.00   81.00     2  firefox-esr",
+   "04:54:58 PM  1000   1011818   23.00    3.00    0.00    4.00   26.00     1  Isolated Web Co",
+   "04:54:58 PM  1000   1073745   30.00    3.00    0.00    0.00   33.00     4  plurxd",
+   "04:54:58 PM  1000   1077512  280.00    6.00    0.00    0.00  286.00    14  ffmpeg",
+   "04:54:58 PM  1000   1078800   21.00    1.00    0.00    0.00   22.00    15  plurxd",
+   "04:54:58 PM  1000   1081451   65.00   26.00    0.00    0.00   91.00     3  ffmpeg",
+   "04:54:58 PM  1000   1082773  176.00   96.00    0.00    0.00  272.00     9  ffmpeg",
+   "04:54:58 PM  1000   1082837  152.00    2.00    0.00    0.00  154.00     8  ffmpeg"
+  ]
+ }
+}

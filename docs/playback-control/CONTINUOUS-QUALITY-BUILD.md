@@ -9896,3 +9896,70 @@ The successor then failed with a player error (2004), and the change was
 retained. The client log for that window had rotated away. The run directory
 and server log are kept, and the case stays open.
 
+
+### 10.306 Browser campaigns after #994, and Firefox on a shared lab host (2026-10-11)
+
+#994 merged as `38799f3d7`. Both browsers ran the fixed-link qualification
+(100 Mb/s, then 10 / 25 / 10 / 25 Mb/s stages) on the lab host. `4f18b67c9`
+is an earlier head of the #994 branch with the same Auto changes; `a1b94d607`
+is its final head, after two merges of `main`.
+
+**Chrome on `4f18b67c9`: PASS.** All 15 manual changes passed, with maximum
+and p95 video gaps of 50.1 ms. The 5 Auto changes alternated 1080p and 720p
+in one session. The run log records TTFF 2.8 s, clock 1.000x, and no hitches
+or stalls.
+
+**Firefox on `4f18b67c9`, browser and daemon sharing CPUs: FAILED one
+limit.** Change 0 (720p, requested 0.2 s into playback) had a 166.9 ms gap.
+With one outlier in 15 changes, that gap is the p95. The other 14 changes
+were 83.8–84.1 ms. The gap fell at film 4.04→4.21 s, during startup, before
+the switch landed at 6.25 s. Auto did not run.
+
+**Firefox on `a1b94d607`, browser on CPUs 0-3,8,9: FAILED.** This aimed at the
+10.224 topology. The daemon and its FFmpeg were pinned to 4-7,10-15 by a
+0.2-second walk of the harness process tree. Five changes exceeded 100 ms:
+
+| Change | Gap | Film at gap | Frames presented | Target presented at |
+|---|---|---|---|---|
+| 2 | 100.6 ms | 77.33→77.42 s | +2 | 92.1 s |
+| 5 | 116.8 ms | 216.71→216.83 s | +3 | 278.1 s |
+| 6 | 132.9 ms | 281.25→281.04 s (backward) | +1 | 340.1 s |
+| 11 | 100.1 ms | 597.17→597.25 s | +2 | 650.1 s |
+| 12 | 450.3 ms | 693.96→694.42 s | +11 | 712.1 s |
+
+**What the outliers share, and what they do not.**
+- No outlier in any run is at a switch boundary. Each falls between the
+  request and the target's first frame, while the successor is prepared.
+- In all except change 6, `presentedFrames` advanced by the number of frame
+  intervals the gap spans. Firefox reports those frames as submitted for
+  composition; the `requestVideoFrameCallback` deliveries between them are
+  missing. Firefox also counted 1–6 dropped frames on these changes, so not
+  every frame need have reached the screen.
+- Change 6 is different. Its callback's media time stepped back 0.21 s, with
+  one frame presented. That matches the backward-callback class seen in
+  headless Firefox before (10.167); it is not explained.
+- The harness measures expected-display spacing between delivered callbacks
+  (10.197); that is unchanged. No run captured pixels.
+
+**The host was not quiet.** Around change 12, `mpstat` shows the browser CPUs
+64–98 % busy, about 40 points of it niced work. `pidstat` shows the Firefox
+content process waiting for a CPU in two of the six samples (19 % and 26 %),
+and 4–6 % in the rest. Several FFmpeg processes ran on the browser CPUs at
+up to 449 % CPU. At least four `plurxd` daemons were running under the same
+user, so other sessions' labs shared the host. The receipts do not record
+which PIDs belonged to this run, so those FFmpeg processes cannot be
+attributed, and pinning cannot be shown to have held throughout.
+
+**Conclusion.** Neither Firefox run achieved the qualifying topology. The
+gaps coincide with heavy CPU load on the browser's CPUs; that is consistent
+with contention, but not proven as the cause. The earlier qualifying pass
+(10.228) ran other code (`a28c6560c`) on disjoint CPUs. No limit is relaxed,
+and Firefox stays unqualified for #994. A qualifying run needs a host where
+nothing else runs on the browser's CPUs, or the browser on a separate
+machine (the production topology), and it should record the run's own PIDs.
+Decision for Paul: reserve such a host or window, or accept Chrome and
+Android TV as the evidence for this change.
+
+Evidence: `docs/evidence/continuous-browser-2026-10-11/campaign-extract.json`
+holds every manual change of the three runs, the hashes of the full receipts,
+and the `mpstat` and `pidstat` window around Firefox change 12.
