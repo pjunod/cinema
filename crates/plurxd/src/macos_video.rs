@@ -3033,7 +3033,9 @@ mod tests {
             token.cancel();
             tokio::time::Instant::now() + std::time::Duration::from_secs(10)
         } else {
-            tokio::time::Instant::now()
+            // Make the stop ready before polling the retained writer; a fresh
+            // deadline can race its notification and the test's release.
+            tokio::time::Instant::now() - std::time::Duration::from_secs(1)
         };
         let (settling, joined) = tokio::sync::oneshot::channel();
         let publication = tokio::spawn(async move {
