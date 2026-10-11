@@ -14,6 +14,10 @@ pub(crate) trait TranscodeManagerHooks: std::any::Any + Send + Sync {
     /// Pause: a VOD response's publication was admitted by the serving
     /// authority, before it awaits its owner.
     fn after_vod_publication_admission(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// Pause: the VOD attempt refused with a fallback code and the live
+    /// recovery switch allowed the rolling fallback, before the rolling start
+    /// reads its source.
+    fn before_vod_fallback_start(&self) -> crate::seam_hooks::HookFuture<'static>;
     /// Override: whether plans resolve under the published artifact identity
     /// without per-path contract selection. Production: never.
     fn forces_artifact_qualification(&self) -> bool;
@@ -56,6 +60,10 @@ impl TranscodeManagerHooks for NoopTranscodeManagerHooks {
         Box::pin(crate::seam_hooks::HookReady)
     }
 
+    fn before_vod_fallback_start(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
     fn forces_artifact_qualification(&self) -> bool {
         false
     }
@@ -93,6 +101,7 @@ impl TranscodeManagerHooks for NoopTranscodeManagerHooks {
 pub(crate) struct TranscodeManagerTestHooks {
     pub(crate) subtitle_playlist_commit: crate::seam_hooks::PauseSlot,
     pub(crate) vod_publication_admission: crate::seam_hooks::PauseSlot,
+    pub(crate) vod_fallback_start: crate::seam_hooks::PauseSlot,
     /// Tests that exercise receipt enforcement without installing a real
     /// diagnostic policy can explicitly force the old all-plan identity. The
     /// production path is always contract-scoped.
@@ -130,6 +139,10 @@ impl TranscodeManagerHooks for TranscodeManagerTestHooks {
 
     fn after_vod_publication_admission(&self) -> crate::seam_hooks::HookFuture<'static> {
         self.vod_publication_admission.hold()
+    }
+
+    fn before_vod_fallback_start(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.vod_fallback_start.hold()
     }
 
     fn forces_artifact_qualification(&self) -> bool {

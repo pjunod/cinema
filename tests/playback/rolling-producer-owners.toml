@@ -2917,7 +2917,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # node-local cursor, runs its bounded frame reads through the scanner's
 # owned child and releases the lease before it returns; it owns no producer
 # and no timer.
-expected_occurrences = 938
+# +8 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
+expected_occurrences = 946
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4486,7 +4487,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the cap, one across it and one long hold, then the shutdown token. Production
 # adds no timer: the follower's existing 10 s interval reads the held answer's
 # age.
-expected_occurrences = 1712
+# +12 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
+expected_occurrences = 1724
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4915,7 +4917,8 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same `true` child, constructed with
 # `std::process::Command::new` so it is not registered at spawn.
-expected_occurrences = 260
+# +2 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
+expected_occurrences = 262
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

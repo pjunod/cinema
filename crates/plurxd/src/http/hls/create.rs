@@ -1378,21 +1378,34 @@ pub(super) fn admit_restart(
 /// network prior — see
 /// [M6-CALLER-HANDOFF.md](../../../../docs/playback-control/M6-CALLER-HANDOFF.md) §3.3 on why
 /// the rest of `resolve_plan` is not what a candidate wants.
+///
+/// `hwaccel` is the [`plurx_core::store::keys::HWACCEL`] preference when the
+/// caller already holds it — a create's own planning snapshot, read in the
+/// same task with nothing in between — and `None` to read it here.
 pub(crate) async fn resolve_height(
     state: &AppState,
     source: Option<&MediaFile>,
     network_prior: Option<&plurx_core::domain::NetworkPrior>,
     hdr10_requested: bool,
     asked: Option<i64>,
+    hwaccel: Option<&str>,
 ) -> i64 {
     let source_height = source.and_then(|f| f.height);
     match asked {
-        None => {
-            state
-                .transcode
-                .auto_height_for_request(source, network_prior, hdr10_requested)
-                .await
-        }
+        None => match hwaccel {
+            Some(prefer) => {
+                state
+                    .transcode
+                    .auto_height_for_preference(source, network_prior, hdr10_requested, prefer)
+                    .await
+            }
+            None => {
+                state
+                    .transcode
+                    .auto_height_for_request(source, network_prior, hdr10_requested)
+                    .await
+            }
+        },
         Some(h) if Some(h) == source_height => h,
         Some(h) => crate::transcode::snap_height(h),
     }
@@ -1564,8 +1577,16 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .as_ref()
         .map(|review| review.hdr10)
         .unwrap_or(body.hdr10 == Some(true));
-    let mut height =
-        resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
+    let hwaccel = snapshot.map(crate::transcode::planning_hwaccel_preference);
+    let mut height = resolve_height(
+        state,
+        source,
+        network_prior,
+        hdr10_requested,
+        body.height,
+        hwaccel,
+    )
+    .await;
     let mut candidate_context = None;
     let mut continuous_media = None;
     let mut candidate_route = None;
@@ -1666,6 +1687,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     super::super::stream::prior_for_candidate_policy(network_prior, true),
                     hdr10_requested,
                     body.height,
+                    hwaccel,
                 )
                 .await;
             }
@@ -2507,7 +2529,9 @@ async fn create_with_purpose(
     let budget = crate::media_pool::CreateStartupBudget::new(remaining);
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
     let before = counts.snapshot();
+    let store_before = counts.store_time();
     let started = tokio::time::Instant::now();
+    budget.begin_phases(before);
     let result = budget
         .scope(plurx_core::store::scope_http_store_operations(
             counts.clone(),
@@ -2518,13 +2542,19 @@ async fn create_with_purpose(
         ))
         .await;
     let after = counts.snapshot();
+    // Whatever ran after the last mark: an early return, or the answer.
+    budget.mark_phase("tail", after);
+    // `snapshot` is indexed by `StoreOperationClass::index`: 0 local, 1
+    // authority, 2 write.
     tracing::info!(target: "plurxd::http::hls",
         file_id = id,
         catalog_calls = budget.calls(),
-        authority_reads = after[0].saturating_sub(before[0]),
-        local_reads = after[1].saturating_sub(before[1]),
+        authority_reads = after[1].saturating_sub(before[1]),
+        local_reads = after[0].saturating_sub(before[0]),
         mutations = after[2].saturating_sub(before[2]),
+        store_ms = counts.store_time().saturating_sub(store_before).as_millis(),
         elapsed_ms = started.elapsed().as_millis(),
+        phases = %budget.phases(),
         "create startup read budget finished"
     );
     result.map_err(|_| {
@@ -2694,8 +2724,8 @@ async fn create_with_purpose_inner(
         ApiError::ServiceUnavailable("the ingress node has no serving authority".to_owned())
     })?;
     // The source height answers three things now: Auto, the ladder in the
-    // response, and the snap's source-height escape. One read, from the read
-    // pool.
+    // response, and the snap's source-height escape. One Authority read: the
+    // file row, its probe and the planning settings in one statement.
     let planning_snapshot = state
         .store
         .playback_planning_snapshot(id, &crate::transcode::QUALITY_PLANNING_KEYS)
@@ -2704,6 +2734,7 @@ async fn create_with_purpose_inner(
     if let Some(snapshot) = planning_snapshot.as_ref() {
         crate::media_pool::capture_create_planning_binding(snapshot);
     }
+    crate::media_pool::mark_create_phase("lookup");
     let source = planning_snapshot
         .as_ref()
         .map(|snapshot| snapshot.file.clone());
@@ -2800,10 +2831,26 @@ async fn create_with_purpose_inner(
         .map(|review| review.hdr10)
         .unwrap_or(req.hdr10 == Some(true));
     let source_height = source.as_ref().and_then(|f| f.height);
-    let ladder_ceiling = state
-        .transcode
-        .capability_height_ceiling_for_request(source.as_ref(), hdr10_requested)
-        .await;
+    // The HWACCEL preference is in the snapshot read above, in this task,
+    // with nothing in between: decide from it rather than reading it again.
+    let ladder_ceiling = match planning_snapshot.as_ref() {
+        Some(snapshot) => {
+            state
+                .transcode
+                .capability_height_ceiling_for_preference(
+                    source.as_ref(),
+                    hdr10_requested,
+                    crate::transcode::planning_hwaccel_preference(snapshot),
+                )
+                .await
+        }
+        None => {
+            state
+                .transcode
+                .capability_height_ceiling_for_request(source.as_ref(), hdr10_requested)
+                .await
+        }
+    };
     let mut identity = super::super::network::identity(&headers, remote);
     if let Some(ref mut id) = identity {
         id.user_id = Some(user.id);
@@ -2819,6 +2866,7 @@ async fn create_with_purpose_inner(
             .map_err(|error| {
                 ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
             })?;
+    crate::media_pool::mark_create_phase("settings");
     let resolved = resolve_plan_with_continuous(
         PlanInputs {
             snapshot: planning_snapshot.as_ref(),
@@ -2900,6 +2948,7 @@ async fn create_with_purpose_inner(
         .request_id
         .clone()
         .unwrap_or_else(|| incarnation_id.clone());
+    crate::media_pool::mark_create_phase("plan");
     match state
         .store
         .claim_media_session_request(
@@ -3088,6 +3137,7 @@ async fn create_with_purpose_inner(
             ));
         }
     }
+    crate::media_pool::mark_create_phase("admission");
     // From this point every early return must settle the exact durable claim.
     // Once worker placement returns, its StartedSessionGuard takes over the
     // same responsibility together with exact worker ownership.
@@ -3344,6 +3394,7 @@ async fn create_with_purpose_inner(
         expected_predecessor_incarnation_id,
         fence_predecessor,
     } = admission;
+    crate::media_pool::mark_create_phase("predecessor");
     let pinned_owner = if let Some(previous_session_id) = request
         .previous_session_id
         .as_deref()
@@ -3422,6 +3473,7 @@ async fn create_with_purpose_inner(
     if owner_candidates.is_empty() {
         owner_candidates.push(state.node_id.clone());
     }
+    crate::media_pool::mark_create_phase("placement");
 
     let mut started = None;
     let mut last_error = None;
@@ -3607,6 +3659,7 @@ async fn create_with_purpose_inner(
             }
         }
     }
+    crate::media_pool::mark_create_phase("dispatch");
     let Some((owner_node_id, info, guard, local_serving_generation)) = started else {
         return Err(last_error.unwrap_or_else(|| {
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
@@ -3901,43 +3954,53 @@ async fn create_with_purpose_inner(
     let owner_activation_generation = local_serving_generation.ok_or_else(|| {
         ApiError::ServiceUnavailable("media worker omitted its activation authority".to_owned())
     })?;
+    // The activation is awaited on this request's critical path, so its Store
+    // operations are this request's: count them into its accounting (and the
+    // read-budget line) even though the task is detached so it can outlive a
+    // cancelled caller.
+    let activation_counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
     let mut activation_task = if owner_node_id == state.node_id {
         let activation_state = state.clone();
         let activation_authority = ingress_serving_authority.clone();
-        tokio::spawn(async move {
-            activate_session_under_authority(
-                activation_state,
-                activation,
-                activation_predecessor,
-                expected_predecessor_incarnation_id,
-                activation_authority,
-                owner_activation_generation,
-                guard,
-            )
-            .await
-            .map(|_| ())
-        })
+        tokio::spawn(plurx_core::store::scope_http_store_operations(
+            activation_counts,
+            async move {
+                activate_session_under_authority(
+                    activation_state,
+                    activation,
+                    activation_predecessor,
+                    expected_predecessor_incarnation_id,
+                    activation_authority,
+                    owner_activation_generation,
+                    guard,
+                )
+                .await
+                .map(|_| ())
+            },
+        ))
     } else {
         let activation_state = state.clone();
         let activation_owner = owner_node_id.clone();
-        tokio::spawn(async move {
-            let request = crate::media_sessions::RemoteActivateRequest {
-                target_generation: owner_activation_generation,
-                activation,
-            };
-            let activation_deadline = tokio::time::Instant::now()
-                + Duration::from_millis(u64::try_from(LEASE_TTL_MS).unwrap_or_default());
-            activation_state
-                .media_sessions
-                .activate_remote(&activation_owner, &request, activation_deadline)
-                .await
-                .map_err(|error| {
-                    ApiError::ServiceUnavailable(format!(
+        tokio::spawn(plurx_core::store::scope_http_store_operations(
+            activation_counts,
+            async move {
+                let request = crate::media_sessions::RemoteActivateRequest {
+                    target_generation: owner_activation_generation,
+                    activation,
+                };
+                let activation_deadline = tokio::time::Instant::now()
+                    + Duration::from_millis(u64::try_from(LEASE_TTL_MS).unwrap_or_default());
+                activation_state
+                    .media_sessions
+                    .activate_remote(&activation_owner, &request, activation_deadline)
+                    .await
+                    .map_err(|error| {
+                        ApiError::ServiceUnavailable(format!(
                         "media worker {activation_owner} could not activate the session: {error:?}"
                     ))
-                })?;
-            let mut guard = guard;
-            let route = match wait_for_publishable_activation(
+                    })?;
+                let mut guard = guard;
+                let route = match wait_for_publishable_activation(
                 &activation_state,
                 &request.activation,
                 activation_deadline,
@@ -3959,16 +4022,17 @@ async fn create_with_purpose_inner(
                     "media worker {activation_owner} did not confirm the session before its owner lease"
                 ))),
             };
-            activation_state.media_sessions.cache_route(route).await;
-            if let Some(guard) = guard.as_mut() {
-                guard.disarm();
-            }
-            Ok(())
-        })
+                activation_state.media_sessions.cache_route(route).await;
+                if let Some(guard) = guard.as_mut() {
+                    guard.disarm();
+                }
+                Ok(())
+            },
+        ))
     };
     let activation_deadline = activation_lease_deadline(&publication_activation);
     match tokio::time::timeout_at(activation_deadline, &mut activation_task).await {
-        Ok(Ok(Ok(_))) => {}
+        Ok(Ok(Ok(_))) => crate::media_pool::mark_create_phase("activation"),
         Ok(Ok(Err(error))) => {
             if matches!(
                 &error,
@@ -4129,6 +4193,7 @@ async fn create_with_purpose_inner(
             Some(&request.playback_id),
         );
     }
+    crate::media_pool::mark_create_phase("registration");
     publication_guard.disarm();
     Ok(Json(response))
 }
