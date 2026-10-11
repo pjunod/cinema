@@ -190,6 +190,17 @@ pub struct Position {
     /// [`WorkingSet::held`]: an ahead stop must not lower the disk-pressure
     /// entry line, and the latch survives a process yielded to a live waiter.
     pub ahead_held: bool,
+    /// A live start is queued for the encoder permit this producer holds.
+    ///
+    /// Viewers come first and speculative ahead-fill is the lowest-priority
+    /// work on the node, so while someone waits for this permit the low-water
+    /// mark applies as if the hold were already latched: a running producer
+    /// whose lead is past [`AHEAD_RESUME_SECONDS`] reaches its ahead hold now
+    /// rather than at the horizon, and `prodexec::yield_step` turns that stop
+    /// into a yield. Its reader keeps the lead it has; the latch then
+    /// re-admits it at the low-water mark like any yielded producer. Always
+    /// false for a producer that holds no permit.
+    pub permit_wanted: bool,
     /// The node's working set, across every rendition — not this one's.
     ///
     /// A producer inside its ahead horizon can still be the one filling the
@@ -295,6 +306,7 @@ pub fn decide(
     let horizon = position.horizon_segments(AHEAD_HORIZON_SECONDS);
     let resume = position.horizon_segments(AHEAD_RESUME_SECONDS);
     let reposition = position.horizon_segments(REPOSITION_GAP_SECONDS);
+    let low_water = position.ahead_held || position.permit_wanted;
 
     // Owed right now: the segments open requests are waiting on and the store
     // does not have. An index off the end of the plan is dropped rather than
@@ -408,7 +420,7 @@ pub fn decide(
             furthest,
             horizon,
             resume,
-            position.ahead_held,
+            low_water,
         );
     };
 
@@ -416,7 +428,7 @@ pub fn decide(
     // horizon means. Suspend rather than run to the end of a two-hour film for
     // a reader who has watched four minutes.
     if gap > furthest.saturating_add(horizon)
-        || (position.ahead_held
+        || (low_water
             && position
                 .produced_through
                 .is_some_and(|through| through > furthest.saturating_add(resume)))
@@ -426,7 +438,7 @@ pub fn decide(
             furthest,
             horizon,
             resume,
-            position.ahead_held,
+            low_water,
         );
     }
 
@@ -507,19 +519,19 @@ fn serve_blocked(manifest: &Manifest, owed: &[u32], position: Position, repositi
     }
 }
 
-/// Suspend if the producer has run past the ahead horizon, idle if it simply
-/// has nothing to do.
+/// Suspend if the producer has run past the ahead horizon — or past the
+/// low-water mark, when that applies — idle if it simply has nothing to do.
 fn stop(
     produced_through: Option<u32>,
     furthest: u32,
     horizon: u32,
     resume: u32,
-    ahead_held: bool,
+    low_water: bool,
 ) -> Action {
     match produced_through {
         Some(through)
             if through >= furthest.saturating_add(horizon)
-                || (ahead_held && through > furthest.saturating_add(resume)) =>
+                || (low_water && through > furthest.saturating_add(resume)) =>
         {
             Action::Suspend {
                 produced_through: through,
@@ -581,6 +593,7 @@ mod tests {
             positioned_at: through.map(|_| 0),
             seconds_per_segment: 7.0,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         }
     }
@@ -870,6 +883,76 @@ mod tests {
                 Position {
                     ahead_held: true,
                     ..position(Some(25))
+                },
+                &[]
+            ),
+            Action::Reposition { to: 1 }
+        );
+    }
+
+    /// Lab F5 (2026-10-11): on a node whose budget fits one encode, a live
+    /// start waited for the running producer's whole session, because a
+    /// running producer only stops at the horizon. With someone queued for
+    /// its permit it stops at the low-water mark instead.
+    #[test]
+    fn a_queued_live_start_brings_the_ahead_hold_down_to_the_low_water_mark() {
+        let mut manifest = manifest(80);
+        for index in 0..=14 {
+            manifest.materialize(index, 1_000, 0);
+        }
+        // Lead of 14 segments: past the 13-segment low-water mark, short of
+        // the 26-segment horizon.
+        assert_eq!(
+            decide(&manifest, &[demand(0)], position(Some(14)), &[]),
+            Action::Produce { next: 15 },
+            "nobody waiting: the producer runs on towards the horizon"
+        );
+        assert!(matches!(
+            decide(
+                &manifest,
+                &[demand(0)],
+                Position {
+                    permit_wanted: true,
+                    ..position(Some(14))
+                },
+                &[]
+            ),
+            Action::Suspend {
+                produced_through: 14,
+                reason: Hold::Ahead { .. },
+            }
+        ));
+    }
+
+    #[test]
+    fn a_queued_live_start_never_takes_the_readers_own_runway() {
+        let mut manifest = manifest(80);
+        for index in 0..=13 {
+            manifest.materialize(index, 1_000, 0);
+        }
+        // At the low-water mark the reader's own runway is what is left, so
+        // the producer keeps its permit and keeps going.
+        assert_eq!(
+            decide(
+                &manifest,
+                &[demand(0)],
+                Position {
+                    permit_wanted: true,
+                    ..position(Some(13))
+                },
+                &[]
+            ),
+            Action::Produce { next: 14 }
+        );
+        // And a blocked request outranks it, as it outranks every hold.
+        manifest.evict(1);
+        assert_eq!(
+            decide(
+                &manifest,
+                &[waiting(1)],
+                Position {
+                    permit_wanted: true,
+                    ..position(Some(13))
                 },
                 &[]
             ),
@@ -1300,6 +1383,7 @@ mod tests {
             positioned_at: Some(0),
             seconds_per_segment: 2.0,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         let long = Position {
@@ -1307,6 +1391,7 @@ mod tests {
             positioned_at: Some(0),
             seconds_per_segment: 7.0,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(short.horizon_segments(AHEAD_HORIZON_SECONDS), 90);
@@ -1322,6 +1407,7 @@ mod tests {
             positioned_at: Some(0),
             seconds_per_segment: 0.0,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         assert!(broken.horizon_segments(AHEAD_HORIZON_SECONDS) >= 1);

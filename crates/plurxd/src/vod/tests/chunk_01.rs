@@ -1056,6 +1056,7 @@ async fn stored_marker_prewarm_is_subordinate_and_hits_only_its_own_production()
         positioned_at: None,
         seconds_per_segment: rendition.seconds_per_segment,
         ahead_held: false,
+        permit_wanted: false,
         working_set: WorkingSet::default(),
     };
     assert_eq!(
@@ -1096,6 +1097,7 @@ async fn stored_marker_prewarm_is_subordinate_and_hits_only_its_own_production()
         positioned_at: Some(0),
         seconds_per_segment: rendition.seconds_per_segment,
         ahead_held: false,
+        permit_wanted: false,
         working_set: WorkingSet {
             used_bytes: 2,
             budget_bytes: 1,

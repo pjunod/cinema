@@ -492,11 +492,28 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 .collect::<Vec<_>>();
             (demands, ledgers)
         };
+        // Observed before deciding: a live start queued for this producer's
+        // permit lowers its ahead hold to the low-water mark (`prodsched`'s
+        // `permit_wanted`), and the same observation then decides the yield.
+        let handoff_requested = handoff.is_some();
+        let contention = rendition.recipe.encoding.as_ref().map_or(
+            Contention {
+                live_waiting: false,
+                holds_permit: false,
+                handoff_waiting: false,
+            },
+            |encoding| Contention {
+                live_waiting: encoding.admissions.live_is_waiting(),
+                holds_permit: true,
+                handoff_waiting: handoff_requested,
+            },
+        );
         let position = Position {
             produced_through: belief.produced_through(),
             positioned_at: belief.positioned_at(),
             seconds_per_segment: rendition.seconds_per_segment,
             ahead_held: rendition.ahead_hold.load(Acquire),
+            permit_wanted: contention.holds_permit && contention.live_waiting,
             working_set: WorkingSet {
                 used_bytes: shared.working_set.load(Relaxed),
                 budget_bytes: rendition.working_set_budget,
@@ -533,19 +550,6 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             belief,
             &decision,
             next_step(belief, decision.action),
-        );
-        let handoff_requested = handoff.is_some();
-        let contention = rendition.recipe.encoding.as_ref().map_or(
-            Contention {
-                live_waiting: false,
-                holds_permit: false,
-                handoff_waiting: false,
-            },
-            |encoding| Contention {
-                live_waiting: encoding.admissions.live_is_waiting(),
-                holds_permit: true,
-                handoff_waiting: handoff_requested,
-            },
         );
         let step = yield_step(belief, step, contention);
         let yielding_for_handoff = handoff_requested

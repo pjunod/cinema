@@ -212,6 +212,18 @@ terminate; the field keeps its documented meaning. For an `Absent` producer
 with the latch set, `next_step(Absent, Suspend { Ahead })` is `Nothing`
 (`prodexec.rs:255`), so nothing is spawned until the low-water mark.
 
+**Amended 2026-10-11 (lab F5).** A running producer only met `yield_step` at
+the horizon, so on a node whose budget fits one encode a live start waited
+for a producer climbing towards 180 s at ~15× realtime — 7–16 s in the lab.
+`Position` now also carries `permit_wanted` (a live start is queued for the
+permit this producer holds, read once per pass from the same `Contention`
+`yield_step` uses), and the low-water mark applies while either it or
+`ahead_held` is set. A running producer whose lead is past
+`AHEAD_RESUME_SECONDS` therefore gets `Suspend { Ahead }` → `Stop` →
+`Terminate { YieldToWaiter }`, sets the latch, and re-admits at the low-water
+mark like any yielded producer. A lead at or under the mark, and a blocked
+request, are untouched: the waiter never takes the reader's own runway.
+
 ### 3.2 `prodexec`: an explicit stopped→release transition on contention
 
 Keep `next_step(producer, action)` as it is — every existing test stays
