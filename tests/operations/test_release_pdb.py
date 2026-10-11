@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 
+from tests.operations.test_release_manifest import SOURCE, resource_section
 from validation.release_pdb import MSF7, verify_pdb_pair
 
 
@@ -27,6 +28,15 @@ def pair(directory: Path, *, guid: bytes = GUID, age: int = 1, name: bytes = b"p
     struct.pack_into("<II", executable, 88 + 160, 0x1000, 28)
     struct.pack_into("<4I", executable, 328 + 8, len(debug + codeview), 0x1000, len(debug + codeview), 512)
     executable[512:540] = debug; executable[540:] = codeview
+    # A second section carries the application manifest Windows packaging
+    # also verifies (validation/release_manifest.py).
+    rsrc = resource_section([SOURCE.read_bytes()], 0x2000)
+    struct.pack_into("<I", executable, 88 + 108, 16)  # NumberOfRvaAndSizes
+    struct.pack_into("<H", executable, 70, 2)
+    struct.pack_into("<II", executable, 88 + 112 + 16, 0x2000, len(rsrc))
+    executable.extend(bytes(1024 - len(executable)))
+    struct.pack_into("<4I", executable, 368 + 8, len(rsrc), 0x2000, len(rsrc), 1024)
+    executable.extend(rsrc)
     (directory / "plurxd.exe").write_bytes(executable)
     pdb = bytearray(512 * 5); pdb[:32] = MSF7
     struct.pack_into("<6I", pdb, 32, 512, 4, 5, 16, 0, 1)
@@ -107,6 +117,9 @@ class PdbPairCase(unittest.TestCase):
             (root / "deploy/windows").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/package-windows", root / "scripts/package-windows")
             shutil.copy2(ROOT / "validation/release_pdb.py", root / "validation/release_pdb.py")
+            shutil.copy2(ROOT / "validation/release_manifest.py", root / "validation/release_manifest.py")
+            (root / "crates/plurxd").mkdir(parents=True)
+            shutil.copy2(SOURCE, root / "crates/plurxd/plurxd.manifest")
             (root / "validation/__init__.py").touch()
             (root / "plurx.example.toml").write_text("# own fixture\n")
             (root / "deploy/windows/README.md").write_text("own fixture\n")

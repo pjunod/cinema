@@ -1,0 +1,77 @@
+# One description of the Linux server package, rendered by nfpm as both a
+# .deb (Debian 12+, Ubuntu 24.04+) and an .rpm (Fedora, RHEL 9+ and rebuilds).
+# scripts/package-linux stages the files, runs nfpm from that staging
+# directory (every ./ path below is relative to it) and sets each ${PLURX_PKG_*};
+# run that script rather than nfpm directly.
+#
+# Layout: the executable and its paired split-debug file live together in
+# /usr/lib/plurx -- the release profile ships the .dwp beside the executable so
+# backtraces keep file and line names -- and /usr/bin/plurxd is a symlink to it.
+# The unit is deploy/plurxd.service with only ExecStart repointed. The state
+# directory /var/lib/plurx is not a package file: post-install creates it for
+# the plurx user, so no upgrade resets its owner and no removal deletes it.
+#
+# ffmpeg 5.1 is the floor plurx paces streams on (-readrate; 6.1 adds the
+# initial burst; docs/OPERATIONS.md "Delivery speed"), and it is what decides
+# the distributions: Debian 12 ships 5.1, Ubuntu 24.04 6.1, Fedora 7.x; RHEL 9+
+# and its rebuilds take it from RPM Fusion (which needs EPEL).
+name: plurxd
+arch: ${PLURX_PKG_ARCH}
+platform: linux
+version: ${PLURX_PKG_VERSION}
+release: 1
+section: video
+priority: optional
+maintainer: ${PLURX_PKG_MAINTAINER}
+vendor: noirr cinema
+homepage: ${PLURX_PKG_HOMEPAGE}
+license: Apache-2.0
+description: |-
+  noirr cinema media server
+  plurxd scans movie and TV libraries, serves the web app and the native
+  clients, and streams by direct play, remux, or transcode. It runs as the
+  plurxd systemd service under its own plurx user, keeping its state in
+  /var/lib/plurx.
+
+overrides:
+  deb:
+    depends:
+      - ffmpeg (>= 7:5.1)
+      - ca-certificates
+    recommends:
+      - mkvtoolnix
+  rpm:
+    # Fedora's ffmpeg-free or RPM Fusion's ffmpeg, either carrying ffprobe.
+    depends:
+      - (ffmpeg-free >= 5.1 or ffmpeg >= 5.1)
+      - /usr/bin/ffprobe
+      - ca-certificates
+      - shadow-utils
+    recommends:
+      - mkvtoolnix
+
+contents:
+  - src: ./plurxd
+    dst: /usr/lib/plurx/plurxd
+    file_info:
+      mode: 0755
+  - src: ./plurxd.dwp
+    dst: /usr/lib/plurx/plurxd.dwp
+    file_info:
+      mode: 0644
+  - src: /usr/lib/plurx/plurxd
+    dst: /usr/bin/plurxd
+    type: symlink
+  - src: ./plurxd.service
+    dst: /usr/lib/systemd/system/plurxd.service
+    file_info:
+      mode: 0644
+  - src: ./plurx.example.toml
+    dst: /usr/share/doc/plurxd/plurx.example.toml
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./postinstall
+  preremove: ./preremove
+  postremove: ./postremove
