@@ -4262,9 +4262,9 @@ pub async fn update_settings(
             .await?;
     }
     if req.cluster_media_pool_enabled.is_some() || req.cluster_session_takeover_enabled.is_some() {
-        // The takeover loop caches an "off" for 60 s; drop it and wake the
-        // loop now. An "on" is never cached, so turning takeover off is seen
-        // on the next 2 s tick here and on every other node.
+        // The takeover loop holds its last proved answer; drop it here and
+        // wake the loop now. Every other node sees the save once it applies
+        // the entry: its replica's switches then disagree with what it holds.
         crate::media_sessions::takeover_settings_changed();
     }
     if let Some(mode) = &req.vod_output_preparation {
@@ -4289,7 +4289,8 @@ pub async fn update_settings(
             )
             .await?;
         // Apply on this node now; every other node picks the replicated value
-        // up on its next enforcement refresh (`clock_offset::run`).
+        // up on its next enforcement look after it applies the save
+        // (`clock_offset::follow_stored_enforcement`).
         state.membership.clock_guard().set_enforced(enabled);
     }
     if let Some(mode) = &req.sub_mode {

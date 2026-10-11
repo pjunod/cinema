@@ -756,6 +756,9 @@ pub struct AppState {
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
     /// Authenticated remote start/abort and streaming HLS relay transport.
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
+    /// What tells an idle reader of replicated settings that a save may have
+    /// landed on another node. Each reader takes its own clone.
+    pub(crate) settings_changes: crate::settings_changes::SettingsChangeSource,
     /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
     pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
     /// One HTTP client for every Live TV ingress-to-owner exchange, plus a
@@ -874,6 +877,57 @@ impl FrameBackfillTally {
     /// Reads ffprobe completed, whatever the frame carried.
     fn read(&self) -> usize {
         self.observed + self.absent + self.fenced
+    }
+}
+
+/// The Activity purpose of the unsignalled-transfer re-probe's frame reads.
+const UNSIGNALLED_TRANSFER_PURPOSE: &str =
+    "catalogue HDR re-probe of titles whose stream left the transfer unsignalled";
+
+/// Frame reads one tick of that walk may start: each opens and decodes media.
+const UNSIGNALLED_TRANSFER_READS_PER_TICK: usize = 16;
+
+/// Where a first-frame walk's cursor ends after a page whose every attempted
+/// read was refused.
+///
+/// One refusal is a statement about one file. Several with no read beside
+/// them could be a statement about the reader, so ffprobe is asked its own
+/// self-check. If it passes, the refusals are verdicts on those files — a
+/// corrupt title, a truncated download — and the cursor moves past them, so
+/// a library whose last rows are unreadable still completes its walk instead
+/// of re-reading them every tick. If it fails, the problem is this node's,
+/// and the cursor holds at the row before the first refusal, keeping every
+/// advance the page earned on its own facts before it.
+async fn settle_refused_page<G, GFut>(
+    walk: &'static str,
+    tally: &FrameBackfillTally,
+    walked: i64,
+    before_first_refusal: i64,
+    self_check: G,
+) -> i64
+where
+    G: FnOnce() -> GFut,
+    GFut: std::future::Future<Output = bool>,
+{
+    if tally.refused <= 1 || tally.read() > 0 {
+        return walked;
+    }
+    if self_check().await {
+        tracing::warn!(
+            walk,
+            refused = tally.refused,
+            "every frame read in this page was refused and ffprobe passes its self-check; \
+             those files keep their stored facts and the walk moves past them"
+        );
+        walked
+    } else {
+        tracing::warn!(
+            walk,
+            refused = tally.refused,
+            "every frame read in this page was refused and ffprobe fails its own self-check; \
+             holding the cursor until it passes"
+        );
+        before_first_refusal
     }
 }
 
@@ -1080,14 +1134,17 @@ impl AppState {
             sharing_network,
         ));
         // A replicated daemon applies the Raft log in this process; that watch
-        // is how an idle Live TV settings observer learns of a save elsewhere.
-        let live_tv_settings_changes = match backup_client
+        // is how an idle settings reader (the Live TV observer, the takeover
+        // gate, the clock-enforcement follower) learns of a save elsewhere.
+        let settings_changes = match backup_client
             .as_ref()
             .and_then(|client| client.local_db_raft_metrics().ok())
         {
-            Some(applied) => crate::live_tv::SettingsChangeSource::Applied(applied),
-            None if membership.is_replicated() => crate::live_tv::SettingsChangeSource::Polled,
-            None => crate::live_tv::SettingsChangeSource::LocalOnly,
+            Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
+            None if membership.is_replicated() => {
+                crate::settings_changes::SettingsChangeSource::Polled
+            }
+            None => crate::settings_changes::SettingsChangeSource::LocalOnly,
         };
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
@@ -1137,6 +1194,11 @@ impl AppState {
             .with_hdr10_passthrough(system.hdr10_passthrough)
             .with_hdr10_passthrough_qsv(system.hdr10_passthrough_qsv)
             .with_hdr10_passthrough_vaapi(system.hdr10_passthrough_vaapi)
+            .with_metal_tone_map_parity(
+                system
+                    .tone_map
+                    .parity(plurx_core::transcode::Pipeline::VtToneMapMetal),
+            )
             .with_cache_layout(
                 cache_dir.clone(),
                 runtime_cache.clone(),
@@ -1183,7 +1245,7 @@ impl AppState {
             live_tv_scratch,
             runtime_cache.join("live-tv"),
         );
-        live_tv.set_settings_changes(live_tv_settings_changes);
+        live_tv.set_settings_changes(settings_changes.clone());
         AppState {
             store,
             sharing,
@@ -1206,6 +1268,7 @@ impl AppState {
             membership,
             media_pool,
             media_sessions,
+            settings_changes,
             live_tv,
             live_tv_peers,
             server_name,
@@ -6204,6 +6267,10 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_frame_luminance().await });
         }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_unsignalled_transfer().await });
+        }
         Ok(())
     }
 
@@ -7086,10 +7153,16 @@ impl JobManager {
     /// that never had a frame read at all: those the stored-document walk
     /// classified from a retained stream document.
     async fn backfill_frame_luminance(self: Arc<Self>) {
-        self.backfill_frame_luminance_with(|path| async move {
-            plurx_core::scan::probe::first_frame_luminance(&path, "catalogue luminance backfill")
+        self.backfill_frame_luminance_with(
+            |path| async move {
+                plurx_core::scan::probe::first_frame_luminance(
+                    &path,
+                    "catalogue luminance backfill",
+                )
                 .await
-        })
+            },
+            plurx_core::scan::probe::self_check,
+        )
         .await;
     }
 
@@ -7117,19 +7190,20 @@ impl JobManager {
     /// - frame carries none: stays `none`, cursor moves on;
     /// - ffprobe refused the file (a [`plurx_core::error::ProbeError::is_file_verdict`]): stays
     ///   `none`, cursor moves on — a new probe document is what earns it
-    ///   another read (open question 2 of the tone-map plan). But a page in
+    ///   another read (open question 2 of the tone-map plan). A page in
     ///   which more than one read was attempted and every one was refused
-    ///   stops without advancing: one refusal is a statement about one file,
-    ///   several with no successful read beside them are a statement about
-    ///   the reader;
+    ///   asks ffprobe's own self-check (see [`settle_refused_page`]): if it
+    ///   passes, the refusals are verdicts on those files and the cursor moves
+    ///   past them; only a failing self-check holds the cursor, at the first
+    ///   refused row;
     /// - ffprobe could not run or did not finish (not a verdict): stop;
     /// - the store write fails: stop.
     ///
     /// The `done` stamp therefore follows a walk in which every row passed
-    /// was skipped on its own facts, read, or refused by a reader that read
-    /// other files successfully — the rows it leaves `none` are the ones a
+    /// was skipped on its own facts, read, or refused by a reader that
+    /// passed its own self-check — the rows it leaves `none` are the ones a
     /// frame read cannot improve until their file changes.
-    async fn backfill_frame_luminance_with<F, Fut>(&self, read_frame: F)
+    async fn backfill_frame_luminance_with<F, Fut, G, GFut>(&self, read_frame: F, self_check: G)
     where
         F: Fn(PathBuf) -> Fut,
         Fut: std::future::Future<
@@ -7138,6 +7212,8 @@ impl JobManager {
                 plurx_core::error::ProbeError,
             >,
         >,
+        G: FnOnce() -> GFut,
+        GFut: std::future::Future<Output = bool>,
     {
         const FRAME_READS_PER_TICK: i64 = 16;
         // Rows become `none` through the stored-document walk; starting
@@ -7223,6 +7299,7 @@ impl JobManager {
 
         let mut walked = cursor;
         let mut tally = FrameBackfillTally::default();
+        let mut before_first_refusal = None;
         for candidate in page {
             if lost.is_cancelled() {
                 break;
@@ -7293,6 +7370,7 @@ impl JobManager {
                 Ok(None) => tally.absent += 1,
                 Err(error) if error.is_file_verdict() => {
                     tally.refused += 1;
+                    before_first_refusal.get_or_insert(walked);
                     tracing::warn!(
                         file_id = candidate.id,
                         %error,
@@ -7310,14 +7388,14 @@ impl JobManager {
             }
             walked = candidate.id;
         }
-        if tally.refused > 1 && tally.read() == 0 {
-            tracing::warn!(
-                refused = tally.refused,
-                "luminance frame backfill: every frame read in this page was refused; \
-                 not advancing until a read succeeds"
-            );
-            walked = cursor;
-        }
+        walked = settle_refused_page(
+            "luminance frame backfill",
+            &tally,
+            walked,
+            before_first_refusal.unwrap_or(cursor),
+            self_check,
+        )
+        .await;
         if walked > cursor {
             if let Err(error) = self
                 .store
@@ -7338,6 +7416,265 @@ impl JobManager {
             ineligible = tally.ineligible,
             cursor = walked,
             "luminance frame backfill: read first frames"
+        );
+    }
+
+    /// Re-probe catalogued SDR titles whose stored stream document left the
+    /// transfer to the bitstream (lab F4, 2026-10-11).
+    ///
+    /// The scanner now asks the first frame when a 10-bit-or-deeper HEVC, AV1
+    /// or VP9 stream (or a BT.2020 one) reports its transfer `unknown`, so a
+    /// PQ or HLG title whose HDR lives only in its VUI/SEI is catalogued HDR.
+    /// A scan is incremental on size and mtime, so the rows catalogued before
+    /// that are never probed again; this walk gives each of them the same
+    /// bounded first-frame read, once per leaf probe pipeline digest. The
+    /// child appears on the Activity page as "catalogue HDR re-probe of
+    /// titles whose stream left the transfer unsignalled", with a stop beside
+    /// it.
+    async fn backfill_unsignalled_transfer(self: Arc<Self>) {
+        // A node that cannot name its FFprobe cannot say which classification
+        // it would complete the walk for.
+        let Some(digest) = plurx_core::scan::probe::pipeline_digest().await else {
+            return;
+        };
+        self.backfill_unsignalled_transfer_with(
+            &digest,
+            |path| async move {
+                plurx_core::scan::probe::first_frame_document(&path, UNSIGNALLED_TRANSFER_PURPOSE)
+                    .await
+            },
+            plurx_core::scan::probe::self_check,
+        )
+        .await;
+    }
+
+    /// [`Self::backfill_unsignalled_transfer`] with the pipeline digest and
+    /// the frame read supplied, so the walk is testable without media.
+    ///
+    /// It follows [`Self::backfill_frame_luminance_with`] row for row: one
+    /// cluster lease (`catalogue:unsignalled-transfer`) so one node walks; at
+    /// most [`UNSIGNALLED_TRANSFER_READS_PER_TICK`] reads per tick; the cursor
+    /// moves past a row only on evidence about that row (ineligible document,
+    /// changed or vanished file, a frame read, or a refusal by an ffprobe that
+    /// passes its own self-check) and stops where this node cannot read
+    /// (library root unavailable, ffprobe could not run or finish or fails its
+    /// self-check, a store write failed).
+    /// A frame that says PQ or HLG writes the HDR columns fenced to the exact
+    /// row snapshot and to the row still being SDR; any other frame leaves
+    /// the row as it is. The completion stamp holds the digest it completed
+    /// for, so another classification version or FFprobe build walks again.
+    async fn backfill_unsignalled_transfer_with<F, Fut, G, GFut>(
+        &self,
+        digest: &str,
+        read_frame: F,
+        self_check: G,
+    ) where
+        F: Fn(PathBuf) -> Fut,
+        Fut: std::future::Future<Output = Result<serde_json::Value, plurx_core::error::ProbeError>>,
+        G: FnOnce() -> GFut,
+        GFut: std::future::Future<Output = bool>,
+    {
+        const PAGE: i64 = 256;
+        match self
+            .store
+            .get_setting(keys::JOB_UNSIGNALLED_TRANSFER_BACKFILL_DONE)
+            .await
+        {
+            Ok(Some(done)) if done == digest => return,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "reading the unsignalled-transfer re-probe stamp");
+                return;
+            }
+        }
+        let lease = match self
+            .acquire_job("catalogue:unsignalled-transfer".to_owned())
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "unsignalled-transfer re-probe lease failed");
+                return;
+            }
+        };
+        let lost = lease.loss_token();
+        let cursor_key = self.local_job_key(keys::JOB_UNSIGNALLED_TRANSFER_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| {
+                let (for_digest, id) = value.trim().rsplit_once(':')?;
+                (for_digest == digest).then(|| id.parse::<i64>().ok())?
+            })
+            .unwrap_or(0);
+        let page = match self
+            .store
+            .files_with_unsignalled_transfer(cursor, PAGE)
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the unsignalled-transfer re-probe");
+                let _ = lease.release().await;
+                return;
+            }
+        };
+        if page.is_empty() {
+            match self
+                .store
+                .put_setting(keys::JOB_UNSIGNALLED_TRANSFER_BACKFILL_DONE, digest)
+                .await
+            {
+                Ok(()) => tracing::info!(digest, "unsignalled-transfer re-probe: complete"),
+                Err(error) => {
+                    tracing::warn!(%error, "stamping the unsignalled-transfer re-probe complete");
+                }
+            }
+            let _ = lease.release().await;
+            return;
+        }
+        let roots: Vec<PathBuf> = match self.store.list_libraries().await {
+            Ok(libraries) => libraries
+                .into_iter()
+                .flat_map(|library| library.paths)
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, "listing library roots for the unsignalled-transfer re-probe");
+                let _ = lease.release().await;
+                return;
+            }
+        };
+
+        let mut walked = cursor;
+        let mut tally = FrameBackfillTally::default();
+        let mut before_first_refusal = None;
+        let mut reads = 0usize;
+        for candidate in page {
+            if lost.is_cancelled() || reads >= UNSIGNALLED_TRANSFER_READS_PER_TICK {
+                break;
+            }
+            if !plurx_core::scan::probe::stored_document_leaves_transfer_to_bitstream(
+                &candidate.probe_json,
+            ) {
+                tally.ineligible += 1;
+                walked = candidate.id;
+                continue;
+            }
+            let path = PathBuf::from(&candidate.path);
+            match scan::file_stat(&path).await {
+                Ok(identity) if identity == (candidate.size, candidate.mtime) => {}
+                Ok(_) => {
+                    tally.changed += 1;
+                    walked = candidate.id;
+                    continue;
+                }
+                Err(error) => {
+                    let root = roots
+                        .iter()
+                        .filter(|root| path.starts_with(root))
+                        .max_by_key(|root| root.as_os_str().len());
+                    let root_available = match root {
+                        Some(root) => scan::library_root_available(root).await,
+                        None => true,
+                    };
+                    if root_available {
+                        tally.gone += 1;
+                        walked = candidate.id;
+                        continue;
+                    }
+                    tracing::info!(
+                        file_id = candidate.id,
+                        %error,
+                        "unsignalled-transfer re-probe: library root unavailable here; retrying next tick"
+                    );
+                    break;
+                }
+            }
+            reads += 1;
+            match read_frame(path).await {
+                Ok(frame) => {
+                    match plurx_core::scan::probe::classify_frame_dynamic_range(
+                        &candidate.probe_json,
+                        &frame,
+                    ) {
+                        Some(observed) => match self
+                            .store
+                            .set_file_frame_dynamic_range(&candidate, &observed)
+                            .await
+                        {
+                            Ok(true) => {
+                                tally.observed += 1;
+                                tracing::info!(
+                                    file_id = candidate.id,
+                                    hdr = %observed.hdr,
+                                    "unsignalled-transfer re-probe: the first frame is HDR; recatalogued"
+                                );
+                            }
+                            Ok(false) => tally.fenced += 1,
+                            Err(error) => {
+                                tracing::warn!(
+                                    file_id = candidate.id,
+                                    %error,
+                                    "writing the first frame's HDR classification"
+                                );
+                                break;
+                            }
+                        },
+                        None => tally.absent += 1,
+                    }
+                }
+                Err(error) if error.is_file_verdict() => {
+                    tally.refused += 1;
+                    before_first_refusal.get_or_insert(walked);
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "ffprobe refused the first frame; the row stays SDR"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "unsignalled-transfer re-probe: ffprobe could not read here; retrying next tick"
+                    );
+                    break;
+                }
+            }
+            walked = candidate.id;
+        }
+        walked = settle_refused_page(
+            "unsignalled-transfer re-probe",
+            &tally,
+            walked,
+            before_first_refusal.unwrap_or(cursor),
+            self_check,
+        )
+        .await;
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &format!("{digest}:{walked}"))
+                .await
+            {
+                tracing::warn!(%error, "advancing the unsignalled-transfer re-probe cursor");
+            }
+        }
+        let _ = lease.release().await;
+        tracing::info!(
+            recatalogued = tally.observed,
+            still_sdr = tally.absent,
+            refused = tally.refused,
+            fenced = tally.fenced,
+            changed = tally.changed,
+            gone = tally.gone,
+            ineligible = tally.ineligible,
+            cursor = walked,
+            "unsignalled-transfer re-probe: read first frames"
         );
     }
 
@@ -11545,7 +11882,24 @@ mod tests {
                 >,
             >,
         {
-            self.jobs.backfill_frame_luminance_with(read_frame).await;
+            self.jobs
+                .backfill_frame_luminance_with(read_frame, || std::future::ready(true))
+                .await;
+        }
+
+        async fn run_with_self_check<F, Fut>(&self, read_frame: F, self_check: bool)
+        where
+            F: Fn(PathBuf) -> Fut,
+            Fut: std::future::Future<
+                Output = Result<
+                    Option<plurx_core::scan::probe::FrameLuminance>,
+                    plurx_core::error::ProbeError,
+                >,
+            >,
+        {
+            self.jobs
+                .backfill_frame_luminance_with(read_frame, || std::future::ready(self_check))
+                .await;
         }
 
         async fn cursor(&self) -> Option<String> {
@@ -11566,6 +11920,361 @@ mod tests {
         async fn file(&self, id: i64) -> MediaFile {
             self.store.get_file(id).await.expect("read").expect("row")
         }
+
+        /// Seed one SDR-catalogued file whose stored stream document carries
+        /// the given colour signalling.
+        async fn stream_row(
+            &self,
+            name: &str,
+            codec: &str,
+            bit_depth: i64,
+            transfer: Option<&str>,
+            primaries: Option<&str>,
+        ) -> (i64, PathBuf) {
+            let path = self.root.join(name);
+            std::fs::write(&path, path.to_string_lossy().as_bytes()).expect("media stand-in");
+            let (size, mtime) = scan::file_stat(&path).await.expect("stat");
+            let mut stream = serde_json::json!({
+                "codec_type": "video",
+                "codec_name": codec,
+                "pix_fmt": if bit_depth >= 10 { "yuv420p10le" } else { "yuv420p" },
+            });
+            if let Some(transfer) = transfer {
+                stream["color_transfer"] = serde_json::json!(transfer);
+            }
+            if let Some(primaries) = primaries {
+                stream["color_primaries"] = serde_json::json!(primaries);
+            }
+            let document =
+                serde_json::json!({"streams": [stream], "path": path.display().to_string()});
+            let id = self
+                .store
+                .upsert_file(
+                    self.item,
+                    path.to_str().expect("utf8 path"),
+                    size,
+                    mtime,
+                    &ProbeResult {
+                        video_codec: Some(codec.to_owned()),
+                        bit_depth: Some(bit_depth),
+                        raw_json: Some(document.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("file");
+            (id, path)
+        }
+
+        async fn run_unsignalled<F, Fut>(&self, digest: &str, read_frame: F)
+        where
+            F: Fn(PathBuf) -> Fut,
+            Fut: std::future::Future<
+                Output = Result<serde_json::Value, plurx_core::error::ProbeError>,
+            >,
+        {
+            self.jobs
+                .backfill_unsignalled_transfer_with(digest, read_frame, || std::future::ready(true))
+                .await;
+        }
+
+        async fn run_unsignalled_with_self_check<F, Fut>(
+            &self,
+            digest: &str,
+            read_frame: F,
+            self_check: bool,
+        ) where
+            F: Fn(PathBuf) -> Fut,
+            Fut: std::future::Future<
+                Output = Result<serde_json::Value, plurx_core::error::ProbeError>,
+            >,
+        {
+            self.jobs
+                .backfill_unsignalled_transfer_with(digest, read_frame, || {
+                    std::future::ready(self_check)
+                })
+                .await;
+        }
+
+        async fn unsignalled_cursor(&self) -> Option<String> {
+            let key = self
+                .jobs
+                .local_job_key(keys::JOB_UNSIGNALLED_TRANSFER_BACKFILL_CURSOR);
+            self.store.get_setting(&key).await.expect("cursor")
+        }
+
+        async fn unsignalled_done(&self) -> Option<String> {
+            self.store
+                .get_setting(keys::JOB_UNSIGNALLED_TRANSFER_BACKFILL_DONE)
+                .await
+                .expect("stamp")
+        }
+    }
+
+    fn frame_with_transfer(transfer: &str) -> serde_json::Value {
+        serde_json::json!({"frames": [{
+            "color_transfer": transfer,
+            "color_primaries": "bt2020",
+            "side_data_list": [{
+                "side_data_type": "Content light level metadata",
+                "max_content": 1000, "max_average": 400
+            }]
+        }]})
+    }
+
+    /// Lab F4, 2026-10-11: titles catalogued SDR before the scanner asked the
+    /// first frame are never rescanned, so they need this walk to become HDR.
+    #[tokio::test]
+    async fn unsignalled_transfer_backfill_recatalogues_hdr_rows_once_per_pipeline_digest() {
+        let fixture = LuminanceFixture::new().await;
+        let (pq_id, pq) = fixture
+            .stream_row("pq.mkv", "hevc", 10, Some("unknown"), None)
+            .await;
+        let (sdr_id, sdr) = fixture
+            .stream_row("sdr10.mkv", "hevc", 10, Some("unknown"), None)
+            .await;
+        let (hlg_id, hlg) = fixture
+            .stream_row("hlg.mkv", "hevc", 10, None, Some("bt2020"))
+            .await;
+        // Listed by the store's coarse filter (10-bit), skipped by the
+        // scanner's eligibility: the stream signals its transfer.
+        let (signalled_id, _) = fixture
+            .stream_row("signalled.mkv", "hevc", 10, Some("bt709"), None)
+            .await;
+        // Not a candidate at all: 8-bit H.264.
+        let (h264_id, _) = fixture
+            .stream_row("h264.mkv", "h264", 8, Some("unknown"), None)
+            .await;
+        let (refused_id, refused) = fixture
+            .stream_row("refused.mkv", "av1", 10, Some("unspecified"), None)
+            .await;
+
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let read_frame = {
+            let reads = Arc::clone(&reads);
+            let (pq, hlg, refused) = (pq.clone(), hlg.clone(), refused.clone());
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path.clone());
+                let answer = if path == pq {
+                    Ok(frame_with_transfer("smpte2084"))
+                } else if path == hlg {
+                    Ok(frame_with_transfer("arib-std-b67"))
+                } else if path == refused {
+                    Err(refusal(&path))
+                } else {
+                    Ok(frame_with_transfer("bt709"))
+                };
+                async move { answer }
+            }
+        };
+
+        fixture.run_unsignalled("digest-one", &read_frame).await;
+        assert_eq!(
+            *reads.lock().expect("reads"),
+            vec![pq.clone(), sdr.clone(), hlg.clone(), refused.clone()],
+            "only the rows a fresh scan would frame-read, in id order"
+        );
+        let recatalogued = fixture.file(pq_id).await;
+        assert_eq!(
+            (
+                recatalogued.hdr.as_deref(),
+                recatalogued.hdr_format.as_deref(),
+                recatalogued.max_cll,
+                recatalogued.max_fall,
+                recatalogued.luminance_source.as_deref()
+            ),
+            (
+                Some("hdr10"),
+                Some("HDR10"),
+                Some(1000),
+                Some(400),
+                Some("frame")
+            )
+        );
+        let hlg_row = fixture.file(hlg_id).await;
+        assert_eq!(
+            (hlg_row.hdr.as_deref(), hlg_row.hdr_format.as_deref()),
+            (Some("hlg"), Some("HLG"))
+        );
+        for id in [sdr_id, signalled_id, h264_id, refused_id] {
+            let row = fixture.file(id).await;
+            assert_eq!(row.hdr, None, "row {id} stays SDR");
+            assert_eq!(row.luminance_source, None, "row {id} stays SDR");
+        }
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            Some(format!("digest-one:{refused_id}")),
+            "a frame that says SDR, an ineligible row and one refusal beside \
+             successful reads all advance the cursor"
+        );
+        assert_eq!(fixture.unsignalled_done().await, None);
+
+        // The next tick finds nothing after the cursor and stamps the digest;
+        // a walk completed for this digest never reads again.
+        fixture.run_unsignalled("digest-one", &read_frame).await;
+        assert_eq!(
+            fixture.unsignalled_done().await.as_deref(),
+            Some("digest-one")
+        );
+        fixture.run_unsignalled("digest-one", &read_frame).await;
+        assert_eq!(reads.lock().expect("reads").len(), 4);
+
+        // Another pipeline digest — a new classification version or another
+        // FFprobe build — walks again from the start, and reads only the rows
+        // that are still SDR.
+        reads.lock().expect("reads").clear();
+        fixture.run_unsignalled("digest-two", &read_frame).await;
+        assert_eq!(
+            *reads.lock().expect("reads"),
+            vec![sdr.clone(), refused.clone()]
+        );
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            Some(format!("digest-two:{refused_id}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unsignalled_transfer_backfill_holds_its_cursor_when_this_node_cannot_read() {
+        use plurx_core::error::ProbeError;
+        let fixture = LuminanceFixture::new().await;
+        fixture
+            .stream_row("first.mkv", "hevc", 10, Some("unknown"), None)
+            .await;
+        fixture
+            .stream_row("second.mkv", "hevc", 10, Some("unknown"), None)
+            .await;
+        let spawn = |_path: PathBuf| async {
+            Err(ProbeError::Spawn("No such file or directory".to_owned()))
+        };
+        fixture.run_unsignalled("digest", spawn).await;
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            None,
+            "Spawn stops the page"
+        );
+        let transient = |path: PathBuf| async move {
+            Err(ProbeError::Transient {
+                path: path.display().to_string(),
+                reason: "ffprobe exceeded 30 s".to_owned(),
+            })
+        };
+        fixture.run_unsignalled("digest", transient).await;
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            None,
+            "Transient stops the page"
+        );
+        let refuse_all = |path: PathBuf| async move { Err(refusal(&path)) };
+        fixture
+            .run_unsignalled_with_self_check("digest", refuse_all, false)
+            .await;
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            None,
+            "an all-refused page holds while ffprobe fails its self-check"
+        );
+        // An unmounted share holds the cursor without a read.
+        let parked = fixture.root.with_extension("parked");
+        std::fs::rename(&fixture.root, &parked).expect("unmount");
+        std::fs::create_dir(&fixture.root).expect("empty mountpoint");
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let recorded = {
+            let reads = Arc::clone(&reads);
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path);
+                async { Ok(frame_with_transfer("smpte2084")) }
+            }
+        };
+        fixture.run_unsignalled("digest", &recorded).await;
+        assert!(
+            reads.lock().expect("reads").is_empty(),
+            "nothing is read while the root is away"
+        );
+        assert_eq!(fixture.unsignalled_cursor().await, None);
+        assert_eq!(fixture.unsignalled_done().await, None);
+    }
+
+    /// Review finding on the frame walks: a page whose only reads were
+    /// refusals of corrupt files reset the cursor every tick, so two corrupt
+    /// files at the end of a library were re-read every 60 s and the walk
+    /// never stamped done. With ffprobe passing its self-check the refusals
+    /// are verdicts on those files and the walk completes.
+    #[tokio::test]
+    async fn frame_luminance_backfill_completes_past_a_page_of_corrupt_files() {
+        let fixture = LuminanceFixture::new().await;
+        fixture.document_walk_done().await;
+        let (_, sdr) = fixture.row("sdr.mkv", None, None, "bt709").await;
+        let (_, first) = fixture
+            .row("corrupt-a.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (second_id, second) = fixture
+            .row("corrupt-b.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let refuse_all = {
+            let reads = Arc::clone(&reads);
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path.clone());
+                let answer = Err(refusal(&path));
+                async move { answer }
+            }
+        };
+        fixture.run(&refuse_all).await;
+        assert_eq!(fixture.cursor().await, Some(second_id.to_string()));
+        fixture.run(&refuse_all).await;
+        assert!(fixture.done().await, "the walk completes");
+        fixture.run(&refuse_all).await;
+        assert_eq!(
+            *reads.lock().expect("reads"),
+            vec![first, second],
+            "each corrupt file is read once, never again"
+        );
+        assert!(!reads.lock().expect("reads").contains(&sdr));
+    }
+
+    #[tokio::test]
+    async fn unsignalled_transfer_backfill_completes_past_a_page_of_corrupt_files() {
+        let fixture = LuminanceFixture::new().await;
+        let (ineligible_id, _) = fixture
+            .stream_row("signalled.mkv", "hevc", 10, Some("bt709"), None)
+            .await;
+        let (_, first) = fixture
+            .stream_row("corrupt-a.mkv", "hevc", 10, Some("unknown"), None)
+            .await;
+        let (second_id, second) = fixture
+            .stream_row("corrupt-b.mkv", "hevc", 10, Some("unknown"), None)
+            .await;
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let refuse_all = {
+            let reads = Arc::clone(&reads);
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path.clone());
+                let answer = Err(refusal(&path));
+                async move { answer }
+            }
+        };
+        // A node-wide refusal holds at the row before the first refused
+        // read, keeping the ineligible row's advance.
+        fixture
+            .run_unsignalled_with_self_check("digest", &refuse_all, false)
+            .await;
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            Some(format!("digest:{ineligible_id}"))
+        );
+        assert_eq!(fixture.unsignalled_done().await, None);
+        // Once ffprobe passes its self-check the refusals are verdicts.
+        reads.lock().expect("reads").clear();
+        fixture.run_unsignalled("digest", &refuse_all).await;
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            Some(format!("digest:{second_id}"))
+        );
+        fixture.run_unsignalled("digest", &refuse_all).await;
+        assert_eq!(fixture.unsignalled_done().await.as_deref(), Some("digest"));
+        fixture.run_unsignalled("digest", &refuse_all).await;
+        assert_eq!(*reads.lock().expect("reads"), vec![first, second]);
     }
 
     fn frame(max_cll: i64) -> plurx_core::scan::probe::FrameLuminance {
@@ -11781,8 +12490,12 @@ mod tests {
         // Every read in a page refused, with more than one attempted, is a
         // statement about the reader, not about those files.
         let refuse_all = |path: PathBuf| async move { Err(refusal(&path)) };
-        fixture.run(refuse_all).await;
-        assert_eq!(fixture.cursor().await, None, "an all-refused page holds");
+        fixture.run_with_self_check(refuse_all, false).await;
+        assert_eq!(
+            fixture.cursor().await,
+            None,
+            "an all-refused page holds while ffprobe fails its self-check"
+        );
         assert!(!fixture.done().await);
 
         // One refusal beside a successful read is a statement about one file.

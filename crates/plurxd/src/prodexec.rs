@@ -169,6 +169,17 @@ pub struct Contention {
     pub handoff_waiting: bool,
 }
 
+/// Whether this producer is holding an encoder permit right now: an encoded
+/// rendition's live process, running or stopped. An `Absent` one holds none,
+/// whatever its recipe — and may itself be the live start queued for one.
+pub fn holds_permit(producer: Producer, encoded: bool) -> bool {
+    encoded
+        && matches!(
+            producer,
+            Producer::Running { .. } | Producer::Stopped { .. }
+        )
+}
+
 /// Let a stopped or about-to-stop encoder return its permit to a live waiter.
 /// All other operations already move the producer and remain untouched.
 pub fn yield_step(producer: Producer, step: Step, contention: Contention) -> Step {
@@ -425,6 +436,22 @@ mod tests {
             ),
             Step::Stop
         );
+    }
+
+    /// Review of lab F5's fix: an `Absent` encoded rendition was treated as
+    /// holding a permit, so its own queued start read as somebody waiting
+    /// for its permit, and it toggled its registration every pass.
+    #[test]
+    fn only_a_live_encoded_process_holds_a_permit() {
+        assert!(holds_permit(running(3), true));
+        assert!(holds_permit(stopped(3, Hold::Ahead { horizon: 26 }), true));
+        assert!(!holds_permit(
+            Producer::Absent {
+                produced_through: Some(3)
+            },
+            true
+        ));
+        assert!(!holds_permit(running(3), false));
     }
 
     fn contention(live_waiting: bool, holds_permit: bool) -> Contention {

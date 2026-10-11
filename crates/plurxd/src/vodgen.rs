@@ -26,15 +26,17 @@
 //! A generation that did not start at entry 0 carries no film time in its
 //! own timestamps (plan §12.3, ruling A1), so before anything is cut it is
 //! *landed*: fragments are buffered until their video-sample byte sequence
-//! places them in the [`FragmentIndex`] ([`match_landing`]), the discard to
-//! the target entry's boundary is counted ([`discards_to`]), and only then is
+//! places them in the [`FragmentIndex`] ([`match_landing`]) at or before the
+//! row that begins the target entry ([`entry_row`]), the discard to that
+//! boundary is counted, and only then is
 //! the segmenter built and fed. `-noaccurate_seek -ss` lands at the RAP
 //! at-or-before the boundary by design, so the discard only ever runs
 //! forward.
 
 use plurx_core::fmp4::{CutPolicy, Fragment, FragmentReader, Init, Published, Segmenter, Unit};
 use plurx_core::segplan::{
-    discards_to, match_landing, FragmentIndex, PlanEntryKind, SegmentPlan, LANDING_WINDOW,
+    entry_row, match_landing, FragmentIndex, LandingError, PlanEntryKind, SegmentPlan,
+    LANDING_WINDOW,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -50,9 +52,10 @@ const READ_CHUNK: usize = 256 * 1024;
 /// Mirror of [`crate::copyseg::MEMORY_WARN_BYTES`], with the landing buffer
 /// counted in: before the landing resolves nothing can be published, so the
 /// buffered fragments are held memory exactly as pending segments are. The
-/// landing itself is bounded — [`LANDING_WINDOW`] fragments decide it — so a
-/// generation that trips this is one whose plan has stopped cutting, not one
-/// that is still finding its feet.
+/// landing itself is bounded — [`LANDING_WINDOW`] fragments decide it, and an
+/// ambiguous one reads further only while it holds less than the policy's
+/// segment byte ceiling — so a generation that trips this is one whose plan
+/// has stopped cutting, not one that is still finding its feet.
 const MEMORY_WARN_BYTES: usize = 160 * 1024 * 1024;
 
 /// Why a generation could not serve its plan. Every variant is a typed
@@ -185,6 +188,8 @@ where
         landing: Vec::new(),
         landing_bytes: 0,
         observed: Vec::new(),
+        discard_remaining: 0,
+        verify_row: None,
         segmenter: None,
         produced_through: None,
         warned_memory: false,
@@ -271,6 +276,16 @@ struct GenerationRun<'a, S> {
     /// quantity [`match_landing`] compares (its tests say so: index
     /// `video_bytes`, never the wire length).
     observed: Vec<u32>,
+    /// Video-carrying fragments still to drop before the target entry
+    /// begins. The landing can sit further before the target than the
+    /// buffer that decided it reaches, so the discard outlives the buffer.
+    discard_remaining: usize,
+    /// The index row the next video-carrying fragment must weigh, from the
+    /// landing until the first segment is cut. A landing is a claim about
+    /// where the stream is; every fragment read before the first publication
+    /// is evidence for or against it, and the first that disagrees is the
+    /// typed landing failure instead of a segment of the wrong film.
+    verify_row: Option<usize>,
     segmenter: Option<Segmenter>,
     produced_through: Option<u32>,
     warned_memory: bool,
@@ -418,7 +433,7 @@ impl<S: Sink> GenerationRun<'_, S> {
         }
         let fragment = fragment;
         if self.segmenter.is_some() {
-            self.push_to_segmenter(fragment).await?;
+            self.feed_landed(fragment).await?;
         } else {
             if self.served.is_none() {
                 return Err(Outcome::Failed(Failure::Stream(
@@ -430,14 +445,15 @@ impl<S: Sink> GenerationRun<'_, S> {
             }
             self.landing_bytes += fragment.len();
             self.landing.push(fragment);
-            // A full window is a final answer either way: `match_landing`
-            // reads only the first `LANDING_WINDOW` values, so more fragments
-            // cannot change what it says. A shorter window is only consulted
-            // at end of stream, where "the pipe ran out" is itself evidence.
+            // A full window is answered at once unless it is ambiguous, in
+            // which case `engage` keeps the buffer and every further fragment
+            // asks again with a longer probe. A shorter window is only
+            // consulted at end of stream, where "the pipe ran out" is itself
+            // evidence.
             if self.observed.len() >= LANDING_WINDOW
                 || (self.generation.index.is_none() && !self.observed.is_empty())
             {
-                self.engage().await?;
+                self.engage(false).await?;
             }
         }
         self.warn_memory(reader_held);
@@ -582,7 +598,13 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// The landing: place the buffered fragments in the index, discard
     /// forward to the target entry's boundary, and start cutting on the
     /// plan's boundaries from there.
-    async fn engage(&mut self) -> Result<(), Outcome> {
+    ///
+    /// An ambiguous landing before the end of the pipe is not an answer yet:
+    /// the buffer is kept and the next fragment asks again with one more
+    /// fragment of evidence, while the buffer holds less than one segment's
+    /// byte ceiling — the memory the segmenter is entitled to hold pending
+    /// anyway. Past that, or at the end of the pipe, it is the typed failure.
+    async fn engage(&mut self, at_end: bool) -> Result<(), Outcome> {
         let start_entry = self.generation.start_entry;
         let Some(entry) = self.generation.plan.entry(start_entry) else {
             return Err(landing_failed(format!(
@@ -592,19 +614,27 @@ impl<S: Sink> GenerationRun<'_, S> {
             )));
         };
         let entry_start_ticks = entry.start_ticks;
+        let mut landed = None;
         let discards = if let Some(index) = &self.generation.index {
-            let row = match match_landing(index, &self.observed) {
-                Ok(row) => row,
-                Err(error) => return Err(landing_failed(error.to_string())),
-            };
-            // Copy's demuxer may land before, but never after, the plan RAP.
-            let Some(discards) = discards_to(index, row, entry) else {
+            let Some(target) = entry_row(index, entry) else {
                 return Err(landing_failed(format!(
-                    "landed at index row {row}, past entry {start_entry} at \
-                     {entry_start_ticks} ticks"
+                    "entry {start_entry} at {entry_start_ticks} ticks does not \
+                     begin at an index row"
                 )));
             };
-            discards
+            // Copy's demuxer may land before, but never after, the plan RAP,
+            // so the target row bounds every possible landing.
+            let row = match match_landing(index, &self.observed, target) {
+                Ok(row) => row,
+                Err(LandingError::Ambiguous { .. })
+                    if !at_end && self.landing_bytes < self.generation.policy.max_bytes =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(landing_failed(error.to_string())),
+            };
+            landed = Some(row);
+            target - row
         } else {
             if self
                 .served
@@ -661,18 +691,49 @@ impl<S: Sink> GenerationRun<'_, S> {
         // Drop the first `discards` video-carrying fragments — the index
         // counts fragments of the video-only pipe, so a fragment without
         // video (a leading audio-only flush) does not count against the
-        // discard — and feed everything after them onward.
-        let mut to_drop = discards;
+        // discard — and feed everything after them onward. The count runs on
+        // past the buffer into the fragments still to come, and every one of
+        // them is checked against the index until the first cut.
+        self.discard_remaining = discards;
+        self.verify_row = landed;
         let buffered = std::mem::take(&mut self.landing);
         self.landing_bytes = 0;
         for fragment in buffered {
-            if to_drop > 0 {
-                if self.video_bytes_of(&fragment).is_some() {
-                    to_drop -= 1;
-                }
-                continue;
+            self.feed_landed(fragment).await?;
+        }
+        Ok(())
+    }
+
+    /// One fragment after the landing: verify it against the index while the
+    /// landing is still unproven by a publication, drop it while the discard
+    /// to the target entry is unfinished, and otherwise cut it.
+    async fn feed_landed(&mut self, fragment: Fragment) -> Result<(), Outcome> {
+        let video_bytes = self.video_bytes_of(&fragment);
+        if let (Some(bytes), Some(row)) = (video_bytes, self.verify_row) {
+            let expected = self
+                .generation
+                .index
+                .as_ref()
+                .and_then(|index| index.rows.get(row))
+                .map(|row| row.video_bytes);
+            if expected != Some(bytes) {
+                return Err(landing_failed(format!(
+                    "the landing did not hold: the fragment placed at index \
+                     row {row} weighs {bytes} video bytes and the index says \
+                     {expected:?}"
+                )));
             }
-            self.push_to_segmenter(fragment).await?;
+            self.verify_row = Some(row + 1);
+        }
+        if self.discard_remaining > 0 {
+            if video_bytes.is_some() {
+                self.discard_remaining -= 1;
+            }
+            return Ok(());
+        }
+        self.push_to_segmenter(fragment).await?;
+        if self.produced_through.is_some() {
+            self.verify_row = None;
         }
         Ok(())
     }
@@ -753,7 +814,7 @@ impl<S: Sink> GenerationRun<'_, S> {
             // accepts a short probe only at the index's own tail, where the
             // stream genuinely ran out. Anywhere else this is a typed
             // landing failure, not a guess.
-            if let Err(outcome) = self.engage().await {
+            if let Err(outcome) = self.engage(true).await {
                 return outcome;
             }
         }
@@ -1330,7 +1391,7 @@ mod tests {
     ///
     /// This is the last guard, and it is the only one. Once `engage()` has
     /// run, `push_to_segmenter` compares nothing against the index — the
-    /// landing matcher reads only the first `LANDING_WINDOW` fragments — so a
+    /// landing matcher reads only what was buffered before it resolved — so a
     /// conversion that refuses on fragment 200 (an unreadable RPU, a Profile 8
     /// one spliced in from another source, a `trun` shape the rewrite cannot
     /// correct) would otherwise pass that fragment through with its Profile 7
@@ -2000,6 +2061,161 @@ mod tests {
             matches!(outcome, Outcome::Failed(Failure::Landing(_))),
             "a stale index must be a typed landing failure, got {outcome:?}"
         );
+        assert!(sink.taken().is_empty());
+    }
+
+    /// The fixture film behind four extra index rows whose first three
+    /// weigh what the film's opening three fragments weigh, and the first
+    /// video entry past them.
+    ///
+    /// A generation fed the film from its top lands at index row 4, but its
+    /// first three fragments match rows 0..3 just as well: three fragments
+    /// cannot tell the two apart, and the fourth — which the extra rows make
+    /// different — can. Both sit at or before the target row.
+    async fn film_with_an_early_repeat() -> (Film, u32) {
+        let mut film = film().await;
+        let real = film.index.rows.clone();
+        assert!(real.len() >= 4, "the fixture needs four fragments");
+        let step = real[0].duration;
+        let base = real[0].dts;
+        let mut rows: Vec<plurx_core::segplan::IndexRow> = (0..4u64)
+            .map(|offset| plurx_core::segplan::IndexRow {
+                dts: base + offset * step,
+                duration: step,
+                ..real[(offset % 3) as usize].clone()
+            })
+            .collect();
+        rows[3].video_bytes = real[3].video_bytes.wrapping_add(1);
+        rows.extend(real.iter().map(|row| plurx_core::segplan::IndexRow {
+            dts: row.dts + 4 * step,
+            ..row.clone()
+        }));
+        film.index.rows = rows;
+        film.plan = plurx_core::segplan::plan_copy(
+            &film.index,
+            &film.policy,
+            &TrackDurations {
+                video_ms: 12_000,
+                audio_ms: 12_000,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let start_entry = film
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == PlanEntryKind::Video)
+            .find(|entry| entry_row(&film.index, entry).is_some_and(|row| row >= 4))
+            .map(|entry| entry.index)
+            .expect("the shifted plan has a video entry inside the real film");
+        (film, start_entry)
+    }
+
+    /// Lab F1 (2026-10-11): a frontier generation failed "landing
+    /// undetermined" because three byte counts elsewhere in the index matched
+    /// its first three fragments. The producer now reads on while the landing
+    /// is ambiguous, and the true landing is the one that keeps matching.
+    #[tokio::test]
+    async fn an_ambiguous_landing_reads_further_and_lands_on_its_entry() {
+        let (film, start_entry) = film_with_an_early_repeat().await;
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..], generation(&film, start_entry), &sink, "f1").await;
+        assert!(
+            matches!(outcome, Outcome::Ran { .. }),
+            "an early byte-count repeat must not fail the landing: {outcome:?}"
+        );
+        let writes = sink.taken();
+        assert_eq!(
+            writes.first().map(|(entry, _)| *entry),
+            Some(start_entry),
+            "the landing at row 4 must discard forward to entry {start_entry}"
+        );
+    }
+
+    /// The first video entry whose row is further from row 0 than a landing
+    /// window, so a generation fed from the top of the film lands more
+    /// fragments before its target than the buffer that decided the landing.
+    fn an_entry_past_the_landing_window(film: &Film) -> u32 {
+        film.plan
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == PlanEntryKind::Video)
+            .find(|entry| entry_row(&film.index, entry).is_some_and(|row| row > LANDING_WINDOW))
+            .map(|entry| entry.index)
+            .expect("the fixture needs a video entry past the landing window")
+    }
+
+    /// Review of F1 (2026-10-11): `engage` dropped only the discards its
+    /// three-fragment buffer held. A landing further back than that threw the
+    /// rest of the count away and published the fragments in front of the
+    /// target under the target's index — the wrong film, silently.
+    #[tokio::test]
+    async fn a_landing_further_back_than_its_buffer_discards_all_the_way_to_its_entry() {
+        let film = film().await;
+        let full = MemSink::default();
+        let outcome = run(&film.feed[..], generation(&film, 0), &full, "full").await;
+        assert!(matches!(outcome, Outcome::Ran { .. }), "{outcome:?}");
+        let full = full.taken();
+
+        let start_entry = an_entry_past_the_landing_window(&film);
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..], generation(&film, start_entry), &sink, "far").await;
+        assert!(matches!(outcome, Outcome::Ran { .. }), "{outcome:?}");
+        let writes = sink.taken();
+        assert_eq!(writes.first().map(|(entry, _)| *entry), Some(start_entry));
+        let payload = video_payload_len(&film, start_entry);
+        assert!(payload > 0);
+        let of_full = mdat_payload(&full[start_entry as usize].1);
+        let of_far = mdat_payload(&writes[0].1);
+        assert!(of_full.len() >= payload && of_far.len() >= payload);
+        assert_eq!(
+            of_far[..payload],
+            of_full[..payload],
+            "entry {start_entry} must carry its own video, not the fragments in front of it"
+        );
+    }
+
+    /// A landing that the next fragments contradict is a coincidence, not a
+    /// landing: rows 0..3 still weigh what the generation emits, row 3 no
+    /// longer does. This is also the shape of a true landing past the target
+    /// with a three-fragment coincidence before it.
+    #[tokio::test]
+    async fn a_landing_its_later_fragments_contradict_fails_typed() {
+        let mut film = film().await;
+        let start_entry = an_entry_past_the_landing_window(&film);
+        let row = &mut film.index.rows[LANDING_WINDOW];
+        row.video_bytes = row.video_bytes.wrapping_add(1);
+        let sink = MemSink::default();
+        let outcome = run(
+            &film.feed[..],
+            generation(&film, start_entry),
+            &sink,
+            "liar",
+        )
+        .await;
+        let Outcome::Failed(Failure::Landing(why)) = &outcome else {
+            panic!("a contradicted landing must fail typed: {outcome:?}");
+        };
+        assert!(why.contains("did not hold"), "{why}");
+        assert!(
+            sink.taken().is_empty(),
+            "nothing of the wrong film is published"
+        );
+    }
+
+    /// Reading further is bounded by one segment's byte ceiling; past it a
+    /// landing that is still ambiguous stays the typed refusal it always was.
+    #[tokio::test]
+    async fn an_ambiguous_landing_past_the_segment_ceiling_is_refused() {
+        let (film, start_entry) = film_with_an_early_repeat().await;
+        let mut generation = generation(&film, start_entry);
+        generation.policy.max_bytes = 1;
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..], generation, &sink, "f1").await;
+        let Outcome::Failed(Failure::Landing(why)) = &outcome else {
+            panic!("an unresolved landing must fail typed: {outcome:?}");
+        };
+        assert!(why.contains("undetermined"), "{why}");
         assert!(sink.taken().is_empty());
     }
 }

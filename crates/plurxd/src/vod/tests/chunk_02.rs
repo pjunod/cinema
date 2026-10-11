@@ -868,6 +868,40 @@
         assert_eq!(first, second, "the playlist is immutable (plan §2.1)");
     }
 
+    /// Lab F2 (2026-10-11): the spawn line logged `rendition=generation@<n>`,
+    /// so ENCODED-VOD-HOLD-AND-RELEASE §5.0's per-rendition grep for the
+    /// rendition key matched nothing. It names the key, with the start entry
+    /// as its own field.
+    #[tokio::test]
+    async fn the_spawn_line_names_the_rendition_key_and_its_start_entry() {
+        use tracing_subscriber::prelude::*;
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(512));
+        // `#[tokio::test]` runs every task on this thread, so a thread-local
+        // default subscriber sees the writer's spawn site.
+        let _capture = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs))),
+        );
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        fetch(&serve, "sess-a", "seg00000.m4s").await;
+        let key = rendition_of(&serve, "sess-a").await.key.clone();
+
+        let spawned: Vec<String> = logs
+            .tail("info", 512)
+            .into_iter()
+            .map(|entry| entry.message)
+            .filter(|message| message.contains("spawned a producer generation"))
+            .collect();
+        assert!(!spawned.is_empty(), "the fetch must have spawned a generation");
+        for line in &spawned {
+            assert!(
+                line.contains(&format!("rendition={key}")) && line.contains("start_entry=0"),
+                "the spawn line must carry the rendition key and start entry: {line}"
+            );
+        }
+    }
+
     /// A capacity stall says why, after the producer it terminated is gone.
     ///
     /// A hold with no scheduled end terminates its producer — a stopped one

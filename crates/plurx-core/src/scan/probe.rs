@@ -21,12 +21,41 @@ fn ffprobe_bin() -> String {
     crate::process::media_tool_bin("ffprobe", std::env::var("PLURX_FFPROBE").ok())
 }
 
+/// Whether this node's FFprobe runs at all: a fresh `-version`, never
+/// answered from a cache. The frame walks ask it after a page in which every
+/// read was refused, to tell refusals that are verdicts on those files from a
+/// reader that cannot read anything.
+pub async fn self_check() -> bool {
+    match crate::process::bounded::output(
+        ffprobe_bin(),
+        &["-version"],
+        REPORTER_PROBE_TIMEOUT,
+        REPORTER_PROBE_MAX_BYTES as usize,
+        crate::process::ChildWork::background("ffprobe self-check"),
+    )
+    .await
+    {
+        Ok(output) => {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| !line.trim().is_empty())
+        }
+        Err(_) => false,
+    }
+}
+
 /// Exact parser/reporter identity used by portable leaf work.
+///
+/// The version names what a probe *concludes*, not only which FFprobe ran:
+/// v2 classifies a stream whose transfer the container left unsignalled from
+/// its first decoded frame, so a v1 worker would publish an SDR verdict a v2
+/// scanner no longer reaches for the same bytes.
 pub async fn pipeline_digest() -> Option<String> {
     use sha2::{Digest, Sha256};
     let reporter = reporter_identity_of(&ffprobe_bin()).await?;
     Some(hex::encode(Sha256::digest(format!(
-        "leaf-probe-v1:{reporter}"
+        "leaf-probe-v2:{reporter}"
     ))))
 }
 
@@ -321,18 +350,30 @@ async fn probe_with_threads(
         }
     }
     let mut result = parse_probe_json(&json);
+    // HEVC, AV1 and VP9 carry their colour description in the bitstream (VUI,
+    // sequence header) as well as, optionally, in the container. When the
+    // container is silent some FFprobe builds report the stream transfer as
+    // `unknown` even though every decoded frame is PQ or HLG, and a stream
+    // read alone would catalogue the title SDR and encode it without a tone
+    // map. The first frame is where that bitstream description surfaces.
+    let transfer_unsignalled = transfer_left_to_bitstream(&json, &result);
     // `luminance_source` is set from the selected stream's transfer rather
     // than its display label. A Dolby Vision stream can still carry a PQ or
     // HLG base layer; `detect_hdr` intentionally labels that stream DOVI first,
     // but that label must not suppress the bounded frame observation.
-    if result.luminance_source.as_deref() == Some("none") {
-        // A failed frame read leaves the stream observation (`none`) in place:
-        // the scan's job is the stream document, and a later probe document
-        // is what earns the file another look.
-        if let Ok(frame) =
-            probe_first_frame_luminance(path, threads, "library scan luminance probe").await
+    if transfer_unsignalled || result.luminance_source.as_deref() == Some("none") {
+        // A failed frame read leaves the stream observation in place (`none`,
+        // or SDR for an unsignalled transfer): the scan's job is the stream
+        // document, and a later probe document is what earns the file another
+        // look.
+        if let Ok(frame) = probe_first_frame(path, threads, "library scan first-frame probe").await
         {
-            apply_frame_luminance(&mut result, &frame);
+            if transfer_unsignalled {
+                apply_frame_dynamic_range(&mut result, &json, &frame);
+            }
+            if result.luminance_source.as_deref() == Some("none") {
+                apply_frame_luminance(&mut result, &frame);
+            }
         }
     }
     // Container comes from the extension — the decision engine keys on it
@@ -365,8 +406,61 @@ pub async fn first_frame_luminance(
     path: &Path,
     purpose: &'static str,
 ) -> Result<Option<FrameLuminance>, ProbeError> {
-    let document = probe_first_frame_luminance(path, Some(1), purpose).await?;
+    let document = probe_first_frame(path, Some(1), purpose).await?;
     Ok(frame_luminance_from(&document))
+}
+
+/// What the first frame says about a catalogued file whose stream document
+/// left its transfer to the bitstream: the HDR columns a scan of the same
+/// bytes would now write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameDynamicRange {
+    pub hdr: String,
+    pub hdr_format: Option<String>,
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+    pub luminance_source: String,
+}
+
+/// Whether a retained stream document is one the scanner would now ask its
+/// first frame about (see `transfer_left_to_bitstream`). The fleet backfill's
+/// eligibility, so it reads exactly the rows a fresh scan would.
+pub fn stored_document_leaves_transfer_to_bitstream(probe_json: &str) -> bool {
+    serde_json::from_str::<Value>(probe_json)
+        .is_ok_and(|document| transfer_left_to_bitstream(&document, &parse_probe_json(&document)))
+}
+
+/// Classify a retained stream document with its file's first frame, by the
+/// scanner's own rules. `None` when the document is not eligible or the frame
+/// says the stream is not HDR — the row stays SDR.
+pub fn classify_frame_dynamic_range(probe_json: &str, frame: &Value) -> Option<FrameDynamicRange> {
+    let document = serde_json::from_str::<Value>(probe_json).ok()?;
+    let mut result = parse_probe_json(&document);
+    if !transfer_left_to_bitstream(&document, &result) {
+        return None;
+    }
+    apply_frame_dynamic_range(&mut result, &document, frame);
+    let hdr = result.hdr.take()?;
+    if result.luminance_source.as_deref() == Some("none") {
+        apply_frame_luminance(&mut result, frame);
+    }
+    Some(FrameDynamicRange {
+        hdr,
+        hdr_format: result.hdr_format,
+        max_cll: result.max_cll,
+        max_fall: result.max_fall,
+        mastering_max_luminance: result.mastering_max_luminance,
+        luminance_source: result.luminance_source.unwrap_or_else(|| "none".to_owned()),
+    })
+}
+
+/// The scanner's bounded first-frame read (one frame, one thread, 30 s /
+/// 256 KiB, background class) for a file already in the catalog, as the raw
+/// ffprobe document for [`classify_frame_dynamic_range`]. `Err` means the
+/// read did not happen or ffprobe refused the file.
+pub async fn first_frame_document(path: &Path, purpose: &'static str) -> Result<Value, ProbeError> {
+    probe_first_frame(path, Some(1), purpose).await
 }
 
 fn frame_luminance_from(document: &Value) -> Option<FrameLuminance> {
@@ -379,7 +473,9 @@ fn frame_luminance_from(document: &Value) -> Option<FrameLuminance> {
     })
 }
 
-async fn probe_first_frame_luminance(
+/// One decoded frame of the first playable video: its colour description
+/// and its luminance side data, under the luminance read's bounds.
+async fn probe_first_frame(
     path: &Path,
     threads: Option<usize>,
     purpose: &'static str,
@@ -401,7 +497,10 @@ async fn probe_first_frame_luminance(
             OsString::from("-read_intervals"),
             OsString::from("%+#1"),
             OsString::from("-show_entries"),
-            OsString::from("frame_side_data=side_data_type,max_content,max_average,max_luminance"),
+            OsString::from(
+                "frame=color_transfer,color_primaries,color_space:\
+                 frame_side_data=side_data_type,max_content,max_average,max_luminance",
+            ),
             path.as_os_str().to_owned(),
         ],
         FRAME_LUMINANCE_PROBE_TIMEOUT,
@@ -581,6 +680,73 @@ fn apply_stream_luminance(result: &mut ProbeResult, stream: &Value) {
     ) {
         result.luminance_source = Some(if found { "stream" } else { "none" }.to_owned());
     }
+}
+
+/// The video stream [`parse_probe_json`] classifies: the first one that is
+/// not an attached picture.
+fn first_playable_video(document: &Value) -> Option<&Value> {
+    document.get("streams")?.as_array()?.iter().find(|stream| {
+        stream.get("codec_type").and_then(Value::as_str) == Some("video")
+            && !is_attached_pic(stream)
+    })
+}
+
+/// Whether the stream read left the selected video's dynamic range to its
+/// bitstream: nothing classified it HDR or Dolby Vision, its transfer is
+/// absent, `unknown` or `unspecified`, and it is a stream that can carry PQ or
+/// HLG — BT.2020 primaries, or 10-bit-or-deeper HEVC, AV1 or VP9.
+///
+/// Deliberately narrow: an 8-bit H.264 file with an unspecified transfer is
+/// SDR on every player, and asking its first frame would only add a second
+/// child to every scan of an ordinary library.
+fn transfer_left_to_bitstream(document: &Value, result: &ProbeResult) -> bool {
+    if result.hdr.is_some() {
+        return false;
+    }
+    let Some(stream) = first_playable_video(document) else {
+        return false;
+    };
+    let unsignalled = matches!(
+        stream.get("color_transfer").and_then(Value::as_str),
+        None | Some("unknown" | "unspecified")
+    );
+    let bt2020 = stream.get("color_primaries").and_then(Value::as_str) == Some("bt2020");
+    let deep_modern = result.bit_depth.is_some_and(|depth| depth >= 10)
+        && matches!(result.video_codec.as_deref(), Some("hevc" | "av1" | "vp9"));
+    unsignalled && (bt2020 || deep_modern)
+}
+
+/// Classify the selected video again with its first frame's transfer in
+/// place of the stream's, through the same [`detect_hdr`] /
+/// [`detect_hdr_format`] / luminance rules the stream read uses — so a
+/// PQ-in-the-VUI title and a PQ-in-the-container title cannot be labelled
+/// differently. A frame that names no transfer, or an SDR one, changes
+/// nothing: the stream's own verdict stands.
+fn apply_frame_dynamic_range(result: &mut ProbeResult, document: &Value, frame: &Value) {
+    let Some(stream) = first_playable_video(document) else {
+        return;
+    };
+    let Some(transfer) = frame
+        .get("frames")
+        .and_then(Value::as_array)
+        .and_then(|frames| frames.first())
+        .and_then(|frame| frame.get("color_transfer"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    let mut observed = stream.clone();
+    let Some(fields) = observed.as_object_mut() else {
+        return;
+    };
+    fields.insert("color_transfer".to_owned(), Value::from(transfer));
+    let hdr = detect_hdr(&observed);
+    if hdr.is_none() {
+        return;
+    }
+    result.hdr = hdr;
+    result.hdr_format = detect_hdr_format(&observed);
+    apply_stream_luminance(result, &observed);
 }
 
 fn apply_frame_luminance(result: &mut ProbeResult, document: &Value) {
@@ -1294,6 +1460,179 @@ pub(crate) mod tests {
         assert_eq!(result.max_cll, Some(1000));
         assert_eq!(result.max_fall, Some(400));
         assert_eq!(result.luminance_source.as_deref(), Some("frame"));
+    }
+
+    /// The lab's F4 title: HEVC Main10 with PQ and HDR10 SEI in the bitstream
+    /// and a Matroska `Colour` element carrying only matrix and range. The
+    /// bound FFprobe reports the stream transfer `unknown`; the first frame
+    /// reports `smpte2084` with mastering and content-light side data.
+    fn vui_only_stream(transfer: Option<&str>, primaries: Option<&str>) -> Value {
+        let mut stream = json!({
+            "index": 0, "codec_type": "video", "codec_name": "hevc",
+            "profile": "Main 10", "pix_fmt": "yuv420p10le",
+            "width": 1920, "height": 1080, "color_space": "bt2020nc",
+            "disposition": {"attached_pic": 0}
+        });
+        if let Some(transfer) = transfer {
+            stream["color_transfer"] = json!(transfer);
+        }
+        if let Some(primaries) = primaries {
+            stream["color_primaries"] = json!(primaries);
+        }
+        json!({"format": {"duration": "60.0"}, "streams": [stream]})
+    }
+
+    fn first_frame(transfer: &str, side_data: Value) -> Value {
+        json!({"frames": [{
+            "color_space": "bt2020nc", "color_primaries": "bt2020",
+            "color_transfer": transfer, "side_data_list": side_data
+        }]})
+    }
+
+    #[test]
+    fn a_vui_only_pq_stream_is_classified_hdr10_from_its_first_frame() {
+        let document = vui_only_stream(Some("unknown"), None);
+        let mut result = parse_probe_json(&document);
+        assert_eq!(result.hdr, None, "the stream read alone says SDR");
+        assert!(transfer_left_to_bitstream(&document, &result));
+
+        let frame = first_frame(
+            "smpte2084",
+            json!([
+                {"side_data_type": "H.26[45] User Data Unregistered SEI message"},
+                {"side_data_type": "Mastering display metadata",
+                 "max_luminance": "10000000/10000"},
+                {"side_data_type": "Content light level metadata",
+                 "max_content": 1000, "max_average": 400}
+            ]),
+        );
+        apply_frame_dynamic_range(&mut result, &document, &frame);
+        assert_eq!(result.hdr.as_deref(), Some("hdr10"));
+        assert_eq!(result.hdr_format.as_deref(), Some("HDR10"));
+        assert_eq!(result.luminance_source.as_deref(), Some("none"));
+        // The scan then reads the same frame's luminance, as for any HDR
+        // stream whose container carried none.
+        apply_frame_luminance(&mut result, &frame);
+        assert_eq!(result.luminance_source.as_deref(), Some("frame"));
+        assert_eq!(result.max_cll, Some(1000));
+        assert_eq!(result.max_fall, Some(400));
+        assert_eq!(result.mastering_max_luminance, Some(1000));
+        // The retained document is the stream read, unchanged: held-source
+        // admission compares it against a fresh stream probe.
+        assert!(!result
+            .raw_json
+            .as_deref()
+            .expect("raw json")
+            .contains("smpte2084"));
+    }
+
+    #[test]
+    fn a_vui_only_hlg_stream_is_classified_hlg_from_its_first_frame() {
+        let document = vui_only_stream(None, Some("bt2020"));
+        let mut result = parse_probe_json(&document);
+        assert!(transfer_left_to_bitstream(&document, &result));
+        apply_frame_dynamic_range(
+            &mut result,
+            &document,
+            &first_frame("arib-std-b67", json!([])),
+        );
+        assert_eq!(result.hdr.as_deref(), Some("hlg"));
+        assert_eq!(result.hdr_format.as_deref(), Some("HLG"));
+        assert_eq!(result.luminance_source.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn a_ten_bit_sdr_stream_stays_sdr_after_its_first_frame() {
+        for frame_transfer in ["bt709", "unknown"] {
+            let document = vui_only_stream(Some("unknown"), None);
+            let mut result = parse_probe_json(&document);
+            assert!(transfer_left_to_bitstream(&document, &result));
+            apply_frame_dynamic_range(
+                &mut result,
+                &document,
+                &first_frame(frame_transfer, json!([])),
+            );
+            assert_eq!(result.hdr, None, "{frame_transfer}");
+            assert_eq!(result.hdr_format, None, "{frame_transfer}");
+            assert_eq!(result.luminance_source, None, "{frame_transfer}");
+        }
+    }
+
+    #[test]
+    fn a_catalogued_document_is_reclassified_by_the_scanners_rules() {
+        let pq = serde_json::to_string(&vui_only_stream(Some("unknown"), None)).expect("json");
+        assert!(stored_document_leaves_transfer_to_bitstream(&pq));
+        let frame = first_frame(
+            "smpte2084",
+            json!([{"side_data_type": "Content light level metadata",
+                    "max_content": 1000, "max_average": 400}]),
+        );
+        assert_eq!(
+            classify_frame_dynamic_range(&pq, &frame),
+            Some(FrameDynamicRange {
+                hdr: "hdr10".to_owned(),
+                hdr_format: Some("HDR10".to_owned()),
+                max_cll: Some(1000),
+                max_fall: Some(400),
+                mastering_max_luminance: None,
+                luminance_source: "frame".to_owned(),
+            })
+        );
+        assert_eq!(
+            classify_frame_dynamic_range(&pq, &first_frame("bt709", json!([]))),
+            None,
+            "a frame that says SDR leaves the row SDR"
+        );
+        let signalled = serde_json::to_string(&vui_only_stream(Some("bt709"), None)).expect("json");
+        assert!(!stored_document_leaves_transfer_to_bitstream(&signalled));
+        assert_eq!(classify_frame_dynamic_range(&signalled, &frame), None);
+        assert!(!stored_document_leaves_transfer_to_bitstream("not json"));
+    }
+
+    #[test]
+    fn only_a_stream_that_can_carry_hdr_asks_its_first_frame() {
+        // Signalled streams are classified from the stream.
+        for transfer in ["smpte2084", "arib-std-b67", "bt709"] {
+            let document = vui_only_stream(Some(transfer), None);
+            let result = parse_probe_json(&document);
+            assert!(
+                !transfer_left_to_bitstream(&document, &result),
+                "{transfer}"
+            );
+        }
+        // Ordinary 8-bit H.264 with an unspecified transfer is SDR.
+        let h264 = json!({"streams": [{
+            "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p",
+            "color_transfer": "unknown"
+        }]});
+        assert!(!transfer_left_to_bitstream(&h264, &parse_probe_json(&h264)));
+        // 8-bit HEVC without BT.2020 primaries is not an HDR candidate either.
+        let hevc8 = json!({"streams": [{
+            "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p",
+            "color_transfer": "unspecified"
+        }]});
+        assert!(!transfer_left_to_bitstream(
+            &hevc8,
+            &parse_probe_json(&hevc8)
+        ));
+        // Dolby Vision is decided from its configuration record, not a frame.
+        let dovi = json!({"streams": [{
+            "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p10le",
+            "side_data_list": [{"side_data_type": "DOVI configuration record",
+                                "dv_profile": 5}]
+        }]});
+        assert!(!transfer_left_to_bitstream(&dovi, &parse_probe_json(&dovi)));
+        // The selected stream is the first playable video, not cover art.
+        let with_cover = json!({"streams": [
+            {"codec_type": "video", "codec_name": "mjpeg", "pix_fmt": "yuvj420p",
+             "disposition": {"attached_pic": 1}},
+            {"codec_type": "video", "codec_name": "av1", "pix_fmt": "yuv420p10le",
+             "color_transfer": "unknown", "disposition": {"attached_pic": 0}}
+        ]});
+        assert!(transfer_left_to_bitstream(
+            &with_cover,
+            &parse_probe_json(&with_cover)
+        ));
     }
 
     #[test]

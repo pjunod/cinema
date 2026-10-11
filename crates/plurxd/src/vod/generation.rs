@@ -507,6 +507,9 @@ pub(super) async fn spawn_generation(
         },
     );
     let epoch = rendition.gen_epoch.load(Relaxed);
+    // The writer task takes the rendition; the spawn line below still has to
+    // name it, because a per-rendition count is a grep for this key.
+    let spawned_key = rendition.key.clone();
     let shared = Arc::clone(shared);
     let rendition = Arc::clone(rendition);
     let (supervised_shared, supervised) = (Arc::clone(&shared), Arc::clone(&rendition));
@@ -593,7 +596,10 @@ pub(super) async fn spawn_generation(
     }));
     tracing::info!(
         target: "plurxd::vodserve",
-        rendition = %rendition_key_field(at), "spawned a producer generation"
+        rendition = %spawned_key,
+        start_entry = at,
+        generation = epoch,
+        "spawned a producer generation"
     );
 }
 
@@ -781,10 +787,6 @@ pub(super) fn copy_video_pipeline(
 ) -> CopyVideoOptions {
     CopyVideoOptions::from_probe(file, probe_json, have_dovi, preserve_dolby_vision)
         .with_dolby_vision_conversion(convert_dolby_vision)
-}
-
-fn rendition_key_field(at: u32) -> String {
-    format!("generation@{at}")
 }
 
 /// Read one generation to its end: establish or verify the init identity,

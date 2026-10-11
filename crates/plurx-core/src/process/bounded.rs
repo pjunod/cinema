@@ -231,7 +231,7 @@ pub async fn output_command(
 
 /// Keep draining after the retained cap. Closing the reader at the cap can
 /// fill the child's pipe and deadlock it before the wall-time owner can reap.
-async fn drain_capped(
+pub(super) async fn drain_capped(
     mut reader: impl AsyncRead + Unpin,
     max_output_bytes: usize,
 ) -> io::Result<Vec<u8>> {

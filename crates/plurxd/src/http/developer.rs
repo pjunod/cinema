@@ -335,7 +335,12 @@ fn macos_video_processing(
         requirements: vec![
             macos_effective_encoder_requirement("effective_encoder", state, preference),
             requirement("sdr_scale", "Progressive SDR scaling", &report.sdr_scale),
-            requirement("hdr10_metal", "HDR10 to SDR processing", &report.hdr10_metal),
+            {
+                let mut hdr10 =
+                    requirement("hdr10_metal", "HDR10 to SDR processing", &report.hdr10_metal);
+                hdr10.evidence.push_str(" HDR10 must also match the CPU tone-map's picture, and beat its speed, at this worker's boot tone-map probe (Settings → System → Transcoding backend); a cpu_parity reason names that check, which reruns when the node restarts rather than on reprobe.");
+                hdr10
+            },
             graph_requirement("hlg_metal", "HLG to SDR processing", &["hlg_metal"]),
             graph_requirement("subtitle_burns", "SDR, HDR10 and HLG subtitle burns", &["sdr_text_burn", "hdr10_text_burn", "hlg_text_burn", "sdr_bitmap_burn", "hdr10_bitmap_burn", "hlg_bitmap_burn"]),
             graph_requirement("deinterlace", "SDR frame and field deinterlacing", &["sdr_bwdif_frame", "sdr_bwdif_field"]),
