@@ -357,7 +357,47 @@ pub(crate) struct CreateStartupBudget {
     source_link: std::sync::Arc<
         std::sync::Mutex<Option<crate::http::hls::link_receipts::SourceLinkIdentity>>,
     >,
+    /// Where this create spent its time and its Store operations, phase by
+    /// phase. Shared with the create worker, so marks it records land here.
+    phases: std::sync::Arc<std::sync::Mutex<CreatePhaseLedger>>,
 }
+
+/// The per-phase split of one create, logged on its read-budget line.
+///
+/// Each mark closes the interval since the previous one (or since
+/// [`CreateStartupBudget::begin_phases`]) and records its elapsed time and
+/// the request's Store operations in it. Logging only: nothing reads it to
+/// decide anything.
+#[derive(Default)]
+struct CreatePhaseLedger {
+    /// When the previous interval closed, and the request's operation
+    /// counts (local, authority, write) at that moment.
+    last: Option<(tokio::time::Instant, [u64; 3])>,
+    rendered: String,
+}
+
+impl CreatePhaseLedger {
+    fn mark(&mut self, name: &str, now: tokio::time::Instant, counts: [u64; 3]) {
+        use std::fmt::Write as _;
+
+        let Some((since, before)) = self.last.replace((now, counts)) else {
+            return;
+        };
+        let delta = |index: usize| counts[index].saturating_sub(before[index]);
+        if !self.rendered.is_empty() {
+            self.rendered.push(',');
+        }
+        let _ = write!(
+            self.rendered,
+            "{name}:{}ms/{}a/{}l/{}w",
+            now.saturating_duration_since(since).as_millis(),
+            delta(1),
+            delta(0),
+            delta(2),
+        );
+    }
+}
+
 impl CreateStartupBudget {
     pub(crate) fn new(remaining_ms: u64) -> Self {
         Self {
@@ -366,10 +406,36 @@ impl CreateStartupBudget {
             binding: Default::default(),
             advisory: Default::default(),
             source_link: Default::default(),
+            phases: Default::default(),
         }
     }
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Open the first phase: `counts` is the request's operation snapshot as
+    /// the measured window starts.
+    pub(crate) fn begin_phases(&self, counts: [u64; 3]) {
+        self.phases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last = Some((tokio::time::Instant::now(), counts));
+    }
+    /// Close the current phase directly, for the caller that owns the
+    /// budget rather than running inside its scope.
+    pub(crate) fn mark_phase(&self, name: &str, counts: [u64; 3]) {
+        self.phases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mark(name, tokio::time::Instant::now(), counts);
+    }
+    /// The phases recorded so far, as `name:ms/Na/Nl/Nw,…` (authority reads,
+    /// local reads, writes).
+    pub(crate) fn phases(&self) -> String {
+        self.phases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rendered
+            .clone()
     }
     pub(crate) fn scope<T>(
         &self,
@@ -394,6 +460,20 @@ pub(crate) fn spawn_create_worker<T: Send + 'static>(
             work.await
         }
     })
+}
+
+/// Close the current create phase as `name`; a no-op outside a create.
+///
+/// The interval it closes carries the elapsed time and the Store operations
+/// this request performed since the previous mark, and is printed on the
+/// create's `create startup read budget finished` line.
+pub(crate) fn mark_create_phase(name: &str) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        let counts = plurx_core::store::current_http_store_operations()
+            .map(|counts| counts.snapshot())
+            .unwrap_or_default();
+        budget.mark_phase(name, counts);
+    });
 }
 
 pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
@@ -2388,6 +2468,36 @@ mod tests {
                 limit: 64,
             })
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn create_phase_marks_split_time_and_operations_between_marks() {
+        let budget = CreateStartupBudget::new(10_000);
+        // Before the window opens a mark has no interval to close.
+        budget.mark_phase("early", [9, 9, 9]);
+        assert_eq!(budget.phases(), "");
+        // Counts are (local, authority, write); the rendering is authority
+        // first, as the log line names them.
+        budget.begin_phases([1, 2, 0]);
+        tokio::time::advance(Duration::from_millis(12)).await;
+        budget.mark_phase("lookup", [1, 3, 0]);
+        let worker = budget.clone();
+        tokio::time::advance(Duration::from_millis(30)).await;
+        // A clone, as the create worker holds, records into the same ledger,
+        // and a mark taken inside the budget's scope does too.
+        budget
+            .scope(async {
+                worker.mark_phase("worker", [2, 5, 1]);
+                mark_create_phase("scoped");
+            })
+            .await;
+        assert_eq!(
+            budget.phases(),
+            "lookup:12ms/1a/0l/0w,worker:30ms/2a/1l/1w,scoped:0ms/0a/0l/0w"
+        );
+        // Outside any create the free function is a no-op.
+        mark_create_phase("outside");
+        assert!(!budget.phases().contains("outside"));
     }
 
     #[tokio::test]

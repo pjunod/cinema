@@ -1432,6 +1432,272 @@ async fn service_vod_only_refuses_unindexed_copy_before_rolling_allocation() {
     assert!(manager.active_session_ids().await.is_empty());
 }
 
+/// The interval the dispatch revalidation does not cover (startup and
+/// tone-map handoff §5.4, B-M2): the source is replaced after the worker's
+/// VOD attempt has read it and refused (no index), and before the rolling
+/// fallback starts. The fallback must start from the replaced row's facts.
+/// On this legacy route the rolling start's own source read is the only
+/// thing that sees the change, so a build that hands it the VOD attempt's
+/// row fails here. (A candidate route re-validates its carried snapshot at
+/// the fallback instead, and refuses a changed source.)
+#[tokio::test]
+async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() {
+    use plurx_core::store::{keys, SqliteStore};
+    use plurx_core::testfixtures::{ffmpeg, run};
+    let base = crate::test_tempdir().expect("fallback fixture");
+    let path = base.path().join("replaced.mkv");
+    std::fs::copy(plurx_core::testfixtures::source("h264"), &path).expect("source copy");
+    let path_text = path.to_str().expect("path").to_owned();
+    let probe = plurx_core::scan::probe::probe(&path).await.expect("probe");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id = seed_file_with_probe_at(&store, &path_text, probe).await;
+    store
+        .put_setting(keys::VOD_LIVE_RECOVERY, "true")
+        .await
+        .expect("recovery on");
+    let before = store.get_file(file_id).await.expect("file").expect("seeded");
+    let manager = Arc::new(TranscodeManager::new(
+        Arc::clone(&store),
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let mut request = reopen_request(file_id, "fallback-interval", "unused", "unused");
+    request.request_id = Some("fallback-interval".into());
+    request.previous_session_id = None;
+    request.reopen_reason = None;
+    request.start_seconds = 0.0;
+    request.presentation = Presentation::Vod;
+    request.kind = SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+    };
+    let pause = manager
+        .test_hooks()
+        .vod_fallback_start
+        .arm("before the rolling fallback start");
+    let mut creating = {
+        let manager = Arc::clone(&manager);
+        let request = request.clone();
+        tokio::spawn(async move { create_local_vod(&manager, &request, "test").await })
+    };
+    // A create that ends before the fallback (served as VOD, or refused
+    // outright) never reaches the pause; say which instead of timing out.
+    let held = tokio::select! {
+        held = pause.reached() => held,
+        ended = &mut creating => panic!(
+            "the create ended before the rolling fallback: {:?}",
+            ended.map(|result| result.map(|info| info.vod))
+        ),
+    };
+    // The VOD attempt read the original row and refused for want of an
+    // index. Replace the file on disk and rescan it, as the scanner would.
+    let replacement = base.path().join("replacement.mkv");
+    run(std::process::Command::new(ffmpeg())
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("testsrc2=size=320x180:rate=24:duration=6")
+        .args(["-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=6"])
+        .args(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac"])
+        .args(["-pix_fmt", "yuv420p", "-ac", "2", "-shortest", "-f", "matroska"])
+        .arg(&replacement));
+    std::fs::rename(&replacement, &path).expect("replace the source");
+    let metadata = std::fs::metadata(&path).expect("replaced metadata");
+    let replaced_probe = plurx_core::scan::probe::probe(&path).await.expect("replaced probe");
+    store
+        .upsert_file(
+            before.item_id,
+            &path_text,
+            i64::try_from(metadata.len()).expect("size"),
+            before.mtime + 60,
+            &replaced_probe,
+        )
+        .await
+        .expect("rescan");
+    let after = store.get_file(file_id).await.expect("file").expect("rescanned");
+    assert_ne!(after.size, before.size, "the replacement is a different file");
+    assert_ne!(after.duration_ms, before.duration_ms);
+    assert_ne!(after.height, before.height);
+    held.release();
+    let started = creating
+        .await
+        .expect("create task")
+        .expect("the index miss falls back to a rolling start");
+    assert!(!started.vod, "the VOD attempt refused and the rolling engine served");
+    assert_eq!(
+        started.duration_ms, after.duration_ms,
+        "the rolling start took the replaced row's probe facts, not the ones the VOD attempt read"
+    );
+    assert_eq!(
+        Some(started.target_height),
+        after.height,
+        "a copy reports the replaced source's own height"
+    );
+    assert!(manager.stop_session(&started.session_id, "test").await);
+}
+
+/// The same interval on a candidate route. Its rolling start reuses the
+/// snapshot its plan was accepted from, so the fallback re-validates that
+/// binding first: a source replaced after the VOD attempt refuses the
+/// fallback as stale execution instead of starting it from the old facts.
+#[tokio::test]
+async fn a_candidate_rolling_fallback_refuses_a_source_replaced_after_the_vod_attempt() {
+    use plurx_core::store::{keys, SqliteStore};
+    use plurx_core::testfixtures::{ffmpeg, run};
+    let base = crate::test_tempdir().expect("fallback fixture");
+    let path = base.path().join("replaced.mkv");
+    std::fs::copy(plurx_core::testfixtures::source("h264"), &path).expect("source copy");
+    let path_text = path.to_str().expect("path").to_owned();
+    let probe = plurx_core::scan::probe::probe(&path).await.expect("probe");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id = seed_file_with_probe_at(&store, &path_text, probe).await;
+    store
+        .put_setting(keys::VOD_LIVE_RECOVERY, "true")
+        .await
+        .expect("recovery on");
+    let manager = Arc::new(TranscodeManager::new(
+        Arc::clone(&store),
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let planning = store
+        .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .expect("planning")
+        .expect("seeded");
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+        "v": 2,
+        "video": [{"codec": "h264", "decode": true, "present": ["sdr"]}],
+        "audio": ["aac"],
+        "transports": ["hls"]
+    }))
+    .expect("caps");
+    let rows = manager
+        .quality_candidates_from_snapshot_progress(
+            &planning,
+            &caps,
+            None,
+            0,
+            None,
+            Presentation::Vod,
+            // The copy flags the request below carries, so the candidate's
+            // recipe is the one its dispatch will rebuild.
+            Some((false, false, false)),
+            None,
+            None,
+        )
+        .await;
+    // The copy candidate (Remux for this h264 source), so the request is
+    // the copy that has no VOD index and falls back.
+    let copy = rows
+        .iter()
+        .find(|row| {
+            matches!(
+                row.route,
+                plurx_core::playback::candidate::CandidateRoute::Remux
+                    | plurx_core::playback::candidate::CandidateRoute::Original
+            )
+        })
+        .unwrap_or_else(|| panic!("a copy candidate: {rows:?}"));
+    let mut context = TranscodeManager::candidate_context(copy);
+    // Bind the context to the exact copy recipe the dispatch rebuilds from
+    // this source, executable and engine (the equality the VOD attempt
+    // checks), so the attempt reaches its index refusal and falls back.
+    let source = crate::fragment_index_cluster::open_source_fence(&planning.file, None)
+        .await
+        .expect("source fence");
+    let executable = crate::ffmpeg::EncodedExecutable::capture()
+        .await
+        .expect("executable");
+    let engine = crate::ffmpeg::EncodedEngine::capture(None)
+        .await
+        .expect("engine");
+    let raster = (
+        u32::try_from(planning.file.width.expect("width")).expect("width"),
+        u32::try_from(planning.file.height.expect("height")).expect("height"),
+    );
+    context.recipe_digest = super::manager_candidates::copy_candidate_recipe_digest(
+        &planning.file,
+        None,
+        0,
+        None,
+        (false, false, false),
+        Some(source.object_version()),
+        Some(&executable.digest),
+        Some(&engine.digest),
+        raster,
+    );
+    context.candidate_id =
+        plurx_core::playback::candidate::CandidateId::for_recipe_digest(context.recipe_digest);
+    context.canonical_caps = Some(caps);
+    context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+    context.planning_snapshot = Some(Arc::new(planning.clone()));
+    let mut request = reopen_request(file_id, "candidate-fallback", "unused", "unused");
+    request.request_id = Some("candidate-fallback".into());
+    request.previous_session_id = None;
+    request.reopen_reason = None;
+    request.start_seconds = 0.0;
+    request.presentation = Presentation::Vod;
+    request.kind = SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+    };
+    request.candidate_context = Some(Box::new(context));
+    let pause = manager
+        .test_hooks()
+        .vod_fallback_start
+        .arm("before the rolling fallback start");
+    let mut creating = {
+        let manager = Arc::clone(&manager);
+        let request = request.clone();
+        tokio::spawn(async move { create_local_vod(&manager, &request, "test").await })
+    };
+    let held = tokio::select! {
+        held = pause.reached() => held,
+        ended = &mut creating => panic!(
+            "the create ended before the rolling fallback: {:?}",
+            ended.map(|result| result.map(|info| info.vod))
+        ),
+    };
+    let replacement = base.path().join("replacement.mkv");
+    run(std::process::Command::new(ffmpeg())
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+        .arg("testsrc2=size=320x180:rate=24:duration=6")
+        .args(["-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=6"])
+        .args(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac"])
+        .args(["-pix_fmt", "yuv420p", "-ac", "2", "-shortest", "-f", "matroska"])
+        .arg(&replacement));
+    std::fs::rename(&replacement, &path).expect("replace the source");
+    let metadata = std::fs::metadata(&path).expect("replaced metadata");
+    let replaced_probe = plurx_core::scan::probe::probe(&path).await.expect("replaced probe");
+    store
+        .upsert_file(
+            planning.file.item_id,
+            &path_text,
+            i64::try_from(metadata.len()).expect("size"),
+            planning.file.mtime + 60,
+            &replaced_probe,
+        )
+        .await
+        .expect("rescan");
+    held.release();
+    let error = creating
+        .await
+        .expect("create task")
+        .err()
+        .expect("a changed source refuses the fallback");
+    assert!(
+        error.contains("candidate source or settings changed"),
+        "the fallback refused as stale execution: {error}"
+    );
+    assert!(
+        manager.active_session_ids().await.is_empty(),
+        "no rolling producer started from the old facts"
+    );
+}
+
 #[tokio::test]
 async fn finite_vod_bitrate_ceiling_is_shared_by_native_recipe_and_worker_identity() {
     let store: Arc<dyn Store> =

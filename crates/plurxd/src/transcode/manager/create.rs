@@ -570,17 +570,23 @@ impl TranscodeManager {
         Ok(Some((successor, permit)))
     }
 
+    /// The dispatch revalidation: re-read the planning inputs and refuse a
+    /// candidate whose source or settings changed since it was accepted.
+    /// Returns that fresh read (for a candidate-route request; `None` when
+    /// there is no binding to check) so the VOD attempt that follows in the
+    /// same task can take its source row and HWACCEL preference from it
+    /// instead of reading them again.
     pub(crate) async fn validate_candidate_planning_binding(
         &self,
         request: &SessionRequest,
         deadline: Option<tokio::time::Instant>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<plurx_core::store::PlaybackPlanningSnapshot>, String> {
         let Some(binding) = request
             .candidate_context
             .as_ref()
             .and_then(|context| context.planning_binding.as_ref())
         else {
-            return Ok(());
+            return Ok(None);
         };
         let deadline = deadline
             .unwrap_or_else(|| crate::media_pool::create_stage_deadline(Duration::from_secs(2)));
@@ -598,7 +604,7 @@ impl TranscodeManager {
                 "candidate source or settings changed before admission",
             ));
         }
-        Ok(())
+        Ok(Some(snapshot))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -666,8 +672,10 @@ impl TranscodeManager {
             self.require_cluster_serving_authority(admission)?;
         }
 
-        self.validate_candidate_planning_binding(req, replacement_deadline)
+        let revalidated = self
+            .validate_candidate_planning_binding(req, replacement_deadline)
             .await?;
+        crate::media_pool::mark_create_phase("worker");
 
         if req.passive_vod
             && (!req.vod_only
@@ -738,6 +746,7 @@ impl TranscodeManager {
                     takeover.is_some(),
                     serving_admission,
                     retained_capture,
+                    revalidated.as_ref(),
                 )
                 .await;
             tracing::info!(
@@ -748,6 +757,7 @@ impl TranscodeManager {
                 outcome = if vod.is_ok() { "ready" } else { "refused" },
                 "playback startup phase completed"
             );
+            crate::media_pool::mark_create_phase("vod");
             match vod {
                 Ok(info) => info,
                 Err(error) => {
@@ -766,6 +776,18 @@ impl TranscodeManager {
                                 refusal = reason.label(),
                                 "VOD prerequisite unavailable; using temporary live-HLS recovery"
                             );
+                            self.hooks.get().before_vod_fallback_start().await;
+                            // The fallback is a second execution of this
+                            // request, a whole VOD attempt after the dispatch
+                            // revalidation. A candidate-route rolling start
+                            // reuses the snapshot its plan was accepted from
+                            // (`rolling_start_inputs`), so the source and
+                            // settings are revalidated again here: a catalog
+                            // never authorizes stale execution. A legacy
+                            // route carries no binding and its rolling start
+                            // reads the source itself.
+                            self.validate_candidate_planning_binding(req, replacement_deadline)
+                                .await?;
                             let started = self
                                 .start_live_recovery_session(
                                     req,
@@ -782,6 +804,7 @@ impl TranscodeManager {
                             // metric whose HELP says "sessions served" must
                             // not include streams nobody ever received.
                             record_live_recovery(reason);
+                            crate::media_pool::mark_create_phase("rolling");
                             started
                         } else {
                             return Err(error);
@@ -1102,7 +1125,21 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        let encoding = Box::pin(self.prepare_vod_encoding_with_source(req, file, None)).await?;
+        self.prepare_vod_encoding_with_preference(req, file, None)
+            .await
+    }
+
+    /// [`Self::prepare_vod_encoding`] with the HWACCEL preference already in
+    /// hand (`Some`, from the dispatch revalidation read) or read here
+    /// (`None`), at every point the encoder is chosen.
+    pub(super) async fn prepare_vod_encoding_with_preference(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        hwaccel: Option<&str>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        let encoding =
+            Box::pin(self.prepare_vod_encoding_with_source(req, file, None, hwaccel)).await?;
         if let Some(encoding) = encoding.as_ref() {
             self.refuse_unadmittable_encoding(encoding).await?;
         }
@@ -1152,6 +1189,7 @@ impl TranscodeManager {
             prepared.request(),
             prepared.file(),
             Some((evidence, proof)),
+            None,
         ))
         .await?
         .ok_or_else(|| "Source encoding recipe missing".to_owned())?;
@@ -1167,6 +1205,7 @@ impl TranscodeManager {
             &crate::transcode::source_preparation::SourceHeldProbeEvidence,
             &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
         )>,
+        hwaccel: Option<&str>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         if req
             .continuous_media
@@ -1523,8 +1562,14 @@ impl TranscodeManager {
             // video tone-map proof merely because its source contains HDR.
             (Encoder::Software, OutputGrade::Sdr)
         } else {
-            self.encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
-                .await?
+            self.encoder_and_grade_preferring(
+                file,
+                req.hdr10,
+                target_height,
+                subtitle_burn.is_some(),
+                hwaccel,
+            )
+            .await?
         };
         // After the encoder and grade, deliberately. `encoder_and_grade_for`
         // can refuse this source outright (an unknown Dolby Vision profile, an
@@ -1585,7 +1630,13 @@ impl TranscodeManager {
                         // is no longer always the burn-free one: choose again
                         // without the burn, and keep the range.
                         (encoder, grade) = self
-                            .encoder_and_grade_for(file, req.hdr10, target_height, false)
+                            .encoder_and_grade_preferring(
+                                file,
+                                req.hdr10,
+                                target_height,
+                                false,
+                                hwaccel,
+                            )
                             .await?;
                         (None, None)
                     }
@@ -1628,7 +1679,7 @@ impl TranscodeManager {
             .filter(|_| req.continuous_media.is_some())
         {
             let catalog_encoder = if shared_audio_role {
-                self.encoder_and_grade_for(file, false, target_height, false)
+                self.encoder_and_grade_preferring(file, false, target_height, false, hwaccel)
                     .await?
                     .0
             } else {
@@ -2242,6 +2293,10 @@ impl TranscodeManager {
         is_takeover: bool,
         serving_admission: Option<ClusterServingAdmission>,
         retained_capture: crate::vodserve::RetainedOutputCapture,
+        // The dispatch revalidation's fresh read, on a candidate route. The
+        // source row and HWACCEL preference come from it: it was taken in
+        // this task, moments ago, and a second read would answer the same.
+        revalidated: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
     ) -> Result<StartInfo, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -2264,20 +2319,38 @@ impl TranscodeManager {
                 "VOD session creation is disabled on this server",
             ));
         };
-        let mut file = self
-            .store
-            .get_file(req.file_id)
-            .await
-            .map_err(|error| {
-                start_infrastructure_error(format!("reading the source file: {error}"))
-            })?
-            .ok_or_else(|| "the file no longer exists".to_owned())?;
+        // The source row and, from the same statement, its item's title (the
+        // session's attribution): the dispatch revalidation's read on a
+        // candidate route, otherwise one snapshot read with no settings keys
+        // where `get_file` used to be.
+        let (mut file, source_item_title) = match revalidated {
+            Some(snapshot) if snapshot.file.id == req.file_id => {
+                (snapshot.file.clone(), snapshot.item_title.clone())
+            }
+            _ => {
+                let snapshot = self
+                    .store
+                    .playback_planning_snapshot(req.file_id, &[])
+                    .await
+                    .map_err(|error| {
+                        start_infrastructure_error(format!("reading the source file: {error}"))
+                    })?
+                    .ok_or_else(|| "the file no longer exists".to_owned())?;
+                (snapshot.file, snapshot.item_title)
+            }
+        };
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
         } else {
             req.audio_offset_ms.clamp(-15_000, 15_000)
         };
-        let encoding = self.prepare_vod_encoding(req, &file).await?;
+        let encoding = self
+            .prepare_vod_encoding_with_preference(
+                req,
+                &file,
+                revalidated.map(super::planning_hwaccel_preference),
+            )
+            .await?;
         let processed_dv_profile = encoding
             .as_ref()
             .filter(|encoding| encoding.preserves_processed_dv())
@@ -2370,14 +2443,7 @@ impl TranscodeManager {
                 .await?;
         }
         let session_id = uuid::Uuid::new_v4().to_string();
-        let item_title = self
-            .store
-            .get_item(file.item_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|item| item.title)
-            .unwrap_or_else(|| format!("#{}", file.item_id));
+        let item_title = source_item_title.unwrap_or_else(|| format!("#{}", file.item_id));
         let attribution = crate::vodserve::VodAttribution {
             user_name,
             item_title: &item_title,

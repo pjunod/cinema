@@ -42,6 +42,13 @@ use plurx_core::transcode::{zscale_tone_map_filter, Encoder, Pipeline, PIPELINE_
 
 use crate::ffmpeg::{ffmpeg_bin, ffprobe_bin};
 
+mod census;
+mod signal;
+
+pub(crate) use census::{
+    run_on_node as run_census, AdmissionSlot, CensusKey, CensusPlan, CensusView, ToneMapCensus,
+};
+
 /// How much faster than the CPU chain a GPU graph must be to be worth its
 /// driver dependency. §2.9 measured the CPU tone-map costing ~28% of
 /// throughput, so a graph that removes it should be clearly ahead; 20% is
@@ -115,6 +122,11 @@ pub struct PipelineReport {
     /// Absent when the probe could not run at all (no ffmpeg, no fixture),
     /// which is a different thing from every candidate failing.
     pub ran: bool,
+    /// The operator-run tone-map census ([`census`]): its live status and
+    /// the stored result for this node. Filled in by `GET /api/v1/system`
+    /// at response time; the boot probe never sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub census: Option<CensusView>,
 }
 
 impl Default for PipelineReport {
@@ -141,6 +153,7 @@ impl PipelineReport {
                 unavailable: false,
             }],
             ran: false,
+            census: None,
         }
     }
 
@@ -182,6 +195,7 @@ pub async fn probe(work_dir: &Path, runtime_cache: &Path, encoder: Encoder) -> P
     probe_with(
         &Spawn {
             runtime_cache: Some(runtime_cache),
+            purpose: None,
         },
         work_dir,
         encoder,
@@ -336,9 +350,18 @@ enum Stdout {
 #[derive(Default)]
 struct Spawn<'a> {
     runtime_cache: Option<&'a Path>,
+    /// What the Activity page calls the child; the boot probe's name when
+    /// unset. The tone-map census runs through this same seam under its own.
+    purpose: Option<&'static str>,
 }
 
 impl Spawn<'_> {
+    fn work(&self) -> crate::process_control::ChildWork {
+        crate::process_control::ChildWork::background(
+            self.purpose.unwrap_or("tone-map pipeline probe"),
+        )
+    }
+
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(program);
         if let Some(runtime_cache) = self.runtime_cache {
@@ -366,12 +389,9 @@ impl Tools for Spawn<'_> {
                 Stdout::Capture => std::process::Stdio::piped(),
             })
             .stderr(std::process::Stdio::piped());
-        crate::process_control::output_job_owned(
-            &mut command,
-            crate::process_control::ChildWork::background("tone-map pipeline probe"),
-        )
-        .await
-        .map_err(|e| format!("could not run ffmpeg: {e}"))
+        crate::process_control::output_job_owned(&mut command, self.work())
+            .await
+            .map_err(|e| format!("could not run ffmpeg: {e}"))
     }
 
     async fn ffprobe(&self, args: Vec<String>) -> Result<std::process::Output, String> {
@@ -390,12 +410,9 @@ impl Tools for Spawn<'_> {
             // not run".
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        crate::process_control::output_job_owned(
-            &mut command,
-            crate::process_control::ChildWork::background("tone-map pipeline probe"),
-        )
-        .await
-        .map_err(|e| format!("could not run ffprobe: {e}"))
+        crate::process_control::output_job_owned(&mut command, self.work())
+            .await
+            .map_err(|e| format!("could not run ffprobe: {e}"))
     }
 }
 
@@ -658,6 +675,7 @@ where
         selected_label: selected.label().to_owned(),
         verdicts,
         ran: true,
+        census: None,
     }
 }
 
@@ -1852,6 +1870,7 @@ mod tests {
         std::fs::create_dir(&runtime_cache).expect("cache exists before startup probes");
         let tools = Spawn {
             runtime_cache: Some(&runtime_cache),
+            purpose: None,
         };
         let mut command = tools.command("/bin/sh");
         command.env("HOME", "/").args([
