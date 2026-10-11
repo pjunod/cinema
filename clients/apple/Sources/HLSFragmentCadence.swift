@@ -168,9 +168,12 @@ enum HLSFragmentCadence {
     /// A segment from a server that ignores Range is walked contiguously as
     /// it arrives; this bounds the bytes such a server may cost.
     static let maximumUnrangedFragmentBytes = 16_777_216
-    /// An MPEG-TS segment has no index, so it is read once, in the order it
-    /// arrives, keeping only timestamps. This bounds the bytes it may cost.
-    static let maximumTransportStreamBytes = 67_108_864
+    /// An MPEG-TS segment has no index, so it is read in arrival order,
+    /// keeping only timestamps, and only until it proves the cadence just
+    /// past the rendezvous. This bounds the bytes it may cost.
+    static let maximumTransportStreamBytes = 16_777_216
+    /// How far past the rendezvous an MPEG-TS prefix must prove its cadence.
+    static let transportStreamProofMarginSeconds = 0.5
 
     /// Routes each task's response and body chunks to the one reader waiting
     /// on it, and refuses redirects so a read never leaves the item's own
@@ -300,12 +303,20 @@ enum HLSFragmentCadence {
         throw Invalid.media
     }
 
-    private static func transportStreamDuration(_ url: URL, deadline: TimeInterval, session: URLSession, loads: ChunkedLoads) async throws -> Double? {
+    /// Read an MPEG-TS segment only until a complete prefix proves the
+    /// cadence `seconds` into it; a segment that ends first is judged whole.
+    /// The answer's `span` scopes the proof when it came from a prefix.
+    private static func transportStreamCadence(_ url: URL, proving seconds: Double, deadline: TimeInterval,
+                                               session: URLSession, loads: ChunkedLoads) async throws -> (duration: Double, span: Double?)? {
         var stream = TransportStreamCadence()
-        _ = try await fetch(url, limit: maximumTransportStreamBytes, deadline: deadline, session: session, loads: loads) {
-            try stream.consume($1); return true
+        var prefix: (duration: Double, span: Double)?
+        _ = try await fetch(url, limit: maximumTransportStreamBytes, deadline: deadline, session: session, loads: loads) { _, chunk in
+            try stream.consume(chunk)
+            prefix = stream.completePrefix(covering: seconds)
+            return prefix == nil
         }
-        return stream.minimumDuration()
+        if let prefix { return (prefix.duration, prefix.span) }
+        return stream.minimumDuration().map { ($0, nil) }
     }
 
     /// One bounded init/fragment inspection of this item's own playlist.
@@ -356,17 +367,18 @@ enum HLSFragmentCadence {
                 }
             }
             guard pending == nil, let fragmentURL, let interval else { return nil }
-            let duration: Double?
             if let initURL {
                 let initData = try await load(initURL, limit: 262_144, deadline: deadline, session: session, loads: loads)
                 let index = try await fragmentIndex(fragmentURL, deadline: deadline, session: session, loads: loads)
-                duration = minimumDuration(initData: initData, index: index)
-            } else {
-                // No EXT-X-MAP: an MPEG-TS media playlist (RFC 8216 §3.3).
-                duration = try await transportStreamDuration(fragmentURL, deadline: deadline, session: session, loads: loads)
+                guard let duration = minimumDuration(initData: initData, index: index) else { return nil }
+                return PreparedDecodedCadence(frameDurationSeconds: duration, itemInterval: interval)
             }
-            guard let duration else { return nil }
-            return PreparedDecodedCadence(frameDurationSeconds: duration, itemInterval: interval)
+            // No EXT-X-MAP: an MPEG-TS media playlist (RFC 8216 §3.3).
+            let proving = itemSeconds - interval.lowerBound + transportStreamProofMarginSeconds
+            guard let proof = try await transportStreamCadence(fragmentURL, proving: proving, deadline: deadline,
+                                                               session: session, loads: loads) else { return nil }
+            let scoped = proof.span.map { interval.lowerBound..<min(interval.upperBound, interval.lowerBound + $0) } ?? interval
+            return PreparedDecodedCadence(frameDurationSeconds: proof.duration, itemInterval: scoped)
         } catch { return nil }
     }
 }
@@ -479,6 +491,11 @@ struct TransportStreamCadence {
     private var continuity: Int?
     private var times: [Int64] = []
     private var firstPTS: Int64?
+    /// Decode time of the most recently opened PES. Decode order is
+    /// strictly increasing and every frame presents no earlier than it
+    /// decodes, so every frame not yet read presents at or after this.
+    private var lastDTS: Int64?
+    private var lowestPTS = Int64.max
     private var inPES = false
     private var accessUnits = 0
     private var zeros = 0
@@ -524,6 +541,33 @@ struct TransportStreamCadence {
         }
         guard minimum <= 90_000 else { return nil }
         return Double(minimum) / 90_000
+    }
+
+    /// The cadence of the segment's complete prefix, once that prefix spans
+    /// `seconds` from the segment's first presented frame.
+    ///
+    /// Frames are read in decode order, so a prefix of the bytes is not a
+    /// prefix of presentation. Every unread frame presents at or after the
+    /// last decode time read, so the frames presenting before it are all
+    /// present; the proof uses only those, and only the span between their
+    /// first and last presentation, where every frame's duration is one of
+    /// the measured spacings. Each of them sits in a PES already closed, so
+    /// the one-access-unit, continuity and discontinuity rules hold for all
+    /// of it exactly as for a whole segment.
+    mutating func completePrefix(covering seconds: Double) -> (duration: Double, span: Double)? {
+        guard !failed, seconds.isFinite, seconds > 0, let lastDTS,
+              Double(lastDTS - lowestPTS) / 90_000 >= seconds else { return nil }
+        let complete = times.filter { $0 < lastDTS }.sorted()
+        guard complete.count >= 2, let first = complete.first, let last = complete.last,
+              Double(last - first) / 90_000 >= seconds else { return nil }
+        var minimum = Int64.max
+        for pair in zip(complete, complete.dropFirst()) {
+            let spacing = pair.1 - pair.0
+            guard spacing > 0 else { failed = true; return nil }
+            minimum = min(minimum, spacing)
+        }
+        guard minimum <= 90_000 else { failed = true; return nil }
+        return (Double(minimum) / 90_000, Double(last - first) / 90_000)
     }
 
     private mutating func packet(_ p: ArraySlice<UInt8>) throws {
@@ -626,14 +670,28 @@ struct TransportStreamCadence {
         let headerLength = Int(p[8])
         guard flags == 2 || flags == 3, headerLength >= (flags == 3 ? 10 : 5), 9 + headerLength <= p.count,
               p[9] >> 4 == (flags == 3 ? 3 : 2), p[9] & 1 == 1, p[11] & 1 == 1, p[13] & 1 == 1 else { throw Malformed() }
-        let pts = Int64(p[9] >> 1 & 7) << 30 | Int64(p[10]) << 22 | Int64(p[11] >> 1) << 15 | Int64(p[12]) << 7 | Int64(p[13] >> 1)
+        func timestamp(_ at: Int) -> Int64 {
+            Int64(p[at] >> 1 & 7) << 30 | Int64(p[at + 1]) << 22 | Int64(p[at + 2] >> 1) << 15 | Int64(p[at + 3]) << 7 | Int64(p[at + 4] >> 1)
+        }
+        let pts = timestamp(9)
+        var dts = pts
+        if flags == 3 {
+            guard p[14] >> 4 == 1, p[14] & 1 == 1, p[16] & 1 == 1, p[18] & 1 == 1 else { throw Malformed() }
+            dts = timestamp(14)
+        }
         let first = firstPTS ?? pts
         firstPTS = first
         // 33-bit clock: place each timestamp nearest the segment's first.
-        var relative = (pts - first) & ((1 << 33) - 1)
-        if relative >= 1 << 32 { relative -= 1 << 33 }
-        guard times.count < Self.maximumFrames else { throw Malformed() }
-        times.append(relative)
+        func relative(_ value: Int64) -> Int64 {
+            let wrapped = (value - first) & ((1 << 33) - 1)
+            return wrapped >= 1 << 32 ? wrapped - (1 << 33) : wrapped
+        }
+        let presentation = relative(pts), decode = relative(dts)
+        guard decode <= presentation, lastDTS.map({ decode > $0 }) ?? true,
+              times.count < Self.maximumFrames else { throw Malformed() }
+        lastDTS = decode
+        lowestPTS = min(lowestPTS, presentation)
+        times.append(presentation)
         inPES = true
         accessUnits = 0
         zeros = 0

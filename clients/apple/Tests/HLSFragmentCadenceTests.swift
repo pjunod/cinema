@@ -251,14 +251,65 @@ final class HLSFragmentCadenceTests: XCTestCase {
         XCTAssertEqual(cadence.itemInterval, 0..<6)
     }
 
-    private static func playlist(map: Bool, segment: String = "seg0.m4s") -> String {
+    /// A TS read stops once a complete prefix proves the cadence just past
+    /// the rendezvous, and the proof is scoped to that prefix.
+    func testTransportStreamSuccessorStopsAtACompletePrefix() async throws {
+        let host = CadenceStub.host()
+        CadenceStub.install(host, [
+            "/hls/s3/index.m3u8": .text(Self.playlist(map: false, segment: "seg0.ts", seconds: "1.000000")),
+            "/hls/s3/seg0.ts": .bytes(Fixtures.avcTransportSegment),
+        ])
+        let inspected = await HLSFragmentCadence.inspect(
+            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s3/index.m3u8")), itemSeconds: 0.2, boundMs: 4_000,
+            configuration: CadenceStub.configuration())
+        let cadence = try XCTUnwrap(inspected)
+        XCTAssertEqual(cadence.frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        let interval = try XCTUnwrap(cadence.itemInterval)
+        XCTAssertEqual(interval.lowerBound, 0)
+        XCTAssertGreaterThanOrEqual(interval.upperBound, 0.2 + HLSFragmentCadence.transportStreamProofMarginSeconds)
+        XCTAssertLessThan(interval.upperBound, 1, "the proof is scoped to the prefix it read")
+        XCTAssertTrue(cadence.covers(itemPositionMs: 200))
+    }
+
+    func testTransportStreamPrefixProofReadsLessThanTheSegment() throws {
+        for (segment, rate) in [(Fixtures.avcTransportSegment, 24.0), (Fixtures.hevcTransportSegment, 25.0)] {
+            var stream = TransportStreamCadence()
+            var consumed = 0
+            var proof: (duration: Double, span: Double)?
+            while consumed < segment.count, proof == nil {
+                try stream.consume(Data(segment[consumed..<(consumed + 188)]))
+                consumed += 188
+                proof = stream.completePrefix(covering: 0.5)
+            }
+            let found = try XCTUnwrap(proof)
+            XCTAssertEqual(found.duration, 1 / rate, accuracy: 1e-9)
+            XCTAssertGreaterThanOrEqual(found.span, 0.5)
+            XCTAssertLessThan(consumed, segment.count)
+        }
+        // A two-frame PES inside the prefix still refuses before any proof.
+        var packets = [Data]()
+        for at in stride(from: 0, to: Fixtures.avcTransportSegment.count, by: 188) {
+            packets.append(Data(Fixtures.avcTransportSegment[at..<(at + 188)]))
+        }
+        let videoStarts = packets.indices.filter { packets[$0][1] & 0x40 != 0 && packets[$0][1] & 0x1F == 0x01 && packets[$0][2] == 0x00 }
+        packets[videoStarts[2]][1] &= ~0x40
+        var stream = TransportStreamCadence()
+        var refused = false
+        for packet in packets {
+            if (try? stream.consume(packet)) == nil { refused = true; break }
+            XCTAssertNil(stream.completePrefix(covering: 0.5))
+        }
+        XCTAssertTrue(refused)
+    }
+
+    private static func playlist(map: Bool, segment: String = "seg0.m4s", seconds: String = "6.000000") -> String {
         """
         #EXTM3U
         #EXT-X-VERSION:7
         #EXT-X-TARGETDURATION:6
         #EXT-X-MEDIA-SEQUENCE:0
         \(map ? "#EXT-X-MAP:URI=\"init.mp4\"" : "#EXT-X-INDEPENDENT-SEGMENTS")
-        #EXTINF:6.000000,
+        #EXTINF:\(seconds),
         \(segment)
         #EXT-X-ENDLIST
 
