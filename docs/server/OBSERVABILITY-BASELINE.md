@@ -697,10 +697,15 @@ On media1 and lab1, with the build carrying PRs <M1..M4 numbers>:
        http://<host>:32400/metrics
    Run it five times per host after at least an hour of normal use and
    paste all ten lines. If any scrape exceeds 2 MB or 500 ms, say so.
-2. Label hygiene — this must return nothing on both hosts:
-     curl -s http://<host>:32400/metrics | grep -E \
-       'route="[^"]*[0-9a-f]{8}-|session|token|/mnt/|file_id='
-   Paste the command's output (expected: empty) and its exit status.
+2. Label hygiene — this must print nothing on both hosts:
+     curl -s http://<host>:32400/metrics | grep -v '^#' | grep -oE '\{[^}]*\}' \
+       | sed -E 's/(peer|owner_node)="[^"]*"//g' \
+       | grep -E '[0-9a-f]{8}-[0-9a-f]{4}-|token|/mnt/|file_id|session_id|playback_id'
+   It searches label sets only, so metric names (plurx_media_session_*) and
+   fixed enum values (outcome="session_gone") cannot match, after dropping
+   the peer and owner_node labels, which name cluster nodes by UUID by
+   design. Paste the command's output (expected: empty) and its exit status
+   (expected: 1, grep's "no match").
 3. ANSI in journald, on each host:
      journalctl -u plurxd -n 200 --output=cat | grep -c $'\e\['
    Expected 0. Report the number.
