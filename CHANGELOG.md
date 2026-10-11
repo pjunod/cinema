@@ -50,6 +50,20 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **Removing a path from a library removes its items.** Saving a library
+  without one of its paths left everything under that path in the catalog.
+  The only code that deleted catalog rows was the scan's vanished-file
+  cleanup, which treats a missing file as a possible unmounted share and is
+  bounded by `scan_prune_percent`; a removed path holding more than that share
+  of the library was kept in full, and the library then had no recorded root
+  identity, so no cleanup ran for it again. A removed path is now handled as
+  the configuration change it is: the scan the edit queues removes every entry
+  no configured path covers, and the items left empty, once it has walked the
+  library's paths — so media moved to a path added in the same edit keeps its
+  items and watch state, and a path it cannot read keeps the old entries until
+  it can. That also clears what earlier removals left behind. A scan that
+  started before an edit no longer records the old paths' root identity, which
+  had made every later scan refuse cleanup as a mount mismatch.
 - **Station logos on the Apple and Android Live TV guides.** The web guide
   has drawn HDHomeRun's station artwork since 2026-10-03; the Apple TV, iOS
   and Android guides still showed only callsigns, because the rule that picks
