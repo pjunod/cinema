@@ -158,6 +158,11 @@ mod hiqlite;
 pub(crate) fn replicated_auth_schema() -> &'static str {
     hiqlite::AUTH_SCHEMA
 }
+/// The replicated `media_sessions` declaration, for the same tests.
+#[cfg(all(test, feature = "hiqlite-store"))]
+pub(crate) fn replicated_media_sessions_schema() -> &'static str {
+    hiqlite_sessions::MEDIA_SESSIONS_SCHEMA
+}
 #[cfg(feature = "hiqlite-store")]
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;

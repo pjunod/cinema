@@ -21858,19 +21858,61 @@ mod tests {
         None
     }
 
+    /// The statement that fires `trigger`, for preparing it: SQLite compiles
+    /// a trigger's `WHEN` clause and body into each statement that fires it,
+    /// and resolves their names then, never when the trigger is created.
+    fn trigger_firing_statement(trigger: &str, connection: &rusqlite::Connection) -> String {
+        let tokens = trigger
+            .split_whitespace()
+            .map(|token| token.trim_end_matches(','))
+            .collect::<Vec<_>>();
+        let event = tokens
+            .iter()
+            .position(|token| {
+                ["INSERT", "UPDATE", "DELETE"].contains(&token.to_ascii_uppercase().as_str())
+            })
+            .unwrap_or_else(|| panic!("trigger without an event: {trigger}"));
+        let on = event
+            + tokens[event..]
+                .iter()
+                .position(|token| token.eq_ignore_ascii_case("ON"))
+                .unwrap_or_else(|| panic!("trigger without a table: {trigger}"));
+        let table = tokens[on + 1];
+        match tokens[event].to_ascii_uppercase().as_str() {
+            "INSERT" => format!("INSERT INTO {table} DEFAULT VALUES"),
+            "DELETE" => format!("DELETE FROM {table}"),
+            _ => {
+                let column = if tokens[event + 1].eq_ignore_ascii_case("OF") {
+                    tokens[event + 2].to_owned()
+                } else {
+                    production_columns(connection, table)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| panic!("trigger on an unknown table: {trigger}"))
+                };
+                format!("UPDATE {table} SET {column} = {column}")
+            }
+        }
+    }
+
     /// CLUSTER-DRILLS-2026-10-11 F2: every SQL constant this module defines
-    /// must compile against the production membership tables. A reference
-    /// read that selected `node.last_applied_index` from `cluster_nodes`
-    /// passed its unit test (whose hand-built table had that column) while
-    /// every voter removal on the deployed schema answered `no such column`.
-    /// A statement that also reads a table another schema owns cannot be
-    /// compiled here; those are listed so a new one is a visible decision.
+    /// must compile against the production schema: the membership tables,
+    /// the replicated auth tables and `media_sessions`, all from their
+    /// production declarations. A reference read that selected
+    /// `node.last_applied_index` from `cluster_nodes` passed its unit test
+    /// (whose hand-built table had that column) while every voter removal on
+    /// the deployed schema answered `no such column`. A trigger is installed
+    /// on its own and the statement that fires it is prepared, because only
+    /// that resolves the trigger's `WHEN` clause and body.
     #[test]
     fn membership_sql_constants_compile_against_the_production_schema() {
         let connection = production_membership_tables();
+        connection
+            .execute_batch(crate::store::replicated_media_sessions_schema())
+            .expect("replicated media sessions table");
         let source = production_source();
         let mut compiled = 0;
-        let mut foreign = BTreeSet::new();
+        let mut triggers = 0;
         for (offset, _) in source.match_indices("_SQL: &str =") {
             let line_start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
             let name = source[line_start..offset]
@@ -21883,31 +21925,36 @@ mod tests {
             let Some(sql) = rust_string_literal(initializer) else {
                 continue;
             };
-            match connection.prepare(&sql) {
-                Ok(_) => compiled += 1,
-                Err(error) => {
-                    let message = error.to_string();
-                    let table = message
-                        .strip_prefix("no such table: ")
-                        .map(|table| table.trim_start_matches("main."));
-                    match table {
-                        Some(table) if production_columns(&connection, table).is_empty() => {
-                            foreign.insert(format!("{name}:{table}"));
-                        }
-                        _ => panic!("{name} does not compile on the production schema: {message}"),
-                    }
+            if sql.trim_start().starts_with("CREATE TRIGGER") {
+                connection
+                    .execute_batch("SAVEPOINT trigger_check")
+                    .expect("savepoint");
+                let fired = connection.execute_batch(&sql).and_then(|()| {
+                    connection
+                        .prepare(&trigger_firing_statement(&sql, &connection))
+                        .map(drop)
+                });
+                connection
+                    .execute_batch("ROLLBACK TO trigger_check; RELEASE trigger_check")
+                    .expect("roll back the trigger");
+                if let Err(error) = fired {
+                    panic!("{name} does not compile on the production schema: {error}");
                 }
+                triggers += 1;
+                continue;
             }
+            if let Err(error) = connection.prepare(&sql) {
+                panic!("{name} does not compile on the production schema: {error}");
+            }
+            compiled += 1;
         }
-        assert!(compiled >= 40, "the constant scan found only {compiled}");
-        let foreign = foreign.iter().map(String::as_str).collect::<Vec<_>>();
-        assert_eq!(
-            foreign,
-            [
-                "BEGIN_REMOVAL_MEDIA_FENCE_SQL:media_sessions",
-                "EXIT_MAINTENANCE_SQL:media_sessions",
-            ],
-            "statements reading another schema's tables"
+        assert!(
+            compiled >= 30,
+            "the constant scan found only {compiled} statements"
+        );
+        assert!(
+            triggers >= 20,
+            "the constant scan found only {triggers} triggers"
         );
     }
 
