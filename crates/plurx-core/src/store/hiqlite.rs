@@ -5632,6 +5632,18 @@ impl SettingsStore for HiqliteAuthStore {
         Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
     }
 
+    async fn local_setting_hint(&self, key: &str) -> Result<Option<String>, StoreError> {
+        let sql = "SELECT value FROM settings WHERE key = $1";
+        validate_sql(sql)?;
+        // `query_map` reads this node's replica: no leader round trip and no
+        // proposal. See the trait method for why a stale answer is safe.
+        let rows = self
+            .client()
+            .query_map::<SettingValueRow, _>(sql, params!(key))
+            .await?;
+        Ok(rows.into_iter().next().map(|row| row.value))
+    }
+
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let now = self.now()?;
         self.execute_idempotent(

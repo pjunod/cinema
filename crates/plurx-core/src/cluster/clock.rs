@@ -901,8 +901,9 @@ mod tests {
     /// observation; it must not refuse takeover, the expiry scan or a
     /// membership change on any node while every voter is bounded. An
     /// unobserved voter still refuses, a MEASURED learner beyond the bound
-    /// still refuses (it may own delegated media leases those decisions
-    /// spend), and promoting a learner requires that learner's own bound.
+    /// refuses only its own routes and promotion (see
+    /// `k06_skewed_learner_refuses_only_its_own_routes_and_promotion`), and
+    /// promoting a learner requires that learner's own bound.
     #[cfg(feature = "hiqlite-store")]
     #[test]
     fn k06_stopped_learner_admits_when_voters_bounded_but_unobserved_voter_refuses() {
@@ -962,10 +963,12 @@ mod tests {
             Some(ClockRefusal::Unknown)
         );
 
-        // A measured learner beyond the bound refuses like any member.
+        // A measured learner beyond the bound is not cluster-wide; it
+        // refuses its own promotion.
         publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 2_500_000)]);
+        assert!(guard.acquire_for(ClockDecision::Takeover).is_ok());
         assert_eq!(
-            guard.acquire_for(ClockDecision::Takeover).err(),
+            guard.admit_promotion_for(4, guard.acquire()).err(),
             Some(ClockRefusal::Offset)
         );
 
@@ -1179,11 +1182,18 @@ mod tests {
             "the owner went unobserved before submission"
         );
         assert_eq!(voter_takeover.revalidate(), Ok(()));
-        // A measured learner above the bound refuses coverage itself.
+        // A measured learner above the bound refuses its own routes only.
         publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 2_500_000)]);
+        let page = guard
+            .acquire_for(ClockDecision::ExpiryScan)
+            .expect("voters bounded");
         assert_eq!(
-            guard.acquire_for(ClockDecision::ExpiryScan).err(),
-            Some(ClockRefusal::Offset)
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, &learner),
+            Err(ClockRefusal::Offset)
+        );
+        assert_eq!(
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, &voter),
+            Ok(())
         );
 
         // An unproved roster proves nothing about absence.
@@ -1227,6 +1237,72 @@ mod tests {
         assert_eq!(
             removed.admit_owner_for(ClockDecision::ExpiryScan, &page, &learner),
             Ok(())
+        );
+    }
+
+    /// 2026-10-10 incident: the non-voting learner stepped ~9.7 s and, for
+    /// ~16 minutes, every voter's enforced expiry scan refused `offset`, so
+    /// no node could fail a session over. A learner holds no vote: measured
+    /// beyond the bound, it refuses only the routes it owns and its own
+    /// promotion. A skewed VOTER is still cluster-wide.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_skewed_learner_refuses_only_its_own_routes_and_promotion() {
+        let (guard, roster) = membership_guard(1, &[1, 2, 3, 4], &[1, 2, 3]);
+        let guard = Arc::new(guard);
+        let learner = peer_uuid(4);
+        let voter = peer_uuid(2);
+        for _ in 0..2 {
+            publish_round(&guard, &roster, &[(2, 0), (3, 0), (4, 10_000_000)]);
+        }
+        let snapshot = guard.snapshot();
+        assert_eq!(
+            snapshot.state,
+            ClusterClockState::Bounded {
+                worst_abs_upper_us: 1_000
+            },
+            "the cluster-wide bound is over voters only"
+        );
+        assert!(
+            !snapshot.readiness.is_unbounded(),
+            "a skewed learner does not make a voter unready"
+        );
+        let page = guard
+            .acquire_for(ClockDecision::ExpiryScan)
+            .expect("voters bounded: the expiry scan runs");
+        assert!(guard.acquire_for(ClockDecision::Takeover).is_ok());
+        assert!(guard
+            .admit_for(ClockDecision::MembershipChange, guard.acquire())
+            .is_ok());
+        assert_eq!(
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, &learner),
+            Err(ClockRefusal::Offset),
+            "the skewed learner's own leases are not expired"
+        );
+        assert_eq!(
+            guard.admit_owner_for(ClockDecision::ExpiryScan, &page, &voter),
+            Ok(())
+        );
+        assert_eq!(
+            guard
+                .acquire_owned_for_owner(ClockDecision::Takeover, &learner)
+                .err(),
+            Some(ClockRefusal::Offset)
+        );
+        assert!(guard
+            .acquire_owned_for_owner(ClockDecision::Takeover, &voter)
+            .is_ok());
+        assert_eq!(
+            guard.admit_promotion_for(4, guard.acquire()).err(),
+            Some(ClockRefusal::Offset),
+            "a skewed learner is never promoted to voter"
+        );
+
+        publish_round(&guard, &roster, &[(2, 10_000_000), (3, 0), (4, 0)]);
+        assert_eq!(
+            guard.acquire_for(ClockDecision::ExpiryScan).err(),
+            Some(ClockRefusal::Offset),
+            "a skewed voter still refuses cluster-wide"
         );
     }
 
@@ -2315,18 +2391,20 @@ impl ClusterClockGuard {
         let mut unobserved_learners = 0;
         let mut worst = 0;
         for (node_id, peer) in &inner.snapshot.peers {
+            let learner = Self::is_learner_peer(
+                inner.membership.as_ref(),
+                inner.peer_directory.as_ref(),
+                node_id,
+            );
             match Self::upper_bound(peer) {
+                // A learner holds no vote, so neither its absence nor its
+                // bound is cluster-wide: its bound gates only the routes it
+                // owns (`owner_policy`) and its own promotion
+                // (`promotion_target_policy`). Counting it here let one
+                // stepped learner refuse every voter's expiry scan.
+                Some(_) if learner => {}
                 Some(value) => worst = worst.max(value),
-                // An unobserved learner is reported, not coverage: it holds
-                // no vote, and a measured learner still counts in `worst`.
-                None if Self::is_learner_peer(
-                    inner.membership.as_ref(),
-                    inner.peer_directory.as_ref(),
-                    node_id,
-                ) =>
-                {
-                    unobserved_learners += 1;
-                }
+                None if learner => unobserved_learners += 1,
                 None => unknown += 1,
             }
         }

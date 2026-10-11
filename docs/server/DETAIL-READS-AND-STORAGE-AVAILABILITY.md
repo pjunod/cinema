@@ -347,6 +347,22 @@ built from the same `index_refusal_summary` (`:32-67`) over the same
 outcomes. A file whose every identity is `Unverified` renders `pending`,
 not `refused`, because no refusal was recorded.
 
+**The cluster-artifact fallback.** On a clustered node an identity the
+local projection does not have as `Ready` still counts toward `present`
+when a published cluster artifact covers it (`9eadfc821`, 2026-10-01). As
+first added that check ran inside pass 2, per identity: a fresh
+`tokio::fs::metadata` of the source (outside §3.3's deadline, so a hung
+mount stalled the page) and two Store reads. Since 2026-10-10 it is part of
+the batched projection. The source object version comes from the §3.3
+observation's own stat (`Observation::stat`; an `Unknown` or `Unavailable`
+observation, or one whose stat no longer matches the scanner's size/mtime,
+is not looked up), and the attestation and artifact rows come from one
+`cluster_fragment_index_availability` Store call per 256 lookups. A
+clustered page is therefore one status call plus at most one cluster call
+per chunk, and it never stats a source a second time. Windows names a
+source object by an open handle, not a stat, so there the fallback has no
+object version from the observation and answers `pending`.
+
 ### 3.3 Availability as a bounded cached observation (M3)
 
 A new node-local module `crates/plurxd/src/availability.rs`:

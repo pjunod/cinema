@@ -618,7 +618,7 @@ ffmpeg build](#burn-in-is-preflighted-against-the-ffmpeg-build).
 
 ### PGS overlay server contract — staged and default-off
 
-The server side of `pgs-v1` is implemented behind Settings → Developer →
+The server side of `pgs-v1` is implemented behind Settings → Playback →
 *Serve PGS subtitles as an overlay* (`subtitles.pgs_overlay`, off by default;
 `PLURX_PGS_OVERLAY` seeds it once and is no longer the gate) and is
 off by default while physical-device HDR/Dolby Vision acceptance remains
@@ -654,7 +654,7 @@ A client advertises the claim as `subtitle_overlays: ["pgs-v1"]`.
 either of those two cases — it is still governed by the gate, which is why it
 is absent entirely while the gate is off. It answers what this process can
 deliver — "could this track be served as `pgs-v1` here" — and it is the only
-surface that answers it, so an operator checking the Developer switch and a
+surface that answers it, so an operator checking the Playback switch and a
 client on an older build both have somewhere to look. What a client acts on is
 the default, `subtitle_requires_burn_in` and `subtitle_route`, and all three
 are narrowed by the claim.

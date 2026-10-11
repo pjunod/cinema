@@ -859,11 +859,11 @@ test("Settings loads only the active tab manifest", () => {
     metadata: { required: ["settings"], secondary: ["libs", "developerReadiness"] },
     playback: { required: ["settings"], secondary: ["developerReadiness"] },
     livetv: { required: ["settings"], secondary: ["developerReadiness"] },
-    analysis: { required: ["settings", "analysis"], secondary: [] },
+    analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
-    cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness"] },
+    cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
     developer: { required: ["settings"], secondary: ["developerReadiness"] },
@@ -1682,11 +1682,13 @@ test("Settings executes exact required and secondary waves for every tab", async
     metadata:{required:["/settings"],secondary:["/libraries","/developer/readiness"]},
     playback:{required:["/settings"],secondary:["/developer/readiness"]},
     livetv:{required:["/settings"],secondary:["/developer/readiness"]},
-    analysis:{required:["/settings","/analysis/summary"],secondary:[]},
+    analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
-    cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","cluster-log"]},
+    // The cluster settings cards fill their own mount when /settings lands; the
+    // health board never waits for it.
+    cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},
     integrations:{required:["/settings","/trakt/status"],secondary:[]},
     // The switches paint from the settings snapshot; the advisory prerequisite
     // readings arrive behind them because one of them asks membership for the

@@ -437,7 +437,7 @@ of never storing it.
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
 | POST | `/api/v1/system/storage` | admin | Re-measures storage. Costs real I/O |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
-| GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Cluster and Developer settings; never gates controls |
+| GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
@@ -2689,7 +2689,7 @@ A session capability still names its worker for routing:
 The parser requires exactly three canonical parts. The worker additionally
 checks the current configuration, boot identity, claim epoch and lease. The
 legacy `owner_node_id` response field is compatibility metadata, not a device
-placement setting. Enablement lives in Settings → Developer; readiness never
+placement setting. Enablement lives in Settings → Live TV; readiness never
 disables that control. Configuration changes increment the generation and
 fence old operations without a physical-fencing checkbox.
 
@@ -2918,8 +2918,8 @@ client resolves once more rather than starting stale media.
 
 The runtime switch `library_channels_enabled` is always compiled and affects
 resolve/session admission only. Listing, preview, authoring, empty-state help,
-and existing schedules stay inspectable while it is off. Its Developer
-readiness rows are advisory and cannot veto an administrator's explicit save.
+and existing schedules stay inspectable while it is off. Its readiness rows
+(Settings → Live TV → Library channels) are advisory and cannot veto an administrator's explicit save.
 
 Preview cursors bind the caller, normalized recipe, candidate-content digest,
 and offset. Guide cursors bind the caller, channel-generation state, requested

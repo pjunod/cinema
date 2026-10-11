@@ -1822,10 +1822,19 @@ pub(crate) struct LibraryReadiness(
     std::sync::Mutex<std::collections::BTreeMap<i64, LibraryReadinessProblem>>,
 );
 
+/// How long one root-check failure stays a statement about this node. The
+/// library loop re-checks every queued library at least every ~30 s
+/// ([`IdlePoll`] tops out at 25 s plus 5 s of jitter) for as long as this node
+/// may run cluster jobs. An observation four polls old describes a node that
+/// stopped checking (a learner, maintenance, a lost membership), not one that
+/// still cannot read the roots, and Activity must not keep printing it.
+const LIBRARY_READINESS_TTL: Duration = Duration::from_secs(120);
+
 #[derive(Clone)]
 struct LibraryReadinessProblem {
     roots: Vec<std::path::PathBuf>,
     message: String,
+    observed: std::time::Instant,
 }
 impl LibraryReadiness {
     fn record(&self, library_id: i64, roots: &[std::path::PathBuf], problem: Option<String>) {
@@ -1842,6 +1851,7 @@ impl LibraryReadiness {
                 LibraryReadinessProblem {
                     roots: roots.to_vec(),
                     message: problem.chars().take(512).collect(),
+                    observed: std::time::Instant::now(),
                 },
             );
         } else {
@@ -1857,11 +1867,25 @@ impl LibraryReadiness {
         &self,
         store: &dyn Store,
     ) -> std::collections::HashMap<i64, String> {
-        let observations = self
+        self.current_problems_at(store, std::time::Instant::now())
+            .await
+    }
+
+    async fn current_problems_at(
+        &self,
+        store: &dyn Store,
+        now: std::time::Instant,
+    ) -> std::collections::HashMap<i64, String> {
+        let observations: std::collections::BTreeMap<i64, LibraryReadinessProblem> = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .iter()
+            .filter(|(_, problem)| {
+                now.saturating_duration_since(problem.observed) < LIBRARY_READINESS_TTL
+            })
+            .map(|(id, problem)| (*id, problem.clone()))
+            .collect();
         if observations.is_empty() {
             return std::collections::HashMap::new();
         }
@@ -2145,6 +2169,51 @@ mod tests {
         );
         readiness.record(library.id, &new.paths, None);
         assert!(readiness.current_problems(&store).await.is_empty());
+    }
+
+    /// A node that stops running the library loop stops re-checking. Its last
+    /// failure must age out rather than tell Activity forever that a scan
+    /// cannot start while other members run it.
+    #[tokio::test]
+    async fn library_readiness_forgets_an_observation_nobody_renewed() {
+        use plurx_core::domain::{LibraryKind, NewLibrary};
+        use plurx_core::store::LibraryStore;
+        let store = SqliteStore::open_in_memory().expect("store");
+        let new = NewLibrary {
+            name: "Movies".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/missing/movies".into()],
+            anime: false,
+        };
+        let library = store.create_library(&new).await.expect("library");
+        let readiness = LibraryReadiness::default();
+        readiness.record(library.id, &new.paths, Some("root unavailable".into()));
+        let now = std::time::Instant::now();
+        assert_eq!(
+            readiness
+                .current_problems_at(&store, now + LIBRARY_READINESS_TTL - Duration::from_secs(1))
+                .await
+                .get(&library.id),
+            Some(&"root unavailable".to_owned()),
+            "a failure renewed within the TTL is still current"
+        );
+        assert!(
+            readiness
+                .current_problems_at(&store, now + LIBRARY_READINESS_TTL)
+                .await
+                .is_empty(),
+            "an unrenewed failure ages out"
+        );
+        readiness.record(
+            library.id,
+            &new.paths,
+            Some("root still unavailable".into()),
+        );
+        assert_eq!(
+            readiness.current_problems(&store).await.get(&library.id),
+            Some(&"root still unavailable".to_owned()),
+            "a fresh check renews it"
+        );
     }
 
     #[tokio::test]

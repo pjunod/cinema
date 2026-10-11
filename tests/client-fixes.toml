@@ -1630,7 +1630,7 @@ test_anchor = "lifecycleRefillLoadedWaitClaimsOneReevaluationWithoutCreatingAnot
 # beside the switch and must never disable it.
 id = "apple.prepared-handoff-readiness-truth-is-advisory"
 commits = ["491aac64"]
-source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source = "clients/apple/Sources/SettingsView.swift"
 source_anchor = "Fleet and link evidence: Not met · Checked during playback"
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"

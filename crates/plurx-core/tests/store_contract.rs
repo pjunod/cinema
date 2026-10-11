@@ -24907,6 +24907,56 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             generation_key,
             "backend {backend}"
         );
+        // C-05: item detail's batched lookup resolves the same head, through
+        // this node's attestation of the exact observed object version.
+        store
+            .record_fragment_index_source(&plurx_core::store::FragmentIndexSourceObservation {
+                node_id: "detail-node".to_owned(),
+                file_id,
+                object_version: "s1:1:2:10000:1:0:1:0".to_owned(),
+                source_size: 10_000,
+                source_mtime: 1,
+                source_sha256: source_sha256.clone(),
+                observed_at_ms: retry_at + 1,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record attestation: {error}"));
+        let probe = |object_version: &str, pipeline: &str| {
+            plurx_core::store::ClusterIndexAvailabilityProbe {
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                object_version: object_version.to_owned(),
+                pipeline_sha256: pipeline.to_owned(),
+            }
+        };
+        assert_eq!(
+            store
+                .cluster_fragment_index_availability(
+                    "detail-node",
+                    &[
+                        probe("s1:1:2:10000:1:0:1:0", &pipeline_sha256),
+                        probe("s1:1:3:10000:1:0:1:0", &pipeline_sha256),
+                        probe("s1:1:2:10000:1:0:1:0", &"0".repeat(64)),
+                        probe("s1:1:2:10000:1:0:1:0", &pipeline_sha256),
+                    ],
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: batched availability: {error}")),
+            [true, false, false, true],
+            "{backend}: one answer per probe, in order, through the forced head"
+        );
+        assert!(
+            store
+                .cluster_fragment_index_availability(
+                    "other-node",
+                    &[probe("s1:1:2:10000:1:0:1:0", &pipeline_sha256)],
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: foreign availability: {error}"))
+                == [false],
+            "{backend}: another node's attestation is not this node's"
+        );
         assert!(store
             .forget_cluster_fragment_index_location(&generation_key, "analysis-node")
             .await

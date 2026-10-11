@@ -85,6 +85,12 @@ const CLUSTER_REPLACEMENT_HOLD_CEILING: Duration = Duration::from_secs(120);
 const MAX_CLUSTER_REPLACEMENT_REENTRIES: usize = 4;
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
+/// A strict subset of the start-infrastructure class: this source's Dolby
+/// Vision pixel proof did not finish (a probe timed out, could not start, or
+/// exited non-zero). Nothing was learned about the source, so this is a
+/// "try again", never the `unsupported_build` verdict a refuted proof gives.
+const SOURCE_PROOF_PENDING_PREFIX: &str =
+    "media session infrastructure is unavailable: this source's Dolby Vision pixel proof did not finish: ";
 /// How long descriptor-bound fact collection may borrow from a producer's
 /// deadline.
 ///
@@ -149,6 +155,10 @@ pub(crate) use session_log::*;
 mod errors;
 pub(crate) use errors::*;
 // split: end errors
+
+#[path = "transcode/dovi_proofs.rs"]
+mod dovi_proofs;
+use dovi_proofs::DoviProofs;
 
 /// Stable classification for a start this ffmpeg build cannot perform at all.
 ///
@@ -324,7 +334,8 @@ const RETENTION_HANDOFF_BATCH: usize = 32;
 /// running, why it chose that work, or that a switch existed to stop it. The
 /// count is exported as `plurx_live_hls_recovery_sessions_total{reason}` and
 /// read back by the Developer readiness route, which names the switch.
-static LIVE_RECOVERY_SESSIONS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static LIVE_RECOVERY_SESSIONS: [AtomicU64; LiveRecoveryReason::COUNT] =
+    [const { AtomicU64::new(0) }; LiveRecoveryReason::COUNT];
 
 // split: begin live-recovery
 #[path = "transcode/live_recovery.rs"]
@@ -333,7 +344,8 @@ pub(crate) use live_recovery::*;
 // split: end live-recovery
 
 /// The reason labels, in `live_recovery_snapshot()` order.
-pub(crate) const LIVE_RECOVERY_LABELS: [&str; 5] = LiveRecoveryReason::LABELS;
+pub(crate) const LIVE_RECOVERY_LABELS: [&str; LiveRecoveryReason::COUNT] =
+    LiveRecoveryReason::LABELS;
 
 static RETENTION_SWEEP_ID: AtomicU64 = AtomicU64::new(0);
 /// Default pace for an HLS session's input, as a multiple of realtime, and how
@@ -749,7 +761,9 @@ pub struct TranscodeManager {
     hdr10_passthrough: bool,
     hdr10_passthrough_qsv: bool,
     hdr10_passthrough_vaapi: bool,
-    dovi_proofs: std::sync::Mutex<HashMap<String, bool>>,
+    /// Per-source Profile 5 pixel proofs: remembered verdicts and the proofs
+    /// in flight ([`DoviProofs`]).
+    dovi_proofs: DoviProofs,
     /// The ahead-window limits, snapshotted ([`AHEAD_LIMITS_TTL`]).
     ///
     /// Flow control consults the limits on every segment publish and

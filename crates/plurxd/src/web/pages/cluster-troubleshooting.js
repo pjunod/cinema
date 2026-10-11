@@ -120,7 +120,7 @@ function clusterPanel(d){
         ${roster}${statusFailure?`<div class="empty">The committed roster could not be read from this node.</div>
         <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>
         </div>`:""}</div>
-    ${clusterTroubleshootingPanel(cluster,d.clusterOps)}${clusterTransportRecoveryCard(d.developerReadiness)}</div>`;
+    ${clusterTroubleshootingPanel(cluster,d.clusterOps)}${clusterTransportRecoveryCard(d.developerReadiness)}${clusterSettingsSection(d)}</div>`;
 }
 function toggleClusterNodes(btn){
   const cards=[...document.querySelectorAll("#cluster-node-list>.clnode")];

@@ -101,6 +101,7 @@ const BORROWED = [
   "toggleClusterNodes",
   "syncClusterNodeToggle",
   "promoteNode",
+  "clusterSettingsSection",
 ];
 
 // One sandbox per test so a mutation of ME or CLUSTER_REFUSAL cannot leak into
@@ -2762,7 +2763,7 @@ test("the Cluster tab is registered and dispatched", () => {
   assert.match(SHIPPED_UI, /if\(tab==="cluster"\)\s*return clusterPanel\(d\)/);
   // The active-tab manifest fetches this roster on first Cluster open; it is
   // absent from every other tab's dependency wave.
-  assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\["clusterOps","developerReadiness"\]\}/);
+  assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\["clusterOps","developerReadiness","settings"\]\}/);
   assert.match(SHIPPED_UI, /cluster:\(\)=>api\("\/cluster\/nodes"\)/);
   assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status",\{keepSessionOn401:true\}\)/);
   assert.equal(

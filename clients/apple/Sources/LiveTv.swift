@@ -666,7 +666,7 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
 
     var errorDescription: String? {
         switch code {
-        case "live_tv_disabled": return "Live TV is off. An administrator can enable it in Settings → Developer."
+        case "live_tv_disabled": return "Live TV is off. An administrator can enable it in Settings → Live TV."
         case "live_tv_protocol_unready": return "Live TV is waiting for every serving node to run a compatible version."
         case "tuner_capacity":
             var copy = "All Live TV slots are busy."
