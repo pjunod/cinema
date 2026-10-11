@@ -1123,7 +1123,9 @@ pattern = "response_status_owner_is_current"
 # initial attachment's owner stays current until the seal settles, and
 # retained.rs proves end_for_owner leaves a replacement incarnation's owner
 # current. No shipped admission path is added.
-expected_occurrences = 12
+# #978: +1, test-only. The create.rs epoch-fence regression checks that the
+# initial attachment's owner is still current after a refused peer seal.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-vod-supersession-transaction"
@@ -1472,7 +1474,9 @@ pattern = "publication_ready_at_ms"
 # left the sentinel (a published route is not a first preparation); one
 # create.rs and one chunk_06.rs fixture build an unpublished route at the
 # sentinel. None moves a shipped fence.
-expected_occurrences = 142
+# #978: +2, test-only. The create.rs epoch-fence regression builds a blocked
+# activation and then the confirmed row a takeover produces.
+expected_occurrences = 144
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1533,7 +1537,8 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # before Confirm, matching the admitted durable owner; no production writer.
 # #844: +3, the same three sites as the handoff fence above: the first-
 # preparation refusal compares the sentinel, and two fixtures set it.
-expected_occurrences = 53
+# #978: +1, test-only, the same blocked activation as the handoff fence above.
+expected_occurrences = 54
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -4486,7 +4491,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the cap, one across it and one long hold, then the shutdown token. Production
 # adds no timer: the follower's existing 10 s interval reads the held answer's
 # age.
-expected_occurrences = 1712
+# #978: +1, test-only. The prepared-owner catalog regression in chunk_06.rs
+# bounds its own wait with one tokio::time::timeout, so a regression to the
+# 45 s prime deadline fails instead of hanging.
+expected_occurrences = 1713
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
