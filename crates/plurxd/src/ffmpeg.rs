@@ -3757,16 +3757,18 @@ pub async fn has_dovi_reshape() -> bool {
 /// are all used here. Omitting the init used to make every QSV probe fail with
 /// "A hardware device reference is required", even though the real session
 /// supplied that device and the node could run the graph.
-/// Raster of the Dolby Vision reshape pairing proof. A hardware encoder has a
-/// minimum frame size (AMD VA-API refuses anything under 128x128), so the
-/// earlier 64x64 proof failed on encoders that take every real delivery size
-/// and pinned Dolby Vision sources to x264 on those nodes. The proof encodes
-/// the 1080p delivery raster the reshape actually feeds, as the VA-API Main10
-/// proof already does.
-const DOVI_RESHAPE_PROOF_RASTER: (u32, u32) = (1920, 1080);
+/// Raster of every hardware-encoder capability proof. A hardware encoder has
+/// a minimum frame size (AMD VA-API refuses anything under 128x128; Intel
+/// QSV's HEVC Main10 encoder fails a 64x64 frame with "Invalid FrameType"),
+/// so a 64x64 proof fails on encoders that take every real delivery size:
+/// it pinned Dolby Vision to x264 on AMD and refused QSV's 4K HDR10 rung and
+/// Dolby Vision HDR10 encode on Intel. Proofs encode the 1080p delivery
+/// raster sessions actually feed. Software proofs keep their small frame;
+/// libx264/libx265 have no such floor.
+const HARDWARE_ENCODE_PROOF_RASTER: (u32, u32) = (1920, 1080);
 
 fn dovi_reshape_probe_args(encoder: Encoder) -> Vec<String> {
-    let (width, height) = DOVI_RESHAPE_PROOF_RASTER;
+    let (width, height) = HARDWARE_ENCODE_PROOF_RASTER;
     // The production reshape chain itself, at the delivery raster, followed by
     // the encoder's own upload: the proof cannot drift from what sessions run.
     let reshape = Pipeline::DoviTonemapx
@@ -4028,6 +4030,38 @@ pub async fn has_hdr10_passthrough() -> bool {
         .await
 }
 
+/// The hardware Main10 encode proof both QSV HDR10 rungs run: the encoder's
+/// device init, its P010 upload and its production Main10 argument builder,
+/// at [`HARDWARE_ENCODE_PROOF_RASTER`].
+fn hardware_main10_probe_args(encoder: Encoder) -> Option<Vec<String>> {
+    let upload = encoder.filter_suffix_for(OutputGrade::Hdr10)?;
+    let (width, height) = HARDWARE_ENCODE_PROOF_RASTER;
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    args.extend(encoder.init_args());
+    args.extend([
+        "-f".to_owned(),
+        "lavfi".to_owned(),
+        "-i".to_owned(),
+        format!("color=size={width}x{height}:rate=1:color=black"),
+        "-frames:v".to_owned(),
+        "1".to_owned(),
+        "-vf".to_owned(),
+        upload.to_owned(),
+    ]);
+    args.extend(encoder.encode_args_for(
+        OutputGrade::Hdr10,
+        20_000,
+        EffectiveRateControl::Vbr,
+        false,
+        None,
+    ));
+    args.extend(["-f", "null", "-"].into_iter().map(str::to_owned));
+    Some(args)
+}
+
 /// Can this node run the plain HDR10 rung's QSV half — P010 upload into
 /// `hevc_qsv` Main10 with the PQ/BT.2020 flags?
 ///
@@ -4042,25 +4076,11 @@ pub async fn has_hdr10_passthrough_qsv() -> bool {
     }
     *HDR10_PASSTHROUGH_QSV
         .get_or_init(|| async {
-            let encoder = Encoder::Qsv;
-            let Some(upload) = encoder.filter_suffix_for(OutputGrade::Hdr10) else {
+            let Some(args) = hardware_main10_probe_args(Encoder::Qsv) else {
                 return false;
             };
             let mut command = tokio::process::Command::new(ffmpeg_bin());
-            command
-                .kill_on_drop(true)
-                .args(["-hide_banner", "-loglevel", "error"])
-                .args(encoder.init_args())
-                .args(["-f", "lavfi", "-i", "color=size=64x64:rate=1:color=black"])
-                .args(["-frames:v", "1", "-vf", upload])
-                .args(encoder.encode_args_for(
-                    OutputGrade::Hdr10,
-                    20_000,
-                    EffectiveRateControl::Vbr,
-                    false,
-                    None,
-                ))
-                .args(["-f", "null", "-"]);
+            command.kill_on_drop(true).args(args);
             let passed = tokio::time::timeout(
                 Duration::from_secs(20),
                 crate::process_control::status_job_owned(
@@ -4091,8 +4111,12 @@ pub async fn has_hdr10_passthrough_vaapi() -> bool {
     *HDR10_PASSTHROUGH_VAAPI
         .get_or_init(|| async {
             let encoder = Encoder::Vaapi;
-            let Some(filter) = Pipeline::Hdr10Passthrough.filters(Some(1920), 1080, Some("hdr10"))
-            else {
+            let (width, height) = HARDWARE_ENCODE_PROOF_RASTER;
+            let Some(filter) = Pipeline::Hdr10Passthrough.filters(
+                Some(i64::from(width)),
+                i64::from(height),
+                Some("hdr10"),
+            ) else {
                 return false;
             };
             let Some(upload) = encoder.filter_suffix_for(OutputGrade::Hdr10) else {
@@ -4103,12 +4127,8 @@ pub async fn has_hdr10_passthrough_vaapi() -> bool {
                 .kill_on_drop(true)
                 .args(["-hide_banner", "-loglevel", "error", "-filter_threads", "1"])
                 .args(encoder.init_args())
-                .args([
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "color=size=1920x1080:rate=24:color=black",
-                ])
+                .args(["-f", "lavfi", "-i"])
+                .arg(format!("color=size={width}x{height}:rate=24:color=black"))
                 .args(["-frames:v", "24", "-vf"])
                 .arg(format!("{filter},{upload}"))
                 .args(encoder.encode_args_for(
@@ -4151,25 +4171,11 @@ pub async fn has_dovi_passthrough_with(encoder: Encoder) -> bool {
     }
     *DOVI_PASSTHROUGH_QSV
         .get_or_init(|| async {
-            let Some(upload) = encoder.filter_suffix_for(OutputGrade::Hdr10) else {
+            let Some(args) = hardware_main10_probe_args(encoder) else {
                 return false;
             };
-            let filter = upload.to_owned();
             let mut command = tokio::process::Command::new(ffmpeg_bin());
-            command
-                .kill_on_drop(true)
-                .args(["-hide_banner", "-loglevel", "error"])
-                .args(encoder.init_args())
-                .args(["-f", "lavfi", "-i", "color=size=64x64:rate=1:color=black"])
-                .args(["-frames:v", "1", "-vf", &filter])
-                .args(encoder.encode_args_for(
-                    OutputGrade::Hdr10,
-                    20_000,
-                    EffectiveRateControl::Vbr,
-                    false,
-                    None,
-                ))
-                .args(["-f", "null", "-"]);
+            command.kill_on_drop(true).args(args);
             let passed = tokio::time::timeout(
                 Duration::from_secs(20),
                 crate::process_control::status_job_owned(&mut command, crate::process_control::ChildWork::background("Dolby Vision passthrough capability probe")),
@@ -4487,7 +4493,7 @@ mod tests {
             Encoder::VideoToolbox,
         ] {
             let args = dovi_reshape_probe_args(encoder);
-            let (width, height) = DOVI_RESHAPE_PROOF_RASTER;
+            let (width, height) = HARDWARE_ENCODE_PROOF_RASTER;
             // AMD VA-API's floor is 128x128; the proof must not test below
             // the sizes the reshape is actually delivered at.
             assert!(width >= 1280 && height >= 720, "{encoder:?}");
@@ -4502,6 +4508,39 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("64x64") || a.contains("scale=64:64")));
         }
+    }
+
+    #[test]
+    fn hardware_main10_proofs_use_a_raster_every_hardware_encoder_accepts() {
+        use super::*;
+        let (width, height) = HARDWARE_ENCODE_PROOF_RASTER;
+        // Intel QSV's HEVC Main10 encoder fails a 64x64 frame ("Invalid
+        // FrameType"); AMD VA-API refuses anything under 128x128.
+        assert!(width >= 1280 && height >= 720);
+        let args = hardware_main10_probe_args(Encoder::Qsv).expect("QSV Main10 proof");
+        assert!(args.contains(&format!("color=size={width}x{height}:rate=1:color=black")));
+        assert!(!args.iter().any(|a| a.contains("64x64")));
+        // The proof is the production device init, upload and encoder.
+        let init = Encoder::Qsv.init_args();
+        assert!(args
+            .windows(init.len())
+            .any(|window| window == init.as_slice()));
+        let filter = &args[args.iter().position(|a| a == "-vf").expect("filter") + 1];
+        assert_eq!(
+            Some(filter.as_str()),
+            Encoder::Qsv.filter_suffix_for(OutputGrade::Hdr10)
+        );
+        let encode = Encoder::Qsv.encode_args_for(
+            OutputGrade::Hdr10,
+            20_000,
+            EffectiveRateControl::Vbr,
+            false,
+            None,
+        );
+        assert!(args
+            .windows(encode.len())
+            .any(|window| window == encode.as_slice()));
+        assert!(encode.iter().any(|a| a == "main10"));
     }
 
     #[tokio::test]
