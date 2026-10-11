@@ -12376,7 +12376,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         .await?;
     let fingerprint = format!("root-fingerprint-{suffix}");
     if store
-        .ensure_library_root_fingerprint(library.id, &fingerprint, true)
+        .ensure_library_root_fingerprint(library.id, &library.paths, &fingerprint, true)
         .await?
         != RootFingerprintStatus::Established
     {

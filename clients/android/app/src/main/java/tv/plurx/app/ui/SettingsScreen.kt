@@ -85,6 +85,8 @@ fun SettingsScreen(
     var audio by remember { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
     var sub by remember { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
     var confirmingSignOut by remember { mutableStateOf(false) }
+    // A build fact, read once and shown in About: it has no switch, so it is
+    // not a Developer entry (it left Developer on 2026-10-10).
     var profileStatus by remember { mutableStateOf("Checking release profile status…") }
     LaunchedEffect(Unit) { profileStatus = readReleaseProfileStatus() }
     val context = LocalContext.current
@@ -159,6 +161,14 @@ fun SettingsScreen(
                 )
                 PreferenceSwitch("Autoplay next episode", preferences.autoplayNext, vm::setAutoplayNext)
                 PreferenceSwitch("Skip intros and credits", preferences.autoSkip, vm::setAutoSkip)
+                // Graduated from Developer: a finished, device-local switch with
+                // its advisory rows. Every form factor draws it — televisions
+                // included, which is where the requirements differ most.
+                PreparedReplacementEnable(
+                    enabled = preferences.preparedReplacement,
+                    isTelevision = isTelevision(LocalContext.current),
+                    onEnabled = vm::setPreparedReplacement,
+                )
             }
         }
         val appearance: @Composable () -> Unit = {
@@ -233,7 +243,7 @@ fun SettingsScreen(
                 "Live TV",
                 "Tuner, programme guide, recording and Library channels for this server. Administrator access is required.",
             ) {
-                PreferenceAction("Tuner, guide, recording and Library channels", onClick = onOpenLiveTvSettings)
+                PreferenceAction("On/off, tuner, guide, recording and Library channels", onClick = onOpenLiveTvSettings)
             }
 
             SettingsSection("Sharing", "Shared libraries and Source status.") {
@@ -255,16 +265,7 @@ fun SettingsScreen(
 
             SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
         tv.plurx.app.ui.components.TvTextButton(onClick = onOpenRemotes) { Text("Remotes & devices") }
-                PreferenceAction("Enable Live TV and match television refresh rate", onClick = onOpenDeveloper)
-                Text("Release startup profile", style = MaterialTheme.typography.titleMedium)
-                Text(profileStatus, style = MaterialTheme.typography.bodySmall, color = Muted)
-                Text("Profile capture needs a dedicated paired account, a controlled movie and physical release measurements. Profile readiness is advisory and changes no feature enablement.", style = MaterialTheme.typography.bodySmall, color = Muted)
-                Text(RELEASE_PROFILE_GRADUATION, style = MaterialTheme.typography.bodySmall, color = Muted)
-                PreparedReplacementEnable(
-                    enabled = preferences.preparedReplacement,
-                    isTelevision = isTelevision(LocalContext.current),
-                    onEnabled = vm::setPreparedReplacement,
-                )
+                PreferenceAction("Match television refresh rate, sharing and remotes", onClick = onOpenDeveloper)
             }
 
             SettingsSection("About", null) {
@@ -276,29 +277,16 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
+                Text("Release startup profile", style = MaterialTheme.typography.bodyLarge)
+                Text(profileStatus, style = MaterialTheme.typography.bodySmall, color = Muted)
             }
         }
     }
 }
 
-/** The web's line for the same device-local permission, adapted to a device. */
-internal const val PREPARED_REPLACEMENT_GRADUATION: String =
-    "Leaves Developer when: prepared quality handoff graduates (the quality-switch continuity " +
-        "build finishes M2-Android, M1-web and M3). Then: this device's switch moves with it to " +
-        "Settings → Playback."
-
 /**
- * What the Release startup profile entry waits on: D-03's M10 (the Baseline
- * Profile measured on the release APK, ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-
- * BUILD §5.10). The entry has no switch, so it is removed when that lands.
- */
-internal const val RELEASE_PROFILE_GRADUATION: String =
-    "Leaves Developer when: D-03's M10 Baseline Profile is measured on the Lenovo release APK " +
-        "(five-run cold-start and first-frame medians with and without the profile). " +
-        "Then: this entry is removed; the profile ships in every release build and has no switch."
-
-/**
- * Settings → Developer → "Prepared replacement".
+ * Settings → Playback → "Prepared replacement". Graduated from Developer with
+ * its switch, its saved value and its advisory rows.
  *
  * The switch is on the left of nothing: it is never disabled, never gated, and
  * never conditioned on the rows beneath it. Those rows say what M5.5 measured
@@ -368,12 +356,6 @@ private fun PreparedReplacementEnable(
                     modifier = Modifier.padding(horizontal = 8.dp),
                 )
             }
-        Text(
-            PREPARED_REPLACEMENT_GRADUATION,
-            color = Muted,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(horizontal = 8.dp),
-        )
         preparedReplacementRequirements(
             isTelevision = isTelevision,
             // The successor inherits the incumbent's tunneling, and tunneling

@@ -15,10 +15,10 @@ use super::{
     item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
     IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
     IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ProgressRails,
-    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, WatchStore, WatchSummary,
-    IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX,
-    IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
-    TOP_LEVEL_ITEM_PREDICATE,
+    ReconcileOutcome, RootFingerprintStatus, RootRemovalOutcome, SeriesHintOutcome, WatchStore,
+    WatchSummary, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
+    IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
+    IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::DolbyVisionFacts;
 use crate::domain::{
@@ -866,6 +866,162 @@ fn reconcile_refusal(
 
 async fn scalar(client: &TimedClient, sql: &'static str) -> Result<i64, StoreError> {
     scalar_with(client, sql.to_owned(), params!()).await
+}
+
+/// Whether library `library_id`'s configured paths are exactly the JSON set
+/// `configured_paths` — the consistent read behind `ConfigurationChanged`.
+pub(super) async fn library_paths_are(
+    client: &TimedClient,
+    library_id: i64,
+    configured_paths: &str,
+) -> Result<bool, StoreError> {
+    let sql = format!(
+        "SELECT {} AS value",
+        super::library_paths_are_sql("$1", "$2")
+    );
+    validate_sql(&sql)?;
+    Ok(scalar_with(client, sql, params!(library_id, configured_paths)).await? != 0)
+}
+
+/// The replicated removal of a library's files `file_ids` (a JSON array),
+/// taken only while its configured paths are still `configured_paths`: the
+/// first statement takes the library's reconcile guard row under that
+/// condition and every later one runs only under the guard. `lease` (the
+/// five job-lease values) adds the publication fence to every statement.
+/// Results: [0] guard taken, [1] files deleted, [2..=5] items pruned (the
+/// folder staging INSERT counts folders), then folder delete, staging clear
+/// and guard release.
+pub(super) fn root_removal_statements(
+    library_id: i64,
+    configured_paths: &str,
+    file_ids: &str,
+    lease: Option<&hiqlite::Params>,
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    const GUARD: &str = "EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)";
+    let paths_are = super::library_paths_are_sql("$1", "$2");
+    let templates: Vec<(String, hiqlite::Params)> = vec![
+        (
+            format!(
+                "INSERT INTO scan_reconcile_guards (library_id) SELECT $1 \
+                 WHERE {paths_are} {{LEASE}} ON CONFLICT(library_id) DO NOTHING"
+            ),
+            params!(library_id, configured_paths),
+        ),
+        (
+            format!(
+                "DELETE FROM files WHERE item_id IN (SELECT id FROM items WHERE library_id = $1) \
+                 AND id IN (SELECT value FROM json_each($2)) \
+                 AND NOT EXISTS (SELECT 1 FROM dv_conversions d \
+                                 WHERE d.file_id = files.id \
+                                   AND d.state IN ('running', 'verified')) \
+                 AND {GUARD} {{LEASE}}"
+            ),
+            params!(library_id, file_ids),
+        ),
+        (
+            format!(
+                "DELETE FROM items WHERE library_id = $1 AND {GUARD} \
+                 AND kind IN ('movie','episode','video','photo','book','audiobook') \
+                 AND id NOT IN (SELECT item_id FROM files) {{LEASE}}"
+            ),
+            params!(library_id),
+        ),
+        (
+            format!(
+                "DELETE FROM items WHERE library_id = $1 AND {GUARD} AND kind = 'season' \
+                 AND id NOT IN (SELECT parent_id FROM items \
+                                WHERE kind = 'episode' AND parent_id IS NOT NULL) {{LEASE}}"
+            ),
+            params!(library_id),
+        ),
+        (
+            format!(
+                "DELETE FROM items WHERE library_id = $1 AND {GUARD} AND kind = 'show' \
+                 AND id NOT IN (SELECT parent_id FROM items \
+                                WHERE kind = 'season' AND parent_id IS NOT NULL) {{LEASE}}"
+            ),
+            params!(library_id),
+        ),
+        (
+            format!(
+                "WITH RECURSIVE descendants(root_id, id, kind) AS ( \
+                     SELECT root.id, child.id, child.kind FROM items root \
+                     LEFT JOIN items child ON child.parent_id = root.id \
+                     WHERE root.library_id = $1 AND root.kind = 'folder' \
+                     UNION SELECT descendants.root_id, child.id, child.kind \
+                     FROM descendants JOIN items child ON child.parent_id = descendants.id \
+                 ) INSERT INTO scan_reconcile_items (library_id, item_id) \
+                   SELECT $1, items.id FROM items \
+                   WHERE items.library_id = $1 AND items.kind = 'folder' AND {GUARD} \
+                     AND NOT EXISTS (SELECT 1 FROM descendants \
+                                     WHERE root_id = items.id AND kind != 'folder') {{LEASE}} \
+                   ON CONFLICT(library_id, item_id) DO NOTHING"
+            ),
+            params!(library_id),
+        ),
+        (
+            "DELETE FROM items WHERE library_id = $1 AND id IN \
+                (SELECT item_id FROM scan_reconcile_items WHERE library_id = $1) {LEASE}"
+                .to_owned(),
+            params!(library_id),
+        ),
+        (
+            "DELETE FROM scan_reconcile_items WHERE library_id = $1 {LEASE}".to_owned(),
+            params!(library_id),
+        ),
+        (
+            "DELETE FROM scan_reconcile_guards WHERE library_id = $1 {LEASE}".to_owned(),
+            params!(library_id),
+        ),
+    ];
+    templates
+        .into_iter()
+        .map(|(sql, mut bound)| {
+            let fence = match lease {
+                None => String::new(),
+                Some(lease) => {
+                    let first = bound.len() + 1;
+                    bound.extend(lease.iter().cloned());
+                    format!(
+                        "AND EXISTS (SELECT 1 FROM job_leases WHERE resource = ${} \
+                         AND owner_node_id = ${} AND fence = ${} AND revision = ${} \
+                         AND expires_at_ms = ${})",
+                        first,
+                        first + 1,
+                        first + 2,
+                        first + 3,
+                        first + 4
+                    )
+                }
+            };
+            let sql = sql.replace("{LEASE}", &fence);
+            validate_sql(&sql)?;
+            Ok((sql, bound))
+        })
+        .collect()
+}
+
+/// Read [`root_removal_statements`]' results. A guard that was not taken
+/// means the paths changed — or, if they did not, another operation holds
+/// the library's guard, which is an error like reconcile's.
+pub(super) async fn root_removal_outcome(
+    client: &TimedClient,
+    library_id: i64,
+    configured_paths: &str,
+    results: &[usize],
+) -> Result<RootRemovalOutcome, StoreError> {
+    if results.first().copied() != Some(1) {
+        if !library_paths_are(client, library_id, configured_paths).await? {
+            return Ok(RootRemovalOutcome::ConfigurationChanged);
+        }
+        return Err(StoreError::Database(
+            "scan reconciliation guard was already held by another operation".to_owned(),
+        ));
+    }
+    Ok(RootRemovalOutcome::Applied {
+        deleted_files: results[1] as u64,
+        pruned_items: results[2..=5].iter().map(|rows| *rows as u64).sum(),
+    })
 }
 
 async fn scalar_with(
@@ -3624,19 +3780,34 @@ impl MediaStore for HiqliteAuthStore {
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
     ) -> Result<RootFingerprintStatus, StoreError> {
+        let configured_paths = super::library_paths_json(configured_paths)?;
+        let sql = format!(
+            "INSERT INTO library_roots (library_id, fingerprint) \
+             SELECT $1, $2 WHERE $3 AND {} \
+             ON CONFLICT(library_id) DO NOTHING",
+            super::library_paths_are_sql("$1", "$4")
+        );
         let inserted = self
+            .client()
             .execute(
-                "INSERT INTO library_roots (library_id, fingerprint) \
-                 SELECT $1, $2 WHERE $3 \
-                 ON CONFLICT(library_id) DO NOTHING",
-                params!(library_id, fingerprint, allow_establish),
+                sql,
+                params!(
+                    library_id,
+                    fingerprint,
+                    allow_establish,
+                    configured_paths.as_str()
+                ),
             )
             .await?;
         if inserted == 1 {
             return Ok(RootFingerprintStatus::Established);
+        }
+        if !library_paths_are(self.client(), library_id, &configured_paths).await? {
+            return Ok(RootFingerprintStatus::ConfigurationChanged);
         }
         let expected = self
             .client()
@@ -3837,6 +4008,27 @@ impl MediaStore for HiqliteAuthStore {
         })
     }
 
+    async fn remove_files_outside_library_roots(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+    ) -> Result<RootRemovalOutcome, StoreError> {
+        super::root_removal_payload(file_ids)?;
+        let configured_paths = super::library_paths_json(configured_paths)?;
+        let ids = serde_json::to_string(file_ids).map_err(database_error)?;
+        let statements = root_removal_statements(library_id, &configured_paths, &ids, None)?;
+        let results = self
+            .client()
+            .txn(statements)
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        root_removal_outcome(self.client(), library_id, &configured_paths, &results).await
+    }
+
     async fn reset_library_root_fingerprint(&self, library_id: i64) -> Result<bool, StoreError> {
         Ok(self
             .execute(
@@ -3892,35 +4084,7 @@ impl MediaStore for HiqliteAuthStore {
     }
 
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError> {
-        let statements = [
-            "DELETE FROM scan_reconcile_items WHERE library_id = $1",
-            "DELETE FROM items WHERE library_id = $1 \
-             AND kind IN ('movie','episode','video','photo','book','audiobook') \
-             AND id NOT IN (SELECT item_id FROM files)",
-            "DELETE FROM items WHERE library_id = $1 AND kind = 'season' \
-             AND id NOT IN (SELECT parent_id FROM items \
-                            WHERE kind = 'episode' AND parent_id IS NOT NULL)",
-            "DELETE FROM items WHERE library_id = $1 AND kind = 'show' \
-             AND id NOT IN (SELECT parent_id FROM items \
-                            WHERE kind = 'season' AND parent_id IS NOT NULL)",
-            "WITH RECURSIVE descendants(root_id, id, kind) AS ( \
-                 SELECT root.id, child.id, child.kind FROM items root \
-                 LEFT JOIN items child ON child.parent_id = root.id \
-                 WHERE root.library_id = $1 AND root.kind = 'folder' \
-                 UNION \
-                 SELECT descendants.root_id, child.id, child.kind \
-                 FROM descendants JOIN items child ON child.parent_id = descendants.id \
-             ) \
-             INSERT INTO scan_reconcile_items (library_id, item_id) \
-               SELECT $1, items.id FROM items \
-               WHERE items.library_id = $1 AND items.kind = 'folder' \
-                 AND NOT EXISTS (SELECT 1 FROM descendants \
-                                 WHERE root_id = items.id AND kind != 'folder') \
-               ON CONFLICT(library_id, item_id) DO NOTHING",
-            "DELETE FROM items WHERE library_id = $1 AND id IN \
-                (SELECT item_id FROM scan_reconcile_items WHERE library_id = $1)",
-            "DELETE FROM scan_reconcile_items WHERE library_id = $1",
-        ];
+        let statements = PRUNE_EMPTY_ITEMS_SQL;
         for sql in statements {
             validate_sql(sql)?;
         }
@@ -3938,6 +4102,40 @@ impl MediaStore for HiqliteAuthStore {
         Ok(results[1..=4].iter().map(|rows| *rows as u64).sum())
     }
 }
+
+/// The replicated prune of a library's items left without files, bottom-up.
+/// Bound `$1` = library id. Rows removed are the counts of statements 1..=4
+/// (the folder staging INSERT counts the folders; CTE DELETE counts vary
+/// across SQLite wrappers).
+const PRUNE_EMPTY_ITEMS_SQL: [&str; 7] = [
+    "DELETE FROM scan_reconcile_items WHERE library_id = $1",
+    "DELETE FROM items WHERE library_id = $1 \
+     AND kind IN ('movie','episode','video','photo','book','audiobook') \
+     AND id NOT IN (SELECT item_id FROM files)",
+    "DELETE FROM items WHERE library_id = $1 AND kind = 'season' \
+     AND id NOT IN (SELECT parent_id FROM items \
+                    WHERE kind = 'episode' AND parent_id IS NOT NULL)",
+    "DELETE FROM items WHERE library_id = $1 AND kind = 'show' \
+     AND id NOT IN (SELECT parent_id FROM items \
+                    WHERE kind = 'season' AND parent_id IS NOT NULL)",
+    "WITH RECURSIVE descendants(root_id, id, kind) AS ( \
+         SELECT root.id, child.id, child.kind FROM items root \
+         LEFT JOIN items child ON child.parent_id = root.id \
+         WHERE root.library_id = $1 AND root.kind = 'folder' \
+         UNION \
+         SELECT descendants.root_id, child.id, child.kind \
+         FROM descendants JOIN items child ON child.parent_id = descendants.id \
+     ) \
+     INSERT INTO scan_reconcile_items (library_id, item_id) \
+       SELECT $1, items.id FROM items \
+       WHERE items.library_id = $1 AND items.kind = 'folder' \
+         AND NOT EXISTS (SELECT 1 FROM descendants \
+                         WHERE root_id = items.id AND kind != 'folder') \
+       ON CONFLICT(library_id, item_id) DO NOTHING",
+    "DELETE FROM items WHERE library_id = $1 AND id IN \
+        (SELECT item_id FROM scan_reconcile_items WHERE library_id = $1)",
+    "DELETE FROM scan_reconcile_items WHERE library_id = $1",
+];
 
 const PLAYABLE_KINDS: &str = "'movie','episode','video','audiobook'";
 
