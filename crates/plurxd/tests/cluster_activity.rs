@@ -1713,16 +1713,17 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         .collect::<Vec<_>>()
         .join("\n");
     eprintln!("create-path store operations:\n{table}");
-    // (authority reads, local reads, writes) per shape, as measured at B-M1
-    // on main fb4397c44. The window is the create handler's own, plus the
-    // activation task it awaits; the bearer-token read happens before it.
-    // Every shape takes six writes on that main (the reopen two more, to
-    // project and hand off its predecessor).
+    // (authority reads, local reads, writes) per shape on main fb4397c44
+    // with every reduction of handoff §5.2 (B-M1 measured 36, 46, 41 and 33
+    // there). The window is the create handler's own, plus the activation
+    // task it awaits; the bearer-token read happens before it. Every shape
+    // takes six writes (the reopen two more, to project and hand off its
+    // predecessor); the reductions remove reads only.
     let expected: [(&str, (u64, u64, u64)); 4] = [
-        ("first play, VOD index", (36, 0, 6)),
-        ("reopen, new position", (46, 0, 8)),
-        ("Auto encode, VOD", (41, 0, 6)),
-        ("index miss, rolling copy", (33, 0, 6)),
+        ("first play, VOD index", (26, 0, 6)),
+        ("reopen, new position", (34, 0, 8)),
+        ("Auto encode, VOD", (31, 0, 6)),
+        ("index miss, rolling copy", (25, 0, 6)),
     ];
     let observed = measured
         .iter()
