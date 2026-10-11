@@ -2843,6 +2843,7 @@ impl TranscodeManager {
 
     /// Prime a genuinely new unpublished reservation and seal its private output
     /// choice before admitting a client. Missing pending markers are strict recovery.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn vod_prepare_first_before<'a>(
         &'a self,
         recipe_json: &'a str,
@@ -2850,6 +2851,7 @@ impl TranscodeManager {
         user_id: i64,
         owner: PreparedVodOwner,
         adoption: SessionAdoptionToken,
+        expected_predecessor_owner_epoch: Option<i64>,
         deadline: Instant,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
@@ -2908,6 +2910,16 @@ impl TranscodeManager {
                 else {
                     return false;
                 };
+                // The epoch the preparation was admitted under, when the caller
+                // knows it (local prime, or an origin that sent it). A takeover
+                // since staging cannot commit this successor, so refuse before
+                // attaching rather than encode for it. Absent (an older origin),
+                // the predecessor's current epoch is all there is to fence on.
+                let predecessor_owner_epoch =
+                    expected_predecessor_owner_epoch.unwrap_or(predecessor.owner_epoch);
+                if predecessor.owner_epoch != predecessor_owner_epoch {
+                    return false;
+                }
                 if adoption.session_id != session_id || gate.released.load(Acquire) {
                     return false;
                 }
@@ -3018,7 +3030,7 @@ impl TranscodeManager {
                     expected_response_json: route.response_json,
                     predecessor_incarnation_id: ledger.expected_predecessor_incarnation_id,
                     predecessor_owner_node_id: predecessor.owner_node_id,
-                    predecessor_owner_epoch: predecessor.owner_epoch,
+                    predecessor_owner_epoch,
                     deadline_ms: route.lease_expires_at_ms,
                     now_ms: crate::media_sessions::unix_ms(),
                     already_complete: complete,
@@ -3830,6 +3842,182 @@ mod retained_recovery_tests {
         );
     }
 
+    /// The peer fences its seal on the predecessor epoch the preparation was
+    /// admitted under. Binding it to whatever epoch the predecessor holds when
+    /// the peer reads it let a peer seal (and attach) for a successor whose
+    /// predecessor had been taken over since staging; only the origin's second
+    /// seal and the commit CAS caught it, after the work was done.
+    #[tokio::test]
+    async fn first_preparation_fences_the_admitted_predecessor_epoch_not_its_current_one() {
+        use plurx_core::store::{MediaSessionStore, UserStore};
+        let (_temp, serve, _, actual_request) =
+            crate::vodserve::retained::test_post_attachment_output_facts().await;
+        let id = "00000000-0000-4000-8000-00000000cace";
+        let initial_facts = serve.hls_facts(id).await.expect("actual current choice");
+        let store =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("capture store"));
+        let user = store
+            .create_user("capture", "hash", false)
+            .await
+            .expect("user");
+        let principal =
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+        let now = crate::media_sessions::unix_ms();
+        let predecessor = uuid::Uuid::new_v4().to_string();
+        let activation = plurx_core::domain::MediaSessionActivation {
+            incarnation_id: predecessor.clone(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            principal: principal.clone(),
+            playback_id: "first-capture".into(),
+            recovery_epoch: "capture-epoch".into(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "node".into(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now,
+            lease_expires_at_ms: now + 60_000,
+            expected_desired_revision: None,
+        };
+        assert!(store
+            .activate_media_session(&activation)
+            .await
+            .expect("predecessor")
+            .is_some());
+        // Published, as a playing predecessor is: only then can it be taken over.
+        store
+            .settle_media_session_activation(
+                &activation,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                now,
+            )
+            .await
+            .expect("confirm predecessor")
+            .expect("predecessor confirmed");
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let fixture = crate::media_sessions::takeover_eligible_route(id, &incarnation);
+        let mut recipe: crate::media_sessions::RemoteStartRequest =
+            serde_json::from_str(&fixture.recipe_json).expect("typed recipe");
+        recipe.principal = principal.clone();
+        recipe.retained_output_receiver = Some(1);
+        recipe.retained_output = None;
+        recipe.request = actual_request;
+        recipe.request.request_id = Some(incarnation.clone());
+        assert_eq!(recipe.request.start_seconds, 70.841);
+        serve.mark_prepared_incarnation(id, &incarnation).await;
+        let recipe_json = serde_json::to_string(&recipe).expect("recipe");
+        let preparation = plurx_core::domain::MediaSessionPreparation {
+            quality_cancellation_key: None,
+            incarnation_id: incarnation.clone(),
+            session_id: id.into(),
+            principal: principal.clone(),
+            playback_id: "first-capture".into(),
+            expected_predecessor_incarnation_id: predecessor.clone(),
+            expected_predecessor_owner_node_id: "node".into(),
+            expected_predecessor_owner_epoch: 1,
+            request_fingerprint: "b".repeat(64),
+            owner_node_id: "node".into(),
+            recipe_json: recipe_json.clone(),
+            response_json: r#"{"prepared_output_capture_pending":true}"#.into(),
+            media_origin_ms: 0,
+            now_ms: now,
+            expected_desired_revision: None,
+            deadline_ms: now + 30_000,
+        };
+        assert!(store
+            .prepare_media_session(&preparation)
+            .await
+            .expect("reserve")
+            .is_some());
+        let work = crate::test_tempdir().expect("capture work");
+        let mut manager = TranscodeManager::new(
+            store.clone(),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        manager.vod = Arc::clone(&serve);
+        let manager = Arc::new(manager);
+        // The predecessor's lease lapses and a survivor takes it over: same
+        // incarnation, owner epoch 2. The staged successor is still reserved.
+        let taken_at = now + 60_001;
+        let adopted = store
+            .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+                incarnation_id: predecessor.clone(),
+                expected_owner_node_id: "node".into(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "survivor".into(),
+                now_ms: taken_at,
+                lease_expires_at_ms: taken_at + 120_000,
+            })
+            .await
+            .expect("takeover CAS")
+            .expect("survivor owns the predecessor");
+        assert_eq!(adopted.owner_epoch, 2);
+        assert!(store
+            .staged_media_session_for_playback(&principal, "first-capture")
+            .await
+            .expect("ledger")
+            .is_some());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(
+            !manager
+                .vod_prepare_first_before(
+                    &recipe_json,
+                    id,
+                    user.id,
+                    PreparedVodOwner {
+                        node_id: "node".into(),
+                        source_authority: None
+                    },
+                    manager.session_adoption_token(id).expect("adoption"),
+                    Some(preparation.expected_predecessor_owner_epoch),
+                    deadline
+                )
+                .await,
+            "a successor admitted under predecessor epoch 1 cannot be sealed under epoch 2"
+        );
+        let route = store
+            .media_session_route_by_incarnation(&incarnation)
+            .await
+            .expect("read")
+            .expect("reserved");
+        assert_eq!(
+            route.response_json, preparation.response_json,
+            "the reservation is still pending: nothing was sealed"
+        );
+        assert!(
+            serve
+                .response_status_owner_is_current(id, &initial_facts.response_owner)
+                .await,
+            "the existing attachment is untouched"
+        );
+        // An older origin sends no epoch; the peer keeps its previous fence.
+        assert!(
+            manager
+                .vod_prepare_first_before(
+                    &recipe_json,
+                    id,
+                    user.id,
+                    PreparedVodOwner {
+                        node_id: "node".into(),
+                        source_authority: None
+                    },
+                    manager.session_adoption_token(id).expect("legacy adoption"),
+                    None,
+                    deadline
+                )
+                .await,
+            "without the field the seal binds the predecessor's current epoch"
+        );
+    }
+
     #[tokio::test]
     async fn first_preparation_seals_actual_choice_and_replay_keeps_owner() {
         use plurx_core::store::{MediaSessionStore, UserStore};
@@ -3943,6 +4131,7 @@ mod retained_recovery_tests {
                 session_id: id.into(),
                 principal: principal.clone(),
                 expected_owner_epoch: 1,
+                expected_predecessor_owner_epoch: None,
             };
             let response = crate::http::internal_media_sessions::prepare_authorized(
                 remote_state,
@@ -3988,6 +4177,7 @@ mod retained_recovery_tests {
                             source_authority: None
                         },
                         manager.session_adoption_token(id).expect("repeat adoption"),
+                        None,
                         deadline
                     )
                     .await
@@ -4022,6 +4212,7 @@ mod retained_recovery_tests {
                         manager
                             .session_adoption_token(id)
                             .expect("changed request adoption"),
+                        None,
                         deadline
                     )
                     .await,
@@ -4048,6 +4239,7 @@ mod retained_recovery_tests {
                         manager
                             .session_adoption_token(id)
                             .expect("changed receipt adoption"),
+                        None,
                         deadline
                     )
                     .await
@@ -4067,6 +4259,7 @@ mod retained_recovery_tests {
                         manager
                             .session_adoption_token(id)
                             .expect("foreign adoption"),
+                        None,
                         deadline
                     )
                     .await
@@ -4118,6 +4311,7 @@ mod retained_recovery_tests {
                         manager
                             .session_adoption_token(id)
                             .expect("published adoption"),
+                        None,
                         deadline
                     )
                     .await,

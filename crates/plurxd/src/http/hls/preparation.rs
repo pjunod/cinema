@@ -2066,14 +2066,14 @@ pub(super) async fn stage_prepared_successor_with_prime(
         Ok(value) => value,
         Err(_) => return,
     };
-    if successor_owner_captures_output(
+    let captures_output = successor_owner_captures_output(
         state,
         successor_owner,
         staged_request.presentation,
         prime_worker,
     )
-    .await
-    {
+    .await;
+    if captures_output {
         response_value
             .as_object_mut()
             .expect("StartResponse object")
@@ -2263,6 +2263,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
                                     local_user_id,
                                     owner,
                                     adoption,
+                                    Some(preparation.expected_predecessor_owner_epoch),
                                     prime_deadline,
                                 )
                                 .await
@@ -2284,6 +2285,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
                                     user_id: local_user_id,
                                 },
                             expected_owner_epoch: 1,
+                            // Only a capture receiver understands the field.
+                            expected_predecessor_owner_epoch: captures_output
+                                .then_some(preparation.expected_predecessor_owner_epoch),
                         },
                         prime_deadline.into(),
                     )
