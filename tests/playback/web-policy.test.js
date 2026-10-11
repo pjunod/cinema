@@ -7131,7 +7131,10 @@ test("cold original recovery can try an unproved compatible lower route within m
   assert.equal(result.candidate.id,low.id);
   assert.equal(result.transition,"recover");
   assert.equal(result.candidate.sustainable,false);
-  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate,null);
+  // With the fitting rung undecodable, 1440p (18.16 Mb/s) does not fit the
+  // 14 Mb/s link but is far cheaper than the 50 Mb/s original that is
+  // stalling: the smaller deficit beats holding.
+  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate.id,middle.id);
   assert.equal(policy.decideCandidateTransition({...args,sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
   assert.equal(policy.decideCandidateTransition({...args,candidates:[low,middle,{...f.original,grade:"hdr10"}],
     sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
