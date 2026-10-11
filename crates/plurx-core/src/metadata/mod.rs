@@ -128,7 +128,64 @@ pub(crate) fn provider_outcome(error: &crate::error::MetadataError) -> ProviderO
         crate::error::MetadataError::BodyBound(_) => ProviderOutcome::BodyBound,
         crate::error::MetadataError::Http(_)
         | crate::error::MetadataError::Parse(_)
-        | crate::error::MetadataError::NotConfigured => ProviderOutcome::Error,
+        | crate::error::MetadataError::NotConfigured
+        // Never recorded: no request was made (`record_provider_result`).
+        | crate::error::MetadataError::Unavailable => ProviderOutcome::Error,
+    }
+}
+
+/// Count one provider call's outcome, unless the call was never sent.
+pub(crate) fn record_provider_result<T>(
+    provider: Provider,
+    result: &Result<T, crate::error::MetadataError>,
+) {
+    match result {
+        Ok(_) => record_provider_request(provider, ProviderOutcome::Ok),
+        Err(crate::error::MetadataError::Unavailable) => {}
+        Err(error) => record_provider_request(provider, provider_outcome(error)),
+    }
+}
+
+/// Whether one provider host is still worth asking in this pass.
+///
+/// A client is built per enrichment pass, and this lives in the client, so
+/// it lasts exactly one pass and the next pass starts healthy — the
+/// scheduled scan and the artwork retry sweep are the retry; there is no
+/// timer here. It trips on the first call whose *transport* failed (refused,
+/// connect or read timeout) after the call's own retry loop had spent its
+/// attempts; an HTTP status, a parse failure or a rate-limit wait never
+/// trips it, because each of those is a provider that answered.
+///
+/// Before this, a blackholed TMDB cost every title the full call budget —
+/// three 5 s connect timeouts plus backoff, about 16.5 s — serially, so a
+/// 2,000-title library would sit in "enriching" for about nine hours to learn one
+/// fact (LAB2-EVIDENCE-2026-10-11 §5, C-02).
+#[derive(Debug, Default)]
+pub(crate) struct HostHealth(std::sync::OnceLock<String>);
+
+impl HostHealth {
+    /// `Err(Unavailable)` once the host has failed in this pass.
+    pub(crate) fn check(&self) -> Result<(), crate::error::MetadataError> {
+        match self.0.get() {
+            Some(_) => Err(crate::error::MetadataError::Unavailable),
+            None => Ok(()),
+        }
+    }
+
+    /// Convert a transport error, tripping the host if it says the provider
+    /// is unreachable rather than that one exchange went wrong.
+    pub(crate) fn failed(&self, error: reqwest::Error) -> crate::error::MetadataError {
+        let unreachable = error.is_connect() || error.is_timeout();
+        let error = request_error(error);
+        if unreachable {
+            let _ = self.0.set(error.to_string());
+        }
+        error
+    }
+
+    /// The failure that tripped the host, URL already stripped.
+    pub(crate) fn cause(&self) -> Option<&str> {
+        self.0.get().map(String::as_str)
     }
 }
 
@@ -654,9 +711,50 @@ pub struct EnrichReport {
     /// Absent a line here that is invisible: the counts all read as success
     /// and the genre facets are simply, silently, empty.
     pub problems: Vec<String>,
+    /// Titles this pass did not look up because their provider had already
+    /// failed to answer in transport (see [`HostHealth`]). They are left
+    /// exactly as they were, so the next scan selects them again.
+    pub deferred: usize,
+    /// The one line per unreachable provider host, also in `problems`. Kept
+    /// apart so a scan can carry it into its own problems list, which is the
+    /// one the operator sees after the run (`ScanReport` is what persists).
+    pub provider_unavailable: Vec<String>,
 }
 
 impl EnrichReport {
+    /// One problem per provider host that stopped being asked partway
+    /// through the pass — however many titles that left behind — rather than
+    /// one per title. Counted as an error: the pass really did fail to do
+    /// what it was asked, and a green report would hide an outage.
+    fn note_unreachable(&mut self, provider: &str, api: Option<&str>, images: Option<&str>) {
+        let mut lines = Vec::new();
+        if let Some(cause) = api {
+            let n = self.deferred;
+            let (titles, verb) = if n == 1 {
+                ("title", "stays")
+            } else {
+                ("titles", "stay")
+            };
+            lines.push(format!(
+                "{provider} could not be reached ({cause}), so this pass stopped asking it; \
+                 {n} {titles} {verb} queued and the next scan retries them"
+            ));
+        }
+        if let Some(cause) = images {
+            lines.push(format!(
+                "{provider}'s image server could not be reached ({cause}), so this pass \
+                 stopped downloading from it; the missing artwork is retried by the next \
+                 artwork sweep"
+            ));
+        }
+        for line in lines {
+            self.errors += 1;
+            tracing::error!(provider, deferred = self.deferred, problem = %line, "metadata provider unreachable");
+            self.note(line.clone());
+            self.provider_unavailable.push(line);
+        }
+    }
+
     /// Record a problem, capped. Use this for anything that also bumps
     /// `errors` — never push directly, or the cap stops holding.
     fn note(&mut self, problem: String) {
@@ -820,6 +918,12 @@ async fn enrich_library_for_targets_inner(
         if crate::process::bounded::check_cancellation().is_err() {
             break;
         }
+        // Not asked: TMDB already failed in transport in this pass. The item
+        // is untouched, so the next scan selects it again.
+        if tmdb.unreachable().is_some() {
+            report.deferred += 1;
+            continue;
+        }
         let deadline_title = match item.year {
             Some(year) => format!("{} ({year})", item.title),
             None => item.title.clone(),
@@ -860,6 +964,10 @@ async fn enrich_library_for_targets_inner(
                             }
                             Ok(None) => {
                                 report.unmatched += 1;
+                                None
+                            }
+                            Err(_) if tmdb.unreachable().is_some() => {
+                                report.deferred += 1;
                                 None
                             }
                             Err(e) => {
@@ -947,6 +1055,9 @@ async fn enrich_library_for_targets_inner(
                         }
                     }
                     Ok(None) => report.unmatched += 1,
+                    // The failure that made TMDB unreachable, or a call not
+                    // sent because of it: one line at the end says so.
+                    Err(_) if tmdb.unreachable().is_some() => report.deferred += 1,
                     Err(e) => {
                         tracing::error!(title = %item.title, error = %e, "movie lookup failed");
                         report.errors += 1;
@@ -1027,6 +1138,7 @@ async fn enrich_library_for_targets_inner(
                         }
                     }
                     Ok(None) => report.unmatched += 1,
+                    Err(_) if tmdb.unreachable().is_some() => report.deferred += 1,
                     Err(e) => {
                         tracing::error!(title = %item.title, error = %e, "show lookup failed");
                         report.errors += 1;
@@ -1048,6 +1160,8 @@ async fn enrich_library_for_targets_inner(
             ));
         }
     }
+
+    report.note_unreachable("TMDB", tmdb.unreachable(), tmdb.images_unreachable());
 
     // Once, at the end, not once per show. The vocabulary is fetched a single
     // time, so it fails a single time, and every title matched by search
@@ -1206,6 +1320,10 @@ async fn enrich_anime_library_inner(
         if item.kind != ItemKind::Show {
             continue;
         }
+        if client.unreachable().is_some() {
+            report.deferred += 1;
+            continue;
+        }
         let deadline_title = match item.year {
             Some(year) => format!("{} ({year})", item.title),
             None => item.title.clone(),
@@ -1252,6 +1370,7 @@ async fn enrich_anime_library_inner(
                     }
                 }
                 Ok(None) => report.unmatched += 1,
+                Err(_) if client.unreachable().is_some() => report.deferred += 1,
                 Err(e) => {
                     tracing::error!(title = %item.title, error = %e, "anilist lookup failed");
                     report.errors += 1;
@@ -1271,6 +1390,7 @@ async fn enrich_anime_library_inner(
             ));
         }
     }
+    report.note_unreachable("AniList", client.unreachable(), client.images_unreachable());
     tracing::info!(
         matched = report.matched,
         unmatched = report.unmatched,
@@ -1294,6 +1414,9 @@ async fn download_url(
     };
     let bytes = match client.download_image(url).await {
         Ok(b) => b,
+        // Never reached the provider: record no attempt, so the item stays
+        // eligible for the next retry sweep instead of a day's backoff.
+        Err(crate::error::MetadataError::Unavailable) => return Artwork::default(),
         Err(e) => {
             tracing::warn!(item_id, kind, error = %e, "anime artwork download failed");
             return Artwork::failed(format!("download: {e}"));
@@ -1457,6 +1580,11 @@ async fn enrich_episodes(
         }
         let remote = match tmdb.season_detail(show_tmdb_id, season_number).await {
             Ok(detail) => detail,
+            // The pass-level line covers it; the show stays retryable.
+            Err(_) if tmdb.unreachable().is_some() => {
+                complete = false;
+                continue;
+            }
             Err(e) => {
                 tracing::error!(season = season_number, error = %e, "season fetch failed");
                 report.errors += 1;
@@ -1615,6 +1743,8 @@ async fn cache_image(
     };
     let bytes = match tmdb.download_image(tmdb_path, size).await {
         Ok(b) => b,
+        // Never reached TMDB: no attempt recorded, as in `download_url`.
+        Err(crate::error::MetadataError::Unavailable) => return Artwork::default(),
         Err(e) => {
             tracing::warn!(item_id, kind, error = %e, "artwork download failed");
             return Artwork::failed(format!("download: {e}"));
@@ -2299,6 +2429,220 @@ mod tests {
         let rendered = serde_json::to_string(&report).expect("report serializes");
         assert!(!rendered.contains(KEY), "{rendered}");
         assert!(!rendered.contains("api_key"), "{rendered}");
+    }
+
+    /// A movie library holding `Title 1` … `Title n`.
+    async fn numbered_movies(n: usize) -> (SqliteStore, i64, Vec<i64>) {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let lib = store
+            .create_library(&NewLibrary {
+                name: "Outage".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("lib");
+        let mut ids = Vec::new();
+        for i in 1..=n {
+            ids.push(
+                store
+                    .insert_item(&NewItem {
+                        library_id: lib.id,
+                        kind: ItemKind::Movie,
+                        parent_id: None,
+                        title: format!("Title {i}"),
+                        year: None,
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .expect("movie"),
+            );
+        }
+        (store, lib.id, ids)
+    }
+
+    /// TMDB answering `Title n` as id `n`, with a poster when asked to.
+    fn numbered_movie_mock(posters: bool) -> axum::Router {
+        use axum::extract::RawQuery;
+        use axum::routing::get;
+        use axum::Json;
+        axum::Router::new()
+            .route(
+                "/search/movie",
+                get(move |RawQuery(query): RawQuery| async move {
+                    let n: i64 = query
+                        .unwrap_or_default()
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("query=Title+"))
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                    let poster = posters.then(|| format!("/p{n}.jpg"));
+                    Json(json!({ "results": [
+                        { "id": n, "title": format!("Title {n}"), "poster_path": poster }
+                    ]}))
+                }),
+            )
+            .route("/movie/{id}", get(|| async { Json(json!({})) }))
+    }
+
+    /// A host that accepts every request and never answers, counting them.
+    fn hanging_counter(hits: Arc<AtomicUsize>) -> axum::Router {
+        axum::Router::new().fallback(move || {
+            let hits = Arc::clone(&hits);
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<String>().await
+            }
+        })
+    }
+
+    fn short_deadline_client(ms: u64) -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(ms))
+            .read_timeout(Duration::from_millis(ms))
+            .timeout(Duration::from_millis(ms))
+            .build()
+            .expect("short-deadline client")
+    }
+
+    /// LAB2 C-02: with TMDB blackholed, every title paid the full call budget
+    /// (~16.5 s) serially and no failure reached the scan's problems. One
+    /// call's retries now decide it for the whole pass: N titles cost one
+    /// call's attempts, the pass reports one line, and every title stays
+    /// queued — and a pass with TMDB back enriches them all.
+    #[tokio::test]
+    async fn an_unreachable_provider_is_asked_once_per_pass_and_retried_on_the_next() {
+        const TITLES: usize = 6;
+        let (store, lib, ids) = numbered_movies(TITLES).await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let dead = serve(hanging_counter(Arc::clone(&hits))).await;
+        let artwork = canonical_tempdir();
+
+        let tmdb = TmdbClient::new("k")
+            .with_base(&dead, &dead)
+            .with_http(short_deadline_client(50));
+        let report = enrich_library(&store, &tmdb, artwork.path(), Some(lib), false, None).await;
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            tmdb::MAX_ATTEMPTS as usize,
+            "one call's attempts for the whole pass, not one call per title"
+        );
+        assert_eq!(report.deferred, TITLES, "{report:?}");
+        assert_eq!(report.matched, 0);
+        assert_eq!(report.errors, 1, "{report:?}");
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert_eq!(report.provider_unavailable, report.problems);
+        let line = &report.problems[0];
+        assert!(
+            line.contains("TMDB could not be reached")
+                && line.contains("timed out")
+                && line.contains(&format!("{TITLES} titles stay queued")),
+            "{line}"
+        );
+        let queued = store
+            .items_needing_metadata(Some(lib), false, None)
+            .await
+            .expect("retry candidates");
+        for id in &ids {
+            assert!(queued.iter().any(|item| item.id == *id), "{id} retryable");
+        }
+
+        // The next pass builds a new client, so it starts healthy.
+        let live = serve(numbered_movie_mock(false)).await;
+        let tmdb = TmdbClient::new("k").with_base(&live, &live);
+        let report = enrich_library(&store, &tmdb, artwork.path(), Some(lib), false, None).await;
+        assert_eq!(report.matched, TITLES, "{report:?}");
+        assert_eq!(report.errors, 0, "{report:?}");
+        assert!(report.provider_unavailable.is_empty());
+        assert!(store
+            .items_needing_metadata(Some(lib), false, None)
+            .await
+            .expect("retry candidates")
+            .is_empty());
+    }
+
+    /// The image CDN is a different host: when only it is down, titles still
+    /// match, one download's attempts settle it, and the downloads that were
+    /// never sent record no attempt — so the retry sweep picks those posters
+    /// up on its next cycle instead of after a day's backoff.
+    #[tokio::test]
+    async fn an_unreachable_image_server_stops_downloads_but_not_matching() {
+        const TITLES: usize = 4;
+        let (store, lib, ids) = numbered_movies(TITLES).await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let dead = serve(hanging_counter(Arc::clone(&hits))).await;
+        let live = serve(numbered_movie_mock(true)).await;
+        let artwork = canonical_tempdir();
+        let tmdb = TmdbClient::new("k")
+            .with_base(&live, &dead)
+            // Long enough that the live mock always answers in time.
+            .with_http(short_deadline_client(1_000));
+
+        let report = enrich_library(&store, &tmdb, artwork.path(), Some(lib), false, None).await;
+
+        assert_eq!(hits.load(Ordering::SeqCst), tmdb::MAX_ATTEMPTS as usize);
+        assert_eq!(report.matched, TITLES, "{report:?}");
+        assert_eq!(report.deferred, 0);
+        assert_eq!(report.provider_unavailable.len(), 1, "{report:?}");
+        assert!(report.provider_unavailable[0].contains("image server could not be reached"));
+        let first = store.get_item(ids[0]).await.expect("get").expect("first");
+        assert!(first.poster_path.is_none());
+        let rest = store.get_item(ids[1]).await.expect("get").expect("second");
+        assert!(rest.poster_path.is_none());
+        assert!(
+            rest.artwork_attempted_at.is_none() && rest.artwork_error.is_none(),
+            "a download never sent records no attempt: {rest:?}"
+        );
+    }
+
+    /// AniList has no retry loop: its one failed call is the definitive one.
+    #[tokio::test]
+    async fn an_unreachable_anilist_is_reported_once_and_its_shows_stay_queued() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let lib = store
+            .create_library(&NewLibrary {
+                name: "Anime".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![],
+                anime: true,
+            })
+            .await
+            .expect("lib");
+        for title in ["One", "Two", "Three"] {
+            store
+                .insert_item(&NewItem {
+                    library_id: lib.id,
+                    kind: ItemKind::Show,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("show");
+        }
+        let client = AniListClient::new().with_base("http://127.0.0.1:1");
+        let artwork = canonical_tempdir();
+
+        let report =
+            enrich_anime_library(&store, &client, artwork.path(), lib.id, false, None).await;
+
+        assert_eq!(report.deferred, 3, "{report:?}");
+        assert_eq!(report.errors, 1, "{report:?}");
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(report.problems[0].contains("AniList could not be reached"));
+        assert_eq!(
+            store
+                .items_needing_metadata(Some(lib.id), false, None)
+                .await
+                .expect("retry candidates")
+                .len(),
+            3
+        );
     }
 
     /// A movie library with one movie in it, titled however you like.

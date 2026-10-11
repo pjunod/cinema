@@ -244,6 +244,31 @@ pub async fn backfill_pass_with_publication(
                 ));
                 return Some(report);
             }
+            // The provider failed in transport and its client will not ask it
+            // again this pass (`HostHealth`). Like a rate limit that is a fact
+            // about the run, so stop with the cursor on this title: carrying
+            // on would advance it past every remaining title as "failed"
+            // without a single request having been sent for them.
+            Err(e)
+                if if anime {
+                    anilist.unreachable().is_some()
+                } else {
+                    tmdb.is_some_and(|tmdb| tmdb.unreachable().is_some())
+                } =>
+            {
+                let provider = if anime { "AniList" } else { "TMDB" };
+                tracing::warn!(
+                    item = item.id,
+                    error = %e,
+                    "genre backfill: provider unreachable; pausing until the next pass"
+                );
+                report.note(format!(
+                    "{provider} could not be reached at `{}` ({e}) — the backfill \
+                     resumes there on the next pass",
+                    item.title
+                ));
+                return Some(report);
+            }
             Err(e) => {
                 tracing::error!(item = item.id, error = %e, "genre backfill: lookup failed");
                 report.failed += 1;
@@ -452,6 +477,33 @@ mod tests {
             }
         }
         n
+    }
+
+    /// An unreachable TMDB is a fact about the run, like a 429: the pass
+    /// stops with the cursor where it was instead of stamping every remaining
+    /// title failed (LAB2 C-02), and the next pass backfills them.
+    #[tokio::test]
+    async fn an_unreachable_provider_pauses_the_backfill_without_advancing_it() {
+        let (store, ids) = seed(3).await;
+        let dead = TmdbClient::new("k").with_base("http://127.0.0.1:1", "http://127.0.0.1:1");
+
+        let report = backfill_pass(&store, Some(&dead), &AniListClient::new(), Duration::ZERO)
+            .await
+            .expect("armed");
+
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(report.cursor, report.resumed_from, "{report:?}");
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(report.problems[0].contains("TMDB could not be reached"));
+        assert!(is_armed(&store).await);
+
+        let hits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = serve(details_mock(hits, false)).await;
+        let live = TmdbClient::new("k").with_base(&base, &base);
+        backfill_pass(&store, Some(&live), &AniListClient::new(), Duration::ZERO)
+            .await
+            .expect("still armed");
+        assert_eq!(with_genres(&store, &ids).await, 3);
     }
 
     /// The acceptance case: kill a pass mid-run and the next one picks up

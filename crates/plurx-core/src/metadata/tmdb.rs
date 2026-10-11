@@ -8,9 +8,8 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 
 use super::{
-    bounded_json_response, provider_client, provider_outcome, record_provider_request,
-    request_error, Provider, ProviderOutcome, PROVIDER_CALL_BUDGET, PROVIDER_CONNECT_TIMEOUT,
-    PROVIDER_READ_TIMEOUT, PROVIDER_TOTAL_TIMEOUT,
+    bounded_json_response, provider_client, record_provider_result, HostHealth, Provider,
+    PROVIDER_CALL_BUDGET, PROVIDER_CONNECT_TIMEOUT, PROVIDER_READ_TIMEOUT, PROVIDER_TOTAL_TIMEOUT,
 };
 use crate::error::MetadataError;
 
@@ -21,7 +20,7 @@ const IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
 /// Three because the failure being ridden out is a burst limit measured in
 /// seconds; a longer outage is the retry *sweep's* problem, not this loop's,
 /// and holding a scan open for it helps nobody.
-const MAX_ATTEMPTS: u32 = 3;
+pub(super) const MAX_ATTEMPTS: u32 = 3;
 /// First backoff step, doubling thereafter. Short enough that a scan does not
 /// visibly stall on one blip.
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
@@ -116,6 +115,10 @@ pub struct TmdbClient {
     /// failure is invisible from outside: each show still matches, still gets
     /// its poster, and just quietly has no genres.
     genre_index_failed: std::sync::atomic::AtomicBool,
+    /// The API host and the image CDN, tracked apart: they are different
+    /// hosts, and a CDN outage must not stop titles from matching.
+    api_health: HostHealth,
+    image_health: HostHealth,
 }
 
 /// TMDB genre ids to names, for one vocabulary.
@@ -168,7 +171,28 @@ impl TmdbClient {
             .into_iter()
             .collect(),
             genre_index_failed: std::sync::atomic::AtomicBool::new(false),
+            api_health: HostHealth::default(),
+            image_health: HostHealth::default(),
         }
+    }
+
+    /// Why this client stopped calling the TMDB API, if it has: the
+    /// transport failure that ended a call after its retries. The client
+    /// lives for one pass, so the next pass asks again.
+    pub fn unreachable(&self) -> Option<&str> {
+        self.api_health.cause()
+    }
+
+    /// The same for TMDB's image CDN.
+    pub fn images_unreachable(&self) -> Option<&str> {
+        self.image_health.cause()
+    }
+
+    /// Swap the transport, so a test can shorten its deadlines.
+    #[cfg(test)]
+    pub(crate) fn with_http(mut self, http: reqwest::Client) -> Self {
+        self.http = http;
+        self
     }
 
     /// Point the API and image bases elsewhere (self-hosted TMDB proxy, tests).
@@ -182,7 +206,7 @@ impl TmdbClient {
     async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value, MetadataError> {
         let url = format!("{}{path}", self.base);
         let response = self
-            .send_with_retry(|| {
+            .send_with_retry(&self.api_health, || {
                 let mut req = self.authorize(self.http.get(&url));
                 for (k, v) in query {
                     req = req.query(&[(*k, v.as_str())]);
@@ -198,13 +222,7 @@ impl TmdbClient {
             },
             Err(error) => Err(error),
         };
-        record_provider_request(
-            Provider::Tmdb,
-            result
-                .as_ref()
-                .map(|_| ProviderOutcome::Ok)
-                .unwrap_or_else(provider_outcome),
-        );
+        record_provider_result(Provider::Tmdb, &result);
         result
     }
 
@@ -216,7 +234,7 @@ impl TmdbClient {
     /// is accepted by the same v3 endpoints as `Authorization: Bearer`, which
     /// never appears in a URL and is marked sensitive by reqwest. Whichever
     /// one the setting holds is sent the only way it works. A URL carrying a
-    /// v3 key still never reaches a log line: [`request_error`] strips it.
+    /// v3 key still never reaches a log line: [`super::request_error`] strips it.
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if is_read_access_token(&self.api_key) {
             request.bearer_auth(&self.api_key)
@@ -236,8 +254,11 @@ impl TmdbClient {
     /// same word. So only 429 and 5xx come back here.
     async fn send_with_retry(
         &self,
+        health: &HostHealth,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, MetadataError> {
+        // Before the allowance: a call that will not be sent costs nothing.
+        health.check()?;
         let started = Instant::now();
         let mut delay = RETRY_BASE_DELAY;
         for attempt in 1..=MAX_ATTEMPTS {
@@ -285,12 +306,12 @@ impl TmdbClient {
                 // A connection that never completed is the same kind of
                 // transient as a 503, and the request was never served, so
                 // repeating it cannot double anything.
-                Err(e) if last => return Err(request_error(e)),
+                Err(e) if last => return Err(health.failed(e)),
                 Err(e) => {
                     tracing::debug!(error = %e, attempt, "tmdb request failed; retrying");
                     let remaining = PROVIDER_CALL_BUDGET.saturating_sub(started.elapsed());
                     if delay >= remaining {
-                        return Err(request_error(e));
+                        return Err(health.failed(e));
                     }
                     super::budget::cancellable(tokio::time::sleep(delay)).await?;
                 }
@@ -547,17 +568,14 @@ impl TmdbClient {
         // Same retry as the API calls, and needed more: the image CDN is hit
         // once per poster and once per backdrop, so it absorbs the bulk of a
         // scan's requests and is where a rate limit lands first.
-        let result = match self.send_with_retry(|| self.http.get(&url)).await {
+        let result = match self
+            .send_with_retry(&self.image_health, || self.http.get(&url))
+            .await
+        {
             Ok(response) => super::bounded_artwork_response(response).await,
             Err(error) => Err(error),
         };
-        record_provider_request(
-            Provider::Tmdb,
-            result
-                .as_ref()
-                .map(|_| ProviderOutcome::Ok)
-                .unwrap_or_else(provider_outcome),
-        );
+        record_provider_result(Provider::Tmdb, &result);
         result
     }
 }
