@@ -20,9 +20,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, ci-coverage]
     container:
       image: ubuntu:24.04
-      options: --cpus 2 --memory 6g --memory-swap 8g
+      options: --cpus 2 --memory 6g --memory-swap 10g
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"
     # Instrumented cold builds need headroom beyond the ordinary unit lane.
     # The uninstrumented suite alone grew to ~55 minutes in the week of

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
 
@@ -47,12 +48,44 @@ def configuration(source, labels, cpus):
         for key in ("CARGO_BUILD_JOBS", "RUST_TEST_THREADS"):
             pattern = rf"^    {key}:.*$"
             if re.search(pattern, section, re.M):
-                section = re.sub(pattern, f'    {key}: "2"', section, flags=re.M)
+                section = re.sub(pattern, f'    {key}: "{1 if key == "CARGO_BUILD_JOBS" else 2}"', section, flags=re.M)
             else:
-                section = section.replace("  envs:\n", f'  envs:\n    {key}: "2"\n', 1)
+                section = section.replace("  envs:\n", f'  envs:\n    {key}: "{1 if key == "CARGO_BUILD_JOBS" else 2}"\n', 1)
         return section
     source = section_update(source, "runner", runner)
-    return section_update(source, "container", lambda section: field(section, "options", f"--cpus {cpus} --memory 6g --memory-swap 8g --pids-limit 4096"))
+    return section_update(source, "container", lambda section: field(section, "options", f"--cpus {cpus} --memory 6g --memory-swap 10g --pids-limit 4096"))
+
+
+def ensure_swap(path=Path("/var/lib/plurx-ci/runner.swap"), fstab=Path("/etc/fstab"), swaps=Path("/proc/swaps"), execute=run, disk=shutil.disk_usage):
+    """Give bounded compiler jobs real backing without consuming the disk reserve."""
+    size = 4 * 1024 ** 3
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise RuntimeError("refusing symlink swap file")
+    if not path.exists():
+        if disk(path.parent).free < size + 8 * 1024 ** 3:
+            raise RuntimeError("guest swap requires 4 GiB plus 8 GiB free disk reserve")
+        temporary = path.with_name(path.name + ".creating")
+        # Exclusive creation prevents overwriting an interrupted or unrelated file.
+        fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        try:
+            execute("fallocate", "-l", str(size), str(temporary))
+            execute("mkswap", str(temporary))
+            os.replace(temporary, path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    if not path.is_file() or path.stat().st_size != size:
+        raise RuntimeError("unexpected existing runner swap file; refusing to replace it")
+    path.chmod(0o600)
+    entry = f"{path} none swap sw 0 0"
+    source = fstab.read_text()
+    if not any(line.split() and line.split()[0] == str(path) for line in source.splitlines() if not line.lstrip().startswith("#")):
+        write_owned(fstab, source.rstrip() + "\n" + entry + "\n")
+    active = {line.split()[0] for line in swaps.read_text().splitlines()[1:] if line.split()}
+    if str(path) not in active:
+        execute("swapon", str(path))
 
 
 def write_owned(path, content):
@@ -95,6 +128,7 @@ def guest(spec):
     if not match:
         raise ValueError("cannot locate existing runner config")
     path = Path(match[1])
+    ensure_swap()
     source = path.read_text()
     updated = configuration(source, labels, 2 if coverage else 3)
     backup = path.with_name(path.name + ".before-resource-budget")
@@ -105,7 +139,7 @@ def guest(spec):
     directory = Path("/etc/systemd/system") / (unit + ".d")
     directory.mkdir(exist_ok=True)
     cpus = 2 if coverage else 3
-    changed |= write_owned(directory / "20-resource-budget.conf", f"[Service]\nMemoryHigh=5G\nMemoryMax=6G\nMemorySwapMax=2G\nCPUQuota={cpus * 100}%\nRestart=always\nRestartSec=5\nTimeoutStopSec=30min\nEnvironment=CARGO_BUILD_JOBS=2\nEnvironment=RUST_TEST_THREADS=2\n")
+    changed |= write_owned(directory / "20-resource-budget.conf", f"[Service]\nMemoryHigh=5G\nMemoryMax=6G\nMemorySwapMax=4G\nCPUQuota={cpus * 100}%\nRestart=always\nRestartSec=5\nTimeoutStopSec=30min\nEnvironment=CARGO_BUILD_JOBS=1\nEnvironment=RUST_TEST_THREADS=2\n")
     for other in set(retired):
         directory = Path("/etc/systemd/system") / (other + ".d")
         directory.mkdir(exist_ok=True)
@@ -117,7 +151,7 @@ def guest(spec):
     if changed:
         run("systemctl", "restart", "--no-block", unit)
     for name in run("docker", "ps", "--filter", "name=ACTIONS-TASK-", "--format", "{{.Names}}").splitlines():
-        run("docker", "update", "--cpus", str(cpus), "--memory", "6g", "--memory-swap", "8g", name)
+        run("docker", "update", "--cpus", str(cpus), "--memory", "6g", "--memory-swap", "10g", name)
     print(json.dumps({"unit": unit, "changed": changed, "retired": sorted(set(retired))}))
 
 

@@ -2075,8 +2075,8 @@ assert.equal(context.ACT_TIMER, null);
             coverage,
         )
         self.assertIn("image: ubuntu:24.04", coverage)
-        self.assertIn("options: --cpus 2 --memory 6g --memory-swap 8g", coverage)
-        self.assertIn('CARGO_BUILD_JOBS: "2"', coverage)
+        self.assertIn("options: --cpus 2 --memory 6g --memory-swap 10g", coverage)
+        self.assertIn('CARGO_BUILD_JOBS: "1"', coverage)
         self.assertIn('RUST_TEST_THREADS: "2"', coverage)
         steps = workflow_step_blocks(coverage)
         install = steps["Install coverage prerequisites"]

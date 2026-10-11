@@ -21,14 +21,18 @@ general/high-cpu pool while six more measurements waited behind it.
 | `lab6` and `lab4` | Two 8 GiB runner VMs per host, one active Forgejo daemon per VM. Duplicate `lab6` daemons are disabled. |
 | Host user workloads | `user-1000.slice`: `MemoryHigh=4G`, `MemoryMax=6G`, `MemorySwapMax=4G`; this limits all operator processes in that slice, including direct compiles. Docker production services have separate cgroups. |
 | `lab4` swap | The existing 8 GiB swap file is activated and restored in fstab; no new disk allocation. |
-| General VM jobs | Runner container options: `--cpus 3 --memory 6g --memory-swap 8g --pids-limit 4096`; two Cargo jobs and two Rust test threads. Host-mode runner services also have a 6 GiB cgroup cap and 300% CPU quota. |
+| General VM jobs | Runner container options: `--cpus 3 --memory 6g --memory-swap 10g --pids-limit 4096`; one Cargo job and two Rust test threads. Host-mode runner services also have a 6 GiB cgroup cap and 300% CPU quota. |
 | Coverage | Reserved `lab6` second VM, `ci-coverage` label only, two CPUs and 6 GiB memory. Manual dispatch replaces push-triggered coverage. |
 | `lab3` | Both runner VMs retired, `boot.autostart=false`; neither belongs to a recovery allowlist. Production and observability retain its disk. |
 | Apple janitor | Fixed 25 GiB job reserve, no reset for a cache below 1 GiB, verified bounded bootstrap retries, unloaded-daemon recovery before cache inspection, five-minute checks. Intentional `launchctl disable` is respected. |
 
-An oversized compiler can now fail inside its own budget instead of removing
-an entire runner from the fleet. `--memory-swap` is a ceiling, not a promise
-that a guest has swap. The VM's 8 GiB allocation remains the outer boundary.
+Each active guest has a persistent 4 GiB swap file. Reconciliation creates it
+only with at least 12 GiB free, leaving an 8 GiB disk reserve; existing files
+are never replaced. A 6 GiB resident-memory cap plus 4 GiB swap lets large
+compiler processes finish while the VM allocation remains 8 GiB. Without
+guest swap, two concurrent compiler processes were killed by the 6 GiB cap.
+Jobs beyond this combined budget fail inside the guest instead of removing
+the VM. The retired `lab3` guests receive no swap allocation.
 
 The host user budget is persistent systemd configuration:
 
@@ -37,10 +41,10 @@ sudo systemctl set-property user-1000.slice MemoryHigh=4G MemoryMax=6G MemorySwa
 ```
 
 Each guest runner's `config.yml` keeps `capacity: 1`,
-`shutdown_timeout: 30m`, `CARGO_BUILD_JOBS: "2"` and `RUST_TEST_THREADS: "2"`
+`shutdown_timeout: 30m`, `CARGO_BUILD_JOBS: "1"` and `RUST_TEST_THREADS: "2"`
 under `runner.envs`, plus the table's resource flags under `container.options`.
 Its `20-resource-budget.conf` systemd drop-in sets `MemoryHigh=5G`,
-`MemoryMax=6G`, `MemorySwapMax=2G`, `CPUQuota=300%` (200% for coverage),
+`MemoryMax=6G`, `MemorySwapMax=4G`, `CPUQuota=300%` (200% for coverage),
 `Restart=always`, `RestartSec=5` and `TimeoutStopSec=30min`. Request a graceful
 restart after changing configuration; do not reboot a VM with a live job.
 
@@ -56,7 +60,8 @@ cat /var/lib/plurx-runner-watchdog/state.json
 ```
 
 The reconciliation command keeps each existing registration and config credentials,
-backs up config with mode 0600, applies capacity/build/container/service budgets,
+backs up config with mode 0600, activates persistent guest swap, applies
+capacity/build/container/service budgets,
 and requests a graceful restart only when configuration changed. The JSON carries
 explicit labels and retired duplicate units. A coverage guest retires all GitHub
 runner services as well; reconciliation refuses while a GitHub worker is active.
