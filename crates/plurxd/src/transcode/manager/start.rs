@@ -11,6 +11,8 @@ pub(super) struct RollingStartInputs {
     pub(super) file: plurx_core::domain::MediaFile,
     pub(super) probe_json: Option<String>,
     pub(super) settings: std::collections::BTreeMap<String, String>,
+    /// The file's item title from the same statement, for attribution only.
+    pub(super) item_title: Option<String>,
 }
 
 impl RollingStartInputs {
@@ -48,6 +50,7 @@ impl TranscodeManager {
                 file: snapshot.file.clone(),
                 probe_json: snapshot.probe_json.clone(),
                 settings: snapshot.settings.clone(),
+                item_title: snapshot.item_title.clone(),
             });
         }
         let snapshot = self
@@ -60,6 +63,7 @@ impl TranscodeManager {
             file: snapshot.file,
             probe_json: snapshot.probe_json,
             settings: snapshot.settings,
+            item_title: snapshot.item_title,
         })
     }
 
@@ -644,6 +648,7 @@ impl TranscodeManager {
             mut file,
             probe_json,
             settings,
+            item_title,
         } = inputs;
         let retained_budget = Self::rolling_retained_budget_from(&settings);
         let pacing = Self::pacing_from_settings(&settings, false).await;
@@ -659,14 +664,7 @@ impl TranscodeManager {
         };
         #[cfg(windows)]
         let source_handle = bind_windows_session_source(&mut file).await?;
-        let item_title = self
-            .store
-            .get_item(file.item_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|i| i.title)
-            .unwrap_or_else(|| "(unknown)".to_owned());
+        let item_title = item_title.unwrap_or_else(|| "(unknown)".to_owned());
 
         // Which tracks this session carries. Before the hardware slot, because
         // the cache lookup below needs the answer — two sessions differing only
@@ -1796,6 +1794,7 @@ impl TranscodeManager {
             mut file,
             probe_json: stored_probe,
             settings,
+            item_title,
         } = self.rolling_start_inputs(file_id, None).await?;
         let retained_budget = Self::rolling_retained_budget_from(&settings);
         // Same make-before-break rule as the transcode path. A takeover
@@ -1845,14 +1844,7 @@ impl TranscodeManager {
             copy_delivers_hdr,
         )
         .audio_index;
-        let item_title = self
-            .store
-            .get_item(file.item_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|i| i.title)
-            .unwrap_or_else(|| "(unknown)".to_owned());
+        let item_title = item_title.unwrap_or_else(|| "(unknown)".to_owned());
         // Every object this session writes passes a Rust grant boundary
         // before it exists, so it may start small and grow. Sizing covers the
         // *effective* startup gate —

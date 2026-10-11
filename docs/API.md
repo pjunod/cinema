@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-11, plurx has 358 routes declared by the ordinary listener's
+As of 2026-10-11, plurx has 361 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -451,6 +451,10 @@ of never storing it.
 | GET | `/api/v1/system/playback-events` | admin | Node-local playback observations |
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
 | POST | `/api/v1/system/storage` | admin | Re-measures storage. Costs real I/O |
+| GET | `/api/v1/system/tone-map/census` | admin | Tone-map census status and this node's stored result |
+| POST | `/api/v1/system/tone-map/census` | admin | Queues a tone-map census. 202; 409 while one is queued or running. Uses the GPU |
+| POST | `/api/v1/system/tone-map/census/stop` | admin | Stops a queued or running census, killing its child |
+| GET | `/api/v1/system/tone-map/census/stills/{name}` | admin | One PNG still from the stored census result |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
@@ -624,6 +628,31 @@ returns the freshly measured report; an immediate 200 carrying the old figures
 would be worse than a slow one. It is a POST precisely so that reading the
 last numbers through `GET /api/v1/system` is never the thing that goes and
 takes new ones.
+
+### 5.3a The tone-map census — `/api/v1/system/tone-map/census`
+
+An operator-run measurement of every GPU tone-map graph this node can pair
+with its encoder, against the CPU chain, on authored PQ signals
+([TONE-MAP-CENSUS.md](streaming/TONE-MAP-CENSUS.md)). It never runs on its own.
+
+`POST` queues a run and answers `202` with the census object at once; `409`
+while one is already queued or running. The run takes a **background**
+hardware permit, so it waits while any viewer holds or wants the hardware and
+yields (kills its ffmpeg, releases the permit) the moment a live start
+arrives. `POST …/stop` stops it the same way. `GET` returns the object below;
+`GET /api/v1/system` carries the same object as `tone_map.census`.
+
+| Field | Meaning |
+|---|---|
+| `state` | `idle` · `queued` · `running` · `finished` · `yielded` (gave the hardware to playback — not a failure) · `stopped` · `failed` |
+| `step`, `candidate` | What a queued or running census is doing, and which graph |
+| `reason` | Why it failed, stopped or yielded |
+| `since` | Unix ms of the last state change |
+| `key` | `ffmpeg_version`, `encoder_family`, `gpu_device` — results are stored and shown per key |
+| `result` | The stored result for `key`, or `null`: `signals` (name, `max_cll`, `max_fall`), `baseline` per signal (`brightest_block_luma`, `noise_floor`, `still`), `noise_floor_zero`, and `candidates[]` each with `pipeline`, `label`, `selected` and per-signal `started`, `reason`, `distance` (`max` and `p95`, each `[Y, U, V]` in 8-bit levels of 16 × 9 block means), `brightest_block_luma`, `still` |
+
+`GET …/stills/{name}` serves `image/png` for a `still` the current result
+names, and `404` for any other name.
 
 ### 5.4 `GET /api/v1/system/logs`
 

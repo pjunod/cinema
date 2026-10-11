@@ -1003,6 +1003,7 @@ async fn plan_preparation_with_candidate(
                     None,
                     predecessor.request.hdr10,
                     Some(height),
+                    None,
                 )
                 .await
             }
@@ -1019,6 +1020,7 @@ async fn plan_preparation_with_candidate(
                     None,
                     predecessor.request.hdr10,
                     Some(height),
+                    None,
                 )
                 .await
             }
