@@ -2152,3 +2152,171 @@ encode, and all 24 decoded frames pass. The first object arrives in 1.48
 seconds, shutdown exits 0, and the window takes 129.5 seconds with
 production unchanged. The window is recorded in the §43 evidence record.
 
+## 45. Intel strict-P5 qualification and its two root causes — 2026-10-11
+
+The owner approved the Intel transfer on 2026-10-11. The authentic shipping
+image (`sha256:4a3164fb…`) and the observer image (`sha256:11308ed3…`) were
+copied directly between the two nodes, and both keep their image IDs. The
+qualification kit was copied with them, and every hash matches: collector
+`aa95d683`, source `d8640232`, frozen daemon `e9191b68`. The node is an
+Alder Lake-P GPU (`0x8086:0x46a6`, i915, kernel 7.0) running the packaged
+iHD driver. Every window uses the AMD contract unchanged:
+
+- fresh holder admission and a production-epoch check;
+- 2 CPUs and no network;
+- all capabilities dropped;
+- an owned container, removed afterwards.
+
+i915 exposes no `gpu_busy_percent`, so GPU activity is recorded from the GT
+actual frequency, which is advisory. The holder set remains authoritative.
+
+**Raw graphs pass.** The raw collector passes all 32 strict controls twice:
+with VA-API encode (28.2 s) and with QSV encode (32.6 s). Production was
+unchanged in both windows, and every owned child was reaped.
+
+**The daemon's probe admitted nothing.** The frozen candidate `2c5a15c5`
+published `loaded_package_object_mismatch`, refused the whole generation and
+reported no graphs. The raw closures show why. Both QSV discovery graphs
+load `/usr/lib/x86_64-linux-gnu/libmfxhw64.so.1.35` beside the packaged
+copy.
+
+- The packaged oneVPL dispatcher enumerates the system library directories
+  as well as the package's.
+- The shipping image also carries Debian's `libmfx1`, which the Debian
+  ffmpeg libraries of the incumbent path pull in.
+- Discovery matched loaded objects to the package inventory by file name
+  alone. It therefore hashed the system copy against the packaged digest
+  (`ff248078…` against `74845de3…`) and returned the mismatch as a fatal
+  probe error. That discarded every graph, the VA-API ones included.
+
+A file outside the package root that carries a packaged runtime's name is a
+different library, not evidence about the package. Such a graph now refuses
+itself in discovery with `foreign_runtime_object`, and the remaining graphs
+still qualify (`766a3fd3`). Two cases stay fatal:
+
+- a packaged file whose bytes differ from the audit;
+- an uninventoried engine module inside the package.
+
+QSV becomes an exact-package graph on this image only once the image stops
+carrying a second Media SDK. That is recorded as a backlog follow-up.
+
+**QSV's Main10 proofs used a frame the encoder rejects.** The same daemon
+log, and every start of the production Intel node, also shows two messages:
+
+- "could not run the QSV Main10 encode for a plain HDR source", so the 4K
+  HDR10 rung is refused;
+- "could not run the Dolby Vision HDR10 hardware encode graph", so Dolby
+  Vision HDR10 output uses the software encoder.
+
+Both proofs encode one 64×64 frame. Measured with the daemon's exact proof
+graph on the shipping image:
+
+| Raster | Result |
+| --- | --- |
+| 64×64 | Stalls, then is killed at 30 s (exit 137). An earlier unbounded run ended in "Invalid FrameType:0", as production logs |
+| 128×128, 256×144, 320×180, 640×360, 1920×1080 | Exit 0 |
+
+This is the class `c862c6a9` fixed for the AMD pairing proof. Every
+hardware-encoder proof now shares one raster constant,
+`HARDWARE_ENCODE_PROOF_RASTER`, which is the 1080p delivery raster. The two
+QSV Main10 proofs now share one builder made from the encoder's production
+device init, P010 upload and Main10 arguments (`57cd7d45`). Software proofs
+keep their small frame.
+
+**The fixed daemon qualifies.** Daemon `57cd7d45` was built incrementally
+over a cold build of main `74182660` (1036 s). The build took 749 s, using
+pinned Rust 1.97.1 in `rust:1.97.1-bookworm` and the unchanged release
+profile, with 4 CPUs and 13 GB. Its `plurxd` SHA-256 is `0185458c…` and its
+debug `.dwp` is `973c4898…`. On the Intel node:
+
+- Its probe admits the four Software/VA-API graphs. It refuses both QSV
+  graphs as `discovery · foreign_runtime_object`.
+- Both QSV Main10 proofs now pass ("proved the QSV Main10 encode", "proved
+  the Dolby Vision HDR10 renderer's hardware encode half").
+
+| Encoder setting | Session encoder | Strict graph | Result |
+| --- | --- | --- | --- |
+| `vaapi` | VA-API | VA-API decode and `h264_vaapi` encode | All 24 frames pass; first object 0.72 s; window 119.7 s |
+| Automatic (unset) | VA-API | Same strict graph, because the QSV graphs are not in the observed envelope | All 24 frames pass; first object 0.63 s |
+| `qsv` (forced by the operator) | Intel QuickSync | Not selected: QSV is outside the observed envelope | Incumbent software Dolby renderer (software decode, `tonemapx … apply_dovi=1`) with `h264_qsv`. All 24 frames are correct; strict checks fail by design |
+
+All three windows shut the daemon down cleanly with production unchanged.
+The forced-QSV window is evidence of envelope enforcement, not a failure to
+deliver. One earlier window was refused before any media work, because the
+copied daemon was not executable. It remains recorded.
+
+**AMD requalified.** The same daemon passes the AMD normal-API window. The
+probe admits the same four graphs and reports both QSV candidates as
+`graph_failed`. Encoder `VA-API`, all 24 frames pass, the first object
+arrives in 0.61 s and the window takes 78.1 s. Three earlier admissions were
+refused and remain recorded: production's own ffmpeg held the GPU twice,
+and a foreign compile left 0.6 GiB of memory once.
+
+**Review round.** One independent adversarial review read the branch. It
+reported one major and four minor findings.
+
+- **Major, partly rejected.** The classifier had been inserted between
+  `graph_refusal`'s doc comment and its `#[cfg]`, which the reviewer said
+  broke non-Linux builds. That part is rejected, because `linux_dolby` is a
+  Linux-only module: a macOS Clippy of plurxd with all targets passes before
+  and after the fix. The item documentation was wrong, though, so the
+  classifier now sits above `graph_refusal`, and its redundant cfgs are
+  removed.
+- **Minor, accepted: the refusal did not say which runtime.** It now names
+  the foreign file as `object`, by file name only, which keeps a stray
+  Media SDK distinguishable from a misdirected VA driver or a preloaded
+  system libavcodec.
+- **Minor, accepted: the raster test could pass if a probe re-inlined its
+  frame size.** A source guard now pins both QSV Main10 probes to the proof
+  builder.
+- **Minor, noted: an operator who forces `qsv` gets the incumbent renderer.**
+  This is recorded above as envelope enforcement, and the backlog follow-up
+  covers it.
+- **Minor, accepted: no non-Linux compile check.** The macOS Clippy run
+  above closes it.
+
+These changes are in `36b9a690`.
+
+**Final tree.** `36b9a690` builds incrementally in 722 s (`plurxd` SHA-256
+`29ef709f…`, debug `.dwp` `97013fbc…`). On the Intel node, with the encoder
+setting left automatic:
+
+- the probe reports both QSV graphs as
+  `foreign_runtime_object · object libmfxhw64.so.1.35`;
+- the session encoder is VA-API, and the strict graph runs with VA-API
+  decode and encode;
+- all 24 frames pass, and the first object arrives in 0.87 s;
+- production is unchanged.
+
+Regressions:
+
+- `crates/plurxd/src/ffmpeg/linux_dolby.rs::a_packaged_role_outside_the_package_is_foreign_not_a_package_mismatch`
+- `crates/plurxd/src/ffmpeg/linux_dolby.rs::a_foreign_runtime_refusal_names_the_file_not_its_directory`
+- `crates/plurxd/src/ffmpeg.rs::hardware_main10_proofs_use_a_raster_every_hardware_encoder_accepts`
+- `crates/plurxd/src/ffmpeg.rs::qsv_main10_probes_take_their_graph_from_the_proof_builder`
+
+These and the surrounding `linux_dolby`, `p5` and proof-raster tests pass
+(25 tests). Pinned Rust 1.97.1 workspace Clippy with denied warnings passes
+on Linux, and plurxd all-targets Clippy passes on macOS. No other unit suite
+ran.
+
+[Intel strict-P5 evidence](evidence/macos-video-20261008/intel-strict-p5-evidence.tar.gz)
+is 107104 compressed bytes, SHA-256
+`f9389ef71402337f2033e2b99f7c0c9d526a90b2ed4a6416b472514cc8978943`. Its
+members were reopened and compared byte-for-byte. It holds three neutral
+JSON records:
+
+- every Intel window, with admission, monitor, raw controls, discovered
+  closures, the daemon reports, observations, producer argv and ffmpeg
+  timelines;
+- the AMD requalification windows;
+- both daemon build records.
+
+It also embeds the QSV raster measurement, the foreign-object comparison,
+and the window and driver scripts with their hashes. The two raw windows ran
+an earlier, Intel-only revision of the window script, which was later
+generalized in place. Their receipts record the exact argv.
+
+This is one Intel Alder Lake-P node and one AMD node. It makes no NVIDIA,
+other-generation, deployment, performance, concurrency or client-presentation
+claim.
