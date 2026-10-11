@@ -82,7 +82,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
 // one physical read in `hiqlite.rs` that was already counted. Its new reads
 // (the audio_recipe shape probe, the two schema-lineage reads, candidate
 // recovery memory, the unobserved-file cursor) each carry a reason.
-const UNANNOTATED_CEILING: usize = 238;
+const UNANNOTATED_CEILING: usize = 237;
 
 const SITE: &str = "query_consistent";
 const REASON: &str = "// authority:";

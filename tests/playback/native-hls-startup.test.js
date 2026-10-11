@@ -221,3 +221,226 @@ test('native deferred attachment cannot fetch after it is cancelled or supersede
   assert.equal(h.requests.length,0);assert.equal(h.sources.length,0);h.stop();
  }
 });
+
+// ---------------------------------------------------------------------------
+// Startup lab (A-M0 of docs/streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md):
+// scripts/playback-startup-lab and the fixture's arm mode. The advertised
+// target and the bootstrap are separate parameters; the summariser's decision
+// may only name B = 32 000 when the 8 / 32 arm itself passed.
+const {execFileSync,spawn}=require('node:child_process'),os=require('node:os');
+const LAB=path.join(__dirname,'../../scripts/playback-startup-lab');
+const FIXTURE=path.join(__dirname,'native-hls-browser-fixture.py');
+function lab(args){
+ try{return {status:0,stdout:execFileSync('python3',[LAB,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']})};}
+ catch(error){return {status:error.status,stdout:String(error.stdout||''),stderr:String(error.stderr||'')};}
+}
+function plan(...args){const run=lab(['--plan',...args]);assert.equal(run.status,0,run.stderr);return JSON.parse(run.stdout);}
+function scratch(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'startup-lab-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return dir;}
+function fakeMedia(dir,segments=120){
+ fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'init.mp4'),'init');
+ for(let i=0;i<segments;i++)fs.writeFileSync(path.join(dir,`seg${String(i).padStart(5,'0')}.m4s`),'seg');
+ fs.writeFileSync(path.join(dir,'lab-media.json'),JSON.stringify({segment_seconds:2,segments,durations:Array(segments).fill(2)}));
+ return dir;
+}
+function serve(t,command,args){
+ return new Promise((resolve,reject)=>{
+  const child=spawn(command,args,{stdio:['ignore','pipe','pipe']});t.after(()=>child.kill());
+  let text='';child.stdout.on('data',chunk=>{text+=chunk;const port=/127\.0\.0\.1:(\d+)/.exec(text);if(port)resolve(`http://127.0.0.1:${port[1]}`);});
+  child.stderr.on('data',chunk=>{text+=chunk;});child.on('exit',code=>reject(Error(`exited ${code}: ${text}`)));
+ });
+}
+const tagOf=text=>Number(/#EXT-X-TARGETDURATION:(\d+)/.exec(text)[1]);
+const extinfs=text=>text.split('\n').filter(line=>line.startsWith('#EXTINF:')).map(line=>parseFloat(line.slice(8)));
+
+test('startup lab separates the advertised target from the bootstrap for every arm',()=>{
+ for(const [target,bootstrap] of [[16,48],[8,24],[8,32],[6,18],[4,12],[10,30]]){
+  const result=plan('--target',String(target),'--bootstrap',String(bootstrap),'--rate','1','--ticks','4');
+  assert.equal(tagOf(result.first_playlist),target);
+  assert.deepEqual(extinfs(result.first_playlist),Array(bootstrap/2).fill(2));
+  assert.match(result.first_playlist,/#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n/);
+  assert.doesNotMatch(result.first_playlist,/ENDLIST|PLAYLIST-TYPE/);
+  assert.equal(result.snapshots[0].end_s,bootstrap);
+  // Publication is due once per target, and 1x production adds one target of media.
+  assert.equal(result.snapshots[1].at_s-result.snapshots[0].at_s,target);
+  assert.equal(result.snapshots[1].end_s,bootstrap+target);
+ }
+ // Same target, different bootstrap: same tag, different first snapshot.
+ const a=plan('--arm','a','--rate','1.05'),b=plan('--arm','b','--rate','1.05');
+ assert.equal(tagOf(a.first_playlist),tagOf(b.first_playlist));
+ assert.deepEqual([a.snapshots[0].end_s,b.snapshots[0].end_s],[24,32]);
+ assert.deepEqual([a.arm,b.arm,plan('--target','10','--bootstrap','30').arm],['a','b','t10-b30']);
+});
+
+test('startup lab validates any pair by rule rather than a whitelist',()=>{
+ const refusals=[
+  [['--target','1','--bootstrap','12'],/shorter than the 2(\.0)? s segment/],
+  [['--target','21','--bootstrap','48'],/above the 20 s bound/],
+  [['--target','8','--bootstrap','14'],/under 2 x target \(16 s\)/],
+  [['--target','8','--bootstrap','126'],/reserve maximum/],
+  [['--target','8','--bootstrap','25'],/whole number of 2(\.0)? s segments/],
+  [['--target','8.5','--bootstrap','24'],/whole number of seconds/],
+  [['--target','8','--bootstrap','24','--rate','9'],/outside/],
+  [['--target','8','--bootstrap','24','--rate','0.1'],/outside/],
+ ];
+ for(const [args,message] of refusals){const run=lab(['--plan',...args]);assert.equal(run.status,2,args.join(' '));assert.match(run.stderr,message);}
+ for(const [target,bootstrap] of [[2,4],[8,16],[12,124],[20,40]])assert.equal(plan('--target',String(target),'--bootstrap',String(bootstrap)).target,target);
+});
+
+test('startup lab publishes at least one segment per cycle, caps the published lead and slides behind the viewer',()=>{
+ for(const rate of ['1','1.05','2']){
+  const result=plan('--arm','a','--rate',rate,'--ticks','120','--position-lag','3');
+  for(let i=1;i<result.snapshots.length;i++){
+   const [before,after]=[result.snapshots[i-1],result.snapshots[i]];
+   assert.ok(after.count>before.count,`tick ${i} at ${rate}x published nothing`);
+   assert.ok(after.media_sequence>=before.media_sequence);
+   assert.ok(after.lead_s<=48+2,`lead ${after.lead_s} at ${rate}x exceeds the steady reserve`);
+  }
+  const last=result.snapshots.at(-1);
+  assert.ok(last.media_sequence>0&&last.position_s-2*last.media_sequence<=30+2,'removed segments trail the viewer by about 30 s');
+ }
+});
+
+test('startup lab server serves the arm, refuses unpublished media and records a receipt',async t=>{
+ const dir=scratch(t),evidence=path.join(dir,'evidence');
+ const base=await serve(t,'python3',[LAB,'--media-dir',fakeMedia(path.join(dir,'media')),'--evidence-dir',evidence,'--port','0','--setup','0','--burst','1000']);
+ const refused=await fetch(`${base}/start?target=8&bootstrap=12&transport=hlsjs`);
+ assert.equal(refused.status,400);assert.match((await refused.json()).error,/under 2 x target/);
+ const {id,playlist}=await (await fetch(`${base}/start?arm=a&rate=2&transport=hlsjs`,{headers:{'user-agent':'lab-test'}})).json();
+ const text=await (await fetch(base+playlist)).text();
+ assert.equal(tagOf(text),8);assert.deepEqual(extinfs(text),Array(12).fill(2));
+ assert.match(text,new RegExp(`#EXT-X-MAP:URI="/media/${id}/init.mp4"`));
+ assert.equal((await fetch(`${base}/media/${id}/seg00011.m4s`)).status,200);
+ assert.equal((await fetch(`${base}/media/${id}/seg00012.m4s`)).status,404);
+ assert.equal((await fetch(`${base}/report/${id}`,{method:'POST',body:JSON.stringify({event:'first_frame',client_ms:900,position:0})})).status,200);
+ const rows=await (await fetch(`${base}/runs`)).json();
+ assert.equal(rows.length,1);assert.equal(rows[0].player,'hlsjs');assert.equal(rows[0].metrics.first_frame,true);
+ let receipt;
+ for(let i=0;i<40&&!receipt;i++){await new Promise(r=>setTimeout(r,100));try{receipt=JSON.parse(fs.readFileSync(path.join(evidence,`${id}.json`),'utf8'));if(!receipt.client.length)receipt=null;}catch{}}
+ assert.ok(receipt,'receipt written');
+ assert.deepEqual([receipt.target,receipt.bootstrap,receipt.rate,receipt.transport,receipt.user_agent],[8,24,2,'hlsjs','lab-test']);
+ assert.equal(receipt.reloads.length,1);
+ assert.deepEqual(Object.keys(receipt.reloads[0]).sort(),['changed','end_s','ended','interval_ms','media_sequence','segments','server_ms','since_first_playlist_ms','tick']);
+ assert.deepEqual([receipt.reloads[0].media_sequence,receipt.reloads[0].segments,receipt.reloads[0].end_s],[0,12,24]);
+ assert.equal(receipt.model.publication_cadence_s,8);assert.equal(receipt.rule.deficit_margin_s,2);
+ assert.match(receipt.rule.clean_rule,/zero buffer deficits/);
+ assert.equal(receipt.segment_requests.refused,1);
+});
+
+const SAFARI='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15';
+const CHROME='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
+let receiptOrdinal=0;
+function receipt(dir,{target,bootstrap,rate,transport,ua,defect=null,seconds=60}){
+ const client=[{event:'first_frame',client_ms:1000,position:0}];
+ let position=0;
+ for(let ms=2000;ms<=(seconds+2)*1000;ms+=1000){
+  position+=1;
+  if(defect==='jump'&&ms===30000)position+=5;
+  client.push({event:'sample',client_ms:ms,position,paused:false,ended:false,seeking:false,rate:1,ahead:defect==='deficit'&&ms===40000?1.0:20});
+ }
+ if(defect==='stall')client.push({event:'waiting',client_ms:30500,position:29.5});
+ if(defect==='pause')client.push({event:'pause',client_ms:30500,position:29.5});
+ if(defect==='fatal')client.push({event:'hls_error',client_ms:30500,fatal:true,type:'mediaError',details:'bufferAppendError'});
+ client.push({event:'run_complete',client_ms:(seconds+2)*1000,position});
+ for(const event of client)event.server_ms=event.client_ms+50;
+ const id=`run${++receiptOrdinal}`;
+ fs.writeFileSync(path.join(dir,`${id}.json`),JSON.stringify({schema:'plurx.startup-lab.run.v2',id,target,bootstrap,rate,transport,
+  user_agent:ua||(transport==='native'?SAFARI:CHROME),device:'',run_seconds:seconds,first_playlist_served_ms:500,endlist_served_ms:null,reloads:[],client}));
+}
+function matrix(dir,defects={},seconds=60){
+ for(const [arm,target,bootstrap] of [['a',8,24],['b',8,32]])
+  for(const transport of ['native','hlsjs'])for(const rate of [1.05,1,2]){
+   const key=`${arm}/${transport}/${rate}`;
+   if(defects[key]==='missing')continue;
+   receipt(dir,{target,bootstrap,rate,transport,defect:defects[key]||null,seconds});
+  }
+}
+function decide(dir){
+ const run=lab(['--summarize',dir,'--min-seconds','60']);
+ return {...run,result:JSON.parse(fs.readFileSync(path.join(dir,'decision.json'),'utf8'))};
+}
+
+test('startup lab summariser decides B = 24 000 only when 8 / 24 is clean everywhere',t=>{
+ const dir=scratch(t);matrix(dir);receipt(dir,{target:16,bootstrap:48,rate:1,transport:'native',defect:'stall'});
+ const {status,result}=decide(dir);
+ assert.equal(status,2);assert.equal(result.provisional_decision,'8 / 24 clean at every rate → B = 24 000');assert.equal(result.provisional_bootstrap_ms,24000);
+ assert.equal(result.missing_cells.length,0);assert.equal(result.required_cells.length,12);
+ assert.equal(result.acceptance_grade,false);assert.match(result.clean_rule,/under 2(\.0)? s while the served playlist has no ENDLIST/);
+ const control=result.cells.find(c=>c.arm==='control');assert.equal(control.status,'not clean','other arms are reported, not decided on');
+ const clean=result.cells.find(c=>c.arm==='a'&&c.player==='safari-native'&&c.rate===1.05);
+ assert.equal(clean.status,'clean');assert.equal(clean.runs[0].ttff_after_first_playlist_ms,550);
+});
+
+test('startup lab summariser names B = 32 000 only when 8 / 32 itself is clean everywhere',t=>{
+ for(const defect of ['stall','jump','deficit','fatal']){
+  const dir=scratch(t);matrix(dir,{'a/native/1.05':defect});
+  const {result}=decide(dir);
+  assert.equal(result.provisional_decision,'8 / 24 not clean, 8 / 32 clean at every rate → B = 32 000',defect);
+  assert.equal(result.provisional_bootstrap_ms,32000);
+  assert.equal(result.cells.find(c=>c.arm==='a'&&c.player==='safari-native'&&c.rate===1.05).status,'not clean');
+ }
+ const dir=scratch(t);matrix(dir,{'a/hlsjs/2':'stall','b/native/1':'jump'});
+ const {status,result}=decide(dir);
+ assert.equal(status,2);assert.equal(result.provisional_decision,'neither clean → Part A is not built');assert.equal(result.provisional_bootstrap_ms,null);
+});
+
+test('startup lab summariser names B only from acceptance-grade runs',t=>{
+ // Sixty-second runs judged at sixty seconds: what they would decide is
+ // provisional, and neither the decision nor B is written.
+ const short=scratch(t);matrix(short);
+ let {status,result}=decide(short);
+ assert.equal(status,2);assert.equal(result.acceptance_grade,false);
+ assert.equal(result.decision,null);assert.equal(result.bootstrap_ms,null);
+ assert.equal(result.provisional_bootstrap_ms,24000);assert.match(result.refusal,/not acceptance grade/);
+ // Full-length runs judged at the default length decide.
+ const full=scratch(t);matrix(full,{},1800);
+ const run=lab(['--summarize',full]);
+ result=JSON.parse(fs.readFileSync(path.join(full,'decision.json'),'utf8'));
+ assert.equal(run.status,0);assert.equal(result.acceptance_grade,true);
+ assert.equal(result.decision,'8 / 24 clean at every rate → B = 24 000');assert.equal(result.bootstrap_ms,24000);
+});
+
+test('startup lab summariser refuses to decide while a target-8 cell is missing',t=>{
+ // "Arm a failed, so use 32" is not a result: 8 / 32 has to have run everywhere.
+ const failedA=scratch(t);matrix(failedA,{'a/native/1':'stall','b/hlsjs/2':'missing'});
+ let {status,result}=decide(failedA);
+ assert.equal(status,2);assert.equal(result.provisional_decision,null);assert.equal(result.provisional_bootstrap_ms,null);
+ assert.deepEqual(result.missing_cells,['8 / 32 hlsjs 2x']);assert.match(result.refusal,/Missing: 8 \/ 32 hlsjs 2x$/);
+ // A clean 8 / 24 does not excuse a missing 8 / 32 either.
+ const onlyA=scratch(t);matrix(onlyA,Object.fromEntries(['native','hlsjs'].flatMap(p=>[1.05,1,2].map(r=>[`b/${p}/${r}`,'missing']))));
+ ({status,result}=decide(onlyA));
+ assert.equal(status,2);assert.equal(result.provisional_decision,null);assert.equal(result.missing_cells.length,6);
+ // A paused run is not counted, and native playback outside Safari is not Safari native.
+ const paused=scratch(t);matrix(paused,{'a/native/2':'pause'});
+ ({result}=decide(paused));
+ assert.deepEqual(result.missing_cells,['8 / 24 safari-native 2x']);
+ const chrome=scratch(t);matrix(chrome,{'b/native/1.05':'missing'});receipt(chrome,{target:8,bootstrap:32,rate:1.05,transport:'native',ua:CHROME});
+ ({result}=decide(chrome));
+ assert.deepEqual(result.missing_cells,['8 / 32 safari-native 1.05x']);
+ assert.ok(result.cells.some(c=>c.player==='native-other'));
+ // Runs shorter than the required length do not fill a cell.
+ const short=scratch(t);matrix(short);
+ assert.equal(lab(['--summarize',short]).status,2);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(short,'decision.json'),'utf8')).missing_cells.length,12);
+});
+
+test('native fixture keeps its 16 s sweep by default and serves a lab arm when given one',async t=>{
+ const dir=scratch(t),media=fakeMedia(path.join(dir,'media'));
+ for(let i=0;i<4;i++)fs.writeFileSync(path.join(media,`seg_${String(i).padStart(4,'0')}.m4s`),'seg');
+ const begin=(base,run,threshold)=>fetch(`${base}/begin`,{method:'POST',body:JSON.stringify({run,threshold})});
+ const sweep=await serve(t,'python3',[FIXTURE,'--media',media,'--receipt',path.join(dir,'sweep.json'),'--port','0']);
+ await begin(sweep,'1',8);
+ const old=await (await fetch(`${sweep}/qual/1/index.m3u8`)).text();
+ assert.equal(tagOf(old),16);assert.ok(extinfs(old).length>=1&&extinfs(old).every(d=>d===8));
+ const armed=await serve(t,'python3',[FIXTURE,'--media',media,'--receipt',path.join(dir,'arm.json'),'--port','0',
+  '--target','8','--bootstrap','32','--rate','1.05','--setup','0','--burst','1000']);
+ assert.match(await (await fetch(armed)).text(),/const fixtureArm=\{"target": 8, "bootstrap": 32, "rate": 1.05, "name": "b"\}/);
+ await begin(armed,'1',32);
+ const text=await (await fetch(`${armed}/qual/1/index.m3u8`)).text();
+ assert.equal(tagOf(text),8);assert.deepEqual(extinfs(text),Array(16).fill(2));
+ assert.equal((await fetch(`${armed}/qual/1/seg00015.m4s`)).status,200);
+ assert.equal((await fetch(`${armed}/qual/1/seg00016.m4s`)).status,404);
+ const refused=spawn('python3',[FIXTURE,'--media',media,'--receipt',path.join(dir,'x.json'),'--port','0','--target','8','--bootstrap','12','--rate','1']);
+ const timer=setTimeout(()=>refused.kill(),5000);
+ const [code]=await new Promise(resolve=>refused.on('exit',(...args)=>resolve(args)));clearTimeout(timer);
+ assert.equal(code,2,'an invalid arm must be refused, not served');
+});

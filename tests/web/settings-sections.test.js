@@ -1969,6 +1969,65 @@ test("transcription queue refusal is not displayed as successful work", async ()
   assert.equal(button.disabled,false);
 });
 
+test("the census row only paints the census of the node Settings loaded", () => {
+  const SETTINGS_DATA={sys:{node_id:"node-a",tone_map:{census:{state:"idle",node_id:"node-a"}}}};
+  const mount={innerHTML:"",querySelector:()=>null,insertAdjacentHTML(_where,html){this.innerHTML+=html;}};
+  const paint=new Function("SETTINGS_DATA","document","toneMapCensusHtml",
+    `${shippedSource("censusFromThisNode")}\n${shippedSource("paintToneMapCensus")}\nreturn paintToneMapCensus;`)(
+    SETTINGS_DATA,{getElementById:()=>mount},c=>`STATE:${c.state}`);
+  paint({state:"running",node_id:"node-b"});
+  assert.equal(SETTINGS_DATA.sys.tone_map.census.state,"idle","another node's census is not stored as this one's");
+  assert.match(mount.innerHTML,/Another node answered/);
+  paint({state:"running",node_id:"node-a"});
+  assert.equal(SETTINGS_DATA.sys.tone_map.census.state,"running");
+  assert.equal(mount.innerHTML,"STATE:running");
+});
+
+test("the tone-map census row is attributable and stoppable", () => {
+  const sources = ["fmtAgo", "censusMount", "toneMapCensusHtml", "toneMapCensusResultHtml", "toneMapHtml"]
+    .map(shippedSource).join("\n");
+  const {toneMapHtml, toneMapCensusHtml} = new Function("esc",
+    `${sources}\nreturn {toneMapHtml, toneMapCensusHtml};`)(esc);
+  const key = {ffmpeg_version:"ffmpeg version 8.1.3", encoder_family:"qsv", gpu_device:"/dev/dri/renderD128"};
+  // Idle: a Run control and the cost stated; no Stop.
+  const idle = toneMapCensusHtml({state:"idle", key, result:null});
+  assert.match(idle, /startToneMapCensus\(this\)">Run census</);
+  assert.doesNotMatch(idle, /stopToneMapCensus/);
+  assert.match(idle, /Uses the GPU/);
+  // Queued and running say what they are doing and offer Stop, not Run.
+  for (const state of ["queued", "running"]) {
+    const html = toneMapCensusHtml({state, step:"vpp_qsv · maxcll-4000 <b>", candidate:"vpp_qsv", key, result:null});
+    assert.match(html, /stopToneMapCensus\(this\)">Stop</, state);
+    assert.doesNotMatch(html, /Run census/, state);
+    assert.ok(html.includes("vpp_qsv · maxcll-4000 &lt;b&gt;"), "the step is shown, escaped");
+  }
+  // Yielding to playback is reported as such, not as a failure.
+  const yielded = toneMapCensusHtml({state:"yielded", since:Date.now(), key, result:null});
+  assert.match(yielded, /Yielded to playback/);
+  assert.doesNotMatch(yielded, /Failed/);
+  assert.match(toneMapCensusHtml({state:"failed", reason:"no <libx265>", key, result:null}), /Failed.*no &lt;libx265&gt;/s);
+  // A result lists the baseline and every candidate per signal, with stills.
+  const result = {key, noise_floor_zero:true,
+    baseline:[{signal:"maxcll-1000", brightest_block_luma:235, noise_floor:0, still:"cpu-maxcll-1000.png"}],
+    candidates:[
+      {pipeline:"vpp_qsv", label:"GPU tone-map (QSV)", selected:true, signals:[
+        {signal:"maxcll-1000", started:true, distance:{max:[9.5,2,1], p95:[4,1,0.5]}, brightest_block_luma:230, still:"vpp_qsv-maxcll-1000.png"}]},
+      {pipeline:"tonemap_opencl", label:"GPU tone-map (OpenCL)", selected:false, signals:[
+        {signal:"maxcll-1000", started:false, reason:"no OpenCL <device>"}]}]};
+  const done = toneMapCensusHtml({state:"finished", since:Date.now(), key, result});
+  assert.match(done, /Finished/);
+  assert.match(done, /9\.5 \/ 2\.0 \/ 1\.0/);
+  assert.match(done, /GPU tone-map \(QSV\) <span class="muted">\(selected\)/);
+  assert.ok(done.includes("did not start: no OpenCL &lt;device&gt;"));
+  assert.ok(done.includes("showCensusStill(this,&quot;vpp_qsv-maxcll-1000.png&quot;)"));
+  assert.match(done, /noise floor 0/);
+  // The row carries the census beneath the probe's own line, and only when the
+  // server reports one.
+  const tm = {ran:true, selected:"vpp_qsv", selected_label:"GPU tone-map (QSV)", verdicts:[]};
+  assert.doesNotMatch(toneMapHtml(tm), /tone-map-census/);
+  assert.match(toneMapHtml({...tm, census:{state:"idle", key, result:null}}), /id="tone-map-census"[\s\S]*Run census/);
+});
+
 main().then(() => {
   if (started !== finished) failures += started - finished;
   process.stdout.write(`${started - failures}/${started} passed\n`);

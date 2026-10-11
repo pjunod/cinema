@@ -329,6 +329,11 @@ claim, silent video transcode or progressive fallback on an unproved client
 is permitted as a shortcut. That expansion requires re-review of the changed
 contract; it is not covered by approval of the initial candidate.
 
+That follow-on design is
+[STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
+§4 — an 8 s target for encoded rolling sessions only, re-reviewed and
+approved 2026-10-04; copy sessions keep 16 s.
+
 ## 5. M0 — instrument and reproduce before choosing a threshold
 
 **Owns:** server timing at the current creation/publication owners; fixture

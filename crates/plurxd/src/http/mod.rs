@@ -27,6 +27,7 @@ pub(crate) mod file_grants;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
 pub(crate) mod images;
+pub(crate) mod index_coverage;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_auth_revocation;
 pub(crate) mod internal_clock;
@@ -332,6 +333,7 @@ fn http_route_group(path: &str) -> usize {
         "/api/v1/items/{id}"
         | "/api/v1/files/{id}/subtitles/search"
         | "/api/v1/files/{id}/subtitles/download"
+        | "/api/v1/files/{id}/subtitles/transcribe"
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
         | "/api/v1/items/{id}/reanalyze"
@@ -343,6 +345,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/timeline-annotations/{kind}"
         | "/api/v1/dv-conversions"
         | "/api/v1/analysis/summary"
+        | "/api/v1/analysis/coverage"
         | "/api/v1/analysis/jobs"
         | "/api/v1/analysis/jobs/{id}"
         | "/api/v1/analysis/jobs/{id}/retry"
@@ -493,9 +496,11 @@ fn http_route_group(path: &str) -> usize {
         "/"
         | "/api/v1/server"
         | "/api/v1/settings"
+        | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
         | "/api/v1/developer/macos-video-processing/reprobe"
+        | "/api/v1/system/video-processing/reprobe"
         | "/api/v1/scan"
         | "/api/v1/scan/status"
         | "/api/v1/scan/requests/{id}"
@@ -515,6 +520,9 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/system/library-shape"
         | "/api/v1/system/storage"
         | "/api/v1/system/transcoder"
+        | "/api/v1/system/tone-map/census"
+        | "/api/v1/system/tone-map/census/stop"
+        | "/api/v1/system/tone-map/census/stills/{name}"
         | "/api/v1/system/search-index/rebuild"
         | "/api/v1/client-log"
         | "/api/v1/coming-soon"
@@ -1594,6 +1602,10 @@ pub fn router(state: AppState) -> Router {
         .route("/dv-conversions", get(dv_disk::status))
         .route("/files/{id}/preparation", get(preparation::status))
         .route("/analysis/summary", get(analysis::summary))
+        .route(
+            "/analysis/coverage",
+            get(index_coverage::status).post(index_coverage::start),
+        )
         .route("/analysis/jobs", get(analysis::jobs))
         .route("/analysis/jobs/{id}", get(analysis::job))
         .route("/hubs", get(browse::hubs))
@@ -1752,6 +1764,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/system/transcoder",
             put(system::update_hardware_preference).post(system::optimize_transcoder),
+        )
+        .route(
+            "/system/tone-map/census",
+            get(system::tone_map_census).post(system::start_tone_map_census),
+        )
+        .route(
+            "/system/tone-map/census/stop",
+            post(system::stop_tone_map_census),
+        )
+        .route(
+            "/system/tone-map/census/stills/{name}",
+            get(system::tone_map_census_still),
         )
         .route(
             "/system/search-index/rebuild",
@@ -4867,15 +4891,22 @@ mod tests {
             ],
         );
         // The cluster-artefact fallback is a catalogue read too (drill F5,
-        // 2026-10-11: it was two Authority reads on every item page). The
-        // handler hands the reader to the VOD layer, which must read through
-        // it and never through its own Store handle.
+        // 2026-10-11: it was two Authority reads on every item page). Item
+        // detail answers it through the shared coverage rule, which hands the
+        // reader to the VOD layer; that must read through it and never
+        // through its own Store handle.
         let item_detail = compact_handler(
             browse,
             "pub async fn item_detail",
             "pub async fn home_previews",
         );
-        assert!(item_detail.contains(".cluster_index_availability(&state.catalogue,&lookups)"));
+        assert!(item_detail.contains("vod_index_coverage(&state,"));
+        let coverage = compact_handler(
+            browse,
+            "pub(crate) async fn vod_index_coverage",
+            "pub(super) fn index_refusal_summary",
+        );
+        assert!(coverage.contains(".cluster_index_availability(&state.catalogue,&lookups)"));
         // Its two display settings are one bounded read, not two Authority
         // reads through the transcode manager's own Store handle.
         assert!(!item_detail.contains("state.transcode.lang_prefs()"));
@@ -12333,6 +12364,56 @@ mod tests {
         let app = test_app();
         let (status, _) = call(&app, post("/api/v1/system/storage", None, json!({}))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The tone-map census routes are admin-only, and an idle node reports an
+    /// idle census with its storage key and no result — in its own route and
+    /// inside `/system` as `tone_map.census`. Nothing here starts a run: that
+    /// spawns real ffmpeg and is covered in `pipeprobe::census`.
+    #[tokio::test]
+    async fn tone_map_census_routes_are_admin_only_and_report_idle() {
+        let app = test_app();
+        for request in [
+            get("/api/v1/system/tone-map/census", None),
+            post("/api/v1/system/tone-map/census", None, json!({})),
+            post("/api/v1/system/tone-map/census/stop", None, json!({})),
+            get(
+                "/api/v1/system/tone-map/census/stills/cpu-maxcll-1000.png",
+                None,
+            ),
+        ] {
+            let (status, _) = call(&app, request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let admin = setup_admin(&app).await;
+        let (status, census) =
+            call(&app, get("/api/v1/system/tone-map/census", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(census["state"], "idle");
+        assert!(census["result"].is_null());
+        assert!(census["key"]["encoder_family"].is_string());
+        let (_, sys) = call(&app, get("/api/v1/system", Some(&admin))).await;
+        assert_eq!(sys["tone_map"]["census"], census);
+        let (status, stopped) = call(
+            &app,
+            post(
+                "/api/v1/system/tone-map/census/stop",
+                Some(&admin),
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stopped["state"], "idle", "stopping nothing changes nothing");
+        let (status, _) = call(
+            &app,
+            get(
+                "/api/v1/system/tone-map/census/stills/..%2Fcensus.json",
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

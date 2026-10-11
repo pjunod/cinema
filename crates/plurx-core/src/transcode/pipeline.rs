@@ -664,7 +664,11 @@ impl Pipeline {
                 } else {
                     "format=yuv420p10le,"
                 };
-                format!("{prefix}tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=yuv420p:apply_dovi=1:require_dovi=1,scale={w}:{},format=yuv420p", height.max(2))
+                format!(
+                    "{prefix}{tonemap}:require_dovi=1,scale={w}:{},format=yuv420p",
+                    height.max(2),
+                    tonemap = super::dovi_tonemapx_sdr_filter(),
+                )
             }
             Pipeline::VtDoviMetal | Pipeline::DoviMetal => {
                 let prefix = if self == Pipeline::DoviMetal {
@@ -679,10 +683,10 @@ impl Pipeline {
             }
             Pipeline::DoviTonemapx => {
                 let h = height.max(2);
+                let format = OutputGrade::Sdr.pixel_format();
                 format!(
-                    "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:\
-                     primaries=bt709:range=tv:format=yuv420p:apply_dovi=1,\
-                     scale={w}:{h},format=yuv420p"
+                    "{tonemap},scale={w}:{h},format={format}",
+                    tonemap = super::dovi_tonemapx_sdr_filter(),
                 )
             }
             // The same filter, the same `apply_dovi=1`, the same

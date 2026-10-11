@@ -5956,7 +5956,8 @@ the loading overlay a few seconds longer, then playback).
 | Gray screen then playback | Hardware session stalled, watchdog fell back to software | Expected under concurrency; check `PLURX_HWACCEL` |
 | HLS playback errors immediately at startup | ffmpeg exited unsuccessfully before publishing a usable playlist; plurx now reports that known server failure promptly instead of waiting for a client-side `manifestLoadTimeOut` | Read the final `plurxd::transcode` line for the source, filter, decoder, or encoder failure |
 | Web HLS says the playlist could not be loaded | No manifest parsed inside the attachment's absolute startup deadline | In browser logs, join `hls_manifest_dispatch`, `hls_retry`, and `hls_fatal` by playback/session and attachment. The dispatch ordinal is the actual-send count; elapsed and remaining milliseconds show whether the 16-send or time ceiling won |
-| Web HLS says video data did not arrive | The manifest parsed, but no fragment completed before startup expired | Read `hls_fatal` and server segment/publication lines. Do not diagnose this by fetching the playlist again; the player already proved that phase completed |
+| Web HLS says the video playlist could not be loaded | The master parsed, but the selected level playlist failed or never loaded before startup expired, so no fragment was requestable | Read the `hls_manifest_dispatch` ordinals after the master, `hls_fatal` (`levelLoadError` / `levelLoadTimeOut`), and the `stall` line's `level_loaded`; then the server's playlist publication lines for that session |
+| Web HLS says video data did not arrive | The master and level playlist loaded, but no fragment completed before startup expired | Read `hls_fatal` and server segment/publication lines. Do not diagnose this by fetching the playlist again; the player already proved that phase completed |
 | Web HLS says playback did not start | Manifest and media arrived, but neither an advancing audio clock nor the required clock-plus-frame evidence appeared | Check browser decoder/media errors and presentation telemetry. This generic exhaustion is deliberately not `decoder_failed` without decoder evidence |
 | Native web HLS remains preparing | Current master or selected child is not ready under the fixed startup allowance; this is not decoder proof | Join `native_hls_readiness` and `hls_startup_presenting` by the existing playback/session context. Do not count Safari’s opaque sends as application dispatches. The master uses the playlist preparation bound and keeps final response admission within its separate five-second phase; no outer deadline is renewed |
 | Native startup says no compatible encode route is available | Ready media was rejected after the one same-session reload, but the current selected-track catalog contains no decoder-compatible encode candidate | No rescue create is sent and no decoder limit is learned. Inspect the current candidate/source/track evidence; retry cannot invent an unavailable route |
@@ -5996,6 +5997,19 @@ decode, frame transfers, encode and process startup. It is not the speed of
 the tone-map filter alone or a promise that another GPU's result will match.
 A candidate must produce valid BT.709 output, pass the picture comparison,
 and exceed the reference throughput by 20%.
+
+**The tone-map census.** The boot gate proves a graph runs and lands on
+BT.709; it does not say whether its picture differs from the CPU chain. The
+**Run census** button on the same row (Settings → System → HDR tone-map)
+measures that for every graph the node's encoder pairs with, on authored PQ
+signals at 1000 and 4000 nits, and keeps per-graph block distances and a
+still of each ([TONE-MAP-CENSUS.md](streaming/TONE-MAP-CENSUS.md)). It uses
+the GPU, so it runs only when asked, waits behind and yields to any viewer
+(the row then says "yielded to playback"), and has a Stop. Admin routes:
+`GET`/`POST /api/v1/system/tone-map/census`,
+`POST /api/v1/system/tone-map/census/stop`,
+`GET /api/v1/system/tone-map/census/stills/{name}`. It changes no selection
+and no filter string.
 
 With a VA-API encoder the probe tries `tonemap_vaapi`, then
 `libplacebo_vaapi` (VA-API decode → Vulkan tone-map → VA-API encode with

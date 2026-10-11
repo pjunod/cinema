@@ -124,6 +124,179 @@ pub(super) fn detail_projection_prometheus() -> String {
     out
 }
 
+/// One file's answer to "can every copy pipeline a client may ask for be
+/// served from an exact index on this node" — item detail's
+/// `vod_index_status`, and the unit the library coverage report counts.
+pub(crate) struct VodIndexCoverage {
+    /// `None` for a file with no video stream; otherwise `unsupported`,
+    /// `indexed`, `partial`, `refused` or `pending`.
+    pub(crate) status: Option<&'static str>,
+    /// The worst recorded refusal among the missing identities, and whether
+    /// it is terminal.
+    pub(crate) refusal: Option<(bool, String)>,
+    /// Copy identities a client can ask this file for.
+    pub(crate) identities: usize,
+    /// How many of them have an index here: local, or a cluster artifact this
+    /// node's source attestation reaches.
+    pub(crate) present: usize,
+}
+
+/// The one rule behind item detail's index badge, for a batch of files.
+///
+/// `probes` and `observations` are per file, in `files` order: the stored
+/// probe JSON and this node's bounded availability observation. The source
+/// object comes from that observation — never a second stat, which a hung
+/// mount would turn into a stalled page — and the artifact state from one
+/// batched read per chunk, not two reads per identity, through the catalogue
+/// reader so a follower answers it from its own replica. Also returns the
+/// local projection rows, which item detail feeds to its read metrics.
+pub(crate) async fn vod_index_coverage(
+    state: &AppState,
+    files: &[plurx_core::domain::MediaFile],
+    probes: &[Option<String>],
+    observations: &[crate::availability::Observation],
+    have_dovi: bool,
+    convert: bool,
+) -> Result<
+    (
+        Vec<VodIndexCoverage>,
+        Vec<plurx_core::store::FragmentIndexStatus>,
+    ),
+    plurx_core::error::StoreError,
+> {
+    let mut wanted = Vec::new();
+    let mut prepared = Vec::with_capacity(files.len());
+    for (file, raw_probe) in files.iter().zip(probes) {
+        let start = wanted.len();
+        let videos = if crate::copyseg::supports(file.video_codec.as_deref()) {
+            crate::fragindex::video_identities(file, raw_probe.as_deref(), have_dovi, convert)
+        } else {
+            Vec::new()
+        };
+        for video in &videos {
+            wanted.push((file.id, crate::fragindex::identity_for(file, *video)));
+        }
+        prepared.push((start..wanted.len(), videos));
+    }
+    let mut statuses = Vec::with_capacity(wanted.len());
+    for chunk in wanted.chunks(plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK) {
+        let batch = state.store.fragment_index_status(chunk).await?;
+        if batch.len() != chunk.len()
+            || batch.iter().zip(chunk).any(|(status, (id, identity))| {
+                status.file_id != *id || status.argv_fingerprint != identity.argv_fingerprint
+            })
+        {
+            return Err(plurx_core::error::StoreError::Task(
+                "fragment status batch lost input identity/order".into(),
+            ));
+        }
+        statuses.extend(batch);
+    }
+    // The cluster-artifact fallback for identities the local projection does
+    // not have, folded into the same batched projection.
+    let mut lookups = Vec::new();
+    let mut lookup_slots = Vec::new();
+    for ((file, observation), (range, videos)) in files.iter().zip(observations).zip(&prepared) {
+        let Some(object_version) = observation
+            .stat
+            .filter(|_| observation.state == crate::availability::Availability::Available)
+            .and_then(|stat| {
+                crate::fragment_index_cluster::copy_object_version_from_stat(file, &stat)
+            })
+        else {
+            continue;
+        };
+        for (slot, video) in range.clone().zip(videos) {
+            if statuses[slot].presence != plurx_core::store::IndexPresence::Ready {
+                lookups.push((file, *video, object_version.clone()));
+                lookup_slots.push(slot);
+            }
+        }
+    }
+    let cluster_present: std::collections::HashSet<usize> = lookup_slots
+        .into_iter()
+        .zip(
+            state
+                .transcode
+                .cluster_index_availability(&state.catalogue, &lookups)
+                .await,
+        )
+        .filter_map(|(slot, present)| present.then_some(slot))
+        .collect();
+    let mut coverage = Vec::with_capacity(files.len());
+    for (file, (range, _)) in files.iter().zip(prepared) {
+        if file.video_codec.is_none() {
+            coverage.push(VodIndexCoverage {
+                status: None,
+                refusal: None,
+                identities: 0,
+                present: 0,
+            });
+            continue;
+        }
+        if !crate::copyseg::supports(file.video_codec.as_deref()) {
+            coverage.push(VodIndexCoverage {
+                status: Some("unsupported"),
+                refusal: None,
+                identities: 0,
+                present: 0,
+            });
+            continue;
+        }
+        // A file is "indexed" only when EVERY pipeline a client can ask
+        // for has an index. The badge used to ask about the
+        // Dolby-Vision-stripped pipeline alone and call that indexed,
+        // which read green for a title a DV-capable client could not serve
+        // from (PLAYBACK-CAPS-V2-PLAN §4.7). `partial` is the state that
+        // was previously invisible.
+        let mut present = 0_usize;
+        // Why the rest are missing, when the indexer has already found
+        // out. `pending` used to cover three states an operator acts on
+        // differently: never tried, tried and truncated at N rows, and
+        // tried and refused for good. The first is a wait; the last never
+        // ends, and nothing on this page said so.
+        //
+        // The batched projection keeps every identity and uses the same
+        // match rule as the index itself — so a
+        // file the operator has since replaced stops answering with its
+        // predecessor's refusal. A per-file read would have kept showing
+        // "cannot be indexed" for a title that now plays, which is the
+        // false-permanent-state failure this whole milestone exists to
+        // remove, inverted.
+        let mut refusals = Vec::new();
+        // Preserve metadata-only batched local answers and the newer
+        // cluster-artifact fallback for the exact same captured pipeline.
+        // Never reintroduce packed per-file local index reads, or
+        // per-identity Store reads or source stats, here.
+        for (slot, status) in range.clone().zip(&statuses[range.clone()]) {
+            if status.presence == plurx_core::store::IndexPresence::Ready
+                || cluster_present.contains(&slot)
+            {
+                present += 1;
+            } else if let Some(outcome) = &status.outcome {
+                refusals.push(outcome.clone());
+            }
+        }
+        let refusal = index_refusal_summary(&refusals);
+        let status = if present == range.len() {
+            "indexed"
+        } else if present > 0 {
+            "partial"
+        } else if refusal.as_ref().is_some_and(|(terminal, _)| *terminal) {
+            "refused"
+        } else {
+            "pending"
+        };
+        coverage.push(VodIndexCoverage {
+            status: Some(status),
+            refusal,
+            identities: range.len(),
+            present,
+        });
+    }
+    Ok((coverage, statuses))
+}
+
 /// One sentence for why a file has no fragment index, and whether waiting will
 /// change it.
 ///
@@ -532,140 +705,29 @@ pub async fn item_detail(
         .any(|file| crate::copyseg::supports(file.video_codec.as_deref()));
     let have_dovi = has_video && crate::ffmpeg::has_dovi_rpu().await;
     let convert = has_video && convert_setting;
-    let mut wanted = Vec::new();
-    let mut prepared = Vec::with_capacity(files.len());
+    let mut probes = Vec::with_capacity(files.len());
     let mut probe_bytes = 0_usize;
     for file in &files {
         let raw_probe = state.catalogue.get_file_probe_json(file.id).await?;
         probe_bytes = probe_bytes.saturating_add(raw_probe.as_ref().map_or(0, String::len));
-        let start = wanted.len();
-        let videos = if crate::copyseg::supports(file.video_codec.as_deref()) {
-            crate::fragindex::video_identities(file, raw_probe.as_deref(), have_dovi, convert)
-        } else {
-            Vec::new()
-        };
-        for video in &videos {
-            wanted.push((file.id, crate::fragindex::identity_for(file, *video)));
-        }
-        prepared.push((raw_probe, start..wanted.len(), videos));
+        probes.push(raw_probe);
     }
-    let mut statuses = Vec::with_capacity(wanted.len());
-    for chunk in wanted.chunks(plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK) {
-        let batch = state.store.fragment_index_status(chunk).await?;
-        if batch.len() != chunk.len()
-            || batch.iter().zip(chunk).any(|(status, (id, identity))| {
-                status.file_id != *id || status.argv_fingerprint != identity.argv_fingerprint
-            })
-        {
-            return Err(plurx_core::error::StoreError::Task(
-                "fragment status batch lost input identity/order".into(),
-            )
-            .into());
-        }
-        statuses.extend(batch);
-    }
+    let (coverage, statuses) =
+        vod_index_coverage(&state, &files, &probes, &availability, have_dovi, convert).await?;
     record_detail_projection(&statuses, probe_bytes);
-    // The cluster-artifact fallback for identities the local projection does
-    // not have, folded into the same batched projection. The source object
-    // comes from the bounded observation above — never a second stat, which
-    // a hung mount would turn into a stalled page — and the artifact state
-    // from one batched read per chunk, not two reads per identity, through
-    // the catalogue reader so a follower answers it from its own replica.
-    let mut lookups = Vec::new();
-    let mut lookup_slots = Vec::new();
-    for ((file, observation), (_, range, videos)) in files.iter().zip(&availability).zip(&prepared)
-    {
-        let Some(object_version) = observation
-            .stat
-            .filter(|_| observation.state == crate::availability::Availability::Available)
-            .and_then(|stat| {
-                crate::fragment_index_cluster::copy_object_version_from_stat(file, &stat)
-            })
-        else {
-            continue;
-        };
-        for (slot, video) in range.clone().zip(videos) {
-            if statuses[slot].presence != plurx_core::store::IndexPresence::Ready {
-                lookups.push((file, *video, object_version.clone()));
-                lookup_slots.push(slot);
-            }
-        }
-    }
-    let cluster_present: std::collections::HashSet<usize> = lookup_slots
+    for ((f, observation), (raw_probe, coverage)) in files
         .into_iter()
-        .zip(
-            state
-                .transcode
-                .cluster_index_availability(&state.catalogue, &lookups)
-                .await,
-        )
-        .filter_map(|(slot, present)| present.then_some(slot))
-        .collect();
-    for ((f, observation), (raw_probe, range, _)) in
-        files.into_iter().zip(availability).zip(prepared)
+        .zip(availability)
+        .zip(probes.into_iter().zip(coverage))
     {
         let path = f.path.clone();
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
-        let mut vod_index_refusal = None;
-        let vod_index_status = if f.video_codec.is_none() {
-            None
-        } else if !crate::copyseg::supports(f.video_codec.as_deref()) {
-            Some("unsupported")
-        } else {
-            // A file is "indexed" only when EVERY pipeline a client can ask
-            // for has an index. The badge used to ask about the
-            // Dolby-Vision-stripped pipeline alone and call that indexed,
-            // which read green for a title a DV-capable client could not serve
-            // from (PLAYBACK-CAPS-V2-PLAN §4.7). `partial` is the state that
-            // was previously invisible.
-            let mut present = 0_usize;
-            // Why the rest are missing, when the indexer has already found
-            // out. `pending` used to cover three states an operator acts on
-            // differently: never tried, tried and truncated at N rows, and
-            // tried and refused for good. The first is a wait; the last never
-            // ends, and nothing on this page said so.
-            //
-            // The batched projection keeps every identity and uses the same
-            // match rule as the index itself — so a
-            // file the operator has since replaced stops answering with its
-            // predecessor's refusal. A per-file read would have kept showing
-            // "cannot be indexed" for a title that now plays, which is the
-            // false-permanent-state failure this whole milestone exists to
-            // remove, inverted.
-            let mut refusals = Vec::new();
-            // Preserve metadata-only batched local answers and the newer
-            // cluster-artifact fallback for the exact same captured pipeline.
-            // Never reintroduce packed per-file local index reads, or
-            // per-identity Store reads or source stats, here.
-            for (slot, status) in range.clone().zip(&statuses[range.clone()]) {
-                if status.presence == plurx_core::store::IndexPresence::Ready
-                    || cluster_present.contains(&slot)
-                {
-                    present += 1;
-                } else if let Some(outcome) = &status.outcome {
-                    refusals.push(outcome.clone());
-                }
-            }
-            vod_index_refusal = index_refusal_summary(&refusals);
-            Some(if present == range.len() {
-                "indexed"
-            } else if present > 0 {
-                "partial"
-            } else if vod_index_refusal
-                .as_ref()
-                .is_some_and(|(terminal, _)| *terminal)
-            {
-                "refused"
-            } else {
-                "pending"
-            })
-        };
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
         dto.available = observation.available();
         dto.availability = observation.state.as_str();
         dto.availability_observed_at_ms = observation.observed_at_ms;
-        dto.vod_index_status = vod_index_status;
-        dto.vod_index_refusal = vod_index_refusal.map(|(_, detail)| detail);
+        dto.vod_index_status = coverage.status;
+        dto.vod_index_refusal = coverage.refusal.map(|(_, detail)| detail);
         dto.part_offset_ms = part_offset_ms;
         dto.chapters = chapters_from_probe_json(raw_probe.as_deref());
         if item.kind == ItemKind::Audiobook {
@@ -1399,6 +1461,133 @@ mod tests {
             detail(&page).await["files"][0]["vod_index_status"],
             "partial"
         );
+    }
+
+    #[tokio::test]
+    async fn the_coverage_report_counts_files_by_the_badge_rule() {
+        use super::super::index_coverage::{coverage_class, measure, ClassCoverage, Progress};
+        // Two Dolby Vision P7 parts: one with every identity indexed, one
+        // with all but the last. The report must call them exactly what
+        // their detail badges do, and count identities, not just files.
+        let page = index_page(2, true).await;
+        let raw = page
+            .state
+            .store
+            .get_file_probe_json(page.files[0].id)
+            .await
+            .expect("probe");
+        publish(&page, 0, usize::MAX, 10).await;
+        publish(&page, 1, 2, 10).await;
+        // Part 0 is on disk; part 1 is not, which is `unavailable` — a stat
+        // that answered — and not `unobserved`.
+        std::fs::write(&page.files[0].path, b"source").expect("part 0 on disk");
+
+        // Neither a book nor a Home library's photo is a title anyone plays
+        // through a copy index, whatever its probe says.
+        let video = plurx_core::domain::ProbeResult {
+            video_codec: Some("h264".into()),
+            duration_ms: Some(1000),
+            ..Default::default()
+        };
+        for (kind, name) in [
+            (LibraryKind::Books, "book.m4b"),
+            (LibraryKind::Home, "IMG_1.jpg"),
+        ] {
+            let library = page
+                .state
+                .store
+                .create_library(&NewLibrary {
+                    name: name.into(),
+                    kind,
+                    paths: vec![page.root.path().join(name)],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = page
+                .state
+                .store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Video,
+                    parent_id: None,
+                    title: name.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            page.state
+                .store
+                .upsert_file(
+                    item,
+                    &page.root.path().join(name).join(name).to_string_lossy(),
+                    1,
+                    1,
+                    &video,
+                )
+                .await
+                .expect("file");
+        }
+
+        let progress = Progress::default();
+        let report = measure(&page.state, &progress).await.expect("coverage");
+        let per_file = crate::fragindex::video_identities(
+            &page.files[0],
+            raw.as_deref(),
+            report.have_dovi,
+            report.convert,
+        )
+        .len();
+        assert_eq!(per_file, 3, "P7 with conversion has three copy identities");
+        assert_eq!(
+            report.classes.keys().copied().collect::<Vec<_>>(),
+            ["dolby_vision_p7"]
+        );
+        assert_eq!(
+            report.classes["dolby_vision_p7"],
+            ClassCoverage {
+                files: 2,
+                bytes: 2 * 4096,
+                identities: 6,
+                identities_indexed: 5,
+                indexed: 1,
+                partial: 1,
+                pending: 0,
+                refused: 0,
+                unsupported: 0,
+                unavailable: 1,
+                unobserved: 0,
+            }
+        );
+        // The Home photo was listed (and skipped); the book was never listed.
+        assert_eq!(
+            progress
+                .files_done
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+        let body = detail(&page).await;
+        let badges = body["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .map(|file| file["vod_index_status"].as_str().expect("badge").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(badges, ["indexed", "partial"]);
+
+        // The class follows the identity rule's own Dolby Vision test.
+        let mut file = page.files[0].clone();
+        assert_eq!(coverage_class(&file), "dolby_vision_p7");
+        file.hdr = None;
+        assert_eq!(
+            coverage_class(&file),
+            "sdr",
+            "a stray profile column is not DV"
+        );
+        file.hdr = Some("hdr10plus".into());
+        assert_eq!(coverage_class(&file), "hdr10");
     }
 
     #[tokio::test]

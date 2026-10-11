@@ -1393,8 +1393,9 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisPageUrl")}
      ${shippedSource("analysisAttentionGroups")}
-     const ANALYSIS_RECONCILE={open:false};
+     const ANALYSIS_RECONCILE={open:false}, ANALYSIS_COVERAGE={open:false};
      ${shippedSource("analysisReconcileHtml")}
+     ${shippedSource("analysisCoverageHtml")}
      ${shippedSource("paintAnalysis")}
      return {
        paint:(snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);},
@@ -1612,8 +1613,9 @@ test("Analysis repaint restores row-link and disclosure focus with stable keys",
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisAttentionGroups")}
-     const ANALYSIS_RECONCILE={open:false};
+     const ANALYSIS_RECONCILE={open:false}, ANALYSIS_COVERAGE={open:false};
      ${shippedSource("analysisReconcileHtml")}
+     ${shippedSource("analysisCoverageHtml")}
      ${shippedSource("paintAnalysis")}
      return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
   )(document,String,()=>"just now",value=>`${value} B`);
@@ -2052,8 +2054,9 @@ test("A failed row lists the code every charged attempt ended with", () => {
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisAttentionGroups")}
-     const ANALYSIS_RECONCILE={open:false};
+     const ANALYSIS_RECONCILE={open:false}, ANALYSIS_COVERAGE={open:false};
      ${shippedSource("analysisReconcileHtml")}
+     ${shippedSource("analysisCoverageHtml")}
      ${shippedSource("paintAnalysis")}
      return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
   )(document,String,()=>"just now",value=>`${value} B`);
