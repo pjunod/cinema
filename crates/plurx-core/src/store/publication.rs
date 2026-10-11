@@ -20,7 +20,7 @@ use crate::error::StoreError;
 
 use super::{
     DvRecoveryGuardState, IdentityRepairOutcome, IdentityRepairPlan, IdentityRepairSnapshot,
-    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, Store,
+    ReconcileOutcome, RootFingerprintStatus, RootRemovalOutcome, SeriesHintOutcome, Store,
 };
 
 const PUBLICATION_CALL_SAFETY_WINDOW: Duration = Duration::from_secs(3);
@@ -755,13 +755,19 @@ impl<'a> PublicationStore<'a> {
     pub async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
+        configured_paths: &[std::path::PathBuf],
         fingerprint: &str,
         allow_establish: bool,
     ) -> Result<RootFingerprintStatus, StoreError> {
         if self.fence.is_none() {
             return self
                 .store
-                .ensure_library_root_fingerprint(library_id, fingerprint, allow_establish)
+                .ensure_library_root_fingerprint(
+                    library_id,
+                    configured_paths,
+                    fingerprint,
+                    allow_establish,
+                )
                 .await;
         }
         self.fenced_call(move |lease, replacement| {
@@ -769,6 +775,7 @@ impl<'a> PublicationStore<'a> {
                 self.store
                     .ensure_library_root_fingerprint_fenced(
                         library_id,
+                        configured_paths,
                         fingerprint,
                         allow_establish,
                         &lease,
@@ -801,6 +808,34 @@ impl<'a> PublicationStore<'a> {
                         root_fingerprint,
                         gone_file_ids,
                         prune_limit,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn remove_files_outside_library_roots(
+        &self,
+        library_id: i64,
+        configured_paths: &[std::path::PathBuf],
+        file_ids: &[i64],
+    ) -> Result<RootRemovalOutcome, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .remove_files_outside_library_roots(library_id, configured_paths, file_ids)
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .remove_files_outside_library_roots_fenced(
+                        library_id,
+                        configured_paths,
+                        file_ids,
                         &lease,
                         &replacement,
                     )

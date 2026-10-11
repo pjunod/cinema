@@ -16,6 +16,7 @@ use subtitle_jobs_fixture::SubtitleFixture;
 use plurx_core::store::background_jobs::{
     AnalysisViewerInterest, ArtifactViewerInterest, CancelWaiter, EnqueueOutcome, WaiterQuery,
 };
+use plurx_core::store::RootRemovalOutcome;
 use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
@@ -477,6 +478,7 @@ const MEDIA_METHODS: &[&str] = &[
     "reset_library_root_fingerprint",
     "rebuild_search_index",
     "reconcile_library",
+    "remove_files_outside_library_roots",
     "delete_files",
     "prune_empty_items",
 ];
@@ -812,6 +814,7 @@ const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "upsert_file_fenced",
     "ensure_library_root_fingerprint_fenced",
     "reconcile_library_fenced",
+    "remove_files_outside_library_roots_fenced",
     "claim_cache_entry_fenced",
     "touch_cache_claim_fenced",
     "complete_cache_entry_fenced",
@@ -8595,6 +8598,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             store
                 .ensure_library_root_fingerprint_fenced(
                     library.id,
+                    &library.paths,
                     "fenced-root",
                     true,
                     &current,
@@ -8747,6 +8751,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
         assert_stale!(
             store.ensure_library_root_fingerprint_fenced(
                 library.id,
+                &library.paths,
                 "stale-root",
                 true,
                 &first,
@@ -8764,6 +8769,16 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 &stale_replacement,
             ),
             "reconcile"
+        );
+        assert_stale!(
+            store.remove_files_outside_library_roots_fenced(
+                library.id,
+                &library.paths,
+                &[baseline_file],
+                &first,
+                &stale_replacement,
+            ),
+            "root removal"
         );
         assert_stale!(
             store.claim_cache_entry_fenced(
@@ -8846,7 +8861,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
         assert_eq!(file_after_stale.mtime, 7, "{backend}");
         assert_eq!(
             store
-                .ensure_library_root_fingerprint(library.id, "fenced-root", false)
+                .ensure_library_root_fingerprint(library.id, &library.paths, "fenced-root", false)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: read fenced root: {error}")),
             RootFingerprintStatus::Matched,
@@ -9021,6 +9036,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             store
                 .ensure_library_root_fingerprint_fenced(
                     library.id,
+                    &library.paths,
                     "fenced-root",
                     true,
                     &successor_current,
@@ -9045,6 +9061,24 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: fenced reconcile: {error}")),
             ReconcileOutcome::Applied { .. }
+        ));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
+        assert!(matches!(
+            store
+                .remove_files_outside_library_roots_fenced(
+                    library.id,
+                    &library.paths,
+                    &[],
+                    &successor_current,
+                    &replacement,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: fenced root removal: {error}")),
+            RootRemovalOutcome::Applied {
+                deleted_files: 0,
+                ..
+            }
         ));
         successor_current = replacement;
         let replacement = publication_successor(&successor_current);
@@ -19191,7 +19225,7 @@ fn contract_inventory_matches_every_store_method() {
     // +9 -> 475: continuous quality's ledger, reservation, family-binding and
     // cancellation-receipt methods on `MediaSessionStore`, listed in
     // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
-    assert_eq!(declared.len(), 478, "review the Store method count");
+    assert_eq!(declared.len(), 480, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -28851,14 +28885,14 @@ async fn media_contract_runs_through_dyn_store() {
 
         assert_eq!(
             store
-                .ensure_library_root_fingerprint(movies.id, "contract-root", true)
+                .ensure_library_root_fingerprint(movies.id, &movies.paths, "contract-root", true)
                 .await
                 .expect("establish root"),
             RootFingerprintStatus::Established
         );
         assert_eq!(
             store
-                .ensure_library_root_fingerprint(movies.id, "contract-root", true)
+                .ensure_library_root_fingerprint(movies.id, &movies.paths, "contract-root", true)
                 .await
                 .expect("match root"),
             RootFingerprintStatus::Matched
@@ -28906,14 +28940,14 @@ async fn media_contract_runs_through_dyn_store() {
             .expect("reset root"));
         assert_eq!(
             store
-                .ensure_library_root_fingerprint(movies.id, "contract-root", false)
+                .ensure_library_root_fingerprint(movies.id, &movies.paths, "contract-root", false)
                 .await
                 .expect("refuse empty root establishment"),
             RootFingerprintStatus::Unestablished
         );
         assert_eq!(
             store
-                .ensure_library_root_fingerprint(movies.id, "contract-root", true)
+                .ensure_library_root_fingerprint(movies.id, &movies.paths, "contract-root", true)
                 .await
                 .expect("re-establish root"),
             RootFingerprintStatus::Established
@@ -29402,7 +29436,12 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .expect("second cleanup candidate verified"));
         assert_eq!(
             store
-                .ensure_library_root_fingerprint(library.id, "dv-contract-root", true)
+                .ensure_library_root_fingerprint(
+                    library.id,
+                    &library.paths,
+                    "dv-contract-root",
+                    true
+                )
                 .await
                 .expect("establish DV reconcile root"),
             RootFingerprintStatus::Established,
@@ -39236,6 +39275,131 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
                 .expect("retained receipt owner")
                 .state,
             "ended",
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// Removing a library path is a configuration fact: every backend removes
+/// the files judged outside the library's paths and the items that leaves
+/// empty, and does neither — nor records a root identity — for a path set
+/// the library no longer has.
+#[tokio::test]
+async fn library_path_removal_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let kept = PathBuf::from(format!("/contract/paths-{backend}/kept"));
+        let removed = PathBuf::from(format!("/contract/paths-{backend}/kept2"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Path removal {backend}"),
+                kind: LibraryKind::Movies,
+                paths: vec![kept.clone(), removed.clone()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let mut placed = Vec::new();
+        for (title, root) in [("Kept", &kept), ("Removed", &removed)] {
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("{title} {backend}"),
+                    year: Some(2026),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let file = store
+                .upsert_file(
+                    item,
+                    &root.join(format!("{title}.mkv")).to_string_lossy(),
+                    1,
+                    1,
+                    &ProbeResult::default(),
+                )
+                .await
+                .expect("file");
+            placed.push((item, file));
+        }
+        let current = store
+            .update_library(
+                library.id,
+                &NewLibrary {
+                    name: library.name.clone(),
+                    kind: library.kind,
+                    paths: vec![kept.clone()],
+                    anime: false,
+                },
+            )
+            .await
+            .expect("update")
+            .expect("library");
+
+        assert_eq!(
+            store
+                .remove_files_outside_library_roots(library.id, &library.paths, &[placed[1].1])
+                .await
+                .expect("stale removal"),
+            RootRemovalOutcome::ConfigurationChanged,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .ensure_library_root_fingerprint(library.id, &library.paths, "old-set", true)
+                .await
+                .expect("stale identity"),
+            RootFingerprintStatus::ConfigurationChanged,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .library_file_paths(library.id)
+                .await
+                .expect("paths")
+                .len(),
+            2,
+            "{backend}: a stale judgement removed nothing"
+        );
+        assert_eq!(
+            store
+                .remove_files_outside_library_roots(library.id, &current.paths, &[])
+                .await
+                .expect("empty removal"),
+            RootRemovalOutcome::Applied {
+                deleted_files: 0,
+                pruned_items: 0
+            },
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .remove_files_outside_library_roots(library.id, &current.paths, &[placed[1].1])
+                .await
+                .expect("removal"),
+            RootRemovalOutcome::Applied {
+                deleted_files: 1,
+                pruned_items: 1
+            },
+            "{backend}"
+        );
+        let remaining = store
+            .library_file_paths(library.id)
+            .await
+            .expect("paths")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, vec![placed[0].1], "{backend}");
+        assert_eq!(
+            store
+                .ensure_library_root_fingerprint(library.id, &current.paths, "new-set", true)
+                .await
+                .expect("current identity"),
+            RootFingerprintStatus::Established,
             "{backend}"
         );
     })
