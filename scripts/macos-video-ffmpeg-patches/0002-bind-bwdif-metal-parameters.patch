@@ -1,0 +1,14 @@
+diff --git a/libavfilter/vf_bwdif_videotoolbox.m b/libavfilter/vf_bwdif_videotoolbox.m
+--- a/libavfilter/vf_bwdif_videotoolbox.m
++++ b/libavfilter/vf_bwdif_videotoolbox.m
+@@ -92,7 +92,9 @@ static void call_kernel(AVFilterContext *ctx,
+     [encoder setTexture:prev atIndex:1];
+     [encoder setTexture:cur  atIndex:2];
+     [encoder setTexture:next atIndex:3];
+-    [encoder setBuffer:s->mtlParamsBuffer offset:0 atIndex:4];
++    /* Texture and buffer argument indices are separate Metal namespaces.
++     * The shader declares its parameter block as [[buffer(0)]]. */
++    [encoder setBuffer:s->mtlParamsBuffer offset:0 atIndex:0];
+     ff_metal_compute_encoder_dispatch(s->mtlDevice, s->mtlPipeline, encoder, dst.width, dst.height);
+     [encoder endEncoding];
+ 

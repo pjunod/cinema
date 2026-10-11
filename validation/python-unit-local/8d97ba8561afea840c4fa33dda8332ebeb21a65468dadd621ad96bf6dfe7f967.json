@@ -1,0 +1,22 @@
+{
+  "branch": "codex/python-unit-receipt-applicability",
+  "command": "PYTHONPATH=tests/validation python3 -m unittest -v test_python_unit_receipts.PythonReceiptCase.test_sibling_definition_metadata_binds_fixture_without_replaying_bodies",
+  "output": "test_sibling_definition_metadata_binds_fixture_without_replaying_bodies (test_python_unit_receipts.PythonReceiptCase.test_sibling_definition_metadata_binds_fixture_without_replaying_bodies)\nONE new local fixture edge; earlier combined success stays retained. ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.008s\n\nOK\nUnit applicability changed: validation:test_fixture.Case.test_kept; prior=19d548a070959d5abeabf3aef89f3e527dbdebb41386736ba993f71aebed263c; current=c48707122f0d5c5461d880855b029c3fe225026a6a9c28d2e0e43d0220e013ce\nUnit applicability changed: validation:test_fixture.Case.test_kept; prior=994dd9ae0c377a7e8a1d3888d211b8d092fcdd17df09bc18e48dcca7d6a6380c; current=b70ea622a9214808d91177ec48dd3798a757d68fea9e38f6f37dc078995731df\nUnit applicability changed: validation:test_fixture.Case.test_kept; prior=dc7628f245b15639e4067dc311f7dc4afe65f213c76cb02bf1a2b1d85c20e7a9; current=db287aadf9016aabf0e8eed6e6a6440236e95cd2a3d67e3d91bafecfe4843a2e\nUnit applicability changed: validation:test_fixture.Case.test_kept; prior=be7f967647ccc1ad32f46e8d07325823db54984a69edc49c23b5741adaef6e21; current=cc83ed3802606cb5d6dc46c4a44c527b7a69ae766f40a42b4d93861748ac6854\nUnit applicability changed: validation:test_fixture.Case.test_kept; prior=f0c7296b62868ea24a67ab81042e68f42489fcfee25458d25fca62ece2b73220; current=02d61dabcfea7cbf1c559a63fc414bb6271645c63dd33548da4100ba3860e8b4\nUnit applicability changed: validation:test_fixture.Case.test_kept; prior=440dd587dcb539b3c5bf1a278802a077582e8a73411deef0fd3b109df43caa0d; current=4ab150d13fa1f9409de16ee95d612c2b493272e29040fc9bb37b7855881c1d0e\n",
+  "repository": 1,
+  "result": {
+    "count": 1,
+    "errors": 0,
+    "expected_failures": 0,
+    "failed": 0,
+    "skipped": 0,
+    "unexpected_successes": 0
+  },
+  "source_commit": "8784cd486f16b2b4bc8f221180b7d5b84680237a",
+  "suite": "validation",
+  "test_file": "tests/validation/test_python_unit_receipts.py",
+  "test_file_sha256": "cda1dbd1cae8f1713462baebcd1fec5305d2ba5bef4120d7510a616b86d4e889",
+  "test_ids": [
+    "test_python_unit_receipts.PythonReceiptCase.test_sibling_definition_metadata_binds_fixture_without_replaying_bodies"
+  ],
+  "version": 1
+}

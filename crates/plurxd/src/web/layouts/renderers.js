@@ -7,11 +7,24 @@
 // Resolve through the active layout, then classic. Two lookups rather than one
 // because a layout that only redefines Home must still get the classic body for
 // every route it has not converted — a missing renderer is normal, not an error.
+// The section the current chrome was painted for, kept so a nav repaint can
+// light the same tab without re-rendering the page under it.
+let LAYOUT_ACTIVE="home";
 function layoutChrome(active, inner){
+  LAYOUT_ACTIVE=active;
   const L=LAYOUTS[layoutId()];
   const answer=(L&&L.chrome?L.chrome:classicChrome)(active, inner);
   dvrPaintGlobal();
   return answer;
+}
+// FEATURES changed under a painted page (an admin saved an enable switch):
+// each layout repaints only its own section links, through its navChanged()
+// hook, and the DVR indicator re-reads whether Recordings is shown at all.
+function layoutNavChanged(){
+  const L=LAYOUTS[layoutId()];
+  const repaint=L&&L.chrome?L.navChanged:classicNavChanged;
+  if(typeof repaint==="function") repaint(LAYOUT_ACTIVE);
+  dvrPaintGlobal();
 }
 function layoutView(name, page){
   const L=LAYOUTS[layoutId()];
@@ -143,7 +156,7 @@ function pagerHtml(shown){
   const pages=libPageCount(shown);
   if(pages<2) return "";
   const at=LIB_PAGE_AT;
-  const btn=(n,label,dis,title)=>`<button class="ghost sm"${dis?" disabled":""}${title?` title="${title}"`:""} onclick="libGoPage(${n})">${label}</button>`;
+  const btn=(n,label,dis,title)=>`<button class="ghost sm" data-remote-page="${n}"${dis?" disabled":""}${title?` title="${title}"`:""} onclick="libGoPage(${n})">${label}</button>`;
   // First and last, because "sorted by date added, newest last" makes the far
   // end a destination and not an edge case — and getting there a page at a
   // time on a 300-title library is sixteen clicks. Hidden below three pages,

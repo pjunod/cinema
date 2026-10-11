@@ -1,0 +1,16 @@
+   Compiling plurx-core v0.3.0 (/private/tmp/plurx-video-quality-next-20261003/crates/plurx-core)
+   Compiling plurxd v0.3.0 (/private/tmp/plurx-video-quality-next-20261003/crates/plurxd)
+   Compiling plurx-compat-plex v0.3.0 (/private/tmp/plurx-video-quality-next-20261003/crates/plurx-compat-plex)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `plurxd` (bin "plurxd" test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 2m 38s
+     Running unittests src/main.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/plurxd-3db4df819e9dc4ef)
+
+running 1 test
+test transcode::content_encoding::tests::native_sample_phase_scores_all_windows_and_cleans_scratch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3162 filtered out; finished in 3.13s
+

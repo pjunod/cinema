@@ -45,7 +45,7 @@ async function setSync(v){
 // browser; offset → fetch the VTT once and re-add the cues shifted back, into
 // one script-created track we keep reusing. pbTick() re-applies when the offset
 // moves, since seeking a transcode restarts the session at a new position.
-function subUrl(index){ return tok(`/api/v1/files/${PLAYER.fileId}/subs/${index}`); }
+function subUrl(index){ return tok(playbackFileUrl(playbackFileContextForPlayer(PLAYER),`subs/${index}`)); }
 function subLabelFor(s, index){ return s?subLabelMenu(s):("Subtitle "+(index+1)); }
 function clearSubs(v){
   [...v.querySelectorAll("track")].forEach(t=>t.remove());
@@ -131,6 +131,7 @@ async function setSub(index){
   const nativeOrdinal=nativeHlsSubtitleOrdinal(me,index);
   if(me.sessionId&&nativeOrdinal>=0){
     if(me.hls){
+      me.hls.subtitleDisplay=true;
       me.hls.subtitleTrack=nativeOrdinal;
     }else if(v.textTracks&&v.textTracks[nativeOrdinal]){
       v.textTracks[nativeOrdinal].mode="showing";
@@ -158,7 +159,7 @@ async function setSub(index){
   if(PLAYER!==me || me.curSub!==index || (me.offset||0)!==off) return;  // switched away mid-fetch
   // One script track per <video>, reused: a script-created track can't be
   // removed, so re-adding one per seek would pile them up over a session.
-  if(!v._vsubs) v._vsubs=v.addTextTrack("subtitles","Subtitles");
+  if(!v._vsubs) v._vsubs=v.addTextTrack("subtitles","");
   const track=v._vsubs;
   // A disabled track reports `cues` as null, so the old cues would survive the
   // clear and stack up behind the new ones — wake it before emptying it.

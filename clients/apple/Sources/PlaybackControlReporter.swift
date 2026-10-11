@@ -469,6 +469,9 @@ struct ControlAction: Codable, Equatable {
     var mediaOriginMs: Int? = nil
     /// What the successor will deliver — the server's answer, not the ask.
     var effectiveSelection: EffectiveSelection? = nil
+    /// The named successor's control owner. It is adopted only after the
+    /// predecessor accepts the frame-proved committed acknowledgement.
+    var control: ControlBootstrap? = nil
 }
 
 /// What a session delivers, in the server's own vocabulary.
@@ -598,6 +601,7 @@ struct PreparedReplacementAction: Equatable {
     let playlistUrl: String
     let mediaOriginMs: Int
     let effectiveSelection: EffectiveSelection
+    let control: ControlBootstrap?
 
     /// `/api/v1/hls/{sessionId}/index.m3u8` or `.../master.m3u8`, and nothing
     /// else — the exact rule `is_node_relative_playlist` applies, including
@@ -634,19 +638,22 @@ struct PreparedReplacementAction: Equatable {
               PlaybackControl.isUUID(sessionId),
               Self.isNodeRelativePlaylist(playlistUrl, sessionId: sessionId),
               (0...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),
-              effectiveSelection.isValid
+              effectiveSelection.isValid,
+              action.control.map({ $0.isValid && $0.url == "/api/v1/hls/\(sessionId)/control" }) ?? true
         else { return nil }
         self.actionId = actionId
         self.sessionId = sessionId
         self.playlistUrl = playlistUrl
         self.mediaOriginMs = mediaOriginMs
         self.effectiveSelection = effectiveSelection
+        self.control = action.control
     }
 }
 
 struct ControlDelivery: Codable, Equatable {
     /// Extensible relay value: only the exact value `ready` has client meaning.
     var subtitleReadiness: String?
+    var subtitleRevision: String? = nil
     /// How far the server has got with a preparation for the newest ask:
     /// `staging`, `offered`, or `none`.
     ///
@@ -661,19 +668,40 @@ enum SubtitleReadinessDecision {
     static func meansReady(_ value: String?) -> Bool { value == "ready" }
 }
 
+/// A terminal extraction failure gets one notice per current selection/seek intent.
+/// Readiness success remains independently retryable when the cache recovers.
+final class SubtitleUnavailableNoticeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var toldIntent: Int?
+
+    func record(_ value: String?, commitUnavailable: Bool = true, intent: Int = 0) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard value == "unavailable", toldIntent != intent else { return false }
+        if commitUnavailable { toldIntent = intent }
+        return true
+    }
+}
+
 /// Turns a non-ready → ready edge into one retry and suppresses repeated
 /// control cadence at `ready`. The reporter actor records into this locked
 /// bridge; the player consumes the edge on MainActor.
 final class SubtitleReadinessRetryState: @unchecked Sendable {
     private let lock = NSLock()
     private var lastReady: Bool?
+    private var lastIntent: Int?
+    private var lastRevision: String?
 
-    func record(_ value: String?, commitReady: Bool = true) -> Bool {
+    func record(_ value: String?, commitReady: Bool = true, intent: Int = 0, revision: String? = nil) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         let ready = SubtitleReadinessDecision.meansReady(value)
-        defer { if !ready || commitReady { lastReady = ready } }
-        return lastReady == false && ready
+        defer {
+            if !ready || commitReady { lastReady = ready; lastIntent = intent; lastRevision = revision }
+        }
+        // Warming can finish between control exchanges. The first ready
+        // observation for this intent must repair any cached empty segments.
+        return ready && (lastReady != true || lastIntent != intent || lastRevision != revision)
     }
 }
 
@@ -683,6 +711,7 @@ struct ControlResponse: Codable, Equatable {
     var controlEpoch: Int
     var acceptedSequence: Int
     var delivery: ControlDelivery? = nil
+    var effectiveProcessing: EffectiveProcessingReport? = nil
     /// What the session being reported on is actually delivering. The server
     /// has always sent this; until now Swift's decoder dropped it on the
     /// floor, so a client had no way to compare what it has against what a
@@ -693,7 +722,7 @@ struct ControlResponse: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case proto = "protocol"
         case generation, controlEpoch, acceptedSequence, delivery
-        case effectiveSelection, action
+        case effectiveSelection, effectiveProcessing, action
     }
 }
 
@@ -1192,7 +1221,7 @@ actor PlaybackControlReporter {
         }
         let retryableControl = (status == 425 && code == "owner_transition")
             || (status == 429 && code == "control_rate_limited")
-            || (status == 503 && code == "control_unavailable")
+            || (status == 503 && (code == "control_unavailable" || code == "serving_fenced"))
         let retryableTransport = status == 408 || status == nil
         guard retryableControl || retryableTransport else {
             stop()

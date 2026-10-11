@@ -1,0 +1,32 @@
+{
+  "scope": "independent FFmpeg9 normal decode compare to retained Jellyfin8 decode",
+  "argv": [
+    "/opt/homebrew/Cellar/ffmpeg/9.0.1_1/bin/ffmpeg",
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-threads",
+    "1",
+    "-i",
+    "/owned/retained-sharp-capture/encoded.mp4",
+    "-frames:v",
+    "1",
+    "-pix_fmt",
+    "yuv420p10le",
+    "-f",
+    "rawvideo",
+    "/owned/hdr-analysis/decoded-independent.yuv"
+  ],
+  "seconds": 0.04974554100772366,
+  "exit": 0,
+  "stderr": "",
+  "tool_sha256": "9f5ddd4f8b36eb07b0c5d60ab6ea1e618bedd70bc45feab82b4dc23be1596ad1",
+  "raw_sha256": "6c3a33672cb1e21ea7c49dbbdcbd0003c40aba9d48e84eb1db225bd05e982147",
+  "identical_to_retained": true,
+  "receipt_provenance": {
+    "kind": "sanitized derivative of locally retained execution receipt",
+    "raw_receipt_sha256": "51ef32dee607cf3651f48bd6f67b2b6acf0d2090d895525bfae8abf1dbe12932",
+    "sanitization": "private source names/paths replaced, media title tags omitted, infrastructure host normalized; numerical measurements unchanged"
+  }
+}

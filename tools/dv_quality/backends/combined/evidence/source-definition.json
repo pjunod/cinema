@@ -1,0 +1,70 @@
+{
+  "scope": "synthetic native Main10 controls",
+  "width": 64,
+  "height": 64,
+  "logical_rate": "24/1",
+  "BL": "Y=400+4f+2floor(x/4)+floor(y/4);U=V=512",
+  "EL": "Y=512\u00b1(8+f) checker;U=V=512",
+  "frames": [
+    {
+      "layer": "bl",
+      "logical_source_frame": 0,
+      "source_sha256": "82c8e7a131e26ee8140e43dcbd758c7597fc4ed602e94a1e710a2ea1cadafcef"
+    },
+    {
+      "layer": "bl",
+      "logical_source_frame": 1,
+      "source_sha256": "d68ac06a2f12aef3d73d2a2790da750f8a72a7202b39e0c933b02e394cb5ac6a"
+    },
+    {
+      "layer": "bl",
+      "logical_source_frame": 2,
+      "source_sha256": "e255dff9f0e9ee0259adff4c00ef7259e5bc4cdf590c59582cfbaeadb510dbc6"
+    },
+    {
+      "layer": "bl",
+      "logical_source_frame": 3,
+      "source_sha256": "d4ac91b058fedcf06feb54fb19ef1f048286b0aef2fe3566fa26d02364e9939e"
+    },
+    {
+      "layer": "bl",
+      "logical_source_frame": 4,
+      "source_sha256": "d8db2c495c21be386887658e03fa6b449a30cf3f79baff546c822377d4c188d4"
+    },
+    {
+      "layer": "bl",
+      "logical_source_frame": 5,
+      "source_sha256": "3dc0eae3f41f181a176885a5259da60d0015bcdb0977e84eae1601b38973ef86"
+    },
+    {
+      "layer": "el",
+      "logical_source_frame": 0,
+      "source_sha256": "6e7dd1d8991d3f20d276a07506c56295d0086445caa595f6dc41ff5868242e94"
+    },
+    {
+      "layer": "el",
+      "logical_source_frame": 1,
+      "source_sha256": "40e7509e471dd29538f5e30d966a9451cf619774470e78e8cc524e82b52b793b"
+    },
+    {
+      "layer": "el",
+      "logical_source_frame": 2,
+      "source_sha256": "2aab2dd0bd04c1386a52216b4034bc196d71df11da4b92b131a7c5ecb9a6782a"
+    },
+    {
+      "layer": "el",
+      "logical_source_frame": 3,
+      "source_sha256": "f0af7a8b49cd16f80fc03dc31aa5d0e8fe42101f9b09268f1a919c804c3444dd"
+    },
+    {
+      "layer": "el",
+      "logical_source_frame": 4,
+      "source_sha256": "c85659cff2553b669b5cbc5bf583e435ba346c6d88738888963994532ed36ea5"
+    },
+    {
+      "layer": "el",
+      "logical_source_frame": 5,
+      "source_sha256": "4298647f45ca773faec717d4dec735ee0f4dc0c6ee6140d9bb2608ec1d558279"
+    }
+  ]
+}

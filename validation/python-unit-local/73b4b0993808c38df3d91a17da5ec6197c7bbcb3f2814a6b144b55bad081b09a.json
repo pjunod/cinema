@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-hdr-reference-scoring",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_docs_index.py",
+  "test_file_sha256": "1cb333314f478d19e257eaa245e563d5bfd559465c261500c592faede7a48162",
+  "test_ids": ["test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed", "test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve"],
+  "command": "python3 -m unittest tests.operations.test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed tests.operations.test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve tests.operations.test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions -v",
+  "output": "test_every_docs_markdown_file_is_listed (tests.operations.test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed) ... ok\ntest_relative_links_between_documents_resolve (tests.operations.test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve) ... ok\ntest_current_index_has_no_mechanical_contradictions (tests.operations.test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 0.544s\n\nOK\n",
+  "provenance_note": "Verbatim successful toolbe5396 output. This document imports only its two named same-file IDs from the three-method successful invocation; the separate status record imports the third. Index row moved to the proper subject section afterward, without repeating any method.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 2}
+}

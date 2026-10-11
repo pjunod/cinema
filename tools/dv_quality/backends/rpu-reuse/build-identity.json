@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+  "ffmpeg_revision": "bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
+  "libdovi_revision": "83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+  "fresh_builds": [
+    "static FFmpeg prefix",
+    "standalone Rust author/inspector examples",
+    "C mux/decode/cache helpers"
+  ],
+  "reused_dependencies": [
+    "verified prior Docker image",
+    "393-file verified public offline Cargo cache/index"
+  ],
+  "ffmpeg_patch": "none",
+  "libdovi_patch": "appended workspace plus reviewed resolved Cargo lock",
+  "system_dependency_resolution": "prior image uses live apt/pip; not a deterministic rebuild lock",
+  "files": {
+    "mux_reuse": "9c79e0e109071a2bc74d222b309ad7620d09dd4e1bd49c46a95577170f495dcc",
+    "decode_reuse": "b3aa859d3dda3f018ae8b28c8ec6a0cb387d7d31eca0e2ec4dc0108018031eb7",
+    "cache_probe": "002a10be33e8f70904bc37c59e7c8cbb8c7d67a9646005947b63fc0ff22ffc4e",
+    "image-id.txt": "03f8f7bddea2d0cdbc02122c1ff0b658cac153c457373767a0650f267d661963",
+    "rust-version.txt": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "ffmpeg-prefix/lib/libavcodec.a": "5ee09d4c98cd082925fb909b2a1bc0402eff48e137081abe8d24bef3b484a45c",
+    "ffmpeg-prefix/lib/libavformat.a": "68129a85b2a160dd571496e282980234c07e7daef3ff5074ffda0f2d7a402c36",
+    "ffmpeg-prefix/lib/libavutil.a": "d2e4864f21d009da22699b3ed173c8b76bc142a3ac4b46e1fabbd7a272f984fd",
+    "FFmpeg-bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa/config.h": "777d114eaf5cd0d68d5853c2ceb4ae024463e360def39dda5774ec842b0edcb1",
+    "FFmpeg-bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa/ffbuild/config.mak": "5e8cc68c9d75e131e4c0422a6ed1916ebdd360a742f7aee33a2927a503d1c6f3",
+    "dovi_tool-83e1fdad6dcd5995556235946e7c5c0f9010d5a1/target/release/examples/m0_reuse": "1d3202a5cf71867e94a39f511e9f275634265008b67106b31deb75e4300a0e93",
+    "dovi_tool-83e1fdad6dcd5995556235946e7c5c0f9010d5a1/target/release/examples/m0_inspect_reuse": "a029fdb22f3c3a1f7cfe8c51239ae6c6f9a0ae65c4e17974abb64b0029c836b7"
+  }
+}

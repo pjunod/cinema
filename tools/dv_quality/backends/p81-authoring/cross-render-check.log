@@ -1,0 +1,59 @@
+{
+  "scope": "analytic controls; separate implementations, no independent DV picture reference",
+  "same_renderer": "Both DV-on/off outputs use same pinned libplacebo backend",
+  "threshold_selection": "25 RGBcode DV diagnostic replay cap selected after observing24; not qualification threshold",
+  "scalar_reference_scope": "Independent analytic BT2020 inverseNCL arithmetic only",
+  "double_mapping_limit": "Original P7 reshape is identity; this cannot detect double application of arbitrary nonidentity reshaping",
+  "unmet_next_operation": "Nonidentity-reshape P7 reconstructed-base authoring control",
+  "creative_trims_applied": false,
+  "results": [
+    {
+      "frame_index": 0,
+      "decoded_input_file_sha256": "d459a2f163d531d425e9d50af16b3b1426baeb7715ee1124d93c1f2a66168865",
+      "selected_decoded_frame_sha256": "182bfbe370fc06cbb2c4e516eca48c91b9f563b853c737f560f158876332277f",
+      "frame_selection_method": "GPU helper fseek(frame_index*64*64*3), explicit index",
+      "same_renderer_dv_on_vs_hdr10_max_code_delta": 24,
+      "gpu_hdr10_vs_independent_inverse_ncl_max_code_delta": 1,
+      "gpu_dv_on_vs_independent_inverse_ncl_max_code_delta": 24,
+      "dv_on_sha256": "d6891d06dc73f53b81f99543ecf368b971f594c33d0d5211e808ade760cc29ee",
+      "hdr10_sha256": "e080d20649de8f34caa03d8e8be3b8723f11ab1d5d20b820a415971d90912861"
+    },
+    {
+      "frame_index": 1,
+      "decoded_input_file_sha256": "d459a2f163d531d425e9d50af16b3b1426baeb7715ee1124d93c1f2a66168865",
+      "selected_decoded_frame_sha256": "7c0014d8d8cf5bc5344922fc9ca5f7c6ab84146ae2f9d6c1931f4681e48a877b",
+      "frame_selection_method": "GPU helper fseek(frame_index*64*64*3), explicit index",
+      "same_renderer_dv_on_vs_hdr10_max_code_delta": 24,
+      "gpu_hdr10_vs_independent_inverse_ncl_max_code_delta": 1,
+      "gpu_dv_on_vs_independent_inverse_ncl_max_code_delta": 24,
+      "dv_on_sha256": "5d89f7273ee3bc026f55677fe827a089cd668d2ce1e6f513c21281b78959746a",
+      "hdr10_sha256": "e7f64e0b9e83425bd31e8f91291e34b615b85b7e48e8a4b89e046fc208f5bc52"
+    },
+    {
+      "frame_index": 2,
+      "decoded_input_file_sha256": "d459a2f163d531d425e9d50af16b3b1426baeb7715ee1124d93c1f2a66168865",
+      "selected_decoded_frame_sha256": "47008909ad1897c4be3e66d6f854912bfa3adbc087d873defed254a29c08bd08",
+      "frame_selection_method": "GPU helper fseek(frame_index*64*64*3), explicit index",
+      "same_renderer_dv_on_vs_hdr10_max_code_delta": 24,
+      "gpu_hdr10_vs_independent_inverse_ncl_max_code_delta": 1,
+      "gpu_dv_on_vs_independent_inverse_ncl_max_code_delta": 24,
+      "dv_on_sha256": "a1117356a6410d9cb6142d66979ab7837609fe7309b885a99864677d3fb28e64",
+      "hdr10_sha256": "76be5dab6cbb8c90263f8b897dc8e7289b4ee30874f698aebccf0d242b7442fe"
+    },
+    {
+      "frame_index": 3,
+      "decoded_input_file_sha256": "d459a2f163d531d425e9d50af16b3b1426baeb7715ee1124d93c1f2a66168865",
+      "selected_decoded_frame_sha256": "935c1a9f42a657868e3e9abadcbe3025fc0d1a85c2e3f13941341c8eaad20f66",
+      "frame_selection_method": "GPU helper fseek(frame_index*64*64*3), explicit index",
+      "same_renderer_dv_on_vs_hdr10_max_code_delta": 24,
+      "gpu_hdr10_vs_independent_inverse_ncl_max_code_delta": 1,
+      "gpu_dv_on_vs_independent_inverse_ncl_max_code_delta": 24,
+      "dv_on_sha256": "223fdba4e718c25cc44fe6c49ecd13ecc980f6821f210f918e80c9f17f5a39ee",
+      "hdr10_sha256": "c86f919a5daa0662448612da7ddba35c9bed9f3431078c09174e8b9c7865af7d"
+    }
+  ],
+  "p81_conformance": null,
+  "independent_dv_picture_reference": null,
+  "reference_fidelity_improvement": null,
+  "result": "diagnostic-control-pass"
+}

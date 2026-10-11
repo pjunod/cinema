@@ -76,10 +76,10 @@ pub(crate) const ADD_DOWNLOADED_SUBTITLE: &str = "WITH caption(file_id, source_s
         OR json_extract(downloaded_subtitles, '$[0].source_mtime') IS NOT (SELECT source_mtime FROM caption)
         OR (json_array_length(downloaded_subtitles) < 8 AND NOT EXISTS (
             SELECT 1 FROM json_each(downloaded_subtitles)
-            WHERE json_extract(value, '$.provider_file_id') = (SELECT provider_id FROM caption))))";
+            WHERE json_extract(value, '$.provider_file_id') = (SELECT provider_id FROM caption) AND json_type(value, '$.transcription') IS NULL)))";
 
 pub(crate) fn encode(track: &DownloadedSubtitle) -> Result<String, StoreError> {
-    if track.provider_file_id <= 0
+    if !valid_identity(track)
         || track.source_size < 0
         || track.language.is_empty()
         || track.language.len() > 12
@@ -93,4 +93,19 @@ pub(crate) fn encode(track: &DownloadedSubtitle) -> Result<String, StoreError> {
         return Err(StoreError::Database("invalid downloaded subtitle".into()));
     }
     serde_json::to_string(track).map_err(|e| StoreError::Database(e.to_string()))
+}
+
+fn valid_identity(track: &DownloadedSubtitle) -> bool {
+    match &track.transcription {
+        None => track.provider_file_id > 0,
+        Some(origin) => {
+            track.provider_file_id == 0
+                && origin.audio_index >= 0
+                && super::background_jobs::digest(&origin.artifact_key)
+                && super::background_jobs::digest(&origin.model_sha256)
+                && super::background_jobs::digest(&origin.pipeline_digest)
+                && origin.adapter == "whisper.cpp"
+                && origin.generated_at_ms >= 0
+        }
+    }
 }

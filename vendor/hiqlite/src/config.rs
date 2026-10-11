@@ -115,6 +115,8 @@ pub struct NodeConfig {
     pub snapshot_chunk_timeout: Duration,
     /// Absolute transfer-stage deadline for one snapshot attempt.
     pub snapshot_transfer_timeout: Duration,
+    /// Bounded storage admission wait; at most ten minutes. Does not suppress a snapshot.
+    pub snapshot_storage_deferral: Duration,
     /// Specific TLS certificates for the Raft traffic. Overwrites `tls_auto_certificates`.
     pub tls_raft: Option<ServerTlsConfig>,
     /// Specific TLS certificates for the API traffic. Overwrites `tls_auto_certificates`.
@@ -177,6 +179,7 @@ impl Default for NodeConfig {
             raft_config: Self::default_raft_config(10_000),
             snapshot_chunk_timeout: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
             snapshot_transfer_timeout: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
+            snapshot_storage_deferral: Duration::from_secs(600),
             tls_raft: None,
             tls_api: None,
             secret_raft: String::default(),
@@ -347,6 +350,7 @@ impl NodeConfig {
             raft_config: Self::default_raft_config(logs_keep),
             snapshot_chunk_timeout: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
             snapshot_transfer_timeout: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
+            snapshot_storage_deferral: Duration::from_secs(600),
             tls_raft: ServerTlsConfig::from_env("RAFT"),
             tls_api: ServerTlsConfig::from_env("API"),
             secret_raft: env::var("HQL_SECRET_RAFT").expect("HQL_SECRET_RAFT not found"),

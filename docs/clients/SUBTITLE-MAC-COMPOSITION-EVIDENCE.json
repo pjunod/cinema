@@ -1,0 +1,544 @@
+{
+  "observed_date": "2026-10-09",
+  "source_base": "6d480b4ea55da964764d9de89c90361d334d8f5b",
+  "ffmpeg_sha256": "c8c4b5259b8129d4240599e16e57e9286b2e3c0ca5076e91fa6055b5872ab4c8",
+  "inputs": {
+    "sdr8": "8be89cbd9ea1c34072893c6eac45fd83804c2010102b39fe07546b876dbfb385",
+    "hdr10": "fb654ce0c77ce4fc940c90d02a4ba0dcacb1cb5b2c61fadfd57ce62ae65975db",
+    "hlg": "3f90b5f07ad5e1418eca6a9450e336c8bfeaceff813a67dbb1507ae4bee6d7e0"
+  },
+  "corpus": [
+    {
+      "name": "sdr8-semantics",
+      "frames": 96,
+      "anchor_fade_region_deltas": [
+        0.0,
+        0.0,
+        43.576298701298704,
+        52.25,
+        52.25,
+        43.576298701298704,
+        0.0
+      ],
+      "moving_centroids": [
+        50.24848484848485,
+        89.88165680473372,
+        109.98837209302326
+      ],
+      "free_region_delta": 0.0,
+      "bitmap_samples": {
+        "6": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            7,
+            10,
+            9
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            7,
+            10,
+            9
+          ]
+        },
+        "18": {
+          "red": [
+            129,
+            0,
+            0
+          ],
+          "palette": [
+            0,
+            255,
+            1
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            7,
+            10,
+            9
+          ]
+        },
+        "42": {
+          "red": [
+            129,
+            0,
+            0
+          ],
+          "palette": [
+            1,
+            0,
+            255
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            7,
+            10,
+            9
+          ]
+        },
+        "66": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            7,
+            10,
+            9
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            7,
+            10,
+            9
+          ]
+        },
+        "90": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            7,
+            10,
+            9
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            7,
+            10,
+            9
+          ]
+        }
+      },
+      "sha256": {
+        "plain": "54396dec07bf67ff7c156d7345c242bc600ba2f69212e8dda14f5acfe1869a2c",
+        "text": "d37ac164cf1a1bd8ac95e1e34c0397952a8b20092821c90105f091fb9fefef30",
+        "bitmap": "fce38a2bcc7771e4dc6838c554d4a134162db58a3833c3fb2816c780d919153b"
+      }
+    },
+    {
+      "name": "hdr10-semantics",
+      "frames": 96,
+      "anchor_fade_region_deltas": [
+        0.0,
+        0.0,
+        41.94155844155844,
+        50.26461038961039,
+        50.26461038961039,
+        41.94155844155844,
+        0.0
+      ],
+      "moving_centroids": [
+        49.71511627906977,
+        89.84,
+        109.81920903954803
+      ],
+      "free_region_delta": 0.0,
+      "bitmap_samples": {
+        "6": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            20,
+            20,
+            20
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        },
+        "18": {
+          "red": [
+            129,
+            0,
+            0
+          ],
+          "palette": [
+            0,
+            255,
+            1
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        },
+        "42": {
+          "red": [
+            129,
+            0,
+            0
+          ],
+          "palette": [
+            1,
+            0,
+            255
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        },
+        "66": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            20,
+            20,
+            20
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        },
+        "90": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            20,
+            20,
+            20
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        }
+      },
+      "sha256": {
+        "plain": "e5f4318284bdc8a5ded54905266d84723632dd2b2db459ea8d662dea1bec2ee6",
+        "text": "f12bfb5255e02fc8a541191eab32cb6c71f6f7f051db26dbcdaf40079fdf63d7",
+        "bitmap": "d710d44ab89cd5866e499dae68694387b0374065205f7349c79174ff72477f51"
+      }
+    },
+    {
+      "name": "hlg-semantics",
+      "frames": 96,
+      "anchor_fade_region_deltas": [
+        0.0,
+        0.0,
+        42.107142857142854,
+        50.478896103896105,
+        50.478896103896105,
+        42.107142857142854,
+        0.0
+      ],
+      "moving_centroids": [
+        49.71511627906977,
+        89.98837209302326,
+        109.98837209302326
+      ],
+      "free_region_delta": 0.0,
+      "bitmap_samples": {
+        "6": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            20,
+            20,
+            20
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        },
+        "18": {
+          "red": [
+            129,
+            0,
+            0
+          ],
+          "palette": [
+            0,
+            255,
+            1
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        },
+        "42": {
+          "red": [
+            129,
+            0,
+            0
+          ],
+          "palette": [
+            1,
+            0,
+            255
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        },
+        "66": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            20,
+            20,
+            20
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        },
+        "90": {
+          "red": [
+            0,
+            0,
+            0
+          ],
+          "palette": [
+            20,
+            20,
+            20
+          ],
+          "base_red": [
+            0,
+            0,
+            0
+          ],
+          "base_palette": [
+            20,
+            20,
+            20
+          ]
+        }
+      },
+      "sha256": {
+        "plain": "5b4beadce30043a771106804c427097cd38975dc2e05068817d0f2bad37f94bc",
+        "text": "fc81140c787252cdb8acbe14ee0d1e0241c9516452ab95ff8fe15048de9451d6",
+        "bitmap": "66c7bd1640dc75d08e950e71f7ecf79565a6f290ba5f027a589398f29f192bb5"
+      }
+    }
+  ],
+  "seek": [
+    {
+      "name": "sdr8-seek-2.5-semantic-assertion",
+      "text_region_delta": 52.25,
+      "bitmap_region_delta": 151.4939393939394,
+      "active": true
+    },
+    {
+      "name": "sdr8-seek-4.5-semantic-assertion",
+      "text_region_delta": 16.891402714932127,
+      "bitmap_region_delta": 151.4939393939394,
+      "active": true
+    },
+    {
+      "name": "sdr8-seek-6.5-semantic-assertion",
+      "text_region_delta": 0.0,
+      "bitmap_region_delta": 0.0,
+      "active": false
+    },
+    {
+      "name": "hdr10-seek-2.5-semantic-assertion",
+      "text_region_delta": 50.26461038961039,
+      "bitmap_region_delta": 149.12727272727273,
+      "active": true
+    },
+    {
+      "name": "hdr10-seek-4.5-semantic-assertion",
+      "text_region_delta": 17.210407239819006,
+      "bitmap_region_delta": 149.12727272727273,
+      "active": true
+    },
+    {
+      "name": "hdr10-seek-6.5-semantic-assertion",
+      "text_region_delta": 0.0,
+      "bitmap_region_delta": 0.0,
+      "active": false
+    },
+    {
+      "name": "hlg-seek-2.5-semantic-assertion",
+      "text_region_delta": 50.478896103896105,
+      "bitmap_region_delta": 142.04545454545453,
+      "active": true
+    },
+    {
+      "name": "hlg-seek-4.5-semantic-assertion",
+      "text_region_delta": 12.604072398190045,
+      "bitmap_region_delta": 142.04545454545453,
+      "active": true
+    },
+    {
+      "name": "hlg-seek-6.5-semantic-assertion",
+      "text_region_delta": 0.0,
+      "bitmap_region_delta": 0.0,
+      "active": false
+    }
+  ],
+  "eof": [
+    {
+      "name": "sdr8-active-eof",
+      "frames": 6,
+      "complete_eof": true,
+      "active_cue_visible": true,
+      "cue_region_deltas": [
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667
+      ]
+    },
+    {
+      "name": "hdr10-active-eof",
+      "frames": 6,
+      "complete_eof": true,
+      "active_cue_visible": true,
+      "cue_region_deltas": [
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667
+      ]
+    },
+    {
+      "name": "hlg-active-eof",
+      "frames": 6,
+      "complete_eof": true,
+      "active_cue_visible": true,
+      "cue_region_deltas": [
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667,
+        46.72666666666667
+      ]
+    }
+  ],
+  "cancellation": [
+    {
+      "name": "text-cancellation",
+      "exit": 255,
+      "reaped": true,
+      "cancel_reap_seconds": 0.07500204199459404,
+      "output_bytes": 21432
+    },
+    {
+      "name": "bitmap-cancellation",
+      "exit": 255,
+      "reaped": true,
+      "cancel_reap_seconds": 1.4168700830050511,
+      "output_bytes": 35720
+    }
+  ],
+  "authored_subtitle_sha256": {
+    "semantic.ass": "fe36f0d169e36e4bd8ef081da7aae10da77854a3b42a6a4159a95e8b6965303d",
+    "semantic.sup": "3cff278363f93d8886f396444b6ff2d5a33e3b5b832508cf285361be39363b36"
+  },
+  "executed_drivers_sha256": {
+    "plurx-subtitle-e2-acceptance.py": "fabd64e43188300afc4e80abb371dcf7ae846c79964891d7bf43922df9e8b3ca",
+    "plurx-subtitle-e2-seek-cancel.py": "3f07848a9f7647fd6b7fcc3addb8d70bed9ab77920ed0e4129de0468b1b2341f"
+  }
+}

@@ -3,11 +3,12 @@ package tv.plurx.app.ui
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
-
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -52,6 +53,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tv.plurx.app.data.Features
 import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.Item
 import tv.plurx.app.data.Library
@@ -69,6 +71,7 @@ import tv.plurx.app.ui.components.imageUrl
 import tv.plurx.app.ui.components.itemResolutionFact
 import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
+import tv.plurx.app.remote.*
 
 /** The "Group by" picker's place in the vertical D-pad chain. */
 private const val GROUPING_KEY = "grouping"
@@ -78,6 +81,34 @@ private data class HomeCollection(
     val libraries: List<Library>,
     val items: List<Item>,
 )
+
+
+/** The optional sections Home links to from its header, each behind a server switch. */
+internal enum class HomeHeaderSection { LiveTv, Recordings, LibraryChannels, SharedLibraries }
+
+/**
+ * Which optional sections Home shows an entry for. Only the entries are
+ * hidden — the routes stay registered, so a deep link or reminder still lands
+ * on the section's own disabled state.
+ */
+internal fun homeHeaderSections(features: Features): Set<HomeHeaderSection> = buildSet {
+    if (features.live_tv) add(HomeHeaderSection.LiveTv)
+    if (features.recordings) add(HomeHeaderSection.Recordings)
+    if (features.library_channels) add(HomeHeaderSection.LibraryChannels)
+    if (features.shared_libraries) add(HomeHeaderSection.SharedLibraries)
+}
+
+/**
+ * The header's remote-navigation stops, in D-pad order. A hidden section's
+ * key must not stay in the order: linear remote navigation would otherwise
+ * step onto a stop with no control behind it.
+ */
+internal fun homeHeaderRemoteKeys(features: Features): List<String> = buildList {
+    val sections = homeHeaderSections(features)
+    add("home:search")
+    if (HomeHeaderSection.LiveTv in sections) add("home:live")
+    if (HomeHeaderSection.SharedLibraries in sections) add("home:shared")
+}
 
 @Composable
 fun HomeScreen(
@@ -90,9 +121,11 @@ fun HomeScreen(
     onOpenLiveTv: () -> Unit = {},
     onOpenRecordings: () -> Unit = {},
     onOpenLibraryChannels: () -> Unit = {},
+    onOpenSharedLibraries: () -> Unit = {},
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
+    val features by vm.features.collectAsStateWithLifecycle()
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
     val posterWidth = (preferences.posterSize.widthDp * formFactor.posterScale()).dp
@@ -111,7 +144,10 @@ fun HomeScreen(
             onOpenLiveTv = onOpenLiveTv,
             onOpenRecordings = onOpenRecordings,
             onOpenLibraryChannels = onOpenLibraryChannels,
+            features = features,
         )
+
+        if (HomeHeaderSection.SharedLibraries in homeHeaderSections(features)) SharedLibrariesEntry(onOpenSharedLibraries)
 
         when {
             // Only a cold start gets a spinner. Once anything has arrived the
@@ -142,6 +178,15 @@ fun HomeScreen(
                         add("collection-${it.title}")
                     }
                 }
+                RemoteOrder(buildList {
+                    addAll(homeHeaderRemoteKeys(features))
+                    listOf("Continue watching" to continueShelfItems, "Next up" to state.hubs.next_up, "Recently added" to state.hubs.recently_added).forEach { (key, items) -> items.forEach { add("row:" + key + ":item:" + it.id) } }
+                    add("choice:Group by")
+                    collections.forEach { collection ->
+                        val key = "collection:" + collection.libraries.joinToString(",") { it.id.toString() }
+                        add("row:" + key + ":all"); collection.items.forEach { add("row:" + key + ":item:" + it.id) }
+                    }
+                }.distinct().take(16384))
                 val shelfFocus = remember(visibleShelfKeys) {
                     visibleShelfKeys.associateWith { FocusRequester() }
                 }
@@ -267,6 +312,7 @@ fun HomeScreen(
                         val key = "collection-${collection.title}"
                         MediaRow(
                             title = collection.title,
+                            remoteKey = "collection:" + collection.libraries.joinToString(",") { it.id.toString() },
                             items = collection.items,
                             posterWidth = posterWidth,
                             onViewAll = { onOpenCollection(collection.title, collection.libraries) },
@@ -414,6 +460,7 @@ private fun compactTimeRemaining(item: Item): String? {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun HomeTopBar(
     theme: ThemeId,
     username: String?,
@@ -427,6 +474,7 @@ internal fun HomeTopBar(
     onOpenLiveTv: () -> Unit = {},
     onOpenRecordings: () -> Unit = {},
     onOpenLibraryChannels: () -> Unit = {},
+    features: Features = Features(),
 ) {
     val brand: @Composable () -> Unit = {
         Text(
@@ -449,17 +497,27 @@ internal fun HomeTopBar(
         TvIconButton(onClick = onRefresh) {
             Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = Muted)
         }
-        TvIconButton(onClick = onSearch) {
+        TvIconButton(onClick = onSearch, modifier = Modifier.remoteAction("home:search", "Search") { onSearch(); RemoteOutcome.Applied }) {
             Icon(Icons.Filled.Search, contentDescription = "Search", tint = Muted)
         }
-        TvIconButton(onClick = onOpenLiveTv) {
-            Icon(Icons.Filled.LiveTv, contentDescription = "Live TV", tint = Muted)
+        // Each optional section's button exists only while the server has
+        // that section switched on. Hiding the Live TV button also drops its
+        // remote action; [homeHeaderRemoteKeys] drops it from the order.
+        val sections = homeHeaderSections(features)
+        if (HomeHeaderSection.LiveTv in sections) {
+            TvIconButton(onClick = onOpenLiveTv, modifier = Modifier.remoteAction("home:live", "Live TV") { onOpenLiveTv(); RemoteOutcome.Applied }) {
+                Icon(Icons.Filled.LiveTv, contentDescription = "Live TV", tint = Muted)
+            }
         }
-        TvIconButton(onClick = onOpenRecordings) {
-            Icon(Icons.Filled.RadioButtonChecked, contentDescription = "Recordings", tint = Muted)
+        if (HomeHeaderSection.Recordings in sections) {
+            TvIconButton(onClick = onOpenRecordings) {
+                Icon(Icons.Filled.RadioButtonChecked, contentDescription = "Recordings", tint = Muted)
+            }
         }
-        TvIconButton(onClick = onOpenLibraryChannels) {
-            Icon(Icons.Filled.VideoLibrary, contentDescription = "Library channels", tint = Muted)
+        if (HomeHeaderSection.LibraryChannels in sections) {
+            TvIconButton(onClick = onOpenLibraryChannels) {
+                Icon(Icons.Filled.VideoLibrary, contentDescription = "Library channels", tint = Muted)
+            }
         }
         if (formFactor != FormFactor.Television) {
             TvIconButton(onClick = onOpenDownloads) {
@@ -473,13 +531,13 @@ internal fun HomeTopBar(
     val chrome = Modifier.fillMaxWidth().windowInsetsPadding(safeInsets)
         .padding(start = side, end = side - 8.dp, top = 14.dp, bottom = 4.dp)
     if (formFactor == FormFactor.Compact) {
-        // Five actions need their own row on narrow phones; the title and
-        // account must not push the last controls outside the viewport.
+        // Keep every action reachable at its full touch size on narrow phones;
+        // added actions wrap instead of overflowing the available width.
         Column(chrome) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 brand(); Box(Modifier.weight(1f)); user()
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }
         }
     } else {
         Row(chrome, verticalAlignment = Alignment.CenterVertically) {

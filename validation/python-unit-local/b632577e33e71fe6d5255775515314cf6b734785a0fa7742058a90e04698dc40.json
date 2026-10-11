@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/k06-owned-measurement-launcher",
+  "suite": "operations",
+  "test_file": "tests/operations/test_k06_owned_lab_review.py",
+  "test_file_sha256": "e05a5d84994b20530ddfab2eb060f1da1dbbe71542f5d861f243c7ce46f9ef2f",
+  "source_commit": null,
+  "command": "Two separate invocations: python3 -m unittest tests.operations.test_k06_owned_lab_review.OwnedClockLabReviewTests.test_threaded_remote_uses_exec_limiter_without_post_fork_callback; python3 -m unittest tests.operations.test_k06_owned_lab_review.OwnedClockLabReviewTests.test_cleanup_exports_both_daemon_channels_before_exact_remove",
+  "test_ids": [
+    "test_k06_owned_lab_review.OwnedClockLabReviewTests.test_threaded_remote_uses_exec_limiter_without_post_fork_callback",
+    "test_k06_owned_lab_review.OwnedClockLabReviewTests.test_cleanup_exports_both_daemon_channels_before_exact_remove"
+  ],
+  "output": "Sole review35 reviewed head933c792ba7b29536291cbfbc26bae61225815bb9. Both new IDs failed against that unchanged production source: threaded callback chunk3ef392 exit1; omitted stderr chunk9e8758 exit1. Corrected sole passes: de3044 exit0, Ran1 test in0.252s OK; 2333ee exit0, Ran1 test in0.184s OK. Passing launcher SHA256f3dd27d9406b651518460c1c0eafe460472a767bdb946bb1cdd1e8e6bd19c36e. Tests used only controlled local fake executables/private temporary fixtures; no SSH/Docker/HTTP host endpoint contacted. Original two successful IDs were not rerun; original test file remains bdac3455119860667a2d45c2dbac4da2cae3aca4b4143a833324a9219c4763a1. No operational lab execution or qualification claimed.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 2}
+}

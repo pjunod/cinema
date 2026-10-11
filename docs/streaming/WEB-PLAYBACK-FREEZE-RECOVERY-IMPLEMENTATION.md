@@ -1,7 +1,7 @@
 # Web playback freeze recovery — preserve delivery and explain quality changes
 
 **Status:** implemented and locally validated, 2026-09-16. Draft review pending; no fix deployed.
-**Executes:** the Free Fall (2013) investigation on nynuc, 2026-09-16.
+**Executes:** the Free Fall (2013) investigation on media1, 2026-09-16.
 **Owner:** the separate Sol implementation task requested by Paul.
 
 Build the four repairs in §4–§7, prove their interaction with §8, and leave
@@ -49,7 +49,7 @@ Non-goals:
   legitimate bandwidth-cliff handling.
 - Do not create another retry controller or change decoder capability
   learning to compensate for delivery failures.
-- Do not restart nynuc, deploy a build, or run disruptive live playback
+- Do not restart media1, deploy a build, or run disruptive live playback
   experiments as part of implementation. Paul may still be watching.
 
 ## 2. Evidence and provenance
@@ -345,7 +345,7 @@ restart instruction. Test the specialized drift handler as well as the
 generic classification function so their verdicts cannot diverge.
 
 Use software encoding for portable coverage where suitable, and record
-hardware-backed evidence separately if available without disrupting nynuc.
+hardware-backed evidence separately if available without disrupting media1.
 The existing production QSV probe proves the diagnosis; do not label a
 software-only new test as hardware qualification. Record any unexecuted
 hardware test as a limitation.

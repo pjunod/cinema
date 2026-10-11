@@ -1,0 +1,36 @@
+{
+  "argv": [
+    "/work/fel_export",
+    "/work/b2-normal/frames/bl-frame-002.rpu.nal",
+    "/work/b2-normal/frames/bl-frame-002.yuv420p10le",
+    "/work/b2-normal/frames/el-frame-002.yuv420p10le",
+    "83/1000",
+    "41/1000"
+  ],
+  "program_sha256": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+  "input_sha256": {
+    "b2-normal/frames/bl-frame-002.rpu.nal": "617ca0734eeb46897fe546b10e85e77d7d724c93f2a2fb505362fa185e445957",
+    "b2-normal/frames/bl-frame-002.yuv420p10le": "e255dff9f0e9ee0259adff4c00ef7259e5bc4cdf590c59582cfbaeadb510dbc6",
+    "b2-normal/frames/el-frame-002.yuv420p10le": "2aab2dd0bd04c1386a52216b4034bc196d71df11da4b92b131a7c5ecb9a6782a"
+  },
+  "cwd": "/work/render-2",
+  "environment": {
+    "LD_LIBRARY_PATH": "/work/prefix/lib/aarch64-linux-gnu",
+    "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.aarch64.json",
+    "XDG_RUNTIME_DIR": "/work/runtime",
+    "LC_ALL": "C"
+  },
+  "exit": 0,
+  "stdout_sha256": "7d21a7c2c76b8d3050927d9ba08d64f181c0fbfa3c5e52b997cc8683bc079bbb",
+  "stderr_sha256": "4bc9774262ecab962fd820029f84626c93dfe961f769790fa10761b8ebb1c208",
+  "output_sha256": {
+    "render-2/outputs/nonzero-rendered.rgba32f": "4afccaa21541f5572b29c7ad0db7ea71e164060114905c97e2cef825b3d6a14f",
+    "render-2/outputs/nonzero-rendered.rgb48le": "6ec37daaab3b7e5f512cdae99e49d9c1d93503758378a7c157d319604e400190",
+    "render-2/outputs/nonzero-reconstruction.rgba32f": "4afccaa21541f5572b29c7ad0db7ea71e164060114905c97e2cef825b3d6a14f",
+    "render-2/outputs/nonzero-reconstruction.rgb48le": "6ec37daaab3b7e5f512cdae99e49d9c1d93503758378a7c157d319604e400190",
+    "render-2/outputs/nonzero-el.rgba32f": "533354c0dbb7e1a972cb11a7752f807b0278ad59bcf2b6dc650423d4737f47a2",
+    "render-2/outputs/nonzero-el.rgb48le": "8ad190d8a81a7c36d6e0f754967251efc70790ceeabc0bb090853a657b7c5817",
+    "render-2/outputs/nonzero-bl.rgb48le": "f5ad13c8dfebd32b1b783651885c502a49a86749014abffdb2cf7aa1925a756d",
+    "render-2/outputs/nonzero-bl.rgba32f": "d6ea6b18f7f502bfd1ad4ebb48068c86b9cadbd578ac64a552d0ef917b1ce3fd"
+  }
+}

@@ -3,6 +3,10 @@
 
 package tv.plurx.app.player
 
+import tv.plurx.app.remote.*
+import kotlinx.serialization.json.*
+import java.util.UUID
+
 import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
@@ -26,6 +30,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -40,6 +45,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -130,6 +136,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.AudioTrack
+import tv.plurx.app.data.DynamicRange
 import tv.plurx.app.data.AudioOutputRoute
 import tv.plurx.app.data.PresentationTarget
 import tv.plurx.app.data.Caps
@@ -160,6 +167,7 @@ import tv.plurx.app.ui.components.sourceDynamicRange
 import tv.plurx.app.ui.components.tvFocusRing
 import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
+import tv.plurx.app.ui.theme.OnBg
 import tv.plurx.app.ui.theme.Surface
 
 private data class Plan(
@@ -343,6 +351,10 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
 }
 
 internal enum class PlayerPanel { Tracks, Settings, Info }
+internal enum class RemoteTrackMenuKind(val wireName: String) {
+    All("all"), Audio("audio"), Subtitles("subtitles"), Quality("quality");
+    companion object { fun fromWire(kind: String) = entries.firstOrNull { it != All && it.wireName == kind } }
+}
 
 internal enum class PlayerControlId {
     SkipBack30,
@@ -1153,6 +1165,128 @@ private fun PlayerContent(
         }
     }
 
+    val remoteClient = LocalRemoteClient.current
+    val remoteNavigation = LocalRemoteNavigation.current
+    val remoteScope = LocalRemoteScope.current
+    val remoteOwnerToken = remember(controller, remoteScope) { UUID.randomUUID().toString() }
+    val remotePreview = remember(controller) { RemotePreviewOwnership() }
+    var remoteTrackMenu by remember(controller) { mutableStateOf<RemoteTrackMenuKind?>(null) }
+    data class OwnedTrack(val kind: String, val id: String, val label: String, val selected: Boolean, val choose: () -> RemoteOutcome)
+    fun ownedTracks(): List<OwnedTrack> {
+        val result = mutableListOf<OwnedTrack>()
+        if (controller.deliveryMode != "direct" && plan.audio.isNotEmpty()) {
+            plan.audio.forEach { track -> result += OwnedTrack("audio", "server-audio:${track.index}", track.title ?: track.language ?: "Audio ${track.index}", controller.selectedAudio == track.index) {
+                controller.switchAudio(track.index); onAudioChanged(track.index); RemoteOutcome.Applied
+            } }
+        } else controller.player.currentTracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_AUDIO }.forEachIndexed { groupIndex, group ->
+            for (index in 0 until group.length) if (group.isTrackSupported(index)) result += OwnedTrack("audio", "native-audio:" + UUID.nameUUIDFromBytes((group.mediaTrackGroup.id + ":" + index + ":" + group.getTrackFormat(index).id).toByteArray()), group.getTrackFormat(index).label ?: group.getTrackFormat(index).language ?: "Audio ${index + 1}", group.isTrackSelected(index)) {
+                if (group !in controller.player.currentTracks.groups) RemoteOutcome.Unavailable else {
+                    controller.player.trackSelectionParameters = controller.player.trackSelectionParameters.buildUpon().setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, index)).setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, false).build(); RemoteOutcome.Applied
+                }
+            }
+        }
+        if (plan.subtitles.isNotEmpty()) {
+            result += OwnedTrack("subtitles", "subtitles-off", "Off", controller.selectedSubtitle == null) { if (controller.switchSubtitle(null)) { onSubtitleChanged(null); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
+            plan.subtitles.forEach { track -> result += OwnedTrack("subtitles", "server-subtitle:${track.index}", track.title ?: track.language ?: "Subtitle ${track.index}", controller.selectedSubtitle == track.index) {
+                if (controller.switchSubtitle(track.index)) { onSubtitleChanged(track.index); RemoteOutcome.Applied } else RemoteOutcome.Unavailable
+            } }
+        } else {
+            val text = controller.player.currentTracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
+            if (text.isNotEmpty()) result += OwnedTrack("subtitles", "subtitles-off", "Off", !controller.player.currentTracks.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_TEXT)) {
+                controller.player.trackSelectionParameters = controller.player.trackSelectionParameters.buildUpon().clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT).setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build(); RemoteOutcome.Applied
+            }
+            text.forEachIndexed { groupIndex, group -> for (index in 0 until group.length) if (group.isTrackSupported(index)) result += OwnedTrack("subtitles", "native-subtitle:" + UUID.nameUUIDFromBytes((group.mediaTrackGroup.id + ":" + index + ":" + group.getTrackFormat(index).id).toByteArray()), group.getTrackFormat(index).label ?: group.getTrackFormat(index).language ?: "Subtitle ${index + 1}", group.isTrackSelected(index)) {
+                if (group !in controller.player.currentTracks.groups) RemoteOutcome.Unavailable else {
+                    controller.player.trackSelectionParameters = controller.player.trackSelectionParameters.buildUpon().setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, index)).setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false).build(); RemoteOutcome.Applied
+                }
+            } }
+        }
+        qualityOptions(plan.ladder).forEach { option -> result += OwnedTrack("quality", "quality:${option.quality.storageValue}", option.label, preferences.playbackQuality == option.quality) {
+            vm.setPlaybackQuality(option.quality)
+            controller.prepareReplacement(option.quality) { position, quality -> onReload(position, "quality", quality) }
+            RemoteOutcome.Applied
+        } }
+        return result.take(64)
+    }
+
+    fun cancelNetworkPreview() {
+        val owned = remotePreview.owns(pendingMs)
+        pendingMs = remotePreview.cancel(pendingMs)
+        if (owned) repeatCount = 0
+    }
+    fun remoteCapabilities(): Set<String> = if (!controller.remoteCommandsAvailable() || blockingFault != null || isInPip || panel != null) emptySet() else
+        setOf("navigate", "select", "back", "set_playing", "stop") +
+            (if (ownedTracks().isNotEmpty()) setOf("open_tracks", "choose_track") else emptySet()) +
+            if (plan.durationMs > 0) setOf("seek_relative", "seek_absolute") else emptySet()
+    fun remoteDispatch(action: RemoteAction): RemoteOutcome {
+        if (action.type !in remoteCapabilities()) return RemoteOutcome.Unsupported
+        if (action.type == "open_tracks") {
+            val kind = action.text("kind") ?: return RemoteOutcome.Invalid
+            if (remoteTrackMenu != null || ownedTracks().none { it.kind == kind }) return RemoteOutcome.Unsupported
+            cancelNetworkPreview(); remoteNavigation?.changedContext(); remoteTrackMenu = RemoteTrackMenuKind.fromWire(kind) ?: return RemoteOutcome.Unsupported; return RemoteOutcome.Applied
+        }
+        if (action.type == "choose_track") {
+            val kind = action.text("kind")
+            if (remoteNavigation?.ownedChoicesReady != true || remoteTrackMenu == null || (remoteTrackMenu != RemoteTrackMenuKind.All && remoteTrackMenu?.wireName != kind)) return RemoteOutcome.Unsupported
+            val choice = ownedTracks().firstOrNull { it.kind == kind && it.id == action.text("option_id") } ?: return RemoteOutcome.Unavailable
+            val result = choice.choose(); if (result == RemoteOutcome.Applied) { remoteNavigation?.dispatch(RemoteAction("back", buildJsonObject {}), remoteNavigation.context); remoteTrackMenu = null }
+            return result
+        }
+        if (remoteTrackMenu != null && action.type in setOf("navigate", "select", "back"))
+            return remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unavailable
+        if (action.type == "set_playing") {
+            // Desired state still observes the existing pending-scrub commit boundary.
+            if (pendingMs != null) applyOutcome(PlayerInputOutcome.Commit, PlayerContractInput.PlayPause)
+            return if (controller.requestRemotePlaying(action.fields.getValue("playing").jsonPrimitive.boolean)) RemoteOutcome.Applied else RemoteOutcome.Unavailable
+        }
+        if (action.type == "stop") {
+            if (!controller.requestRemotePlaying(false)) return RemoteOutcome.Unavailable
+            cancelNetworkPreview(); onExit(); return RemoteOutcome.Applied
+        }
+        if (action.type == "seek_relative" || action.type == "seek_absolute") {
+            if (inputState() in setOf(PlayerInputState.Failed, PlayerInputState.Menu, PlayerInputState.Info)) return RemoteOutcome.Unsupported
+            if (pendingMs != null) applyOutcome(PlayerInputOutcome.Commit, PlayerContractInput.PlayPause)
+            val destination = if (action.type == "seek_absolute") action.fields.getValue("position_ms").jsonPrimitive.long
+                else controller.realPosition() + action.fields.getValue("seconds").jsonPrimitive.long * 1000
+            if (destination !in 0..plan.durationMs) return RemoteOutcome.Invalid
+            seekWithMarkerUndo(destination); poke(); return RemoteOutcome.Applied
+        }
+        val input = when (action.type) {
+            "navigate" -> when (action.text("direction")) { "left" -> PlayerContractInput.Left; "right" -> PlayerContractInput.Right; "up" -> PlayerContractInput.Up; else -> PlayerContractInput.Down }
+            "select" -> PlayerContractInput.Select
+            "back" -> PlayerContractInput.Back
+            else -> return RemoteOutcome.Unsupported
+        }
+        val outcome = PlayerInputPolicy.route(playerSurface, inputState(), input)
+        if (outcome in setOf(PlayerInputOutcome.FocusRow, PlayerInputOutcome.Activate, PlayerInputOutcome.MenuFocus))
+            return remoteNavigation?.dispatch(action, remoteNavigation.context) ?: RemoteOutcome.Unavailable
+        if (outcome == PlayerInputOutcome.Ignore) return RemoteOutcome.Unsupported
+        val before = pendingMs
+        repeatCount = 0
+        val applied = applyOutcome(outcome, input)
+        remotePreview.claim(before, pendingMs)
+        return if (applied && !(outcome == PlayerInputOutcome.Preview && pendingMs == before)) RemoteOutcome.Applied else RemoteOutcome.Unsupported
+    }
+    SideEffect {
+        controller.onPhysicalTransport = { remoteClient?.physicalInput() }
+        remoteClient?.playback?.attach(RemotePlaybackAdapter.Owner(remoteOwnerToken, remoteScope, ::remoteCapabilities, {
+            buildJsonObject {
+                put("media", buildJsonObject { put("type", "item"); put("item_id", itemId) })
+                put("title", RemoteWire.safeLabel(plan.title, fallback = "Playing")); put("playing", playbackIntent.playbackRequested)
+                put("position_ms", controller.realPosition().coerceAtLeast(0)); put("duration_ms", plan.durationMs.coerceAtLeast(0))
+                put("tracks", JsonArray(ownedTracks().map { track -> buildJsonObject { put("kind", track.kind); put("option_id", track.id); put("label", RemoteWire.safeLabel(track.label)) } }))
+            }
+        }, ::remoteDispatch, ::cancelNetworkPreview, { controller.remoteCommandsAvailable() && panel == null && blockingFault == null && !isInPip && (remoteTrackMenu == null || remoteNavigation?.ownedChoicesReady == true) }))
+    }
+    DisposableEffect(remoteClient, remoteOwnerToken) { onDispose { controller.onPhysicalTransport = null; remoteClient?.playback?.detach(remoteOwnerToken) } }
+    if (panel != null || blockingFault != null || isInPip) RemoteRestricted()
+    if (remoteTrackMenu != null) {
+        val kind = remoteTrackMenu
+        RemoteChoiceDialog(if (kind == RemoteTrackMenuKind.All) "Audio and subtitles" else "Choose ${kind?.wireName}", ownedTracks().filter { kind == RemoteTrackMenuKind.All && it.kind != "quality" || it.kind == kind?.wireName }.map { track ->
+            RemoteChoice(track.id, RemoteWire.safeLabel(track.label), track.selected, track.choose)
+        }) { remoteTrackMenu = null; poke(); focus(panelOpener) }
+    }
+
     BackHandler(enabled = !isInPip) {
         applyOutcome(
             PlayerInputPolicy.route(
@@ -1410,24 +1544,25 @@ private fun PlayerContent(
         AndroidView(
             factory = {
                 PlayerView(it).apply {
-                    player = controller.player
+                    player = controller.presentationPlayer
                     useController = false
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    // Warm promotion has already rendered offscreen; it must
+                    // not wait for a second first-frame event to drop a shutter.
+                    setKeepContentOnPlayerReset(controller.keepsWarmVideoOutputs)
                     screenOn.sync(this)
                     playerView = this
                 }
             },
-            // `controller.player` is read here as well as in `factory` so a
-            // committed prepared replacement re-attaches the surface to the
-            // successor: the read makes this recompose when the instance
-            // changes, and `PlayerView.setPlayer` moves the surface across.
+            // The presentation delegate follows the actual player for cues
+            // and tracks. Warm outputs keep their application-owned Surfaces;
+            // older platforms use PlayerView's ordinary SurfaceView binding.
             update = { view ->
-                if (view.player !== controller.player) {
-                    view.player = controller.player
-                    // The surface has moved, so the player it moved off can go.
-                    // This is the only place that knows that; the controller
-                    // parks the predecessor and waits to be told.
+                if (view.player !== controller.presentationPlayer) {
+                    view.player = controller.presentationPlayer
+                    // Collection waits for warm exposure and first-frame
+                    // ownership when either receipt is still outstanding.
                     controller.collectRetiredPlayer()
                 }
                 screenOn.sync(view)
@@ -1555,6 +1690,8 @@ private fun PlayerContent(
                         hdrTypes = displayHdrTypes,
                     ),
                     deliveredDolbyVisionProfile = controller.deliveredDolbyVisionProfile,
+                    effectiveProcessing = controller.effectiveProcessing,
+                    activeGeneration = controller.effectiveProcessingGeneration,
                 ),
                 onTransportHeight = { transportHeightPx = it },
                 // The arrow is the `close` control, not the BACK key: `Back`
@@ -1570,7 +1707,7 @@ private fun PlayerContent(
                 onSeekBack = { controller.seekBy(-10_000); poke() },
                 onSeekForward = { controller.seekBy(10_000); poke() },
                 onSeekForward30 = { controller.seekBy(30_000); poke() },
-                onScrub = { pendingMs = it.coerceIn(0L, plan.durationMs.coerceAtLeast(0L)) },
+                onScrub = { remoteNavigation?.physicalInput(); pendingMs = it.coerceIn(0L, plan.durationMs.coerceAtLeast(0L)) },
                 onScrubEnd = {
                     pendingMs?.let(::seekWithMarkerUndo)
                     pendingMs = null
@@ -1578,7 +1715,7 @@ private fun PlayerContent(
                 },
                 onTracks = {
                     panelOpener = PlayerControlId.Tracks
-                    panel = PlayerPanel.Tracks
+                    if (isTelevision(context)) remoteTrackMenu = RemoteTrackMenuKind.All else panel = PlayerPanel.Tracks
                 },
                 onSettings = {
                     panelOpener = PlayerControlId.Settings
@@ -1632,6 +1769,8 @@ private fun PlayerContent(
             PlayerPanel.Settings -> PlayerSettings(
                 vm = vm,
                 qualityOptions = qualityOptions(plan.ladder),
+                retainedQuality = controller.retainedQualityRequest,
+                onApplyWithRestart = controller::applyRetainedQualityWithRestart,
                 audioOffsetMs = controller.audioOffsetMs,
                 declaredOffsetMs = plan.declaredOffsetMs,
                 currentPosition = controller::positionForPlaybackIntent,
@@ -1802,6 +1941,11 @@ internal fun Controls(
     onPip: (() -> Unit)?,
     onTransportHeight: (Int) -> Unit = {},
 ) {
+    RemoteOrder(buildList {
+        if (durationMs > 0) add("player:Timeline")
+        addAll(listOf("SkipBack30", "SkipBack", "PlayPause", "SkipForward", "SkipForward30").map { "player:$it" })
+        if (onTracks != null) add("player:Tracks")
+    })
     val ownFocus = remember { PlayerControlFocus() }
     val resolvedFocus = focus ?: ownFocus
     val formFactor = currentFormFactor()
@@ -1818,6 +1962,7 @@ internal fun Controls(
     // node that was never attached.
     val upFromTransport = if (durationMs > 0L) resolvedFocus.timeline else FocusRequester.Cancel
 
+    @Composable
     fun transportModifier(control: PlayerControlId): Modifier = Modifier
         .focusRequester(resolvedFocus.requester(control))
         .focusProperties { up = upFromTransport }
@@ -1832,7 +1977,7 @@ internal fun Controls(
             if (onTracks != null) {
                 TvIconButton(
                     onClick = onTracks,
-                    modifier = transportModifier(PlayerControlId.Tracks),
+                    modifier = transportModifier(PlayerControlId.Tracks).remoteAction("player:Tracks", "Audio and subtitles") { onTracks(); RemoteOutcome.Applied },
                 ) {
                     Icon(Icons.Filled.ClosedCaption, contentDescription = "Audio and subtitles", tint = Color.White)
                 }
@@ -1902,8 +2047,9 @@ internal fun Controls(
                 overflow = TextOverflow.Ellipsis,
             )
             if (mediaFacts.isNotEmpty()) {
-                Row(
+                FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     mediaFacts.forEach { fact -> MediaFactChip(fact) }
                 }
@@ -1945,7 +2091,7 @@ internal fun Controls(
                     },
                     onTouchPreview = onScrub,
                     onTouchCommit = onScrubEnd,
-                    modifier = Modifier.padding(top = 4.dp),
+                    modifier = Modifier.padding(top = 4.dp).remoteAction("player:Timeline", "Playback timeline") { RemoteOutcome.Unsupported },
                 )
             }
 
@@ -2037,7 +2183,19 @@ private fun TransportButtons(
     onSeekForward: () -> Unit,
     onSeekForward30: () -> Unit,
 ) {
+    @Composable
     fun modifier(control: PlayerControlId, size: Dp): Modifier = Modifier
+        .remoteAction("player:${control.name}", when (control) { PlayerControlId.SkipBack30 -> "Back 30 seconds"; PlayerControlId.SkipBack -> "Back 10 seconds"; PlayerControlId.PlayPause -> if (isPlaying) "Pause" else "Play"; PlayerControlId.SkipForward -> "Forward 10 seconds"; PlayerControlId.SkipForward30 -> "Forward 30 seconds"; else -> "Playback control" }) {
+            when (control) {
+                PlayerControlId.SkipBack30 -> onSeekBack30()
+                PlayerControlId.SkipBack -> onSeekBack()
+                PlayerControlId.PlayPause -> onPlayPause()
+                PlayerControlId.SkipForward -> onSeekForward()
+                PlayerControlId.SkipForward30 -> onSeekForward30()
+                else -> return@remoteAction RemoteOutcome.Unsupported
+            }
+            RemoteOutcome.Applied
+        }
         .size(size)
         .focusRequester(focus.requester(control))
         .focusProperties { up = if (timelineAbove) focus.timeline else FocusRequester.Cancel }
@@ -2093,6 +2251,8 @@ private fun TransportButtons(
 private fun PlayerSettings(
     vm: AppViewModel,
     qualityOptions: List<QualityOption>,
+    retainedQuality: PlaybackQuality?,
+    onApplyWithRestart: () -> Unit,
     audioOffsetMs: Long,
     declaredOffsetMs: Long?,
     currentPosition: () -> Long,
@@ -2107,6 +2267,11 @@ private fun PlayerSettings(
     RequestInitialFocus(initialFocusRequester, enabled = qualityOptions.isNotEmpty())
     PlayerPanelSurface("Playback settings", onDismiss) {
         Text("Quality", color = Muted, style = MaterialTheme.typography.labelMedium)
+        retainedQuality?.let { quality ->
+            Text("The requested quality did not arrive. Current playback continues.", color = Muted)
+            PanelRow("Retry ${quality.label}", false) { onReload(currentPosition(), "quality", quality) }
+            PanelRow("Apply ${quality.label} with restart", false) { onApplyWithRestart() }
+        }
         // The rungs are the server's, filtered to what this source can feed —
         // a 1080p file never offers to upscale itself to 4K.
         qualityOptions.forEachIndexed { index, option ->
@@ -2126,7 +2291,7 @@ private fun PlayerSettings(
             }
         }
         Text("Audio sync", color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 12.dp))
-        Text(offsetLabel(offset), color = Color.White, style = MaterialTheme.typography.bodyMedium)
+        Text(offsetLabel(offset), color = OnBg, style = MaterialTheme.typography.bodyMedium)
         declaredOffsetMs?.let {
             Text("Container declares ${if (it > 0) "+" else ""}$it ms (already honored)", color = Muted, style = MaterialTheme.typography.labelMedium)
         }
@@ -2186,13 +2351,14 @@ private fun PlayerInfo(
     val videoFormat = player.videoFormat
     val source = plan.source
     val clientLoadedSeconds = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0
-    val method = buildList {
-        add(deliveryLabel(controller.deliveryMode))
-        if (controller.deliveryMode == "transcode") {
-            controller.encoder?.takeIf { it.isNotBlank() }?.let(::add)
-            controller.sessionStatus?.target_height?.takeIf { it > 0 }?.let { add("${it}p") }
-        }
-    }.joinToString(" · ")
+    val method = playbackDeliverySummary(
+        mode = controller.deliveryMode,
+        encoder = controller.encoder,
+        measuredHeight = player.videoSize.takeIf {
+            it.width > 0 && it.height > 0 && it.unappliedRotationDegrees == 0
+        }?.height,
+        plannedHeight = controller.sessionStatus?.target_height,
+    )
     PlaybackInfoOverlay(
         details = PlaybackInfoDetails(
             title = plan.title,
@@ -2229,6 +2395,8 @@ private fun PlayerInfo(
                     hdrTypes = displayHdrTypes,
                 ),
                 reasons = plan.reasons,
+                effectiveProcessing = controller.effectiveProcessing,
+                activeGeneration = controller.effectiveProcessingGeneration,
             ),
             subtitles = selectedSubtitle,
             decoder = videoFormat?.codecs ?: videoFormat?.sampleMimeType,
@@ -2846,6 +3014,22 @@ private fun requestIdleTone(seconds: Long, suspended: Boolean): PlaybackStatTone
     else -> PlaybackStatTone.Neutral
 }
 
+/** The initial server target can outlive an in-place quality change. */
+internal fun playbackDeliverySummary(
+    mode: String,
+    encoder: String?,
+    measuredHeight: Int?,
+    plannedHeight: Long?,
+): String = buildList {
+    add(deliveryLabel(mode))
+    if (mode == "transcode") {
+        encoder?.takeIf { it.isNotBlank() }?.let(::add)
+        val measured = measuredHeight?.takeIf { it > 0 }
+        if (measured != null) add("${measured}p")
+        else plannedHeight?.takeIf { it > 0 }?.let { add("Planned ${it}p") }
+    }
+}.joinToString(" · ")
+
 internal fun deliveryLabel(mode: String): String = when (mode) {
     "direct" -> "Direct play"
     "remux" -> "Remux"
@@ -2903,10 +3087,14 @@ internal fun dynamicRangeSummary(
     delivered: String?,
     rendered: String?,
     reasons: List<String>,
+    effectiveProcessing: tv.plurx.app.data.EffectiveProcessingReport? = null,
+    activeGeneration: String? = null,
 ): String? {
     if (source == null) return null
     if (delivered == null) return dynamicRangeLabel(source)
     val onScreen = rendered ?: delivered
+    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == DynamicRange.HDR10)
+        return "HDR10-E — ${effectiveProcessing.detail}"
     if (onScreen == source) return "${dynamicRangeLabel(source)} (rendering)"
     val why = reasons.firstOrNull { reason ->
         reason.contains("dolby vision", ignoreCase = true) || reason.contains("hdr", ignoreCase = true) ||
@@ -3019,7 +3207,7 @@ internal fun videoHealthSummary(
 }
 
 @Composable
-private fun PlayerPanelSurface(title: String, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+internal fun PlayerPanelSurface(title: String, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
@@ -3042,7 +3230,7 @@ private fun PlayerPanelSurface(title: String, onDismiss: () -> Unit, content: @C
 }
 
 @Composable
-private fun PanelRow(
+internal fun PanelRow(
     label: String,
     selected: Boolean,
     modifier: Modifier = Modifier,
@@ -3050,7 +3238,7 @@ private fun PanelRow(
 ) {
     Text(
         (if (selected) "●  " else "    ") + label,
-        color = if (selected) Accent else Color.White,
+        color = if (selected) Accent else OnBg,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         modifier = modifier
             .fillMaxWidth()
@@ -3061,7 +3249,7 @@ private fun PanelRow(
 }
 
 @Composable
-private fun PanelSwitch(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+internal fun PanelSwitch(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -3071,7 +3259,7 @@ private fun PanelSwitch(label: String, checked: Boolean, onCheckedChange: (Boole
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = Color.White, modifier = Modifier.weight(1f))
+        Text(label, color = OnBg, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = null)
     }
 }
@@ -3086,5 +3274,107 @@ private fun offsetLabel(ms: Long): String = if (ms == 0L) {
 private fun BackChip(onExit: () -> Unit) {
     TvIconButton(onClick = onExit, modifier = Modifier.padding(4.dp)) {
         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+    }
+}
+
+
+/** Explicit Shared dispatch, without a numeric Local PlanLike sentinel. Every
+ * control here asks the server first; the picture moves only after B accepts. */
+@Composable
+internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, incumbent: SharedPlayerController? = null, onEnded: () -> Unit = {}, onExit: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val controller = remember(vm, plan, incumbent) { incumbent ?: SharedPlayerController(context, vm) }
+    val remoteClient = LocalRemoteClient.current
+    val remoteNavigation = LocalRemoteNavigation.current
+    val remoteToken = remember(controller) { "shared-player:" + UUID.randomUUID().toString() }
+    var remoteLive by remember(controller) { mutableStateOf(true) }
+    val currentExit by rememberUpdatedState(onExit)
+    fun remoteOwned() = remoteLive && remoteNavigation?.scope == remoteToken
+    fun exitOwned(home: Boolean): RemoteOutcome {
+        if (!remoteOwned()) return RemoteOutcome.StaleContext
+        controller.beginStop(); remoteLive = false
+        if (home) remoteNavigation?.onHome?.invoke() else currentExit()
+        return RemoteOutcome.Applied
+    }
+    DisposableEffect(remoteNavigation, remoteToken) {
+        remoteNavigation?.enter(remoteToken, "playback") { exitOwned(false); true }
+        onDispose { remoteLive = false; remoteNavigation?.releaseScope(remoteToken) }
+    }
+    SideEffect {
+        remoteClient?.playback?.attach(RemotePlaybackAdapter.Owner(remoteToken, remoteToken,
+            { setOf("set_playing", "stop", "back", "home") }, { null }, { action ->
+                when (action.type) { "stop", "back" -> exitOwned(false); "home" -> exitOwned(true); else -> RemoteOutcome.Unsupported }
+            }, controller::retireNetworkOperation, ::remoteOwned, { action ->
+                if (action.type != "set_playing") null else RemoteDeferredEffect(
+                    RemoteDeferredBinding(remoteToken, remoteToken, plan.subject.context.toString()), ::remoteOwned,
+                    { check -> controller.setPlayingRemote(action.boolean("playing") == true) { remoteOwned() && check() } })
+            }))
+    }
+    DisposableEffect(remoteClient, remoteToken) { onDispose { remoteClient?.playback?.detach(remoteToken) } }
+    val starting by controller.owner.starting.collectAsStateWithLifecycle()
+    val failure by controller.owner.failure.collectAsStateWithLifecycle()
+    val statusSummary by controller.owner.statusSummary.collectAsStateWithLifecycle()
+    val selection by controller.owner.selection.collectAsStateWithLifecycle()
+    val playing by controller.playing.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    BackHandler { remoteClient?.physicalInput(); controller.beginStop(); onExit() }
+    LaunchedEffect(plan) { controller.start(plan) }
+    val ended by controller.ended.collectAsStateWithLifecycle()
+    val finished by rememberUpdatedState(onEnded)
+    LaunchedEffect(ended) { if (ended) finished() }
+    DisposableEffect(controller) { onDispose { controller.close() } }
+    Column(Modifier.fillMaxSize()) {
+        Text(plan.subject.title, style = MaterialTheme.typography.headlineSmall)
+        // A prepared handoff moves the surface to the successor (and a rollback
+        // back); the view releases the pipeline it left once it no longer
+        // points at it.
+        val surface by controller.surfacePlayer.collectAsStateWithLifecycle()
+        val retired by controller.retired.collectAsStateWithLifecycle()
+        AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = surface } },
+            update = { view -> if (view.player !== surface) view.player = surface; if (retired != null) controller.collectRetired(view.player) },
+            modifier = Modifier.weight(1f).fillMaxWidth())
+        if (starting) Text("Starting Shared playback")
+        statusSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        failure?.let { Text(it) }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.seekBy(-10_000) }, enabled = !starting) { Text("−10 s") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.togglePlaying() }, enabled = !starting) { Text(if (playing) "Pause" else "Play") }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.seekBy(30_000) }, enabled = !starting) { Text("+30 s") }
+            selection?.let { current ->
+                SharedChoiceMenu("Quality", current.quality.label, tv.plurx.app.data.PlaybackQuality.entries.map { it.label to current.copy(quality = it) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
+                val audio = plan.decision.presentation.audio
+                if (audio.size > 1) SharedChoiceMenu("Audio", audio.firstOrNull { it.index.toInt() == current.audio }?.let(::sharedTrackLabel) ?: "Default",
+                    audio.filter { it.index in 0..1024 }.map { sharedTrackLabel(it) to current.copy(audio = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
+                val subtitles = plan.decision.presentation.subtitles.filter { it.native == true && it.index in 0..1024 }
+                if (subtitles.isNotEmpty()) SharedChoiceMenu("Subtitles", subtitles.firstOrNull { it.index.toInt() == current.subtitle }?.let { sharedTrackLabel(it.language, it.title, it.codec) } ?: "Off",
+                    listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
+            }
+            androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.beginStop(); onExit() }) { Text("Close") }
+        }
+    }
+}
+
+private fun sharedTrackLabel(track: tv.plurx.app.data.AudioTrack): String =
+    sharedTrackLabel(track.language, track.title, track.codec) + (track.channels?.let { " · ${it}ch" } ?: "")
+
+private fun sharedTrackLabel(language: String?, title: String?, codec: String): String =
+    listOfNotNull(title?.takeIf { it.isNotBlank() }, language?.takeIf { it.isNotBlank() }).joinToString(" · ").ifEmpty { codec }
+
+/** A directed change: the choice is an ask, and the reopen it causes is the owner's. */
+@Composable
+private fun SharedChoiceMenu(
+    label: String, current: String, options: List<Pair<String, tv.plurx.app.data.SharedSelection>>, enabled: Boolean,
+    onChoose: (tv.plurx.app.data.SharedSelection) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val remoteClient = LocalRemoteClient.current
+    RemoteRestricted(open)
+    Box {
+        androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); open = true }, enabled = enabled) { Text("$label: $current") }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { remoteClient?.physicalInput(); open = false }) {
+            options.forEach { (text, choice) ->
+                androidx.compose.material3.DropdownMenuItem(text = { Text(text) }, onClick = { open = false; onChoose(choice) })
+            }
+        }
     }
 }

@@ -108,9 +108,16 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 143
+        versionCode = 163
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Explicit isolated instrumentation only; ordinary debug/release builds
+    // keep their existing identities and test variant. Never installs over the
+    // viewer's tv.plurx.app package.
+    if (providers.gradleProperty("plurxIsolatedBudgetProbe").orNull == "true") {
+        testBuildType = "capabilityProbe"
     }
 
     signingConfigs {
@@ -169,6 +176,14 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    defaultConfig {
+        // Public Firebase application configuration, never provider credentials or a home proof.
+        listOf("PROJECT_ID", "APPLICATION_ID", "API_KEY", "SENDER_ID").forEach { field ->
+            val value = providers.gradleProperty("cinemaFirebase" + field.lowercase().split('_').joinToString("") { it.replaceFirstChar(Char::uppercase) }).orNull.orEmpty()
+            require(value.matches(Regex("[A-Za-z0-9_:.\\-]*"))) { "Invalid Cinema Firebase application configuration" }
+            buildConfigField("String", "CINEMA_FIREBASE_" + field, "\"" + value + "\"")
+        }
+    }
     buildFeatures {
         buildConfig = true
         compose = true
@@ -178,6 +193,9 @@ android {
         // playback-info-fields.json are consumed directly from tests/playback.
         getByName("test").resources.directories.add("../../../tests/contracts")
         getByName("test").resources.directories.add("../../../tests/playback")
+        // tests/sharing/protocol-cases.json: the Shared wire rows every port reads.
+        getByName("test").resources.directories.add("../../../tests/sharing")
+        getByName("test").resources.directories.add("../../../crates/plurx-core/tests/fixtures")
     }
 }
 
@@ -191,6 +209,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(libs.firebase.messaging)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.profileinstaller)
     implementation(libs.androidx.activity.compose)
@@ -232,4 +251,6 @@ dependencies {
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.test.manifest)
+    // Isolated physical Compose tests need the same host activity as debug.
+    add("capabilityProbeImplementation", libs.androidx.ui.test.manifest)
 }

@@ -1,0 +1,85 @@
+{
+  "bitrate_kbps": 20000,
+  "family": "vaapi",
+  "hdr10_1080_filter": "scale=1920:1080,format=yuv420p10le",
+  "input_args": [
+    "-vaapi_device",
+    "/dev/dri/renderD128"
+  ],
+  "modes": {
+    "qvbr": {
+      "encoder_args": [
+        "-c:v",
+        "hevc_vaapi",
+        "-profile:v",
+        "main10",
+        "-tier:v",
+        "high",
+        "-level:v",
+        "4",
+        "-idr_interval",
+        "0",
+        "-b:v",
+        "20000k",
+        "-maxrate",
+        "30000k",
+        "-bufsize",
+        "40000k",
+        "-color_primaries",
+        "bt2020",
+        "-color_trc",
+        "smpte2084",
+        "-colorspace",
+        "bt2020nc",
+        "-color_range",
+        "tv"
+      ],
+      "recipe_value": "qvbr:q22:maxrate1.5x:bufsize2x"
+    },
+    "vbr": {
+      "encoder_args": [
+        "-c:v",
+        "hevc_vaapi",
+        "-profile:v",
+        "main10",
+        "-tier:v",
+        "high",
+        "-level:v",
+        "4",
+        "-idr_interval",
+        "0",
+        "-b:v",
+        "20000k",
+        "-maxrate",
+        "30000k",
+        "-bufsize",
+        "40000k",
+        "-color_primaries",
+        "bt2020",
+        "-color_trc",
+        "smpte2084",
+        "-colorspace",
+        "bt2020nc",
+        "-color_range",
+        "tv"
+      ],
+      "recipe_value": "vbr:maxrate1.5x:bufsize2x"
+    }
+  },
+  "output_grade": "hdr10",
+  "quality": 22,
+  "schema_version": 1,
+  "scope": "encoder_arguments_only",
+  "software_threads": 1,
+  "upload_filter": "format=p010le,hwupload",
+  "vod_hevc_sample_entry": "hvc1",
+  "expected_hls_codec": "hvc1.2.4.H120.B0",
+  "source_commit": "addfac9f138da42d1912c88d508451533410224f",
+  "exporter_sha256": "5e183924674f9fecbde74006004dac367443e666b7fec5516b1c75245be0e440",
+  "source_sha256": {
+    "crates/plurx-core/src/transcode/encoder.rs": "4942e44fdbca2b5f93fff2bba6953bbae25718b8b72c8f95c83c70b4bc4a136a",
+    "crates/plurx-core/src/transcode/pipeline.rs": "23f56c9dc4b8f00d650485feac28f9f479898742c41de96295ae8120db924e3f",
+    "crates/plurxd/src/transcode/ladder.rs": "7c996c6dd2af510963ca9b4f895bc3122d38cb745c87049c8f73d9d321474a92",
+    "crates/plurx-core/src/transcode/vod.rs": "f6302654e76ac1f658295b84360174af97456368392e9df359f21ebdfeef4c4c"
+  }
+}

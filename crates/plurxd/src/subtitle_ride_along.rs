@@ -4638,7 +4638,7 @@ mod tests {
         let id = 70_012;
         let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
         let manifest = harvest_of(&case.root, id, case.stamp, b"PG source")
-            .publish_with_cluster(&catalog, "nuc4", &"a".repeat(64), None)
+            .publish_with_cluster(&catalog, "lab4", &"a".repeat(64), None)
             .await
             .expect("publish");
         let rows = catalog
@@ -4667,7 +4667,7 @@ mod tests {
         let lost = CancellationToken::new();
         let result = harvest_of(&case.root, id, case.stamp, b"cancelled source")
             .publish_internal(
-                Some((&catalog, "nuc4", &"a".repeat(64))),
+                Some((&catalog, "lab4", &"a".repeat(64))),
                 Some(&lost),
                 None,
                 None,
@@ -4759,7 +4759,7 @@ mod tests {
             .await
             .expect("enqueue");
         let claimed = catalog
-            .claim_subtitle_fixture(&request.request_id, "nuc4", now, now + 60_000)
+            .claim_subtitle_fixture(&request.request_id, "lab4", now, now + 60_000)
             .await
             .expect("claim")
             .expect("running");
@@ -4768,7 +4768,7 @@ mod tests {
         assert!(!lost.is_cancelled(), "admin cancel is a separate fence");
         let result = harvest_of(&case.root, id, case.stamp, b"admin cancelled")
             .publish_internal(
-                Some((&catalog, "nuc4", &"a".repeat(64))),
+                Some((&catalog, "lab4", &"a".repeat(64))),
                 Some(&lost),
                 Some(&claimed),
                 None,

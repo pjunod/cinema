@@ -32,6 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
@@ -53,6 +55,13 @@ import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
 import tv.plurx.app.ui.theme.SurfaceHi
 import tv.plurx.app.ui.theme.Outline
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlinx.coroutines.launch
+import tv.plurx.app.ui.FormFactor
+import tv.plurx.app.ui.currentFormFactor
+import tv.plurx.app.remote.*
 
 enum class PosterResolutionPlacement {
     ArtworkOverlay,
@@ -61,6 +70,7 @@ enum class PosterResolutionPlacement {
 
 /** Absolute image URL for a server-relative poster/backdrop path (or null). */
 fun imageUrl(path: String?): String? = path?.let { Session.url(it) }
+
 
 @Composable
 fun NetworkImage(url: String?, modifier: Modifier = Modifier) {
@@ -82,11 +92,14 @@ fun NetworkImage(url: String?, modifier: Modifier = Modifier) {
  * shows "S1 E3", for everything else the year.
  */
 @Composable
-fun PosterCard(
+internal fun PosterCard(
     item: Item,
     modifier: Modifier = Modifier,
     width: Dp = 128.dp,
     resolutionPlacement: PosterResolutionPlacement = PosterResolutionPlacement.ArtworkOverlay,
+    landscape: Boolean = false,
+    remoteEnabled: Boolean = true,
+    remoteActivate: (() -> RemoteOutcome)? = null,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -95,6 +108,7 @@ fun PosterCard(
 
     Column(
         modifier
+            .remoteAction(LocalRemoteItemPrefix.current + ":" + item.id, item.title, enabled = remoteEnabled) { remoteActivate?.invoke() ?: run { onClick(); RemoteOutcome.Applied } }
             .width(width)
             .scale(scale)
             .onFocusChanged { focused = it.isFocused }
@@ -111,7 +125,7 @@ fun PosterCard(
             Modifier
                 .fillMaxWidth()
                 .testTag("poster-artwork")
-                .aspectRatio(2f / 3f)
+                .aspectRatio(if (landscape) 16f / 9f else 2f / 3f)
                 .clip(MaterialTheme.shapes.medium)
                 .background(SurfaceHi)
                 .then(
@@ -122,7 +136,7 @@ fun PosterCard(
                     },
                 )
         ) {
-            NetworkImage(imageUrl(item.poster), Modifier.fillMaxSize())
+            NetworkImage(imageUrl(if (landscape) item.backdrop ?: item.poster else item.poster), Modifier.fillMaxSize())
             if (resolutionPlacement == PosterResolutionPlacement.ArtworkOverlay) item.resolution?.let { height ->
                 Text(
                     resolutionLabel(height),
@@ -171,7 +185,7 @@ fun PosterCard(
         )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                subtitleFor(item),
+                if (landscape) homeMediaMetadata(item) else subtitleFor(item),
                 style = MaterialTheme.typography.labelMedium,
                 color = Muted,
                 maxLines = 1,
@@ -197,13 +211,22 @@ fun MediaRow(
     posterWidth: Dp = 128.dp,
     resolutionPlacement: PosterResolutionPlacement = PosterResolutionPlacement.ArtworkOverlay,
     onViewAll: (() -> Unit)? = null,
+    landscape: Boolean = false,
     rowFocusRequester: FocusRequester? = null,
     previousRowFocusRequester: FocusRequester? = null,
     nextRowFocusRequester: FocusRequester? = null,
+    remoteKey: String = title,
     onOpen: (Item) -> Unit,
 ) {
     if (items.isEmpty()) return
     val viewAllFocusRequester = remember { FocusRequester() }
+    val remotePrefix = "row:" + remoteKey + ":item"
+    val remoteRowState = rememberLazyListState()
+    val remoteScope = rememberCoroutineScope()
+    RemoteRealizer { key ->
+        val index = items.indexOfFirst { remotePrefix + ":" + it.id == key }
+        if (index >= 0) remoteScope.launch { remoteRowState.scrollToItem(index) }
+    }
     Column(Modifier.padding(vertical = 10.dp)) {
         androidx.compose.foundation.layout.Row(
             Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, bottom = 10.dp),
@@ -216,6 +239,8 @@ fun MediaRow(
                     color = Accent,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
+                        .remoteAction("row:" + remoteKey + ":all", "View all " + title) { onViewAll(); RemoteOutcome.Applied }
+                        .semantics { contentDescription = "View all $title" }
                         .focusRequester(viewAllFocusRequester)
                         .focusProperties {
                             if (previousRowFocusRequester != null) up = previousRowFocusRequester
@@ -257,7 +282,9 @@ fun MediaRow(
                 nextRowFocusRequester?.let { down = it }
             }
         }
+        CompositionLocalProvider(LocalRemoteItemPrefix provides remotePrefix) {
         LazyRow(
+            state = remoteRowState,
             modifier = Modifier
                 .testTag(shelfTestTag(title))
                 .then(rowFocusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
@@ -271,8 +298,10 @@ fun MediaRow(
                     modifier = cardFocusOrder,
                     width = posterWidth,
                     resolutionPlacement = resolutionPlacement,
+                    landscape = landscape,
                 ) { onOpen(item) }
             }
+        }
         }
     }
 }
@@ -290,6 +319,7 @@ fun <T> ChoicePicker(
     modifier: Modifier = Modifier,
 ) {
     var open by remember { mutableStateOf(false) }
+    val television = currentFormFactor() == FormFactor.Television
     val selectorShape = MaterialTheme.shapes.small
     Column(modifier) {
         Text(label, color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(bottom = 6.dp))
@@ -305,21 +335,23 @@ fun <T> ChoicePicker(
                     .background(SurfaceHi, selectorShape)
                     .border(1.dp, Outline, selectorShape)
                     // `clickable` carries the focus target; see PosterCard.
+                    .remoteAction("choice:" + label, label) { open = true; RemoteOutcome.Applied }
                     .clickable { open = true }
                     .padding(horizontal = 16.dp, vertical = 14.dp),
             )
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                options.forEach { option ->
-                    DropdownMenuItem(
-                        modifier = Modifier.tvFocusRing(MaterialTheme.shapes.small, focusedScale = 1.02f),
-                        text = {
-                            Text(
-                                optionLabel(option),
-                                color = if (option == value) Accent else MaterialTheme.colorScheme.onSurface,
-                            )
-                        },
-                        onClick = { onSelect(option); open = false },
-                    )
+            if (open && television) {
+                RemoteChoiceDialog(label, options.mapIndexed { index, option ->
+                    RemoteChoice(index.toString(), optionLabel(option), option == value) { onSelect(option); RemoteOutcome.Applied }
+                }) { open = false }
+            }
+            if (!television) {
+                if (open) RemoteRestricted()
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    options.forEach { option ->
+                        DropdownMenuItem(modifier = Modifier.tvFocusRing(MaterialTheme.shapes.small, focusedScale = 1.02f),
+                            text = { Text(optionLabel(option), color = if (option == value) Accent else MaterialTheme.colorScheme.onSurface) },
+                            onClick = { onSelect(option); open = false })
+                    }
                 }
             }
         }
@@ -332,6 +364,11 @@ fun LoadingBox(modifier: Modifier = Modifier) {
         CircularProgressIndicator(color = Accent)
     }
 }
+
+internal fun homeMediaMetadata(item: Item): String = listOfNotNull(
+    item.recorded_at?.take(10),
+    item.runtime_ms?.takeIf { it > 0 }?.let { "${maxOf(1, it / 60_000)} min" },
+).joinToString(" · ").ifEmpty { subtitleFor(item) }
 
 private fun subtitleFor(item: Item): String = when {
     (item.isBook || item.isAudiobook) && !item.author.isNullOrBlank() -> item.author

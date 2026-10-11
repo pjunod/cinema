@@ -1368,9 +1368,19 @@ pub async fn atomic_write_child(
     destination: &str,
     bytes: &[u8],
 ) -> io::Result<()> {
+    atomic_write_child_owned(directory, destination, bytes.to_vec()).await
+}
+
+/// Move the allocation and any attached admission owner into the actual
+/// blocking writer. Cancelling its async caller cannot release that ownership
+/// before the held-directory write, sync, rename and cleanup settle.
+pub async fn atomic_write_child_owned<T: AsRef<[u8]> + Send + 'static>(
+    directory: &Path,
+    destination: &str,
+    bytes: T,
+) -> io::Result<()> {
     let directory = directory.to_owned();
     let destination = destination.to_owned();
-    let bytes = bytes.to_vec();
     tokio::task::spawn_blocking(move || {
         let directory = open_directory_nofollow_blocking(&directory)?;
         let destination = child_name(&destination)?;
@@ -1397,7 +1407,7 @@ pub async fn atomic_write_child(
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
         let mut file = File::from(fd);
         let result = (|| {
-            file.write_all(&bytes)?;
+            file.write_all(bytes.as_ref())?;
             file.sync_all()?;
             // SAFETY: both names are valid C strings and both directory
             // descriptors remain open for the duration of the rename.
@@ -2824,6 +2834,84 @@ pub fn clear_scratch_with_protected_blocking(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn owned_atomic_writer_retains_allocation_until_blocking_settlement_after_cancel() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Condvar, Mutex,
+        };
+        struct Owned {
+            bytes: Vec<u8>,
+            entered: Arc<AtomicBool>,
+            gate: Arc<(Mutex<bool>, Condvar)>,
+            dropped: Arc<AtomicBool>,
+        }
+        impl AsRef<[u8]> for Owned {
+            fn as_ref(&self) -> &[u8] {
+                self.entered.store(true, Ordering::SeqCst);
+                let (lock, wake) = &*self.gate;
+                let mut ready = lock.lock().expect("gate");
+                while !*ready {
+                    ready = wake.wait(ready).expect("gate wait");
+                }
+                &self.bytes
+            }
+        }
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        let root = std::fs::canonicalize(std::env::temp_dir()).expect("canonical root");
+        let dir = tempfile::tempdir_in(root).expect("owned fixture");
+        let entered = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let owner = Owned {
+            bytes: b"bounded immutable snapshot".to_vec(),
+            entered: entered.clone(),
+            gate: gate.clone(),
+            dropped: dropped.clone(),
+        };
+        let path = dir.path().to_owned();
+        let caller =
+            tokio::spawn(
+                async move { super::atomic_write_child_owned(&path, "snapshot", owner).await },
+            );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("writer entered");
+        caller.abort();
+        let _ = caller.await;
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "blocking I/O still owns allocation/admission after caller cancel"
+        );
+        *gate.0.lock().expect("release") = true;
+        gate.1.notify_all();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("writer settlement");
+        assert_eq!(
+            std::fs::read(dir.path().join("snapshot")).expect("committed bytes"),
+            b"bounded immutable snapshot"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("no staging leak")
+                .count(),
+            1
+        );
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
     use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};

@@ -20,7 +20,7 @@ use crate::store::{
     item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
     IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
     IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome,
-    RootFingerprintStatus, SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX,
+    RootFingerprintStatus, RootRemovalOutcome, SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX,
     IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
     IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
@@ -715,11 +715,12 @@ impl MediaStore for SqliteStore {
             } else {
                 sort_title_for(&item.title)
             };
-            conn.execute(
-                "INSERT INTO items
-                   (library_id, kind, parent_id, title, sort_title, year,
-                    season_number, episode_number)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            let changed = conn.execute(
+                if conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'", [], |r| r.get::<_,i64>(0))? == 1 {
+                    "INSERT INTO items(id,library_id,kind,parent_id,title,sort_title,year,season_number,episode_number) SELECT high_water+1,?1,?2,?3,?4,?5,?6,?7,?8 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807"
+                } else {
+                    "INSERT INTO items(library_id,kind,parent_id,title,sort_title,year,season_number,episode_number) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"
+                },
                 params![
                     item.library_id,
                     item.kind.as_str(),
@@ -731,6 +732,7 @@ impl MediaStore for SqliteStore {
                     item.episode_number,
                 ],
             )?;
+            if changed != 1 { return Err(StoreError::Database("item identity allocation unavailable".into())); }
             Ok(conn.last_insert_rowid())
         })
         .await
@@ -1720,7 +1722,7 @@ impl MediaStore for SqliteStore {
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
                     probe.video_codec_tag,
-                    probe.field_order,
+                    probe.stored_field_order(),
                     probe.max_cll,
                     probe.max_fall,
                     probe.mastering_max_luminance,
@@ -1841,6 +1843,7 @@ impl MediaStore for SqliteStore {
         file_id: i64,
         keys: &[&str],
     ) -> Result<Option<crate::store::PlaybackPlanningSnapshot>, StoreError> {
+        self.note_settings_read(keys);
         let keys = crate::store::selected_settings_json(keys)?;
         self.with_read(move |conn| {
             conn.query_row(&format!("SELECT {FILE_COLS}, probe_json AS planning_probe, \
@@ -1922,6 +1925,27 @@ impl MediaStore for SqliteStore {
                     SET probe_json = json_set(probe_json, '$.plurx_hevc_parameter_sets', json(?1))
                   WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
                 params![census, file_id, size, mtime],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn merge_file_probe_content_encoding(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        report_json: &str,
+    ) -> Result<bool, StoreError> {
+        let report = report_json.to_owned();
+        self.with_conn(move |conn| {
+            // The same in-SQL graft as the chapters above, fenced to the
+            // measured revision.
+            Ok(conn.execute(
+                "UPDATE files
+                    SET probe_json = json_set(probe_json, '$.plurx_content_encoding', json(?1))
+                  WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
+                params![report, file_id, size, mtime],
             )? == 1)
         })
         .await
@@ -2107,6 +2131,63 @@ impl MediaStore for SqliteStore {
                     max_fall,
                     mastering_max_luminance,
                     source,
+                    candidate.id,
+                    candidate.path,
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json
+                ],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn files_without_luminance_facts(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        self.with_conn(move |conn| {
+            let rows = conn
+                .prepare(
+                    "SELECT id, path, size, mtime, probe_json FROM files
+                      WHERE hdr IS NOT NULL AND luminance_source = 'none'
+                        AND probe_json IS NOT NULL AND id > ?1
+                      ORDER BY id LIMIT ?2",
+                )?
+                .query_map(params![after_id, limit.max(0)], |row| {
+                    Ok(MissingVideoCodecTag {
+                        id: row.get(0)?,
+                        path: row.get(1)?,
+                        size: row.get(2)?,
+                        mtime: row.get(3)?,
+                        probe_json: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn set_file_frame_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        let candidate = candidate.clone();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE files SET max_cll = ?1, max_fall = ?2,
+                                  mastering_max_luminance = ?3, luminance_source = 'frame'
+                  WHERE id = ?4 AND path = ?5 AND size = ?6 AND mtime = ?7
+                    AND probe_json = ?8 AND luminance_source = 'none'",
+                params![
+                    max_cll,
+                    max_fall,
+                    mastering_max_luminance,
                     candidate.id,
                     candidate.path,
                     candidate.size,
@@ -2365,34 +2446,20 @@ impl MediaStore for SqliteStore {
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
     ) -> Result<RootFingerprintStatus, StoreError> {
+        let configured_paths = crate::store::library_paths_json(configured_paths)?;
         let fingerprint = fingerprint.to_owned();
         self.with_conn(move |conn| {
-            let inserted = conn.execute(
-                "INSERT INTO library_roots (library_id, fingerprint) SELECT ?1, ?2 WHERE ?3 \
-                 ON CONFLICT(library_id) DO NOTHING",
-                params![library_id, fingerprint, allow_establish],
-            )?;
-            if inserted == 1 {
-                return Ok(RootFingerprintStatus::Established);
-            }
-            let expected: Option<String> = conn
-                .query_row(
-                    "SELECT fingerprint FROM library_roots WHERE library_id = ?1",
-                    params![library_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let Some(expected) = expected else {
-                return Ok(RootFingerprintStatus::Unestablished);
-            };
-            if expected == fingerprint {
-                Ok(RootFingerprintStatus::Matched)
-            } else {
-                Ok(RootFingerprintStatus::Mismatch { expected })
-            }
+            super::publication::ensure_library_root_fingerprint(
+                conn,
+                library_id,
+                &configured_paths,
+                &fingerprint,
+                allow_establish,
+            )
         })
         .await
     }
@@ -2507,6 +2574,25 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn remove_files_outside_library_roots(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+    ) -> Result<RootRemovalOutcome, StoreError> {
+        crate::store::root_removal_payload(file_ids)?;
+        let configured_paths = crate::store::library_paths_json(configured_paths)?;
+        let ids = file_ids.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let outcome =
+                super::publication::remove_library_files(&tx, library_id, &configured_paths, &ids)?;
+            tx.commit()?;
+            Ok(outcome)
+        })
+        .await
+    }
+
     async fn reset_library_root_fingerprint(&self, library_id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| {
             Ok(conn.execute(
@@ -2548,46 +2634,53 @@ impl MediaStore for SqliteStore {
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError> {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let mut removed = 0u64;
-            // Bottom-up: file-less leaves, then empty seasons, then empty shows.
-            removed += tx.execute(
-                "DELETE FROM items
-                 WHERE library_id = ?1 AND kind IN ('movie','episode','video','photo','book','audiobook')
-                   AND id NOT IN (SELECT item_id FROM files)",
-                params![library_id],
-            )? as u64;
-            removed += tx.execute(
-                "DELETE FROM items WHERE library_id = ?1 AND kind = 'season'
-                 AND id NOT IN (SELECT parent_id FROM items
-                                WHERE kind = 'episode' AND parent_id IS NOT NULL)",
-                params![library_id],
-            )? as u64;
-            removed += tx.execute(
-                "DELETE FROM items WHERE library_id = ?1 AND kind = 'show'
-                 AND id NOT IN (SELECT parent_id FROM items
-                                WHERE kind = 'season' AND parent_id IS NOT NULL)",
-                params![library_id],
-            )? as u64;
-            // Folders nest arbitrarily deep, so one pass only strips the
-            // innermost layer: delete a whole subtree of files and the empty
-            // chain above it has to go too. Loop until a pass removes nothing.
-            loop {
-                let pass = tx.execute(
-                    "DELETE FROM items WHERE library_id = ?1 AND kind = 'folder'
-                     AND id NOT IN (SELECT parent_id FROM items
-                                    WHERE parent_id IS NOT NULL)",
-                    params![library_id],
-                )? as u64;
-                removed += pass;
-                if pass == 0 {
-                    break;
-                }
-            }
+            let removed = prune_empty_items_in(&tx, library_id)?;
             tx.commit()?;
             Ok(removed)
         })
         .await
     }
+}
+
+/// Remove a library's items left without files, bottom-up, inside the
+/// caller's transaction. Returns rows removed.
+pub(super) fn prune_empty_items_in(tx: &Connection, library_id: i64) -> Result<u64, StoreError> {
+    let mut removed = 0u64;
+    // Bottom-up: file-less leaves, then empty seasons, then empty shows.
+    removed += tx.execute(
+        "DELETE FROM items
+         WHERE library_id = ?1 AND kind IN ('movie','episode','video','photo','book','audiobook')
+           AND id NOT IN (SELECT item_id FROM files)",
+        params![library_id],
+    )? as u64;
+    removed += tx.execute(
+        "DELETE FROM items WHERE library_id = ?1 AND kind = 'season'
+         AND id NOT IN (SELECT parent_id FROM items
+                        WHERE kind = 'episode' AND parent_id IS NOT NULL)",
+        params![library_id],
+    )? as u64;
+    removed += tx.execute(
+        "DELETE FROM items WHERE library_id = ?1 AND kind = 'show'
+         AND id NOT IN (SELECT parent_id FROM items
+                        WHERE kind = 'season' AND parent_id IS NOT NULL)",
+        params![library_id],
+    )? as u64;
+    // Folders nest arbitrarily deep, so one pass only strips the
+    // innermost layer: delete a whole subtree of files and the empty
+    // chain above it has to go too. Loop until a pass removes nothing.
+    loop {
+        let pass = tx.execute(
+            "DELETE FROM items WHERE library_id = ?1 AND kind = 'folder'
+             AND id NOT IN (SELECT parent_id FROM items
+                            WHERE parent_id IS NOT NULL)",
+            params![library_id],
+        )? as u64;
+        removed += pass;
+        if pass == 0 {
+            break;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -2599,6 +2692,74 @@ mod tests {
         NewLibrary, ProbeResult,
     };
     use crate::store::{LibraryStore, MediaStore, SqliteStore};
+
+    #[tokio::test]
+    async fn content_encoding_publication_is_source_fenced_and_reprobe_invalidates_it() {
+        let store = SqliteStore::open_in_memory().expect("fixture succeeds");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/media")],
+                anime: false,
+            })
+            .await
+            .expect("fixture succeeds");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Sample".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("fixture succeeds");
+        let probe = ProbeResult {
+            raw_json: Some("{\"streams\":[]}".into()),
+            ..Default::default()
+        };
+        let file = store
+            .upsert_file(item, "/media/sample.mkv", 100, 1, &probe)
+            .await
+            .expect("fixture succeeds");
+        assert!(store
+            .merge_file_probe_content_encoding(file, 100, 1, "{\"outcome\":\"measured\"}")
+            .await
+            .expect("fixture succeeds"));
+        assert!(!store
+            .merge_file_probe_content_encoding(file, 101, 1, "{}")
+            .await
+            .expect("fixture succeeds"));
+        assert!(!store
+            .merge_file_probe_content_encoding(file, 100, 2, "{}")
+            .await
+            .expect("fixture succeeds"));
+        let document: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file)
+                .await
+                .expect("fixture succeeds")
+                .expect("fixture succeeds"),
+        )
+        .expect("fixture succeeds");
+        assert_eq!(document["plurx_content_encoding"]["outcome"], "measured");
+        store
+            .upsert_file(item, "/media/sample.mkv", 101, 2, &probe)
+            .await
+            .expect("fixture succeeds");
+        let document: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file)
+                .await
+                .expect("fixture succeeds")
+                .expect("fixture succeeds"),
+        )
+        .expect("fixture succeeds");
+        assert!(document.get("plurx_content_encoding").is_none());
+    }
 
     /// The whole-catalogue statement `recently_added` ran before K-05, kept
     /// as the oracle the windowed read must agree with.
@@ -2906,6 +3067,7 @@ mod tests {
                         codec: "aac".into(),
                         channels: Some(2),
                         sample_rate: None,
+                        channel_layout: None,
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -2936,6 +3098,7 @@ mod tests {
                             codec: "truehd".into(),
                             channels: Some(8),
                             sample_rate: None,
+                            channel_layout: None,
                             language: Some("eng".into()),
                             title: None,
                             default: true,
@@ -2945,6 +3108,7 @@ mod tests {
                             codec: "eac3".into(),
                             channels: Some(6),
                             sample_rate: None,
+                            channel_layout: None,
                             language: Some("eng".into()),
                             title: Some("Commentary".into()),
                             default: false,
@@ -3101,6 +3265,7 @@ mod tests {
                                 codec: "truehd".into(),
                                 channels: Some(8),
                                 sample_rate: None,
+                                channel_layout: None,
                                 language: Some("eng".into()),
                                 title: None,
                                 default: true,

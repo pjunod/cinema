@@ -1,0 +1,12 @@
+{
+  "source": "1088d7529401297bddced74bfa11c166457468d8",
+  "binary_sha256": "6df96d61dc44e0fadb12c53b9168b5dc97a9928ebdafc1c3c87fe6271482e255",
+  "bytes": 598928568,
+  "patch_sha256": "b5a7495470a75475ec83a6d4f88b246d7e064d6b8c3b5bda85f1136a3aed4136",
+  "changed_file": "crates/plurxd/src/http/hls/response.rs",
+  "changed_file_sha256": "12bf25d13988dc094e2a1493dffb0b7b68468e8f9f58a02a5b6d90bd21167dd7",
+  "build": "cargo +1.97.1 build --locked --offline -p plurxd -p plurx-core --bin plurxd --example encoder-calibration-args",
+  "incremental": false,
+  "jobs": 2,
+  "purpose": "measurement-only per4KiB owner roundtrip; storage/fences/EOF unchanged"
+}

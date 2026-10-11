@@ -14,6 +14,14 @@ const {shellSource} = require("../web/shell-source.js");
 // The app's body rows, joined in served order.
 const SHIPPED_SHELL = shellSource();
 const SHIPPED_UI = SHIPPED_SHELL.bodyScript;
+// Function-only harnesses load the same context helper as the served shell.
+// Keep its validation real: diagnostic files below use canonical local IDs.
+const FILE_CONTEXT_SOURCE=fs.readFileSync(path.join(__dirname,
+  "../../crates/plurxd/src/web/core/file-context.js"),"utf8");
+function PlaybackContextFunction(...args){
+  args[args.length-1]=FILE_CONTEXT_SOURCE+"\n"+args[args.length-1];
+  return new Function(...args);
+}
 // The player's own DOM is in the shell's markup and its treatments are in
 // app.css; neither is in a body row.
 const SHIPPED_MARKUP = SHIPPED_SHELL.html;
@@ -91,6 +99,48 @@ function test(name, run) {
     throw error;
   }
 }
+
+test("future callback metadata cannot seed false backward hitches or erase real holds", () => {
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:769.125,expectedDisplayTime:1000},
+    {nowMs:1000,currentTime:768.709,nominalSeconds:1/24}),true);
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:1.4,expectedDisplayTime:1400},
+    {nowMs:1000,currentTime:1,playbackRate:1,nominalSeconds:1/24}),false);
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:0.8,expectedDisplayTime:1000},
+    {nowMs:1000,currentTime:1,nominalSeconds:1/24}),false);
+  const p={},v={requestVideoFrameCallback(){},addEventListener(){},removeEventListener(){},
+    paused:false,seeking:false,playbackRate:1,currentTime:0,dataset:{}};
+  let next,settled=0;
+  const run=new Function('PLAYER','PlaybackPolicy','document','performance','queuePlaybackFrame',
+    'playbackOwnsAttachedMedia','settlePlaybackControlSeek','reportRateChase',
+    `let PLAYBACK_LIFETIME_HITCHES=0;
+     const HITCH_WARMUP=12,HITCH_WINDOW=120,HITCH_NEAR_MS=150,HITCH_GAP_FRAMES=2.5,
+       HITCH_SLOW_FACTOR=3,HITCH_LATE_FLOOR_MS=25,HITCH_LATE_FRACTION=0.75;
+     // The detector's per-element pause/play boundary registry is module state
+     // beside it, like the constants above.
+     const HITCH_LIFECYCLE_BOUNDARIES=new WeakMap();
+     ${shippedSource('armHitchDetector')}
+     // The slice keeps the comment block that trails the declaration, so the
+     // call must start on its own line or it is commented out.
+     armHitchDetector(arguments[8]);`);
+  run(p,policy,{getElementById:()=>v},{now:()=>0},(_v,_p,callback)=>{next=callback;},
+    ()=>true,()=>{settled++;},()=>{},v);
+  function frame(now,mediaTime,currentTime,count){v.currentTime=currentTime;next(now,
+    {mediaTime,presentedFrames:count,expectedDisplayTime:now},0,{});}
+  for(let i=0;i<24;i++)frame(i*1000/24,i/24,i/24,i+1);
+  const lastSettled=settled;
+  frame(1000,1.4,1,25);
+  assert.equal(p.hitches.metadataAnomalies,1);
+  assert.equal(p.hitches.metadataFaults[0].media_time,1.4);
+  assert.equal(settled,lastSettled,'uncertain metadata cannot settle presentation');
+  frame(1041.667,25/24,25/24,26);
+  assert.equal(p.hitches.back,0,'future outlier cannot seed a false backward step');
+  frame(1083.333,1,26/24,27);
+  assert.equal(p.hitches.back,1,'a real backward timestamp remains classified');
+  // A future metadata row does not reset the display-clock interval.
+  frame(1300,1.5,1.125,28);
+  frame(1400,26/24,1.125,29);
+  assert.equal(p.hitches.late,1,'a real hold across uncertain metadata stays visible');
+});
 
 function heldKeyFixture() {
   let now = 0;
@@ -200,7 +250,7 @@ test("Activity renders explicit lease and demand-window instrumentation", () => 
   // paints them as a state pill, a Server ahead meter against its target, and
   // a Lease/Demand/Policy row set behind the disclosure — the run-on sentence
   // is gone, the facts are not.
-  const helpers = new Function(
+  const helpers = new PlaybackContextFunction(
     `${shippedSource("esc")}\n${shippedSource("clockFromSec")}\n${shippedSource("fmtBytes")}\n${shippedSource("fmtMbps")}\n` +
       `${shippedSource("activityMethodLabel")}\n${shippedSource("activityObservedVodSession")}\n${shippedSource("activityStreamState")}\n${shippedSource("activityStreamMeters")}\n` +
       `${shippedSource("activityStreamDetails")}\n${shippedSource("activityStreamCell")}\n` +
@@ -236,7 +286,7 @@ test("Activity renders explicit lease and demand-window instrumentation", () => 
 });
 
 test("playback info explicitly separates playback mode from delivery method", () => {
-  const modes = new Function(
+  const modes = new PlaybackContextFunction(
     `${shippedSource("playbackModeName")}\n${shippedSource("playbackModeDetail")}\nreturn {playbackModeName,playbackModeDetail};`,
   )();
   assert.equal(modes.playbackModeName({ vod: true }), "VOD HLS");
@@ -250,7 +300,7 @@ test("playback info explicitly separates playback mode from delivery method", ()
 });
 
 test("playback info keeps readiness unknown distinct from measured zero", () => {
-  const telemetry = new Function(
+  const telemetry = new PlaybackContextFunction(
     `${shippedSource("statsServerReady")}\n${shippedSource("statsHttpWait")}\n${shippedSource("playbackWaitCopy")}\nreturn {statsServerReady,statsHttpWait,playbackWaitCopy};`,
   )();
   assert.deepEqual(telemetry.statsServerReady(null), {
@@ -295,7 +345,7 @@ test("playback info keeps readiness unknown distinct from measured zero", () => 
 // always read "0.0 s client loaded" for the whole wait. The sampling tick now
 // recomputes it, and only for the player that owns the attached element.
 test("the wait detail is sampled live and only for the owning player", () => {
-  const live = new Function(
+  const live = new PlaybackContextFunction(
     "bufferRunway", "playbackOwnsAttachedMedia", "performance",
     `let PLAYER=null;\n${shippedSource("playbackWaitCopy")}\n` +
       `${shippedBinding("const", "PLAYBACK_WAIT_HEALTH_MAX_AGE_MS")}\n${shippedSource("playbackWaitLiveDetail")}\n` +
@@ -315,7 +365,7 @@ test("the wait detail is sampled live and only for the owning player", () => {
 test("the sampling tick resamples the wait sentence before the presenter paints", () => {
   const order = [];
   const render = function renderPlaybackSurface() {};
-  const tick = new Function(
+  const tick = new PlaybackContextFunction(
     "renderPlaybackSurface", "playbackWaitLiveDetail", "playbackProgressTick",
     // The same half-second tick carries the MediaSession position (F-web-13);
     // the plan forbids a second timer for it, so it has to be visible here.
@@ -336,7 +386,7 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
   // prepared handoff's adoption of the successor element.
   const intervals = [];
   let installedMediaSession = 0;
-  const arm = new Function(
+  const arm = new PlaybackContextFunction(
     "setInterval", "clearInterval", "playbackSamplingTick", "PlaybackPolicy",
     // Arming the timers is also where the attached stream claims the OS
     // transport, so a re-arm after a stall recovery re-installs it.
@@ -368,7 +418,7 @@ test("the health poll runs for a live media wait as well as for the panel", asyn
     const calls = [];
     // The slice carries the module's own 2 s `setInterval` beside the
     // function; a real timer there would keep this process alive forever.
-    const poll = new Function(
+    const poll = new PlaybackContextFunction(
       "PLAYER", "playbackOwnsAttachedMedia", "document", "playbackWaitSurfaceLive", "api",
       "updateStats", "performance", "setInterval",
       `${shippedSource("pollSessionHealth")}\nreturn pollSessionHealth;`,
@@ -432,6 +482,7 @@ const CAPS_DOCUMENT_PRELUDE = [
   "function decodeLimits(){return {};}",
   `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
   "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+  "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
   shippedSource("capsDocumentIsUsable"),
 ].join("\n");
@@ -451,7 +502,7 @@ function buildOpenSession(overrides) {
     },
     overrides || {},
   );
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "api",
     "newRequestId",
     "vodClientContract",
@@ -462,6 +513,7 @@ function buildOpenSession(overrides) {
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;} function qualityForce(){return 'auto';}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -556,7 +608,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
   // Vision from the one request that explicitly asked for the original.
   const requests = [];
   const api = async (url, options) => { requests.push({ url, options }); return {}; };
-  const shipped = new Function(
+  const shipped = new PlaybackContextFunction(
     "api",
     "newRequestId",
     "vodClientContract",
@@ -570,6 +622,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("askDecision"),
@@ -610,12 +663,13 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
   // put an `override force=auto` note on every ordinary create and move the
   // `overridden` counter for nothing.
   requests.length = 0;
-  const auto = new Function(
+  const auto = new PlaybackContextFunction(
     "api", "newRequestId", "vodClientContract", "PLAYER",
     "capsDocument", "PLAY_CAPS", "decodeLimits", "qualityForce",
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -633,7 +687,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
 
 test("a stream rejection reports what the server handed over, not just that it failed", () => {
   const build = (PLAYER, PLAY_CAPS) =>
-    new Function(
+    new PlaybackContextFunction(
       "PLAYER",
       "PLAY_CAPS",
       [
@@ -748,7 +802,7 @@ test("the rejection report carries the join, whatever the path built it", () => 
   // which passed against a build whose `clientLog(...)` had been replaced by
   // `void (...)` — the report never sent at all — and failed on a reformat
   // that added a space after a colon. Both were checked.
-  const report = new Function(
+  const report = new PlaybackContextFunction(
     "playbackContext",
     `${shippedSource("streamRejectionReport")}\nreturn streamRejectionReport;`,
   )(() => ({ session: "s-abc", height: 2160, encoder: "copy", runway: 4.5 }));
@@ -812,7 +866,7 @@ asyncTest("a create never sends an empty capabilities document", async () => {
   // told the server which codecs it decodes, and that document is worth
   // re-deriving from. (This is also what fails when the predicate's `||`
   // becomes `&&`, which every other case here survives.)
-  const usable = new Function(
+  const usable = new PlaybackContextFunction(
     shippedSource("capsDocumentIsUsable") + "\nreturn capsDocumentIsUsable;",
   )();
   assert.equal(usable({ v: 2, video: [{ codec: "hevc" }], audio: [], containers: [] }), true);
@@ -830,7 +884,7 @@ test("the document this browser actually builds is one the server can read", () 
   // at which point the guard stops being decoration and starts being load
   // bearing, and either way somebody finds out here rather than from a
   // `plan_derivation.unusable_caps` counter climbing on the fleet.
-  const built = new Function(
+  const built = new PlaybackContextFunction(
     "SERVER",
     "navigator",
     "document",
@@ -872,7 +926,7 @@ test("the caps document stays bounded now that every create carries it", () => {
   // at most 256 learned limits and clips each label to 160, so anything past
   // that is bytes nobody reads — and the route's 64 KiB body limit is what
   // they would eventually run into.
-  const capsDocument = new Function(
+  const capsDocument = new PlaybackContextFunction(
     "SERVER",
     "navigator",
     `${shippedSource("capsDocument")}\nreturn capsDocument;`,
@@ -897,7 +951,7 @@ test("the caps document stays bounded now that every create carries it", () => {
 });
 
 test("the VOD fetch contract stays below hls.js and beyond the producer watchdog", () => {
-  const contract = new Function(
+  const contract = new PlaybackContextFunction(
     `${shippedSource("vodClientContract")}\nreturn vodClientContract();`,
   )();
   assert.equal(contract.session.presentation, "vod");
@@ -946,7 +1000,7 @@ test("an initial VOD refusal stays visible instead of closing the player", () =>
 });
 
 test("VOD diagnostics describe materialization instead of claiming a cache hit", () => {
-  const status = new Function(
+  const status = new PlaybackContextFunction(
     "health",
     `${shippedSource("vodServerState")}\nreturn vodServerState(health);`,
   );
@@ -1002,20 +1056,21 @@ test("analysis controls are first-class settings separate from playback mode con
 });
 
 test("analysis settings render the numeric retry policy returned by the API", () => {
-  const esc = new Function(`${shippedSource("esc")}\nreturn esc;`)();
-  const presetOpts = new Function(
+  const esc = new PlaybackContextFunction(`${shippedSource("esc")}\nreturn esc;`)();
+  const presetOpts = new PlaybackContextFunction(
     "esc",
     `${shippedSource("presetOpts")}\nreturn presetOpts;`,
   )(esc);
-  const render = new Function(
+  const render = new PlaybackContextFunction(
     "analysisSummaryCard",
     "presetOpts",
     "esc",
+    "subtitleBackfillCard",
     [
       shippedSource("setHead"), shippedSource("setCard"), shippedSource("cardHead"),
       shippedSource("togRow"), shippedSource("setCardFoot"), shippedSource("analysisSettingsPanel"),
     ].join("\n") + "\nreturn analysisSettingsPanel;",
-  )(() => "summary", presetOpts, esc);
+  )(() => "summary", presetOpts, esc, () => "");
 
   const html = render(
     {
@@ -1050,7 +1105,7 @@ test("estimated skip markers are hedged without rebuilding each tick", () => {
     },
   };
   const player = { autoskip: false, _markerOffers: new Set() };
-  const renderSkip = new Function(
+  const renderSkip = new PlaybackContextFunction(
     "document",
     "esc",
     "PLAYER",
@@ -1117,13 +1172,13 @@ return renderSkip;`,
 });
 
 test("auto-skip only seeks exact marker provenance", () => {
-  const markerAutoSkipEligible = new Function(
+  const markerAutoSkipEligible = new PlaybackContextFunction(
     `${shippedSource("markerAutoSkipEligible")}
 return markerAutoSkipEligible;`,
   )();
   const skipped = [];
   const player = { autoskip: true, markers: [] };
-  const checkMarkers = new Function(
+  const checkMarkers = new PlaybackContextFunction(
     "PLAYER",
     "markerNowMs",
     "renderSkip",
@@ -1171,7 +1226,7 @@ test("a preview is offered but never auto-skipped", () => {
   // surface that offers it. A preview is the one kind that is new footage each
   // week, so auto-skipping it would silently widen an opt-in the viewer made
   // about repeated material. The button still appears — that is the point.
-  const eligible = new Function(
+  const eligible = new PlaybackContextFunction(
     `${shippedSource("markerAutoSkipEligible")}
 return markerAutoSkipEligible;`,
   )();
@@ -1194,7 +1249,7 @@ test("only a tail kind that runs to the end finishes playback", () => {
   // next one is not a thing to do on a kind we cannot name.
   const finished = [];
   const sought = [];
-  const skipMarker = new Function(
+  const skipMarker = new PlaybackContextFunction(
     "PLAYER",
     "document",
     "clientLog",
@@ -1298,7 +1353,7 @@ test("required_hls_never_falls_back_to_progressive", () => {
   }
   assert.match(
     shippedSource("startCopyHls"),
-    /indexPendingFallback[\s\S]*?stream\.mp4[\s\S]*?copyHls=false/,
+    /indexPendingFallback[\s\S]*?copyHls=false[\s\S]*?playbackFileUrl\(context,"stream\.mp4"\)/,
     "the shipped session-open path must attach the progressive response",
   );
 });
@@ -1967,7 +2022,7 @@ test("two long supply-stall episodes do not satisfy the three-stall rescue", () 
 
 test("the shipped counter records one event per pause reported at both edges", () => {
   let nowMs = 0;
-  const noteAutoStall = new Function(
+  const noteAutoStall = new PlaybackContextFunction(
     "PlaybackPolicy",
     "performance",
     `${shippedSource("noteAutoStall")}\nreturn noteAutoStall;`,
@@ -2062,7 +2117,7 @@ function autoRescueHarness(player, autoAbr = true) {
   }
 
   const noop = () => {};
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER",
     "SERVER",
     "document",
@@ -2183,7 +2238,7 @@ async function autoRungTick(autoAbr) {
       failedHeights: new Set(),
     },
   };
-  const tick = new Function(
+  const tick = new PlaybackContextFunction(
     "PLAYER",
     "SERVER",
     "document",
@@ -2237,7 +2292,7 @@ asyncTest("the Auto switch gates an automatic rung change", async () => {
 });
 
 test("the disabled Auto controller leaves every manual ladder rung available", () => {
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER",
     "SERVER",
     "PlaybackPolicy",
@@ -2383,7 +2438,7 @@ function autoRungHarness(attaches) {
   const raises = [];
   const player = { abr: { switching: false }, autoFallbackInFlight: false, started: true };
   const asked = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "document", "raisePlaybackSurface",
     "positionForPlaybackIntent", "beginPlaybackControlSeek", "requestPlaybackMediaChange",
     "requestQualityChange", "video",
@@ -2711,12 +2766,13 @@ test("completed main fragments give a bounded delivery window without burst opti
 
 test("native element transfer errors never spend a compatibility transcode", () => {
   for (const code of [0, 1, 2, 3, 4]) {
-    const run = new Function("PlaybackPolicy", "code", [
+    const run = new PlaybackContextFunction("PlaybackPolicy", "code", [
       "const callbacks={}, rescues=[]; let stopped=0;",
       "const PLAYER={method:'remux',triedFallback:false};",
       "const document={getElementById(){return {};}};",
       "const console={warn(){}};",
       "function playbackOwnsAttachedMedia(){return true;} function notifyPlaybackControl(){} function clearStall(){}",
+      "function autoDecodeMediaError(){return false;}",
       "function finishStallRecovery(){return false;} function playbackIsReal(){return false;}",
       "function streamRejectionFacts(){return {};} function streamRejectionNote(){return '';} function streamRejectionReport(){return {};} function streamRejectionMessage(){return '';}",
       "function clientLog(){} function raisePlaybackSurface(){} function toast(){} function pbTick(){} function pbSyncPlayIcon(){}",
@@ -2731,6 +2787,39 @@ test("native element transfer errors never spend a compatibility transcode", () 
     assert.equal(result.tried, decode, "transfer failure must retain the compatible-rescue credit");
     assert.equal(result.stopped, decode ? 0 : 1, "nondecode terminal errors use the existing failure owner");
   }
+});
+
+test("a typed media decoder error reaches Auto policy before terminal handling", () => {
+  const run = new Function("PlaybackPolicy", "ladder", "quality", "blocked", "consumed", "code", [
+    "const callbacks={},switches=[]; let stopped=0;",
+    "const PLAYER={method:'transcode',autoHeight:1080,ladder,abr:{failedHeights:new Set(blocked),decodeStepConsumed:consumed}};",
+    "const document={getElementById(){return {};}}; const performance={now(){return 1000;}};",
+    "const console={warn(){}}; function qualityForce(){return quality;}",
+    "function hasPendingPlaybackOpen(){return false;} function playbackOwnsAttachedMedia(){return true;}",
+    "function switchAutoRung(from,decision){switches.push({from,decision});return Promise.resolve();}",
+    "function notifyPlaybackControl(){} function clearStall(){} function finishStallRecovery(){return false;}",
+    "function playbackIsReal(){return false;} function clientLog(){} function raisePlaybackSurface(){} function toast(){} function pbTick(){} function pbSyncPlayIcon(){}",
+    "function stopPlayerForExhaustion(){stopped++;} function startTranscodeFallback(){}",
+    "function streamRejectionFacts(){return {};} function streamRejectionNote(){return '';} function streamRejectionReport(){return {};} function streamRejectionMessage(){return '';}",
+    shippedSource("autoDecodeMediaError"), shippedSource("wirePlayerMedia"),
+    "const v={error:{code},videoHeight:1080,currentSrc:'/media',getAttribute(){return '/media';},addEventListener(name,fn){callbacks[name]=fn;}};",
+    "wirePlayerMedia(v); callbacks.error(); return {switches,stopped,consumed:PLAYER.abr.decodeStepConsumed,blocked:[...PLAYER.abr.failedHeights]};",
+  ].join("\n"));
+  const first = run(policy, serverLadder, "auto", [720], false, 3);
+  assert.equal(first.stopped, 0, "Auto owns the first typed decoder failure");
+  assert.equal(first.switches.length, 1, "the shipped error listener invokes policy's one step");
+  assert.equal(first.switches[0].from, 1080);
+  assert.equal(first.switches[0].decision.height, 720);
+  assert.equal(first.switches[0].decision.reason, "decode");
+  assert.equal(first.consumed, true);
+  assert.deepEqual(first.blocked.sort((a,b)=>a-b), [720, 1080]);
+  const second = run(policy, serverLadder, "auto", [720, 1080], true, 3);
+  assert.equal(second.switches.length, 0, "a second decoder failure cannot step again");
+  assert.equal(second.stopped, 1, "the compatibility owner handles the second failure");
+  const manual = run(policy, serverLadder, "1080", [], false, 3);
+  assert.equal(manual.switches.length, 0, "an explicit rung is never changed by Auto");
+  const network = run(policy, serverLadder, "auto", [], false, 2);
+  assert.equal(network.switches.length, 0, "a network error is not decoder evidence");
 });
 
 test("a rejected cheap stream gets one compatibility transcode", () => {
@@ -2960,7 +3049,7 @@ test("a bitmap default is never auto-applied, whatever the server sent", () => {
     /s\.text\s*===\s*false/,
     "the client's burn test reads the wire's `text` flag",
   );
-  const subNeedsBurn = new Function(
+  const subNeedsBurn = new PlaybackContextFunction(
     [source, "return subNeedsBurn;"].join("\n"),
   )();
 
@@ -3052,7 +3141,7 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   const setTimeoutStub = (fn) => { pending = fn; return 1; };
   const clearTimeoutStub = () => { pending = null; };
   let surface = "desktop";
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "document", "PLAYER", "PlaybackPolicy", "PLAYBACK_SURFACE", "isFullscreenAnywhere", "toggleFullscreen",
     "toggleStats", "cycleSub", "playerActivity", "pbTotalSec", "pbPosSec",
     "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer", "coarsePointer",
@@ -3233,7 +3322,7 @@ function buildShippedSurfaceRender() {
     pindicator: node(), pindText: node(),
   };
   const document = { getElementById: (id) => elements[id] || null };
-  const render = new Function(
+  const render = new PlaybackContextFunction(
     "document",
     [
       shippedSource("esc"),
@@ -3341,7 +3430,7 @@ test("the shipped presenter step is the only thing that renders, and it renders 
 // this fails, because a full-screen `preparing` keeps today's routing.
 test("surface kind x class x input is a fixed cross-product", () => {
   const { render, elements } = buildShippedSurfaceRender();
-  const inputState = new Function(
+  const inputState = new PlaybackContextFunction(
     "document", "PLAYER", "PlaybackPolicy", "PLAYBACK_SURFACE",
     [
       shippedSource("playerSeekPending"),
@@ -3403,7 +3492,7 @@ test("the shipped canplay listener feeds an inert event and nothing else", () =>
   const fed = [];
   // Everything the listener could reach for, so a mutation that feeds evidence
   // fails on what it fed rather than on an undefined name.
-  new Function(
+  new PlaybackContextFunction(
     "playbackSurfaceStep", "PLAYER", "playbackSurfaceGeneration", "playbackWaitNeedsProgress",
     match[1],
   )((event) => fed.push(event), { started: true, attemptId: "g1" }, () => "g1", () => false);
@@ -3436,10 +3525,14 @@ test("the shipped canplay listener feeds an inert event and nothing else", () =>
 function keepWaitingHarness() {
   const calls = [];
   const player = { method: "remux", recoveringStall: { at: 1, action: "reconnect" } };
-  const act = new Function(
+  const act = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "retryPlayback", "closePlayer",
     "startTranscodeFallback", "logout", "armStall", "pbPosSec",
+    "PLAYBACK_SURFACE", "retryQualityChange",
     [
+      // Retry routes a retained quality change to its own effect; whether one
+      // is retained is the shipped predicate, not a harness answer.
+      shippedSource("retainedQualityChange"),
       shippedSource("playbackSurfaceAction"),
       "return playbackSurfaceAction;",
     ].join("\n"),
@@ -3452,6 +3545,8 @@ function keepWaitingHarness() {
     (options) => calls.push(["logout", options]),
     (from) => calls.push(["armStall", from]),
     () => 742,
+    { state: policy.initialSurfaceState(), surface: null, history: [] },
+    () => calls.push(["retryQualityChange"]),
   );
   return { act, calls, player };
 }
@@ -3487,7 +3582,7 @@ test("exhausted and stopped prompts offer executable recovery actions", () => {
   // deliberately not on it: nothing is attached there, so `armStall` would arm
   // a watchdog `stallDiagnose` returns from on its first line, and the button
   // would clear the prompt and do nothing. Ruled 2026-09-13.
-  const shared = new Function(
+  const shared = new PlaybackContextFunction(
     "PLAYER",
     [
       shippedSource("playbackStallActions"),
@@ -3502,7 +3597,7 @@ test("exhausted and stopped prompts offer executable recovery actions", () => {
     "Force transcode is still not offered on a session that already is one");
   // …and a `stopped` terminal keeps the list it had: there is nothing left to
   // wait for when the server has ended the recipe.
-  const stall = new Function("PLAYER",
+  const stall = new PlaybackContextFunction("PLAYER",
     [shippedSource("playbackStallActions"), "return playbackStallActions;"].join("\n"));
   assert.deepEqual(stall({})({ method: "remux" }), ["retry", "force_transcode", "close"]);
   // The create-exhaustion owner names the actions inline, so read them back.
@@ -3527,7 +3622,7 @@ test("the stall-recovery prompt stops the player before it raises", () => {
   const order = [];
   const beacons = [];
   let raised = null;
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "document", "pausePlaybackInternally", "stopPlayerTimers",
     "retireHlsTerminalAttempt", "raisePlaybackSurface", "clientLog",
     [
@@ -3615,7 +3710,7 @@ function buildShippedSurfaceGlue(player) {
   const document = { getElementById: (id) => elements[id] || null };
   const clock = { now: 0 };
   const logged = [];
-  const api = new Function(
+  const api = new PlaybackContextFunction(
     "document", "PLAYER", "PlaybackPolicy", "performance", "recordPlaybackSurfaceLog",
     [
       shippedSource("esc"),
@@ -3706,7 +3801,7 @@ test("a refusal no source row claims still reaches the surface as the server's s
   const raised = [];
   const toasts = [];
   const stops = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "PlaybackPolicy", "STREAM_FAILURE", "currentStreamFailureOverlay",
     "playbackSurfaceContext", "playbackSurfaceIntent", "playbackSurfaceClassOf",
     "playbackSurfaceClassBlocks", "stopPlayerForExhaustion", "raisePlaybackSurface",
@@ -3841,7 +3936,7 @@ test("every blocking raise in the page takes the owner's stop first", () => {
 // and this fails — evidence is the clock AND the frames, not the tick running.
 test("the shipped progress tick reports the advance it measured, not that it ran", () => {
   const fed = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "document", "performance", "playbackSurfaceStep", "playbackSurfaceGeneration",
     "samplePlaybackPresentationClock", "streamHasVideo", "endWait", "clearStall",
     "finishStallRecovery", "persistentWait", "bufferRunway", "PERSISTENT_STALL_MS",
@@ -3891,7 +3986,7 @@ test("the shipped progress tick reports the advance it measured, not that it ran
 // the presenter's only evidence.
 test("a stream that starts again after the owner stopped it gets its sampler back", () => {
   const armed = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "document", "setTimeout", "clearStall", "stallDiagnose", "pbPosSec",
     "armPlaybackSampling", "configureHlsStartupDeadline", "PlaybackPolicy",
     [shippedSource("armStall"), "return armStall;"].join("\n"),
@@ -3912,16 +4007,23 @@ test("a stream that starts again after the owner stopped it gets its sampler bac
 // what bounds a fault's life; without it a refusal outlives the attempt.
 test("attachment and retirement are what the presenter is told about identity", () => {
   const fed = [];
-  const attach = new Function(
+  const attach = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration",
-    [shippedSource("beginPlaybackMediaAttachment"), "return beginPlaybackMediaAttachment;"].join("\n"),
+    [shippedSource("clearEffectiveProcessing"), shippedSource("beginPlaybackMediaAttachment"),
+      "return beginPlaybackMediaAttachment;"].join("\n"),
   )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null);
   attach({ attemptId: "a7" });
   assert.deepEqual(fed, [{ attach: "a7" }],
     "every attach on every route runs through here, so every one must say so");
+  // HDR10-E names one attachment's accepted processing; a new attachment
+  // starts without it until its own control exchange reports one.
+  const reattached = { attemptId: "a8", effectiveProcessing: { hdr10_enhanced: true } };
+  attach(reattached);
+  assert.equal(reattached.effectiveProcessing, null,
+    "a new attachment cannot inherit the previous one's processing report");
 
   fed.length = 0;
-  const retire = new Function(
+  const retire = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration", "stopPlayerTimers",
     "teardownHls", "releaseSession",
     [shippedSource("retirePlaybackPredecessor"), "return retirePlaybackPredecessor;"].join("\n"),
@@ -3939,7 +4041,7 @@ test("the waiting listener raises one fault per wait, not one per boundary", () 
   assert.ok(match, "index.html no longer wires waiting through the presenter");
   const raised = [];
   const live = [];
-  const handler = new Function(
+  const handler = new PlaybackContextFunction(
     "PLAYER", "PlaybackPolicy", "playbackOwnsAttachedMedia", "playbackSurfacePromptUp",
     "beginWait", "bufferRunway", "playbackWaitCopy", "raisePlaybackSurface",
     "notifyPlaybackControl", "v",
@@ -3974,7 +4076,7 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
   const runs = [];
   const order = [];
   // stallDiagnose's terminal verdict.
-  const diagnose = new Function(
+  const diagnose = new PlaybackContextFunction(
     "PLAYER", "document", "TOKEN", "pbPosSec", "notifyPlaybackControl", "currentStreamFailureOverlay",
     "probePlaybackSource", "finishStallRecovery", "clientLog", "toast",
     "stopPlayerForExhaustion", "raisePlaybackSurface", "playbackOwnsAttachedMedia",
@@ -3998,7 +4100,7 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
 });
 
 test("playback-info row builders follow the shared web field list in fixture order", () => {
-  const rows = new Function(
+  const rows = new PlaybackContextFunction(
     [
       shippedBinding("const", "PLAYBACK_INFO_FIELDS"),
       shippedBinding("const", "STATS_ROWS"),
@@ -4020,7 +4122,7 @@ test("playback-info row builders follow the shared web field list in fixture ord
 });
 
 test("playback info labels tone-map peak provenance without calling policy source truth", () => {
-  const summarize = new Function(`${shippedSource("statsToneMapPeak")}\nreturn statsToneMapPeak;`)();
+  const summarize = new PlaybackContextFunction(`${shippedSource("statsToneMapPeak")}\nreturn statsToneMapPeak;`)();
   assert.equal(
     summarize({tone_map_peak_nits: 4000, tone_map_peak_source: "cll"}),
     "Tone-map peak 4,000 nits · source MaxCLL",
@@ -4037,7 +4139,7 @@ test("playback info labels tone-map peak provenance without calling policy sourc
 // attributability (§5), and it had to be added to a hand-written column list
 // to appear at all.
 test("every available diagnostic field is rendered in a named disclosure", () => {
-  const render = new Function(`${shippedSource("esc")}\n${shippedSource("playbackInfoHelp")}\n${shippedSource("playbackInfoMarkup")}\nreturn playbackInfoMarkup;`)();
+  const render = new PlaybackContextFunction(`${shippedSource("esc")}\n${shippedSource("playbackInfoHelp")}\n${shippedSource("playbackInfoMarkup")}\nreturn playbackInfoMarkup;`)();
   const fields = require("./playback-info-fields.json").fields;
   const rows = fields.map(field => ({...field, value: "observed", note: "sample"}));
   const markup = render("debug", rows, "", "");
@@ -4049,7 +4151,7 @@ test("every available diagnostic field is rendered in a named disclosure", () =>
 });
 
 test("missing stream frame stays explicit beside source and player facts", () => {
-  const render = new Function(`${shippedSource("esc")}\n${shippedSource("playbackInfoOverview")}\nreturn playbackInfoOverview;`)();
+  const render = new PlaybackContextFunction(`${shippedSource("esc")}\n${shippedSource("playbackInfoOverview")}\nreturn playbackInfoOverview;`)();
   const markup = render({decode_resolution: "Unavailable", source_resolution: "3840×2160", stream_frame: "Unavailable", player_state: "Playing", method: "Transcode · cached"});
   assert.match(markup, /pi-picture[^]*?Source frame[^]*?<strong>3840×2160<\/strong>/);
   assert.match(markup, /Stream frame[^]*?<strong>Unavailable<\/strong>/);
@@ -4299,7 +4401,7 @@ test("a refusal only explains a failure it is contemporary with", () => {
 test("a successful playlist retry immediately clears its 503 explanation", () => {
   const player = { hls: {} };
   let now = 1_000_000;
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PlaybackPolicy",
     "PLAYER",
     "Date",
@@ -4377,7 +4479,7 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     burnedSub: null,
   };
   const video = { currentTime: 12 };
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PlaybackPolicy",
     "fetch",
     "document",
@@ -4536,7 +4638,7 @@ function shippedBinding(keyword, name) {
 // stubbed, everything that decides what a viewer READS is shipped code.
 function detailHarness({ decisions = {}, admin = false } = {}) {
   const requested = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "document",
     "PlaybackPolicy",
     "qualityForce",
@@ -4602,7 +4704,7 @@ function detailHarness({ decisions = {}, admin = false } = {}) {
 }
 
 function bookMetadataHarness() {
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "grid",
     [
       shippedSource("esc"),
@@ -4948,6 +5050,21 @@ test("a pre-play burn rides the first session open rather than a restart", () =>
   });
 });
 
+test("a default subtitle in a transcode decision rides the first session recipe", () => {
+  const decision={...PGS_DECISION,
+    subtitles:PGS_DECISION.subtitles.map(s=>({...s,default:s.index===2}))};
+  const h=detailHarness();
+  for(const selection of [null,{audio:0,subtitle:null}]){
+    const applied=h.prePlayApplication(decision,selection);
+    assert.equal(applied.subtitle,2);
+    assert.equal(applied.burnedSub,2,"the chosen candidate includes this burn");
+  }
+  assert.equal(h.prePlayApplication(decision,{subtitle:-1}).burnedSub,null,
+    "explicit Off overrides the server default");
+  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,null,
+    "a default must not force a copy decision into transcode");
+});
+
 test("a pre-play text subtitle is a <track>, not a second session", () => {
   const applied = detailHarness().prePlayApplication(
     {
@@ -5041,7 +5158,7 @@ function carryHarness(player) {
     load() {},
   });
   const cleared = { count: 0 };
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "document",
     "PLAYER",
     "exitPresentationModes",
@@ -5070,6 +5187,9 @@ function carryHarness(player) {
       shippedSource("setPrePlay"),
       shippedSource("rememberPlaybackSelection"),
       "function clearPlaybackControlWaiters(){}",
+      "let AUTOPLAY_NEXT_PREPARED={page:{id:'next-episode'}};",
+      shippedSource("cancelNextEpisodePreparation"),
+      shippedSource("clearAutoplayNextPreparation"),
       shippedSource("supersedePlaybackControlIntent"),
       transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
@@ -5081,7 +5201,7 @@ function carryHarness(player) {
       shippedSource("beginPlaybackPreparation"),"function play(){}",
       shippedSource("retirePlaybackPredecessor"),
       "return {prePlaySelection, clearPrePlay, playbackSelection, setPrePlay," +
-        " rememberPlaybackSelection, closePlayer};",
+        " rememberPlaybackSelection, closePlayer,nextPrepared:()=>AUTOPLAY_NEXT_PREPARED};",
     ].join("\n"),
   );
   const harness = build(
@@ -5111,12 +5231,17 @@ function carryHarness(player) {
 }
 
 test("closing the player ends its track choice instead of arming the next play", () => {
-  const player = { fileId: 42, preplay: { audio: 1, subtitle: null } };
+  let nextEpisodeCancelled = 0;
+  const player = { fileId: 42, preplay: { audio: 1, subtitle: null },
+    nextEpisodePreparation: { owner: { cancel() { nextEpisodeCancelled++; } } } };
   const h = carryHarness(player);
   // While it is open, this playback's own tracks are the answer — that is the
   // carry a quality change depends on.
   assert.deepEqual(h.playbackSelection(player, 42), { audio: 1, subtitle: null });
   h.closePlayer();
+  assert.equal(nextEpisodeCancelled, 1, "closing cancels its pending episode preparation");
+  assert.equal(player.nextEpisodePreparation, null);
+  assert.equal(h.nextPrepared(), null, "closing drops transferable successor metadata");
   assert.equal(h.mediaSessionCleared(), 1,
     "closing left the OS media keys installed for a player that is gone");
   // loadItem() empties the pickers on the way back to the detail screen, so
@@ -5202,7 +5327,7 @@ function hevcHarness({
   } else if (mediaCapabilities !== null) {
     nav.mediaCapabilities = mediaCapabilities;
   }
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "window",
     "document",
     "MediaSource",
@@ -5515,7 +5640,7 @@ asyncTest("the Dolby Vision probe is unchanged by the tiering", async () => {
   assert.match(safari.capsQuery(caps), /&dv=1&dvprofile=5,8&/);
 });
 
-test("a converted Dolby Vision stream names the profile it is playing as", () => {
+test("a converted Dolby Vision stream names its delivered profile", () => {
   // The badge state PLAYBACK-CAPS-V2-PLAN §4.8 adds and MEDIA-BADGES-PLAN
   // §2.3 spells out. A Profile 7 disc remux converted to 8.1 for a browser
   // that takes 8 and not 7 is delivered `dolby_vision` — the same value a
@@ -5523,10 +5648,9 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   // apart, and a chip reading plain `DV P7` for both is describing the file
   // rather than the picture.
   //
-  // Neither half dims. The base layer is copied byte for byte and nothing is
-  // re-encoded, so the source capability is active; dimming it would say the
-  // opposite of what happened.
-  const build = new Function(
+  // Neither half dims: the delivered grade remains Dolby Vision. This says
+  // what the server delivered, independently of the unverified display output.
+  const build = new PlaybackContextFunction(
     "RANGE_SHORT",
     "RANGE_LONG",
     [
@@ -5553,8 +5677,8 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   assert.equal(converted.base, "DV P7", "the source half still names the source");
   assert.equal(converted.arrow, "DV P8");
   assert.equal(converted.off, false, "nothing about the grade was lost");
-  assert.equal(converted.rendered, "dolby_vision");
-  assert.match(converted.aria, /Profile 7, playing as Dolby Vision Profile 8/);
+  assert.equal(converted.rendered, null, "delivery does not observe display output");
+  assert.match(converted.aria, /Profile 7; Delivered Dolby Vision Profile 8/);
   assert.match(converted.panel, /Profile 8/, "the stats overlay reads this one");
   assert.match(converted.full, /converted for this browser/);
 
@@ -5562,8 +5686,7 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   // profile must name that one.
   assert.equal(dynamicRangeBadge(p7, "dolby_vision", true, 5).arrow, "DV P5");
 
-  // A client that decodes Profile 7 gets it untouched, and the arrow would be
-  // a lie: the profile on screen is the profile on disk.
+  // A preserved Profile 7 delivery needs no conversion arrow.
   const preserved = dynamicRangeBadge(p7, "dolby_vision", true, 7);
   assert.equal(preserved.text, "DV P7");
   assert.equal(preserved.arrow, null);
@@ -5597,6 +5720,50 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   assert.equal(agreeing.text, "DV P8", "the column wins, and 8 → 8 is no arrow");
 });
 
+test("browser_hdr_capability_never_claims_observed_display_output", () => {
+  const build=new PlaybackContextFunction("RANGE_SHORT","RANGE_LONG",[
+    shippedSource("hdrChip"),shippedSource("sourceDynamicRange"),
+    shippedSource("sourceDolbyVisionProfile"),shippedSource("dynamicRangeReason"),
+    shippedSource("dynamicRangeBadge"),"return dynamicRangeBadge;"].join("\n"));
+  const badge=build({dolby_vision:"DV",hdr10:"HDR10",hlg:"HLG",sdr:"SDR"},
+    {dolby_vision:"Dolby Vision",hdr10:"HDR10",hlg:"HLG",sdr:"SDR"});
+  const p7={hdr:"dolby_vision",hdr_format:"Dolby Vision · Profile 7 (HDR10-compatible)"};
+  for(const [delivered,profile,text,off] of [
+    ["dolby_vision",8,"DV P7 → DV P8",false],
+    ["dolby_vision",7,"DV P7",false],
+    ["hdr10",null,"DV P7 → HDR10",true],
+    ["sdr",null,"DV P7 → SDR",true],
+  ]){
+    for(const hdrCapability of [true,false]){
+      const result=badge(p7,delivered,hdrCapability,profile);
+      assert.equal(result.text,text,"CSS capability cannot change server delivery");
+      assert.equal(result.off,off,"CSS capability cannot invent a lost source grade");
+      assert.equal(result.rendered,null);
+      for(const field of ["panel","full","aria"]){
+        assert.match(result[field],/Delivered .*display output unverified/);
+        assert.doesNotMatch(result[field],/\(rendering\)|playing as/);
+      }
+      assert.match(result.panel,hdrCapability?/browser reports HDR capability/:/browser has not reported HDR capability/);
+    }
+  }
+  const hdr10={hdr:"hdr10",hdr_format:"HDR10"};
+  for(const capability of [true,false]){
+    const result=badge(hdr10,"hdr10",capability,null);
+    assert.equal(result.text,"HDR10");assert.equal(result.arrow,null);
+    assert.equal(result.rendered,null);assert.equal(result.off,false);
+    assert.match(result.panel,/Delivered HDR10 · display output unverified/);
+  }
+  const hlg={hdr:"hlg",hdr_format:"HLG"};
+  for(const capability of [true,false]){
+    const result=badge(hlg,"hlg",capability,null);
+    assert.equal(result.text,"HLG");assert.equal(result.rendered,null);
+    assert.match(result.panel,/Delivered HLG · display output unverified/);
+  }
+  const pending=badge(p7,null,true,8);
+  assert.equal(pending.text,"DV P7");assert.equal(pending.rendered,null);
+  assert.doesNotMatch(pending.panel,/Delivered/);
+});
+
 test("every surface paints the badge from the same four answers", () => {
   // The four surfaces that show this chip — the fact badges, the play overlay,
   // the stats panel and the debug ledger — used to call dynamicRangeBadge()
@@ -5605,13 +5772,12 @@ test("every surface paints the badge from the same four answers", () => {
   // correct-looking chip for the wrong delivery, on one surface out of four.
   // `playerRangeBadge` is the single reader, so there is one place to get it
   // wrong and this is the test of that place.
-  const built = new Function(
+  const built = new PlaybackContextFunction(
     "PLAYER",
     "RANGE_SHORT",
     "RANGE_LONG",
-    // node has no matchMedia, so the shipped `displayIsHdr` would answer no
-    // and every case below would collapse to the display-loss branch. The
-    // display answer is not what this test is about.
+    // Keep the capability note deterministic; delivery is reported by the
+    // session and must not depend on this CSS capability answer.
     "displayIsHdr",
     [
       shippedSource("hdrChip"),
@@ -5619,6 +5785,8 @@ test("every surface paints the badge from the same four answers", () => {
       shippedSource("sourceDolbyVisionProfile"),
       shippedSource("dynamicRangeReason"),
       shippedSource("dynamicRangeBadge"),
+      shippedSource("effectiveHdrProcessing"),
+      shippedSource("effectiveProcessingDetail"),
       shippedSource("playerRangeBadge"),
       "return {playerRangeBadge};",
     ].join("\n"),
@@ -5654,7 +5822,7 @@ test("a session that lands on a different range repaints the badge", () => {
   // session open, before the route was chosen. attachSession is the one site
   // every session passes through, so it owns the repaint.
   let repaints = 0;
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER",
     "renderPlayerInfo",
     "attachHls",
@@ -5662,6 +5830,7 @@ test("a session that lands on a different range repaints the badge", () => {
     "startPlaybackControl",
     [shippedSource("markPlaybackControlSeekExecuted"),
       shippedSource("samplePlaybackPresentationClock"),
+      shippedSource("effectiveHdrProcessing"), shippedSource("clearEffectiveProcessing"),
       shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
   const player = { deliveredRange: "hdr10" };
@@ -5723,7 +5892,7 @@ test("a session that lands on a different range repaints the badge", () => {
 });
 
 test("every web transcode reopen preserves the decision's HDR10 request", () => {
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER",
     "transcodeHeight",
     "qualityForce",
@@ -5863,7 +6032,7 @@ test("the caps document says the two things the flat query could not", () => {
   // The flat query has one `maxheight` slot, so a browser whose 8-bit ceiling
   // is 2160 and whose Main10 ceiling is 1080 had to send 1080 — transcoding
   // every 4K 8-bit title it would have direct-played. The document says both.
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "SERVER",
     "navigator",
     // The newline matters: `shippedSource` can end on a `//` comment, and
@@ -5943,7 +6112,7 @@ test("a learned limit reaches the server with the identity it was keyed by", () 
   // every limit is anonymous — and an anonymous limit matches nothing on the
   // server, silently. The whole feature would look like it simply did not
   // work.
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "SERVER",
     "navigator",
     `${shippedSource("capsDocument")}\n; return capsDocument;`,
@@ -5974,7 +6143,7 @@ test("a learned limit reaches the server with the identity it was keyed by", () 
 asyncTest("new_caps_failure_does_not_retry_legacy_decision", async () => {
   async function callsFor(caps, failure) {
     const calls = [];
-    const ask = new Function(
+    const ask = new PlaybackContextFunction(
       "api",
       "currentCapsDocument",
       "decisionUrl",
@@ -6109,7 +6278,7 @@ test("the create-retry ladder is one set of numbers on all three clients", () =>
   );
   assert.match(
     SHIPPED_UI,
-    /openSessionRetryingNotYet\(fileId,options,signal,/,
+    /openSessionRetryingNotYet\(attempt\.fileContext\|\|fileId,options,signal,/,
     "the web's create must go through the retry sequence",
   );
 
@@ -6368,7 +6537,7 @@ test("hls.js media recovery is fenced by the shared attach and item budgets", ()
   assert.ok(terminal > recovery,
     "decoder rescue must run before the attempt is reported terminal");
   assert.match(handler, /sourceBufferName:d\.sourceBufferName\|\|null/,
-    "the vendored hls.js 1.6.16 payload names its SourceBuffer explicitly");
+    "the vendored hls.js payload names its SourceBuffer explicitly");
 });
 
 test("web HLS startup has one bounded manifest policy and terminal precedence", () => {
@@ -6391,6 +6560,12 @@ test("web HLS startup has one bounded manifest policy and terminal precedence", 
   }
   for (const code of policy.HLS_STARTUP_TERMINAL_CODES) {
     assert.equal(policy.hlsStartupResponseAction({ status: 503, code }), "terminal", code);
+  }
+  // A segment the producer delivered but publication never made servable is
+  // the same terminal startup answer as the producer failing (502).
+  for (const code of ["producer_failed", "segment_publication_failed"]) {
+    assert.ok(policy.HLS_STARTUP_TERMINAL_CODES.includes(code), code);
+    assert.equal(policy.hlsStartupResponseAction({ status: 502, code }), "terminal", code);
   }
   assert.equal(policy.hlsStartupResponseAction({ status: 503 }), "retry",
     "a generic 503 may consume the bounded retry but is not called startup");
@@ -6523,10 +6698,11 @@ test("the Android policy module stays free of ExoPlayer and Android", () => {
 // ---------------------------------------------------------------------------
 // The shared Auto-quality policy fixture (A-04 / D1).
 //
-// `tests/playback/auto-quality-policy.json` is one file, read by three runners:
-// this one today, and a Swift and a JVM runner the build plan adds. It exists
-// so "the same policy" is a checkable claim rather than three codebases that
-// happen to spell 1.8 the same way this week.
+// `tests/playback/auto-quality-policy.json` is the policy as data. This is its
+// only runner: the Swift and JVM ports (#634) were deleted on 2026-10-04 because
+// no player called them. A native adapter that ports `decideRung` again reads
+// this file, so "the same policy" stays a checkable claim rather than three
+// codebases that happen to spell 1.8 the same way this week.
 //
 // The rule that makes it honest: a case may carry `web_current` beside
 // `expect` when the shipped browser and the design disagree. The runner then
@@ -6543,6 +6719,7 @@ const autoQuality = require("./auto-quality-policy.json");
 const AUTO_DECISION_KEYS = new Set([
   "height", "reason", "emergency", "action", "evidence", "mildSamples",
   "upgradeSinceMs",
+  "blockedHeights",
 ]);
 
 // Design section 3.5's table, verbatim in its first column. Pinned here and
@@ -6642,6 +6819,72 @@ test("the Auto-quality fixture drives decideRung, and records every disagreement
   }
 });
 
+test("a stall-scoped verdict and a typed decode stall reach the shipped classifier", () => {
+  const classify = new Function(
+    "PlaybackPolicy", "STREAM_FAILURE", "Date",
+    `${shippedSource("autoCauseEvidence")}\nreturn autoCauseEvidence;`,
+  )(policy, null, Date);
+  const now = 10_000;
+  const p = {
+    mediaAttachment: "a1", waitAt: 1_000,
+    health: {producer_state: "held", recent_speed: 3},
+    healthObservedAt: now,
+    abr: {stallEvents: {decode: []}, recentEstimateAtMs: null,
+      controlStallVerdict: {waitAt: 1_000, atMs: 9_000, untilMs: 21_000}},
+  };
+  assert.equal(classify(p, now).kind, "control-stall-verdict");
+  p.waitAt = 2_000;
+  assert.notEqual(classify(p, now).kind, "control-stall-verdict",
+    "a verdict from the previous wait cannot suppress this one");
+  p.waitAt = 1_000;
+  assert.notEqual(classify(p, 21_000).kind, "control-stall-verdict",
+    "the verdict expires at the absolute stall deferral deadline");
+  p.abr.controlStallVerdict = null;
+  p.abr.stallEvents.decode.push(9_500);
+  assert.equal(classify(p, now).kind, "decode-failed");
+  p.abr.stallEvents.decode = [];
+  assert.notEqual(classify(p, now).kind, "control-stall-verdict",
+    "the healthy producer-paced hold is not a stall verdict");
+});
+
+test("ending a wait retires its stall-scoped verdict", () => {
+  const p = {waitAt: 1_000, waitReported: false,
+    abr: {controlStallVerdict: {waitAt: 1_000, untilMs: 21_000}}};
+  const end = new Function("PLAYER", "performance", "clearTimeout",
+    "STALL_MIN_MS", "recordWaitStall", "clientLog", "playbackContext",
+    "bufferRunway", "persistentWaitEvidence",
+    `${shippedSource("endWait")}\nreturn endWait;`,
+  )(p, {now: () => 2_000}, () => {}, 2_000, () => {}, () => {}, () => ({}),
+    () => 0, () => ({kind: "supply"}));
+  end(false);
+  assert.equal(p.abr.controlStallVerdict, null);
+});
+
+test("Auto reads one stall verdict, and it is the one a wait retires", () => {
+  // `stallVerdictUntilMs` was a second owner of the same fact: written beside
+  // `controlStallVerdict`, read first, scoped to no wait and cleared by nothing.
+  assert.doesNotMatch(SHIPPED_UI, /stallVerdictUntilMs/,
+    "the uncleared stall deadline must not come back beside controlStallVerdict");
+  const classify = new Function(
+    "PlaybackPolicy", "STREAM_FAILURE", "Date",
+    `${shippedSource("autoCauseEvidence")}\nreturn autoCauseEvidence;`,
+  )(policy, null, Date);
+  const p = {mediaAttachment: "a1", waitAt: null,
+    health: {producer_state: "active", recent_speed: 3}, healthObservedAt: 10_000,
+    abr: {stallEvents: {decode: []}, recentEstimateAtMs: null,
+      controlStallVerdict: null, stallVerdictUntilMs: 21_000}};
+  assert.notEqual(classify(p, 10_000).kind, "control-stall-verdict",
+    "a resumed stall leaves nothing behind that suppresses Auto");
+  // Both at once: a stale verdict from the previous wait and a deadline that
+  // has not passed yet must not combine into a verdict for this wait.
+  p.waitAt = 12_000;
+  p.abr.controlStallVerdict = {waitAt: 1_000, atMs: 9_000, untilMs: 21_000};
+  assert.notEqual(classify(p, 12_500).kind, "control-stall-verdict");
+  assert.equal(shippedSource("persistentWait").match(/controlStallVerdict=null/g).length, 1,
+    "every pass of a wait re-derives its verdict");
+  assert.match(shippedSource("endWait"), /controlStallVerdict=null/);
+});
+
 test("every controller gate the fixture names is still in the shipped tick", () => {
   const tick = shippedSource("autoControllerTick");
   // Each gate is asserted on its own side of the awaited health poll. A whole-
@@ -6657,6 +6900,14 @@ test("every controller gate the fixture names is still in the shipped tick", () 
   for (const row of autoQuality.controller_gates) {
     if (!row.viewer_state) continue;
     if (row.web_gate == null) {
+      if (row.viewer_state === "A stall-scoped control verdict") {
+        assert.match(shippedSource("autoControllerTick"),
+          /const causeEvidence=autoCauseEvidence\(p,now\)/,
+          "the tick must still pass classified stall evidence to decideRung");
+        assert.match(shippedSource("persistentWait"), /controlStallVerdict=/,
+          "a stalled ask must publish its bounded verdict to Auto");
+        continue;
+      }
       assert.ok(
         typeof row.finding === "string" && row.finding.length >= 200,
         `${row.viewer_state}: a gate the browser does not have needs a finding`,
@@ -6770,7 +7021,7 @@ test("unknown source peak requires distinct completed successor segment margins"
   assert.equal(policy.qualityOriginalTrialMargin([first,{...second,elapsed_ms:3000}]),false);
 });
 test("viewer recipe edits do not send an incumbent candidate under new tracks or offset",()=>{
-  const shipped=new Function("selectedAudioIndex",[
+  const shipped=new PlaybackContextFunction("selectedAudioIndex",[
     "const SERVER={playback_display_aware_auto:true,display_aware_auto_protocol:'route-v1'};",
     "function playQuality(){return 'auto';}",
     shippedSource("qualityCatalogSelectionKey"),
@@ -6787,7 +7038,7 @@ test("viewer recipe edits do not send an incumbent candidate under new tracks or
   assert.equal(shipped.selection({...p,qualityProtocol:'route-v1'},true).quality.candidate_id,f.middle.id);
   for(const change of [{audioIndex:1},{aoffset:250},{curSub:2,burnedSub:2}])
     assert.equal(shipped.selection({...p,...change}).quality.candidate_id,undefined);
-  const query=new Function(`${shippedSource("prePlaySelectionQuery")}\nreturn prePlaySelectionQuery;`)();
+  const query=new PlaybackContextFunction(`${shippedSource("prePlaySelectionQuery")}\nreturn prePlaySelectionQuery;`)();
   assert.equal(query({audio:1,audio_offset_ms:250}),"&audio=1&audio_offset_ms=250");
   assert.equal(query({audio_offset_ms:50000}),"&audio_offset_ms=15000");
   assert.equal(query({audio_offset_ms:0}),"");
@@ -6799,6 +7050,55 @@ test("severe route pressure skips intermediate rungs despite voluntary budget",(
     candidates:[f.low,f.middle,f.high,f.original],currentId:f.original.id,target:f.target,aspect:16/9});
   assert.equal(result.candidate.id,f.low.id);
   assert.equal(result.emergency,true);
+});
+
+test("link pressure takes the cheapest costed rung when no lower rung fits the link",()=>{
+  const f=routeQualityFixture();
+  const decide=candidates=>policy.decideCandidateTransition({state:{},
+    sample:{...f.sample,cause:"link",stalled:true,runway_ms:1000,transfer:{...f.transfer,bytes:1000000}},
+    candidates,currentId:f.high.id,target:f.target,aspect:16/9});
+  // 8 Mb/s fits neither 1440p (18.16) nor 1080p (12): holding 2160p (30)
+  // keeps the largest deficit, so the cheapest costed rung is taken.
+  const result=decide([f.low,f.middle,f.high]);
+  assert.equal(result.candidate.id,f.low.id);
+  assert.equal(result.emergency,true);
+  assert.equal(decide([{...f.low,peak_bps:null,average_bps:null},f.high]).candidate,null,
+    "an uncosted rung is never chosen for a link cause");
+  assert.equal(decide([{...f.low,peak_bps:31000000,average_bps:31000000},f.high]).candidate,null,
+    "a lower rung that costs more than the current one is no recovery");
+});
+
+test("mild route pressure survives ordinary HLS refills but only moves while draining",()=>{
+  const f=routeQualityFixture();
+  const args={state:{previousRunwayMs:61000},candidates:[f.low,f.middle,f.high],
+    currentId:f.high.id,target:f.target,aspect:16/9,
+    sample:{...f.sample,cause:"link",runway_ms:60000,
+      transfer:{...f.transfer,bytes:3000000}}};
+  const first=policy.decideCandidateTransition(args);
+  assert.equal(first.candidate,null);
+  assert.equal(first.state.mildSamples,1);
+  const refill=policy.decideCandidateTransition({...args,state:first.state,
+    sample:{...args.sample,now_ms:121000,runway_ms:61000}});
+  assert.equal(refill.candidate,null,"refilling is not a draining-buffer decision");
+  assert.equal(refill.state.mildSamples,2,"low link margin persists across the refill");
+  const drained={...args,state:refill.state,
+    sample:{...args.sample,now_ms:122000,runway_ms:60000}};
+  const move=policy.decideCandidateTransition(drained);
+  assert.equal(move.candidate.id,f.middle.id);
+  assert.equal(move.emergency,false);
+  assert.equal(policy.decideCandidateTransition({...drained,
+    state:{...refill.state,lastSwitchMs:121000}}).candidate,null,"cooldown still applies");
+  assert.equal(policy.decideCandidateTransition({...drained,
+    state:{...refill.state,switchTimesMs:Array(6).fill(119000)}}).candidate,null,"voluntary budget still applies");
+  for(const transfer of [{...f.transfer,bytes:5000000},
+    {...args.sample.transfer,age_ms:15001}, {...args.sample.transfer,producer_paced:true}]){
+    const reset=policy.decideCandidateTransition({...drained,
+      sample:{...drained.sample,transfer}});
+    assert.equal(reset.state.mildSamples,0,"recovered or invalid link proof clears the counter");
+    assert.equal(policy.decideCandidateTransition({...args,state:reset.state,
+      sample:{...args.sample,now_ms:123000,runway_ms:59000}}).candidate,null,
+      "one new low-margin observation cannot reuse cleared pressure");
+  }
 });
 
 test("unknown peak original downshifts from fresh demand without inventing upgrade proof",()=>{
@@ -6832,11 +7132,89 @@ test("cold original recovery can try an unproved compatible lower route within m
   assert.equal(result.candidate.id,low.id);
   assert.equal(result.transition,"recover");
   assert.equal(result.candidate.sustainable,false);
-  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate,null);
+  // With the fitting rung undecodable, 1440p (18.16 Mb/s) does not fit the
+  // 14 Mb/s link but is far cheaper than the 50 Mb/s original that is
+  // stalling: the smaller deficit beats holding.
+  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate.id,middle.id);
   assert.equal(policy.decideCandidateTransition({...args,sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
   assert.equal(policy.decideCandidateTransition({...args,candidates:[low,middle,{...f.original,grade:"hdr10"}],
     sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
   assert.equal(policy.selectQualityCandidate({candidates:[low,middle],target:f.target,aspect:16/9}),null);
+});
+
+// Run the shipped diagnostic functions with controlled output representations,
+// rather than a codec ladder whose acceptance says nothing about this stream.
+function decodePredictionHarness(answer){
+  const listeners=new Map(),calls=[];
+  const hls={currentLevel:0,levels:[{videoCodec:"avc1.640028",width:1920,height:1080,
+    bitrate:4000000,attrs:{"FRAME-RATE":29.97}}],on:(event,callback)=>listeners.set(event,callback)};
+  const player={method:"transcode",source:{video_codec:"hevc",width:3840,height:2160,
+    bitrate:69000000,frame_rate:"24/1"},mediaAttachment:{id:1},hls};
+  const holder={current:player};
+  const navigator={mediaCapabilities:{decodingInfo:config=>{calls.push(config);return answer(config);}}};
+  const funcs=["decodePredictionTuple","currentDecodePrediction","decodePredictionLabel","probeDecode"].map(shippedSource).join("\n");
+  // A getter preserves PLAYER's live ownership semantics when replacement
+  // happens while decodingInfo's promise is outstanding.
+  const withPlayer=funcs.replace("const p=PLAYER;", "const p=holder.current;");
+  const api=new Function("holder","navigator","Hls","playbackOwnsAttachedMedia",withPlayer+
+    "\nreturn {probe:probeDecode,label:decodePredictionLabel,current:currentDecodePrediction,tuple:decodePredictionTuple};")(
+      holder,navigator,{Events:{FRAG_CHANGED:"fragment",LEVEL_SWITCHED:"level",LEVEL_LOADED:"loaded"}},
+      p=>p===holder.current&&p.mediaAttachment!=null);
+  return {api,player,holder,navigator,calls,listeners};
+}
+asyncTest("browser_prediction_uses_delivered_representation_not_original_source",async()=>{
+  const h=decodePredictionHarness(async()=>({supported:true,smooth:false,powerEfficient:false}));
+  await h.api.probe();
+  assert.deepEqual(h.calls,[{type:"media-source",video:{contentType:'video/mp4; codecs="avc1.640028"',
+    width:1920,height:1080,bitrate:4000000,framerate:29.97}}]);
+  assert.equal(h.player.decodeInfo.supported,true);
+  assert.equal(h.player.decodeInfo.powerEfficient,false);
+  assert.match(h.api.label(h.player),/Active decoder unknown.*MediaCapabilities prediction/);
+  assert.doesNotMatch(h.api.label(h.player),/software|no GPU|hardware/);
+  // Repeated fragment events for the same attached tuple do not requery.
+  h.listeners.get("fragment")();
+  assert.equal(h.calls.length,1);
+});
+asyncTest("browser_prediction_missing_output_or_api_remains_unavailable",async()=>{
+  const h=decodePredictionHarness(async()=>({supported:true}));
+  await h.api.probe();
+  assert.equal(h.player.decodeInfo.smooth,null);
+  assert.equal(h.player.decodeInfo.powerEfficient,null);
+  delete h.player.hls.levels[0].attrs["FRAME-RATE"];
+  await h.api.probe();
+  assert.equal(h.calls.length,1);
+  assert.equal(h.player.decodeInfo,null);
+  assert.match(h.api.label(h.player),/unavailable/);
+  h.player.hls=null;
+  await h.api.probe();
+  assert.equal(h.calls.length,1,"progressive source metadata must not authorize a guessed RFC codec");
+  h.player.hls={currentLevel:0,levels:[{videoCodec:"avc1.640028",width:1920,height:1080,
+    bitrate:4000000,attrs:{"FRAME-RATE":30}}],on:()=>{}};
+  h.navigator.mediaCapabilities=null;
+  await h.api.probe();
+  assert.equal(h.player.decodeInfo,null);
+});
+asyncTest("browser_prediction_fences_representations_and_attachments",async()=>{
+  const resolve=[];
+  const h=decodePredictionHarness(()=>new Promise(done=>resolve.push(done)));
+  const first=h.api.probe();
+  h.player.hls.levels.push({videoCodec:"avc1.4d401f",width:1280,height:720,
+    bitrate:2000000,attrs:{"FRAME-RATE":60}});
+  h.player.hls.currentLevel=1;
+  const second=h.api.probe();
+  resolve[1]({supported:true,smooth:true,powerEfficient:true});await second;
+  resolve[0]({supported:false,smooth:false,powerEfficient:false});await first;
+  assert.equal(h.player.decodeInfo.powerEfficient,true,"older representation cannot overwrite the newer answer");
+  h.player.hls.currentLevel=0;
+  assert.equal(h.api.current(h.player),null,"stale facts clear before a new probe finishes");
+  const third=h.api.probe();
+  h.player.mediaAttachment={id:2};
+  resolve[2]({supported:true,smooth:true,powerEfficient:true});await third;
+  assert.equal(h.player.decodeInfo,null,"same player with a different attachment is fenced");
+  const fourth=h.api.probe();
+  h.holder.current={mediaAttachment:{id:3}};
+  resolve[3]({supported:true,smooth:true,powerEfficient:true});await fourth;
+  assert.equal(h.player.decodeInfo,null,"detached player cannot publish an answer");
 });
 
 // Drained last, in registration order, after every synchronous case has run.
@@ -6867,7 +7245,7 @@ test("recovery allowance rearms only after continuous observed health",()=>{
 });
 
 test("VOD activity distinguishes actual zero, missing control, stale control and producer hold",()=>{
-  const api=new Function([shippedSource("fmtBytes"),shippedSource("activityObservedVodSession"),shippedSource("activityStreamState"),shippedSource("activityStreamDetails"),"return {fmtBytes,activityStreamState,activityStreamDetails};"].join("\n"))();
+  const api=new PlaybackContextFunction([shippedSource("fmtBytes"),shippedSource("activityObservedVodSession"),shippedSource("activityStreamState"),shippedSource("activityStreamDetails"),"return {fmtBytes,activityStreamState,activityStreamDetails};"].join("\n"))();
   assert.equal(api.fmtBytes(0),'0 B');assert.equal(api.fmtBytes(null),'');
   const session={presentation:'vod',live_bytes:0,advertised_bytes:0,vod_observation:{control_demand:'active',render_state:'rendering',control_age_ms:100,producer_state:'held',producer_hold:'ahead'}};
   assert.equal(api.activityStreamState(session).label,'Holding');
@@ -6879,7 +7257,7 @@ test("VOD activity distinguishes actual zero, missing control, stale control and
 });
 
 test("watch delivery follows attachment rather than catalogue status",()=>{
-  const make=new Function('PLAYER','WATCH','playbackOwnsAttachedMedia','esc',shippedSource('watchDeliveryRow')+';return watchDeliveryRow;');
+  const make=new PlaybackContextFunction('PLAYER','WATCH','playbackOwnsAttachedMedia','esc',shippedSource('watchDeliveryRow')+';return watchDeliveryRow;');
   const p={fileId:7,sessionId:'vod-session',vod:true,method:'remux'};
   const row=make(p,{accepted:true},()=>true,value=>value);
   assert.match(row({id:7,vod_index_status:'pending'}),/>VOD HLS</);
@@ -6890,7 +7268,7 @@ test("watch delivery follows attachment rather than catalogue status",()=>{
 
 
 test("peer VOD Activity cell preserves measured control and producer facts",()=>{
-  const cell=new Function("clockFromSec","fmtBytes","fmtMbps","esc",[
+  const cell=new PlaybackContextFunction("clockFromSec","fmtBytes","fmtMbps","esc",[
     shippedSource("activityObservedVodSession"),shippedSource("activityMethodLabel"),
     shippedSource("activityStreamState"),shippedSource("activityStreamMeters"),
     shippedSource("activityStreamDetails"),shippedSource("activityStreamCell"),
@@ -6905,9 +7283,54 @@ test("peer VOD Activity cell preserves measured control and producer facts",()=>
   assert.ok(!html.includes("Live scratch"));
 });
 
+test("the browser claims its output's channels for the codecs it decodes, never passthrough", () => {
+  const helpers = new Function(
+    "window",
+    [
+      shippedSource("browserOutputChannels"),
+      shippedSource("browserAudioSinks"),
+      "return {browserOutputChannels, browserAudioSinks};",
+    ].join("\n"),
+  );
+  let closed = 0;
+  const surround = helpers({
+    AudioContext: function () {
+      this.destination = { maxChannelCount: 6 };
+      this.close = () => { closed += 1; return Promise.resolve(); };
+    },
+  });
+  assert.equal(surround.browserOutputChannels(), 6);
+  assert.equal(closed, 1, "the probe context is closed again");
+  assert.equal(helpers({}).browserOutputChannels(), 2, "no AudioContext is stereo");
+  assert.equal(
+    helpers({ AudioContext: function () { throw new Error("blocked"); } }).browserOutputChannels(),
+    2,
+  );
+  const sinks = surround.browserAudioSinks("aac,mp3,opus,flac,eac3", 6);
+  assert.deepEqual(sinks.map((sink) => sink.codec), ["aac", "mp3", "flac", "eac3"]);
+  for (const sink of sinks) {
+    assert.equal(sink.max_channels, 6);
+    assert.equal(sink.passthrough, false);
+    assert.deepEqual(sink.sample_rates_hz, [44100, 48000]);
+  }
+  assert.equal(surround.browserAudioSinks("aac", 1)[0].max_channels, 2);
+  assert.equal(surround.browserAudioSinks("aac", 32)[0].max_channels, 8);
+  assert.equal(surround.browserAudioSinks("aac", NaN)[0].max_channels, 2);
+
+  const capsDocument = new Function(
+    "SERVER",
+    "navigator",
+    `${shippedSource("capsDocument")}\nreturn capsDocument;`,
+  )({ build: "test" }, { userAgent: "test" });
+  const claimed = capsDocument({ vcodec: "h264", acodec: "aac", container: "mp4", audioSinks: sinks }, {});
+  assert.deepEqual(claimed.audio_sinks, sinks);
+  const legacy = capsDocument({ vcodec: "h264", acodec: "aac", container: "mp4", audioSinks: [] }, {});
+  assert.equal("audio_sinks" in legacy, false, "an empty claim stays the legacy contract");
+});
+
 test("fenced retirement followed by native error 3 reopens once without codec blame", () => {
   for (const reason of ['serving_fenced','authority_fenced']) {
-    const build=new Function('PlaybackPolicy','reason',[
+    const build=new PlaybackContextFunction('PlaybackPolicy','reason',[
       "let PLAYER={method:'remux',sessionId:'retired',mediaAttachment:{},wantsPlayback:true,stallRecoveries:0}; const callbacks={},reopens=[],rescues=[];",
       "PLAYER.sessionTerminal={sessionId:PLAYER.sessionId,attachment:PLAYER.mediaAttachment,reason};",
       "const document={getElementById:()=>({})},console={warn(){}},performance={now:()=>1};",
@@ -6925,7 +7348,7 @@ test("fenced retirement followed by native error 3 reopens once without codec bl
 });
 
 test("fenced recovery cannot inherit a predecessor attachment or session", () => {
-  const build=new Function([
+  const build=new PlaybackContextFunction([
     "const attachment={},PLAYER={sessionId:'new',mediaAttachment:attachment};",
     "function playbackOwnsAttachedMedia(){return true;}",shippedSource('recoverServingFencedAttachment'),
     "return p=>recoverServingFencedAttachment({},p);",
@@ -6934,4 +7357,36 @@ test("fenced recovery cannot inherit a predecessor attachment or session", () =>
     {sessionId:'old',attachment:{},reason:'serving_fenced'},
     {sessionId:'new',attachment:{},reason:'serving_fenced'},
   ]) assert.equal(build({sessionId:'new',mediaAttachment:{},sessionTerminal:terminal}),false);
+});
+
+
+test("completed video transfer evidence survives a full browser resource timing buffer",()=>{
+  const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/player/player.js"),"utf8");
+  const block=source.slice(source.indexOf("const QUALITY_RESOURCE_TIMING_LIMIT="),source.indexOf("function createHlsStartupLoader("));
+  const retained=Array.from({length:250},(_,i)=>({name:`http://localhost/old-${i}`}));
+  const queued=[];
+  class Observer {
+    observe(options){assert.equal(options.type,"resource");}
+    takeRecords(){return queued.splice(0);}
+    disconnect(){}
+  }
+  const perf={getEntriesByName:name=>retained.filter(row=>row.name===name)};
+  const build=new Function("PerformanceObserver","performance","URL","location",block+
+    "\nreturn {complete:completedQualityTransfer,size:()=>qualityResourceTimingRows.size};");
+  const timing=build(Observer,perf,URL,{href:"http://localhost/"});
+  const url="http://localhost/api/v1/hls/session/video/rendition/segment/0.m4s";
+  const entry={name:url,startTime:100,responseStart:110,responseEnd:130,encodedBodySize:100000,transferSize:100400};
+  const xhr={status:200,getResponseHeader:()=>"0"};
+  queued.push(entry);
+  const proof=timing.complete(xhr,url,{start:100,end:130},140,100000);
+  assert.equal(proof.bytes,100000);assert.equal(proof.elapsed_ms,20);
+  assert.equal(proof.from_cache,false);assert.equal(proof.producer_paced,false);
+  assert.equal(retained.length,250);
+  assert.equal(timing.complete({...xhr,getResponseHeader:()=>"1"},url,{start:100,end:130},140,100000),undefined);
+  queued.push({...entry,transferSize:0});
+  assert.equal(timing.complete(xhr,url,{start:100,end:130},140,100000),undefined);
+  for(let i=0;i<200;i++)queued.push({...entry,name:url+`?request=${i}`});
+  timing.complete(xhr,url,{start:100,end:130},140,100000);
+  assert.equal(timing.size(),128);
+  assert.equal(timing.complete(xhr,url,{start:100,end:130},140,100000),undefined);
 });

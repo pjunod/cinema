@@ -392,12 +392,29 @@ impl ObservedFfmpeg {
 /// The binary a transcode producer runs: the configured FFmpeg, except where a
 /// test on this thread has put a stand-in in its place (see
 /// [`with_producer_ffmpeg_for_test`]).
-fn producer_ffmpeg_bin() -> String {
+pub(super) fn producer_ffmpeg_bin() -> String {
     #[cfg(test)]
     if let Some(bin) = PRODUCER_FFMPEG_FOR_TEST.with(|bin| bin.borrow().clone()) {
         return bin;
     }
     ffmpeg_bin()
+}
+
+/// Bind a selected Mac plan to the exact encoder captured for this launch.
+/// The canonical path survives a later configured-symlink retarget; ordinary
+/// plans keep their existing producer selection and attestation behavior.
+pub(super) async fn capture_macos_plan_executable(
+    plan: &ResolvedTranscode,
+    program: &str,
+) -> Result<Option<crate::ffmpeg::EncodedExecutable>, String> {
+    if plan.captured_processing_ffmpeg_sha256().is_none() {
+        return Ok(None);
+    }
+    let executable = crate::ffmpeg::EncodedExecutable::capture_program(program).await?;
+    if !executable.matches_macos_plan(plan) {
+        return Err("macos_processing_implementation_changed: encoder differs from the frozen processing plan; check compatibility again".to_owned());
+    }
+    Ok(Some(executable.bind_linux_plan(plan)?))
 }
 
 #[cfg(test)]
@@ -430,13 +447,67 @@ pub(super) fn spawn_ffmpeg(
     descriptors: FfmpegDescriptors,
     observation: DiagnosticObservation,
 ) -> Result<ObservedFfmpeg, String> {
+    spawn_ffmpeg_at(
+        std::path::Path::new(&producer_ffmpeg_bin()),
+        args,
+        work,
+        encoder_label,
+        session_id,
+        progress_observer,
+        runtime_cache,
+        descriptors,
+        observation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_ffmpeg_at(
+    program: &std::path::Path,
+    args: &[String],
+    work: crate::process_control::ChildWork,
+    encoder_label: &'static str,
+    session_id: &str,
+    progress_observer: FfmpegProgressObserver,
+    runtime_cache: &std::path::Path,
+    descriptors: FfmpegDescriptors,
+    observation: DiagnosticObservation,
+) -> Result<ObservedFfmpeg, String> {
+    spawn_ffmpeg_at_with_env(
+        program,
+        args,
+        work,
+        encoder_label,
+        session_id,
+        progress_observer,
+        runtime_cache,
+        descriptors,
+        observation,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_ffmpeg_at_with_env(
+    program: &std::path::Path,
+    args: &[String],
+    work: crate::process_control::ChildWork,
+    encoder_label: &'static str,
+    session_id: &str,
+    progress_observer: FfmpegProgressObserver,
+    runtime_cache: &std::path::Path,
+    descriptors: FfmpegDescriptors,
+    observation: DiagnosticObservation,
+    processing_env: &[(&str, &std::ffi::OsStr)],
+) -> Result<ObservedFfmpeg, String> {
+    let mut child_env = vec![("http_proxy", std::ffi::OsStr::new(""))];
+    child_env.extend_from_slice(processing_env);
     let crate::producer_spawn::Spawned {
         child,
         child_job,
         stdout,
         stderr,
     } = crate::producer_spawn::spawn(
-        std::path::Path::new(&producer_ffmpeg_bin()),
+        program,
         args,
         crate::producer_spawn::SpawnOptions {
             runtime_cache,
@@ -444,7 +515,7 @@ pub(super) fn spawn_ffmpeg(
             descriptors,
             // The muxer's uploads go to a loopback endpoint. An inherited
             // `http_proxy` would send them, token and all, to the proxy.
-            env: &[("http_proxy", std::ffi::OsStr::new(""))],
+            env: &child_env,
             work,
         },
     )?;
@@ -517,7 +588,9 @@ pub(super) fn spawn_ffmpeg(
 /// feeds the actor progress ingress plus the activity page. Losing that would
 /// leave a segmenter session with no `speed`, no `out_time`, and no advancing
 /// progress evidence.
-pub(super) fn spawn_ffmpeg_pipe(
+#[allow(clippy::too_many_arguments)] // exact captured executable joins seven existing producer inputs
+pub(super) fn spawn_ffmpeg_pipe_at(
+    program: &std::path::Path,
     args: &[String],
     work: crate::process_control::ChildWork,
     session_id: &str,
@@ -532,7 +605,7 @@ pub(super) fn spawn_ffmpeg_pipe(
         stdout,
         stderr,
     } = crate::producer_spawn::spawn(
-        std::path::Path::new(&ffmpeg_bin()),
+        program,
         args,
         crate::producer_spawn::SpawnOptions {
             runtime_cache,

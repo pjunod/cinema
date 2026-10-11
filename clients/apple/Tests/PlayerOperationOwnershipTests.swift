@@ -61,7 +61,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         var decision: CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>?
         var finishSeek: CheckedContinuation<Void, Never>?
         var expire: CheckedContinuation<Void, Error>?
-        let preparation = PlayerController.ItemPreparation(ready: { _ in }, seek: { _, _ in
+        let preparation = PlayerController.ItemPreparation(ready: { _, _ in }, seek: { _, _ in
             await withCheckedContinuation {
                 finishSeek = $0
                 seekEntered.fulfill()
@@ -124,7 +124,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         let readyEntered = expectation(description: "item readiness suspended")
         var readiness: CheckedContinuation<Void, Error>?
         var seeks: [Int] = []
-        let itemPreparation = PlayerController.ItemPreparation(ready: { _ in
+        let itemPreparation = PlayerController.ItemPreparation(ready: { _, _ in
             try await withCheckedThrowingContinuation {
                 readiness = $0
                 readyEntered.fulfill()
@@ -281,6 +281,43 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertEqual(controller.selectedAudio, 7)
         controller.stop()
         for decision in decisions { decision.resume(throwing: CancellationError()) }
+        await load.value
+    }
+
+    func testCancelledMediaSelectionPreparationCannotApplyLateTracks() async throws {
+        let decisionEntered = expectation(description: "decision suspended")
+        var decision: CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>?
+        let preparedAudio = expectation(description: "audio suspended")
+        var releaseAudio: CheckedContinuation<Void, Never>?
+        var audioCommits = 0
+        var subtitlePreparations = 0
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in
+            await withCheckedContinuation { releaseAudio = $0; preparedAudio.fulfill() }
+            return { audioCommits += 1 }
+        }
+        preparation.native = { _, _, _ in
+            subtitlePreparations += 1
+            return .init(hasSubtitleOptions: true, apply: { true })
+        }
+        let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in
+            try await withCheckedThrowingContinuation { decision = $0; decisionEntered.fulfill() }
+        }, mediaSelectionPreparation: preparation)
+        let model = AppModel()
+        start(controller, model: model)
+        let load = try XCTUnwrap(controller.loadingTask)
+        await fulfillment(of: [decisionEntered], timeout: 3)
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/cancelled-selection-test"))
+        controller.player.replaceCurrentItem(with: item)
+        let selection = Task { await controller.reconcileNativeMediaSelections(to: item) }
+        await fulfillment(of: [preparedAudio], timeout: 3)
+        selection.cancel()
+        try XCTUnwrap(releaseAudio).resume()
+        await selection.value
+        XCTAssertEqual(audioCommits, 0)
+        XCTAssertEqual(subtitlePreparations, 0)
+        controller.stop()
+        try XCTUnwrap(decision).resume(throwing: CancellationError())
         await load.value
     }
 
@@ -707,6 +744,119 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         throw APIError.transport(message)
     }
 
+    func testGrowingKeyframeCorrectionUsesSessionPreparationAndSeeksOnce() async throws {
+        let prior = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
+        defer { Session.shared.setCredentials(origin: prior.origin, token: prior.token) }
+        let decision = try coldDecision()
+        let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"growing","playlistUrl":"/hls/growing/index.m3u8","mediaOriginMs":813730,"vod":false}
+        """.utf8))
+        var now = 0
+        var native: AVPlayerItem.Status = .unknown
+        var seeks: [Int] = []
+        var controller: PlayerController!
+        let stream = AsyncStream<PlayerItemEvent>.makeStream()
+        defer { stream.continuation.finish(); controller?.stop() }
+        controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
+            itemPreparation: .init(ready: { _, context in
+                XCTAssertEqual(context.growingSessionID, "growing")
+                XCTAssertTrue(context.ownsItem())
+                // Wait for the actual existing status poll to supply evidence.
+                try await self.waitUntil("preparation evidence") { context.sample() != nil }
+                let initial = try XCTUnwrap(context.sample())
+                XCTAssertEqual(initial.status.outTimeMs, 27_527)
+                try await PlayerItemReadiness.wait(
+                    events: stream.stream, status: { native }, failure: { nil },
+                    context: .init(growingSessionID: context.growingSessionID, ownsItem: context.ownsItem, sample: {
+                        var status = initial.status
+                        status.playlistReady = now >= 21_000
+                        return .init(status: status, requestedAtMs: now, observedAtMs: now)
+                    }), nowMs: { now }, sleep: { ms in
+                        now += ms
+                        if now >= 22_000 { native = .readyToPlay }
+                        await Task.yield()
+                    }
+                )
+            }, seek: { _, ms in
+                seeks.append(ms)
+                controller.stop()
+            }), releaseHlsSession: { _, _ in }, requestHlsSession: { _, _, _ in hls },
+            requestHlsStatus: { _, id in
+                var status = PlaybackSessionStatus(id: id)
+                status.playlistReady = false; status.producerState = "running"
+                status.producedEndMs = 27_527; status.outTimeMs = 27_527; status.progressIdleMs = 80
+                return status
+            })
+        let model = AppModel()
+        controller.start(model: model, itemId: 1, fileId: 1, startMs: 814_473,
+                         durationMs: 600_000, title: "Growing resume fixture")
+        let load = try XCTUnwrap(controller.loadingTask)
+        await load.value
+        XCTAssertEqual(now, 22_000)
+        XCTAssertEqual(seeks, [743])
+    }
+
+    func testSameSessionFailoverRebindsPollAndRejectsDelayedPredecessorEvidence() async throws {
+        let prior = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
+        Session.shared.configureNodeOrigins(["http://127.0.0.1:8770"], primary: "http://127.0.0.1:8769")
+        defer {
+            Session.shared.configureNodeOrigins([], primary: prior.origin)
+            Session.shared.setCredentials(origin: prior.origin, token: prior.token)
+        }
+        let decision = try coldDecision()
+        let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"growing","playlistUrl":"/hls/growing/index.m3u8","mediaOriginMs":813730,"vod":false}
+        """.utf8))
+        var contexts: [PlayerItemReadiness.Context] = []
+        var waits: [CheckedContinuation<Void, Error>] = []
+        var oldStatus: CheckedContinuation<PlaybackSessionStatus, Error>?
+        var polls = 0
+        var seeks: [Int] = []
+        var controller: PlayerController!
+        controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
+            itemPreparation: .init(ready: { _, context in
+                contexts.append(context)
+                try await withCheckedThrowingContinuation { waits.append($0) }
+            }, seek: { _, ms in seeks.append(ms); controller.stop() }),
+            releaseHlsSession: { _, _ in }, requestHlsSession: { _, _, _ in hls },
+            requestHlsStatus: { _, id in
+                polls += 1
+                if polls == 1 { return try await withCheckedThrowingContinuation { oldStatus = $0 } }
+                var status = PlaybackSessionStatus(id: id)
+                status.outTimeMs = 42_000; status.playlistReady = false
+                return status
+            })
+        defer { controller.stop() }
+        let model = AppModel()
+        controller.start(model: model, itemId: 1, fileId: 1, startMs: 814_473,
+                         durationMs: 600_000, title: "Failover fixture")
+        let load = try XCTUnwrap(controller.loadingTask)
+        try await waitUntil("initial wait and poll") { waits.count == 1 && oldStatus != nil }
+        let predecessor = try XCTUnwrap(controller.player.currentItem)
+        let failover = Task { await controller.retryMediaOnNextNode(predecessor) }
+        try await waitUntil("replacement wait and rebound poll") {
+            waits.count == 2 && contexts[1].sample()?.status.outTimeMs == 42_000
+        }
+        XCTAssertFalse(contexts[0].ownsItem())
+        XCTAssertTrue(contexts[1].ownsItem())
+        XCTAssertEqual(contexts[1].growingSessionID, "growing")
+        var delayed = PlaybackSessionStatus(id: "growing")
+        delayed.outTimeMs = 1; delayed.playlistReady = true
+        oldStatus?.resume(returning: delayed)
+        oldStatus = nil
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(contexts[1].sample()?.status.outTimeMs, 42_000)
+        XCTAssertEqual(contexts[1].sample()?.status.playlistReady, false)
+        waits[1].resume()
+        let retried = await failover.value
+        XCTAssertTrue(retried)
+        waits[0].resume()
+        await load.value
+        XCTAssertEqual(seeks, [743], "only the replacement may perform the correction")
+    }
+
     private func coldDecision(file: Int = 1, mode: String = "transcode") throws -> Decision {
         try JSONDecoder().decode(Decision.self, from: Data("""
         {"fileId":\(file),"method":"\(mode)","playUrl":"/not-fetched",
@@ -999,6 +1149,31 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             bytesTotal: nil, localAssetRelativePath: path, markers: [], positionMs: 0,
             recordedAt: nil, pendingProgress: false, errorMessage: nil, updatedAt: Date()
         )
+    }
+
+    /// The finite player's half of #818: the claim follows `decision` through
+    /// an open and the player's own transport, so a film holds the display
+    /// while it plays and lets go the moment the viewer pauses.
+    func testTheFinitePlayerHoldsTheDisplayWhilePlayingAndLetsGoOnPause() async throws {
+        let (path, url) = try makeOfflineAudio()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in nil }
+        preparation.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
+        let recorder = DisplayWakeRecorder()
+        let owner = DisplayWakeOwner { recorder.applied.append($0) }
+        let controller = PlayerController(
+            mediaSelectionPreparation: preparation,
+            canPlayOffline: { _ in true },
+            displayWakeOwner: owner
+        )
+        controller.startOffline(model: AppModel(), item: offlineItem(path: path))
+        for _ in 0..<100 where !owner.isHeld { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertTrue(owner.isHeld, "a playing film holds the screensaver and auto-lock off")
+        controller.togglePlayPause()
+        for _ in 0..<100 where owner.isHeld { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertFalse(owner.isHeld, "a paused film lets the display sleep")
+        controller.stop()
     }
 
     func testOfflineAttachmentHonorsPauseAndSeeksWithoutAnOnlineRecipeReopen() async throws {

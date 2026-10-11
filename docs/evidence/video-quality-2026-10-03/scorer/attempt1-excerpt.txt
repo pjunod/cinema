@@ -1,0 +1,25 @@
+#11 277.0 [65/71] Compiling C object tools/vmaf.p/cli_parse.c.o
+#11 277.4 [66/71] Compiling C++ object src/libvmaf.a.p/svm.cpp.o
+#11 277.4 [67/71] Linking static target src/libvmaf.a
+#11 277.5 [68/71] Compiling C object tools/vmaf.p/vidinput.c.o
+#11 277.5 [69/71] Compiling C object tools/vmaf.p/y4m_input.c.o
+#11 277.5 [70/71] Compiling C object tools/vmaf.p/yuv_input.c.o
+#11 277.6 [71/71] Linking target tools/vmaf
+#11 277.6 ninja: Entering directory `/tmp/tmp.Huky0MzkMB/vmaf-build'
+#11 277.6 [1/5] Generating include/vcs_version.h with a custom command
+#11 277.6 [1/2] Installing files.
+#11 277.8 Installing src/libvmaf.a to /tmp/tmp.Huky0MzkMB/install/lib
+#11 277.8 Installing tools/vmaf to /tmp/tmp.Huky0MzkMB/install/bin
+#11 277.8 Installing /tmp/tmp.Huky0MzkMB/vmaf/libvmaf/include/libvmaf/libvmaf.h to /tmp/tmp.Huky0MzkMB/install/include/libvmaf/
+#11 277.8 Installing /tmp/tmp.Huky0MzkMB/vmaf/libvmaf/include/libvmaf/feature.h to /tmp/tmp.Huky0MzkMB/install/include/libvmaf/
+#11 277.8 Installing /tmp/tmp.Huky0MzkMB/vmaf/libvmaf/include/libvmaf/model.h to /tmp/tmp.Huky0MzkMB/install/include/libvmaf/
+#11 277.8 Installing /tmp/tmp.Huky0MzkMB/vmaf/libvmaf/include/libvmaf/picture.h to /tmp/tmp.Huky0MzkMB/install/include/libvmaf/
+#11 277.8 Installing /tmp/tmp.Huky0MzkMB/vmaf-build/include/libvmaf/version.h to /tmp/tmp.Huky0MzkMB/install/include/libvmaf/
+#11 277.8 Installing /tmp/tmp.Huky0MzkMB/vmaf-build/meson-private/libvmaf.pc to /tmp/tmp.Huky0MzkMB/install/lib/pkgconfig
+#11 284.4 ERROR: libvmaf >= 2.0.0 not found using pkg-config
+#11 284.4 
+#11 284.4 If you think configure made a mistake, make sure you are using the latest
+#11 284.4 version from Git.  If the latest version fails, report the problem to the
+#11 284.4 ffmpeg-user@ffmpeg.org mailing list or IRC #ffmpeg on irc.libera.chat.
+#11 284.4 Include the log file "ffbuild/config.log" produced by configure as this will help
+#11 284.4 solve the problem.

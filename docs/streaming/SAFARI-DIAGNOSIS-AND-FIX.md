@@ -71,7 +71,7 @@ copy-remux path. Do not re-encode video merely to change its envelope.
 
 ### 1.1 The review found 171 potentially affected library rows
 
-Fable reports a read-only census of the live store on nuc4, selecting the
+Fable reports a read-only census of the live store on lab4, selecting the
 first non-attached video stream from stored probe JSON:
 
 | Source | Tag | Rows | hvcC bytes |
@@ -117,8 +117,8 @@ have explicit work and regression tests in the implementation contract.
 | Incident | Observed path / defect | Relationship to this proposal |
 |---|---|---|
 | reference film K in Safari | Direct MP4 playback; no HLS session or playback-control reporter in the observed attempt; native `hev1` decode failure | This document |
-| Repeated seeking / `invalid_control` | Valid old-buffer/new-target snapshots rejected; backward-seek gaps could also inflate producer runway | Separate [draft PR #336](http://192.168.4.7:3000/noirr/plurx/pulls/336), as of this investigation |
-| Chrome startup with text subtitles | Separate startup/subtitle handling defect | Addressed by [PR #335](http://192.168.4.7:3000/noirr/plurx/pulls/335); not proof of Safari compatibility |
+| Repeated seeking / `invalid_control` | Valid old-buffer/new-target snapshots rejected; backward-seek gaps could also inflate producer runway | Separate [draft PR #336](http://forge.lan:3000/noirr/plurx/pulls/336), as of this investigation |
+| Chrome startup with text subtitles | Separate startup/subtitle handling defect | Addressed by [PR #335](http://forge.lan:3000/noirr/plurx/pulls/335); not proof of Safari compatibility |
 
 Routing reference film K through HLS will make the seek/control path relevant to its
 future playback. That does not make the earlier direct-MP4 failure a control

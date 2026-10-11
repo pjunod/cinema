@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "result": "Review-corrected native framework matrix complete: four Apple cases and four Android cases, each with four passing phases.",
+  "apple": {
+    "cases": 4,
+    "phases": 16,
+    "retained_receipts": "apple-*.json",
+    "review_corrected_identity": "review-apple-identity.json",
+    "review_corrected_receipts": [
+      "review-apple-animation-bf0-attempt1.json",
+      "review-apple-animation-bf2-attempt1.json",
+      "review-apple-live-action-bf0-attempt1.json",
+      "review-apple-live-action-bf2-attempt1.json"
+    ]
+  },
+  "android": {
+    "cases": 4,
+    "phases": 16,
+    "retained_initial_passes": [
+      "initial-android-animation-bf0.json",
+      "initial-android-animation-bf2.json",
+      "initial-android-live-action-bf2.json"
+    ],
+    "selective_fresh_pass": "android-final-live-action-bf0.json",
+    "final_harness_identity": "android-final-identity.json",
+    "final_maximum_video_to_player_clock_seconds": 0.159666,
+    "failures_retained": [
+      "initial-android-live-action-bf0.json",
+      "android-epoch-attempt2-live-action-bf0.json",
+      "android-epoch-attempt3-live-action-bf0.json"
+    ],
+    "invalid_stale_attempt": "android-quiet-attempt4-identity.json",
+    "retry_policy": "Three original successful cases were retained during epoch/freshness repairs. Final adversarial review exposed a filtering defect affecting every native case, so only that affected matrix was recaptured on corrected probes. Unrelated browser, encoding, HDR and latency successes were not rerun.",
+    "review_corrected_identity": "review-android-identity.json",
+    "review_corrected_receipts": [
+      "review-android-animation-bf0.json",
+      "review-android-animation-bf2.json",
+      "review-android-live-action-bf0.json",
+      "review-android-live-action-bf2.json"
+    ]
+  },
+  "scope": [
+    "Actual Plurx immutable VOD objects with identities in asset-identities.json.",
+    "AVPlayer on tvOS simulator and Media3 1.10.1 on owned API36 emulator; not shipping application UI or physical hardware.",
+    "Audio selection and video/player-clock correspondence measured; physical speaker/display synchronization not measured.",
+    "Fresh Android receipt follows owned-package data clear and verified receipt absence; attempt4 contributes no new verdict.",
+    "Earlier loaded clock failure is retained; its underlying scheduling cause is not proven by a later pass.",
+    "Review-corrected probes count initial-floor exclusions; all later same-epoch timestamps reach reversal and clock checks. Apple exclusions0; Android exclusions3 during initial restart admission, none hidden within an established phase."
+  ],
+  "historical_scope_limit": "Pre-review receipts prove only admitted observations because an unconditional target-floor guard could hide below-target established-phase reversals. They remain retained, without upgrading their scope from a source-only fix."
+}

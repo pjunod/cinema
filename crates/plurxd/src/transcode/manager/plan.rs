@@ -112,14 +112,94 @@ impl TranscodeManager {
         encoder: Encoder,
         restrictions: &AttemptRestrictions,
     ) -> Result<ResolvedTranscode, String> {
+        self.resolve_movie_plan_with_processing_exclusion(
+            file,
+            options,
+            encoder,
+            restrictions,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_movie_processing_retry(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        failed_pipeline: Pipeline,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_movie_plan_with_processing_exclusion(
+            file,
+            options,
+            encoder,
+            &AttemptRestrictions::none(),
+            Some(failed_pipeline),
+        )
+        .await
+    }
+
+    async fn resolve_movie_plan_with_processing_exclusion(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        restrictions: &AttemptRestrictions,
+        excluded_pipeline: Option<Pipeline>,
+    ) -> Result<ResolvedTranscode, String> {
         let stored_probe = self
             .store
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| format!("reading decoder planning facts: {error}"))?;
+        let facts = Self::planning_facts(file, stored_probe.as_deref())?;
+        let context = self
+            .macos_video_report()
+            .context(self.macos_video_processing_enabled())
+            .map(|context| context.with_hevc_output_enabled(self.macos_hevc_output_enabled()))
+            .map(|context| match excluded_pipeline {
+                Some(pipeline) => context.excluding_pipeline(pipeline),
+                None => context,
+            });
+        self.resolve_movie_plan_with_processing_context(
+            file,
+            options,
+            encoder,
+            &facts,
+            restrictions,
+            context.as_ref(),
+        )
+    }
+
+    /// [`Self::resolve_movie_plan`] from the stored probe a caller already
+    /// read with the file (a rolling start reads both, and its settings, in
+    /// one statement).
+    pub(super) fn resolve_movie_plan_from_probe(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        stored_probe: Option<&str>,
+    ) -> Result<ResolvedTranscode, String> {
+        let facts = Self::planning_facts(file, stored_probe)?;
+        self.resolve_movie_plan_with_facts(
+            file,
+            options,
+            encoder,
+            &facts,
+            &AttemptRestrictions::none(),
+        )
+    }
+
+    /// Decoder planning facts from the stored probe, or from the catalog row
+    /// when there is none.
+    fn planning_facts(
+        file: &plurx_core::domain::MediaFile,
+        stored_probe: Option<&str>,
+    ) -> Result<DecodeFacts, String> {
         // One expression for both builds: a row without probe output plans
         // from what the scan recorded rather than refusing to play.
-        let probe: serde_json::Value = match stored_probe.as_deref() {
+        let probe: serde_json::Value = match stored_probe {
             Some(encoded) => serde_json::from_str(encoded)
                 .map_err(|error| format!("decoder planning facts are invalid: {error}"))?,
             None => Self::catalog_plan_probe(file),
@@ -143,7 +223,7 @@ impl TranscodeManager {
             Some(&catalog),
         )
         .map_err(|error| format!("decoder planning facts are incompatible: {error}"))?;
-        self.resolve_movie_plan_with_facts(file, options, encoder, &facts, restrictions)
+        Ok(facts)
     }
 
     pub(super) fn resolve_movie_plan_with_facts(
@@ -153,6 +233,29 @@ impl TranscodeManager {
         encoder: Encoder,
         facts: &DecodeFacts,
         restrictions: &AttemptRestrictions,
+    ) -> Result<ResolvedTranscode, String> {
+        let context = self
+            .macos_video_report()
+            .context(self.macos_video_processing_enabled())
+            .map(|context| context.with_hevc_output_enabled(self.macos_hevc_output_enabled()));
+        self.resolve_movie_plan_with_processing_context(
+            file,
+            options,
+            encoder,
+            facts,
+            restrictions,
+            context.as_ref(),
+        )
+    }
+
+    fn resolve_movie_plan_with_processing_context(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: &DecodeFacts,
+        restrictions: &AttemptRestrictions,
+        macos_context: Option<&plurx_core::transcode::MacosProcessingContext>,
     ) -> Result<ResolvedTranscode, String> {
         use plurx_core::transcode::ArtifactQualification;
 
@@ -164,6 +267,7 @@ impl TranscodeManager {
                 facts,
                 restrictions,
                 self.artifact_qualification(),
+                macos_context,
             );
         }
 
@@ -178,6 +282,7 @@ impl TranscodeManager {
             facts,
             restrictions,
             ArtifactQualification::Unqualified,
+            macos_context,
         )?;
         if !self.published_artifact_qualification().requested {
             return Ok(unqualified);
@@ -209,6 +314,7 @@ impl TranscodeManager {
             facts,
             restrictions,
             ArtifactQualification::HealthQualified,
+            macos_context,
         )?;
         if qualified.decode().backend() != backend
             || qualified.decode().input_codec() != Some(codec)
@@ -224,6 +330,7 @@ impl TranscodeManager {
         Ok(qualified)
     }
 
+    #[allow(clippy::too_many_arguments)] // Independent frozen source, policy and implementation inputs.
     fn resolve_movie_plan_with_qualification(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -232,7 +339,17 @@ impl TranscodeManager {
         facts: &DecodeFacts,
         restrictions: &AttemptRestrictions,
         qualification: plurx_core::transcode::ArtifactQualification,
+        macos_context: Option<&plurx_core::transcode::MacosProcessingContext>,
     ) -> Result<ResolvedTranscode, String> {
+        // Recheck the same contract against the facts actually used by this
+        // plan. A stale catalogue preview cannot admit a different held source
+        // into the fixed-level encoder or its already-named artifact.
+        if encoder == Encoder::Vaapi
+            && options.pipeline.output_grade() == OutputGrade::Hdr10
+            && !Self::vaapi_hdr10_facts_fit(file, options.target_height, facts)
+        {
+            return Err("VAAPI HDR10 level 4 requires a known cadence at most 30 fps".into());
+        }
         let build = self
             .cache
             .as_ref()
@@ -247,7 +364,7 @@ impl TranscodeManager {
         let decoders = self.decoders.clone();
         let capabilities = DecodeCapabilities::new(
             identity,
-            Vec::new(),
+            self.measured_decoders.operational_request_capabilities(),
             decoders
                 .into_iter()
                 // A measured name, or none — never the family. This node's
@@ -280,8 +397,16 @@ impl TranscodeManager {
         )
         .map_err(|error| format!("decoder capability snapshot is invalid: {error}"))?;
         let compatibility = std::env::var("PLURX_HWDECODE").ok();
-        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
-            .qualifying_artifacts(qualification);
+        let mut policy =
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
+                .qualifying_artifacts(qualification);
+        #[cfg(target_os = "linux")]
+        if let Some(context) = self.macos_video_probe.linux_snapshot().context() {
+            policy = policy.with_linux_dolby(context);
+        }
+        if let Some(context) = macos_context {
+            policy = policy.with_macos_processing(context.clone());
+        }
         let request = TranscodeRequest::new(
             encoder,
             TranscodeMediaOptions::from_options_with_facts(file, options, facts),
@@ -296,6 +421,23 @@ impl TranscodeManager {
             None => request,
         };
         transcode::resolve_transcode(&request, facts, &capabilities, &policy, restrictions)
+            .map(|plan| {
+                if let Some(selection) = plan.macos_processing_selection() {
+                    let identity_digest = plan
+                        .macos_processing_identity()
+                        .map(|identity| identity.digest());
+                    tracing::debug!(target: "plurxd::transcode", selection = selection.name(),
+                        pipeline = plan.options().pipeline.name(),
+                        strict_dolby = plan.options().strict_dolby.is_some(),
+                        macos_identity_digest = identity_digest.as_deref().unwrap_or("none"),
+                        "resolved Mac processing for new movie plan");
+                }
+                let frame_rate = facts.frame_rate();
+                let cadence = (frame_rate.provenance() != transcode::FrameRateProvenance::Variable)
+                    .then(|| frame_rate.value())
+                    .flatten();
+                plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr)
+            })
             .map_err(|error| format!("decoder plan refused: {error}"))
     }
 
@@ -324,6 +466,109 @@ impl TranscodeManager {
         )
     }
 
+    /// A single sealed, descriptor-bound collection supplies both current
+    /// source verification and decoder planning. No full document is cached.
+    pub(super) async fn probe_vod_source_once(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        handle: Arc<std::fs::File>,
+    ) -> Result<Option<crate::decode_facts::FreshSourceProbe>, String> {
+        let Some(probe) = self.decode_probe_identity.as_ref() else {
+            return Ok(None);
+        };
+        let catalog = DecodeCatalogMetadata::from_media_file(file)
+            .map_err(|error| vod_refusal_error("vod_source_rescan_required", error.to_string()))?;
+        let source = self.hooks.get().decode_fact_source(
+            BoundPlanCaller::Vod
+                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1))),
+        );
+        self.decode_facts
+            .probe_source_document(
+                probe,
+                source,
+                Some(&catalog),
+                crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .map(Some)
+            .map_err(|error| {
+                vod_refusal_error(
+                    "vod_source_rescan_required",
+                    format!("the held source could not be verified against its scan: {error}"),
+                )
+            })
+    }
+
+    pub(super) async fn resolve_vod_prepared_source(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        handle: Arc<std::fs::File>,
+        prepared: crate::decode_facts::FreshSourceProbe,
+        font_digest: Option<&str>,
+    ) -> Result<ResolvedTranscode, String> {
+        let probe = self.decode_probe_identity.as_ref().ok_or_else(|| {
+            vod_refusal_error(
+                "vod_decoder_plan_refused",
+                "bound probe identity disappeared",
+            )
+        })?;
+        let catalog = DecodeCatalogMetadata::from_media_file(file)
+            .map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error.to_string()))?;
+        let source = self.hooks.get().decode_fact_source(
+            BoundPlanCaller::Vod
+                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1))),
+        );
+        let facts = self
+            .decode_facts
+            .refine_source_document(
+                probe,
+                source,
+                Some(&catalog),
+                prepared,
+                DECODE_PLAN_PROBE_BUDGET,
+                None,
+            )
+            .await;
+        if let Err(
+            error @ (crate::decode_facts::DecodeFactError::SourceChanged
+            | crate::decode_facts::DecodeFactError::ProbeChanged
+            | crate::decode_facts::DecodeFactError::CacheInvariant),
+        ) = &facts
+        {
+            return Err(vod_refusal_error(
+                "vod_decoder_plan_refused",
+                error.to_string(),
+            ));
+        }
+        let result = match facts {
+            Ok(facts) => {
+                let context = self
+                    .macos_video_report()
+                    .context_for_fonts(self.macos_video_processing_enabled(), font_digest)
+                    .map(|context| {
+                        context.with_hevc_output_enabled(self.macos_hevc_output_enabled())
+                    });
+                self.resolve_movie_plan_with_processing_context(
+                    file,
+                    options,
+                    encoder,
+                    &facts,
+                    &AttemptRestrictions::none(),
+                    context.as_ref(),
+                )
+            }
+            Err(error) => {
+                self.resolve_held_movie_plan_facts(file, options, encoder, Err(error))
+                    .await
+            }
+        };
+        BoundPlanCaller::Vod.finish(result)
+    }
+
     /// The VOD start's decoder plan, through the descriptor it holds, within
     /// `DECODE_PLAN_PROBE_BUDGET` and with the viewer's class on its probes.
     pub(super) async fn resolve_vod_movie_plan(
@@ -333,8 +578,20 @@ impl TranscodeManager {
         encoder: Encoder,
         held_plan_handle: Arc<std::fs::File>,
     ) -> Result<ResolvedTranscode, String> {
+        self.resolve_vod_movie_plan_with_fonts(file, options, encoder, held_plan_handle, None)
+            .await
+    }
+
+    pub(super) async fn resolve_vod_movie_plan_with_fonts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        held_plan_handle: Arc<std::fs::File>,
+        font_digest: Option<&str>,
+    ) -> Result<ResolvedTranscode, String> {
         BoundPlanCaller::Vod.finish(
-            self.resolve_held_movie_plan(
+            self.resolve_held_movie_plan_with_fonts(
                 file,
                 options,
                 encoder,
@@ -342,6 +599,7 @@ impl TranscodeManager {
                     .decode_fact_source(held_plan_handle, Arc::new(tokio::sync::Semaphore::new(1))),
                 Instant::now() + DECODE_PLAN_PROBE_BUDGET,
                 None,
+                font_digest,
             )
             .await,
         )
@@ -359,6 +617,29 @@ impl TranscodeManager {
         fact_source: crate::decode_facts::DecodeFactSource,
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_held_movie_plan_with_fonts(
+            file,
+            options,
+            encoder,
+            fact_source,
+            deadline,
+            cancelled,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // Existing held-source inputs plus its captured font authority.
+    async fn resolve_held_movie_plan_with_fonts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        fact_source: crate::decode_facts::DecodeFactSource,
+        deadline: Instant,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+        font_digest: Option<&str>,
     ) -> Result<ResolvedTranscode, String> {
         let Some(probe) = self.decode_probe_identity.as_ref() else {
             if options.normalized_geometry {
@@ -382,7 +663,7 @@ impl TranscodeManager {
                 cancelled,
             )
             .await;
-        self.resolve_held_movie_plan_facts(file, options, encoder, facts)
+        self.resolve_held_movie_plan_facts_with_fonts(file, options, encoder, facts, font_digest)
             .await
     }
 
@@ -393,14 +674,35 @@ impl TranscodeManager {
         encoder: Encoder,
         facts: Result<plurx_core::transcode::DecodeFacts, crate::decode_facts::DecodeFactError>,
     ) -> Result<ResolvedTranscode, String> {
+        self.resolve_held_movie_plan_facts_with_fonts(file, options, encoder, facts, None)
+            .await
+    }
+
+    pub(super) async fn resolve_held_movie_plan_facts_with_fonts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: Result<plurx_core::transcode::DecodeFacts, crate::decode_facts::DecodeFactError>,
+        font_digest: Option<&str>,
+    ) -> Result<ResolvedTranscode, String> {
         match facts {
-            Ok(facts) => self.resolve_movie_plan_with_facts(
-                file,
-                options,
-                encoder,
-                &facts,
-                &AttemptRestrictions::none(),
-            ),
+            Ok(facts) => {
+                let context = self
+                    .macos_video_report()
+                    .context_for_fonts(self.macos_video_processing_enabled(), font_digest)
+                    .map(|context| {
+                        context.with_hevc_output_enabled(self.macos_hevc_output_enabled())
+                    });
+                self.resolve_movie_plan_with_processing_context(
+                    file,
+                    options,
+                    encoder,
+                    &facts,
+                    &AttemptRestrictions::none(),
+                    context.as_ref(),
+                )
+            }
             // A probe that could not finish inside its budget, or a node with
             // no probe artifact at all, must not make the title unproducible.
             // Fall back to the same stored-probe plan live and offline already
@@ -517,6 +819,7 @@ impl TranscodeManager {
         &self,
         plan: &ResolvedTranscode,
         presentation: super::Presentation,
+        reorder_frames: bool,
     ) -> Result<[u8; 32], String> {
         let digest = self
             .digest()
@@ -529,6 +832,10 @@ impl TranscodeManager {
             super::Presentation::Live => b"rolling-mpegts".as_slice(),
         });
         hash.update(recipe.as_bytes());
+        if presentation == super::Presentation::Vod {
+            hash.update(b"\0plurx:encoded-vod-reorder:v1\0");
+            hash.update([u8::from(reorder_frames)]);
+        }
         Ok(hash.finalize().into())
     }
 
@@ -673,8 +980,14 @@ impl TranscodeManager {
     }
 
     /// `class` is the caller's: the per-source proof runs two 30-second
-    /// FFmpeg probes and memoizes its answer, so a session start that is
-    /// waiting on it must not run them at the background class.
+    /// FFmpeg probes and memoizes its verdict, so a session start that is
+    /// waiting on it must not run them at the background class — nor wait on
+    /// a background caller's proof ([`DoviProofs::prove`]). A proof that
+    /// did not finish is not a verdict: it is not memoized and the start is
+    /// refused as transient ([`source_proof_pending_error`]), so the next
+    /// start measures again. Only callers that need the verdict to do the
+    /// work call this; an advisory answer reads the remembered verdict
+    /// ([`Self::dovi_reshape_encoder_advisory`]).
     async fn require_dovi_renderer(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -687,26 +1000,27 @@ impl TranscodeManager {
             ));
         }
         if required {
-            let key = Self::dovi_proof_key(file);
-            let cached = self
+            let proof = self
                 .dovi_proofs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&key)
-                .copied();
-            let proved = match cached {
-                Some(proved) => proved,
-                None => {
-                    let proved = crate::ffmpeg::dovi_reshape_changes_pixels(file, class).await;
-                    self.dovi_proofs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(key, proved);
-                    proved
+                .prove(Self::dovi_proof_key(file), class, || {
+                    let scripted = self.hooks.get().scripted_dovi_pixel_proof(file);
+                    let file = file.clone();
+                    async move {
+                        match scripted {
+                            Some(proof) => proof,
+                            None => crate::ffmpeg::dovi_reshape_changes_pixels(&file, class).await,
+                        }
+                    }
+                })
+                .await;
+            match proof {
+                crate::ffmpeg::DoviPixelProof::Proved => {}
+                crate::ffmpeg::DoviPixelProof::Refuted => {
+                    return Err(unsupported_build_error("this source did not prove that Dolby Vision RPU application changes pixels through the production renderer"));
                 }
-            };
-            if !proved {
-                return Err(unsupported_build_error("this source did not prove that Dolby Vision RPU application changes pixels through the production renderer"));
+                crate::ffmpeg::DoviPixelProof::Inconclusive(reason) => {
+                    return Err(source_proof_pending_error(reason));
+                }
             }
         }
         Ok(required)
@@ -790,13 +1104,41 @@ impl TranscodeManager {
             );
             return Ok(OutputGrade::Sdr);
         }
-        // A hardware encoder this rung was never measured on. Only libx265 and
-        // hevc_qsv have Main10 routes here, so an NVENC or VA-API node would
+        if encoder == Encoder::VideoToolbox {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            let report = self.macos_video_report();
+            let observed = report
+                .context(self.macos_video_processing_enabled())
+                .is_some_and(|context| {
+                    context.graph(MacosProcessingGraph::HevcHdr10Host)
+                        == MacosProcessingAvailability::Available
+                        || (self.macos_video_processing_enabled()
+                            && context.graph(MacosProcessingGraph::HevcHdr10)
+                                == MacosProcessingAvailability::Available)
+                });
+            return Ok(
+                if self.macos_hevc_output_enabled()
+                    && observed
+                    && route == plurx_core::playback::HdrRoute::Passthrough
+                    && transcode::routing_hdr(file) == Some("hdr10")
+                {
+                    OutputGrade::Hdr10
+                } else {
+                    OutputGrade::Sdr
+                },
+            );
+        }
+        // A hardware encoder this rung has no recipe for must not silently
+        // fall back to software. Plain HDR additionally has a VAAPI Main10
+        // route; Dolby reshaping still supports software/QSV only. Others would
         // fall back to software x265 — measured at 11 fps for 1080p on two
         // cores, under realtime, against the 20.3 fps the SDR chain it
         // replaced runs at. Losing the grade is a worse picture; losing
         // realtime is a stall, and the viewer notices that one.
-        if !matches!(preferred, Encoder::Software | Encoder::Qsv) {
+        if !matches!(preferred, Encoder::Software | Encoder::Qsv)
+            && !(preferred == Encoder::Vaapi
+                && route == plurx_core::playback::HdrRoute::Passthrough)
+        {
             tracing::info!(
                 target: "plurxd::transcode",
                 file = file.id,
@@ -807,7 +1149,7 @@ impl TranscodeManager {
             return Ok(OutputGrade::Sdr);
         }
         if route == plurx_core::playback::HdrRoute::Passthrough {
-            if !self.hdr10_passthrough {
+            if encoder != Encoder::Vaapi && !self.hdr10_passthrough {
                 tracing::info!(
                     target: "plurxd::transcode",
                     file = file.id,
@@ -830,8 +1172,14 @@ impl TranscodeManager {
                 );
                 return Ok(OutputGrade::Sdr);
             }
-            // No RPU to prove: the graph reads no metadata, so the boot proof
-            // is the whole proof. `require_dovi_renderer` below is a
+            if encoder == Encoder::Vaapi
+                && (!self.hdr10_passthrough_vaapi
+                    || !self.vaapi_hdr10_source_fits(file, target_height).await)
+            {
+                return Ok(OutputGrade::Sdr);
+            }
+            // No RPU to prove: this graph needs the boot capability proof and,
+            // for the fixed VAAPI level, the source cadence contract. `require_dovi_renderer` below is a
             // per-source check that this file's RPU actually changes pixels,
             // which is a question this route never asks.
             return Ok(OutputGrade::Hdr10);
@@ -868,6 +1216,44 @@ impl TranscodeManager {
         Ok(OutputGrade::Hdr10)
     }
 
+    /// The advertised VAAPI Main10 point is level 4 at at most 30 fps.
+    /// Keep source cadence intact: unknown, variable or higher rates use the
+    /// existing SDR route instead of dropping frames to make HDR fit.
+    pub(super) fn vaapi_hdr10_facts_fit(
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+        facts: &DecodeFacts,
+    ) -> bool {
+        hdr10_rung_fits(file, target_height, Encoder::Vaapi)
+            && facts.frame_rate().value().is_some_and(|rate| {
+                u64::from(rate.numerator()) <= 30 * u64::from(rate.denominator())
+            })
+    }
+
+    pub(super) async fn vaapi_hdr10_source_fits(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+    ) -> bool {
+        let Ok(Some(raw)) = self.store.get_file_probe_json(file.id).await else {
+            return false;
+        };
+        let Ok(probe) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return false;
+        };
+        let Some(index) = crate::decode_facts::absolute_video_ordinal(&probe, 0) else {
+            return false;
+        };
+        let Ok(identity) = Self::plan_source_identity(file) else {
+            return false;
+        };
+        let Ok(catalog) = DecodeCatalogMetadata::from_media_file(file) else {
+            return false;
+        };
+        crate::decode_facts::legacy_ordinal_facts(&probe, identity, index, Some(&catalog))
+            .is_ok_and(|facts| Self::vaapi_hdr10_facts_fit(file, target_height, &facts))
+    }
+
     /// The grade a session would deliver, without building one.
     ///
     /// A projection of [`Self::encoder_and_grade_for`] rather than a second
@@ -896,6 +1282,27 @@ impl TranscodeManager {
             requested_hdr10,
             target_height,
             subtitle_burn.is_some_and(|index| index >= 0),
+        )
+        .await
+        .map(|(_, grade)| grade)
+        .unwrap_or(OutputGrade::Sdr)
+    }
+
+    /// [`Self::grade_preview`] under an encoder preference the caller read.
+    pub(super) async fn grade_preview_with_preference(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        requested_hdr10: bool,
+        target_height: i64,
+        subtitle_burn: Option<i64>,
+        preference: &str,
+    ) -> OutputGrade {
+        self.encoder_and_grade_for_with_preference(
+            file,
+            requested_hdr10,
+            target_height,
+            subtitle_burn.is_some_and(|index| index >= 0),
+            preference,
         )
         .await
         .map(|(_, grade)| grade)
@@ -942,13 +1349,25 @@ impl TranscodeManager {
             && plurx_core::playback::hdr_route(file).is_some()
             && matches!(target_height, HDR10_HEIGHT | HDR10_4K_HEIGHT)
         {
-            let preferred = self.caps.choose(preference);
+            let preferred = self.encoder_for_preference(preference);
             let qsv_proved = match plurx_core::playback::hdr_route(file) {
                 Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough_qsv,
                 _ => self.hdr10_passthrough_qsv,
             };
-            if preferred == Encoder::Qsv && qsv_proved {
+            if preferred == Encoder::VideoToolbox
+                && self.macos_hevc_output_enabled()
+                && target_height == HDR10_HEIGHT
+            {
+                Encoder::VideoToolbox
+            } else if preferred == Encoder::Qsv && qsv_proved {
                 Encoder::Qsv
+            } else if preferred == Encoder::Vaapi
+                && self.hdr10_passthrough_vaapi
+                && plurx_core::playback::hdr_route(file)
+                    == Some(plurx_core::playback::HdrRoute::Passthrough)
+                && target_height == HDR10_HEIGHT
+            {
+                Encoder::Vaapi
             } else {
                 Encoder::Software
             }
@@ -963,7 +1382,7 @@ impl TranscodeManager {
                 target_height,
                 hdr_candidate,
                 subtitle_burn,
-                self.caps.choose(preference),
+                self.encoder_for_preference(preference),
             )
             .await?;
         if grade == OutputGrade::Hdr10 {
@@ -1000,24 +1419,58 @@ impl TranscodeManager {
         class: crate::process_control::ChildClass,
     ) -> Result<Encoder, String> {
         if self.require_dovi_renderer(file, class).await? {
-            // Software decode is forced by the pipeline itself
-            // (`requires_software_decode`) — that is what preserves the RPU
-            // AVFrame side data the tonemapx graph consumes. The ENCODER is
-            // free to be the node's real one, provided that exact pairing has
-            // been proved at boot; an unproved pairing falls back to software
-            // rather than failing in front of a viewer. Pinning it to x264
-            // used to cap 4K Dolby Vision at 720p for every non-DV client.
-            let preferred = self.caps.choose(requested);
-            if preferred != Encoder::Software
-                && crate::ffmpeg::has_dovi_reshape_with(preferred).await
-            {
-                Ok(preferred)
-            } else {
-                Ok(Encoder::Software)
-            }
+            Ok(self.dovi_reshape_encoder(requested).await)
         } else {
-            Ok(self.caps.choose(requested))
+            Ok(self.encoder_for_preference(requested))
         }
+    }
+
+    /// The encoder a Profile 5 reshape runs on once its source is proved.
+    ///
+    /// Software decode is forced by the pipeline itself
+    /// (`requires_software_decode`) — that is what preserves the RPU AVFrame
+    /// side data the tonemapx graph consumes. The ENCODER is free to be the
+    /// node's real one, provided that exact pairing has been proved at boot;
+    /// an unproved pairing falls back to software rather than failing in
+    /// front of a viewer. Pinning it to x264 used to cap 4K Dolby Vision at
+    /// 720p for every non-DV client.
+    async fn dovi_reshape_encoder(&self, requested: &str) -> Encoder {
+        let preferred = self.encoder_for_preference(requested);
+        if preferred != Encoder::Software && crate::ffmpeg::has_dovi_reshape_with(preferred).await {
+            preferred
+        } else {
+            Encoder::Software
+        }
+    }
+
+    /// The encoder a Profile 5 reshape of `file` would reach, for an answer
+    /// that only describes it (the advertised ladder's ceiling). It reads the
+    /// remembered pixel verdict and never starts a proof: the proof is two
+    /// 30-second probes, and an advisory caller ahead of a session start used
+    /// to run them at the background class inside the viewer's create.
+    ///
+    /// No verdict yet reports the encoder the reshape reaches once proved —
+    /// the only outcome in which any rung is served (a refuted source is
+    /// refused outright at the start, whatever the ladder said). A refuted
+    /// source, or a node without the renderer, reports software, which is
+    /// what the probing path answered for either.
+    pub(super) async fn dovi_reshape_encoder_advisory(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Encoder {
+        if !self.dovi_reshape
+            || self.dovi_proofs.verdict(&Self::dovi_proof_key(file)) == Some(false)
+        {
+            return Encoder::Software;
+        }
+        let requested = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        self.dovi_reshape_encoder(&requested).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1066,9 +1519,9 @@ impl TranscodeManager {
             },
             // The node proved a graph; this session may still not be entitled
             // to it (HLG, non-compatible Dolby Vision, a light source, an
-            // encoder it cannot feed). Deciding once, here,
-            // is what keeps the log line honest — `pipeline=` is what actually
-            // ran, not what the box is capable of. Routed by `routing_hdr`
+            // encoder it cannot feed). This chooses the candidate; resolution
+            // owns its final scan-dependent graph, which later execution and
+            // diagnostics retain. Routed by `routing_hdr`
             // rather than the raw column: a DV base layer that is
             // HDR10-compatible is an hdr10 stream to a tone-map, and a bitmap
             // subtitle burn keeps the GPU graph (it downloads once for
@@ -1095,13 +1548,15 @@ impl TranscodeManager {
             } else if dovi_reshape {
                 Pipeline::DoviTonemapx
             } else {
-                Pipeline::for_session_with_scan(
+                // This is a candidate graph. Descriptor-bound decode facts
+                // decide deinterlace in resolve_transcode; a catalog flag can
+                // be overruled by idet and must not discard the graph here.
+                Pipeline::for_session(
                     self.pipeline,
                     encoder,
                     transcode::routing_hdr(file),
                     transcode::heavy_source(file),
                     subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
-                    plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
                 )
             },
             subtitle_burn,
@@ -1190,7 +1645,7 @@ impl TranscodeManager {
         audio_index: Option<i64>,
         subtitle_burn: Option<plurx_core::transcode::SubtitleBurn>,
     ) -> TranscodeOptions {
-        self.options_for_effective_rate_control(
+        let options = self.options_for_effective_rate_control(
             encoder,
             file,
             target_height,
@@ -1204,6 +1659,17 @@ impl TranscodeManager {
             // Main10 PQ decoder, so they produce the SDR ladder — the rung
             // every client can take.
             OutputGrade::Sdr,
+        );
+        // Typed audio, through the one resolver a live rolling start uses and
+        // on the route the artifact is served through. Every current client
+        // sends audio sinks, so its lookup key carries the resolved delivery;
+        // an untyped producer key was one no client computes. The ffmpeg
+        // arguments are built from `options.audio`, so the bytes match the key.
+        self.rolling_start_audio_options(
+            file,
+            options,
+            Some(&plurx_core::playback::audio::canonical_producer_claim()),
+            None,
         )
     }
 
@@ -1214,7 +1680,7 @@ impl TranscodeManager {
         spec: &OfflineSpec,
         subtitle_burn: Option<plurx_core::transcode::SubtitleBurn>,
     ) -> TranscodeOptions {
-        self.options_for_effective_rate_control(
+        let mut options = self.options_for_effective_rate_control(
             encoder,
             file,
             spec.target_height,
@@ -1227,7 +1693,11 @@ impl TranscodeManager {
             // An offline package is downloaded for playback anywhere later;
             // the SDR rung is the one that plays everywhere.
             OutputGrade::Sdr,
-        )
+        );
+        if let Some(audio) = &spec.audio_delivery {
+            options.set_audio_delivery(audio.clone());
+        }
+        options
     }
 
     /// A lossless-enough sidecar for simple text codecs. ASS/SSA remains

@@ -1,0 +1,63 @@
+{
+  "scope": "Synthetic exact recipes/AUD association; no P8.1 container/device conformance",
+  "result": "analytic-control-pass",
+  "results": [
+    {
+      "control": "correct",
+      "frame": 0,
+      "rpu_sha256": "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+      "luma_curve": "identity",
+      "residual_disabled": true
+    },
+    {
+      "control": "correct",
+      "frame": 1,
+      "rpu_sha256": "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+      "luma_curve": "identity",
+      "residual_disabled": true
+    },
+    {
+      "control": "correct",
+      "frame": 2,
+      "rpu_sha256": "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+      "luma_curve": "identity",
+      "residual_disabled": true
+    },
+    {
+      "control": "correct",
+      "frame": 3,
+      "rpu_sha256": "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c",
+      "luma_curve": "identity",
+      "residual_disabled": true
+    },
+    {
+      "control": "wrong",
+      "frame": 0,
+      "rpu_sha256": "6bb20ebc399557cf4766b802a0e93b21fa441ce6a1ceab92ed9a0f92c86dddac",
+      "luma_curve": "1/16+3x/4",
+      "residual_disabled": true
+    },
+    {
+      "control": "wrong",
+      "frame": 1,
+      "rpu_sha256": "16ea07fdf270e5b4d47b28f6ca11c8a4d8a9daad5678c5a2106864c25811717c",
+      "luma_curve": "1/16+3x/4",
+      "residual_disabled": true
+    },
+    {
+      "control": "wrong",
+      "frame": 2,
+      "rpu_sha256": "fa55d080e60cc3fefe671ac467a3232e83a2b73ab2b983355d930418bbe42695",
+      "luma_curve": "1/16+3x/4",
+      "residual_disabled": true
+    },
+    {
+      "control": "wrong",
+      "frame": 3,
+      "rpu_sha256": "aa46758b5243864f4f2de5539f71db0ff5336f8cf814ed9cc4a8292a69821927",
+      "luma_curve": "1/16+3x/4",
+      "residual_disabled": true
+    }
+  ],
+  "actual_container_pts": null
+}

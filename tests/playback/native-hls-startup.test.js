@@ -11,26 +11,31 @@ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
 const master='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200000\nindex.m3u8\n';
 const media='#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:8,\nseg_0000.m4s\n#EXTINF:8,\nseg_0001.m4s\n#EXTINF:8,\nseg_0002.m4s\n';
 async function flush(){for(let i=0;i<16;i++)await new Promise(resolve=>setImmediate(resolve));}
-function harness(){
+function harness({pendingOpen=false,pendingChange=false}={}){
  let now=0,ordinal=0;const timers=new Map(),answers=[],requests=[],sources=[],rescues=[],diagnoses=[],positions=[],listeners=new Map(),reopens=[],surfaces=[],stops=[];
  const video={readyState:0,videoWidth:0,currentTime:0,paused:true,currentSrc:'/session/master.m3u8',getAttribute:()=>'/session/master.m3u8',addEventListener(event,fn){listeners.set(event,fn);},removeEventListener(event,fn){if(listeners.get(event)===fn)listeners.delete(event);},removeAttribute(){},load(){},pause(){},play(){return Promise.resolve();}};
  const player={hls:null,wantsPlayback:true,method:'remux',sessionId:'retired',stallRecoveries:0,mediaAttachment:{},controlIntentGeneration:0,qualityCandidates:[],abr:{}};
- const ctx=vm.createContext({PlaybackPolicy:policy,URL,TextDecoder,AbortController,Uint8Array,console,
+ if(pendingOpen) player.pendingOpenAttempt={};
+ if(pendingChange) player.pendingMediaChange={};
+ const ctx=vm.createContext({PLAY_OPEN_GATE:{current:()=>true},PlaybackPolicy:policy,URL,TextDecoder,AbortController,Uint8Array,console,
   document:{getElementById:id=>id==='video'?video:{classList:{remove(){}}}},performance:{now:()=>now},location:{href:'http://fixture.invalid/'},player,video,
   setTimeout:(fn,ms)=>{const id=++ordinal;timers.set(id,{fn,at:now+ms});return id;},clearTimeout:id=>timers.delete(id),
   fetch:async(url,options)=>{requests.push({url,options});const answer=answers.shift();if(!answer)throw Error('No scripted answer');return typeof answer==='function'?answer(options):answer;},
   bufferTargets:()=>({}),parseSegTimes:text=>text.split('\n').filter(line=>line.startsWith('#EXTINF:')).map((_,i)=>(i+1)*8),
   setPlaybackMediaSource:(_,url)=>sources.push(url),applyPlaybackTransportIntent(){},applyPlaybackAttachmentPosition(){positions.push(true);},pausePlaybackInternally(){},resetPlaybackTransportEvents(){},
-  playbackOwnsAttachedMedia:p=>p===player,qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog(){},tok:x=>x,
+  qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog(){},tok:x=>x,
   pbTick(){},pbSyncPlayIcon(){},endWait(){},positionForPlaybackIntent:()=>42,stallRecoverySnapshot:(_p,_v,facts)=>facts,seekTo:(...args)=>reopens.push(args),showStallRecoveryFailure(){throw Error('unexpected recovery exhaustion');},playbackIsReal:()=>false,playbackSurfaceSourceIsBlocking:()=>true,stopPlayerForExhaustion:()=>stops.push(true),raisePlaybackSurface:(source,facts)=>surfaces.push(policy.presentSurface(policy.initialSurfaceState(),{raise:source,...facts,now_ms:now})),toast(){},
   startTranscodeFallback:(...args)=>rescues.push(args),stallDiagnose:()=>{diagnoses.push(true);return Promise.resolve();}});
  vm.runInContext(source,ctx);
  vm.runInContext("PLAYER=player;function clearStreamFailure(){STREAM_FAILURE=null;}",ctx);
+ vm.runInContext(shippedFunction("stall-diagnosis.js","hasPendingPlaybackOpen"),ctx);
+ vm.runInContext(shippedFunction("stall-diagnosis.js","playbackOwnsAttachedMedia"),ctx);
  vm.runInContext(shippedFunction("measurements.js","recoverServingFencedAttachment"),ctx);
  vm.runInContext(shippedFunction("transport.js","wirePlayerMedia"),ctx);
  ctx.wirePlayerMedia(video);
  const response=(text,status=200,type='application/vnd.apple.mpegurl')=>new Response(text,{status,headers:{'Content-Type':type}});
  ctx.attachNativeHls(video,'http://fixture.invalid/session/master.m3u8?token=fixture',0,player,{current:()=>ctx.current!==false});
+ if(!pendingOpen&&!pendingChange){for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}
  return {ctx,player,video,answers,requests,sources,rescues,diagnoses,positions,listeners,response,reopens,surfaces,stops,
   advance(ms){now+=ms;for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}},
   retry(){ctx.runNativeHlsReadiness(video,player,player.hlsStartup);},
@@ -181,4 +186,38 @@ test('native classification paused during readiness resumes under the original c
  h.player.wantsPlayback=true;h.player.controlIntentGeneration++;h.ctx.resumeHlsStartup(h.video,h.player);await flush();
  assert.equal(episode.deadlineMs,deadline);assert.equal(episode.native.reloadUsed,true);
  assert.equal(h.sources.length,2);assert.equal(h.rescues.length,0);h.stop();
+});
+
+
+test('native cold open and stream change start readiness after attachment ownership settles',async()=>{
+ for(const pending of ['pendingOpen','pendingChange']){
+  const h=harness({[pending]:true});await flush();
+  const episode=h.player.hlsStartup,deadline=episode.deadlineMs;
+  assert.equal(h.requests.length,0,'the preparing player must not fetch yet');
+  h.answers.push(h.response(master),h.response(media));
+  h.player.pendingOpenAttempt=null;h.player.pendingMediaChange=null;
+  h.advance(0);await flush();
+  assert.equal(h.requests.length,2,'the committed attachment must fetch its playlists');
+  assert.equal(h.sources.length,1);assert.equal(episode.deadlineMs,deadline);h.stop();
+ }
+});
+
+test('native readiness keeps a bounded wakeup while attachment ownership is pending',async()=>{
+ const h=harness({pendingOpen:true});await flush();
+ const deadline=h.player.hlsStartup.deadlineMs;
+ h.advance(0);await flush();assert.equal(h.requests.length,0);
+ h.player.pendingOpenAttempt=null;
+ h.answers.push(h.response(master),h.response(media));
+ h.advance(1000);await flush();
+ assert.equal(h.sources.length,1);assert.equal(h.player.hlsStartup.deadlineMs,deadline);h.stop();
+});
+
+test('native deferred attachment cannot fetch after it is cancelled or superseded',async()=>{
+ for(const stale of ['cancelled','superseded']){
+  const h=harness({pendingChange:true});await flush();
+  h.player.pendingMediaChange=null;
+  if(stale==='cancelled')h.stop();else h.ctx.current=false;
+  h.advance(1000);await flush();
+  assert.equal(h.requests.length,0);assert.equal(h.sources.length,0);h.stop();
+ }
 });

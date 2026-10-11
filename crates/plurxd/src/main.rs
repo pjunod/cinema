@@ -1,23 +1,36 @@
 // Production children go through `process_control::spawn_job_owned`; see
 // clippy.toml.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+#![cfg_attr(plurx_dv_segment_probe, allow(dead_code))]
 
 mod admission;
+mod availability;
 use plurx_core::process::bounded as bounded_process;
 #[cfg(test)]
 #[path = "../../plurx-core/tests/support/queue_fixture.rs"]
 mod queue_fixture;
+// Reuse the exact Core fixture observer. The shared fixture exports helpers
+// used by different packages; this test-only include has no production path.
+#[cfg(test)]
+use plurx_core as observer_core;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../plurx-core/tests/fixtures/startup_observer.rs"]
+mod sharing_fixture_clock;
 
 mod artifact_integrity;
 mod background_jobs;
 mod backup;
 mod cachekeep;
 mod channel_subjects;
+mod clock_offset;
 mod copyseg;
 mod decode_facts;
 mod decoder_health;
 mod delivery;
 mod dv_disk;
+#[cfg(unix)]
+mod dv_segment;
 mod dvpipe;
 mod ffmpeg;
 mod fontenv;
@@ -30,6 +43,7 @@ mod library_search;
 mod live_tv;
 mod live_tv_delivery;
 mod logbuf;
+mod macos_video;
 mod manifest_cache;
 mod media_pool;
 mod media_sessions;
@@ -52,12 +66,19 @@ mod progressive;
 mod reader_formats;
 mod redact;
 mod renditiondir;
+mod rolling_output;
+mod rolling_provenance;
 mod schedule;
 mod scratch_ledger;
 mod scratch_put;
 mod seam_hooks;
 mod serving_fence;
 mod shared_cache;
+mod sharing;
+mod sharing_client;
+mod sharing_connection_custody;
+#[cfg(test)]
+mod sharing_protocol_fixture;
 mod source_probe;
 mod state;
 mod store_result;
@@ -65,11 +86,13 @@ mod storeprobe;
 mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
+mod subtitle_transcription;
 mod subtitles;
 mod telemetry;
 mod titlestore;
 mod trakt;
 mod transcode;
+mod transcoder_optimization;
 mod version;
 mod vodencode;
 mod vodgen;
@@ -93,11 +116,10 @@ use clap::{Parser, Subcommand};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
-use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
 use plurx_core::cluster::migration::{
-    connect_activated_store, select_daemon_store, SelectedBackend,
+    connect_activated_store, select_daemon_store_observing, SelectedBackend, StartupClockObserver,
 };
 use plurx_core::config::{Config, StorageConfig};
 use plurx_core::domain::LibraryKind;
@@ -296,6 +318,11 @@ struct Cli {
 enum Command {
     /// Run the server (the default when no subcommand is given).
     Run,
+    /// Provision the node-local TLS identity used by the private sharing listener.
+    Sharing {
+        #[command(subcommand)]
+        command: SharingCommand,
+    },
     /// Install, remove, or enter the native Windows service.
     #[cfg(windows)]
     Service {
@@ -379,6 +406,15 @@ enum Command {
     /// diagnostic-panic`. It touches no storage and no network.
     #[command(hide = true)]
     DiagnosticPanic,
+}
+
+#[derive(Subcommand)]
+enum SharingCommand {
+    /// Create an owner-only node key and certificate; refuse existing identity files.
+    InitTls {
+        #[arg(long)]
+        key_directory: PathBuf,
+    },
 }
 
 #[cfg(windows)]
@@ -472,8 +508,29 @@ fn cli_exit(code: i32, message: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
+#[cfg(not(plurx_dv_segment_probe))]
+fn main() -> anyhow::Result<()> {
+    if let Some(result) = decode_facts::dispatch_probe_bootstrap() {
+        result.context("launching namespace-bound probe")?;
+        anyhow::bail!("probe exec unexpectedly returned");
+    }
+    daemon_main()
+}
+
+// Source-only validation entry: compile the real production graph without
+// unrelated unit bodies. No public command, server listener or qualification.
+#[cfg(all(unix, plurx_dv_segment_probe))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dv_segment::physical_probe().await;
+    Ok(())
+}
+
+#[cfg(all(not(unix), plurx_dv_segment_probe))]
+compile_error!("DV segment physical probe requires Unix descriptor custody");
+
+#[tokio::main]
+async fn daemon_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
     if let Err(error) = dispatch(
@@ -526,10 +583,23 @@ async fn dispatch(
         | Command::Cluster { .. }
         | Command::Restore { .. }
         | Command::Wal { .. }
+        | Command::Sharing { .. }
         | Command::DiagnosticPanic => {}
     }
     match command {
         Command::Run => run(config).await,
+        Command::Sharing {
+            command: SharingCommand::InitTls { key_directory },
+        } => {
+            let now = crate::state::clock_ms() / 1000;
+            let node = plurx_core::sharing_tls::NodeTls::initialize(&key_directory, now)?;
+            println!("SPKI SHA-256: {}", node.spki_sha256);
+            println!(
+                "Certificate expires at Unix second {}",
+                node.expires_at_seconds
+            );
+            Ok(())
+        }
         #[cfg(windows)]
         Command::Service { command } => match command {
             WindowsServiceCommand::Install => {
@@ -1693,9 +1763,17 @@ async fn run(config: Config) -> anyhow::Result<()> {
     // one of them first.
     let shutdown = ShutdownWatch::observing(shutdown_signal());
 
-    let selected = select_daemon_store(&config)
-        .await
-        .with_context(|| format!("selecting store in {}", config.storage.data_dir.display()))?;
+    let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
+    let mut selected =
+        match select_daemon_store_observing(&config, Some(observation.as_ref())).await {
+            Ok(selected) => selected,
+            Err(error) => {
+                observation.stop_and_drain().await;
+                return Err(error).with_context(|| {
+                    format!("selecting store in {}", config.storage.data_dir.display())
+                });
+            }
+        };
     // Which backend is serving is not otherwise observable. A recovery boot
     // binds and serves normally on unreplicated SQLite, so a persistently
     // failing activation otherwise looks only like a flapping container, with
@@ -1721,6 +1799,12 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!("shutdown signal received during store activation; not serving");
             return Ok(());
         }
+        let source_layout_ready = Box::pin(selected.prepare_source_schema_before_serving())
+            .await
+            .context("qualifying Source schema before serving")?;
+        if !source_layout_ready {
+            tracing::info!(target:"plurx::sharing","Source schema readiness pending; Local serving continues");
+        }
         let store = Arc::clone(&selected.store);
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
@@ -1733,13 +1817,14 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let probed = tokio::select! {
             biased;
             () = shutdown.clone().signalled() => None,
-            probed = probe_system(&config, &store, &dirs.transcode, &dirs.runtime_cache) => Some(probed?),
+            probed = probe_system(&config, &store, &selected.identity.node_id, &dirs.transcode, &dirs.runtime_cache) => Some(probed?),
         };
         let Some((encoder_caps, system)) = probed else {
             tracing::info!("shutdown signal received during system probing; not serving");
             return Ok(());
         };
         let parts = Boot {
+            source_activation_at_boot: Some(source_layout_ready),
             store,
             replication,
             membership,
@@ -1752,9 +1837,17 @@ async fn run(config: Config) -> anyhow::Result<()> {
             system,
             logs,
         };
-        boot(config, parts, start_mdns_advertiser, shutdown.signalled()).await
+        boot_observing(
+            config,
+            parts,
+            start_mdns_advertiser,
+            shutdown.signalled(),
+            Some(Arc::clone(&observation)),
+        )
+        .await
     };
     let result = serving.await;
+    observation.stop_and_drain().await;
     let shutdown = selected
         .shutdown()
         .await
@@ -1764,6 +1857,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
 
 /// What a measured node hands to the server it is about to become.
 struct Boot {
+    source_activation_at_boot: Option<bool>,
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
@@ -1779,6 +1873,273 @@ struct Boot {
     logs: logbuf::LogBuffers,
 }
 
+/// One public socket owner spanning clock-only observation and normal HTTP.
+/// Routing is selected per request, so already-open keepalive connections
+/// cannot retain the pending router after activation.
+struct StartupObservationHttp {
+    bind: SocketAddr,
+    router: Arc<std::sync::RwLock<axum::Router>>,
+    tasks: tokio::sync::Mutex<Option<StartupObservationTasks>>,
+    stop: tokio_util::sync::CancellationToken,
+}
+
+struct StartupObservationTasks {
+    server: tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
+    observer: crate::clock_offset::ClockObserver,
+    probe: Option<tokio::task::JoinHandle<()>>,
+    probe_stop: tokio_util::sync::CancellationToken,
+}
+
+impl StartupObservationHttp {
+    fn new(bind: SocketAddr) -> Self {
+        Self {
+            bind,
+            router: Arc::new(std::sync::RwLock::new(axum::Router::new())),
+            tasks: tokio::sync::Mutex::new(None),
+            stop: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    async fn stop_probe(&self) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(tasks) = tasks.as_mut() {
+            tasks.probe_stop.cancel();
+            if let Some(mut probe) = tasks.probe.take() {
+                if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut probe)
+                    .await
+                    .is_err()
+                {
+                    probe.abort();
+                    let _ = probe.await;
+                }
+            }
+        }
+    }
+
+    async fn observer(&self) -> Option<crate::clock_offset::ClockObserver> {
+        self.tasks
+            .lock()
+            .await
+            .as_ref()
+            .map(|tasks| tasks.observer.clone())
+    }
+
+    async fn stop_and_drain(&self) {
+        self.stop.cancel();
+        self.stop_probe().await;
+        if let Some(mut tasks) = self.tasks.lock().await.take() {
+            if tokio::time::timeout(
+                SHUTDOWN_DRAIN_TIMEOUT + Duration::from_secs(1),
+                &mut tasks.server,
+            )
+            .await
+            .is_err()
+            {
+                tasks.server.abort();
+                let _ = tasks.server.await;
+            }
+        }
+    }
+
+    async fn serve_normal(
+        &self,
+        app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+    ) -> anyhow::Result<HttpDrain> {
+        *self
+            .router
+            .write()
+            .map_err(|_| anyhow::anyhow!("startup router ownership poisoned"))? = app;
+        let mut tasks = self
+            .tasks
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("startup observation socket was not installed"))?;
+        tokio::pin!(shutdown);
+        let result = tokio::select! {
+            result = &mut tasks.server => result.context("startup HTTP task").and_then(|result| result),
+            () = &mut shutdown => {
+                self.stop.cancel();
+                (&mut tasks.server).await.context("startup HTTP task").and_then(|result| result)
+            }
+        };
+        self.stop.cancel();
+        tasks.probe_stop.cancel();
+        if let Some(mut probe) = tasks.probe.take() {
+            if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut probe)
+                .await
+                .is_err()
+            {
+                probe.abort();
+                let _ = probe.await;
+            }
+        }
+        result
+    }
+}
+
+/// Seconds a client is told to wait before asking a still-starting server again.
+const STARTUP_PENDING_RETRY_SECS: u64 = 2;
+
+/// The page a browser gets while the server is still starting: it says so and
+/// reloads itself, so a tab opened during startup lands in the app on its own.
+const STARTUP_PENDING_HTML: &str = concat!(
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+    "<meta http-equiv=\"refresh\" content=\"3\"><title>Starting…</title>",
+    "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;",
+    "background:#111;color:#ddd;font:16px/1.5 system-ui,sans-serif}",
+    "main{max-width:32em;padding:24px;text-align:center}h1{font-size:22px;margin:0 0 8px}",
+    "p{margin:0;color:#aaa}</style></head><body><main role=\"status\">",
+    "<h1>The server is starting</h1>",
+    "<p>This page reloads by itself when it is ready.</p></main></body></html>",
+);
+
+/// Every route but the clock observation while the store is still coming up.
+///
+/// The listener is bound before the store is selected so a joining learner can
+/// answer clock observation, which leaves a window — seconds on a standalone
+/// server, as long as a snapshot transfer on a cluster node — in which the
+/// socket accepts connections the application cannot serve yet. Axum's default
+/// fallback answered those with an empty 404: a browser saw a blank page,
+/// `/readyz` said "not found" rather than "not ready", and a client probing
+/// `/api/v1/server` was told there was no plurx server here. A 503 with
+/// Retry-After is the truthful answer, and it carries the typed code every
+/// client already dispatches on.
+async fn startup_pending(headers: axum::http::HeaderMap) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    let browser = headers
+        .get(header::ACCEPT)
+        .and_then(|accept| accept.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"));
+    let response = if browser {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            STARTUP_PENDING_HTML,
+        )
+            .into_response()
+    } else {
+        http::error::ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "server_starting",
+            message: "the server is starting; retry shortly".into(),
+            retry_after_seconds: STARTUP_PENDING_RETRY_SECS,
+        }
+        .into_response()
+    };
+    startup_pending_headers(response)
+}
+
+/// `/readyz` keeps its own contract while pending: plain text, 503, and a
+/// one-word reason (API.md §22.1), so status tables that print the body show
+/// `starting` rather than a JSON object.
+async fn startup_pending_readyz() -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    startup_pending_headers(
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "starting\n",
+        )
+            .into_response(),
+    )
+}
+
+fn startup_pending_headers(mut response: axum::response::Response) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    let headers = response.headers_mut();
+    headers.insert(
+        header::RETRY_AFTER,
+        HeaderValue::from(STARTUP_PENDING_RETRY_SECS),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+impl Drop for StartupObservationHttp {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+impl StartupClockObserver for StartupObservationHttp {
+    fn start(
+        &self,
+        membership: plurx_core::cluster::membership::MembershipManager,
+        node_id: String,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), plurx_core::error::StoreError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let mut tasks = self.tasks.lock().await;
+            if tasks.is_some() {
+                return Err(plurx_core::error::StoreError::Database(
+                    "clock observation socket already owned".into(),
+                ));
+            }
+            let listener = bind_listener(self.bind)
+                .await
+                .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?;
+            let observer = crate::clock_offset::ClockObserver::new(membership.clone());
+            let pending = axum::Router::new()
+                .route(
+                    http::internal_clock::PATH,
+                    axum::routing::get(http::internal_clock::observation_snapshot),
+                )
+                .route("/readyz", axum::routing::get(startup_pending_readyz))
+                .with_state(http::internal_clock::ObservationContext {
+                    membership: membership.clone(),
+                    node_id,
+                    observer: observer.clone(),
+                })
+                .fallback(startup_pending);
+            *self.router.write().map_err(|_| {
+                plurx_core::error::StoreError::Database("startup router ownership poisoned".into())
+            })? = pending;
+            let router = Arc::clone(&self.router);
+            let dispatch = axum::Router::new().fallback(axum::routing::any(
+                move |request: axum::http::Request<axum::body::Body>| {
+                    let router = Arc::clone(&router);
+                    async move {
+                        let app = router
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        match tower::ServiceExt::oneshot(app, request).await {
+                            Ok(response) => response,
+                            Err(never) => match never {},
+                        }
+                    }
+                },
+            ));
+            let stop = self.stop.clone();
+            let server = tokio::spawn(serve_http(
+                listener,
+                dispatch,
+                async move { stop.cancelled().await },
+                HTTP_TIMEOUTS,
+            ));
+            let probe_stop = self.stop.child_token();
+            let probe_owner = observer.clone();
+            let probe_shutdown = probe_stop.clone();
+            let probe = tokio::spawn(async move { probe_owner.run(probe_shutdown).await });
+            *tasks = Some(StartupObservationTasks {
+                server,
+                observer,
+                probe: Some(probe),
+                probe_stop,
+            });
+            Ok(())
+        })
+    }
+}
+
 /// Everything from a measured node to a served, drained shutdown.
 ///
 /// Separated from [`run`] at exactly the line where startup stops reaching
@@ -1786,13 +2147,29 @@ struct Boot {
 /// is wiring. Taking the shutdown future and the advertiser rather than
 /// installing a signal handler and registering on the LAN is what lets the
 /// whole sequence run in a test, on a temporary directory and a loopback port.
+#[cfg(test)]
 async fn boot(
-    mut config: Config,
+    config: Config,
     parts: Boot,
     advertiser: MdnsAdvertiser,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    boot_observing(config, parts, advertiser, shutdown, None).await
+}
+
+async fn boot_observing(
+    mut config: Config,
+    parts: Boot,
+    advertiser: MdnsAdvertiser,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    observation: Option<Arc<StartupObservationHttp>>,
+) -> anyhow::Result<()> {
+    let observation = match observation {
+        Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
+        _ => None,
+    };
     let Boot {
+        source_activation_at_boot,
         store,
         replication,
         membership,
@@ -1822,9 +2199,10 @@ async fn boot(
     tracing::debug!(expiry_since, "sign-in expiry clock");
     log_startup(&config, &identity);
 
+    let purpose_master = Arc::clone(&credential_key);
     let instance_id = identity.cluster_id;
     let node_id = identity.node_id;
-    let state = build_state(
+    let mut state = build_state(
         &config,
         node_id.clone(),
         instance_id.clone(),
@@ -1839,6 +2217,43 @@ async fn boot(
         system,
         logs,
     );
+    state
+        .sharing
+        .observe_source_activation_at_boot(source_activation_at_boot);
+    if let Some(owner) = &observation {
+        let observer = owner.observer().await.ok_or_else(|| {
+            anyhow::anyhow!("startup observation owner disappeared before activation")
+        })?;
+        anyhow::ensure!(
+            observer.belongs_to(&state.membership),
+            "foreign startup clock owner"
+        );
+        state.clock_observer = observer;
+    }
+    state
+        .membership
+        .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
+    state
+        .membership
+        .publish_ingress_custody_boot()
+        .await
+        .context("publishing actual accepted-driver custody boot")?;
+    state
+        .membership
+        .prepare_purpose_master(purpose_master)
+        .await
+        .context("qualifying coordinated sharing purpose master")?;
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        state.membership.coordinate_purpose_keys(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(code = error.code(), "sharing purpose factory is pending"),
+        Err(_) => tracing::warn!(code = "deadline", "sharing purpose factory is pending"),
+    }
+
     // The stored request is not an ffmpeg contract. Exercise the exact
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
@@ -1852,11 +2267,24 @@ async fn boot(
     // Recovery authorization changes no artifact identity, but it still has
     // to be published before the listener accepts the first session.
     state.transcode.publish_automatic_decoder_recovery().await;
+    state.transcode.publish_macos_video_processing().await;
     // One bounded telemetry writer owns all node-local event persistence.
     // Register it before the listener can accept the first producer.
     crate::telemetry::initialize(Arc::clone(&state.store))
         .await
         .context("seed playback telemetry settings")?;
+    // The Plex façade census continues across restarts (C-07 §8.5). Restored
+    // before the listener accepts; an unusable file is a new census, never a
+    // refusal to start.
+    state
+        .plex_census
+        .restore_durable(
+            &config.storage.data_dir,
+            http::plex_census::unix_now_s(),
+            http::plex_census::build_source_floor().unwrap_or(0),
+        )
+        .await;
+    let plex_census = Arc::clone(&state.plex_census);
     let background_loops = BackgroundLoopGuard::new();
     spawn_background_loops(&state, background_loops.token());
 
@@ -1865,25 +2293,41 @@ async fn boot(
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
+    let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     let app = http::router(state);
     tokio::task::spawn_blocking(http::web::warm_static_assets)
         .await
         .context("precompute embedded web assets")?;
-    let listener = bind_listener(config.server.bind).await?;
+    let listener = if observation.is_none() {
+        Some(bind_listener(config.server.bind).await?)
+    } else {
+        None
+    };
     #[cfg(windows)]
     crate::windows_service::report_listener_ready()?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
     let discovery_node_id =
         (!config.cluster.advertise_host.trim().is_empty()).then_some(node_id.as_str());
     let mdns = start_discovery(&config, &instance_id, discovery_node_id, advertiser);
+    let jellyfin = JellyfinStandardListener::open(
+        config.server.jellyfin_bind(),
+        &app,
+        &jellyfin_standard_port,
+    )
+    .await;
+    let jellyfin_stop = jellyfin.stop_token();
 
-    serve(listener, app, progress, mdns, async move {
+    let shutdown = async move {
         tokio::select! {
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
                 tracing::info!("cluster leave committed, draining");
             }
         }
+        // One drain token for both causes: owners that must hand work back
+        // before exit (shared session retirement) observe `state.shutdown`,
+        // and a signal is as much a drain as a committed leave.
+        leave_shutdown.cancel();
         // Stop new media starts before waiting for tuner/FFmpeg ownership to
         // settle. The HTTP server remains alive during this short phase so
         // existing close/resource requests can finish normally.
@@ -1898,8 +2342,44 @@ async fn boot(
         if let Err(error) = live_tv_shutdown.shutdown().await {
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
-    })
-    .await
+        // The main listener stops accepting when this future completes;
+        // the Jellyfin standard port stops at the same moment.
+        jellyfin_stop.cancel();
+    };
+    let served = if let Some(owner) = observation {
+        match owner.serve_normal(app, shutdown).await {
+            Ok(drain) => {
+                let drain = drain.and(jellyfin.drain().await);
+                drain_serving_state(progress, mdns).await.map(|()| drain)
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        serve(
+            listener.expect("normal startup owns its listener"),
+            app,
+            jellyfin,
+            progress,
+            mdns,
+            shutdown,
+        )
+        .await
+    };
+    // The last census write. It is marked clean only when the HTTP server
+    // stopped with every connection drained: then no façade request can still
+    // be counted, and the clean mark tells the next start that nothing was
+    // lost. A drain that timed out leaves connections that may still finish
+    // and be counted after this write, and a serving error says nothing about
+    // them, so both write an unclean final record and the next start counts an
+    // unclean stop. A failed write is read the same way, which is honest too.
+    let clean = matches!(served, Ok(HttpDrain::Complete));
+    if let Err(error) = plex_census
+        .flush_durable(http::plex_census::unix_now_s(), clean)
+        .await
+    {
+        tracing::warn!(%error, "could not record the Plex façade census at shutdown");
+    }
+    served.map(|_| ())
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
@@ -2381,6 +2861,7 @@ fn create_dirs(data_dir: &std::path::Path) -> anyhow::Result<crate::state::Dirs>
 async fn probe_system(
     config: &Config,
     store: &Arc<dyn plurx_core::store::Store>,
+    node_id: &str,
     transcode_dir: &std::path::Path,
     runtime_cache: &std::path::Path,
 ) -> anyhow::Result<(plurx_core::transcode::EncoderCaps, SystemInfo)> {
@@ -2418,8 +2899,37 @@ async fn probe_system(
     }
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
+    let hwaccel_override = store
+        .get_setting(&crate::state::node_hwaccel_key(node_id))
+        .await?;
+    let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
-    let probe_pref = probe_preference(&hwaccel_pref);
+    let optimization = match tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        transcoder_optimization::measure(&ffmpeg, &encoder_caps),
+    )
+    .await
+    {
+        Ok(Ok(report)) => {
+            if let Err(error) = transcoder_optimization::save(store, node_id, &report).await {
+                tracing::warn!(%error, "could not persist transcoder benchmark");
+            }
+            Some(report)
+        }
+        result => {
+            tracing::warn!(
+                ?result,
+                "transcoder benchmark unavailable; using validated encoder order"
+            );
+            None
+        }
+    };
+    let probe_pref = optimization
+        .as_ref()
+        .filter(|_| hwaccel_pref == "auto" || hwaccel_pref.is_empty())
+        .and_then(|report| report.fastest(&encoder_caps))
+        .map(|encoder| encoder.family_name().to_owned())
+        .unwrap_or_else(|| probe_preference(&hwaccel_pref));
     let encoder_selected = encoder_caps.choose(&probe_pref).label().to_owned();
     // Which tone-map graph this node may use. After encoder detection, because
     // a graph is only worth probing if it can feed the encoder that won. Costs
@@ -2454,6 +2964,11 @@ async fn probe_system(
         } else {
             false
         },
+        hdr10_passthrough_vaapi: if encoder_caps.vaapi {
+            crate::ffmpeg::has_hdr10_passthrough_vaapi().await
+        } else {
+            false
+        },
         dovi_passthrough_qsv: if encoder_caps.qsv {
             crate::ffmpeg::has_dovi_passthrough_with(plurx_core::transcode::Encoder::Qsv).await
         } else {
@@ -2465,7 +2980,7 @@ async fn probe_system(
         tone_map,
         dv_disk: crate::dv_disk::probe_capabilities().await,
     };
-    let system = system_info(
+    let mut system = system_info(
         config,
         ffmpeg,
         ffprobe,
@@ -2473,6 +2988,8 @@ async fn probe_system(
         encoder_caps.clone(),
         measured,
     );
+    system.hwaccel_override = hwaccel_override;
+    system.transcoder_optimization = optimization;
     Ok((encoder_caps, system))
 }
 
@@ -2488,6 +3005,7 @@ struct Measured {
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
     hdr10_passthrough_qsv: bool,
+    hdr10_passthrough_vaapi: bool,
     encoder_selected: String,
     decoders: Vec<String>,
     measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
@@ -2517,6 +3035,8 @@ fn system_info(
         ffmpeg,
         ffprobe,
         hwaccel_pref,
+        hwaccel_override: None,
+        transcoder_optimization: None,
         encoders,
         decoders: measured.decoders,
         measured_decoders: measured.measured_decoders,
@@ -2529,6 +3049,7 @@ fn system_info(
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,
         hdr10_passthrough_qsv: measured.hdr10_passthrough_qsv,
+        hdr10_passthrough_vaapi: measured.hdr10_passthrough_vaapi,
         dv_disk: measured.dv_disk,
         // Not measured: the conversion is plurx's own code, so the only
         // question is whether an operator has turned it off. The default is
@@ -2657,6 +3178,7 @@ fn build_state(
 ) -> AppState {
     AppState::new_configured(
         crate::state::AppConfig {
+            sharing_network: config.sharing.clone(),
             server_name: config.server.name.clone(),
             node_id,
             cluster_advertisement: !config.cluster.advertise_host.trim().is_empty(),
@@ -2750,7 +3272,28 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(http::remote::invitations::worker::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(Arc::clone(&state.sharing).run(state.clone(), background_shutdown.clone()));
+    tokio::spawn(Arc::clone(&state.sharing).claim_loop(state.clone(), background_shutdown.clone()));
+    // Crash recovery for orphaned shared-playback receiver routes; ends on drain.
+    tokio::spawn(
+        crate::http::shared_receiver_playback::receiver_recovery_loop(
+            state.clone(),
+            background_shutdown.clone(),
+        ),
+    );
+    tokio::spawn(crate::clock_offset::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(http::file_grants::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(subtitle_transcription::run(
         state.clone(),
         background_shutdown.clone(),
     ));
@@ -2759,6 +3302,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(state.clone().store_metrics_loop());
+    tokio::spawn(http::plex_census::flush_loop(
+        Arc::clone(&state.plex_census),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(Arc::clone(&state.backup).schedule_loop(background_shutdown.clone()));
     tokio::spawn(
         crate::http::cluster_operations::membership_status_cache_loop(
@@ -2845,6 +3392,15 @@ fn spawn_background_loops(
     // become the public leader before a failover actually happens.
     tokio::spawn(crate::http::images::materialize_loop(state.clone()));
     tokio::spawn(std::sync::Arc::clone(&state.transcode).rate_control_refresh_loop());
+    // Compatibility probing stays off startup and session creation. A restart
+    // owns one generation; an explicit admin reprobe uses this same owner.
+    tokio::spawn({
+        let manager = Arc::clone(&state.transcode);
+        let cancelled = background_shutdown.clone();
+        async move {
+            manager.reprobe_video_processing(&cancelled).await;
+        }
+    });
     tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv).scratch_sweep_loop(background_shutdown.clone()),
@@ -2855,6 +3411,15 @@ fn spawn_background_loops(
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv)
             .guide_refresh_loop(state.serving.subscribe(), background_shutdown.clone()),
+    );
+    // Running Live TV survives a loss of serving authority inside the session
+    // grace, as rolling and progressive playback do; this loop decides when a
+    // loss has outlasted it.
+    tokio::spawn(
+        state
+            .live_tv
+            .authority()
+            .serving_fence_loop(state.serving.subscribe()),
     );
     // One queue, one worker: the recording and reminder loops enqueue and
     // never await the network, so an unreachable endpoint cannot delay a
@@ -2889,6 +3454,8 @@ fn spawn_background_loops(
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
     tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());
+    // Post-start complete-output queue publication; VOD create only hands off.
+    tokio::spawn(std::sync::Arc::clone(&state.transcode).output_enqueue_loop(background_shutdown));
     // The expiry sweep in here is a cluster-wide idempotent sweep and stays
     // ungated; claiming the next queued package is not, and takes the same
     // live membership check the other cluster-wide loops do.
@@ -2978,11 +3545,133 @@ fn gdm_responder_port(lan_discovery: bool, bind: SocketAddr) -> Option<u16> {
 async fn serve(
     listener: tokio::net::TcpListener,
     app: axum::Router,
+    jellyfin: JellyfinStandardListener,
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<HttpDrain> {
+    // The shutdown future stops both listeners at once; the standard port
+    // finishes draining before progress is flushed, like the main one.
+    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS)
+        .await?
+        .and(jellyfin.drain().await);
+    drain_serving_state(progress, mdns).await?;
+    Ok(drain)
+}
+
+/// How `serve_http`'s shutdown drain ended. Only `Complete` proves that no
+/// request can still be running in this process; the Plex census marks its
+/// last write clean on exactly that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpDrain {
+    /// Every open connection finished inside the drain window.
+    Complete,
+    /// The window passed with connections still open; they were abandoned.
+    TimedOut,
+}
+
+impl HttpDrain {
+    /// A process drained only if every listener it served did.
+    fn and(self, other: Self) -> Self {
+        if self == Self::Complete && other == Self::Complete {
+            Self::Complete
+        } else {
+            Self::TimedOut
+        }
+    }
+}
+
+/// Jellyfin's standard port, served beside the main listener.
+///
+/// Jellyfin clients given only a host assume this port at the server root, so
+/// the facade answers there too: `http::jellyfin_standard_port_app` maps every
+/// request under the facade's mount, and nothing else is reachable on it.
+/// Opening it is best-effort, like discovery: a host where the port is taken
+/// (a real Jellyfin still running, say) keeps serving on its own port, and
+/// Settings -> Developer says why bare-host clients cannot connect. It stops
+/// accepting at the same moment as the main listener and drains before
+/// playback progress is flushed, so a late progress report through it is not
+/// lost.
+#[derive(Default)]
+struct JellyfinStandardListener {
+    stop: tokio_util::sync::CancellationToken,
+    task: Option<tokio::task::JoinHandle<anyhow::Result<HttpDrain>>>,
+}
+
+impl JellyfinStandardListener {
+    async fn open(
+        address: Option<SocketAddr>,
+        app: &axum::Router,
+        status: &http::JellyfinStandardPortStatus,
+    ) -> Self {
+        let mut listener = Self::default();
+        let Some(address) = address else {
+            status.record(http::JellyfinStandardPort::Off);
+            return listener;
+        };
+        match tokio::net::TcpListener::bind(address).await {
+            Ok(socket) => {
+                let bound = socket.local_addr().unwrap_or(address);
+                tracing::info!(addr = %bound, "listening for Jellyfin clients at the server root");
+                status.record(http::JellyfinStandardPort::Listening(bound));
+                let stop = listener.stop.clone();
+                listener.task = Some(tokio::spawn(serve_http(
+                    socket,
+                    http::jellyfin_standard_port_app(app.clone()),
+                    async move { stop.cancelled().await },
+                    HTTP_TIMEOUTS,
+                )));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    addr = %address,
+                    %error,
+                    "Jellyfin standard port unavailable; Jellyfin clients need the /jellyfin address on the main port"
+                );
+                status.record(http::JellyfinStandardPort::Unavailable {
+                    address,
+                    error: error.to_string(),
+                });
+            }
+        }
+        listener
+    }
+
+    fn stop_token(&self) -> tokio_util::sync::CancellationToken {
+        self.stop.clone()
+    }
+
+    /// Stop accepting, if the shutdown future has not already, and wait for
+    /// open connections to finish inside `serve_http`'s drain window.
+    async fn drain(mut self) -> HttpDrain {
+        self.stop.cancel();
+        let Some(task) = self.task.take() else {
+            return HttpDrain::Complete;
+        };
+        match task.await {
+            Ok(Ok(drain)) => drain,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "Jellyfin standard-port listener stopped with an error");
+                HttpDrain::TimedOut
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Jellyfin standard-port listener task failed");
+                HttpDrain::TimedOut
+            }
+        }
+    }
+}
+
+impl Drop for JellyfinStandardListener {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+async fn drain_serving_state(
+    progress: Arc<crate::progress::ProgressCoalescer>,
+    mdns: Option<mdns_sd::ServiceDaemon>,
 ) -> anyhow::Result<()> {
-    serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await?;
     match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain()).await {
         Ok(Ok(flushed)) if flushed > 0 => {
             tracing::info!(
@@ -3041,6 +3730,12 @@ impl HttpAcceptor for tokio::net::TcpListener {
         Ok((stream, remote))
     }
 }
+impl HttpAcceptor for plurx_core::sharing_tls::SharingTlsListener {
+    type Stream = plurx_core::sharing_tls::SharingTlsStream;
+    async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
+        plurx_core::sharing_tls::SharingTlsListener::accept(self).await
+    }
+}
 
 /// Send every write as soon as it is made: set `TCP_NODELAY` on an accepted
 /// HTTP connection.
@@ -3075,12 +3770,97 @@ fn disable_nagle(stream: &tokio::net::TcpStream, remote: SocketAddr) {
     }
 }
 
+/// Sharing content monitors may close this accepted transport even when Hyper
+/// is blocked writing a body. HTTP/2 cancellation closes all multiplexed streams
+/// on that connection; ordinary handlers never cancel this token.
+#[derive(Clone)]
+pub(crate) struct SharingConnectionCancellation(
+    pub(crate) tokio_util::sync::CancellationToken,
+    std::sync::Arc<SharingConnectionMonitors>,
+    tokio_util::sync::CancellationToken,
+    tokio_util::sync::CancellationToken,
+);
+/// Read-only observer of actual accepted writer closure; it cannot request it.
+#[derive(Clone)]
+pub(crate) struct SharingConnectionClosure(tokio_util::sync::CancellationToken);
+impl SharingConnectionClosure {
+    pub(crate) async fn wait(&self) {
+        self.0.cancelled().await;
+    }
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+struct SharingConnectionMonitors(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
+impl Drop for SharingConnectionMonitors {
+    fn drop(&mut self) {
+        for monitor in self.0.get_mut().expect("sharing monitor owner").drain(..) {
+            monitor.abort();
+        }
+    }
+}
+impl SharingConnectionCancellation {
+    fn new() -> Self {
+        Self(
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(SharingConnectionMonitors(std::sync::Mutex::new(Vec::new()))),
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+    }
+    /// Stop accepting new streams, while completing existing accepted writers.
+    /// Only actual connection closure supplies the settlement observation.
+    pub(crate) fn drain_token(&self) -> tokio_util::sync::CancellationToken {
+        self.3.clone()
+    }
+    /// Opaque weak ownership identity for deduplicating per-actor monitors.
+    /// Holding it cannot keep the connection or monitor owner alive.
+    pub(crate) fn ownership_key(&self) -> std::sync::Weak<dyn Send + Sync> {
+        let identity: std::sync::Arc<dyn Send + Sync> = self.1.clone();
+        std::sync::Arc::downgrade(&identity)
+    }
+    /// Completes only after the accepted Hyper connection future is dropped.
+    pub(crate) fn closed(&self) -> SharingConnectionClosure {
+        SharingConnectionClosure(self.2.clone())
+    }
+    /// After the actual writer has closed, let accepted-driver-owned closure
+    /// acknowledgements finish their finite exchange before dropping owners.
+    async fn join_monitors(&self) {
+        // Keep pending handles in their owner even if daemon shutdown cancels
+        // this join future. The owner's Drop can then abort remaining work.
+        futures_util::future::poll_fn(|cx| {
+            let mut tasks = self.1 .0.lock().expect("sharing monitor owner");
+            tasks.retain_mut(|task| {
+                std::future::Future::poll(std::pin::Pin::new(task), cx).is_pending()
+            });
+            if tasks.is_empty() {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+    pub(crate) fn monitor(
+        &self,
+        future: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), ()> {
+        let mut monitors = self.1 .0.lock().expect("sharing monitor owner");
+        monitors.retain(|monitor| !monitor.is_finished());
+        if monitors.len() >= 32 || self.0.is_cancelled() || self.2.is_cancelled() {
+            return Err(());
+        }
+        monitors.push(tokio::spawn(future));
+        Ok(())
+    }
+}
+
 async fn serve_http<A: HttpAcceptor>(
     listener: A,
     app: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     timeouts: HttpTimeouts,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HttpDrain> {
     let (drain_started, drain_signal) = tokio::sync::oneshot::channel();
     let mut builder = ConnectionBuilder::new(TokioExecutor::new());
     builder
@@ -3097,7 +3877,8 @@ async fn serve_http<A: HttpAcceptor>(
         // that behavior while taking ownership of the connection builder.
         .enable_connect_protocol();
 
-    let graceful = GracefulShutdown::new();
+    let connection_shutdown = tokio_util::sync::CancellationToken::new();
+    let mut connections = tokio::task::JoinSet::new();
     tokio::pin!(shutdown);
     loop {
         let accepted = tokio::select! {
@@ -3123,29 +3904,62 @@ async fn serve_http<A: HttpAcceptor>(
         // `http::network`, which extract the peer address. The lower-level
         // hyper loop has to insert it explicitly because axum's IncomingStream
         // is private to `axum::serve`.
+        let connection_cancel = SharingConnectionCancellation::new();
+        let request_cancel = connection_cancel.clone();
         let service = tower::ServiceBuilder::new()
             .map_request(move |mut request: Request<Incoming>| {
                 request.extensions_mut().insert(ConnectInfo(remote));
+                request.extensions_mut().insert(request_cancel.clone());
                 request.map(axum::body::Body::new)
             })
             .service(app.clone());
         let connection = builder
             .serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(service))
             .into_owned();
-        let connection = graceful.watch(connection);
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::debug!(%error, %remote, "HTTP connection closed with an error");
+        let shutdown_connection = connection_shutdown.clone();
+        // Reap completed accepted drivers on each admission; the JoinSet owns
+        // every remaining writer through daemon drain.
+        while connections.try_join_next().is_some() {}
+        connections.spawn(async move {
+            let _cancel_on_close = connection_cancel.0.clone().drop_guard();
+            // Declared before the owned connection so unwinding also drops the
+            // actual writer before signalling closure to capacity monitors.
+            let _closed_after_writer = connection_cancel.2.clone().drop_guard();
+            let mut connection = Box::pin(connection);
+            tokio::select! {
+                () = async {
+                    tokio::select! {
+                        () = connection_cancel.3.cancelled() => {},
+                        () = shutdown_connection.cancelled() => {},
+                    }
+                } => {
+                    connection.as_mut().graceful_shutdown();
+                    tokio::select! {
+                        () = connection_cancel.0.cancelled() => {},
+                        result = &mut connection => {
+                            if let Err(error) = result {
+                                tracing::debug!(%error, %remote, "HTTP connection drain ended with an error");
+                            }
+                        }
+                    }
+                },
+                ()=connection_cancel.0.cancelled()=>{},
+                result=&mut connection=> {if let Err(error)=result {tracing::debug!(%error,%remote,"HTTP connection closed with an error");}},
             }
+            drop(connection);
+            connection_cancel.2.cancel();
+            connection_cancel.join_monitors().await;
         });
     }
 
     let _ = drain_started.send(());
-    let connections_drained = graceful.shutdown();
+    connection_shutdown.cancel();
+    let connections_drained = async { while connections.join_next().await.is_some() {} };
     tokio::pin!(connections_drained);
-    tokio::select! {
+    let drain = tokio::select! {
         () = &mut connections_drained => {
             tracing::info!("shutdown complete");
+            HttpDrain::Complete
         }
         // Only starts counting once the signal has actually arrived: if the
         // channel never fires, this branch stays pending and the server runs.
@@ -3157,9 +3971,10 @@ async fn serve_http<A: HttpAcceptor>(
                 after = ?timeouts.shutdown_drain,
                 "drain timed out with connections still open; exiting anyway"
             );
+            HttpDrain::TimedOut
         }
-    }
-    Ok(())
+    };
+    Ok(drain)
 }
 
 /// How long to wait for open connections to finish after a shutdown signal.
@@ -4004,7 +4819,7 @@ mod startup_tests {
     ) -> (
         SocketAddr,
         tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<anyhow::Result<()>>,
+        tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -4074,6 +4889,397 @@ mod startup_tests {
             accept_error_backoff: Duration::from_millis(20),
             shutdown_drain: Duration::from_millis(200),
         }
+    }
+
+    /// Real pending listener boundary and in-place transfer, not proof that
+    /// a learner has completed clock observation or voter promotion.
+    #[tokio::test]
+    async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepalive() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        async fn request(stream: &mut BufReader<tokio::net::TcpStream>, path: &str) -> String {
+            stream
+                .get_mut()
+                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .await
+                .expect("request");
+            let mut status = String::new();
+            stream.read_line(&mut status).await.expect("status");
+            let mut bytes = 0;
+            loop {
+                let mut line = String::new();
+                stream.read_line(&mut line).await.expect("header");
+                assert!(!line.is_empty(), "response must not close before headers");
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    bytes = value.trim().parse::<usize>().expect("length");
+                }
+            }
+            let mut body = vec![0; bytes];
+            stream.read_exact(&mut body).await.expect("body");
+            status
+        }
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve");
+        let address = reservation.local_addr().expect("address");
+        drop(reservation);
+        let owner = Arc::new(StartupObservationHttp::new(address));
+        owner
+            .start(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+                "pending-node".into(),
+            )
+            .await
+            .expect("pending socket");
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_err(),
+            "pending phase owns the one bound socket"
+        );
+        let mut stream = BufReader::new(
+            tokio::net::TcpStream::connect(address)
+                .await
+                .expect("connect"),
+        );
+        assert!(
+            request(&mut stream, "/_internal/v1/clock")
+                .await
+                .contains("401"),
+            "unsigned observation refuses"
+        );
+        assert!(
+            request(&mut stream, "/active").await.contains("503"),
+            "no application route while pending, and it says the server is starting"
+        );
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let normal_owner = Arc::clone(&owner);
+        let normal = tokio::spawn(async move {
+            normal_owner
+                .serve_normal(
+                    axum::Router::new().route("/active", axum::routing::get(|| async { "active" })),
+                    async move {
+                        let _ = stopped.await;
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if request(&mut stream, "/active").await.contains("200") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("same keepalive observes transferred router");
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_err(),
+            "activation did not release/rebind the socket"
+        );
+        shutdown.send(()).expect("shutdown");
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(2), normal)
+            .await
+            .expect("drain budget")
+            .expect("task")
+            .expect("normal drain");
+        assert!(
+            owner.tasks.lock().await.is_none(),
+            "server/probe ownership consumed exactly once"
+        );
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_ok(),
+            "drained listener releases the port"
+        );
+    }
+
+    /// The 2026-10-10 report: a page opened during startup was blank and
+    /// `/readyz` answered 404. While pending, every non-clock route says the
+    /// server is starting — typed JSON for clients, a self-reloading page for
+    /// browsers — and never that the route does not exist.
+    #[tokio::test]
+    async fn pending_socket_answers_starting_not_not_found() {
+        use axum::http::{header, Request, StatusCode};
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve");
+        let address = reservation.local_addr().expect("address");
+        drop(reservation);
+        let owner = Arc::new(StartupObservationHttp::new(address));
+        owner
+            .start(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+                "pending-node".into(),
+            )
+            .await
+            .expect("pending socket");
+        let app = owner.router.read().expect("router").clone();
+        for path in ["/api/v1/server", "/healthz", "/web/index.html"] {
+            let response = tower::ServiceExt::oneshot(
+                app.clone(),
+                Request::get(path)
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(response.headers()[header::RETRY_AFTER], "2", "{path}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store",
+                "{path}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("typed JSON");
+            assert_eq!(json["code"], "server_starting", "{path}");
+        }
+        let ready = tower::ServiceExt::oneshot(
+            app.clone(),
+            Request::get("/readyz")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("infallible");
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ready.headers()[header::RETRY_AFTER], "2");
+        let body = axum::body::to_bytes(ready.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"starting\n", "readyz keeps its one-word reason");
+        let page = tower::ServiceExt::oneshot(
+            app,
+            Request::get("/")
+                .header(header::ACCEPT, "text/html,application/xhtml+xml,*/*;q=0.8")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("infallible");
+        assert_eq!(page.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(page.headers()[header::RETRY_AFTER], "2");
+        assert_eq!(
+            page.headers()[header::CACHE_CONTROL],
+            "no-store",
+            "the starting page must never be cached as the app shell"
+        );
+        assert!(page.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .expect("type")
+            .starts_with("text/html"));
+        let body = axum::body::to_bytes(page.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let html = std::str::from_utf8(&body).expect("utf-8");
+        assert!(
+            html.contains("http-equiv=\"refresh\""),
+            "the page reloads itself"
+        );
+        assert!(html.contains("The server is starting"));
+        // The clock route keeps its own answer; k06 above pins it over a
+        // real socket, where the connection info it needs exists.
+        owner.stop_and_drain().await;
+    }
+
+    /// Real learner/catchup -> authenticated observation -> committed vote.
+    /// This is not a physical restart/qualification receipt.
+    #[cfg(feature = "cluster-integration-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
+        use axum::{extract::State, response::IntoResponse, Json};
+        use plurx_core::cluster::membership::{
+            FinalizeJoinRequest, MembershipManager, RedeemJoinRequest,
+        };
+        use plurx_core::cluster::migration::select_daemon_store_observing;
+        fn config(root: &std::path::Path) -> Config {
+            let listeners: Vec<_> = (0..3)
+                .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("port"))
+                .collect();
+            let addresses: Vec<_> = listeners
+                .iter()
+                .map(|listener| listener.local_addr().expect("address"))
+                .collect();
+            let mut config = Config::default();
+            config.storage.data_dir = root.into();
+            config.server.bind = addresses[0];
+            config.cluster.raft_bind = addresses[1];
+            config.cluster.api_bind = addresses[2];
+            config.cluster.advertise_host = "localhost".into();
+            config.cluster.join_url = format!("http://{}", config.server.bind);
+            config.cluster.artwork_url = config.cluster.join_url.clone();
+            config
+        }
+        async fn redeem(
+            State(manager): State<MembershipManager>,
+            Json(request): Json<RedeemJoinRequest>,
+        ) -> axum::response::Response {
+            match manager.redeem(&request).await {
+                Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(serde_json::json!({"code":error.code(),"message":error.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
+        async fn finalize(
+            State(manager): State<MembershipManager>,
+            Json(request): Json<FinalizeJoinRequest>,
+        ) -> axum::response::Response {
+            match manager.finalize(&request).await {
+                Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(serde_json::json!({"code":error.code(),"message":error.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
+        struct AuditObserver {
+            owner: Arc<StartupObservationHttp>,
+            source: MembershipManager,
+            raft_id: u64,
+            observed: Arc<AtomicBool>,
+            origin: String,
+        }
+        impl StartupClockObserver for AuditObserver {
+            fn start(
+                &self,
+                membership: MembershipManager,
+                node_id: String,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<(), plurx_core::error::StoreError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async move {
+                    let roster = membership
+                        .clock_peers()
+                        .await
+                        .map_err(|error| {
+                            plurx_core::error::StoreError::Database(error.to_string())
+                        })?
+                        .membership
+                        .expect("actual applied startup roster");
+                    assert!(roster.members.contains(&self.raft_id));
+                    assert!(
+                        !roster.voters.contains(&self.raft_id),
+                        "desired voter must still be a committed learner at observation entry"
+                    );
+                    self.owner.start(membership, node_id.clone()).await?;
+                    let response =
+                        crate::http::peer_transport::PeerTransport::new(self.source.clone())
+                            .clock_request(&node_id, &self.origin)
+                            .await
+                            .map_err(|error| {
+                                plurx_core::error::StoreError::Database(format!("{error:?}"))
+                            })?;
+                    assert_eq!(
+                        response.status,
+                        reqwest::StatusCode::OK,
+                        "pending learner serves authenticated clock observation before promotion"
+                    );
+                    self.observed.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+        let source_root = crate::test_tempdir().expect("source");
+        let source_config = config(source_root.path());
+        drop(
+            plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
+                .expect("SQLite source"),
+        );
+        let source_owner = Arc::new(StartupObservationHttp::new(source_config.server.bind));
+        let source = select_daemon_store_observing(&source_config, Some(source_owner.as_ref()))
+            .await
+            .expect("source activation");
+        let manager = source.membership_manager();
+        let clock = axum::Router::new()
+            .route(
+                http::internal_clock::PATH,
+                axum::routing::get(http::internal_clock::observation_snapshot),
+            )
+            .with_state(http::internal_clock::ObservationContext {
+                membership: manager.clone(),
+                node_id: source.identity.node_id.clone(),
+                observer: source_owner.observer().await.expect("source clock owner"),
+            });
+        let app = axum::Router::new()
+            .route("/api/v1/cluster/join/redeem", axum::routing::post(redeem))
+            .route(
+                "/api/v1/cluster/join/finalize",
+                axum::routing::post(finalize),
+            )
+            .with_state(manager.clone())
+            .merge(clock);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let source_http = Arc::clone(&source_owner);
+        let server = tokio::spawn(async move {
+            source_http
+                .serve_normal(app, async move {
+                    let _ = stopped.await;
+                })
+                .await
+        });
+        let original = manager
+            .clock_guard()
+            .acquire_owned_for(plurx_core::cluster::clock::ClockDecision::MembershipChange)
+            .expect("actual singleton clock proof");
+        let token = manager
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("voter intent");
+        let joining_root = crate::test_tempdir().expect("joiner");
+        let mut joining_config = config(joining_root.path());
+        let token_path = joining_root.path().join("join.token");
+        std::fs::write(&token_path, format!("{}\n", token.token)).expect("test token");
+        joining_config.cluster.join_token_file = token_path.clone();
+        let joining_owner = Arc::new(StartupObservationHttp::new(joining_config.server.bind));
+        let observed = Arc::new(AtomicBool::new(false));
+        let observer = AuditObserver {
+            owner: Arc::clone(&joining_owner),
+            source: manager.clone(),
+            raft_id: token.raft_id,
+            observed: Arc::clone(&observed),
+            origin: joining_config.cluster.artwork_url.clone(),
+        };
+        let joined = tokio::time::timeout(
+            Duration::from_secs(90),
+            select_daemon_store_observing(&joining_config, Some(&observer)),
+        )
+        .await
+        .expect("bounded actual join")
+        .expect("joined voter");
+        assert!(observed.load(Ordering::SeqCst));
+        let applied = joined
+            .local_client()
+            .expect("local client")
+            .local_db_raft_metrics()
+            .expect("watch")
+            .membership_snapshot();
+        assert!(applied.committed && applied.voters.contains(&token.raft_id));
+        assert!(
+            original.revalidate().is_err(),
+            "actual member/promotion changes invalidate the original singleton proof"
+        );
+        assert!(
+            !token_path.exists(),
+            "finalization follows actual applied vote"
+        );
+        assert!(
+            joining_root.path().join("hiqlite/activation.json").exists(),
+            "activation must be published after vote"
+        );
+        joining_owner.stop_and_drain().await;
+        let joined_shutdown = joined.shutdown().await;
+        stop.send(()).expect("source stop");
+        server.await.expect("HTTP task").expect("HTTP drain");
+        source.shutdown().await.expect("source Raft drain");
+        joined_shutdown.expect("joined Raft drain");
     }
 
     struct FailFirstAccept {
@@ -4162,7 +5368,7 @@ mod startup_tests {
 
     async fn stop_timeout_test_server(
         stop: tokio::sync::oneshot::Sender<()>,
-        served: tokio::task::JoinHandle<anyhow::Result<()>>,
+        served: tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
     ) {
         stop.send(()).expect("stop server");
         tokio::time::timeout(Duration::from_secs(1), served)
@@ -4211,6 +5417,254 @@ mod startup_tests {
 
         expect_header_timer_close(&mut stream, "an idle keep-alive connection").await;
         stop_timeout_test_server(stop, served).await;
+    }
+
+    #[tokio::test]
+    async fn sharing_h2_graceful_predecessor_drain_preserves_existing_successor_writer() {
+        use http_body_util::BodyExt;
+        async fn expect_empty_terminal_eof(body: &mut hyper::body::Incoming, label: &str) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(frame) = body.frame().await {
+                    let frame =
+                        frame.expect("graceful terminal frame must not be a transport error");
+                    let data = frame
+                        .into_data()
+                        .expect("fixture emits no terminal trailers");
+                    eprintln!("{label} terminal DATA length={}", data.len());
+                    assert!(
+                        data.is_empty(),
+                        "{label} unexpected queued terminal DATA: {data:?}"
+                    );
+                }
+            })
+            .await
+            .expect("bounded terminal stream EOF");
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let (first_tx, first_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
+        let (second_tx, second_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
+        let (third_tx, third_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
+        drop(third_tx);
+        let streams = Arc::new(std::sync::Mutex::new([
+            Some(first_rx),
+            Some(second_rx),
+            Some(third_rx),
+        ]));
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(2);
+        let app = axum::Router::new().route(
+            "/{index}",
+            axum::routing::get({
+                move |axum::extract::Path(index): axum::extract::Path<usize>,
+                      axum::Extension(connection): axum::Extension<
+                    SharingConnectionCancellation,
+                >| {
+                    let receiver = streams.lock().expect("streams")[index]
+                        .take()
+                        .expect("stream");
+                    let accepted = accepted_tx.clone();
+                    async move {
+                        accepted.send(connection).await.expect("observer");
+                        let stream =
+                            futures_util::stream::unfold(receiver, |mut receiver| async move {
+                                receiver
+                                    .recv()
+                                    .await
+                                    .map(|bytes| (Ok::<_, std::io::Error>(bytes), receiver))
+                            });
+                        axum::body::Body::from_stream(stream)
+                    }
+                }
+            }),
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        // Test server owns accepted drivers; explicit stop and join close it.
+        let served = tokio::spawn(serve_http(
+            listener,
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            HTTP_TIMEOUTS,
+        ));
+        let socket = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        let (mut client, driver) = hyper::client::conn::http2::handshake::<_, _, axum::body::Body>(
+            TokioExecutor::new(),
+            TokioIo::new(socket),
+        )
+        .await
+        .expect("h2 handshake");
+        // Client driver is joined after GOAWAY and actual accepted closure.
+        let driven = tokio::spawn(driver);
+        let mut predecessor = client
+            .send_request(
+                Request::builder()
+                    .uri(format!("http://{address}/0"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("predecessor headers")
+            .into_body();
+        let connection = accepted_rx.recv().await.expect("accepted predecessor");
+        let custody = crate::sharing_connection_custody::AcceptedDriverRegistry::default();
+        let captured = custody
+            .capture(&connection, "owner")
+            .expect("physical capture");
+        assert_eq!(captured.id().boot_id, custody.boot_id());
+        let principal_incarnation = uuid::Uuid::new_v4();
+        let owner_identity = "a".repeat(64);
+        let mut registration = custody
+            .registration_guard()
+            .await
+            .expect("registration gate");
+        let obligation = captured
+            .prepare_obligation(
+                &mut registration,
+                "receiver",
+                principal_incarnation,
+                &owner_identity,
+            )
+            .expect("independently retained registration obligation");
+        // Model the lost durable-registration answer while retaining exact
+        // node-local custody. Actual closure below comes only from Hyper.
+        drop(registration);
+
+        let mut successor = client
+            .send_request(
+                Request::builder()
+                    .uri(format!("http://{address}/1"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("successor headers")
+            .into_body();
+        let same = accepted_rx.recv().await.expect("accepted successor");
+        assert!(std::sync::Weak::ptr_eq(
+            &connection.ownership_key(),
+            &same.ownership_key()
+        ));
+        assert_eq!(
+            custody
+                .capture(&same, "owner")
+                .expect("same actual driver")
+                .id(),
+            captured.id()
+        );
+        connection.drain_token().cancel();
+        second_tx
+            .send(axum::body::Bytes::from_static(b"successor survives"))
+            .await
+            .expect("write");
+        let frame = tokio::time::timeout(Duration::from_secs(5), successor.frame())
+            .await
+            .expect("successor read deadline")
+            .expect("frame")
+            .expect("successor DATA");
+        assert_eq!(frame.into_data().expect("data"), "successor survives");
+        assert!(
+            !connection.0.is_cancelled(),
+            "graceful drain never hard-cuts either stream"
+        );
+        assert!(
+            !connection.closed().is_closed(),
+            "queued predecessor ownership is unsettled"
+        );
+        drop(first_tx);
+        // Hyper may expose its legal empty END_STREAM DATA frame before EOF.
+        // Inspect every frame and reject errors/bytes; stream EOF still does
+        // not prove the accepted driver closed while the successor owns it.
+        expect_empty_terminal_eof(&mut predecessor, "predecessor").await;
+        assert!(
+            !connection.closed().is_closed(),
+            "successor still owns its accepted writer"
+        );
+        drop(second_tx);
+        expect_empty_terminal_eof(&mut successor, "successor").await;
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), connection.closed().wait())
+            .await
+            .expect("actual accepted writer closure");
+        let receipt = obligation.joined().await;
+        assert!(receipt.matches(captured.id()));
+        assert!(!receipt.confirmation().is_empty());
+        let close = crate::sharing_connection_custody::DriverCloseRequest {
+            driver: captured.id().clone(),
+            registration_sequence: obligation.registration_sequence(),
+            principal_kind: "receiver".into(),
+            incarnation_id: principal_incarnation,
+            owner_identity,
+            expected_owner_epoch: 1,
+            mode: crate::sharing_connection_custody::DriverCloseMode::Drain,
+            deadline_unix_ms: crate::media_sessions::unix_ms() + 5_000,
+        };
+        assert!(custody.close("foreign-owner", &close).await.is_err());
+        assert!(custody
+            .close("owner", &close)
+            .await
+            .expect("exact lost-close replay")
+            .matches(captured.id()));
+        obligation
+            .release_after_ack(&receipt)
+            .expect("only actual closure allows durable ack release");
+        let recovered = custody
+            .existing_obligation(
+                captured.id(),
+                "receiver",
+                principal_incarnation,
+                &close.owner_identity,
+            )
+            .expect("exact reservation survives actual closure and ack");
+        custody
+            .reconcile_guard(&recovered)
+            .await
+            .expect("mutable ack does not change pending identity")
+            .complete();
+        let mut next_socket = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("fresh actual transport");
+        next_socket
+            .write_all(b"GET /2 HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .expect("new writer request");
+        let next_connection = accepted_rx.recv().await.expect("fresh accepted driver");
+        let next_driver = custody
+            .capture(&next_connection, "owner")
+            .expect("fresh physical capture");
+        let mut next_permit = custody
+            .registration_guard()
+            .await
+            .expect("registration gate");
+        let next = next_driver
+            .prepare_obligation(
+                &mut next_permit,
+                "receiver",
+                principal_incarnation,
+                &close.owner_identity,
+            )
+            .expect("new driver admitted after exact unknown reconciliation");
+        assert!(next.registration_sequence() > recovered.registration_sequence());
+        next_permit.complete();
+        drop(next_socket);
+        tokio::time::timeout(Duration::from_secs(5), next_connection.closed().wait())
+            .await
+            .expect("fresh accepted driver actually joined");
+        let restarted = crate::sharing_connection_custody::AcceptedDriverRegistry::default();
+        assert!(
+            restarted.close("owner", &close).await.is_err(),
+            "restart cannot manufacture closure"
+        );
+        driven
+            .await
+            .expect("driver joined")
+            .expect("graceful h2 result");
+        stop.send(()).expect("stop");
+        served.await.expect("server joined").expect("server result");
     }
 
     #[tokio::test]
@@ -5386,9 +6840,16 @@ mod startup_tests {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let logs = Arc::new(logbuf::LogBuffer::new(64));
         let _capture = capturing(&logs);
-        let served = tokio::spawn(serve(listener, app, progress, Some(daemon), async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            Some(daemon),
+            async move {
+                let _ = stopped.await;
+            },
+        ));
         stop.send(()).expect("stop");
 
         tokio::time::timeout(Duration::from_secs(10), served)
@@ -5467,9 +6928,16 @@ mod startup_tests {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let logs = Arc::new(logbuf::LogBuffer::new(64));
         let _capture = capturing(&logs);
-        let served = tokio::spawn(serve(listener, app, progress, None, async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
         stop.send(()).expect("stop");
 
         tokio::time::timeout(Duration::from_secs(10), served)
@@ -5932,9 +7400,16 @@ mod startup_tests {
         let addr = listener.local_addr().expect("addr");
 
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let served = tokio::spawn(serve(listener, app, progress, None, async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
 
         let client = reqwest::Client::new();
         let health = client
@@ -5949,7 +7424,11 @@ mod startup_tests {
             .await
             .expect("serve must finish inside the drain window")
             .expect("join");
-        outcome.expect("an orderly shutdown is exit 0, not an error");
+        assert_eq!(
+            outcome.expect("an orderly shutdown is exit 0, not an error"),
+            HttpDrain::Complete,
+            "every connection finished, so the drain says so"
+        );
 
         // And the listener really is gone: an orchestrator that restarts the
         // container must not race a socket that is still bound.
@@ -5998,9 +7477,16 @@ mod startup_tests {
         let addr = listener.local_addr().expect("addr");
 
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let served = tokio::spawn(serve(listener, app, progress, None, async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
 
         let body = reqwest::Client::new()
             .get(format!("http://{addr}/peer"))
@@ -6221,6 +7707,61 @@ mod startup_tests {
         init_companion_logging();
     }
 
+    /// The standard port is best-effort: off and taken both leave the server
+    /// running and say so, and an open one answers over TCP, then stops
+    /// accepting when it drains.
+    #[tokio::test]
+    async fn jellyfin_standard_port_is_best_effort_and_drains_with_the_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let status = http::JellyfinStandardPortStatus::default();
+        let app = axum::Router::new();
+
+        let off = JellyfinStandardListener::open(None, &app, &status).await;
+        assert_eq!(status.current(), http::JellyfinStandardPort::Off);
+        assert_eq!(off.drain().await, HttpDrain::Complete);
+
+        let held = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("hold a port");
+        let taken = held.local_addr().expect("held address");
+        let refused = JellyfinStandardListener::open(Some(taken), &app, &status).await;
+        assert!(
+            matches!(
+                status.current(),
+                http::JellyfinStandardPort::Unavailable { address, .. } if address == taken
+            ),
+            "{:?}",
+            status.current()
+        );
+        assert_eq!(refused.drain().await, HttpDrain::Complete);
+
+        let open = JellyfinStandardListener::open(
+            Some("127.0.0.1:0".parse().expect("addr")),
+            &app,
+            &status,
+        )
+        .await;
+        let http::JellyfinStandardPort::Listening(bound) = status.current() else {
+            panic!("not listening: {:?}", status.current());
+        };
+        assert_ne!(bound.port(), 0);
+        let mut stream = tokio::net::TcpStream::connect(bound)
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET /System/Info/Public HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.expect("read");
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        assert_eq!(open.drain().await, HttpDrain::Complete);
+        assert!(
+            tokio::net::TcpStream::connect(bound).await.is_err(),
+            "a drained listener stops accepting"
+        );
+    }
+
     /// The common boot failure is a port already in use, and "Address already
     /// in use" on its own does not say which one.
     #[tokio::test]
@@ -6364,9 +7905,73 @@ mod startup_tests {
         );
     }
 
+    /// The Plex façade census (C-07 §8.7) is wired into the daemon, not only
+    /// into its own module: boot restores it from the data directory before
+    /// serving, and the drained shutdown writes it once more, marked clean. A
+    /// boot that dropped the restore leaves no file; one that dropped the
+    /// final write leaves the startup write's `stopped_cleanly: false`, and the
+    /// second boot then counts an unclean stop.
+    #[tokio::test]
+    async fn a_drained_boot_records_a_clean_plex_census_stop() {
+        let tmp = crate::test_tempdir().expect("tempdir");
+        let config = config_in(tmp.path());
+        let census_path = tmp.path().join(http::plex_census::CENSUS_FILE);
+        let read_census = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(&census_path).expect("the census file"))
+                .expect("census json")
+        };
+
+        drop(boot_serve_and_drain(&config, tmp.path()).await);
+        let first = read_census();
+        assert_eq!(
+            first["stopped_cleanly"],
+            serde_json::Value::Bool(true),
+            "a drained shutdown marks the census stop clean: {first}"
+        );
+        assert_eq!(first["unclean_stops"], 0);
+        let started = first["started_unix_s"].as_u64().expect("a start time");
+        assert!(started > 0);
+
+        drop(boot_serve_and_drain(&config, tmp.path()).await);
+        let second = read_census();
+        assert_eq!(
+            second["unclean_stops"], 0,
+            "the second boot continued a cleanly stopped census: {second}"
+        );
+        assert_eq!(second["stopped_cleanly"], serde_json::Value::Bool(true));
+        assert_eq!(
+            second["started_unix_s"].as_u64(),
+            Some(started),
+            "one census across both boots"
+        );
+    }
+
     /// Boots `config` over `root`, checks it is serving, shuts it down, and
     /// hands back the store it ran on.
     async fn boot_serve_and_drain(
+        config: &Config,
+        root: &std::path::Path,
+    ) -> Arc<dyn plurx_core::store::Store> {
+        let config = config.clone();
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            // Each simulated process owns its runtime. Settle its detached
+            // tasks and blocking writers before a later boot reopens the file.
+            // The SQLite handle owns its connections independently; subsequent
+            // inspection runs on the caller's current runtime.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("boot runtime");
+            let store = runtime.block_on(boot_serve_and_drain_in_runtime(&config, &root));
+            drop(runtime);
+            store
+        })
+        .await
+        .expect("boot runtime worker")
+    }
+
+    async fn boot_serve_and_drain_in_runtime(
         config: &Config,
         root: &std::path::Path,
     ) -> Arc<dyn plurx_core::store::Store> {
@@ -6380,6 +7985,7 @@ mod startup_tests {
         let booted = tokio::spawn(boot(
             config.clone(),
             Boot {
+                source_activation_at_boot: None,
                 store: handle.store,
                 catalogue,
                 replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
@@ -6590,6 +8196,7 @@ mod startup_tests {
                 dovi_passthrough_qsv: true,
                 hdr10_passthrough: true,
                 hdr10_passthrough_qsv: true,
+                hdr10_passthrough_vaapi: true,
                 encoder_selected: selected.clone(),
                 decoders: vec!["h264".to_owned(), "hevc".to_owned()],
                 tone_map: pipeprobe::PipelineReport::cpu_only("not probed"),
@@ -7400,9 +9007,16 @@ mod startup_tests {
         let addr = listener.local_addr().expect("addr");
 
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let served = tokio::spawn(serve(listener, app, progress, None, async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
 
         // Hold a request open, then ask the server to stop.
         let hanging = tokio::spawn(async move {
@@ -7421,7 +9035,12 @@ mod startup_tests {
         .await
         .expect("the drain must be bounded, not indefinite")
         .expect("join");
-        outcome.expect("a timed-out drain is still an orderly exit 0");
+        // Still exit 0, but reported as timed out: the Plex census must not
+        // mark a stop clean while this connection could still be counted.
+        assert_eq!(
+            outcome.expect("a timed-out drain is still an orderly exit 0"),
+            HttpDrain::TimedOut
+        );
         hanging.abort();
     }
 
@@ -7534,6 +9153,51 @@ mod startup_tests {
             cli.command,
             Some(Command::RefreshMetadata { library: Some(7) })
         ));
+    }
+
+    #[tokio::test]
+    async fn sharing_tls_command_refuses_to_replace_an_existing_node_key() {
+        let dir = tempfile::tempdir().expect("synthetic node key directory");
+        // NodeTls refuses a group- or world-writable key directory, and a
+        // temporary directory inherits the runner umask (002 on some hosts).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("private synthetic node key directory");
+        }
+        let command = || SharingCommand::InitTls {
+            key_directory: dir.path().to_path_buf(),
+        };
+        let cli = Cli::try_parse_from([
+            "plurxd",
+            "sharing",
+            "init-tls",
+            "--key-directory",
+            dir.path().to_str().expect("synthetic UTF-8 path"),
+        ])
+        .expect("sharing provisioning command");
+        assert!(matches!(cli.command, Some(Command::Sharing { .. })));
+        dispatch(
+            Command::Sharing { command: command() },
+            Config::default(),
+            None,
+        )
+        .await
+        .expect("provision synthetic TLS identity");
+        let original =
+            std::fs::read(dir.path().join("sharing-tls.der")).expect("synthetic certificate");
+        assert!(dispatch(
+            Command::Sharing { command: command() },
+            Config::default(),
+            None
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("sharing-tls.der")).expect("retained certificate"),
+            original
+        );
     }
 
     #[test]

@@ -1,0 +1,15 @@
+{
+  "scope": "Synthetic affine-luma analytic control, not picture/profile qualification",
+  "registration_stage": "RPU fixtures generated; before CPU reconstruction, encode or GPU rendering",
+  "source_transform": "Luma g(x)=1/16+3*x/4; chroma identity; known EL rr=+/-16 codes",
+  "cpu_scalar_max_rgb_code_error": 0,
+  "encoder_max_yuv_code_error": 4,
+  "forward_inverse_ncl_max_code_error": 2,
+  "encoded_hdr10_vs_reconstructed_rgb_bound_derivation": "ceil(65535*5*(1/876+1.8814/896))+2; conversion allowance1 + compression cap4",
+  "gpu_vs_scalar_full_matrix_max_rgb_code_error": 3,
+  "gpu_vs_scalar_full_matrix_max_pq_error": 0.00002,
+  "deliberately_repeated_mapping_vs_once_min_max_rgb_code_separation": 1024,
+  "repeated_mapping_rejection_basis": "Incorrect retained affine curve changes already reconstructed HDR10 base; residual disabled in both P8 controls",
+  "independent_dv_picture_reference": null,
+  "p81_conformance": null
+}

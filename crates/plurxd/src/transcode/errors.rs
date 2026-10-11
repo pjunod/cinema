@@ -38,6 +38,16 @@ pub(crate) fn is_start_infrastructure_error(error: &str) -> bool {
     error.starts_with(START_INFRASTRUCTURE_PREFIX)
 }
 
+pub(crate) fn source_proof_pending_error(message: impl AsRef<str>) -> String {
+    format!("{SOURCE_PROOF_PENDING_PREFIX}{}", message.as_ref())
+}
+
+/// A subset of [`is_start_infrastructure_error`], so every consumer of that
+/// class keeps treating an unfinished proof as transient.
+pub(crate) fn is_source_proof_pending_error(error: &str) -> bool {
+    error.starts_with(SOURCE_PROOF_PENDING_PREFIX)
+}
+
 pub(super) fn unsupported_build_error(message: impl AsRef<str>) -> String {
     format!("{UNSUPPORTED_BUILD_PREFIX}{}", message.as_ref())
 }

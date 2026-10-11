@@ -1,7 +1,7 @@
 # Architecture document reconciliation — make §1–§9 describe the tree it ships with
 
-**Status:** implementation merged — M1-M4 and both adversarial-review corrections shipped
-in draft PR #398; exact-head validation pending · **Executes:** §4.7 /
+**Status:** done — M1–M4 and review corrections accepted at #398's exact head;
+2026-09-30 closure receipt effective on its landing · **Executes:** §4.7 /
 F-hist-10 / F-ltv-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -527,8 +527,54 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | Commit / plan PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M1 | `d85125e8` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Constant guard and reporting-only status audit built; focused unit green; pre-M2 audit reproduced 46 contradictions. |
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M2 | `ee72c187` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | All eleven checked claims required; retired spellings absent; docs-index test green. Delegated decisions: keep the supported 1-voter path, record the interrupted-activation recovery boot, accepted DVR reversal and maintained fork. |
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M3 | `98c4c750..eda11c85` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 304 indexed status rows scanned; zero contradictions and zero missing Markdown status headers; docs-index and status-claim tests green. Merged milestones remain open where promotion, deployment or physical acceptance is outstanding. |
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M4 | `a4c21621` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Stale spelt count absent; 65-row scratch rejects all four prose surfaces; both touched Node contracts green. |
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | Review corrections | `c1b17959..bab34ba0` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | P0 accepted: the plan now keeps M1-M4 as logical commits in one plan PR. P1 accepted: all 36 unclear headers were inspected, the additional impossible composites were corrected, and the executable multiline audit reports 305 rows, zero contradictions, zero missing headers and zero unclear rows. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M1 | `d85125e8` · [#398](http://forge.lan:3000/noirr/plurx/pulls/398) | Constant guard and reporting-only status audit built; focused unit green; pre-M2 audit reproduced 46 contradictions. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M2 | `ee72c187` · [#398](http://forge.lan:3000/noirr/plurx/pulls/398) | All eleven checked claims required; retired spellings absent; docs-index test green. Delegated decisions: keep the supported 1-voter path, record the interrupted-activation recovery boot, accepted DVR reversal and maintained fork. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M3 | `98c4c750..eda11c85` · [#398](http://forge.lan:3000/noirr/plurx/pulls/398) | 304 indexed status rows scanned; zero contradictions and zero missing Markdown status headers; docs-index and status-claim tests green. Merged milestones remain open where promotion, deployment or physical acceptance is outstanding. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M4 | `a4c21621` · [#398](http://forge.lan:3000/noirr/plurx/pulls/398) | Stale spelt count absent; 65-row scratch rejects all four prose surfaces; both touched Node contracts green. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | Review corrections | `c1b17959..bab34ba0` · [#398](http://forge.lan:3000/noirr/plurx/pulls/398) | P0 accepted: the plan now keeps M1-M4 as logical commits in one plan PR. P1 accepted: all 36 unclear headers were inspected, the additional impossible composites were corrected, and the executable multiline audit reports 305 rows, zero contradictions, zero missing headers and zero unclear rows. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | Historical acceptance / closure receipt | `codex/p04-closure-receipt` into `effort/architecture-review-2026-09-20` | Coordinator-authorized evidence-only reconciliation: the original exact-head acceptance and landing are verified below, not inferred from merge alone. P-04 is done effective on this receipt's reviewed, gated landing. Original milestone authors/history remain intact; no source, constants, workflow, fleet or physical acceptance changes. |
+
+### Historical acceptance receipt — 2026-09-30
+
+The earlier header's “draft #398; exact-head validation pending” was stale.
+[#398](http://forge.lan:3000/noirr/plurx/pulls/398) merged final head
+`95025de1484275e1200d3e2da7c4171a7ddb49ce` as
+`d77a1afadf45b3e98b06f68a08625712b8dc68ec`. The landing's parents are
+`175c8ad53c1df6201b2e3268fab5702deb15656d` and that exact source head.
+Both source and actual landing trees equal
+`8ef9a0183ca8a9d9324859e8765678f157f03561`.
+
+Sole formal review 2 / [comment 3063](http://forge.lan:3000/noirr/plurx/pulls/398#issuecomment-3063)
+reviewed the earlier `5138320a` candidate. Both findings were accepted:
+`c1b17959` corrected the one-implementation-PR instruction;
+`edc47be4..bab34ba0` inspected the 36 unclear headers, corrected impossible
+terminal/ready combinations and made wrapped-status auditing executable.
+[Disposition 3074](http://forge.lan:3000/noirr/plurx/pulls/398#issuecomment-3074)
+binds the following local evidence to final `95025de1`, after current-main
+`175c8ad5` synchronization. The initial run 2351 history failure and its
+`db21ea14` mapping correction are retained, not represented as an initial pass.
+
+| Original acceptance | Recorded exact-head proof |
+|---|---|
+| M1 constant guard, source-value drift and unknown-name rejection | 18 focused P-04 operations tests passed. The original exact-head [constant tests](../../tests/operations/test_architecture_constants.py) include synthetic `SEGMENT_SECONDS` 2→3 rejection with both values and an unregistered constant rejection. |
+| M2 named claims, retired spellings, DVR reversal and links | M2's dated row above records all eleven required claims and the accepted DVR reversal; final disposition records retired-spelling sweeps, docs/static checks and `git diff --check` passing. |
+| M3 individual status/header reconciliation | Final audit: 305 rows, zero contradictions, zero missing headers, zero unclear rows after the sole-review corrections; this is not the earlier regex-only result the reviewer rejected. |
+| M4 four web prose surfaces and both touched Node contracts | Original exact-head constant test adds a synthetic 65th asset and asserts all four stale surfaces reject it. `node tests/web/asset-graph.js` and `node tests/web/shell-source.js` passed. |
+| §6 operations and validation contracts | `make operations-check`: 405 passed; `python3 -m unittest discover -s tests/validation -p 'test_*.py'`: 199 passed, one expected skip; `make history-check`: 2,090 corrective commits accounted for. |
+
+The independently re-read [exact-head gate 2355](http://forge.lan:3000/noirr/plurx/actions/runs/2355)
+(API run 2373) is successful at the full source SHA above. Scope job 27456,
+mobile-release version 27457, preflight 27458, Rust 27459, Windows 27460,
+web syntax 27461 and aggregate Main promotion gate 27464 all succeeded.
+Apple 27462 and Android 27463 were skipped: this plan changed no native source.
+The historical preflight's actual workflow invokes the validation contracts
+and `make operations-check`, so these are required-command gate results,
+not acceptance inferred merely from the PR's merged flag.
+
+By §6, P-04 has no fleet or device milestone. This receipt reconciles the
+plan, board and existing index to that completed historical acceptance;
+it does not reuse gate 2355 to qualify the current effort or promote main.
+The coordinator authorized one grouped three-document commit followed by
+an immediate WIP draft as this evidence-only continuation's public ownership
+record, without a separate claim-only commit. Current-effort review and gate
+remain required for this receipt's landing.

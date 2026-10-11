@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized] target(s) in 0.19s
+     Running tests/store_contract.rs (/private/tmp/plurx-quality-20261002/target/debug/deps/store_contract-601a4d555fa17f9d)
+
+running 1 test
+test content_encoding_report_publication_is_source_fenced_on_every_backend ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 9.39s
+

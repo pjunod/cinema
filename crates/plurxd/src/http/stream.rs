@@ -729,6 +729,9 @@ pub struct DecisionResponse {
     pub quality_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_candidates: Option<Vec<plurx_core::playback::candidate::QualityCandidate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) measured_candidate_outputs:
+        Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>>,
     pub file_id: i64,
     /// Whether this node has a fragment index matching the current file and
     /// the copy-video identity selected by this decision.
@@ -1859,7 +1862,34 @@ async fn pause_marker_fallback_for_test(path: &Path) {
     }
 }
 
-async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
+/// Shared planning reads evidence only. Missing scan-time chapters never launch
+/// an unadmitted probe or mutate the revision captured by the Source request.
+async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Marker> {
+    let identity = annotation_source_identity(file);
+    match state
+        .store
+        .timeline_annotation_set(file.id, &identity)
+        .await
+    {
+        Ok(Some(set)) => markers_from_annotation_set(set),
+        Ok(None) => markers_from_chapters(
+            &stored_chapters(state, file.id).await.unwrap_or_default(),
+            file.duration_ms,
+        ),
+        Err(error) => {
+            tracing::warn!(file_id=file.id, %error, "could not read Source timeline annotations");
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MarkerReadPolicy {
+    LocalDerivation,
+    StoredSourceEvidence,
+}
+
+pub(crate) async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
     let source_identity = annotation_source_identity(file);
     match state
         .store
@@ -2188,6 +2218,19 @@ pub async fn decision_post(
     decision(auth, state, path, Query(q), headers, remote).await
 }
 
+/// Legacy priors have neither completed-body nor candidate-recipe provenance.
+/// Only legacy policy may read them; catalog negotiation itself is not proof.
+pub(super) fn prior_for_candidate_policy(
+    prior: Option<&plurx_core::domain::NetworkPrior>,
+    candidate_policy: bool,
+) -> Option<&plurx_core::domain::NetworkPrior> {
+    if candidate_policy {
+        None
+    } else {
+        prior
+    }
+}
+
 pub async fn decision(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -2207,7 +2250,53 @@ pub async fn decision(
     }
     let network_prior =
         super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
-    let mut file = load_file(&state, id).await?;
+    let file = load_file(&state, id).await?;
+    decision_for_file(
+        &state,
+        file,
+        q,
+        network_prior,
+        Some(&user),
+        (
+            identity.as_ref(),
+            super::hls::link_receipts::requested_receipt(&headers),
+        ),
+        MarkerReadPolicy::LocalDerivation,
+    )
+    .await
+    .map(Json)
+}
+
+/// The actual engine for both local and authorized Source media. Source callers
+/// never supply a local account or its node-local network prior.
+pub(super) async fn decision_for_source_file(
+    state: &AppState,
+    file: MediaFile,
+    q: Caps,
+) -> Result<DecisionResponse, ApiError> {
+    decision_for_file(
+        state,
+        file,
+        q,
+        None,
+        None,
+        (None, None),
+        MarkerReadPolicy::StoredSourceEvidence,
+    )
+    .await
+}
+
+async fn decision_for_file(
+    state: &AppState,
+    mut file: MediaFile,
+    q: Caps,
+    network_prior: Option<plurx_core::domain::NetworkPrior>,
+    user: Option<&plurx_core::domain::User>,
+    link_evidence: (Option<&crate::telemetry::NetworkIdentity>, Option<&str>),
+    marker_policy: MarkerReadPolicy,
+) -> Result<DecisionResponse, ApiError> {
+    let (identity, incumbent_receipt) = link_evidence;
+    let id = file.id;
     // Older builds stored this against the file. A fresh playback must never
     // inherit that historical value; its client starts at zero and carries
     // any adjustment on each stream request for this one playback only.
@@ -2264,7 +2353,7 @@ pub async fn decision(
     // therefore about whether `Auto` wants full subtitles at all.
     let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let node = decision_render_caps(render_caps(&state).await, q.caps_v2.as_ref());
+    let node = decision_render_caps(render_caps(state).await, q.caps_v2.as_ref());
     let decision_now_ms = crate::media_sessions::unix_ms();
     let mut decision = q.decide(&file, &node, decision_now_ms);
     if let Some(caps) = q.caps_v2.as_ref().filter(|caps| {
@@ -2407,8 +2496,8 @@ pub async fn decision(
         })
         .unwrap_or_default();
     tracing::info!(
-        user_id = user.id,
-        username = %user.username,
+        user_id = user.map(|user| user.id),
+        username = user.map(|user| user.username.as_str()),
         file_id = id,
         client = q.client.as_deref().unwrap_or("unknown"),
         device = q.device.as_deref().unwrap_or("unknown"),
@@ -2457,7 +2546,10 @@ pub async fn decision(
     } else {
         None
     };
-    let markers = markers_for(&state, &file).await;
+    let markers = match marker_policy {
+        MarkerReadPolicy::LocalDerivation => markers_for(state, &file).await,
+        MarkerReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
+    };
 
     // DTO defaults and the verdict now come from the same selection above.
     let audio = audio_tracks(&file);
@@ -2479,6 +2571,12 @@ pub async fn decision(
     // to Trakt, and a third-party call belongs nowhere near the click path.
     // The media endpoints announce it once delivery is actually happening.
 
+    let mut measured_candidate_outputs = None;
+    // One advisory deadline for every link-evidence read this decision makes
+    // (measured costs, recorded negatives, the live incumbent proof), taken
+    // once the catalogue itself is in hand so its enumeration cannot spend
+    // it. Missing evidence is Unknown; it never refuses the decision.
+    let mut advisory = None;
     let quality_candidates = if state
         .store
         .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
@@ -2486,25 +2584,67 @@ pub async fn decision(
         .is_some_and(|value| value.trim() == "1")
     {
         if let Some(caps) = q.caps_v2.as_ref() {
-            Some(
-                state
-                    .media_pool
-                    .quality_candidates(
-                        &state,
-                        crate::media_pool::QualityCatalogRequest {
-                            copy_contract: None,
-                            file_id: file.id,
-                            source_size: file.size,
-                            source_mtime: file.mtime,
-                            caps: caps.clone(),
-                            audio_index: selected_audio,
-                            audio_offset_ms: file.audio_offset_ms,
-                            subtitle_burn: selected_subtitle
-                                .filter(|_| selected_subtitle_requires_burn),
-                            presentation: crate::transcode::Presentation::Vod,
-                        },
-                    )
+            let request = crate::media_pool::QualityCatalogRequest {
+                audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                    .ok()
+                    .flatten(),
+                audio_delivery: None,
+                copy_contract: None,
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                caps: caps.clone(),
+                audio_index: selected_audio,
+                audio_offset_ms: file.audio_offset_ms,
+                subtitle_burn: selected_subtitle.filter(|_| selected_subtitle_requires_burn),
+                presentation: crate::transcode::Presentation::Vod,
+            };
+            let accepted = state
+                .media_pool
+                .quality_candidates(state, request.clone())
+                .await;
+            // Costs are advisory, but their source/settings must be the exact
+            // accepted local row. Acquisition and projection share one deadline.
+            let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
+            measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
+                let planning = state
+                    .store
+                    .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
                     .await
+                    .ok()??;
+                let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+                if planning.file.id != file.id
+                    || planning.file.size != file.size
+                    || planning.file.mtime != file.mtime
+                    || !accepted.iter().any(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                {
+                    return None;
+                }
+                let local: Vec<_> = accepted
+                    .iter()
+                    .filter(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                    .cloned()
+                    .collect();
+                super::hls::link_receipts::measured_outputs(
+                    state,
+                    &file,
+                    &request,
+                    &local,
+                    Some(&planning),
+                    deadline,
+                )
+                .await
+            })
+            .await
+            .ok()
+            .flatten();
+
+            Some(
+                accepted
                     .into_iter()
                     .map(|entry| entry.candidate)
                     .collect::<Vec<_>>(),
@@ -2515,12 +2655,62 @@ pub async fn decision(
     } else {
         None
     };
+    // Keep the public menu/explicit choices. This narrows only this warm Auto
+    // advisory selection, never the feature switch or a manual request.
+    let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
+        if let Some(catalog) = quality_candidates.as_ref() {
+            let advisory = advisory.unwrap_or_else(super::hls::link_receipts::advisory_deadline);
+            // One source fence for every advisory read of this Decision, as
+            // a create gets; and one live positive proof, taken in
+            // `decision_catalog` and reused by the warm-Auto narrowing below.
+            super::hls::link_receipts::with_decision_source_link(async {
+                let (catalog, positive) = super::hls::candidate_recovery::decision_catalog(
+                    state,
+                    identity,
+                    &file,
+                    incumbent_receipt,
+                    catalog.clone(),
+                    advisory,
+                )
+                .await;
+                let catalog = super::hls::link_receipts::filter_catalog(
+                    state, identity, &file, catalog, advisory,
+                )
+                .await;
+                // Cold start only: with an incumbent receipt the live transfer
+                // below is fresher evidence than a stored verdict.
+                let catalog = if incumbent_receipt.is_none() {
+                    super::hls::link_receipts::link_starved_catalog(
+                        network_prior.as_ref(),
+                        catalog,
+                        crate::media_sessions::unix_ms(),
+                    )
+                } else {
+                    catalog
+                };
+                Some(super::hls::link_receipts::positive_catalog_with_proof(
+                    positive.as_ref(),
+                    catalog,
+                    measured_candidate_outputs.as_deref(),
+                ))
+            })
+            .await
+        } else {
+            None
+        }
+    } else {
+        quality_candidates.clone()
+    };
+    // A negotiated catalog cannot reinterpret coarse legacy supply history
+    // as completed-transfer evidence for its candidate recipes.
+    let candidate_prior =
+        prior_for_candidate_policy(network_prior.as_ref(), quality_candidates.is_some());
     let fallback_height = state
         .transcode
-        .auto_height_for_request(Some(&file), network_prior.as_ref(), q.hdr10t == Some(1))
+        .auto_height_for_request(Some(&file), candidate_prior, q.hdr10t == Some(1))
         .await;
     let display_aspect = state.transcode.quality_display_aspect(&file).await;
-    let quality_candidate_id = quality_candidates.as_ref().and_then(|catalog| {
+    let quality_candidate_id = selection_candidates.as_ref().and_then(|catalog| {
         if decision.method != playback::PlaybackMethod::Transcode {
             catalog
                 .iter()
@@ -2563,10 +2753,11 @@ pub async fn decision(
                 })
         }
     });
-    Ok(Json(DecisionResponse {
+    Ok(DecisionResponse {
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,
+        measured_candidate_outputs,
         file_id: id,
         vod_indexed,
         source: source_summary(&file, probe_json.as_deref()),
@@ -2584,11 +2775,11 @@ pub async fn decision(
         }),
         markers,
         audio_offset_ms: file.audio_offset_ms,
-        declared_offset_ms: declared_av_offset(&state, id).await,
+        declared_offset_ms: declared_av_offset(state, id).await,
         ladder: crate::transcode::ladder(file.height),
-        prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
+        prior_kbps: candidate_prior.and_then(|prior| prior.sustained_kbps),
         prefer_segmented,
-    }))
+    })
 }
 
 /// The container's own per-stream start-time story: audio start minus video
@@ -2662,6 +2853,7 @@ pub async fn subtitles_vtt(
     _user: AuthUser,
     State(state): State<AppState>,
     AxPath((id, subtitle)): AxPath<(i64, String)>,
+    Query(query): Query<SubtitleVttQuery>,
 ) -> Result<Response, ApiError> {
     let index = subtitle
         .strip_suffix(".vtt")
@@ -2669,6 +2861,25 @@ pub async fn subtitles_vtt(
         .parse::<i64>()
         .map_err(|_| ApiError::NotFound("subtitle track"))?;
     let file = load_file(&state, id).await?;
+    subtitle_vtt_for_file_revision(&state, &file, index, query.revision.as_deref()).await
+}
+
+/// An optional readiness revision asks for already-published bytes only.
+#[derive(Default, Deserialize)]
+pub struct SubtitleVttQuery {
+    pub revision: Option<String>,
+}
+
+/// One text track of an already-resolved file as WebVTT. Local callers resolve
+/// the file by ID after login; the shared Source resolves it only after its
+/// grant/item/file/revision witness.
+pub(crate) async fn subtitle_vtt_for_file_revision(
+    state: &AppState,
+    file: &MediaFile,
+    index: i64,
+    revision: Option<&str>,
+) -> Result<Response, ApiError> {
+    let id = file.id;
     let stream = file
         .subtitle_streams
         .get(index as usize)
@@ -2681,9 +2892,33 @@ pub async fn subtitles_vtt(
         ));
     }
 
+    if let Some(revision) = revision {
+        if revision.len() > 192 {
+            return Err(ApiError::BadRequest("invalid subtitle revision".into()));
+        }
+        let cached = crate::subtitles::read_cached_revision(&state.subs_dir, file, index, revision)
+            .await
+            .map_err(|_| ApiError::Internal("subtitle cache read failed".into()))?;
+        return Ok(match cached {
+            Some((bytes, complete)) => {
+                let mut response = vtt_response(bytes);
+                response.headers_mut().insert(
+                    HeaderName::from_static("x-plurx-subtitle-complete"),
+                    HeaderValue::from_static(if complete { "true" } else { "false" }),
+                );
+                response
+            }
+            None => (
+                StatusCode::NO_CONTENT,
+                [(header::CACHE_CONTROL, "no-store")],
+            )
+                .into_response(),
+        });
+    }
+
     let bytes = crate::subtitles::ensure_vtt_bytes_with_store(
         &state.subs_dir,
-        &file,
+        file,
         index,
         &state.subtitle_source_access(),
         SUBTITLE_TRACK_FOR_A_VIEWER,
@@ -2888,6 +3123,8 @@ pub struct StreamQuery {
     pub vcodec: Option<String>,
     pub vmaxheight: Option<String>,
     pub acodec: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_audio_channels")]
+    pub achannels: Option<u8>,
     pub container: Option<String>,
     pub maxheight: Option<i64>,
     pub hdr: Option<u8>,
@@ -2959,7 +3196,7 @@ impl StreamQuery {
             vcodec: self.vcodec.clone(),
             vmaxheight: self.vmaxheight.clone(),
             acodec: self.acodec.clone(),
-            achannels: None,
+            achannels: self.achannels,
             container: self.container.clone(),
             maxheight: self.maxheight,
             hdr: self.hdr,
@@ -3124,6 +3361,12 @@ async fn serve_stream_mp4(
     #[cfg(not(windows))]
     let remux_path = file.path.clone();
     remux(RemuxSpec {
+        audio_delivery: (caps.achannels.is_some()
+            || caps
+                .caps_v2
+                .as_ref()
+                .is_some_and(|caps| !caps.audio_sinks.is_empty()))
+        .then_some(&served.delivered_audio),
         path: &remux_path,
         #[cfg(windows)]
         source: &source.handle,
@@ -3290,6 +3533,74 @@ fn range_decimal(value: &str) -> Result<u64, ()> {
     }))
 }
 
+/// The byte answer one raw-file request receives. Local direct play and the
+/// shared Source direct lane derive it from the same inputs with the same
+/// function, so their 200/206/416 and If-Range behaviour cannot drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileRangePlan {
+    /// The whole representation (also every HEAD and every ignored Range).
+    Full,
+    /// One satisfiable inclusive byte range.
+    Partial { start: u64, end: u64 },
+    /// A Range this file cannot satisfy (416).
+    Unsatisfiable,
+}
+
+/// Plan a raw-file response. HEAD never ranges; an If-Range precondition
+/// cannot authorize a partial response because these routes publish no
+/// strong validator, so the Range is ignored and the whole file is sent.
+pub(crate) fn plan_file_range(headers: &HeaderMap, method: &Method, len: u64) -> FileRangePlan {
+    if method != Method::GET {
+        return FileRangePlan::Full;
+    }
+    match parse_range(headers, len) {
+        Err(()) => FileRangePlan::Unsatisfiable,
+        Ok(Some((start, end))) => FileRangePlan::Partial { start, end },
+        Ok(None) => FileRangePlan::Full,
+    }
+}
+
+/// The exact status and header set a planned raw-file response carries.
+/// Shared by Local direct play and the Source direct lane.
+pub(crate) fn file_range_head(
+    plan: FileRangePlan,
+    len: u64,
+    ctype: &str,
+) -> (StatusCode, Vec<(header::HeaderName, String)>) {
+    match plan {
+        FileRangePlan::Unsatisfiable => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            vec![
+                (header::CONTENT_RANGE, format!("bytes */{len}")),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, "0".to_owned()),
+            ],
+        ),
+        FileRangePlan::Partial { start, end } => (
+            StatusCode::PARTIAL_CONTENT,
+            vec![
+                (header::CONTENT_TYPE, ctype.to_owned()),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, (end - start + 1).to_string()),
+                (header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
+            ],
+        ),
+        FileRangePlan::Full => (
+            StatusCode::OK,
+            vec![
+                (header::CONTENT_TYPE, ctype.to_owned()),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, len.to_string()),
+            ],
+        ),
+    }
+}
+
+/// The media type a raw-file response names for `path`.
+pub(crate) fn file_content_type(path: &Path) -> &'static str {
+    content_type(path)
+}
+
 /// HTTP range serving of a file (direct play). Shared by the native part
 /// endpoint and the Plex-compat `/library/parts/...` endpoint.
 pub(crate) async fn serve_file_range(
@@ -3310,65 +3621,33 @@ pub(crate) async fn serve_file_range(
         return Err(ApiError::NotFound("file on disk"));
     }
     let ctype = content_type(path);
-
-    let range = if method == Method::GET {
-        parse_range(headers, len)
-    } else {
-        Ok(None)
-    };
-    match range {
-        Err(()) => Ok((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            [
-                (header::CONTENT_RANGE, format!("bytes */{len}")),
-                (header::ACCEPT_RANGES, "bytes".to_owned()),
-                (header::CONTENT_LENGTH, "0".to_owned()),
-            ],
-            Body::empty(),
-        )
-            .into_response()),
-        Ok(Some((start, end))) => {
-            let count = end - start + 1;
+    let plan = plan_file_range(headers, method, len);
+    let body = match plan {
+        FileRangePlan::Unsatisfiable => Body::empty(),
+        FileRangePlan::Partial { start, end } => {
             fh.seek(std::io::SeekFrom::Start(start))
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let stream = tokio_util::io::ReaderStream::with_capacity(
-                fh.take(count),
+            Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+                fh.take(end - start + 1),
                 crate::media_sessions::MEDIA_BODY_READ_BUFFER,
-            );
-            Ok((
-                StatusCode::PARTIAL_CONTENT,
-                [
-                    (header::CONTENT_TYPE, ctype.to_owned()),
-                    (header::ACCEPT_RANGES, "bytes".to_owned()),
-                    (header::CONTENT_LENGTH, count.to_string()),
-                    (header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
-                ],
-                Body::from_stream(stream),
-            )
-                .into_response())
+            ))
         }
-        Ok(None) => {
-            let body = if method == Method::HEAD {
-                Body::empty()
-            } else {
-                Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
-                    fh,
-                    crate::media_sessions::MEDIA_BODY_READ_BUFFER,
-                ))
-            };
-            Ok((
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, ctype.to_owned()),
-                    (header::ACCEPT_RANGES, "bytes".to_owned()),
-                    (header::CONTENT_LENGTH, len.to_string()),
-                ],
-                body,
-            )
-                .into_response())
-        }
+        FileRangePlan::Full if method == Method::HEAD => Body::empty(),
+        FileRangePlan::Full => Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+            fh,
+            crate::media_sessions::MEDIA_BODY_READ_BUFFER,
+        )),
+    };
+    let (status, headers) = file_range_head(plan, len, ctype);
+    let mut response = (status, body).into_response();
+    for (name, value) in headers {
+        response.headers_mut().insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|e| ApiError::Internal(e.to_string()))?,
+        );
     }
+    Ok(response)
 }
 
 // --- remux ------------------------------------------------------------------
@@ -3378,6 +3657,7 @@ pub(crate) async fn serve_file_range(
 /// bare bools and numbers — a call site with seven positional arguments is one
 /// transposition away from remuxing at the wrong pace with the wrong track.
 struct RemuxSpec<'a> {
+    audio_delivery: Option<&'a plurx_core::playback::audio::AudioDelivery>,
     path: &'a Path,
     #[cfg(windows)]
     source: &'a std::fs::File,
@@ -3428,47 +3708,217 @@ impl Drop for RemuxProcessGuard {
     }
 }
 
+/// The independent owner of one progressive remux child, and the only place
+/// that decides whether a loss of serving authority ends the stream.
+///
+/// A loss is resolved through [`crate::serving_fence::SessionGrace`], the
+/// same bounded grace the rolling-session registry applies: a loss that
+/// recovers inside [`crate::serving_fence::SERVING_FENCE_SESSION_GRACE`]
+/// (summed over one outage) keeps the child, and the owner adopts the
+/// generation that is current after recovery; a loss that outlasts it ends
+/// the stream exactly as before, so a node that has truly lost authority
+/// stops serving within one grace. Before this, any generation bump killed
+/// ffmpeg and ended the response even after authority had returned, so a
+/// leader restart (which drops every voter's quorum watermark for a second
+/// or two) ended every progressive play on every node, and nothing respawns
+/// a progressive remux.
+///
+/// While authority is lost the response body publishes nothing (see
+/// [`remux_may_publish`]); ffmpeg blocks on its pipe meanwhile. `fenced` is
+/// how the body learns the owner gave up: it fires only when the grace ran
+/// out or the fence closed, never on a natural exit, so a finished child's
+/// buffered output still drains. The owner keeps that decision after a
+/// natural exit, until the body is dropped, so a body waiting on authority
+/// always has someone to end its wait.
 fn spawn_remux_process_owner(
     mut child: tokio::process::Child,
     child_job: crate::process_control::ChildJob,
     mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
     admitted_generation: u64,
     registry_guard: Option<crate::progressive::StreamGuard>,
-) -> (RemuxProcessGuard, tokio::task::JoinHandle<()>) {
+) -> (
+    RemuxProcessGuard,
+    tokio_util::sync::CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
     let cancel = tokio_util::sync::CancellationToken::new();
     let owner_cancel = cancel.clone();
+    let fenced = tokio_util::sync::CancellationToken::new();
+    let owner_fenced = fenced.clone();
     let task = tokio::spawn(async move {
         let _child_job = child_job;
         // Registration belongs to the process lifetime. It disappears on
         // natural exit, body drop, or serving loss—not merely when Hyper next
         // decides to poll a response body.
-        let _registry_guard = registry_guard;
-        loop {
+        let mut registry_guard = registry_guard;
+        let mut grace = crate::serving_fence::SessionGrace::default();
+        let mut generation = admitted_generation;
+        // After a natural exit the owner still owns the authority decision
+        // until the body is dropped: the body may still hold a buffered tail
+        // (or, at startup, a response not yet sent), and only this owner can
+        // tell it that a loss outlasted the grace.
+        let mut exited = false;
+        // `Some(reason)`: the stream ends because authority is gone.
+        let fenced_out: Option<&'static str> = loop {
             let authority = *serving.borrow_and_update();
-            if authority.authority_lost_since(admitted_generation) {
-                break;
+            if authority.authority_lost_since(generation) {
+                // A child that exits during the loss stays unreaped until the
+                // loss resolves (at most one grace): the budget wait is not
+                // raced against anything but this owner's own end.
+                let outcome = tokio::select! {
+                    outcome = grace.resolve_loss(&mut serving) => outcome,
+                    () = owner_cancel.cancelled() => break None,
+                };
+                match outcome {
+                    crate::serving_fence::LossOutcome::Recovered {
+                        outage,
+                        budget_spent,
+                    } => {
+                        generation = serving.borrow_and_update().loss_generation;
+                        tracing::info!(
+                            outage_ms = u64::try_from(outage.as_millis()).unwrap_or(u64::MAX),
+                            outage_budget_spent_ms =
+                                u64::try_from(budget_spent.as_millis()).unwrap_or(u64::MAX),
+                            loss_generation = generation,
+                            "serving authority returned within the session grace; progressive remux kept"
+                        );
+                        continue;
+                    }
+                    crate::serving_fence::LossOutcome::Expired => {
+                        break Some("serving authority not regained within the session grace; progressive remux ended");
+                    }
+                    crate::serving_fence::LossOutcome::Closed => {
+                        break Some("serving fence closed; progressive remux ended");
+                    }
+                }
             }
             tokio::select! {
-                status = child.wait() => {
+                status = child.wait(), if !exited => {
                     if let Err(error) = status {
                         tracing::warn!(%error, "waiting for remux ffmpeg failed");
                     }
-                    return;
+                    exited = true;
+                    drop(registry_guard.take());
                 }
-                () = owner_cancel.cancelled() => break,
+                () = owner_cancel.cancelled() => break None,
                 changed = serving.changed() => {
                     if changed.is_err() {
-                        break;
+                        break Some("serving fence closed; progressive remux ended");
                     }
                 }
             }
+        };
+        if let Some(reason) = fenced_out {
+            tracing::warn!(
+                grace_ms =
+                    u64::try_from(crate::serving_fence::SERVING_FENCE_SESSION_GRACE.as_millis())
+                        .unwrap_or(u64::MAX),
+                "{reason}"
+            );
+            owner_fenced.cancel();
         }
-        if child.try_wait().ok().flatten().is_none() {
-            let _ = child.kill().await;
+        if !exited {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill().await;
+            }
+            let _ = child.wait().await;
         }
-        let _ = child.wait().await;
     });
-    (RemuxProcessGuard { cancel }, task)
+    (RemuxProcessGuard { cancel }, fenced, task)
+}
+
+/// Whether the progressive body may publish now: serving authority is held,
+/// or wait until it is again. `false` once the owner has ended the stream for
+/// lost authority (or the fence is gone). The wait is bounded by the owner's
+/// grace, which fires `fenced` when it runs out; the body never decides that
+/// on its own.
+async fn remux_may_publish(
+    serving: &mut tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    fenced: &tokio_util::sync::CancellationToken,
+) -> bool {
+    loop {
+        if fenced.is_cancelled() {
+            return false;
+        }
+        if serving.borrow_and_update().ready {
+            return true;
+        }
+        tokio::select! {
+            () = fenced.cancelled() => return false,
+            changed = serving.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+/// The progressive response body: ffmpeg's stdout, published only while
+/// serving authority is held. Bytes read during a loss are held until
+/// authority returns (the read stops, so ffmpeg blocks on the pipe) and
+/// dropped if the owner ends the stream instead. The body carries the owner's
+/// cancellation and its own idempotent registry guard, so dropping it ends
+/// the owner and deregisters synchronously.
+fn remux_body<R>(
+    reader: R,
+    tracked: Option<std::sync::Arc<crate::progressive::Stream>>,
+    process_guard: RemuxProcessGuard,
+    registry_guard: Option<crate::progressive::StreamGuard>,
+    serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    fenced: tokio_util::sync::CancellationToken,
+) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let state = (
+        reader,
+        tracked,
+        process_guard,
+        registry_guard,
+        serving,
+        fenced,
+    );
+    futures_util::stream::unfold(
+        state,
+        |(mut reader, tracked, process_guard, registry_guard, mut serving, fenced)| async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            let read = tokio::select! {
+                read = reader.read(&mut buf) => read,
+                () = fenced.cancelled() => return None,
+            };
+            match read {
+                Ok(0) => None,
+                Ok(n) => {
+                    if !remux_may_publish(&mut serving, &fenced).await {
+                        return None;
+                    }
+                    buf.truncate(n);
+                    // Bytes are counted here — where they actually leave — rather
+                    // than at the top of the response. On a paced remux this is the
+                    // delivery rate a viewer is really getting, gaps included.
+                    if let Some(s) = &tracked {
+                        s.delivery.note(n as u64);
+                    }
+                    Some((
+                        Ok::<_, std::io::Error>(bytes::Bytes::from(buf)),
+                        (
+                            reader,
+                            tracked,
+                            process_guard,
+                            registry_guard,
+                            serving,
+                            fenced,
+                        ),
+                    ))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "remux stream read error");
+                    None
+                }
+            }
+        },
+    )
 }
 
 #[cfg(test)]
@@ -3564,6 +4014,7 @@ async fn consume_remux_stderr<R>(
 
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
+        audio_delivery,
         path,
         #[cfg(windows)]
         source,
@@ -3655,7 +4106,17 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             retain_hevc_parameter_sets,
         ));
     }
-    if transcode_audio {
+    if let Some(audio) = audio_delivery {
+        let offset = if audio.transcodes() {
+            plurx_core::transcode::audio_offset_filter(audio_offset_ms)
+        } else {
+            None
+        };
+        if let Some(af) = plurx_core::transcode::audio_filter_chain(Some(audio), offset) {
+            args.extend(["-af".to_owned(), af]);
+        }
+        plurx_core::transcode::push_audio_delivery_args(&mut args, audio, false);
+    } else if transcode_audio {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
             args.extend(["-af".to_owned(), af]);
         }
@@ -3723,34 +4184,6 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     )
     .map_err(ApiError::Internal)?;
 
-    // Probe after the remux starts opening the source, matching the HLS copy
-    // path: the work overlaps instead of adding its full latency to startup.
-    // `make_zero` makes the preceding keyframe local time zero, so the
-    // requested seek is not an accurate source-time origin for copied video.
-    let start_seconds = start.unwrap_or(0.0).max(0.0);
-    let media_origin = bounded_progressive_media_origin(
-        start_seconds,
-        PROGRESSIVE_MEDIA_ORIGIN_PROBE_TIMEOUT,
-        crate::transcode::probe_media_origin(path, start_seconds),
-    );
-    tokio::pin!(media_origin);
-    let media_origin_seconds = loop {
-        tokio::select! {
-            origin = &mut media_origin => break origin,
-            changed = serving.changed() => {
-                if changed.is_err()
-                    || serving
-                        .borrow_and_update()
-                        .authority_lost_since(admitted_generation)
-                {
-                    return Err(ApiError::ServiceUnavailable(
-                        crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
-                    ));
-                }
-            }
-        }
-    };
-
     let (tracked_stream, guard) = match tracked {
         Some((s, g)) => (Some(s), Some(g)),
         None => (None, None),
@@ -3770,8 +4203,11 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     });
     tokio::spawn(consume_remux_stderr(stderr, telemetry));
 
+    // The owner takes the child before anything else can wait, so a loss of
+    // serving authority during the origin probe is resolved by the same grace
+    // as one during playback rather than refusing the start outright.
     let owner_guard = guard.clone();
-    let (process_guard, _process_owner) = spawn_remux_process_owner(
+    let (process_guard, fenced, _process_owner) = spawn_remux_process_owner(
         child,
         child_job,
         serving.clone(),
@@ -3779,73 +4215,38 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         owner_guard,
     );
 
-    // Stream ffmpeg stdout. The body carries cancellation plus its own
-    // idempotent registry guard; the detached owner carries a clone so body
-    // drop deregisters synchronously while serving loss can do the same even
-    // when Hyper is not polling this body.
-    let reader = tokio::io::BufReader::new(stdout);
-    let state = (
-        reader,
+    // Probe after the remux starts opening the source, matching the HLS copy
+    // path: the work overlaps instead of adding its full latency to startup.
+    // `make_zero` makes the preceding keyframe local time zero, so the
+    // requested seek is not an accurate source-time origin for copied video.
+    let start_seconds = start.unwrap_or(0.0).max(0.0);
+    let media_origin_seconds = tokio::select! {
+        origin = bounded_progressive_media_origin(
+            start_seconds,
+            PROGRESSIVE_MEDIA_ORIGIN_PROBE_TIMEOUT,
+            crate::transcode::probe_media_origin(path, start_seconds),
+        ) => origin,
+        () = fenced.cancelled() => {
+            return Err(ApiError::ServiceUnavailable(
+                crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+            ));
+        }
+    };
+    // Answer only under authority: a loss still in its grace delays the
+    // response; one the owner gave up on refuses it, as before.
+    if !remux_may_publish(&mut serving, &fenced).await {
+        return Err(ApiError::ServiceUnavailable(
+            crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+        ));
+    }
+
+    let stream = remux_body(
+        tokio::io::BufReader::new(stdout),
         tracked_stream,
         process_guard,
         guard,
         serving,
-        admitted_generation,
-    );
-    let stream = futures_util::stream::unfold(
-        state,
-        |(mut reader, tracked, process_guard, registry_guard, mut serving, admitted_generation)| async move {
-            if serving
-                .borrow_and_update()
-                .authority_lost_since(admitted_generation)
-            {
-                return None;
-            }
-            let mut buf = vec![0u8; 64 * 1024];
-            let read = reader.read(&mut buf);
-            tokio::pin!(read);
-            let read = loop {
-                tokio::select! {
-                    result = &mut read => break result,
-                    changed = serving.changed() => {
-                        if changed.is_err()
-                            || serving
-                                .borrow_and_update()
-                                .authority_lost_since(admitted_generation)
-                        {
-                            return None;
-                        }
-                    }
-                }
-            };
-            match read {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    // Bytes are counted here — where they actually leave — rather
-                    // than at the top of the response. On a paced remux this is the
-                    // delivery rate a viewer is really getting, gaps included.
-                    if let Some(s) = &tracked {
-                        s.delivery.note(n as u64);
-                    }
-                    Some((
-                        Ok::<_, std::io::Error>(bytes::Bytes::from(buf)),
-                        (
-                            reader,
-                            tracked,
-                            process_guard,
-                            registry_guard,
-                            serving,
-                            admitted_generation,
-                        ),
-                    ))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "remux stream read error");
-                    None
-                }
-            }
-        },
+        fenced,
     );
 
     let mut response = (
@@ -3876,6 +4277,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a05_candidate_catalog_never_promotes_legacy_prior_provenance() {
+        let prior = plurx_core::domain::NetworkPrior {
+            credential_generation: Default::default(),
+            client_class: "web".to_owned(),
+            network_fingerprint: "candidate-isolation".to_owned(),
+            sustained_kbps: Some(1),
+            worst_rung_height: Some(2160),
+            starved_at_ms: Some(i64::MAX),
+            sample_count: 99,
+            updated_at_ms: i64::MAX,
+            link_worst_rung_height: Some(2160),
+            link_starved_at_ms: Some(i64::MAX),
+        };
+        assert!(prior_for_candidate_policy(Some(&prior), true).is_none());
+        let legacy = prior_for_candidate_policy(Some(&prior), false)
+            .expect("legacy consumers retain their unchanged prior");
+        assert!(std::ptr::eq(legacy, &prior));
+        assert_eq!(legacy.sustained_kbps, Some(1));
+        assert!(prior_for_candidate_policy(None, false).is_none());
+    }
+
+    #[test]
     fn flat_audio_channel_claim_is_bounded_at_the_request_boundary() {
         for value in ["0", "17", "255"] {
             assert!(
@@ -3898,6 +4321,43 @@ mod tests {
             ["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
         );
         assert_eq!(progressive_audio_args(false), ["-c:a", "copy"]);
+    }
+
+    #[test]
+    fn progressive_query_preserves_the_existing_flat_audio_channel_claim() {
+        let query: StreamQuery =
+            serde_urlencoded::from_str("acodec=aac&achannels=2").expect("bounded flat claim");
+        let caps = query.caps();
+        assert_eq!(caps.achannels, Some(2));
+        let source = plurx_core::domain::AudioStream {
+            codec: "aac".into(),
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        };
+        let audio = plurx_core::playback::audio::resolve_audio(
+            Some(&source),
+            &caps.profile(NOW_MS),
+            plurx_core::playback::audio::AudioRoute::Progressive,
+            0,
+        );
+        assert!(matches!(
+            audio.action,
+            plurx_core::playback::audio::AudioAction::Encode { channels: 2, .. }
+        ));
+        let mut argv = Vec::new();
+        plurx_core::transcode::push_audio_delivery_args(&mut argv, &audio, false);
+        assert!(argv.windows(2).any(|pair| pair == ["-ac", "2"]));
+        for value in [0, 17] {
+            assert!(
+                serde_urlencoded::from_str::<StreamQuery>(&format!("achannels={value}")).is_err()
+            );
+        }
+        assert!(serde_urlencoded::from_str::<StreamQuery>("")
+            .expect("legacy query")
+            .caps()
+            .achannels
+            .is_none());
     }
 
     /// A fixed clock for every test that builds a device profile.
@@ -4295,21 +4755,84 @@ mod tests {
         for (profile, compatibility, expected_tag, expected_box) in
             [(8u8, 1u8, "hvc1", b"dvvC"), (5u8, 0u8, "dvh1", b"dvcC")]
         {
-            let feed = plurx_core::testfixtures::with_dolby_vision_rpus(
-                &plurx_core::testfixtures::pipe("closed-gop"),
-            );
+            // A DV record must describe the actual base layer: Jellyfin's
+            // muxer rejects an 8-bit SDR source labelled P8.1 or P5. These
+            // committed CC0 controls carry HDR10 Main10 and P5 IPT-PQ-C2
+            // respectively; the P5 control already has matching P5 RPUs.
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/macos-processing")
+                .join(if profile == 8 {
+                    "hdr10.mp4"
+                } else {
+                    "strict_p5_fresh.mp4"
+                });
+            let mut fixture_command = Command::new(crate::ffmpeg::ffmpeg_bin());
+            fixture_command
+                .args(["-hide_banner", "-loglevel", "error", "-i"])
+                .arg(fixture)
+                .args([
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-sn",
+                    "-c:v",
+                    "copy",
+                    "-tag:v",
+                    expected_tag,
+                    "-strict",
+                    "unofficial",
+                    "-bsf:v",
+                    "filter_units=remove_types=32-34",
+                    "-movflags",
+                    "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+                    "-f",
+                    "mp4",
+                    "pipe:1",
+                ]);
+            let feed = plurx_core::testfixtures::run(&mut fixture_command);
+            let feed = if profile == 8 {
+                plurx_core::testfixtures::with_dolby_vision_rpus(&feed)
+            } else {
+                feed
+            };
             let mut reader = FragmentReader::new();
             reader.push(&feed);
             let Some(Unit::Init(mut source_init)) = reader.next_unit().expect("source init") else {
                 panic!("fixture must begin with an init");
             };
-            let old_init_len = source_init.bytes.len();
+            let video = source_init.video().expect("source video track");
+            let video_id = video.id;
+            let nal_length_size = video.nal_length_size;
             let record = fmp4::DolbyVisionRecord::new(profile, 6, false, true, true, compatibility)
                 .expect("native DV record");
             fmp4::set_dolby_vision_record(&mut source_init, &record)
                 .expect("write source DV record");
-            let mut source_bytes = source_init.bytes;
-            source_bytes.extend_from_slice(&feed[old_init_len..]);
+            let mut source_bytes = source_init.bytes.clone();
+            while let Some(unit) = reader.next_unit().expect("source media") {
+                if let Unit::Fragment(mut fragment) = unit {
+                    if profile == 8 {
+                        // Match the injected RPUs to the single HDR10 layer
+                        // rather than merely relabelling Profile 7 metadata.
+                        fmp4::rewrite_video_samples(
+                            &mut fragment,
+                            &source_init.tracks,
+                            video_id,
+                            |sample| {
+                                let mut converted = Vec::new();
+                                plurx_core::transcode::dvconvert::convert_length_prefixed(
+                                    sample,
+                                    nal_length_size,
+                                    &mut converted,
+                                )
+                                .expect("convert fixture RPUs to P8.1");
+                                Ok(converted)
+                            },
+                        )
+                        .expect("rewrite P8.1 fixture samples");
+                    }
+                    source_bytes.extend_from_slice(&fragment.bytes);
+                }
+            }
 
             let base = crate::test_tempdir().expect("native DV progressive fixture");
             let input = base.path().join(format!("p{profile}-source.mp4"));
@@ -4588,6 +5111,7 @@ mod tests {
                 display_aware_auto_protocol: Some("route-v1".to_owned()),
                 quality_candidate_id: None,
                 quality_candidates: None,
+                measured_candidate_outputs: None,
                 file_id: 42,
                 vod_indexed: false,
                 decision,
@@ -4790,6 +5314,7 @@ mod tests {
             codec: "eac3".into(),
             channels: Some(6),
             sample_rate: Some(48_000),
+            channel_layout: None,
             language: Some(language.into()),
             title: None,
             default,
@@ -4845,6 +5370,7 @@ mod tests {
                     codec: "eac3".into(),
                     channels: Some(8),
                     sample_rate: Some(48_000),
+                    channel_layout: None,
                     language: Some("fra".into()),
                     title: Some("French E-AC-3".into()),
                     default: true,
@@ -4854,6 +5380,7 @@ mod tests {
                     codec: "truehd".into(),
                     channels: Some(8),
                     sample_rate: Some(48_000),
+                    channel_layout: None,
                     language: Some("eng".into()),
                     title: Some("English TrueHD Atmos".into()),
                     default: false,
@@ -5069,10 +5596,29 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn remux_owner_reaps_child_without_polling_the_http_body() {
-        let mut command = tokio::process::Command::new("sleep");
-        command.arg("60").kill_on_drop(true);
+    /// A progressive remux owner around a stand-in child, with the serving
+    /// watch under the test's control and no HTTP body: the owner, not body
+    /// polling, holds and reaps the child.
+    fn remux_owner_stand_in() -> (
+        tokio::sync::watch::Sender<crate::serving_fence::ServingState>,
+        RemuxProcessGuard,
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        remux_owner_around("sleep", &["60"])
+    }
+
+    fn remux_owner_around(
+        program: &str,
+        args: &[&str],
+    ) -> (
+        tokio::sync::watch::Sender<crate::serving_fence::ServingState>,
+        RemuxProcessGuard,
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut command = tokio::process::Command::new(program);
+        command.args(args).kill_on_drop(true);
         let child = command.spawn().expect("spawn remux stand-in");
         let child_job = crate::process_control::ChildJob::attach(&child).expect("attach child job");
         let (serving_tx, serving_rx) =
@@ -5080,27 +5626,217 @@ mod tests {
                 ready: true,
                 loss_generation: 0,
             });
-        let (_body_guard, owner) = spawn_remux_process_owner(child, child_job, serving_rx, 0, None);
+        let (guard, fenced, owner) =
+            spawn_remux_process_owner(child, child_job, serving_rx, 0, None);
+        (serving_tx, guard, fenced, owner)
+    }
 
-        // Deliberately publish recovery before the owner gets a scheduling
-        // point and never construct or poll a body stream. The generation—not
-        // a transient false boolean—must still make the owner reap the child.
-        serving_tx
-            .send(crate::serving_fence::ServingState {
-                ready: false,
-                loss_generation: 1,
-            })
-            .expect("publish serving loss");
-        serving_tx
-            .send(crate::serving_fence::ServingState {
-                ready: true,
-                loss_generation: 1,
-            })
-            .expect("publish serving recovery");
-        tokio::time::timeout(std::time::Duration::from_secs(2), owner)
+    fn publish_serving(
+        serving: &tokio::sync::watch::Sender<crate::serving_fence::ServingState>,
+        ready: bool,
+        loss_generation: u64,
+    ) {
+        // send_replace, because an owner that already ended has dropped its
+        // receiver, and a test publishing past that point is not an error.
+        serving.send_replace(crate::serving_fence::ServingState {
+            ready,
+            loss_generation,
+        });
+    }
+
+    /// The 2026-10-04 shape on the progressive path: a leader restart costs
+    /// every voter its serving authority for a second or two. A loss that
+    /// recovers inside the grace must keep ffmpeg and the response.
+    #[tokio::test]
+    async fn remux_owner_keeps_the_child_through_a_brief_loss() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (serving, guard, fenced, owner) = remux_owner_stand_in();
+        publish_serving(&serving, false, 1);
+        tokio::time::sleep(grace / 4).await;
+        publish_serving(&serving, true, 1);
+        // Well past the point at which a sustained loss would have ended it.
+        tokio::time::sleep(grace + grace / 2).await;
+        assert!(
+            !owner.is_finished(),
+            "a brief authority loss must not reap the progressive child"
+        );
+        assert!(
+            !fenced.is_cancelled(),
+            "a brief authority loss must not end the response body"
+        );
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(10), owner)
             .await
-            .expect("independent owner must finish")
+            .expect("dropping the body still ends the owner")
             .expect("owner task must not panic");
+    }
+
+    /// The fence's safety property still holds: a node that has truly lost
+    /// authority stops serving within the grace, and not before it.
+    #[tokio::test]
+    async fn remux_owner_reaps_the_child_after_a_sustained_loss() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (serving, _guard, fenced, owner) = remux_owner_stand_in();
+        let lost_at = std::time::Instant::now();
+        publish_serving(&serving, false, 1);
+        tokio::time::timeout(grace + std::time::Duration::from_secs(10), owner)
+            .await
+            .expect("a sustained loss must reap the child once the grace is spent")
+            .expect("owner task must not panic");
+        assert!(
+            fenced.is_cancelled(),
+            "the body learns the owner ended the stream"
+        );
+        assert!(
+            lost_at.elapsed() >= grace,
+            "reaped after {:?}, before the {grace:?} grace",
+            lost_at.elapsed()
+        );
+    }
+
+    /// Recovery, then more losses before the quorum has been stable for a
+    /// grace: they spend one budget, so a flapping quorum still ends the
+    /// stream, even though every single loss is shorter than the grace.
+    #[tokio::test]
+    async fn remux_owner_losses_after_a_recovery_share_one_grace() {
+        let slice = crate::serving_fence::SERVING_FENCE_SESSION_GRACE / 3;
+        let (serving, _guard, fenced, owner) = remux_owner_stand_in();
+        for generation in 1..=4 {
+            publish_serving(&serving, false, generation);
+            tokio::time::sleep(slice).await;
+            publish_serving(&serving, true, generation);
+            tokio::task::yield_now().await;
+        }
+        // Authority is back now; only the shared budget can end the stream.
+        tokio::time::timeout(
+            crate::serving_fence::SERVING_FENCE_SESSION_GRACE + std::time::Duration::from_secs(10),
+            owner,
+        )
+        .await
+        .expect("losses summing past the grace must reap the child")
+        .expect("owner task must not panic");
+        assert!(fenced.is_cancelled(), "the body is ended with the child");
+    }
+
+    /// Recovery published before the owner gets a scheduling point leaves it
+    /// a new generation with authority already restored. Until 2026-10-04
+    /// this alone reaped the child; the owner now adopts the new generation.
+    #[tokio::test]
+    async fn remux_owner_adopts_a_new_generation_when_authority_is_already_back() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (serving, guard, fenced, owner) = remux_owner_stand_in();
+        publish_serving(&serving, false, 1);
+        publish_serving(&serving, true, 1);
+        tokio::time::sleep(grace + grace / 2).await;
+        assert!(
+            !owner.is_finished(),
+            "a generation bump with authority restored must not reap the child"
+        );
+        assert!(!fenced.is_cancelled(), "nor end the response body");
+        // The adopted generation is the one later losses are judged against:
+        // a sustained loss after it still ends the stream.
+        publish_serving(&serving, false, 2);
+        tokio::time::timeout(grace + std::time::Duration::from_secs(10), owner)
+            .await
+            .expect("a sustained loss after recovery still reaps the child")
+            .expect("owner task must not panic");
+        assert!(fenced.is_cancelled());
+        drop(guard);
+    }
+
+    /// Shutdown while authority is lost does not wait out the grace.
+    #[tokio::test]
+    async fn remux_owner_reaps_the_child_when_the_fence_closes_during_a_loss() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (serving, _guard, fenced, owner) = remux_owner_stand_in();
+        publish_serving(&serving, false, 1);
+        tokio::task::yield_now().await;
+        drop(serving);
+        tokio::time::timeout(grace / 2, owner)
+            .await
+            .expect("a closed fence reaps the child without waiting for the grace")
+            .expect("owner task must not panic");
+        assert!(fenced.is_cancelled(), "the body is ended with the child");
+    }
+
+    /// ffmpeg finished on its own, and the body may still hold its tail. The
+    /// owner keeps the authority decision until the body is dropped, so a
+    /// loss after the exit still ends the body within the grace instead of
+    /// leaving it waiting for authority forever.
+    #[tokio::test]
+    async fn remux_owner_still_decides_for_the_body_after_a_natural_exit() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (serving, guard, fenced, owner) = remux_owner_around("true", &[]);
+        tokio::time::sleep(grace / 4).await;
+        assert!(
+            !owner.is_finished(),
+            "a natural exit leaves the owner deciding for the body"
+        );
+        publish_serving(&serving, false, 1);
+        tokio::time::timeout(grace + std::time::Duration::from_secs(10), owner)
+            .await
+            .expect("a sustained loss after the exit still ends the owner")
+            .expect("owner task must not panic");
+        assert!(fenced.is_cancelled(), "and tells the body to stop waiting");
+        drop(guard);
+
+        let (_serving, guard, fenced, owner) = remux_owner_around("true", &[]);
+        tokio::time::sleep(grace / 4).await;
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(10), owner)
+            .await
+            .expect("dropping the body ends an owner whose child already exited")
+            .expect("owner task must not panic");
+        assert!(!fenced.is_cancelled(), "an ordinary end is not a fence");
+    }
+
+    /// The body publishes only under authority: bytes produced during a loss
+    /// are held until authority returns, and dropped when the owner gives up.
+    #[tokio::test]
+    async fn remux_body_publishes_nothing_while_authority_is_lost() {
+        use futures_util::StreamExt as _;
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let (serving, serving_rx) =
+            tokio::sync::watch::channel(crate::serving_fence::ServingState {
+                ready: true,
+                loss_generation: 0,
+            });
+        let fenced = tokio_util::sync::CancellationToken::new();
+        let guard = RemuxProcessGuard {
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        let body = remux_body(reader, None, guard, None, serving_rx, fenced.clone());
+        tokio::pin!(body);
+
+        writer.write_all(b"one").await.expect("write");
+        let chunk = body.next().await.expect("chunk").expect("bytes");
+        assert_eq!(&chunk[..], b"one");
+
+        publish_serving(&serving, false, 1);
+        writer.write_all(b"two").await.expect("write");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), body.next())
+                .await
+                .is_err(),
+            "nothing is published while authority is lost"
+        );
+        publish_serving(&serving, true, 1);
+        let chunk = body.next().await.expect("chunk").expect("bytes");
+        assert_eq!(
+            &chunk[..],
+            b"two",
+            "held bytes follow once authority returns"
+        );
+
+        publish_serving(&serving, false, 2);
+        writer.write_all(b"three").await.expect("write");
+        fenced.cancel();
+        assert!(
+            body.next().await.is_none(),
+            "an owner that gave up ends the body without publishing what it held"
+        );
     }
 
     fn headers_with_range(value: &str) -> HeaderMap {
@@ -6193,6 +6929,147 @@ mod tests {
     /// what else is in it — and refuses to invent a document for a file whose
     /// probe never succeeded, because `probe_json IS NULL` is the fingerprint
     /// the repair job keys on.
+    #[tokio::test]
+    async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_backfill() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        let (_, state) = super::super::tests::test_app_with_state();
+        let directory = tempfile::tempdir().expect("Source marker fixture");
+        let path = directory.path().join("legacy-source.mp4");
+        std::fs::write(&path, b"Source marker presence fixture").expect("actual presence");
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Source markers".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Source".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let raw = r#"{"format":{"duration":"600.0"},"streams":[]}"#;
+        let id = state
+            .store
+            .upsert_file(
+                item,
+                path.to_str().expect("path"),
+                30,
+                1000,
+                &ProbeResult {
+                    duration_ms: Some(600_000),
+                    container: Some("mp4".into()),
+                    video_codec: Some("h264".into()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    bit_depth: Some(8),
+                    raw_json: Some(raw.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("scan without chapter capture");
+        let file = state
+            .store
+            .get_file(id)
+            .await
+            .expect("file read")
+            .expect("file");
+        let pause = pause_next_marker_fallback_for_test(&path);
+        let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            decision_for_source_file(
+                &state,
+                file.clone(),
+                Caps {
+                    caps_v2: Some(caps),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("Source never enters the paused live-probe fallback")
+        .expect("actual Source engine");
+        assert_eq!(
+            serde_json::to_value(&decision.markers).expect("markers"),
+            serde_json::to_value(markers_from_chapters(&[], file.duration_ms))
+                .expect("stored evidence only")
+        );
+        assert_eq!(
+            state
+                .store
+                .get_file_probe_json(id)
+                .await
+                .expect("unchanged scan"),
+            Some(raw.into())
+        );
+        assert!(
+            state
+                .store
+                .timeline_annotation_set(id, &annotation_source_identity(&file))
+                .await
+                .expect("annotation read")
+                .is_none(),
+            "decision must not backfill an annotation set"
+        );
+        // The ordinary Local fallback still enters its existing owned seam.
+        let local_state = state.clone();
+        let local_file = file.clone();
+        let local = tokio::spawn(async move { markers_for(&local_state, &local_file).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), pause.wait())
+            .await
+            .expect("Local fallback retained");
+        local.abort();
+        let _ = local.await;
+        marker_fallback_pauses()
+            .lock()
+            .expect("pause registry")
+            .remove(path.to_str().expect("path"));
+        let chapters =
+            serde_json::to_string(&vec![chapter("Intro", "0.0", "60.0")]).expect("scan chapters");
+        state
+            .store
+            .merge_file_probe_chapters(id, &chapters)
+            .await
+            .expect("scanner evidence fixture");
+        assert_eq!(
+            serde_json::to_value(stored_markers_for_source(&state, &file).await)
+                .expect("stored markers"),
+            serde_json::to_value(markers_from_chapters(
+                &[chapter("Intro", "0.0", "60.0")],
+                file.duration_ms
+            ))
+            .expect("same common marker engine")
+        );
+        let manual = annotation_set_from_markers(
+            annotation_source_identity(&file),
+            &markers_from_chapters(&[chapter("Opening", "0", "90")], file.duration_ms),
+        );
+        state
+            .store
+            .put_timeline_annotation_set_if_missing(id, 600_000, &manual)
+            .await
+            .expect("persisted annotation fixture");
+        assert_eq!(
+            serde_json::to_value(stored_markers_for_source(&state, &file).await)
+                .expect("persisted markers"),
+            serde_json::to_value(markers_from_annotation_set(manual))
+                .expect("persisted evidence wins")
+        );
+    }
+
     #[tokio::test]
     async fn chapters_backfill_into_the_stored_probe() {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};

@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Provision only the registry-checksummed public 0.14 sources for K08's oracle."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+from pathlib import Path, PurePosixPath
+import shutil
+import tarfile
+import tempfile
+import urllib.request
+
+CRATES = {
+    "hiqlite": "8711815c093414290a5fcbc0bf74e1e70e3d6ef37e21735000178d25cee6fcf0",
+    "hiqlite-wal": "247fc29e082f38fdf25270f6a5d7148284c9710384c3bce21636608dc104fddf",
+}
+ARCHIVE_LIMIT = 1024 * 1024
+EXPANDED_LIMIT = 8 * 1024 * 1024
+MEMBER_LIMIT = 512
+
+
+def archive_bytes(crate: str, archive_dir: Path | None) -> bytes:
+    name = f"{crate}-0.14.0.crate"
+    if archive_dir is not None:
+        with (archive_dir / name).open("rb") as source:
+            data = source.read(ARCHIVE_LIMIT + 1)
+    else:
+        url = f"https://static.crates.io/crates/{crate}/{name}"
+        with urllib.request.urlopen(url, timeout=20) as source:
+            data = source.read(ARCHIVE_LIMIT + 1)
+    if len(data) > ARCHIVE_LIMIT:
+        raise ValueError(f"{name}: public archive exceeds its bound")
+    if hashlib.sha256(data).hexdigest() != CRATES[crate]:
+        raise ValueError(f"{name}: registry checksum mismatch")
+    return data
+
+
+def unpack(crate: str, data: bytes, root: Path) -> None:
+    prefix = f"{crate}-0.14.0"
+    seen: set[str] = set()
+    expanded = 0
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        for member in archive:
+            path = PurePosixPath(member.name)
+            if (path.is_absolute() or ".." in path.parts or not path.parts
+                    or path.parts[0] != prefix or member.name in seen):
+                raise ValueError(f"{prefix}: unsafe or duplicate member")
+            seen.add(member.name)
+            if len(seen) > MEMBER_LIMIT or not (member.isfile() or member.isdir()):
+                raise ValueError(f"{prefix}: member type/count refused")
+            destination = root.joinpath(*path.parts)
+            if member.isdir():
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            expanded += member.size
+            if member.size < 0 or expanded > EXPANDED_LIMIT:
+                raise ValueError(f"{prefix}: expanded size refused")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"{prefix}: missing member bytes")
+            with source, destination.open("xb") as target:
+                shutil.copyfileobj(source, target)
+            destination.chmod(0o444)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("destination", type=Path)
+    parser.add_argument("--archive-dir", type=Path,
+                        help="reuse public registry archives without network access")
+    args = parser.parse_args()
+    destination = args.destination.absolute()
+    if destination.exists():
+        raise ValueError("destination must be a fresh owned fixture directory")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="hiqlite-public-", dir=destination.parent) as stage:
+        root = Path(stage) / "source"
+        root.mkdir()
+        for crate in CRATES:
+            unpack(crate, archive_bytes(crate, args.archive_dir), root)
+        root.rename(destination)
+    print(destination)
+
+
+if __name__ == "__main__":
+    main()

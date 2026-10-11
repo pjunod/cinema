@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/k06-owned-measurement-launcher",
+  "suite": "operations",
+  "test_file": "tests/operations/test_doc_status_audit.py",
+  "test_file_sha256": "58ccb669583560721f146959f8250f48d62908a701980396919211be1cb087dd",
+  "source_commit": null,
+  "command": "python3 -m unittest tests.operations.test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions",
+  "test_ids": ["test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions"],
+  "output": "Actual PR674 gate3723 job39448 failed this sole method on committed2ee63ca9c5976aaefca2006fb58a2958f3bdce2a: index open versus prepared-for-review header. Final1490 completeTrue/fixture_errorsEmpty retained902passkeys; productionrestore903a0d certified all current279validation plus622operations successes before rerun. Corrected only doc header to open; no assertion or runtime changes. Sole failed-only invocation6be145 exit0 Ran1 test in0.087s OK, no successful method rerun. Passing document SHA25645b6819221f6a76eafe5be4c61cb48ab1c309671627af92ddbd1a27f000a6ddc. No host lab action.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}

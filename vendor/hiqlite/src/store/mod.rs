@@ -43,36 +43,77 @@ pub(crate) async fn start_raft_db(
     raft_config: Arc<RaftConfig>,
     do_reset_metadata: bool,
     snapshot_transport: crate::LocalSnapshotTransportStatus,
+    staged_startup: bool,
 ) -> Result<StateRaftDB, Error> {
     // We always want to start stopped and set to `false` as soon as we found out,
     // that we are not pristine node and need cleanup.
     let is_raft_stopped = Arc::new(AtomicBool::new(true));
 
-    let log_store = hiqlite_wal::LogStore::<TypeConfigSqlite>::start(
+    let mut startup_owner = crate::startup_cleanup::StartupStorageOwner::new(staged_startup);
+    let log_store = crate::startup_cleanup::start_wal::<TypeConfigSqlite>(
         logs::logs_dir_db(&node_config.data_dir),
         node_config.wal_sync.clone(),
         node_config.wal_size,
+        staged_startup,
     )
     .await?;
+    startup_owner.protect_wal(log_store.shutdown_handle());
     let wal_status = log_store.status_handle();
-    let state_machine_store = StateMachineSqlite::new(
-        &node_config.data_dir,
-        &node_config.filename_db,
-        node_config.node_id,
-        node_config.log_statements,
-        node_config.prepared_statement_cache_capacity,
-        node_config.read_pool_size,
+    let state_machine_store = if staged_startup {
+        let data_dir = node_config.data_dir.clone();
+        let filename = node_config.filename_db.clone();
+        let node_id = node_config.node_id;
+        let log_statements = node_config.log_statements;
+        let statement_capacity = node_config.prepared_statement_cache_capacity;
+        let read_pool_size = node_config.read_pool_size;
+        let snapshot_deferral = node_config.snapshot_storage_deferral;
         #[cfg(feature = "s3")]
-        node_config.s3_config.clone(),
-        do_reset_metadata,
+        let s3_config = node_config.s3_config.clone();
         #[cfg(feature = "backup")]
-        node_config.backup_keep_days_local,
-    )
-    .await
-    .unwrap();
+        let backup_keep_days = node_config.backup_keep_days_local;
+        crate::startup_cleanup::construct_sqlite(async move {
+            StateMachineSqlite::new(
+                &data_dir,
+                &filename,
+                node_id,
+                log_statements,
+                statement_capacity,
+                read_pool_size,
+                snapshot_deferral,
+                #[cfg(feature = "s3")]
+                s3_config,
+                do_reset_metadata,
+                #[cfg(feature = "backup")]
+                backup_keep_days,
+                true,
+            )
+            .await
+            .map_err(|error| Error::Error(format!("SQLite startup constructor: {error}").into()))
+        })
+        .await?
+    } else {
+        StateMachineSqlite::new(
+            &node_config.data_dir,
+            &node_config.filename_db,
+            node_config.node_id,
+            node_config.log_statements,
+            node_config.prepared_statement_cache_capacity,
+            node_config.read_pool_size,
+            node_config.snapshot_storage_deferral,
+            #[cfg(feature = "s3")]
+            node_config.s3_config.clone(),
+            do_reset_metadata,
+            #[cfg(feature = "backup")]
+            node_config.backup_keep_days_local,
+            false,
+        )
+        .await
+        .unwrap()
+    };
 
     let is_startup_finished = Arc::new(AtomicBool::new(false));
     let sql_writer = state_machine_store.write_tx.clone();
+    startup_owner.protect_writer(sql_writer.clone());
     let read_pool = state_machine_store.read_pool.clone();
 
     let network = NetworkStreaming {
@@ -109,8 +150,21 @@ pub(crate) async fn start_raft_db(
         snapshot_transport,
     );
 
+    let state = StateRaftDB {
+        raft,
+        snapshot_executor: Arc::new(snapshot_executor),
+        shutdown_handle,
+        wal_status,
+        sql_writer,
+        read_pool,
+        log_statements: node_config.log_statements,
+        is_raft_stopped,
+        is_startup_finished,
+    };
+    startup_owner.handoff();
+    startup_owner.protect_db(&state);
     init::init_pristine_node_1_db(
-        &raft,
+        &state.raft,
         node_config.node_id,
         &node_config.nodes,
         &node_config.secret_api,
@@ -123,17 +177,8 @@ pub(crate) async fn start_raft_db(
     )
     .await?;
 
-    Ok(StateRaftDB {
-        raft,
-        snapshot_executor,
-        shutdown_handle,
-        wal_status,
-        sql_writer,
-        read_pool,
-        log_statements: node_config.log_statements,
-        is_raft_stopped,
-        is_startup_finished,
-    })
+    startup_owner.handoff();
+    Ok(state)
 }
 
 #[cfg(feature = "cache")]
@@ -141,6 +186,7 @@ pub(crate) async fn start_raft_cache<C>(
     node_config: &NodeConfig,
     raft_config: Arc<RaftConfig>,
     snapshot_transport: crate::LocalSnapshotTransportStatus,
+    staged_startup: bool,
 ) -> Result<StateRaftCache, Error>
 where
     C: Debug + CacheVariants,
@@ -151,11 +197,18 @@ where
     // that we are not pristine node and need cleanup.
     let is_raft_stopped = Arc::new(AtomicBool::new(true));
     let is_startup_finished = Arc::new(AtomicBool::new(false));
+    let mut startup_owner = crate::startup_cleanup::StartupStorageOwner::new(staged_startup);
 
-    let state_machine_store = Arc::new(
-        StateMachineMemory::new::<C>(&node_config.data_dir, !node_config.cache_storage_disk)
-            .await?,
-    );
+    let state_machine_store = Arc::new(if staged_startup {
+        let data_dir = node_config.data_dir.clone();
+        let in_memory_only = !node_config.cache_storage_disk;
+        crate::startup_cleanup::construct_cache(async move {
+            StateMachineMemory::new::<C>(&data_dir, in_memory_only).await
+        })
+        .await?
+    } else {
+        StateMachineMemory::new::<C>(&node_config.data_dir, !node_config.cache_storage_disk).await?
+    });
     let network = NetworkStreaming {
         node_id: node_config.node_id,
         tls_config: node_config.tls_raft.as_ref().map(|tls| tls.client_config()),
@@ -180,13 +233,15 @@ where
     let tx_dlock = state_machine_store.tx_dlock.clone();
 
     let (raft, shutdown_handle) = if node_config.cache_storage_disk {
-        let log_store = hiqlite_wal::LogStore::<TypeConfigKV>::start(
+        let log_store = crate::startup_cleanup::start_wal::<TypeConfigKV>(
             logs::logs_dir_cache(&node_config.data_dir),
             node_config.wal_sync.clone(),
             node_config.wal_size,
+            staged_startup,
         )
         .await?;
         let shutdown_handle = log_store.shutdown_handle();
+        startup_owner.protect_wal(shutdown_handle.clone());
 
         let raft = openraft::Raft::new(
             node_config.node_id,
@@ -220,8 +275,25 @@ where
         snapshot_transport,
     );
 
+    let state = StateRaftCache {
+        raft,
+        snapshot_executor: Arc::new(snapshot_executor),
+        tx_caches,
+        #[cfg(feature = "listen_notify")]
+        tx_notify,
+        #[cfg(feature = "listen_notify_local")]
+        rx_notify,
+        #[cfg(feature = "dlock")]
+        tx_dlock,
+        is_raft_stopped,
+        is_startup_finished,
+        shutdown_handle,
+        cache_storage_disk: node_config.cache_storage_disk,
+    };
+    startup_owner.handoff();
+    startup_owner.protect_cache(&state);
     init::init_pristine_node_1_cache(
-        &raft,
+        &state.raft,
         node_config.cache_storage_disk,
         node_config.node_id,
         &node_config.nodes,
@@ -235,19 +307,6 @@ where
     )
     .await?;
 
-    Ok(StateRaftCache {
-        raft,
-        snapshot_executor,
-        tx_caches,
-        #[cfg(feature = "listen_notify")]
-        tx_notify,
-        #[cfg(feature = "listen_notify_local")]
-        rx_notify,
-        #[cfg(feature = "dlock")]
-        tx_dlock,
-        is_raft_stopped,
-        is_startup_finished,
-        shutdown_handle,
-        cache_storage_disk: node_config.cache_storage_disk,
-    })
+    startup_owner.handoff();
+    Ok(state)
 }

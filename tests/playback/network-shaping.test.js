@@ -19,7 +19,7 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 
 const lab = require("../../scripts/playback-lab");
 
@@ -34,7 +34,10 @@ function test(name, run) {
 }
 
 async function runAll() {
+  let executed = 0;
   for (const [name, run] of pending) {
+    if (process.env.PLAYBACK_LAB_TEST_FILTER && !new RegExp(process.env.PLAYBACK_LAB_TEST_FILTER).test(name)) continue;
+    executed++;
     try {
       await run();
       process.stdout.write(`PASS ${name}\n`);
@@ -43,11 +46,300 @@ async function runAll() {
       process.stdout.write(`FAIL ${name}: ${error.message}\n`);
     }
   }
+  if (!executed) failures.push("test filter matched no contracts");
+  return executed;
 }
+
+test("D3 intent samples are independent of transport pause and retain lifecycle, replacement and stop", () => {
+  const vm = require("node:vm");
+  let now = 0, tick;
+  const listeners = new Map();
+  let element = { currentTime: 1, paused: true, seeking: false, ended: false, videoHeight: 720 };
+  const context = { performance: { now: () => now }, WeakMap, AUTO_SWITCH_SEQ: 0,
+    PLAYER: { wantsPlayback: true, sessionId: "a", attemptId: "one", offset: 0 },
+    document: { visibilityState: "visible", getElementById: () => element,
+      addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
+    setInterval: fn => { tick = fn; return 1; }, clearInterval: () => { tick = null; } };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(32,100)`, context);
+  now = 100; tick();
+  context.AUTO_SWITCH_SEQ = 1;
+  context.PLAYER.abr = { switches: [{ seq: 1, at_ms: 101, from_height: 720,
+    to_height: 360, target_session_id: "b", target_attempt_id: "two" }] };
+  context.document.visibilityState = "hidden"; now = 120; listeners.get("visibilitychange")();
+  element = { ...element, currentTime: 0 }; context.PLAYER.sessionId = "b";
+  now = 200; tick();
+  now = 300; context.__plurxLabD3.stop("terminal-unrecovered");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  assert.equal(capture.records.find(r => r.kind === "start").wants_playback, true,
+    "paused transport must not erase independent viewer intent");
+  assert.ok(capture.records.some(r => r.kind === "lifecycle" && r.visible === false));
+  assert.equal(capture.records.filter(r => r.kind === "attachment").length, 2);
+  assert.equal(capture.records.at(-1).reason, "terminal-unrecovered");
+  assert.equal(capture.auto_switch_end - capture.auto_switch_baseline, 1);
+  assert.equal(capture.records.find(r => r.kind === "automatic_switch").target_session_id, "b");
+  assert.equal(tick, null);
+  assert.equal(listeners.size, 0);
+  assert.equal(lab.d3PresentationEvidence(capture).stalled_seconds, null);
+});
+
+test("D3 overflow preserves the head and makes loss and censored absence explicit", () => {
+  const vm = require("node:vm");
+  let now = 0;
+  const context = { performance: { now: () => ++now }, WeakMap,
+    document: { visibilityState: "visible", getElementById: () => null,
+      addEventListener() {}, removeEventListener() {} }, setInterval: () => 1, clearInterval() {} };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(1,100)`, context);
+  context.__plurxLabD3.stop("observation-end");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  assert.equal(capture.records.length, 1);
+  assert.ok(capture.dropped > 0);
+  const evidence = lab.d3PresentationEvidence(capture);
+  assert.equal(evidence.status, "incomplete");
+  assert.equal(evidence.stationary_integral_bounds_seconds, null);
+  assert.equal(evidence.automatic_switches, null);
+  assert.ok(evidence.missing.includes("record limit exceeded"));
+});
+
+test("D3 skipped and backward composition frames never become an exact zero stall", () => {
+  const capture = { stopped: true, records: [
+    { kind: "start", at_ms: 0, wants_playback: true, visible: true, seeking: false, ended: false, element_id: 1, current_time: 1 },
+    { kind: "composition_submission", at_ms: 10, visible: true, element_id: 1, media_time: 1, presented_frames: 1 },
+    { kind: "composition_submission", at_ms: 50, visible: true, element_id: 1, media_time: .9, presented_frames: 4 },
+    { kind: "stop", at_ms: 100, wants_playback: true, visible: true, seeking: false, ended: false, element_id: 1, current_time: 1 },
+    { kind: "censor", at_ms: 100, reason: "terminal" },
+  ] };
+  const result = lab.d3PresentationEvidence(capture);
+  assert.equal(result.skipped_submissions, 2);
+  assert.equal(result.backward_frames, 1);
+  assert.equal(result.sampled_equal_clock_seconds, .1);
+  assert.equal(result.stalled_seconds, null);
+  assert.equal(result.stationary_integral_bounds_seconds, null);
+  assert.equal(result.terminal_censor[0].reason, "terminal");
+});
+
+test("D3 clock brackets bound drift and frame times without interpolating an offset", () => {
+  const anchors = [{ sent_ms: 100, received_ms: 110, browser_ms: 20 },
+    { sent_ms: 200, received_ms: 230, browser_ms: 110 }];
+  const alignment = lab.d3ClockAlignment(anchors);
+  assert.equal(alignment.status, "bracketed");
+  assert.equal(alignment.drift_lower_ms, 0);
+  assert.equal(alignment.drift_upper_ms, 40);
+  assert.deepEqual(lab.d3ControllerTimeBounds(50, anchors), [100, 230]);
+  assert.equal(lab.d3ControllerTimeBounds(5, anchors), null);
+  assert.equal(lab.d3ClockAlignment(anchors.slice(0, 1)).status, "missing");
+  assert.equal(lab.d3ClockAlignment([anchors[0], { ...anchors[1], browser_ms: 10 }]).status, "missing");
+});
+
+test("D3 two cliffs use exact final sixty-second completion boundaries and keep advertisements separate", () => {
+  const stage = { index: 1, entered_at_ms: 12_000, left_at_ms: 87_000 };
+  const samples = [{ at_ms: 26_999, bytes: 900, media: true, session_id: "a" },
+    { at_ms: 27_000, bytes: 500, media: true, session_id: "a" },
+    { at_ms: 27_001, bytes: 60_000, media: true, session_id: "a" },
+    { at_ms: 87_000, bytes: 60_000, media: true, session_id: "a" },
+    { at_ms: 87_001, bytes: 999, media: true, session_id: "a" },
+    { at_ms: 50_000, bytes: 999, media: false, session_id: "a" }];
+  const capture = { stopped: true, records: [
+    { kind: "composition_submission", visible: true, session_id: "a", height: 240 },
+    { session_id: "a", ladder: [{ height: 240, total_kbps: 900 }] },
+  ] };
+  const first = lab.d3FinalDeliveryWindow(stage, samples, 0, capture);
+  assert.equal(first.media_bytes, 120_000);
+  assert.equal(first.delivered_kbps, 16);
+  assert.equal(first.advertised_total_kbps, 900);
+  assert.equal(first.samples.length, 2);
+  assert.match(first.interval, /socket-completion.*not client consumption/);
+  const second = lab.d3FinalDeliveryWindow({ index: 2, entered_at_ms: 87_000, left_at_ms: 162_000 },
+    [{ at_ms: 102_001, bytes: 30_000, media: true, session_id: "b" }]);
+  assert.equal(second.socket_completion_media_bytes, 30_000);
+  assert.equal(second.media_bytes, null);
+  assert.equal(second.delivered_kbps, null);
+  assert.equal(second.advertised_total_kbps, null);
+  assert.ok(second.missing.length);
+  assert.equal(lab.d3FinalDeliveryWindow(stage, samples, 1).media_bytes, null);
+  assert.equal(lab.d3FinalDeliveryWindow({ ...stage, left_at_ms: 50_000 }, samples).media_bytes, null);
+});
+
+test("D3 ambiguous or missing rung evidence stays missing instead of using the cap", () => {
+  const stage = { index: 1, kbps: 1500, entered_at_ms: 0, left_at_ms: 75_000 };
+  const result = lab.d3FinalDeliveryWindow(stage, [{ at_ms: 20_000, media: true, bytes: 123, session_id: null }]);
+  assert.equal(result.advertised_total_kbps, null);
+  assert.ok(result.missing.some(reason => reason.includes("cannot be attributed")));
+});
+
+test("D3 write acquisition timestamps callback completion without changing limiter settlement", async () => {
+  const { Writable } = require("node:stream");
+  const shaper = new lab.ShapingProxy(lab.parseNetworkProfile("8mbps-to-1.5mbps"), "http://127.0.0.1:1");
+  let now = 27_001, complete;
+  shaper.startedAt = 0;
+  shaper.now = () => now;
+  shaper.reserveSlice = async () => null;
+  const sink = new Writable({ highWaterMark: 64 * 1024,
+    write(_chunk, _encoding, callback) { complete = callback; } });
+  await shaper.writeShaped(Buffer.alloc(1024), sink, true, () => false, "session");
+  assert.equal(sink.writableLength, 1024);
+  assert.equal(shaper.deliverySamples[0][0].at_ms, 27_001, "legacy accepted-write accounting stays unchanged");
+  assert.equal(shaper.d3DeliverySamples[0].length, 0, "buffer admission is not completion");
+  assert.equal(shaper.d3WriteRecords[0].status, "pending");
+  const stage = { index: 0, entered_at_ms: 12_000, left_at_ms: 87_000 };
+  let evidence = { records: shaper.d3WriteRecords, dropped: 0 };
+  assert.equal(lab.d3FinalDeliveryWindow(stage, [], 0, null, evidence).socket_completion_media_bytes, null);
+  now = 87_001; shaper.stageIndex = 1; complete();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shaper.d3WriteRecords[0].completed_at_ms, 87_001);
+  assert.equal(shaper.d3DeliverySamples[1][0].at_ms, 87_001);
+  assert.equal(lab.d3FinalDeliveryWindow(stage, shaper.d3DeliverySamples.flat(), 0, null, evidence)
+    .socket_completion_media_bytes, 0, "completion past the window is excluded");
+  await shaper.writeShaped(Buffer.alloc(100), { writable: true, destroyed: false,
+    write(_slice, callback) { callback(Object.assign(new Error("fixture failure"), { code: "EPIPE" })); return true; } },
+  true, () => false, "session");
+  assert.equal(shaper.d3WriteRecords.at(-1).status, "failed");
+  assert.equal(shaper.d3WriteRecords.at(-1).callback_at_ms, 87_001);
+  const later = { index: 1, entered_at_ms: 87_000, left_at_ms: 162_000 };
+  assert.equal(lab.d3FinalDeliveryWindow(later, shaper.d3DeliverySamples[1], 0, null, evidence)
+    .socket_completion_media_bytes, null, "failed completion cannot mean zero lost bytes");
+  assert.equal(lab.d3FinalDeliveryWindow(later, [], 0, null, { records: [], dropped: 1 })
+    .socket_completion_media_bytes, null);
+  sink.destroy(); shaper.agent.destroy();
+});
+
+test("D3 automatic event provenance separates method-only reopens from proven rung changes", () => {
+  const vm = require("node:vm");
+  let now = 0, tick;
+  const element = { currentTime: 1, seeking: false, ended: false, videoHeight: 720 };
+  const context = { performance: { now: () => now }, WeakMap, AUTO_SWITCH_SEQ: 0,
+    PLAYER: { wantsPlayback: true, sessionId: "session", attemptId: "attempt", abr: { switches: [] } },
+    document: { visibilityState: "visible", getElementById: () => element,
+      addEventListener() {}, removeEventListener() {} },
+    setInterval: fn => { tick = fn; return 1; }, clearInterval() {} };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(32,100)`, context);
+  context.__plurxLabD3.appendFrame(element, 0, { mediaTime: 1, presentedFrames: 1, height: 720 }, context.PLAYER);
+  now = 100; context.AUTO_SWITCH_SEQ = 2;
+  context.PLAYER.abr.switches = [
+    { seq: 1, at_ms: 90, from: "copy_hls", to: "transcode", reason: "auto supply",
+      target_method: "transcode", position: 10, from_height: null, to_height: null },
+    { seq: 2, at_ms: 99, from: "720p", to: "360p", reason: "bandwidth cliff", from_height: 720, to_height: 360 },
+  ];
+  tick(); now = 200; context.__plurxLabD3.stop("observation-end");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  let measured = lab.d3PresentationEvidence(capture);
+  assert.equal(measured.automatic_event_sequence_complete, true);
+  assert.equal(measured.automatic_events, 2);
+  assert.equal(measured.proven_automatic_rung_changes, 1);
+  assert.equal(measured.automatic_switches, null, "unknown Auto heights must not be counted as rung changes");
+  const method = capture.records.find(r => r.kind === "automatic_switch");
+  assert.equal(method.from, "copy_hls"); assert.equal(method.to, "transcode");
+  assert.equal(method.reason, "auto supply"); assert.equal(method.position, 10);
+  assert.equal(method.target_method, "transcode");
+  const knownOnly = { ...capture, auto_switch_baseline: 1,
+    records: capture.records.filter(r => r.kind !== "automatic_switch" || r.switch_seq === 2) };
+  assert.equal(lab.d3PresentationEvidence(knownOnly).automatic_switches, 1);
+  assert.equal(lab.d3PresentationEvidence({ ...knownOnly, stopped: false }).automatic_switches, null,
+    "a last sample is not a completed observation boundary");
+  for (const record of capture.records) if (Object.hasOwn(record, "current_time")) record.current_time = null;
+  measured = lab.d3PresentationEvidence(capture);
+  assert.equal(measured.sampled_equal_clock_seconds, null, "missing sampled clocks are not zero stationary seconds");
+  assert.ok(measured.missing.includes("sampled media clock unavailable"));
+  capture.records.find(r => r.kind === "start").wants_playback = null;
+  assert.equal(lab.d3PresentationEvidence(capture).sampled_intent_eligible_seconds, null);
+});
+
+test("D3 normalization preserves failed raw acquisition, null metrics and provenance verbatim", () => {
+  const acquisition = { acceptance: "incomplete", clock_alignment: { anchors: [{ sent_ms: 12 }] },
+    presentation: { stalled_seconds: null, backward_frames: 1, raw: { records: [{ at_ms: 4 }] } },
+    missing: ["physical grade unavailable"] };
+  const provenance = { runtime_build: "unqualified", missing: ["binary digest unavailable"] };
+  const report = { schema_version: 1, summary: { failed: 1 }, d3_provenance: provenance,
+    results: [{ name: "failed", status: "failed", d3_acquisition: acquisition }] };
+  const normalized = lab.normalizeTrace(report);
+  assert.deepEqual(normalized.results[0].d3_acquisition, acquisition);
+  assert.deepEqual(normalized.d3_provenance, provenance);
+  assert.equal(normalized.results[0].status, "failed");
+  assert.equal(Object.hasOwn(lab.normalizeTrace({ results: [{}] }).results[0], "d3_acquisition"), false);
+});
 
 function cli(args) {
   return spawnSync(process.execPath, [LAB, ...args], { encoding: "utf8", cwd: ROOT });
 }
+
+test("quality baseline requires an advancing outgoing frame rather than preload", () => {
+  const snapshot = {frame_probe: {supported: true, sequence: 1,
+    last_frame_at_ms: 2400, last_frame: {media_time: 0}},
+    video: {paused: false, seeking: false}};
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 0), false);
+  snapshot.frame_probe.last_frame.media_time = 0.041667;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  snapshot.frame_probe.sequence = 2;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), true);
+  snapshot.video.paused = true;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  snapshot.video.paused = false;
+  snapshot.video.seeking = true;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  assert.ok(Math.abs(lab.frameGapSince(2900, 3416.6) - 516.6) < 1e-6,
+    "a real outgoing-frame blackout is still measured in full");
+});
+
+test("presentation gaps retain late callback diagnostics and refuse invalid display evidence", () => {
+  // Exact Firefox receipt: the first callback precedes display by one refresh;
+  // the next arrives at display. Dispatch spacing is not presentation spacing.
+  const before={at_ms:71831.76,expected_display_time_ms:71848.72,
+    media_time:69.5,presented_frames:1669,element_id:1};
+  const after={at_ms:71933.34,expected_display_time_ms:71933.34,
+    media_time:69.583333,presented_frames:1671,element_id:1};
+  const gap=lab.framePresentationGap(before,after);
+  assert.equal(gap.clock,"expected_display");
+  assert.ok(Math.abs(gap.gap_ms-84.62)<1e-6);
+  assert.ok(Math.abs(gap.callback_gap_ms-101.58)<1e-6);
+  const stalled={...after,at_ms:72000,expected_display_time_ms:72000};
+  assert.ok(lab.framePresentationGap(before,stalled).gap_ms>100,
+    "a real compositor gap still exceeds the unchanged presentation bound");
+  for(const invalid of [
+    {...after,expected_display_time_ms:null},
+    {...after,expected_display_time_ms:71840},
+    {...after,expected_display_time_ms:71933.34+10000},
+    {...after,presented_frames:1669},
+    {...after,media_time:69.4},
+  ]){
+    const refused=lab.framePresentationGap(before,invalid);
+    assert.equal(refused.clock,"callback");
+    assert.ok(refused.gap_ms>100,"unknown evidence cannot erase the raw failure");
+  }
+  const scored=lab.transitionMetrics({media_event_seq:0},{
+    media_event_seq:0,media_events:[],sampled_at_ms:71940,
+    frame_probe:{supported:true,last_frame_at_ms:after.at_ms,last_frame:after,
+      maximum_gap_ms:gap.gap_ms,maximum_callback_gap_ms:gap.callback_gap_ms},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(Math.abs(scored.maximum_video_gap_ms-84.62)<1e-6);
+  assert.ok(Math.abs(scored.maximum_callback_gap_ms-101.58)<1e-6);
+  const silent=lab.transitionMetrics({media_event_seq:0},{
+    media_event_seq:0,media_events:[],sampled_at_ms:72100,
+    frame_probe:{supported:true,last_frame_at_ms:after.at_ms,last_frame:after,maximum_gap_ms:0},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(silent.maximum_video_gap_ms>100,"an open presentation gap must still fail");
+});
+
+test("steady frame window excludes preload time but preserves later and switch gaps", () => {
+  assert.ok(Math.abs(lab.frameGapSince(4921.2, 5421.2, 5300) - 121.2) < 1e-6);
+  assert.equal(lab.frameGapSince(5421.2, 5921.2, 5300), 500,
+    "a blackout wholly inside the observed window still fails the 250 ms bound");
+  assert.equal(lab.frameGapSince(4921.2, 5421.2), 500,
+    "a quality switch retains the complete outgoing-to-target frame gap");
+  assert.equal(lab.frameGapSince(null, 5421.2, 5300), 0,
+    "missing first-frame evidence is not invented by a window origin");
+  const measured = lab.transitionMetrics({media_event_seq:0}, {
+    media_event_seq:0,media_events:[],sampled_at_ms:5921.2,
+    frame_probe:{supported:true,last_frame_at_ms:4921.2,
+      maximum_gap_ms:0,measurement_start_at_ms:5300},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(Math.abs(measured.maximum_video_gap_ms - 621.2) < 1e-6,
+    "no new callback after the origin remains an open blackout");
+});
 
 test("VOD readiness requires a pass that stored an index", () => {
   const empty = { message: "fragment indexing pass finished attempted=1 built=0" };
@@ -337,99 +629,461 @@ test("client probes are captured without credentials and TTFF drives scheduled c
   });
 });
 
-test("device-run defaults to Auto quality, writes evidence, and restores the app", async () => {
-  await withTempDir(async (directory) => {
-    await withOrigin(1, async (origin) => {
-      const launches = [];
-      const json = path.join(directory, "device-evidence.json");
-      const evidence = await lab.deviceRunCommand({
-        device: "physical-device-17",
-        target: origin,
-        public_host: "127.0.0.1",
-        file_id: "42",
-        item_id: "17",
-        network_profile: "8mbps-to-1mbps-to-350kbps",
-        json,
-      }, {
-        createShaper: (profile, target, options) => new lab.ShapingProxy(profile, target, {
-          ...options, listenHost: "127.0.0.1",
-        }),
-        launchDevice: (args) => launches.push(["launch", ...args]),
-        restoreDevice: (args) => launches.push(["restore", ...args]),
-        waitForAcceptance: async (shaper) => {
-          shaper.captureClientLog({
-            event: "playback_probe", file_id: 42, snapshot: { runway: 4.75 },
-          });
-          return { reason: "test-complete", event: null };
-        },
-      });
+function deviceRunFixture(directory) {
+  const canonical = "F7CEB1BB-0000-0000-0000-000000000001";
+  const diagnosticScope = "file:///private/containers/DIAG/Diagnostic.app/";
+  const productionScope = "file:///private/containers/PROD/plurx.app/";
+  const rows = new Map([[10, { processIdentifier: 10, executable: `${productionScope}plurx` }]]);
+  const calls = [];
+  const state = { rows, calls, canonical, diagnosticScope, productionScope };
+  const reply = (fields) => ({ result: { deviceIdentifier: canonical, ...fields } });
+  const command = async (args) => {
+    calls.push([...args]);
+    if (args[1] === "info" && args[2] === "apps") return reply({ apps: [
+      { bundleIdentifier: "tv.plurx.diagnostic", url: diagnosticScope },
+      { bundleIdentifier: "tv.plurx.app", url: productionScope },
+    ] });
+    if (args[1] === "info" && args[2] === "processes") return reply({ runningProcesses: [...rows.values()] });
+    if (args[2] === "terminate") {
+      if (state.terminateError) throw new Error("termination unavailable");
+      if (!state.noopTerminate) rows.delete(Number(args[args.indexOf("--pid") + 1]));
+      return reply({});
+    }
+    if (args[2] === "launch") {
+      const bundle = args[args.indexOf("--") + 1];
+      if (bundle === "tv.plurx.app") return reply({ process: rows.get(10) });
+      const process = { processIdentifier: 77, executable: `${diagnosticScope}Diagnostic` };
+      rows.set(77, process);
+      if (state.launchError) throw new Error("malformed launch JSON after spawn");
+      if (state.launchTimeout) return await new Promise(() => {});
+      return reply({ process });
+    }
+    throw new Error(`unexpected fake command ${args.join(" ")}`);
+  };
+  const options = { device: "apple-tv-alias", target: "http://127.0.0.1:32400", public_host: "127.0.0.1",
+    file_id: "42", item_id: "17", bundle_id: "tv.plurx.diagnostic", network_profile: "8mbps-to-1mbps-to-350kbps",
+    json: path.join(directory, "device-evidence.json"), observe: "1" };
+  const dependencies = {
+    leaseDirectory: path.join(directory, "leases"), commandTimeoutMs: 100, cleanupTimeoutMs: 20,
+    deviceCommand: command,
+    createShaper: async () => ({
+      clientEvents: [], start: async () => "http://127.0.0.1:9999",
+      controlSnapshot: () => ({ device_calls: calls }),
+      close: async () => { state.closed = true; if (state.closeError) throw new Error("proxy close failed"); },
+    }),
+    preflightProxy: async () => {},
+    waitForAcceptance: async () => ({ reason: "test-complete" }),
+  };
+  return { options, dependencies, state, reply, command };
+}
 
-      assert.equal(launches.length, 2);
-      assert.ok(launches[0].includes("-plurx.origin"));
-      assert.ok(launches[0].includes("-plurx.acceptance.fileId"));
-      assert.ok(launches[0].includes("-plurx.acceptance.probe"));
-      assert.ok(launches[0].indexOf("--") < launches[0].indexOf("tv.plurx.app"),
-        "devicectl options must end before dash-prefixed app arguments");
-      assert.equal(launches[0].includes("-plurx.acceptance.height"), false,
-        "omitting --height must preserve the player's Auto quality selection");
-      assert.deepEqual(launches[1].slice(0, 5), [
-        "restore", "--device", "physical-device-17", "--terminate-existing", "--activate",
-      ]);
-      assert.deepEqual(launches[1].slice(5), ["--", "tv.plurx.app"]);
-      assert.equal(evidence.completion.reason, "test-complete");
-      const artifact = JSON.parse(await fsp.readFile(json, "utf8"));
-      assert.equal(artifact.client_events[0].snapshot.runway, 4.75);
-      assert.doesNotMatch(JSON.stringify(artifact), /control_token|authorization|bearer/i);
-    });
+async function failedDeviceRun(fixture) {
+  try { await lab.deviceRunCommand(fixture.options, fixture.dependencies); }
+  catch (error) { assert.ok(error.evidence, error.stack); return error.evidence; }
+  assert.fail("device-run should fail");
+}
+
+async function deviceLeases(fixture) {
+  return await fsp.readdir(fixture.dependencies.leaseDirectory).catch((error) => {
+    if (error.code === "ENOENT") return []; throw error;
+  });
+}
+
+test("device-run terminates only its owned PID before clean production restore and proxy close", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    const evidence = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    const { state } = fixture;
+    const launches = state.calls.filter((args) => args[2] === "launch");
+    assert.equal(state.rows.has(10), true, "another production PID must survive");
+    assert.equal(state.rows.has(77), false);
+    assert.equal(state.closed, true);
+    assert.equal(launches[0].includes("-plurx.acceptance.height"), false, "default quality remains Auto");
+    assert.equal(launches[0].includes("--terminate-existing"), false);
+    assert.deepEqual(launches[1], ["device", "process", "launch", "--device", state.canonical, "--activate", "--", "tv.plurx.app"]);
+    assert.ok(state.calls.findIndex((args) => args[2] === "terminate") < state.calls.indexOf(launches[1]));
+    assert.equal(evidence.cleanup.status, "verified-absent");
+    assert.equal(evidence.verdict, "passed");
+    assert.deepEqual(await deviceLeases(fixture), []);
+    assert.equal(JSON.parse(await fsp.readFile(fixture.options.json)).verdict, "passed");
   });
 });
 
-test("device-run passes an explicitly requested manual quality height", async () => {
+test("device-run isolated lab skips absent production app and retains owned cleanup and lease release", async () => {
   await withTempDir(async (directory) => {
-    await withOrigin(1, async (origin) => {
-      const launches = [];
-      await lab.deviceRunCommand({
-        device: "physical-device-17",
-        target: origin,
-        public_host: "127.0.0.1",
-        file_id: "42",
-        height: "480",
-        network_profile: "8mbps-to-1mbps-to-350kbps",
-        json: path.join(directory, "manual-quality-evidence.json"),
-      }, {
-        createShaper: (profile, target, options) => new lab.ShapingProxy(profile, target, {
-          ...options, listenHost: "127.0.0.1",
-        }),
-        launchDevice: (args) => launches.push(["launch", ...args]),
-        restoreDevice: (args) => launches.push(["restore", ...args]),
-        waitForAcceptance: async () => ({ reason: "test-complete", event: null }),
-      });
+    const fixture = deviceRunFixture(directory);
+    fixture.options.restore_policy = "isolated-lab";
+    fixture.state.rows.delete(10);
+    fixture.dependencies.deviceCommand = async (args) => {
+      const reply = await fixture.command(args);
+      if (args[1] === "info" && args[2] === "apps") {
+        reply.result.apps = reply.result.apps.filter((app) => app.bundleIdentifier !== "tv.plurx.app");
+      }
+      return reply;
+    };
+    fixture.dependencies.restoreDevice = async () => { throw new Error("production restore must not be requested"); };
+    fixture.dependencies.waitForAcceptance = async () => {
+      const receipt = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(receipt.restore_policy, "isolated-lab", "chosen policy is durable before observation");
+      assert.equal(receipt.owned_process.processIdentifier, 77);
+      assert.equal((await deviceLeases(fixture)).length, 1, "non-restoring run still owns a durable lease");
+      return { reason: "test-complete" };
+    };
+    const result = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    const launches = fixture.state.calls.filter((args) => args[2] === "launch");
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0][launches[0].indexOf("--") + 1], "tv.plurx.diagnostic");
+    assert.deepEqual(fixture.state.calls.filter((args) => args[2] === "terminate"), [
+      ["device", "process", "terminate", "--device", fixture.state.canonical, "--pid", "77"],
+    ]);
+    assert.equal(fixture.state.rows.has(77), false);
+    assert.equal(fixture.state.closed, true);
+    assert.equal(result.cleanup.owned_process_absent, true);
+    assert.equal(result.cleanup.status, "verified-absent");
+    assert.equal(result.cleanup.production_restored, false);
+    assert.equal(result.cleanup.production_restore_skipped, "explicit-isolated-lab-policy");
+    assert.equal(result.production_executable_scope, undefined);
+    assert.equal(result.verdict, "passed");
+    assert.deepEqual(await deviceLeases(fixture), []);
+    const durable = JSON.parse(await fsp.readFile(fixture.options.json));
+    assert.equal(durable.restore_policy, "isolated-lab");
+    assert.equal(durable.cleanup.owned_process_absent, true);
+    assert.equal(durable.cleanup.production_restored, false);
+  });
+});
 
-      const heightFlag = launches[0].indexOf("-plurx.acceptance.height");
-      assert.ok(heightFlag > 0);
-      assert.equal(launches[0][heightFlag + 1], "480");
-    });
+test("device-run isolated lab requires separate QA bundle and explicit known restore policy", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    for (const options of [
+      { ...fixture.options, restore_policy: "unknown" },
+      { ...fixture.options, restore_policy: true },
+      { ...fixture.options, restore_policy: "isolated-lab", bundle_id: undefined },
+      { ...fixture.options, restore_policy: "isolated-lab", bundle_id: "tv.plurx.app" },
+    ]) {
+      await assert.rejects(lab.deviceRunCommand(options, fixture.dependencies), /restore-policy/);
+    }
+    assert.equal(fixture.state.calls.length, 0, "invalid policy fails before device operations");
+    assert.equal(fixture.state.closed, undefined);
+  });
+});
+
+test("device-run awaits injected launch restore and shaper operations with explicit manual height", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.options.height = "480";
+    fixture.dependencies.launchDevice = async (args) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const receipt = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(receipt.launch_attempted, true, "intent must precede launch");
+      assert.equal(receipt.bundle_executable_scope, fixture.state.diagnosticScope);
+      assert.equal((await deviceLeases(fixture)).length, 1);
+      assert.equal(args[args.indexOf("-plurx.acceptance.height") + 1], "480");
+      return await fixture.command(["device", "process", "launch", ...args]);
+    };
+    fixture.dependencies.restoreDevice = async (args) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(fixture.state.rows.has(77), false);
+      assert.equal(fixture.state.closed, undefined, "proxy closes only after device cleanup/restore");
+      return await fixture.command(["device", "process", "launch", ...args]);
+    };
+    await lab.deviceRunCommand(fixture.options, fixture.dependencies);
   });
 });
 
 test("device-run refuses a dead proxy API before launching the physical app", async () => {
   await withTempDir(async (directory) => {
-    const launches = [];
-    await assert.rejects(lab.deviceRunCommand({
-      device: "physical-device-17",
-      target: "http://127.0.0.1:1",
-      public_host: "127.0.0.1",
-      file_id: "42",
-      network_profile: "8mbps-to-1mbps",
-      json: path.join(directory, "unreachable.json"),
-    }, {
-      createShaper: (profile, target, options) => new lab.ShapingProxy(profile, target, {
-        ...options, listenHost: "127.0.0.1",
-      }),
-      launchDevice: (args) => launches.push(args),
-    }), /device proxy API preflight/);
-    assert.deepEqual(launches, []);
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.preflightProxy = async () => { throw new Error("device proxy API preflight failed"); };
+    const result = await failedDeviceRun(fixture);
+    assert.match(result.errors[0].message, /device proxy API preflight/);
+    assert.equal(fixture.state.calls.length, 0);
+    assert.equal(fixture.state.closed, true);
   });
+});
+
+test("device-run refuses leave-running and unwritable evidence before device mutation", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    await assert.rejects(lab.deviceRunCommand({ ...fixture.options, leave_running: true }, fixture.dependencies), /leave-running/);
+    await fsp.writeFile(fixture.options.json, "existing evidence");
+    const result = await failedDeviceRun(fixture);
+    assert.equal(result.launch_attempted, false);
+    assert.equal(fixture.state.calls.length, 0);
+    assert.equal(await fsp.readFile(fixture.options.json, "utf8"), "existing evidence");
+  });
+});
+
+test("device-run records observation and cleanup errors and retains unresolved lease", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.waitForAcceptance = async () => { throw new Error("observation failed"); };
+    fixture.state.terminateError = true;
+    const result = await failedDeviceRun(fixture);
+    assert.match(result.errors.map((entry) => entry.message).join(" "), /observation failed.*termination unavailable.*remains/);
+    assert.equal(result.cleanup.status, "unresolved");
+    assert.equal(fixture.state.rows.has(77), true);
+    assert.equal(fixture.state.calls.filter((args) => args[2] === "launch").length, 1, "unresolved cleanup must not restore");
+    assert.equal((await deviceLeases(fixture)).length, 1);
+    assert.equal(fixture.state.closed, true);
+  });
+});
+
+for (const mode of ["launchError", "launchTimeout"]) {
+  test(`device-run ${mode} after spawn retains intent without guessing or killing a PID`, async () => {
+    await withTempDir(async (directory) => {
+      const fixture = deviceRunFixture(directory);
+      fixture.state[mode] = true;
+      const result = await failedDeviceRun(fixture);
+      assert.equal(result.owned_process, null);
+      assert.equal(result.cleanup.status, "unresolved");
+      assert.equal(fixture.state.rows.has(77), true);
+      assert.equal(fixture.state.calls.some((args) => args[2] === "terminate"), false);
+      assert.equal((await deviceLeases(fixture)).length, 1);
+      const receipt = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(receipt.launch_attempted, true);
+      assert.equal(receipt.verdict, "failed");
+    });
+  });
+}
+
+test("device-run no-op termination fails and retains lease", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.state.noopTerminate = true;
+    const result = await failedDeviceRun(fixture);
+    assert.equal(result.cleanup.status, "unresolved");
+    assert.equal((await deviceLeases(fixture)).length, 1);
+  });
+});
+
+test("device-run already absent PID skips termination but restores production", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.waitForAcceptance = async () => {
+      fixture.state.rows.delete(77); return { reason: "app-exited" };
+    };
+    const result = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    assert.equal(result.cleanup.production_restored, true);
+    assert.equal(fixture.state.calls.some((args) => args[2] === "terminate"), false);
+  });
+});
+
+test("device-run PID reuse with another executable refuses kill and retains lease", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.waitForAcceptance = async () => {
+      fixture.state.rows.set(77, { processIdentifier: 77, executable: `${fixture.state.productionScope}plurx` });
+      return { reason: "pid-reused" };
+    };
+    const result = await failedDeviceRun(fixture);
+    assert.match(result.errors[0].message, /different executable/);
+    assert.equal(fixture.state.calls.some((args) => args[2] === "terminate"), false);
+    assert.equal((await deviceLeases(fixture)).length, 1);
+  });
+});
+
+test("device-run canonical lease excludes aliases and refuses stale ownership without mutation", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    let entered;
+    const ready = new Promise((resolve) => { entered = resolve; });
+    let finish;
+    fixture.dependencies.waitForAcceptance = async () => { entered(); return await new Promise((resolve) => { finish = resolve; }); };
+    const first = lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    await ready;
+    const other = deviceRunFixture(directory);
+    other.options.device = "another-alias-for-same-device";
+    other.options.json = path.join(directory, "other.json");
+    const result = await failedDeviceRun(other);
+    assert.match(result.errors[0].message, /lease already exists/);
+    assert.equal(other.state.calls.some((args) => args[2] === "launch"), false);
+    finish({ reason: "test-complete" });
+    await first;
+    await fsp.writeFile(path.join(fixture.dependencies.leaseDirectory,
+      require("node:crypto").createHash("sha256").update(fixture.state.canonical).digest("hex") + ".json"), "stale or truncated");
+    other.options.json = path.join(directory, "stale.json");
+    const stale = await failedDeviceRun(other);
+    assert.match(stale.errors[0].message, /manual reconciliation/);
+    assert.equal((await deviceLeases(fixture)).length, 1);
+  });
+});
+
+test("device-run never takes ownership of a preexisting target app", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.state.rows.set(99, { processIdentifier: 99, executable: `${fixture.state.diagnosticScope}Diagnostic` });
+    const result = await failedDeviceRun(fixture);
+    assert.match(result.errors[0].message, /already running/);
+    assert.equal(fixture.state.rows.has(99), true);
+    assert.equal(fixture.state.calls.some((args) => args[2] === "launch" || args[2] === "terminate"), false);
+    assert.deepEqual(await deviceLeases(fixture), []);
+  });
+});
+
+test("device-run artifact and proxy failures cannot bypass owned process cleanup", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.state.closeError = true;
+    fixture.dependencies.writeReceipt = async (filename, evidence) => {
+      if (evidence.owned_process) throw new Error("artifact unavailable");
+      await lab.durableDeviceReceipt(filename, evidence);
+    };
+    const result = await failedDeviceRun(fixture);
+    assert.equal(fixture.state.rows.has(77), false);
+    assert.equal(result.cleanup.owned_process_absent, true);
+    assert.match(result.errors.map((entry) => entry.message).join(" "), /artifact unavailable.*proxy close failed.*artifact unavailable/);
+    assert.equal((await deviceLeases(fixture)).length, 1, "retain durable audit when final artifact cannot be written");
+    const lease = JSON.parse(await fsp.readFile(result.lease_path));
+    assert.equal(lease.cleanup.status, "verified-absent");
+    assert.equal(lease.verdict, "failed");
+  });
+});
+
+async function assertDeviceRunChildSignal(signal) {
+  await withTempDir(async (directory) => {
+    const fixtureSource = `const fs = require('node:fs'); const fsp = fs.promises; const path = require('node:path');
+const lab = require(${JSON.stringify(require.resolve("../../scripts/playback-lab"))});
+${deviceRunFixture.toString()}
+const fixture = deviceRunFixture(${JSON.stringify(directory)});
+fixture.dependencies.waitForAcceptance = async () => { process.stdout.write('READY\\n'); return await new Promise(() => {}); };
+const command = fixture.command;
+fixture.dependencies.deviceCommand = async (args) => {
+ if (args[2] === 'terminate') { process.stdout.write('CLEANUP\\n'); await new Promise(r => setTimeout(r, 80)); }
+ return await command(args);
+};
+lab.deviceRunCommand(fixture.options, fixture.dependencies).then(() => {process.exitCode=2;}).catch(async error => {
+ await fsp.writeFile(path.join(${JSON.stringify(directory)}, 'child-state.json'), JSON.stringify({rows:[...fixture.state.rows.keys()],closed:fixture.state.closed,evidence:error.evidence}));
+ process.exitCode=1;
+});`;
+    const child = spawn(process.execPath, ["-e", fixtureSource], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    let stderr = "";
+    let sent = false;
+    let repeated = false;
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      if (!sent && output.includes("READY")) { sent = true; child.kill(signal); }
+      if (!repeated && output.includes("CLEANUP")) { repeated = true; child.kill(signal); }
+    });
+    const status = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`signal fixture hung: ${output} ${stderr}`)); }, 5000);
+      child.on("error", (error) => { clearTimeout(timer); reject(error); });
+      child.on("close", (code, exitSignal) => { clearTimeout(timer); resolve({ code, exitSignal }); });
+    });
+    assert.deepEqual(status, { code: 1, exitSignal: null }, stderr);
+    const state = JSON.parse(await fsp.readFile(path.join(directory, "child-state.json")));
+    assert.deepEqual(state.rows, [10]);
+    assert.equal(state.closed, true);
+    assert.equal(state.evidence.cleanup.production_restored, true);
+    assert.deepEqual(state.evidence.signals, [signal, signal]);
+    assert.equal(JSON.parse(await fsp.readFile(path.join(directory, "device-evidence.json"))).verdict, "failed");
+    assert.deepEqual(await fsp.readdir(path.join(directory, "leases")), []);
+  });
+}
+
+test("device-run real child SIGINT and repeated signals await cleanup",
+  async () => await assertDeviceRunChildSignal("SIGINT"));
+
+test("device-run real child SIGTERM and repeated signals await cleanup",
+  async () => await assertDeviceRunChildSignal("SIGTERM"));
+
+test("device-run normalizes devicectl four-slash launch URLs and UUID casing", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.deviceCommand = async (args) => {
+      const reply = await fixture.command(args);
+      reply.result.deviceIdentifier = reply.result.deviceIdentifier.toLowerCase();
+      if (reply.result.process) reply.result.process = { ...reply.result.process,
+        executable: reply.result.process.executable.replace("file:///", "file:////") };
+      return reply;
+    };
+    const result = await lab.deviceRunCommand(fixture.options, fixture.dependencies);
+    assert.equal(result.owned_process.executable, `${fixture.state.diagnosticScope}Diagnostic`);
+  });
+});
+
+test("device-run failed production restore fails run after confirmed diagnostic absence", async () => {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    fixture.dependencies.restoreDevice = async () => undefined;
+    const result = await failedDeviceRun(fixture);
+    assert.equal(result.cleanup.owned_process_absent, true);
+    assert.equal(result.cleanup.production_restored, undefined);
+    assert.equal(result.errors[0].phase, "restore");
+    assert.equal(fixture.state.rows.has(77), false);
+    assert.equal(fixture.state.closed, true);
+    assert.deepEqual(await deviceLeases(fixture), []);
+  });
+});
+
+async function assertDeviceRunFinalizationSignal(phase, signal) {
+  await withTempDir(async (directory) => {
+    const fixture = deviceRunFixture(directory);
+    const originalUnlink = fsp.unlink;
+    const originalListeners = process.listenerCount(signal);
+    let emitted = false;
+    if (phase === "final receipt") {
+      fixture.dependencies.writeReceipt = async (filename, evidence) => {
+        // Reproduce a signal after the successful verdict was serialized.
+        await lab.durableDeviceReceipt(filename, evidence);
+        if (!emitted && evidence.verdict === "passed") {
+          emitted = true;
+          process.emit(signal);
+        }
+      };
+    } else {
+      fsp.unlink = async (filename, ...args) => {
+        await originalUnlink.call(fsp, filename, ...args);
+        if (!emitted && path.dirname(filename) === fixture.dependencies.leaseDirectory
+            && filename.endsWith(".json")) {
+          emitted = true;
+          process.emit(signal);
+        }
+      };
+    }
+    try {
+      const result = await failedDeviceRun(fixture);
+      assert.equal(emitted, true, "must exercise the requested finalization await");
+      assert.equal(result.verdict, "failed");
+      assert.deepEqual(result.signals, [signal]);
+      assert.ok(result.errors.some((entry) => entry.phase === "signal" && entry.message.includes(signal)));
+      const artifact = JSON.parse(await fsp.readFile(fixture.options.json));
+      assert.equal(artifact.verdict, "failed", "durable receipt must agree with returned failure");
+      assert.deepEqual(artifact.signals, [signal]);
+      assert.deepEqual(artifact.errors, result.errors);
+      assert.equal(artifact.cleanup.owned_process_absent, true);
+      assert.equal(fixture.state.rows.has(77), false);
+      assert.equal(fixture.state.closed, true);
+      assert.deepEqual(await deviceLeases(fixture), [], "verified-absent lease is not recreated");
+      assert.equal(process.listenerCount(signal), originalListeners);
+    } finally { fsp.unlink = originalUnlink; }
+  });
+}
+
+test("device-run SIGINT during final receipt fails and durably reconciles the final verdict",
+  async () => await assertDeviceRunFinalizationSignal("final receipt", "SIGINT"));
+
+test("device-run SIGTERM during final receipt fails and durably reconciles the final verdict",
+  async () => await assertDeviceRunFinalizationSignal("final receipt", "SIGTERM"));
+
+test("device-run SIGINT during lease release fails and durably reconciles the final verdict",
+  async () => await assertDeviceRunFinalizationSignal("lease release", "SIGINT"));
+
+test("device-run SIGTERM during lease release fails and durably reconciles the final verdict",
+  async () => await assertDeviceRunFinalizationSignal("lease release", "SIGTERM"));
+
+test("device command bounds and reaps a stalled host child without device calls", async () => {
+  let child;
+  await assert.rejects(lab.physicalAppleDeviceCommand(["device", "info", "processes"], {
+    timeoutMs: 30,
+    spawnCommand: () => {
+      child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: ["ignore", "pipe", "pipe"] });
+      return child;
+    },
+  }), /timed out/);
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
 });
 
 test("concurrent reservations are rescheduled at the cliff instead of bursting", async () => {
@@ -2158,6 +2812,37 @@ test("VOD readiness waits for the exact file built by an indexing pass", () => {
   }, 42), false);
 });
 
+test("actual Auto pressure uses the profile's own links, never rates derived from the costs", () => {
+  const qualification = require("../../scripts/continuous-quality-qualification");
+  const catalog = [{route: "encode", height: 720, peak_bps: 6128000},
+    {route: "encode", height: 1080, peak_bps: 12128000},
+    {route: "copy", height: 1080, peak_bps: 999999999}];
+  const profile = qualification.autoLinkProfile(catalog);
+  assert.deepEqual(profile.stages, [100000, 10000, 25000, 10000, 25000]);
+  // A 4x cost error moves no stage; it is refused, because 1080p could then
+  // never recover on the 25 Mb/s link.
+  assert.throws(() => qualification.autoLinkProfile(catalog.map(row =>
+    ({...row, peak_bps: row.peak_bps * 4}))), /upgrade margin/);
+  assert.throws(() => qualification.autoLinkProfile([]), /two costed encoded rungs/);
+  assert.throws(() => qualification.autoLinkProfile([
+    {route: "encode", height: 720, peak_bps: 1000000},
+    {route: "encode", height: 1080, peak_bps: 1548000}]), /applies no pressure/);
+});
+
+test("encoded-only qualification does not wait for an impossible copy fragment index", () => {
+  const files = new Map([
+    ["encoded.mp4", {id: 1, video_codec: "mpeg4"}],
+    ["avc.mp4", {id: 2, video_codec: "h264"}],
+    ["hevc.mp4", {id: 3, video_codec: "hevc"}],
+    ["unknown.mp4", {id: 4}],
+  ]);
+  assert.deepEqual(lab.fragmentIndexTargets(files, ["encoded.mp4"]), []);
+  assert.deepEqual(lab.fragmentIndexTargets(files, ["encoded.mp4", "avc.mp4", "hevc.mp4"])
+    .map(file => file.id), [2, 3]);
+  assert.throws(() => lab.fragmentIndexTargets(files, ["unknown.mp4"]), /video codec/);
+  assert.throws(() => lab.fragmentIndexTargets(files, ["missing.mp4"]), /scan missed/);
+});
+
 test("VOD acceptance pauses startup indexing until its fixture scan is complete", () => {
   const source = fs.readFileSync(LAB, "utf8");
   const start = source.indexOf("async function startServer");
@@ -2417,6 +3102,7 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   let lastFrame = null;
   let maximumGapMs = 0;
   let switchPolls = null;
+  const targetFrames = [];
   const presentFrame = () => {
     frames += 1;
     frameSequence += 1;
@@ -2436,14 +3122,22 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   const state = () => {
     sampledAt += 50;
     position += 0.05;
-    if (switchPolls === null && frames === 0) presentFrame();
+    // Playback advances before each request: the lab waits for a fresh
+    // outgoing frame before it issues one.
+    if (switchPolls === null) presentFrame();
     if (switchPolls !== null) {
       switchPolls += 1;
       renditionPolls = switchPolls;
       if (switchPolls === 1) presentFrame(); // one late frame from the outgoing rendition
       if (switchPolls === 2) committed = selected;
-      if (switchPolls === 4) presentFrame(); // first frame after target state was observed
-      if (switchPolls >= 5) maximumGapMs = Math.max(maximumGapMs, 150);
+      if (switchPolls === 4) { // first frame after target state was observed
+        presentFrame();
+        targetFrames.push(frameSequence);
+      }
+      if (switchPolls >= 5) {
+        maximumGapMs = Math.max(maximumGapMs, 150);
+        presentFrame(); // the target rendition keeps playing
+      }
     }
     const down = committed === "720";
     return {
@@ -2507,7 +3201,10 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   assert.equal(operation.changes.length, 2);
   assert.deepEqual(operation.changes.map((change) => change.actual_method), ["transcode", "remux"]);
   assert.deepEqual(operation.changes.map((change) => change.decoded_height), [720, 1080]);
-  assert.deepEqual(operation.changes.map((change) => change.committed_frame_sequence), [4, 7]);
+  // Frames keep arriving before and after each switch, so the committed
+  // frame is named by the poll that produced it, not by a count.
+  assert.equal(targetFrames.length, 2);
+  assert.deepEqual(operation.changes.map((change) => change.committed_frame_sequence), targetFrames);
   assert.ok(renditionPolls >= 4,
     "the old frame and the target-state poll were not accepted without a later target frame");
   assert.ok(
@@ -2594,6 +3291,61 @@ test("quality-cycle scoring rejects missing runway and a single excessive gap", 
   assert.match(score.errors.join("; "), /no measured runway/);
   assert.match(score.errors.join("; "), /video-gap p95 150 ms/);
   assert.match(score.errors.join("; "), /video-gap max 300 ms/);
+});
+
+test("continuous switch evidence refuses replacement, future removal and stale presentation", () => {
+  const before = { family_id: "family", closed: false, element: 1, hls: 2, media_source: 3,
+    buffers: ["video", "audio"].map((type, index) => ({ type, identity: index + 4, removal_sequence: 0, completed_removals: [] })) };
+  const after = { ...before, wanted_candidate: "target", presented: { candidate_id: "target", height: 720 },
+    transaction: { first_presented_tick: 50, first_presented_at_ms: 1100,
+      appended: [{ from_tick: 40, through_tick: 60, timescale: 24 }] } };
+  assert.deepEqual(lab.continuousSwitchErrors(before, after, 1000, 720), []);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, hls: 99 }, 1000, 720).join(";"), /hls.*replaced/);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, transaction: { ...after.transaction,
+    first_presented_at_ms: 900 } }, 1000, 720).join(";"), /fresh presented receipt/);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, transaction: { ...after.transaction,
+    first_presented_tick: 60 } }, 1000, 720).join(";"), /actual appended interval/);
+  const removed = { ...after, buffers: after.buffers.map((row) => row.type === "audio" ? { ...row,
+    removal_sequence: 1, completed_removals: [{ sequence: 1, from: 20, through: 22, playhead: 10 }] } : row) };
+  assert.match(lab.continuousSwitchErrors(before, removed, 1000, 720).join(";"), /audio removed media ahead/);
+  removed.buffers[1].completed_removals[0].through = 9;
+  assert.deepEqual(lab.continuousSwitchErrors(before, removed, 1000, 720), [], "ordinary back-buffer eviction is allowed");
+  removed.buffers[1].completed_removals = [];
+  assert.match(lab.continuousSwitchErrors(before, removed, 1000, 720).join(";"), /evidence was truncated/);
+  assert.match(lab.continuousSwitchErrors(before, after, undefined, 720).join(";"), /fresh presented receipt/);
+});
+
+test("continuous snapshots count only completed removals and keep weak transport identities", () => {
+  const listeners = {};
+  const buffer = { updating: false, remove() {}, addEventListener(name, fn) { listeners[name] = fn; } };
+  const video = { currentTime: 20 };
+  const player = { hls: { bufferController: { mediaSource: {}, tracks: { audio: { buffer } } } } };
+  const objects = { next: 0, ids: new WeakMap() };
+  const before = lab.continuousTransportSnapshot(player, video, objects);
+  buffer.remove(0, 10);
+  assert.equal(lab.continuousTransportSnapshot(player, video, objects).buffers[0].removal_sequence, 0);
+  listeners.updateend();
+  const completed = lab.continuousTransportSnapshot(player, video, objects);
+  assert.equal(completed.element, before.element);
+  assert.equal(completed.hls, before.hls);
+  assert.equal(completed.media_source, before.media_source);
+  assert.equal(completed.buffers[0].removal_sequence, 1);
+  buffer.remove(10, 12); listeners.error(); listeners.updateend();
+  assert.equal(lab.continuousTransportSnapshot(player, video, objects).buffers[0].removal_sequence, 1);
+  player.hls.bufferController.tracks.audio.buffer = { ...buffer, addEventListener() {} };
+  assert.notEqual(lab.continuousTransportSnapshot(player, video, objects).buffers[0].identity, before.buffers[0].identity);
+});
+
+test("the continuous suite requires actual production proof for twenty future-load switches", () => {
+  const manifest = lab.loadManifest();
+  const [testCase] = lab.expandCases(manifest, "continuous");
+  assert.equal(testCase.require_continuous, true);
+  assert.equal(testCase.require_vod, true);
+  assert.equal(testCase.repetitions * testCase.switches.length, 20);
+  assert.equal(manifest.suites.continuous.requires_vod, true);
+  const fixture = manifest.fixtures.find((row) => row.id === testCase.fixture);
+  assert.equal(fixture.opt_in, true);
+  assert.ok(fixture.duration_seconds > 20 * 60, "the normal sixty-second frontier must fit without shortening playback buffers");
 });
 
 test("the VOD suite makes native seeking and resume invariants executable", () => {
@@ -2908,11 +3660,59 @@ test("the isolated playback server reserves distinct HTTP, Raft, and API ports",
   assert.doesNotMatch(config, /3240[12]/);
 });
 
-runAll().then(() => {
+runAll().then(executed => {
   if (failures.length) {
     process.stderr.write(`\n${failures.length} shaping contract failure(s)\n`);
     process.exitCode = 1;
     return;
   }
-  process.stdout.write(`\n${pending.length} shaping contracts hold\n`);
+  process.stdout.write(`\n${executed} shaping contracts hold\n`);
+});
+
+
+test("VOD attachment census survives console eviction and counts same-session replacement",()=>{
+ const event={event:"session_start",encoder:"vod",file_id:"9007199254740999",
+  at_unix_ms:2000,session_id:"redacted",extra:'{"presentation":"vod"}'};
+ assert.equal(lab.vodAttachmentCensus([event],event.file_id,1000),1);
+ assert.equal(lab.vodAttachmentCensus([event,{...event,at_unix_ms:3000}],event.file_id,1000),2);
+ assert.equal(lab.vodAttachmentCensus([event,{...event,file_id:"9007199254740998"},
+  {...event,at_unix_ms:999},{...event,encoder:"legacy"}],event.file_id,1000),1);
+ assert.throws(()=>lab.vodAttachmentCensus(Array(2000).fill(event),event.file_id,1000),/truncated/);
+ assert.throws(()=>lab.vodAttachmentCensus(null,event.file_id,1000),/unavailable/);
+});
+
+
+test("sampled removal evidence survives a long Auto window and refuses observation gaps", () => {
+  const listeners = new Map();
+  const makeBuffer = () => {
+    const handlers = {};
+    const buffer = { updating: false, remove() {}, addEventListener(name, fn) { handlers[name] = fn; } };
+    listeners.set(buffer, handlers); return buffer;
+  };
+  const video = { currentTime: 1000 };
+  const tracks = { video: { buffer: makeBuffer() }, audio: { buffer: makeBuffer() } };
+  const player = { hls: { bufferController: { mediaSource: {}, tracks } } };
+  const objects = { next: 0, ids: new WeakMap() };
+  const snapshot = () => ({ ...lab.continuousTransportSnapshot(player, video, objects),
+    family_id: "family", closed: false, wanted_candidate: "target", presented: { candidate_id: "target", height: 720 },
+    transaction: { first_presented_tick: 50, first_presented_at_ms: 1100,
+      appended: [{ from_tick: 40, through_tick: 60, timescale: 24 }] } });
+  const before = snapshot(), evidence = lab.continuousRemovalEvidence(before);
+  for (let index = 0; index < 300; index++) {
+    for (const { buffer } of Object.values(tracks)) { buffer.remove(index, index + 1); listeners.get(buffer).updateend(); }
+    if (index % 16 === 15) lab.observeContinuousRemovals(evidence, snapshot());
+  }
+  const after = snapshot();lab.observeContinuousRemovals(evidence, after);
+  assert.equal(after.buffers[0].completed_removals.length, 64, "the browser journal stays bounded");
+  assert.match(lab.continuousSwitchErrors(before, after, 1000, 720).join(";"), /truncated/);
+  assert.deepEqual(lab.continuousSwitchErrors(before, after, 1000, 720, evidence), []);
+  assert.equal(evidence.buffers[0].completed_count, 300);
+  const missed = lab.continuousRemovalEvidence(before);lab.observeContinuousRemovals(missed, after);
+  assert.match(lab.continuousSwitchErrors(before, after, 1000, 720, missed).join(";"), /truncated/);
+  const next = lab.continuousRemovalEvidence(after);
+  tracks.audio.buffer.remove(1001, 1002);listeners.get(tracks.audio.buffer).updateend();
+  const futureRemoval = snapshot();lab.observeContinuousRemovals(next, futureRemoval);
+  assert.match(lab.continuousSwitchErrors(after, futureRemoval, 1000, 720, next).join(";"), /audio removed media ahead/);
+  tracks.video.buffer = makeBuffer();const replaced = snapshot();lab.observeContinuousRemovals(next, replaced);
+  assert.match(lab.continuousSwitchErrors(after, replaced, 1000, 720, next).join(";"), /buffer.*replaced/);
 });

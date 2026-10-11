@@ -1,6 +1,7 @@
 use super::*;
 
-/// Store-free, lock-free projection used by the Prometheus handler.
+/// Store-free projection used by the Prometheus handler. Compatibility uses
+/// one short immutable-report clone; this never probes while serving metrics.
 #[derive(Clone)]
 pub(crate) struct TranscodeMetrics {
     pub(super) active_sessions: Arc<AtomicUsize>,
@@ -8,6 +9,8 @@ pub(crate) struct TranscodeMetrics {
     pub(super) decode_facts: Arc<crate::decode_facts::DecodeFactMetrics>,
     pub(super) caps: EncoderCaps,
     pub(super) codec_qualification: Arc<CodecQualificationMetrics>,
+    pub(super) macos_video_probe: Arc<crate::macos_video::MacosVideoProbe>,
+    pub(super) macos_video_processing_enabled: Arc<AtomicBool>,
 }
 
 pub(super) struct CodecQualificationMetrics {
@@ -53,6 +56,16 @@ impl CodecQualificationMetrics {
             Pipeline::DoviPassthrough => 5,
             Pipeline::Hdr10Passthrough => 6,
             Pipeline::Cpu => 7,
+            Pipeline::LibplaceboVaapi => 8,
+            Pipeline::TonemapCuda => 9,
+            Pipeline::VtScaleSdr => 10,
+            Pipeline::VtScaleHdr10 => 12,
+            Pipeline::DoviStrictTonemapx => 13,
+            Pipeline::VtDoviTonemapx => 14,
+            Pipeline::VtDoviMetal => 15,
+            Pipeline::DoviMetal => 16,
+            Pipeline::VtToneMapMetal => 11,
+            Pipeline::LibplaceboSoftware => 17,
         }
     }
 
@@ -155,6 +168,76 @@ impl TranscodeMetrics {
     }
 
     pub(crate) fn codec_qualification_prometheus(&self) -> String {
-        self.codec_qualification.prometheus(&self.caps)
+        let mut out = self.codec_qualification.prometheus(&self.caps);
+        out.push_str("# HELP plurx_macos_video_processing_enabled Published operator choice for new plans; compatibility does not override it.\n# TYPE plurx_macos_video_processing_enabled gauge\n");
+        out.push_str(&format!(
+            "plurx_macos_video_processing_enabled {}\n",
+            u8::from(self.macos_video_processing_enabled.load(Acquire))
+        ));
+        out.push_str("# HELP plurx_macos_video_graph_available Node-local bounded compatibility observation, not qualification or visual approval.\n# TYPE plurx_macos_video_graph_available gauge\n");
+        let report = self.macos_video_probe.snapshot();
+        for (graph, observation) in [
+            ("vt_scale_sdr", &report.sdr_scale),
+            ("vt_tonemap_metal", &report.hdr10_metal),
+        ] {
+            let available = observation.availability
+                == plurx_core::transcode::MacosProcessingAvailability::Available;
+            out.push_str(&format!(
+                "plurx_macos_video_graph_available{{graph=\"{graph}\",reason=\"{}\"}} {}\n",
+                observation.reason.as_str(),
+                u8::from(available)
+            ));
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod pipeline_metric_tests {
+    use super::*;
+
+    #[test]
+    fn software_vulkan_metric_appends_without_changing_existing_pipeline_slots() {
+        let expected = [
+            Pipeline::VppQsv,
+            Pipeline::TonemapVaapi,
+            Pipeline::Libplacebo,
+            Pipeline::TonemapOpencl,
+            Pipeline::DoviTonemapx,
+            Pipeline::DoviPassthrough,
+            Pipeline::Hdr10Passthrough,
+            Pipeline::Cpu,
+            Pipeline::LibplaceboVaapi,
+            Pipeline::TonemapCuda,
+            Pipeline::VtScaleSdr,
+            Pipeline::VtToneMapMetal,
+            Pipeline::VtScaleHdr10,
+            Pipeline::DoviStrictTonemapx,
+            Pipeline::VtDoviTonemapx,
+            Pipeline::VtDoviMetal,
+            Pipeline::DoviMetal,
+            Pipeline::LibplaceboSoftware,
+        ];
+        assert_eq!(QUALIFICATION_PIPELINES, expected);
+        let metrics = CodecQualificationMetrics::default();
+        assert_eq!(metrics.pipeline_sessions.len(), expected.len());
+        for (slot, pipeline) in expected.into_iter().enumerate() {
+            assert_eq!(CodecQualificationMetrics::pipeline_slot(pipeline), slot);
+            for _ in 0..=slot {
+                metrics.record_pipeline(pipeline);
+            }
+        }
+        let output = metrics.prometheus(&EncoderCaps::default());
+        for (slot, pipeline) in expected.into_iter().enumerate() {
+            assert_eq!(
+                metrics.pipeline_sessions[slot].load(Relaxed),
+                (slot + 1) as u64
+            );
+            assert!(output.contains(&format!(
+                "plurx_tone_map_pipeline_sessions_total{{pipeline=\"{}\"}} {}\n",
+                pipeline.name(),
+                slot + 1
+            )));
+        }
     }
 }

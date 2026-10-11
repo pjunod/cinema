@@ -69,6 +69,10 @@ async function stopLiveTv(){
   // fullscreen element before the browser clears fullscreenElement can strand
   // Chromium in fullscreen indefinitely. Keep those operations concurrent,
   // then dismantle the media tree only after presentation state settles.
+  // Silence the local picture now without removing the fullscreen element.
+  // Fullscreen teardown and remote tuner release may both remain pending.
+  const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("live-tv-video"));
+  if(video) video.pause();
   const exiting=exitLiveTvPresentation();
   const stopping=LIVE_TV_LEASE.stop().then(value=>({ok:true,value}),error=>({ok:false,error}));
   await exiting;
@@ -171,8 +175,9 @@ async function liveTvAttachSession(info,index,serial,generation){
     video.onerror=()=>failed({code:video.error&&[3,4].includes(video.error.code)?"codec_unsupported":"stream_failed"},
       video.error&&[3,4].includes(video.error.code)?{failed_video:true,failed_audio:true,failed_container:true}:null);
     video.onended=()=>failed({code:"stream_failed"});
+    liveTvCaptionsAttaching();
     if(window.Hls&&Hls.isSupported()){
-      const hls=new Hls({liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,maxBufferLength:12,maxMaxBufferLength:18,backBufferLength:0});
+      const hls=new Hls({preferManagedMediaSource:false,liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,maxBufferLength:12,maxMaxBufferLength:18,backBufferLength:0});
       LIVE_TV.hls=hls;
       hls.on(Hls.Events.MANIFEST_PARSED,()=>{ liveTvRefreshCaptionControls(); play(); });
       hls.on(Hls.Events.ERROR,(_,data)=>{ if(data.fatal) failed({code:data.type===Hls.ErrorTypes.MEDIA_ERROR?"codec_unsupported":"stream_failed"},

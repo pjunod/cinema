@@ -1,0 +1,13 @@
+{
+  "case": "live-action-bf0",
+  "apk_sha256": "6ce7730195dd47447bc691008a8a012f3de7e3dec05195395bb4efad364216b2",
+  "started_unix": 1791515492.86099,
+  "scope": "Selective quiet-window retry; unchanged 250ms acceptance criterion; prior three successful cases retained.",
+  "prior_receipt_absence_verified": true,
+  "result": "pass",
+  "failure": null,
+  "finished_unix": 1791515534.465887,
+  "owned_emulator_reaped": true,
+  "harness_sha256": "37bd365d04f1d0bacb022d7951d6ec59a89d67c2440bdd073d549ae29364aae7",
+  "receipt_sha256": "6cc4c38f672b421d94965326bf215ba4adb955800dcdea84eb6ce63d4744d3a1"
+}

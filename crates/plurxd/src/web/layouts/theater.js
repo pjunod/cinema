@@ -69,6 +69,7 @@ function theaterNavItems(active){
   // library. Home means the home page.
   const homeOn = active==="home" && (hash==="#/"||hash==="#"||hash==="");
   const items=[{tab:"home", href:"#/", label:"Home", on:homeOn},
+               {tab:"shared", href:"#/shared", label:"Shared libraries", on:active==="shared"},
                {tab:"live-tv", href:"#/live-tv", label:"Live TV", on:active==="live-tv"},
                {tab:"recordings", href:"#/recordings", label:"Recordings", on:active==="recordings"},
                {tab:"library-channels", href:"#/library-channels", label:"Library channels", on:active==="library-channels"},
@@ -77,12 +78,17 @@ function theaterNavItems(active){
   // non-admin sees no Settings anywhere in theater's chrome. (The account
   // popover applies the same test to its own entry.)
   if(ME&&ME.is_admin) items.push({tab:"settings", href:"#/settings", label:"Settings", on:active==="settings"});
-  return items;
+  // A section whose server switch is off is not a tab (featureVisible()).
+  return items.filter(i=>featureVisible(i.tab));
 }
 function theaterNavHtml(active){
   return theaterNavItems(active).map(i=>
     `<a href="${i.href}" data-tab="${i.tab}" class="${i.on?"on":""}"${i.on?' aria-current="page"':""}>${esc(i.label)}</a>`
   ).join("");
+}
+// Both copies — the header row and the phone pills — repaint from the one list.
+function theaterNavChanged(active){
+  for(const nav of document.querySelectorAll(".th-nav,.th-pills")) nav.innerHTML=theaterNavHtml(active);
 }
 function theaterChrome(active, inner){
   const searchFocus=captureSearchFocus();
@@ -97,7 +103,7 @@ function theaterChrome(active, inner){
      <span class="spacer"></span>
      <button class="dvr-global" id="dvr-global" onclick="location.hash='#/activity'" aria-label="Recording status"></button>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
-     <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
+     <input class="search" id="q" type="search" name="q" autocomplete="off" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
      <div class="th-ctl">
        <div class="th-pop">
          <button class="ghost sm lookbtn" onclick="toggleLookMenu(event)" title="Appearance — layout, theme, light or dark, poster size" aria-label="Appearance" aria-haspopup="menu"><span class="tsw"></span><span class="lookword">Appearance</span></button>
@@ -115,7 +121,7 @@ function theaterChrome(active, inner){
    <main id="main">${inner}</main>
    <nav class="th-pills" aria-label="Sections">${theaterNavHtml(active)}</nav>`;
   const q=document.getElementById("q");
-  let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  wireSearchInput(q);
   restoreSearchFocus(searchFocus);
   theaterWireOnce();
   pollActivity();
@@ -301,15 +307,14 @@ function theaterLibraryShell(m){
   const sort=m.sort;
   const head=pageHead([{href:"#/",label:"Home"},{label:m.title}],m.title);
   const bar=`<div class="libbar th-chips">
+      ${libraryViewToggle()}
       <span class="th-cpair"><span class="lbl">Sort</span>
         <select aria-label="Sort" onchange="LIB_SORT=this.value;${m.reload}">
           ${libOpt("title","Title (A–Z)",sort)}${libOpt("added","Recently added",sort)}${libOpt("recorded","Date recorded",sort)}${libOpt("year","Year",sort)}${libOpt("resolution","Resolution",sort)}</select></span>
       <span class="th-cpair"><span class="lbl">Show</span>
         <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
           ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select></span>
-      <span class="th-cpair"><span class="lbl">Per page</span>
-        <select aria-label="Per page" onchange="setPerPage(this.value);libGoPage(0)">
-          ${LIB_SIZES.map(n=>libOpt(String(n),String(n),String(LIB_PER))).join("")}${libOpt("all","All",String(LIB_PER))}</select></span>
+      ${libraryPageSize()}
       <span class="muted" id="libcount"></span></div>`;
   return `${head}${bar}<div class="th-grid"><div id="libbody"><div class="empty">Loading…</div></div></div>`
     +`<div id="libpager"></div><div id="librail"></div>`;
@@ -529,7 +534,8 @@ LAYOUTS.theater={name:"Theater", surfaces:["desktop","mobile","tv"],
   chrome: theaterChrome,
   views: {home: theaterHomeBody, item: theaterItemBody,
           library: {shell: theaterLibraryShell}},
-  stickyFloor: theaterStickyFloor};
+  stickyFloor: theaterStickyFloor,
+  navChanged: theaterNavChanged};
 // applyLayout() ran in the <head>, where the registry may not yet know this
 // id. Re-applying here is invisible — boot() has not resolved /server yet, so
 // #app is empty and there is nothing painted to reflow — and it is a belt to

@@ -15,7 +15,7 @@ files, or attach their complete contents if repository access is unavailable.
 Perform an independent, adversarial architecture and implementation-plan
 review. Do not implement, deploy, modify settings, or rewrite the plan yet.
 
-Repository: /Users/pjunod/code/plurx
+Repository: ~/code/plurx
 Read AGENTS.md and docs/README.md first, then:
 - docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md
 - docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md

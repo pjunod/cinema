@@ -1,6 +1,20 @@
 use super::*;
 
 impl VodServe {
+    #[cfg(test)]
+    pub(crate) async fn source_control_observation_for_test(
+        &self,
+        session_id: &str,
+    ) -> Option<(
+        Option<crate::playback_control::PlaybackDemandSnapshot>,
+        Instant,
+    )> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        let touched = *session.last_touch.lock().expect("touch lock");
+        Some((session.last_control_snapshot.clone(), touched))
+    }
+
     /// Apply one fenced control exchange without conflating a replay or stale
     /// request with a media-object touch. Only a newly accepted non-terminal
     /// sequence moves the existing five-minute VOD activity clock. A fresh
@@ -27,6 +41,48 @@ impl VodServe {
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
         preparation_admission: Option<
             Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        self.control_with_authority(
+            control,
+            deadline_unix_ms,
+            terminal_committer,
+            preparation_admission,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn control_source(
+        &self,
+        authority: &mut crate::transcode::source_actor::control::SourceControlAuthority<'_>,
+        control: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        self.control_with_authority(control, deadline_unix_ms, None, None, Some(authority))
+            .await
+    }
+
+    async fn control_with_authority(
+        &self,
+        control: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        preparation_admission: Option<
+            Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
+        mut source: Option<
+            &mut crate::transcode::source_actor::control::SourceControlAuthority<'_>,
         >,
     ) -> Option<
         Result<
@@ -121,7 +177,11 @@ impl VodServe {
             return Some(Ok(result));
         }
 
-        if let Err(error) = crate::playback_control::verify_authority(
+        if let Some(authority) = source.as_deref_mut() {
+            if let Err(error) = authority.refresh(&control).await {
+                return Some(Err(error));
+            }
+        } else if let Err(error) = crate::playback_control::verify_authority(
             self.shared.store.as_ref(),
             control.session_id,
             control.generation,
@@ -180,6 +240,52 @@ impl VodServe {
             }
             if crate::media_sessions::unix_ms() >= deadline_unix_ms {
                 return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+            }
+            // Private readers share parent control authority, but use their
+            // own sample clocks. Lock every graph before accepting a sequence
+            // so cancellation cannot publish a command to only some children.
+            let mut child_groups: Vec<(Arc<Rendition>, Vec<String>)> = Vec::new();
+            let mut root_children = Vec::new();
+            if control.snapshot.demand != crate::playback_control::PlaybackDemand::End {
+                for child in &session.children {
+                    if Arc::ptr_eq(&child.rendition, &control_rendition) {
+                        if !readers.contains_key(&child.reader_id) {
+                            return Some(Err(
+                                crate::playback_control::ControlStateError::Unavailable,
+                            ));
+                        }
+                        root_children.push(child.reader_id.clone());
+                    } else if let Some((_, ids)) = child_groups
+                        .iter_mut()
+                        .find(|(rendition, _)| Arc::ptr_eq(rendition, &child.rendition))
+                    {
+                        ids.push(child.reader_id.clone());
+                    } else {
+                        child_groups
+                            .push((Arc::clone(&child.rendition), vec![child.reader_id.clone()]));
+                    }
+                }
+            }
+            child_groups.sort_by(|(left, _), (right, _)| left.key.cmp(&right.key));
+            let mut child_readers = Vec::with_capacity(child_groups.len());
+            for (rendition, ids) in &child_groups {
+                let guard = rendition.readers.lock().await;
+                if ids.iter().any(|id| !guard.contains_key(id)) {
+                    return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                }
+                child_readers.push(guard);
+            }
+            if let Some(authority) = source.as_deref() {
+                authority.before_acceptance().await;
+                if authority.validate().is_err()
+                    || session.supersession_user
+                        != authority.assignment().binding().principal().owner_key()
+                    || !control_rendition
+                        .source_owners
+                        .contains_live_assignment(authority.assignment())
+                {
+                    return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                }
             }
             // Acceptance and M6's selection gate are one lock scope. They are
             // two reads of the same fence, and taking the lock twice would let
@@ -242,8 +348,31 @@ impl VodServe {
                     prewarm.enabled = false;
                     prewarm.deactivate();
                 }
+                let anchor_ms = control.snapshot.buffer_anchor_ms();
+                for id in root_children {
+                    readers
+                        .get_mut(&id)
+                        .expect("locked private root reader")
+                        .accept_control(
+                            control.sequence,
+                            media_entry_containing_ms(&control_rendition.plan, anchor_ms),
+                        );
+                }
+                for ((rendition, ids), child_readers) in
+                    child_groups.iter().zip(child_readers.iter_mut())
+                {
+                    let index = media_entry_containing_ms(&rendition.plan, anchor_ms);
+                    for id in ids {
+                        child_readers
+                            .get_mut(id)
+                            .expect("locked private reader")
+                            .accept_control(control.sequence, index);
+                    }
+                    rendition.kick();
+                }
                 control_rendition.kick();
             }
+            drop(child_readers);
             drop(readers);
 
             if disposition == crate::playback_control::ControlDisposition::Accepted
@@ -308,8 +437,8 @@ impl VodServe {
                     kind: session.kind,
                 })
             } else {
-                let marker_prewarm = (disposition
-                    == crate::playback_control::ControlDisposition::Accepted)
+                let marker_prewarm = (source.is_none()
+                    && disposition == crate::playback_control::ControlDisposition::Accepted)
                     .then(|| MarkerPrewarmControl {
                         rendition: session
                             .live_rendition()
@@ -322,6 +451,16 @@ impl VodServe {
                         kind: session.kind,
                     });
                 if disposition == crate::playback_control::ControlDisposition::Accepted {
+                    #[cfg(target_os = "linux")]
+                    if control.snapshot.seek_target_ms.is_some() {
+                        if let Some(runtime) = session
+                            .live_rendition()
+                            .and_then(|rendition| rendition.recipe.encoding.as_ref())
+                            .and_then(|encoding| encoding.dv_runtime.as_ref())
+                        {
+                            runtime.invalidate_report_owner(&session.incarnation);
+                        }
+                    }
                     session.last_control_snapshot = Some(control.snapshot.clone());
                     session.control_observed_at = Some(Instant::now());
                 }

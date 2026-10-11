@@ -1,0 +1,16 @@
+{
+  "result": "passed",
+  "source_ci": "http://192.168.4.7:3000/noirr/plurx/actions/runs/3959/jobs/2",
+  "ci_commit": "a06f87e6966a1847ffc285921ee005c92417141e",
+  "main_merge": "3197d0c58c079e485667da20e949f7275cb92cb9",
+  "evidence": "23 node subtests passed in main web-control lane;22 native cases retained, prepared-buffer case passed separately on batch",
+  "byte_identical_files": [
+    "crates/plurxd/src/web/playback-policy.js",
+    "crates/plurxd/src/web/playback-control.js",
+    "crates/plurxd/src/web/hls.min.js",
+    "tests/playback/native-hls-startup.test.js"
+  ],
+  "source_comparison": "main PR code tree equals merge tree; batch native harness calls unchanged helpers. New successor pbTick seam is stubbed by this harness; preparation changes are not used.",
+  "log_sha256": "71a66cf732f01457e495dbbf51594ea9cba998dafcb46d608374c4f167c7848a",
+  "retained_log": "native-hls-main-preflight.log.gz"
+}

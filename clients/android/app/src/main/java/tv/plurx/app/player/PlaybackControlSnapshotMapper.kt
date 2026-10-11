@@ -290,7 +290,7 @@ fun controlCapabilities(
         maxHeight = PlaybackControl.MAX_HEIGHT,
         codecs = codecs,
         dynamicRanges = ranges,
-        // On unless the viewer turns it off in Settings → Developer.
+        // On unless the viewer turns it off in Settings → Playback.
         //
         // This is a hardware claim — "this platform can hold two live decode
         // pipelines" — and M5.5 measured it per device class, not per platform.

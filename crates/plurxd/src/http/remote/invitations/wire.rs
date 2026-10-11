@@ -1,0 +1,139 @@
+//! Strict home invitation envelopes. Provider tokens never enter this API.
+use serde::{Deserialize, Serialize};
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub enum Version {
+    #[serde(rename = "cinema.invitation.v1")]
+    V1,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Register {
+    pub version: Version,
+    pub installation_id: String,
+    pub platform: String,
+    pub name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneList {
+    pub version: Version,
+    pub after_id: Option<String>,
+    pub limit: u8,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Availability {
+    pub version: Version,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_phone_generation: i64,
+    pub permission_granted: bool,
+    pub resident_active: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rebind {
+    pub version: Version,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_phone_generation: i64,
+}
+
+pub trait Envelope {
+    fn version(&self) -> Version;
+}
+macro_rules! envelope {($($name:ident),*)=>{$(impl Envelope for $name{fn version(&self)->Version{self.version}})*};}
+envelope!(Register, PhoneList, Availability, Rebind);
+
+// Deserialize through u64 to reject negative and floating JSON lexemes, including
+// -0 and exponent notation, before the generation reaches an authority CAS.
+fn positive_generation<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let value = u64::deserialize(d)?;
+    if !(1..=9_007_199_254_740_991).contains(&value) {
+        return Err(serde::de::Error::custom("invalid generation"));
+    }
+    i64::try_from(value).map_err(serde::de::Error::custom)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Consent {
+    pub version: Version,
+    pub installation_id: String,
+    pub receiver_id: String,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_phone_generation: i64,
+    #[serde(deserialize_with = "nonnegative_generation")]
+    pub expected_consent_generation: i64,
+    pub enabled: bool,
+    pub grant_id: Option<String>,
+    pub transport: Option<plurx_core::store::invitations::InvitationTransport>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsentList {
+    pub version: Version,
+    pub installation_id: String,
+    pub after_receiver_id: Option<String>,
+    pub limit: u8,
+}
+
+fn nonnegative_generation<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let value = u64::deserialize(d)?;
+    if value >= 9_007_199_254_740_991 {
+        return Err(serde::de::Error::custom("invalid generation"));
+    }
+    i64::try_from(value).map_err(serde::de::Error::custom)
+}
+envelope!(Consent, ConsentList);
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportStart {
+    pub version: Version,
+    pub installation_id: String,
+    pub receiver_id: String,
+    pub grant_id: String,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_phone_generation: i64,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_consent_generation: i64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportConfirm {
+    pub version: Version,
+    pub installation_id: String,
+    pub receiver_id: String,
+    pub ticket_id: String,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_phone_generation: i64,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_consent_generation: i64,
+    #[serde(deserialize_with = "positive_generation")]
+    pub expected_transport_generation: i64,
+}
+
+envelope!(TransportStart, TransportConfirm);
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Poll {
+    pub version: Version,
+    pub installation_id: String,
+    #[serde(deserialize_with = "revision")]
+    pub after_revision: i64,
+    pub wait_ms: u32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lookup {
+    pub version: Version,
+    pub installation_id: String,
+    pub invitation_id: String,
+}
+envelope!(Poll, Lookup);
+fn revision<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let v = u64::deserialize(d)?;
+    if v > 9_007_199_254_740_991 {
+        return Err(serde::de::Error::custom("invalid revision"));
+    }
+    i64::try_from(v).map_err(serde::de::Error::custom)
+}

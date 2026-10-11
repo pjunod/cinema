@@ -1,6 +1,218 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "subtitles.available-count-includes-selection"
+commits = ["884614df1b58c2878c30c758d21adbeb973f60c9"]
+source = "crates/plurxd/src/web/detail/watch-browser.js"
+source_anchor = "<b>${tracks.length}</b> available"
+test = "tests/web/file-context.test.js"
+test_anchor = "folded subtitle availability includes the selected generated track"
+
+[[fixes]]
+id = "subtitles.paused-selection-projects-immediately"
+commits = ["a27ba45498ae716419f5f3461d3d817c803227eb"]
+source = "crates/plurxd/src/web/player/menus.js"
+source_anchor = 'if(typeof watchRenderLedger==="function") watchRenderLedger();'
+test = "tests/playback/web-control.test.js"
+test_anchor = "paused subtitle selection projects ordinal zero and Off immediately"
+
+# Subtitle batch source/test anchors; retained execution evidence is separate.
+[[fixes]]
+id = "subtitles.acknowledged-native-reselection"
+commits = ["46a15c2800b850b4ac00dbbc7d973b6d922cfad4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/NativeSubtitleRetry.kt"
+source_anchor = "suspendCancellableCoroutine<Unit>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/NativeSubtitleRetryTest.kt"
+test_anchor = "reselectWaitsForPlaybackThreadAcknowledgement"
+
+[[fixes]]
+id = "subtitles.explicit-offline-generation-refusal"
+commits = ["96cc3fce06934f1eb30a04e40f8519bf57662f56"]
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = "async function generateSubtitles(fileId,button)"
+test = "tests/web/settings-sections.test.js"
+test_anchor = "transcription queue refusal is not displayed as successful work"
+
+[[fixes]]
+id = "subtitles.unavailable-notice-preserves-video"
+commits = ["4f6a1d7e2ba2b1a681b554c18ffb798a7ad82b4a"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "guard value == \"unavailable\", toldIntent != intent else { return false }"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testUnavailableSubtitleNotifiesOncePerIntentWithoutConsumingReadyRetry"
+
+# Reviewed Mac completion client changes: source/test anchors, not execution receipts.
+[[fixes]]
+id = "android.hls-hevc-retains-measured-envelope"
+commits = ["0d6a466cd521963dcec5bfb13604c31d86496f6e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = 'if (displayAwareAuto || (entry.codec == "hevc" && !hlsHevcSampleEntries.isNullOrEmpty())) {'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "hlsHevcKeepsMeasuredEnvelopeWhenDisplayAwareAutoIsOff"
+
+[[fixes]]
+id = "apple.hls-hevc-independent-transport-claim"
+commits = ["a542ab1403a979fb1cbd84f306363560e4615955"]
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = 'return supported ? ["hvc1"] : []'
+test = "clients/apple/Tests/SharedDecisionClientTests.swift"
+test_anchor = "testHlsHevcPackagingClaimIsIndependentAndPreservesExplicitEmpty"
+
+# Cinema B03: current source/test anchor for the authored navigation commit.
+# Execution evidence remains in PR863's focused XCTest receipt.
+[[fixes]]
+id = "apple.cinema-remote-restricted-navigation"
+commits = ["93f821c0f320ab091b2adb8870fd0e5b17eaa81e"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "guard !blocked else { return .restrictedSurface }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRestrictedModalFencesAllActionsAndSensitiveState"
+[[fixes]]
+id = "apple.tv-theater-preserves-classic-preference"
+commits = ["f69f8ae94"]
+source = "clients/apple/Sources/SettingsStore.swift"
+source_anchor = 'get { TvHomeLayout(rawValue: defaults.string(forKey: Key.tvHomeLayout) ?? "") ?? .classic }'
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testClassicRemainsDefaultAndTheaterPersistsIndependently"
+
+[[fixes]]
+id = "apple.tv-theater-video-feature-and-shelf-preservation"
+commits = []
+supplements = "apple.tv-theater-preserves-classic-preference"
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "if let item = continueWatching.first(where: video) {"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterFeaturesVideoWithoutDroppingOtherContinueWatchingItems"
+
+[[fixes]]
+id = "apple.tv-theater-skips-unavailable-files"
+commits = ["6dec4b114"]
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "guard let file = detail.files?.first(where: { $0.available != false }) else { return nil }"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterPlaybackSkipsUnavailableFilesAndRejectsUnavailableTitles"
+
+# 2026-10-06 — fix(sharing): bound initial Apple successor parking.
+# Current regression definitions for 39a72929; execution qualification is
+# recorded separately by the main fast lane, never inferred from this mapping.
+[[fixes]]
+id = "apple.shared-initial-parking-readiness-budget"
+commits = ["39a72929788172b04d868618defbdc3eed69ae16"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining)"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testStalledInitialSeekConsumesRemainingReadinessAndSettlesFailed"
+
+[[fixes]]
+id = "apple.shared-initial-parking-preemption"
+commits = []
+supplements = "apple.shared-initial-parking-readiness-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "coordinator.abandonWithoutFallback(.aborted)"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreemptedInitialSeekSettlesAbortedWithoutWaitingForCompletion"
+
+[[fixes]]
+id = "apple.shared-initial-parking-cancellation"
+commits = []
+supplements = "apple.shared-initial-parking-readiness-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "preparedAlignment.generation &+= 1"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testCancelledInitialSeekReturnsWithoutAVFoundationCompletion"
+
+[[fixes]]
+id = "apple.shared-initial-parking-production-generation"
+commits = []
+supplements = "apple.shared-initial-parking-readiness-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func prime(_ offer: SharedPreparedOffer"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testSharedInitialParkingUsesBoundedGenerationAndAbortOrFailureSettlement"
+
+# Current once-passed A05 bridges, not historical execution claims. Native
+# adapter compile evidence and physical device acceptance remain separate.
+[[fixes]]
+id = "apple.a05-exact-completed-body-receipt"
+commits = ["9161485793d0907eb8a3e3aa5fb59658ea25ce30"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "receipt: response?.value(forHTTPHeaderField: \"X-Plurx-Link-Receipt\")"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 genuine completed body carries the response receipt without cache promotion"
+
+[[fixes]]
+id = "apple.a05-qualified-full-output-margin"
+commits = ["05f8b90c11eb2aa1e894a54be1d85b66a6ca62cc"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs)"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 qualified full-output sidecar is required for positive candidate margin"
+
+[[fixes]]
+id = "apple.a05-retired-attachment-evidence-refusal"
+commits = ["40ceb6e681bf2a487a3f9df7d0a99636b65443f8"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func currentLinkReceipt() -> String?"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 positive margin refuses bare metrics and retired candidate attachment"
+
+[[fixes]]
+id = "apple.a05-per-call-incumbent-receipt"
+commits = ["14c5b75eea72b14d26f79daa09d16b44f585c6c4"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "PlaybackLinkRequestContext.$receipt.withValue(receipt)"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 request header uses only this installed incumbent nonce"
+
+# Current native recovery bridges cover the new typed-pressure and accepted
+# negative acknowledgement adapters; earlier web executions remain historical.
+[[fixes]]
+id = "apple.auto-typed-candidate-recovery-pressure"
+commits = ["d9d7c04522f27d7f47368c1369fbfc2b0d753a4b"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoDecodePressureWindow"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals"
+
+[[fixes]]
+id = "android.auto-typed-candidate-recovery-pressure"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class AutoDecodePressureWindow"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals"
+
+[[fixes]]
+id = "apple.auto-exact-negative-recovery-ack"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func receiptForRequest(previous: String?, candidate: String?, cause: String?)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline"
+
+[[fixes]]
+id = "android.auto-exact-negative-recovery-ack"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "fun receiptForRequest(previous: String?, candidate: String?, cause:"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline"
+
+# Original A05 height controller was removed before landing because PR669 owns
+# the combined route-v1 controller. This anchors its historical client commit
+# to the current removal contract, not to an adapter claimed to be shipped.
+[[fixes]]
+id = "android.a05-height-controller-superseded"
+commits = ["d47d4a83afd1d19583223a095aa72bf255876b08"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "class Controller internal constructor("
+test = "tests/operations/test_a05_superseded_controller.py"
+test_anchor = "test_removed_height_controller_does_not_reappear"
+
 # A-04 physical shaping acceptance refuses a saved-server fallback when the
 # explicit Debug launch proxy is absent or does not match the server identity.
 [[fixes]]
@@ -106,7 +318,7 @@ test_anchor = "transcode_capacity_pending"
 id = "web.frame-callback-registration-lifecycle"
 commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b", "3d22d5ee2"]
 source = "crates/plurxd/src/web/player/decode-tiers.js"
-source_anchor = "if(id!=null||v.readyState<2||v.seeking) return;"
+source_anchor = "if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;"
 test = "tests/playback/web-control.test.js"
 test_anchor = "loadeddata during the initial seek must not strand a frame request"
 
@@ -537,7 +749,7 @@ test_anchor = "testApplePlayerTreatsDolbyVisionRejectionsAsCompatibilityFailures
 id = "apple.dolby-vision-profile5-black-frame-watchdog"
 commits = ["47c06809"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "struct BlackFrameWatchdog: Equatable"
+source_anchor = "struct BlackFrameWatchdog"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testBlackFrameWatchdogFiresOnlyWhenNothingIsEverDecoded"
 
@@ -1418,7 +1630,7 @@ test_anchor = "lifecycleRefillLoadedWaitClaimsOneReevaluationWithoutCreatingAnot
 # beside the switch and must never disable it.
 id = "apple.prepared-handoff-readiness-truth-is-advisory"
 commits = ["491aac64"]
-source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source = "clients/apple/Sources/SettingsView.swift"
 source_anchor = "Fleet and link evidence: Not met · Checked during playback"
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
@@ -1708,7 +1920,7 @@ test_anchor = "testACreateThatLandsAfterTheDeadlineIsReleasedAndNeverAttached"
 id = "apple.create-sequence-stops-shadowing-started"
 commits = ["1f75e593"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "let opened = try await requestHlsSession(model, file, request)"
+source_anchor = "let opened = try await requestHlsSession(model, try contextForFile(file), request)"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "testAChangeContextCreateIsNotRetriedAndArmsNoDeadline"
 
@@ -2036,7 +2248,6 @@ source_anchor = "// This was `#if os(iOS)` and tvOS took the"
 test = "tests/web/live-tv.test.js"
 test_anchor = "no client's guide cell branches on airing — the defect was on all three"
 
-
 [[fixes]]
 id = "web.library-channel-create-draft-and-preview-fences"
 commits = ["c1d80a47"]
@@ -2044,7 +2255,6 @@ source = "crates/plurxd/src/web/pages/library-channels-page.js"
 source_anchor = "function libraryChannelDraftKey("
 test = "tests/web/library-channels.test.js"
 test_anchor = "Create never resumes an old edit ID, including legacy stored drafts"
-
 
 [[fixes]]
 id = "clients.subject-save-attempt-survives-late-preview"
@@ -2162,7 +2372,6 @@ source_anchor = "case sameDeliveryRepair"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testPresentationStallRepairPreservesTheRecipeWithoutAQualityTicket"
 
-
 [[fixes]]
 id = "clients.original-native-home"
 commits = ["cb878f70"]
@@ -2183,9 +2392,20 @@ test_anchor = "fun initialFocusCanDisableItselfOnlyAfterTheTargetAcceptsFocus()"
 id = "android.playback-heap-budget"
 commits = ["f49a1d7ed"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackLoadControl.kt"
-source_anchor = ".setTargetBufferBytes(playbackBufferTargetBytes(memoryClass))"
+source_anchor = ".setTargetBufferBytes(target)"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackLoadControlTest.kt"
 test_anchor = "fun byteBudgetStopsLoadingBeforeTimeTargetForNetworkAndLocalMedia()"
+
+# D-01 retained the allocator-budget behavior while binding each role to the
+# actual Runtime.maxMemory grant. Keep the prior fix association above and
+# anchor the new corrective commit to its already-landed JVM regression.
+[[fixes]]
+id = "android.actual-granted-heap-budget"
+commits = ["fd0babf30c89699c66a7270423c154eb480c67ab"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackBufferBudget.kt"
+source_anchor = "minOf(existingCeiling.toLong(), (grantedHeapBytes / 8).coerceAtLeast(1)).toInt()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackBufferBudgetTest.kt"
+test_anchor = "fun actualGrantedHeapClampsEveryRoleWithoutRaisingTheExistingCeiling()"
 
 [[fixes]]
 id = "apple.prepared-fallback-epoch-ownership"
@@ -2633,7 +2853,7 @@ test_anchor = "assert.equal(video.src, `/api/live-tv/sessions/${session.session_
 [[fixes]]
 id = "apple.library-paging-target-merge"
 commits = ["12331fb3"]
-source = "clients/apple/Sources/LibraryView.swift"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
 source_anchor = "requestedThrough = max(requestedThrough, through)"
 test = "clients/apple/Tests/LibraryMergeTests.swift"
 test_anchor = "testFirstPaintNeedsOnePagePerLibrary"
@@ -3203,6 +3423,67 @@ source_anchor = "@JvmStatic @AfterClass fun sealCompletedInvocation()"
 test = "tests/operations/test_android_profile_report.py"
 test_anchor = "test_real_macrobenchmark_device_context_and_binding_are_required"
 
+[[fixes]]
+id = "apple.library-query-task-ownership"
+commits = ["5b32b380e"]
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "final class LibraryGridCoordinator: ObservableObject"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testQueryDrivesActualPagerToCompletionAndSummaryReportsProgress"
+
+[[fixes]]
+id = "apple.library-stale-filter-result"
+commits = []
+supplements = "apple.library-query-task-ownership"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "private func filterNow()"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testLateFilterResultCannotReplaceNewerQuerySnapshot"
+
+[[fixes]]
+id = "apple.library-query-cancellation"
+commits = []
+supplements = "apple.library-query-task-ownership"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "func queryChanged(_ text: String) async"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testFiveQueryEditsCoalesceIntoOneActualFilterPassAfter150msWait"
+
+[[fixes]]
+id = "android.library-filter-and-focus-wiring"
+commits = ["75e3d561f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPager.kt"
+source_anchor = "fun setWatchFilter(filter: WatchFilter)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPagerWatchFilterTest.kt"
+test_anchor = "watchFilterLoadsTheUnfetchedTailAndPublishesActualLoadedTotals"
+
+[[fixes]]
+id = "android.library-filter-drive-cancellation"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPager.kt"
+source_anchor = "fun setWatchFilter(filter: WatchFilter)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPagerWatchFilterTest.kt"
+test_anchor = "clearingTheWatchFilterCancelsTheDriveWithoutDiscardingLoadedTitles"
+
+[[fixes]]
+id = "android.library-page-arrival-dpad-focus"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "internal fun LibraryScreen("
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/LibraryPageArrivalFocusTest.kt"
+test_anchor = "arrivingPagePreservesTheDpadSelectedCardAndItsOpenAction"
+
+[[fixes]]
+id = "android.library-local-loader-production-bridge"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "pager.setDriveToCompletion(rows || filter != WatchFilter.Everything || query.isNotBlank())"
+test = "tests/operations/test_android_library_paging_wiring.py"
+test_anchor = "test_view_model_route_uses_the_same_grid_and_watch_filter_policy"
+
 # A rolling session retired by the 180 s pause grace failed the paused item
 # with "resource unavailable" and raised "Playback stopped." for nobody. The
 # failure now parks while paused and Play reopens at the saved position.
@@ -3273,6 +3554,128 @@ source_anchor = "func autoDownsideCostBps("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testOriginalAverageIsDownsideOnlyAndNeedsFreshUnpacedSessionEvidence"
 
+# A05 prepared HTTP observations: these are source-to-current-contract
+# bridges to the new once-passed web regressions, not claims that native unit
+# methods executed. Exact-source Apple/Android compilation is separate evidence.
+[[fixes]]
+id = "apple.prepared-explicit-observation-header"
+commits = ["00c1cfad4110c21638b67651fdc1bd3696d7f89b"]
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = "urlRequest.setValue(linkReceipt, forHTTPHeaderField: \"X-Plurx-Link-Receipt\")"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 prepared control sends only its explicit per-call nonce"
+
+[[fixes]]
+id = "android.prepared-explicit-observation-header"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+source_anchor = "builder.header(\"X-Plurx-Link-Receipt\", linkReceipt)"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 prepared control sends only its explicit per-call nonce"
+
+[[fixes]]
+id = "apple.prepared-own-completed-body-observation"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func reportStagedLinkSample("
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 staged completed body reports only its own attachment nonce"
+
+[[fixes]]
+id = "android.prepared-own-completed-body-observation"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "message = \"Completed staged candidate body\""
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 staged completed body reports only its own attachment nonce"
+
+# A05 native pacing and attachment-bound quiet windows: each bridge names
+# the new native method executed once against its attributed source snapshot.
+[[fixes]]
+id = "apple.auto-paced-production-upgrade-windows"
+commits = ["080b45734c8246e46158662bed8c42b3766fd22d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoActiveProductionPressure("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05PacingAndAttachmentUpgradeWindowsUseActualEvidence"
+
+[[fixes]]
+id = "android.auto-paced-production-upgrade-windows"
+commits = []
+supplements = "apple.auto-paced-production-upgrade-windows"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoActiveProductionPressure("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+[[fixes]]
+id = "apple.auto-observed-attachment-quiet-window"
+commits = ["af9362e368c60d0c1c55716051671623e8f4ed91"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let quietStart = max(observationStartMs, lastStallMs ?? observationStartMs)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade"
+
+[[fixes]]
+id = "android.auto-observed-attachment-quiet-window"
+commits = []
+supplements = "apple.auto-observed-attachment-quiet-window"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "val quietStart = maxOf(start, lastStallMs ?: start)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade()"
+
+# The new exact Android regression compiles this existing test source; this
+# bridge does not claim that any old PlaybackControlAskTest method executed.
+[[fixes]]
+id = "android.receipt-callback-test-transport-binding"
+commits = ["69fae8ab1a179c8be6f7cbcb7a6b703646df895c"]
+source = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlAskTest.kt"
+source_anchor = "transport = transport(\"hold\", reason = \"no_room\", sequence = sequence)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+[[fixes]]
+id = "apple.auto-staged-advertised-interval-proof"
+commits = ["fd5dbb84921e72025d4349d9c523e860abf1c6a9"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoVODAdvertisedIntervals(_ data: Data)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05StagedAdvertisedIntervalsRequireCapturedScopeAndOriginalDeadline"
+
+[[fixes]]
+id = "android.auto-staged-completed-load-interval-proof"
+commits = []
+supplements = "apple.auto-staged-advertised-interval-proof"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoStagedEmpiricalMargin(samples: List<AutoCompletedTransfer>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline()"
+
+# Native original-boundary source-to-current-test bridges. These two methods
+# passed once on exact a82 source; no historical fd74 execution is implied.
+# The boundary no longer holds Play or a seek: the anchors now name the
+# re-plan that the ordinary Auto evaluation serves beside the incumbent.
+[[fixes]]
+id = "android.auto-prepared-viewer-boundary-owner-and-budget"
+commits = ["e7511b9c9945d0ab19a0234d64a74ed19d35ae60", "228874547df1c1c870973e417be0986d7e0948e4", "d9dea0ab387f6e7f69047162d4a47f53ba466481"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoViewerTransport(delegate: Player"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05ViewerTransportRefusesStaleWrappers()"
+
+[[fixes]]
+id = "apple.auto-prepared-viewer-boundary-original-budget"
+commits = []
+supplements = "android.auto-prepared-viewer-boundary-owner-and-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoBoundaryReplan"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testOptionalOriginalReplanNeverBlocksAndIsServedOnceBesideThePlayingIncumbent"
+
 [[fixes]]
 id = "player.ten-and-thirty-second-controls"
 commits = ["270231322"]
@@ -3299,6 +3702,71 @@ source_anchor = 'class="pseek-arrows"'
 test = "tests/playback/seek-control.test.js"
 test_anchor = "10 and 30 second buttons accumulate mixed taps and clamp at title bounds"
 
+# Actual caller provenance, covered once by the new source-contract method;
+# this does not claim physical AVPlayer boundary execution.
+[[fixes]]
+id = "apple.auto-viewer-relative-and-internal-marker-provenance"
+commits = ["603964bccac111a019d5515c8011eb4d603a5375"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance"
+
+[[fixes]]
+id = "apple.auto-boundary-captured-typed-epoch-ownership"
+commits = ["f94345baa99553e333f0a8280dc9995ee640cc43"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "AutoBoundaryAttempt(attempt: snapshotAttempt(), item:"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes"
+
+# Same review58 source-to-new-pass bridges; these four controls were executed
+# once on the repair source, not on historical pre-proof native code.
+[[fixes]]
+id = "apple.auto-decoder-accepted-event-original-budget"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func rejectFailedDecoderCandidate(_ rejected: inout Set<String>"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testDecoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement"
+
+[[fixes]]
+id = "android.auto-decoder-accepted-event-original-budget"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal fun rejectFailedDecoderCandidate(rejected: MutableSet<String>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun decoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement()"
+
+# S-09 route sink claims (claude-opus-5-5). Device-route acceptance (M3/M5)
+# remains separate physical evidence.
+[[fixes]]
+id = "apple.audio-route-sink-claim"
+commits = ["fa43eab6a0f30a178d1ed112d8c9af6333691eda"]
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = "static func audioSinks(route: AudioRouteFacts) -> [AudioSinkClaim]"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAudioSinkClaimFollowsTheRouteAndPassesThroughOnlyToAMultichannelReceiver"
+
+[[fixes]]
+id = "android.audio-route-sink-claim"
+commits = ["68c21b9aeb35cbac74fc284c552b4e1c8d03d6ce", "8af9707a2664258a02aac2e5a97c8c825fbb3ee9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "internal fun audioSinkClaims("
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "theAudioSinkClaimFollowsTheRouteAndPassesBitstreamsOnlyToTheSink"
+# D-02 prepared-successor audio focus (claude-opus-5-5). The device re-run of
+# a prepared quality change remains separate physical evidence.
+[[fixes]]
+id = "android.successor-audio-focus-owner"
+commits = ["054dd9c8084647beb455d128fdb02f343dde5569"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
+test_anchor = "everySwapSiteMovesFocusToTheAudiblePlayer"
+
 [[fixes]]
 id = "android.tcl-decoder-envelope-compaction"
 commits = ["067021dc8"]
@@ -3314,3 +3782,2404 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = '"quality_catalog_unavailable",'
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testOnlyTheContractsNotYetCodesAreRetried() throws"
+
+# Shared Libraries native client corrections (integrated 2026-10-04).
+[[fixes]]
+id = "sharing.bind-native-telemetry-to-retained-shared-session-lineage"
+commits = ["1e4b05b3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'suspend fun status(playback: SharedStartedPlayback): SharedPlaybackStatus {'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "refuses"
+
+[[fixes]]
+id = "sharing.isolate-presenter-fixtures-from-account-bootstrap"
+commits = ["741f8764"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = 'init(startServices: Bool = true) {'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testTheRowEighteenSitesLogOnceAndDrawNothing"
+
+[[fixes]]
+id = "sharing.keep-synthetic-native-selection-fixtures-internally-consiste"
+commits = ["ffc3b7fc"]
+source = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+source_anchor = 'val encodedDecision = SharedDecision.decode(wire("9223372036854775807") { JsonObject(it + mapOf("method" to JsonPrimitive("transcode"), "delivered_dynamic_range" to JsonPrimitive("sdr"), "height" to JsonPrimitive(72), "delivery" to JsonObject(it.getValue("delivery").jsonObject + ("mode" to JsonPrimitive("transcode"))))) })'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.retain-original-native-control-selection-projection"
+commits = ["65cf1a1d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedPlaybackModels.kt"
+source_anchor = '/** Exact original current-rendition selection, without Local candidate coercion. */'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.dispatch-native-players-through-retained-shared-subjects"
+commits = ["03b77807"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'fun playlistUrl(playback: SharedStartedPlayback): String {'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.retain-tagged-native-hls-initial-plans"
+commits = ["091415fb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedPlaybackModels.kt"
+source_anchor = '/** Initial Shared subject carries full strings/opaque B context, never a Local ID. */'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.serialize-native-progress-across-imports"
+commits = ["7d95cd90"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'import kotlinx.coroutines.NonCancellable'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.retain-ordered-native-progress-beats"
+commits = ["080e283b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'import kotlinx.serialization.json.*'
+test = "clients/apple/Tests/SharedPlaybackModelsTests.swift"
+test_anchor = "testProgressOrderRetainsUncertainBeatAndRequiresFreshResync"
+
+[[fixes]]
+id = "sharing.prepare-authenticated-native-initial-start-adapters"
+commits = ["dce1989b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = '"subtitle" -> text.toLongOrNull()?.let { it.toString() == text && it in -1..4095 } == true'
+test = "clients/apple/Tests/SharedDecisionClientTests.swift"
+test_anchor = "testAuthenticatedInitialStartRetainsWholeRequestAndBContext"
+
+[[fixes]]
+id = "sharing.add-authenticated-native-shared-decision-adapters"
+commits = ["b77d14a9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'require(listOf(import_id, server_id, catalogue_epoch).all { PlaybackFileContext.canonicalUuid(it) && it != "00000000-0000-0000-0000-000000000000" })'
+test = "clients/apple/Tests/SharedDecisionClientTests.swift"
+test_anchor = "testActualV2BuilderExactSourceStringsAndTypedNegotiation"
+
+[[fixes]]
+id = "sharing.render-bounded-authenticated-shared-artwork-in-native-client"
+commits = ["1c7cff40"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedArtwork.kt"
+source_anchor = 'import android.graphics.BitmapFactory'
+test = "clients/apple/Tests/SharedArtworkTests.swift"
+test_anchor = "testClosedArtworkGrammarAliasesAndSourceContainment"
+
+[[fixes]]
+id = "sharing.edit-native-endpoints-with-exact-authority-and-retire-refuse"
+commits = ["03743ef3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedSharingManagementClient.kt"
+source_anchor = 'if (response.code == 401 || response.code == 403) SharedSharingSecretDraft.retireAuthorization(auth.generation)'
+test = "clients/apple/Tests/SharedSharingManagementTests.swift"
+test_anchor = "testEndpointMutationsPreserveExactGenerationsAndRequireExplicitNewPins"
+
+[[fixes]]
+id = "sharing.preserve-complete-native-viewer-assignment-matrices"
+commits = ["b5de42d1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedSharingManagementClient.kt"
+source_anchor = 'suspend fun sourceLibraries(row: SharedSharingImportSummary): SharedSharingSourceLibrariesSnapshot {'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedSharingManagementTest.kt"
+test_anchor = "wire"
+
+[[fixes]]
+id = "sharing.manage-native-invitations-and-source-access"
+commits = ["b51db84c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Session.kt"
+source_anchor = 'private var authorizationObserverId = 0L'
+test = "clients/apple/Tests/SharedSharingManagementTests.swift"
+test_anchor = "testActualApprovalAndScopeBodiesPreserveExactIdsAndRequireEnteredCode"
+
+[[fixes]]
+id = "sharing.integrate-source-renewal-and-shared-browsing"
+commits = ["4ebb8522"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = 'import tv.plurx.app.ui.SharedLibrariesScreen'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testAuthenticatedDetailHonorsFourMiBBoundWithoutGrantingMissingLocator"
+
+[[fixes]]
+id = "sharing.add-source-labelled-native-browsing-and-advisory-settings"
+commits = ["cee083a8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = 'import tv.plurx.app.ui.SharedLibrariesScreen'
+test = "clients/apple/Tests/SharedLibraryTests.swift"
+test_anchor = "testActualBOnlyBrowsePreservesPreciseIdsAndPerSourceFailure"
+
+[[fixes]]
+id = "sharing.preserve-complete-playback-envelopes-across-receiver-project"
+commits = ["ca879be5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'internal fun validateSharedReference(item: SharedPlaybackReference, file: String, revision: String) {'
+test = "clients/apple/Tests/SharedPlaybackModelsTests.swift"
+test_anchor = "testDistinctDecisionPreservesWireAndCannotAcquireMediaAuthority"
+
+[[fixes]]
+id = "sharing.validate-distinct-native-shared-playback-wire-subjects"
+commits = ["5d42f292"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'internal fun validateSharedReference(item: SharedPlaybackReference, file: String, revision: String) {'
+test = "clients/apple/Tests/SharedPlaybackModelsTests.swift"
+test_anchor = "testDistinctDecisionPreservesWireAndCannotAcquireMediaAuthority"
+
+[[fixes]]
+id = "sharing.integrate-source-reservations-and-receiver-body-authority"
+commits = ["352b5644"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'import java.nio.charset.StandardCharsets'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testSharedFullQueryVocabularyAndTranslatedMediaCannotAcquireAuthority"
+
+[[fixes]]
+id = "sharing.retain-native-context-through-playback-file-calls"
+commits = ["8d7845b7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'import java.nio.charset.StandardCharsets'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testSharedFullQueryVocabularyAndTranslatedMediaCannotAcquireAuthority"
+
+[[fixes]]
+id = "sharing.bind-native-file-contexts-to-authenticated-b-details"
+commits = ["52b27c2b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'import kotlinx.serialization.Serializable'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testAuthenticatedBContextPreservesExactReferenceAndSessionAuthority"
+
+[[fixes]]
+id = "sharing.align-native-authenticated-detail-with-the-b-response-bound"
+commits = ["b41e3f8e"]
+source = "clients/apple/Sources/PlaybackFileContext.swift"
+source_anchor = 'current.token == auth.token, data.count <= 4_194_304,'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testAuthenticatedDetailHonorsFourMiBBoundWithoutGrantingMissingLocator"
+
+[[fixes]]
+id = "sharing.pass-captured-auth-to-native-watch-resync"
+commits = ["d037cf4c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'val text = detail(reference, auth, transport); requireCurrent()'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.native-shared-status-safe-tokens"
+commits = ["48a865b74"]
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "static func isToken(_ text: String) -> Bool {"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testStatusRendersOnlyValidatedTokensBoundToTheRetainedPlayback"
+
+[[fixes]]
+id = "sharing.native-shared-controls-reopen-and-direct-play"
+commits = ["92a642699"]
+source = "clients/apple/Sources/SharedPlaybackControl.swift"
+source_anchor = "response.acceptedSequence == request.sequence"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testAnswersBindOnlyToTheSentSequenceOnBsTuple"
+
+[[fixes]]
+id = "sharing.native-shared-asset-index-grammar"
+commits = ["399a1a7cd"]
+source = "clients/apple/Sources/PlaybackFileContext.swift"
+source_anchor = "if reference != nil, !Self.sharedAssetIndexIsCanonical(resource) { throw APIError.badURL }"
+test = "clients/apple/Tests/SharedProtocolFixtureTests.swift"
+test_anchor = "testFileSuffixGrammarAndPresessionAssetPaths"
+
+[[fixes]]
+id = "sharing.native-shared-start-safe-duration"
+commits = []
+supplements = "sharing.native-shared-asset-index-grammar"
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "response.durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true,"
+test = "clients/apple/Tests/SharedProtocolFixtureTests.swift"
+test_anchor = "testHlsStartPublicProjectionAndClientMutations"
+
+[[fixes]]
+# One row per fix commit: the suffix bound and the 2^53 duration bound both land
+# in 20a1d58c0, and the same fixture suite reads both rows.
+id = "sharing.android-shared-file-suffix-index-bound"
+commits = ["20a1d58c0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = "if (reference != null) require(sharedFileSuffix(resource))"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedProtocolCasesTest.kt"
+test_anchor = "sharedFileSuffixesFollowTheClosedSharedGrammar"
+
+[[fixes]]
+id = "sharing.web-source-owned-burn-and-hdr-request"
+commits = ["d4d2ec8e4"]
+source = "crates/plurxd/src/web/core/shared-decision.js"
+source_anchor = "if(body.preserve_dolby_vision===true)dolbyVisionUnsupported();"
+test = "tests/web/shared-decision.test.js"
+test_anchor = "synthetic B Start carries a burn and an HDR10 ask unchanged and refuses Dolby Vision before sending"
+
+[[fixes]]
+id = "sharing.native-burn-hdr-and-closed-direct-request"
+commits = ["ec9b12a0f", "316f21c33"]
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "let burn = subtitleIndex.flatMap"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testSharedBurnAndHDRPlanUseSourceOwnedStartFields"
+
+[[fixes]]
+id = "sharing.android-source-owned-burn-and-hdr-request"
+commits = []
+supplements = "sharing.native-burn-hdr-and-closed-direct-request"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedPlaybackSession.kt"
+source_anchor = "val burn = selection.burn || track?.isNativeHls == false"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedPlaybackSessionTest.kt"
+test_anchor = "sharedBurnAndHdrPlanUseSourceOwnedStartFields"
+
+[[fixes]]
+id = "sharing.web-refused-handoff-original-account-cleanup"
+commits = ["da2e407a2"]
+source = "crates/plurxd/src/web/player/prepared-replacement.js"
+source_anchor = "releaseSession(predecessor,accountToken);"
+test = "tests/playback/web-control.test.js"
+test_anchor = "Shared visible commit refusal reopens once and ends both old sessions even when Start fails"
+
+[[fixes]]
+id = "sharing.android-failed-renderer-start-cleanup"
+commits = ["9dbd35ea3", "432a4e3bc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { runCatching { client.end(direct) } }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "rendererSetupFailureEndsTheStartedSessionForHlsAndDirect"
+
+[[fixes]]
+id = "sharing.native-history-requires-a-rendered-frame"
+commits = ["3490ed451"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "val framePresented: Boolean = false,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "noRenderedFrameNeverWritesZeroHistoryOnTickOrClose"
+
+[[fixes]]
+id = "sharing.native-continue-watching-source-groups"
+commits = ["3bfdbcf66"]
+source = "clients/apple/Sources/SharedLibraryClient.swift"
+source_anchor = "func continueGroups() async throws -> [SharedContinueGroup] {"
+test = "clients/apple/Tests/SharedLibraryTests.swift"
+test_anchor = "testSharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOfflineMetadata"
+
+[[fixes]]
+id = "sharing.android-continue-watching-source-groups"
+commits = []
+supplements = "sharing.native-continue-watching-source-groups"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedLibraryClient.kt"
+source_anchor = "suspend fun continueGroups(): List<SharedContinueGroup> {"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "sharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOfflineMetadata"
+
+[[fixes]]
+id = "sharing.android-advisory-qualification-status"
+commits = ["3dd492f8c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingSettingsScreen.kt"
+source_anchor = "Shared playback is implemented; private network, cluster recovery and physical-device qualification remain pending."
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "savedChoiceAndPendingEditSurviveUnknownReadiness"
+
+[[fixes]]
+id = "sharing.native-next-episode-current-membership"
+commits = ["32a556f7b"]
+source = "clients/apple/Sources/SharedLibraryClient.swift"
+source_anchor = "guard let at = episodes.firstIndex(of: reference) else { return nil }"
+test = "clients/apple/Tests/SharedCatalogueActionsTests.swift"
+test_anchor = "testMissingCurrentEpisodeNeverSkipsToTheNextSeason"
+
+[[fixes]]
+id = "sharing.android-next-episode-current-membership"
+commits = []
+supplements = "sharing.native-next-episode-current-membership"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedLibraryClient.kt"
+source_anchor = "if (at < 0) return null"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedCatalogueActionsTest.kt"
+test_anchor = "missingCurrentEpisodeNeverSkipsToTheNextSeason"
+
+[[fixes]]
+id = "sharing.android-frame-proof-belongs-to-attachment"
+commits = ["a062ce299"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "internal class SharedFrameEvidence {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "frameEvidenceCarriesPreparedProofAndRejectsOldAttachmentCallbacks"
+
+[[fixes]]
+id = "android.prepared-alignment-decoded-frame-cadence"
+commits = ["08ca9a15a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedSurfaceReceipts.kt"
+source_anchor = "data class Frame(val positionUs: Long, val width: Int, val height: Int, val frameDurationUs: Double? = null)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun alignmentRequiresOneDecodedFrameRatherThanQuarterSecondSlack("
+
+[[fixes]]
+id = "android.rendezvous-waits-for-decoded-readiness"
+commits = ["0a13cd18e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "fun alignmentWindowMs(player: ExoPlayer): Double? ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun decodedFrameWindowReparksInsteadOfAcceptingQuarterSecondLateArrival("
+
+[[fixes]]
+id = "apple.inline-promotion-keeps-prepared-player-and-layer"
+commits = ["11ad88cc1"]
+source = "clients/apple/Sources/PlayerSurface.swift"
+source_anchor = "func promote(_ player: AVPlayer) -> Bool {"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "func testTransportAdvanceKeepsRetentionButCannotReviveAnOlderChoice("
+
+[[fixes]]
+id = "android.continuous-transaction-replays-uncertain-request"
+commits = ["122a26831"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityProtocol.kt"
+source_anchor = "private suspend fun replayPending() { pending?.let { send(it) } }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityProtocolTest.kt"
+test_anchor = "fun lostAcknowledgementReplaysTheSameRequestBeforeNewIntent("
+
+[[fixes]]
+id = "apple.prepared-track-reconciliation-bounded-by-overlap"
+commits = ["130ab19a0"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func reconcilePreparedMediaSelections(to item: AVPlayerItem, overlapStartedAtMs: Int) async -> Bool {"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testCancelledMediaSelectionPreparationCannotApplyLateTracks("
+
+[[fixes]]
+id = "android.committed-quality-observation-deadline"
+commits = ["19d7b3820"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousObservationDeadline.kt"
+source_anchor = "internal class ContinuousObservationDeadline(private val graceMs: Long = 2000) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousObservationDeadlineTest.kt"
+test_anchor = "fun aFarFutureAppendAndPauseDoNotBecomeAFalsePresentationTimeout("
+
+[[fixes]]
+id = "android.reserved-loading-bound-to-accepted-samples"
+commits = ["1c915839b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousHlsExtractorFactory.kt"
+source_anchor = "data class AcceptedSample("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "fun aReadyTargetCannotChangeFutureLoadsUntilItsIntervalIsReserved("
+
+[[fixes]]
+id = "android.superseded-owners-dispose-unexposed-pins"
+commits = ["26c4f10c3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousUnexposedPins.kt"
+source_anchor = "internal object ContinuousUnexposedPins {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousUnexposedPinsTest.kt"
+test_anchor = "fun supersededOwnersDisposeOnlyPinsThatNeverReachedTheQueue("
+
+[[fixes]]
+id = "android.refused-quality-command-settled-from-ledger"
+commits = ["287641427"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityProtocol.kt"
+source_anchor = "private suspend fun resolveRefusal(request: JsonObject, refusal: ContinuousQualityHttpFailure): JsonObject {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityProtocolTest.kt"
+test_anchor = "fun refusalIsResolvedByOneLedgerReadAndNeverResent("
+
+# The commit's own regression tests are server-side; this client test pins
+# that stale compositor callbacks cannot credit a presentation.
+[[fixes]]
+id = "android.prepared-present-fence-observation-bounded"
+commits = ["2b7fd1743"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "val deadline = android.os.SystemClock.elapsedRealtime() + PREPARED_OVERLAP_BOUND_MS"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun seekAndSurfaceRecreationRejectOldFramesAndCompositorCallbacks("
+
+[[fixes]]
+id = "android.continuous-auto-costs-include-audio"
+commits = ["34f6a87d7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousEnrollment.kt"
+source_anchor = "internal fun continuousQualityBoundCatalog(candidates: List<QualityCandidate>, family: JsonObject?): List<QualityCandidate> {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "fun continuousAutoCostsIncludeSharedAudioWithoutChangingCandidateIdentity("
+
+[[fixes]]
+id = "android.tunneled-rendering-item-local-frames"
+commits = ["471e3a410"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedFrameRenderersFactory.kt"
+source_anchor = "internal fun preparedItemFramePositionUs(codecPositionUs: Long, streamOffsetUs: Long): Long? {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun tunneledCodecClockMapsToTheSameItemFrameBoundary("
+
+[[fixes]]
+id = "android.rendezvous-lead-at-playback-rate"
+commits = ["487db3085"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "val filmLead = kotlin.math.ceil(wallLead.toDouble() * rate).toLong().coerceAtLeast(1)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun wallLeadIsConvertedToFilmDistanceAtThePlaybackRate("
+
+[[fixes]]
+id = "android.continuous-output-evidence-owner-bound"
+commits = ["530c55c11"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousCodecAdapterFactory.kt"
+source_anchor = "override fun flush() { adapter.flush(); freed() }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousOutputEvidenceTest.kt"
+test_anchor = "fun aFailedCodecFlushCannotCreditDecoderRelease("
+
+[[fixes]]
+id = "android.reservation-owned-rendition-selection"
+commits = ["62c72e8a8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousVideoSelection.kt"
+source_anchor = "internal data class ReservedVideoChoice(val renditionId: String, val intentRevision: Long, val transactionId: String, val automatic: Boolean)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "fun reservedFutureChoiceUsesTheSameSelectionAfterMedia3ReordersFormats("
+
+[[fixes]]
+id = "android.prepared-readiness-and-alignment-share-overlap"
+commits = ["6309c5d70"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "var remainingOverlapMs = overlapBoundMs?.let { bound ->"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "fun preparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline("
+
+[[fixes]]
+id = "android.canceled-control-restored-without-reopen"
+commits = ["637b47f05"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousReservations.kt"
+source_anchor = "suspend fun recoverFailedChange(): Retained? = lock.withLock {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousReservationsTest.kt"
+test_anchor = "fun unsupportedTargetsDoNotPrepareAndColdVideoSchedulesBeforeSelection("
+
+[[fixes]]
+id = "android.optional-control-budget-bounded"
+commits = ["6718dd049"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousControlDeadline.kt"
+source_anchor = "internal class ContinuousControlDeadline(private val budgetMs: Long = 30_000) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousControlDeadlineTest.kt"
+test_anchor = "fun pauseAndCommittedTargetsCannotConsumeOrReuseOptionalControlBudgets("
+
+[[fixes]]
+id = "android.audio-focus-stays-with-audible-player"
+commits = ["699db58de"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
+source_anchor = "internal object PreparedAudioFocus {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedAudioFocusTest.kt"
+test_anchor = "fun aStagedSuccessorNeverRequestsFocusAndCommitReleasesBeforeRequesting("
+
+[[fixes]]
+id = "android.failed-manual-quality-retains-playback"
+commits = ["6aa41e7b2"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun retainFailedQuality(pending: PendingQualityChange, incumbent: QualitySelection): Boolean {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "fun failedQualityRetainsWireAndMediaWithoutLosingSavedPreferenceOrPause("
+
+[[fixes]]
+id = "android.continuous-budgets-charge-active-time-only"
+commits = ["700a9e883"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousPlaybackClock.kt"
+source_anchor = "internal class ContinuousPlaybackClock {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousPlaybackClockTest.kt"
+test_anchor = "fun coalescedPauseResumeSamplesCannotChargeBackgroundTime("
+
+[[fixes]]
+id = "android.continuous-ownership-retired-with-transport"
+commits = ["76d150901"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun retireContinuousForTransportChange(): ContinuousAttachment? {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityOwnershipTest.kt"
+test_anchor = "fun aClosedAttachmentOwnsNoQualityChange("
+
+[[fixes]]
+id = "android.prepared-overlap-bounded-through-pause"
+commits = ["809881e92"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "remainingOverlapMs = remainingOverlapMs?.let { it - minOf(it, elapsed) }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "fun pauseParksObservationButPhysicalOverlapStillExpires("
+
+[[fixes]]
+id = "apple.prepared-rendezvous-ahead-of-seek-latency"
+commits = ["823bf7c03"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func awaitPreparedRendezvous("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testFutureRendezvousParksAheadWithoutChangingTheSuccessorOrigin("
+
+[[fixes]]
+id = "android.artifact-disposal-serialized-against-reads"
+commits = ["86cd395fc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousDisposalBarriers.kt"
+source_anchor = "internal class ContinuousDisposalBarriers {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousDisposalBarriersTest.kt"
+test_anchor = "fun reentryWaitsForActualRetirementAndCancellationDoesNotRemoveTheBarrier("
+
+[[fixes]]
+id = "apple.first-frame-budget-survives-explicit-pause"
+commits = ["88101f553"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "struct PreparedActiveWallBudget: Equatable {"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testFirstFrameBudgetSuspendsExplicitPauseAndResumesRemainingTime("
+
+[[fixes]]
+id = "android.warm-decoder-surfaces-through-exposure"
+commits = ["883957178"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "internal class PreparedVideoSurfaces private constructor() {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun hiddenRenderingDoesNotProveExposureAndRollbackFencesLatePresentation("
+
+[[fixes]]
+id = "android.target-presentation-delay-from-film-clock"
+commits = ["9565c98c1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousObservationDeadline.kt"
+source_anchor = "fun expectedDelayMs(boundaryUs: Long, clock: Clock): Long? {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousObservationDeadlineTest.kt"
+test_anchor = "fun expectedPresentationUsesActualRateWithoutPromisingThroughPauseOrOverflow("
+
+[[fixes]]
+id = "android.aac-reserved-on-actual-fragment-clock"
+commits = ["960b18a99"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousFragmentClock.kt"
+source_anchor = "fun firstDecodeTick(bytes: ByteArray): Long {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousFragmentClockTest.kt"
+test_anchor = "fun actualAacDecodeClockChoosesItsContainingVideoEntry("
+
+[[fixes]]
+id = "android.compressed-allocation-retirement-proved"
+commits = ["9793ed7aa"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAllocationOwnership.kt"
+source_anchor = "internal class ContinuousAllocationOwnership {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousAllocationOwnershipTest.kt"
+test_anchor = "fun sharedAllocationsRemainOwnedUntilActualReleaseAndOwnersStaySeparate("
+
+[[fixes]]
+id = "apple.failed-manual-quality-retains-playback"
+commits = ["9f0a14a07"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func retainManualQualityFailure() -> Bool {"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "func testRetainsExactStandingRecipeOnceAndRejectsStaleFailure("
+
+[[fixes]]
+id = "android.quality-receipt-operation-facts-validated"
+commits = ["a73f0add9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityProtocol.kt"
+source_anchor = "fun acceptedIntervals(field: String, destination: String): Boolean {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityProtocolTest.kt"
+test_anchor = "fun receiptIdentityAloneCannotAcknowledgeUnperformedOperations("
+
+[[fixes]]
+id = "android.continuous-segments-are-auto-link-samples"
+commits = ["a982c789a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoLinkMediaSegment(path: String): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoLinkMediaSegmentTest.kt"
+test_anchor = "fun continuousVideoSegmentsAreLinkSamplesLikeOrdinarySegments("
+
+[[fixes]]
+id = "android.first-frame-budget-survives-pause-and-background"
+commits = ["af18f77b8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun samplePreparedCommitFrameBudget(): Boolean? = preparedCommitFrameBudget?.update("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "fun explicitPausePreservesRemainingFirstFrameBudget("
+
+[[fixes]]
+id = "android.first-render-metadata-not-replaced-by-queued-frames"
+commits = ["b7a6ea11a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedSurfaceReceipts.kt"
+source_anchor = "internal class PreparedFirstFrameSlot {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun queuedMetadataCannotReplaceTheFrameNamedByFirstRender("
+
+[[fixes]]
+id = "apple.decoded-alignment-before-warm-promotion"
+commits = ["b83b690ad"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func awaitPreparedDecodedAlignment("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testDecodedAlignmentRejectsStaleInvalidAndEmptySamples("
+
+[[fixes]]
+id = "android.compact-acknowledgements-use-current-media-facts"
+commits = ["bc1600ee2"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityProtocol.kt"
+source_anchor = 'settled["intent_revision"] != acknowledged["intent_revision"]) return false'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityProtocolTest.kt"
+test_anchor = "fun compactAcknowledgementsUseCurrentLedgerMediaFactsWithoutInventingPins("
+
+# The legacy-preparation half of this commit is server-side (pinned by
+# chunk_04.rs); this row covers the Apple overlap clamp.
+[[fixes]]
+id = "apple.layer-readiness-clamped-to-remaining-overlap"
+commits = ["be001d003"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testPreparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline("
+
+[[fixes]]
+id = "android.quality-authority-survives-independent-seeks"
+commits = ["c26b08f6c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQueueEpochs.kt"
+source_anchor = "internal class ContinuousQueueEpochs {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQueueEpochsTest.kt"
+test_anchor = "fun queueResetNeedsActualZeroIndicesAndNewSamplesCannotBorrowTheEarlierEpoch("
+
+[[fixes]]
+id = "android.held-producer-not-an-auto-blocker"
+commits = ["d8bce1eb7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoDecisionGate(state: AutoTickState): String? = when {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "fun aHeldProducerNeverBlocksAnAutoDecision("
+
+[[fixes]]
+id = "android.reserved-loads-survive-cancellation-and-retirement"
+commits = ["d94f6dc60"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousLoadErrorPolicy.kt"
+source_anchor = "internal class ContinuousLoadErrorPolicy : DefaultLoadErrorHandlingPolicy() {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "fun staleColdLoadsYieldOnlyToTheBoundReservedChoiceWithoutBlacklisting("
+
+[[fixes]]
+id = "android.continuous-reservation-bytes-verified"
+commits = ["dc827ebcc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityMedia.kt"
+source_anchor = "fun authorize(resource: Resource, bytes: ByteArray): Authorized? {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityMediaTest.kt"
+test_anchor = "fun immutableInitializationAndExactReservedBytesAreRequiredBeforeExtraction("
+
+[[fixes]]
+id = "android.cold-target-failure-retained-before-exposure"
+commits = ["dd6f68a69"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousExposure.kt"
+source_anchor = "internal class ContinuousExposure {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousExposureTest.kt"
+test_anchor = "fun publicationAndPhysicalAliasingPreventFalseRetention("
+
+# The commit's own regression test (tests/operations/test_evidence_workflows.py)
+# no longer exists; this test pins the standing Pause intent across a failed
+# prepared change.
+[[fixes]]
+id = "android.prepared-rollback-keeps-viewer-controls"
+commits = ["f5b244a76"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "predecessor.player.playWhenReady = effectivePlayWhenReady()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "fun failedQualityRetainsWireAndMediaWithoutLosingSavedPreferenceOrPause("
+
+[[fixes]]
+id = "android.continuous-session-adopted-on-retained-attachment"
+commits = ["fbb1c9e1b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun presented(quality: PlaybackQuality) { activeQuality = quality }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "fun aPresentedContinuousQualityKeepsLaterSeeksOnTheRetainedPlan("
+
+[[fixes]]
+id = "android.load-control-forwards-media3-defaults"
+commits = ["fccbccf00"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousLoadControl.kt"
+source_anchor = "override fun shouldStartPlayback(parameters: LoadControl.Parameters): Boolean = delegate.shouldStartPlayback(parameters)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousLoadControlTest.kt"
+test_anchor = "fun modernPlayerLifecycleAndStartupKeepTheDelegatePolicy("
+
+[[fixes]]
+id = "android.controlled-callbacks-bound-to-timeline-source"
+commits = ["ff87c371d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousSourceRegistry.kt"
+source_anchor = "internal class ContinuousPeriodBindings<T : Any> {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousPeriodBindingsTest.kt"
+test_anchor = "fun maskedPlaylistPeriodsRequireTheirSourceSequenceAndLiveOwner("
+
+[[fixes]]
+id = "apple.prepared-commit-fences-through-attempt-fence"
+commits = ["50b90e68e"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func preparedCommitStillOwned(_ commit: Attempt) -> Bool {"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid()"
+
+# 2026-10-04 promotion-review client fixes (Opus).
+[[fixes]]
+id = "android.recovery-sample-encodes-cause-and-age"
+commits = ["35f6f21d5bcbe30f6d3aedc2eb0d53932b2cf5c5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal fun rejectFailedDecoderCandidate(rejected: MutableSet<String>, candidateId: String): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun candidateRecoverySampleAlwaysEncodesCauseAndAge()"
+
+[[fixes]]
+id = "android.play-and-seek-never-wait-on-original-stage"
+commits = ["8ad649654d3de0d15a7f724f0a686a4de5ac1deb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class AutoBoundaryReplan {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun playAfterALongPauseReachesThePlayerImmediately()"
+
+[[fixes]]
+id = "apple.play-and-seek-never-wait-on-original-stage"
+commits = ["44fb5ac0d69c59a4447e3cd90dc3bacf932b907a"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoBoundaryReplan {"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testPlayAfterALongPauseIsAppliedAtOnceAndOnlyArmsTheReplan() throws"
+
+[[fixes]]
+id = "android.boundary-replan-that-builds-nothing-is-withdrawn"
+commits = ["8000338dbde659102bedbe69472f6e72db21e1c3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoBoundaryOfferBuiltNothing(boundaryStillOwns: Boolean, built: Boolean, switched: Boolean): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun boundaryOfferThatBuildsNothingIsWithdrawn()"
+
+[[fixes]]
+id = "apple.boundary-replan-spent-only-on-a-candidate"
+commits = ["bb131fad23c46195c116453c558d96bb5c3d68a0"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoBoundaryReplan {"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testBoundaryReplanIsSpentOnlyOnACandidate()"
+
+[[fixes]]
+id = "web.play-after-a-long-pause-never-seeks-on-a-retained-route"
+commits = ["b825457942d388772f96deebd2e5d5a054fcc443"]
+source = "crates/plurxd/src/web/player/transport.js"
+source_anchor = "async function resumeQualityBoundary(p){"
+test = "tests/playback/web-media-recovery.test.js"
+test_anchor = "Play after a long pause never seeks when Auto keeps the route"
+
+[[fixes]]
+id = "web.continuous-auto-family-budget-margin"
+commits = ["a81fa97684ea6b099e3bb6fc4706fa6792a0f1f8"]
+source = "crates/plurxd/src/web/player/stall-diagnosis.js"
+source_anchor = "if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "continuous family upgrades use the enforced family budget and the family's own objects"
+
+[[fixes]]
+id = "android.display-mode-timeout-withdraws-the-request"
+commits = ["42f93dd2c893596de0934857a8f8418ca92ddd9b", "fb724005eb87a1a3f625db28dacfc899763adf09"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/DisplayModeMatcher.kt"
+source_anchor = "internal fun clearsDisplayModeRequestAfterWait(matched: Boolean, stillOwner: Boolean, late: Boolean): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/DisplayModeMatcherTest.kt"
+test_anchor = "@Test fun timedOutPrepareWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow()"
+
+[[fixes]]
+id = "android.continuous-audio-outputs-retire-every-released-output"
+commits = ["5ab6affcf2ea0f9ce2f89d2a84be79fe81a3d811"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAudioOutputs.kt"
+source_anchor = ".map { it.key to it.value.owner }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousAudioOutputsTest.kt"
+test_anchor = "@Test fun releasingManyOutputsRetiresEveryOneOfThem()"
+
+[[fixes]]
+id = "android.seek-during-a-prepared-switch-is-held-not-dropped"
+commits = ["8ed4a3b821ccff4d2e2c515d18124b2348d6c8f6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class SeekDeferredBehindSwitch {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun seekDeferredBehindASwitchRunsExactlyOnceAndOnlyWhileCurrent()"
+
+# iOS does not promise an `.ended` for every `.began`. A hold raised on
+# `.began` that only `.ended` could clear stayed up for an hour over a picture
+# the viewer had resumed (iPad Pro, 2026-10-04), with the stall monitor off.
+# The viewer's press, and film actually playing, now end it, and a `.began`
+# while the viewer has already paused holds nothing.
+[[fixes]]
+id = "apple.system-hold-ends-without-ended"
+commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if systemPaused, viewerOrigin { endSystemHoldForViewer(play: requested) }"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testViewerPlayEndsASystemHoldThatIOSNeverEnded()"
+
+[[fixes]]
+# Apple TV, 2026-10-04: the screensaver came on over Live TV, fullscreen and in
+# the guide. No Apple stack owned display wake; AVPlayer's implicit assertion
+# does not survive the picture moving between surfaces. One app-level owner of
+# isIdleTimerDisabled now holds it from each stack's AVPlayer transport state.
+id = "apple.display-wake-owned-by-the-app"
+commits = ["75c84f37a3342dfca2617707dfaeef4ce896696c"]
+source = "clients/apple/Sources/PlaybackPlatformIntegration.swift"
+source_anchor = "static let shared = DisplayWakeOwner { UIApplication.shared.isIdleTimerDisabled = $0 }"
+test = "clients/apple/Tests/DisplayWakeTests.swift"
+test_anchor = "func testTheClaimFollowsItsPlayersTransportState() async"
+
+[[fixes]]
+# The web drew guide station logos from #755 while Apple and Android drew
+# callsigns only: the rule lived in the web page, outside the shared guide
+# contract the three clients replay (issue #815). Each native reducer now
+# answers the fixture's `station_logo` cases, and every surface that names a
+# station draws the tile.
+id = "apple.live-tv-guide-station-logos"
+commits = ["f2c36d0bc605d3aa6380a9c20cd8e06a638f1a6b"]
+source = "clients/apple/Sources/LiveTvGuide.swift"
+source_anchor = "static func stationLogoURL(_ guide: LiveTvGuide?, channelId: String) -> String?"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testStationLogoAnswersEverySharedCase() throws"
+
+[[fixes]]
+id = "android.live-tv-guide-station-logos"
+commits = ["11532e7c1d3d32cad90c46e06c5a1642cc474b4d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuide.kt"
+source_anchor = "fun stationLogoUrl(guide: LiveTvGuide?, channelId: String): String?"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvGuideTest.kt"
+test_anchor = "fun stationLogoAnswersEverySharedCase()"
+
+[[fixes]]
+# Coil's HTTP fetcher matches the scheme case-sensitively, so an accepted
+# `HTTPS://` logo drew on the web and Apple and not on Android. The shared rule
+# now respells the accepted scheme `https://` on every client.
+id = "live-tv.station-logo-scheme-respelled"
+commits = ["9c248d7cd5f28c28f7a53a6d72954eb9219d1cd9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuide.kt"
+source_anchor = "return \"https://$rest\""
+test = "tests/web/live-tv.test.js"
+test_anchor = "stationLogoUrl answers every shared station_logo case"
+
+[[fixes]]
+id = "apple.live-tv-station-tile-wiring"
+commits = ["92e1317756623a6c363d25223bf4b8c5b9583a29"]
+source = "clients/apple/Sources/LiveTvStationLogo.swift"
+source_anchor = "guard flights[address] == flight else { return }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testEveryStationSurfaceDrawsTheGuideLogo() throws"
+
+[[fixes]]
+# Coil keeps no record of failures, so a blocked logo host was asked again on
+# every recomposition of the guide. A failed address now backs off.
+id = "android.live-tv-station-logo-backoff"
+commits = ["184b1e7f87c890064d0f06994bd18a25808a0ffc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvStationLogo.kt"
+source_anchor = "fun shouldLoad(address: String, nowMs: Long = System.currentTimeMillis()): Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvGuideTest.kt"
+test_anchor = "fun aFailedStationLogoBacksOffAndASuccessClearsIt()"
+
+[[fixes]]
+id = "apple.native-library-group-membership"
+commits = ["b0b499bab73ee903f1759caa6a45b1861f45d975"]
+source = "clients/apple/Sources/LibraryGroups.swift"
+source_anchor = "static func make(_ items: [Item], sort: LibrarySort"
+test = "clients/apple/Tests/LibraryGroupsTests.swift"
+test_anchor = "func testTitleRowsUseServerKeysAndKeepEveryItemInPagerOrder()"
+
+[[fixes]]
+id = "android.native-library-group-membership"
+commits = []
+supplements = "apple.native-library-group-membership"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryGroups.kt"
+source_anchor = "internal fun libraryGroups(items: List<Item>, sort: String"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryGroupsTest.kt"
+test_anchor = "fun titleRowsUseServerKeysAndKeepEveryItemInPagerOrder()"
+
+[[fixes]]
+id = "apple.native-library-refresh-retains-rows"
+commits = ["a7dbd3542a3e8786ac3802b9ad933312f916cf55"]
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "if !preservingRowsDuringRefresh || current.complete {"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "func testReturningRefreshesWatchStateWithoutDroppingLateRows()"
+
+[[fixes]]
+id = "android.native-library-group-action-identity"
+commits = ["a21a9791cdea390148bb1a0c90ae17835ead8a80"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/Common.kt"
+source_anchor = '.semantics { contentDescription = "View all $title" }'
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/LibraryRowsNavigationTest.kt"
+test_anchor = 'compose.onNodeWithContentDescription("View all Z · 21").performClick()'
+
+[[fixes]]
+id = "apple.library-index-scroll-target"
+commits = ["970005e101f3e67fe80c5d3184dcf2e611e3c6ba"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = "proxy.scrollTo(LibraryScrollTarget.row(group.id), anchor: .top)"
+test = "clients/apple/UITests/LibraryRowsNavigationTests.swift"
+test_anchor = "func testLetterIndexScrollsToOffscreenRowAndRepeatsAfterManualScroll()"
+
+[[fixes]]
+id = "web.sharing-current-source-activation"
+commits = ["8177e7af8d42f17e8c8603b28662293f05a8b6a7"]
+source = "crates/plurxd/src/web/pages/settings-developer.js"
+source_anchor = "Current Source activation"
+test = "tests/web/settings-sections.test.js"
+test_anchor = "Cinema sharing reports current activation during rolling upgrade without a restart gate"
+
+[[fixes]]
+id = "web.sharing-invitation-address-setup"
+commits = ["7a4facf648713c5b1035117669971bebf9467777"]
+source = "crates/plurxd/src/web/pages/sharing-management.js"
+source_anchor = "async function sharingConfigureAddresses()"
+test = "tests/web/sharing-management.test.js"
+test_anchor = "invitation address setup preserves selected libraries and never posts until configured"
+
+[[fixes]]
+id = "desktop.cec-bounded-local-receiver"
+commits = ["d27b42bfc290d7429d5aa90be5c0b4497c4c6eb2"]
+source = "clients/desktop-remote/native_host.py"
+source_anchor = "if not self.eligible(now):"
+test = "clients/desktop-remote/tests/test_host.py"
+test_anchor = "test_backend_open_stall_cannot_replay_old_press"
+
+[[fixes]]
+id = "desktop.cec-native-frame-freshness"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "now>=credit.deadline"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "native inputs reject old credits even when disconnect status remains queued"
+
+[[fixes]]
+id = "desktop.cec-page-frame-freshness"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "now>=offered.deadline"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "MAIN delivery checks its own credit after a page stall and invalidates before context capture"
+
+[[fixes]]
+id = "desktop.cec-async-binding-fence"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "const generation=++this.generation,epoch=this.nonce();"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "overlapping bind operations fence delayed permissions and unbind during setup"
+
+[[fixes]]
+id = "desktop.cec-focused-window"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "this.operationWindow?.windowId??this.binding?.windowId"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "window focus loss fences in-flight bind and content ticks cannot rearm background input"
+
+[[fixes]]
+id = "desktop.cec-installation-ownership"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/install.py"
+source_anchor = "registration target changed; uninstall first or use a separate prefix"
+test = "clients/desktop-remote/tests/test_host.py"
+test_anchor = "test_reinstall_target_change_preserves_previous_manifest_and_receipt"
+
+[[fixes]]
+id = "desktop.cec-windows-registration"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/install.py"
+source_anchor = "refusing to replace foreign native-host registration"
+test = "clients/desktop-remote/tests/test_host.py"
+test_anchor = "test_windows_foreign_registration_and_receipt_keys_are_refused"
+
+[[fixes]]
+id = "desktop.cec-structured-libcec"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/libcec_backend.py"
+source_anchor = "config.SetKeyPressCallback(self.key_callback)"
+test = "clients/desktop-remote/tests/test_host.py"
+test_anchor = "test_structured_libcec_callback_and_selected_adapter_cleanup"
+
+[[fixes]]
+id = "desktop.cec-real-main-lifecycle"
+commits = []
+supplements = "desktop.cec-bounded-local-receiver"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "documentIds:[binding.documentId]"
+test = "clients/desktop-remote/tests/extension.browser.cjs"
+test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"
+
+[[fixes]]
+id = "desktop.cec-effect-document-focus"
+commits = ["58e0eaa58920b49d07d08a5b46a1c567e0b0680a"]
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "!document.hasFocus()"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "visible background document rejects queued MAIN input at the effect boundary"
+
+[[fixes]]
+id = "desktop.cec-popup-focus-handoff"
+commits = ["71711842c717d9b132d0a7e5923e3920450d3da2"]
+source = "clients/desktop-remote/extension/popup.js"
+source_anchor = "window.close();"
+test = "clients/desktop-remote/tests/extension.browser.cjs"
+test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"
+
+[[fixes]]
+id = "desktop.cec-setup-initial-document"
+commits = ["c7d8056d578627dfc1c62596404aeb31925826ae"]
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "pinnedDocument=result.documentId;"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "focus setup pins its first document and pending navigation invalidates the operation"
+# Cinema remote task source regressions; physical acceptance is separate.
+[[fixes]]
+id = "apple.cinema-receiver-sequence-before-effect"
+commits = ["74b4bbf5980d31f9fa2d04614ec87ebbd615debd"]
+source = "clients/apple/Sources/RemoteReceiverGuard.swift"
+source_anchor = "lastSequence = command.sequence"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testSequenceConsumedBeforeSynchronousEffectAndRejectedEffectIsNotReplayed"
+
+[[fixes]]
+id = "apple.cinema-strict-nested-command"
+commits = []
+supplements = "apple.cinema-receiver-sequence-before-effect"
+source = "clients/apple/Sources/RemoteAPI.swift"
+source_anchor = "for command in commands { _ = try CinemaRemoteCommand.decode"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testCanonicalWireFixturesAndStrictNestedPollDecode"
+
+[[fixes]]
+id = "apple.cinema-physical-preview-owner"
+commits = []
+supplements = "apple.cinema-receiver-sequence-before-effect"
+source = "clients/apple/Sources/RemotePreviewOwnership.swift"
+source_anchor = "return owns(current) ? nil : current"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPhysicalScrubSurvivesUnrelatedInputAndOnlyNetworkPreviewIsCancelled"
+
+[[fixes]]
+id = "apple.cinema-control-sequence-lifetime"
+commits = ["cbb5e0925131e8eea6ea1bca9174f3d8243743a3"]
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "guard let previous = values[key], previous < CinemaRemoteCommand.maximumInteger"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testControlSequenceSurvivesCloseAndUnknownEpochRequiresAcquisition"
+
+[[fixes]]
+id = "apple.cinema-active-scene-effect-fence"
+commits = []
+supplements = "apple.cinema-control-sequence-lifetime"
+source = "clients/apple/Sources/RemoteSceneEligibility.swift"
+source_anchor = "eligible = active"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testInactiveSceneSuspendsEffectsWithoutRotatingForegroundIdentity"
+
+[[fixes]]
+id = "apple.cinema-conditional-own-epoch-recovery"
+commits = []
+supplements = "apple.cinema-control-sequence-lifetime"
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "return control.controlEpoch"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testUnknownOwnEpochRecoveryCarriesObservedEpochAndCannotTargetOtherGrant"
+
+[[fixes]]
+id = "apple.cinema-explicit-control-reacquisition"
+commits = ["42607dc16f938e11cadc76198e0a6e690f3d6781"]
+source = "clients/apple/Sources/RemoteControlSequence.swift"
+source_anchor = "func permits(_ generation: UUID) -> Bool { acquiredGeneration == generation }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testReopenAndConnectionRecoveryRequireExplicitControlAcquisition"
+
+[[fixes]]
+id = "apple.cinema-live-guide-window-focus-order"
+commits = ["05237632b91363b3ae86fb81a3ea38da6efae4cc"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".onChange(of: remoteGuideKeys)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testGuideOrderRefreshesWhenSameChannelsHaveNewProgrammeTimes"
+
+[[fixes]]
+id = "apple.cinema-pairing-lifetime-retirement"
+commits = ["6649ba08ffb9d64061e8bae9c2fc787227880c71"]
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "ticket.generation == generation && ticket.receiverID == receiverID && ticket.target == target"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPairingCloseAndTargetSwitchRetireLateApprovedReply"
+
+[[fixes]]
+id = "apple.cinema-null-state-means-unchanged"
+commits = []
+supplements = "apple.cinema-pairing-lifetime-retirement"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "guard let state else { return }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNullStateTimeoutPreservesStateUntilControllerRetirement"
+
+[[fixes]]
+id = "android.cinema-remote-foreground-guard"
+commits = ["98ac181b567acfd55a2b51619b3fc4fafde8f6f1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteReceiverGuard.kt"
+source_anchor = "highWater = command.sequence"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "consumesSequenceBeforeEffectAndRetainsRejectedOutcome"
+
+[[fixes]]
+id = "android.cinema-remote-native-focus-realization"
+commits = []
+supplements = "android.cinema-remote-foreground-guard"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigation.kt"
+source_anchor = "if (requestedFocus != null || entry.identity != focusedIdentity"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "lazyFocusRequestCannotSelectUntilRealizedNativeAcknowledgement"
+
+[[fixes]]
+id = "android.cinema-remote-owned-overlay"
+commits = []
+supplements = "android.cinema-remote-foreground-guard"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePlaybackAdapter.kt"
+source_anchor = "if (!current.effectsEligible()) return RemoteOutcome.Restricted"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "playbackOwnerModalFenceAndOptionChangesInvalidateExactContext"
+
+[[fixes]]
+id = "android.cinema-remote-pairing-monotonic-deadline"
+commits = ["2e50aa9d9faa875e88aaf5c4578bf6590bd1af64"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "withTimeout(remaining)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "monotonicPairingDeadlineRejectsSlowClaimAndLateApprovedResult"
+
+[[fixes]]
+id = "android.cinema-remote-ack-before-queued"
+commits = []
+supplements = "android.cinema-remote-pairing-monotonic-deadline"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "commandStatus = commandResult.known(control.epoch, sequence)?.viewerMessage()"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "exactAckBefore202CannotBecomePendingOrAffectAnotherCommand"
+
+[[fixes]]
+id = "desktop.cec-cinema-device-local-choice"
+commits = ["500748f58be0a9652ae018dcf022a9d1c9a8ca7b"]
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "typeof cinemaRemoteLocalEnabled===\"function\"&&!cinemaRemoteLocalEnabled(\"cec\")"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "saved Cinema local CEC choice fences install and queued delivery independently of server"
+
+[[fixes]]
+id = "desktop.cec-cinema-disable-document"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/content.js"
+source_anchor = "cinema-cec-disabled"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "fixed local disable notification unbinds the document port without accepting page actions"
+
+[[fixes]]
+id = "desktop.cec-cinema-disable-worker"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/worker.js"
+source_anchor = "message.type===\"disabled\""
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "fixed local disable notification unbinds the document port without accepting page actions"
+
+[[fixes]]
+id = "desktop.cec-cinema-server-instance"
+commits = []
+supplements = "desktop.cec-cinema-device-local-choice"
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = "SERVER?.instance_id!==instance"
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "saved Cinema local CEC choice fences install and queued delivery independently of server"
+
+# Cinema couch: local-only CEC admission captures probe-time physical identity.
+[[fixes]]
+id = "desktop.cinema-cec-pairing-credit-identity"
+commits = ["8ee2f4be2674676af94d511df6c66102774ccc99"]
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = 'if(JSON.stringify(current)!==JSON.stringify(offered.context))return "stale_focus";'
+test = "clients/desktop-remote/tests/extension.test.mjs"
+test_anchor = "MAIN Select requires a fresh physical focus and pending identity credit"
+
+[[fixes]]
+id = "desktop.cinema-cec-pairing-physical-owner"
+commits = []
+supplements = "desktop.cinema-cec-pairing-credit-identity"
+source = "clients/desktop-remote/extension/bridge.js"
+source_anchor = 'if(typeof CinemaRemoteLocalPhysical!=="undefined")return CinemaRemoteLocalPhysical.dispatch(action,offered.context);'
+test = "clients/desktop-remote/tests/extension.browser.cjs"
+test_anchor = "real Chromium extension targets MAIN document and invalidates local context without native hardware"
+
+[[fixes]]
+id = "android.cinema-remote-physical-observer-adapter"
+commits = ["d2c287b96c2ae3eda0a29a84659ca4e560f07554"]
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePhysicalInputAdapter.kt"
+source_anchor = "fun retiresCredits(action: Int, keyCode: Int)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "dedicatedPhysicalPlayPauseStopRetireCreditsAndPreservePhysicalScrub"
+
+[[fixes]]
+id = "android.cinema-remote-observer-fence-boundary"
+commits = []
+supplements = "android.cinema-remote-physical-observer-adapter"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigationViews.kt"
+source_anchor = ".observeRemotePhysicalKeys"
+test = "tests/operations/test_player_input_fence.py"
+test_anchor = "test_companion_android_adapter_does_not_exempt_neighboring_raw_handlers"
+
+[[fixes]]
+id = "android.cinema-remote-typed-track-menu"
+commits = []
+supplements = "android.cinema-remote-physical-observer-adapter"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "mutableStateOf<RemoteTrackMenuKind?>(null)"
+test = "tests/operations/test_playback_surface_fence.py"
+test_anchor = "test_the_android_player_carries_no_pre_contract_surface_write"
+
+[[fixes]]
+id = "apple.cinema-owned-couch-navigation"
+commits = ["512fac49526aa501c4f31ef339ab20cd9e482f42"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "destinations.count < 8"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedDestinationBackRouteReplacementAndLateDisposalStayScoped"
+
+[[fixes]]
+id = "apple.cinema-couch-native-realization"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func attachDestination("
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedDestinationBoundsAndRealizationRequireCurrentNativeFocus"
+
+[[fixes]]
+id = "apple.cinema-couch-choice-admission"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "if let refused = entry.admission() { return refused }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testStaleCapturedPreplaySelectRejectsBeforeActionAndCannotCloseReplacementModal"
+
+[[fixes]]
+id = "apple.cinema-couch-choice-source"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "let source = RemoteOwnedChoiceSource(token: UUID(), epoch: remoteNavigation.epoch, signature: remoteDetailSourceSignature)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRefreshedPreplaySourceAndReplacedPanelRejectCapturedChoice"
+
+[[fixes]]
+id = "apple.cinema-couch-registration-refresh"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "func updateUIView(_ uiView: UIView, context: Context) { update() }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testRealRegistrationRefreshesVersionClosureAtUnchangedButtonGeometry"
+
+[[fixes]]
+id = "apple.cinema-couch-dismiss-fallback"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "requestFocus(old.opener.flatMap"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testPhysicalDestinationDismissRestoresAvailableFallbackWhenOpenerRemoved"
+
+[[fixes]]
+id = "apple.cinema-couch-episode-retry"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "defer { episodePlayAttempt.finish(attempt) }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testEpisodeContextChangeRetiresLoadingAndAllowsFreshRetryWithoutClearingReplacement"
+
+[[fixes]]
+id = "apple.cinema-couch-wire-negative-zero"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteWire.swift"
+source_anchor = "guard Array(token) != [45, 48]"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNegativeZeroRejectedByCommandAndProductionNestedPollDecoder"
+
+[[fixes]]
+id = "apple.cinema-couch-state-budget"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteAPI.swift"
+source_anchor = "static let maximumBytes = 48 * 1_024"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testNormalizedPresenceBudgetPreservesExactIDsAndTransport"
+
+[[fixes]]
+id = "apple.cinema-couch-publisher-revision"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "func makeState(pairingRestricted: Bool)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testProductionPresenceRevisionAdvancesAcrossPairingOpenPendingExpiredAndClose"
+
+[[fixes]]
+id = "apple.cinema-couch-pairing-surface"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "challenge = nil; pairingExpired = true; guardState.invalidate()"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testTVPairSurfaceCloseReplacementAndExpiredCodeRetireOldReplies"
+
+[[fixes]]
+id = "apple.cinema-couch-pairing-deadline"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "return now >= start && now < deadline"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testPhonePairingMonotonicDeadlineRejectsLateApprovalBeforeSave"
+
+[[fixes]]
+id = "apple.cinema-couch-command-ack-order"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePairingLifetime.swift"
+source_anchor = "func known(epoch: UUID, sequence: UInt64)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testExactAckBefore202CannotReturnToPendingOrCrossCommandOwner"
+
+[[fixes]]
+id = "apple.cinema-couch-deferred-permit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteReceiverGuard.swift"
+source_anchor = "now < value.creditDeadline"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testDeferredReservationOriginalDeadlinePhysicalRetirementAndNoReplay"
+
+[[fixes]]
+id = "apple.cinema-couch-late-resource-cleanup"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemotePlaybackAdapter.swift"
+source_anchor = "let task = Task { await cleanup() }"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testLateSharedOfferCleanupRunsAfterPermitExpiryWithoutRendererMutation"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-start-retry"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "remoteRetryRequiresPreparation = true"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testRejectedInitialRemoteStartAllowsFreshRequestAndExpiredRetryNeverDispatches"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-stop-cleanup"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func beginStop(watched: Bool = false) -> Task<Void, Never>"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testLocalStopExitRemainsUsableWhileOwnedCleanupOutlivesCommandDeadline"
+
+[[fixes]]
+id = "apple.cinema-couch-shared-owned-exit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "guard modal == nil, presentations.isEmpty else { return .unsupported }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testOwnedSharedPresentationExitProtectsUnderlyingDetailAndReplacement"
+
+[[fixes]]
+id = "apple.cinema-couch-pending-owned-exit"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteClientModel.swift"
+source_anchor = "replacingPending: [.stop, .back, .home].contains(command.action.type)"
+test = "clients/apple/Tests/RemoteReceiverTests.swift"
+test_anchor = "testOwnedBackHomeCanReplacePendingNetworkPermitWithoutReplayingIt"
+
+[[fixes]]
+id = "apple.cinema-couch-stationary-physical-action"
+commits = []
+supplements = "apple.cinema-owned-couch-navigation"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func performPhysicalAction(_ action: () -> Void)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "testStationarySharedPhysicalActionRetiresNetworkAuthorityBeforeTransportEffect"
+
+# Android couch: exact owned windows/full-reference playback and bounded deferred effects.
+
+[[fixes]]
+id = "android.couch-expanded-library"
+commits = ["e9311ab776435ce6bf30e0312a4b85293ee4b816"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "RemotePresentationKind.LibraryGroup"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "expandedLibraryOwnsRealizationAndBackRestoresExactOpener"
+
+[[fixes]]
+id = "android.couch-poster-outcome"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/Common.kt"
+source_anchor = "remoteActivate?.invoke()"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "retiredExpandedDialogCannotCloseReplacementPresentation"
+
+[[fixes]]
+id = "android.couch-typed-owned-windows"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigation.kt"
+source_anchor = "ProgrammeDetails(\"details\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-owned-window-view"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteNavigationViews.kt"
+source_anchor = "internal fun RemoteOwnedWindow"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-choice-close"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChoiceDialog.kt"
+source_anchor = "val keys = choiceKeys + closeKey"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-shared-entry"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/HomeScreen.kt"
+source_anchor = "add(\"home:shared\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "onlyExactOwnedRoutesCanAdvertiseSemanticControls"
+
+[[fixes]]
+id = "android.couch-shared-stack"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedLibrariesScreen.kt"
+source_anchor = "stack.size >= 8"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "sharedChildExitRestoresExactOpenerAndRetiredDisposalCannotResetParent"
+
+[[fixes]]
+id = "android.couch-shared-preplay"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedRemotePreplay.kt"
+source_anchor = "if (action.type == \"select\") null else deferred(action)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "admittedSharedStartKeepsActualPlayFocusThroughOwnerBusyAndRecordsBeforeTransfer"
+
+[[fixes]]
+id = "android.couch-shared-prepare"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String?, permitted:"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "expiredRemoteStartCleansLateOfferWithoutRendererAndFreshRetryUsesNewRequest"
+
+[[fixes]]
+id = "android.couch-shared-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt"
+source_anchor = "check(permitted())"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "expiredRemoteStartCleansLateOfferWithoutRendererAndFreshRetryUsesNewRequest"
+
+[[fixes]]
+id = "android.couch-shared-local-exit"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "fun beginStop(watched: Boolean = false): kotlinx.coroutines.Job"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "remotePauseChecksAfterControlAndLocalStopPausesBeforeCleanupRuns"
+
+[[fixes]]
+id = "android.couch-shared-incumbent"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "incumbent ?: SharedPlayerController(context, vm)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedPlaybackOwnerTest.kt"
+test_anchor = "admittedSharedStartKeepsActualPlayFocusThroughOwnerBusyAndRecordsBeforeTransfer"
+
+[[fixes]]
+id = "android.couch-deferred-binding"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteDeferredEffect.kt"
+source_anchor = "val resultDeadline: Long"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredTerminalDeadlineDoesNotExtendAndGrantRetirementFencesOldWork"
+
+[[fixes]]
+id = "android.couch-deferred-guard"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteReceiverGuard.kt"
+source_anchor = "now < permit.resultDeadline"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredPermitRetainsOriginalDeadlineConsumesSequenceAndBoundsCleanup"
+
+[[fixes]]
+id = "android.couch-deferred-adapter"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemotePlaybackAdapter.kt"
+source_anchor = "val deferred: ((RemoteAction) -> RemoteDeferredEffect?)?"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "deferredAckCompletesBeforeOwnerTransitionAndStaleCompletionCannotAffectReplacement"
+
+[[fixes]]
+id = "android.couch-retained-ack"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteClientModel.kt"
+source_anchor = "receiverGuard.retainedResult(command,"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "retainedDeferredAckSurvivesOwnedTransitionButRejectsOtherGrantAndOriginalDeadline"
+
+[[fixes]]
+id = "android.couch-attempt-cleanup"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteOwnedAttempt.kt"
+source_anchor = "if (busyTicket == ticket) busyTicket = null"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "retiredSharedPreparationClearsOnlyItsBusyMarkerAndAutoplayCannotRestartClosedPlayer"
+
+[[fixes]]
+id = "android.couch-channel-admission"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChannelAdmission.kt"
+source_anchor = "if (serial != token || !permitted())"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteChannelAdmissionTest.kt"
+test_anchor = "expiredOrReplacedChannelNeverInvokesIncumbentAndPhysicalJobIsUntouched"
+
+[[fixes]]
+id = "android.couch-channel-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = "remoteChannels.run(LiveTvInputPolicy.CHANNEL_COALESCE_MS, permitted)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteChannelAdmissionTest.kt"
+test_anchor = "networkRetirementCancelsOnlyItsOwnUninvokedCoalescingSlot"
+
+[[fixes]]
+id = "android.couch-guide-focus"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuideUi.kt"
+source_anchor = "lastWindow != slots"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-programme-watch"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/DvrUi.kt"
+source_anchor = "watchModifier: Modifier = Modifier"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-live-programme-owner"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "RemotePresentationKind.ProgrammeDetails"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteNavigationTest.kt"
+test_anchor = "programmeDetailsOwnsOnlyWatchCloseAndRestoresExactGuideCell"
+
+[[fixes]]
+id = "android.couch-challenge-deadline"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteChallengeExpiry.kt"
+source_anchor = "fun remaining(now: Long)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "tvChallengeUsesOriginalMonotonicDeadlineAndRejectsInvalidDuration"
+
+[[fixes]]
+id = "android.couch-challenge-retry"
+commits = []
+supplements = "android.couch-expanded-library"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteCompanionViews.kt"
+source_anchor = "This TV code expired. Get a new code to try again."
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "tvChallengeUsesOriginalMonotonicDeadlineAndRejectsInvalidDuration"
+
+# Android B09 invitations: current source/test anchors for the reviewed authored
+# source packet. JVM/loopback/Router-schema evidence is separate from physical
+# Firebase, permission, Wi-Fi and background-execution qualification.
+
+[[fixes]]
+id = "android.invitation-wire"
+commits = ["ea9c03109e7ca939cb0c1f9bf181ae6e81be2069"]
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "RemoteWire.objectBody(bytes, 64 * 1024)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "strictWholeBodyRejectsNumericLexemesUnknownNestedFieldsAndBadGeneration"
+
+[[fixes]]
+id = "android.invitation-consent-invariants"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "it.readiness.eligible == (it.enabled && it.readiness.status == \"ready\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "consentReadinessAndAbsentOffAreConsistent"
+
+[[fixes]]
+id = "android.invitation-opaque-installation"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "Base64.getUrlEncoder().withoutPadding().encodeToString(bytes) == value"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "canonicalOpaqueIdSelectsOnlyInstallationPrefixAndRejectsPaddingAliases"
+
+[[fixes]]
+id = "android.invitation-profile-vault"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/remote/RemoteProfileScope.kt"
+source_anchor = "cinema-profile-v2:"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "canonicalScopeSeparatesOriginInstanceAccountAndOldConcatenationCollision"
+
+[[fixes]]
+id = "android.invitation-broker-origin"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "require(canonical == value)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationWireTest.kt"
+test_anchor = "brokerTicketAcceptsOnlyExactCanonicalHttpsOrigin"
+
+[[fixes]]
+id = "android.invitation-offline-visibility"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationAdmission.kt"
+source_anchor = "if (!state.loginCurrent || !state.permission || !state.channelEnabled"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationAdmissionTest.kt"
+test_anchor = "offlineOffLogoutPermissionAndInstallationGateBeforeSharedDedupe"
+
+[[fixes]]
+id = "android.invitation-dedupe-retention"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationAdmission.kt"
+source_anchor = "if (seen.size >= 256) return false"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationAdmissionTest.kt"
+test_anchor = "saturationNeverEvictsAnUnexpiredNotificationIdentity"
+
+[[fixes]]
+id = "android.invitation-clock-retirement"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationAdmission.kt"
+source_anchor = "if (time < lastClock"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationAdmissionTest.kt"
+test_anchor = "invalidClockAndRollbackCannotReleaseDedupeOrAdmitFreshWork"
+
+[[fixes]]
+id = "android.invitation-home-cas"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationApi.kt"
+source_anchor = "it.phone.phone_generation > generation"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationApiTest.kt"
+test_anchor = "homePhoneCasReplyAndLateAuthorizationAreFenced"
+
+[[fixes]]
+id = "android.invitation-broker-header"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationApi.kt"
+source_anchor = "values.size == 1 && RemoteWire.uuid(values.single()) == brokerGeneration"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationApiTest.kt"
+test_anchor = "brokerClaimContainsOnlyTicketAuthorityAndRequiresExactGeneration"
+
+[[fixes]]
+id = "android.invitation-resident-callback"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationResidentLifetime.kt"
+source_anchor = "if (active != run || network != null) return false"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationResidentLifetimeTest.kt"
+test_anchor = "callbackLossStopAndReplacementCannotRearmOrRetireAnotherRun"
+
+[[fixes]]
+id = "android.invitation-resident-teardown"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationServiceTeardown.kt"
+source_anchor = "if (owner != run || retiring) return false"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationResidentLifetimeTest.kt"
+test_anchor = "teardownWaitsForSocketsAndUsesLatestRejectedStartWithoutAdmittingReplacement"
+
+[[fixes]]
+id = "android.invitation-resident-permission"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationResidentService.kt"
+source_anchor = "if (!InvitationNotifications.permission(this)) { stopOwned(owner); return START_NOT_STICKY }"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationResidentLifetimeTest.kt"
+test_anchor = "permissionRejectedAfterAdmissionRetiresExactRunBeforeAndroidDestroy"
+
+[[fixes]]
+id = "android.invitation-rotation-per-screen"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationRotationQueue.kt"
+source_anchor = "confirmed[it.key] != (current to it.value)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationRotationQueueTest.kt"
+test_anchor = "firstScreenSuccessDoesNotDropSecondUncertainRenewalOrEnableAnOffScreen"
+
+[[fixes]]
+id = "android.invitation-explicit-unknown"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationModel.kt"
+source_anchor = "if (current(generation)) rotation.unknown(receiver)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationRotationQueueTest.kt"
+test_anchor = "explicitUnknownEnrollmentDoesNotDrainPendingTokenUntilFreshExplicitRetry"
+
+[[fixes]]
+id = "android.invitation-tap-intent"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationTapAdmission.kt"
+source_anchor = "choice.enabled && !choice.pendingSync && intents[receiver] == choice.intentRevision"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationTapAdmissionTest.kt"
+test_anchor = "lookupCompletionCannotSelectAfterOfflineOffOrIdentityPhoneIntentReplacement"
+
+[[fixes]]
+id = "android.invitation-missing-grant-off"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationScreenInventory.kt"
+source_anchor = "choices.map { it.receiver } + consents.map { it.receiver_id }"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationTapAdmissionTest.kt"
+test_anchor = "missingGrantAndUnavailableReadinessKeepSavedOffRowsInActualInventory"
+
+[[fixes]]
+id = "android.invitation-router-envelope"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationWire.kt"
+source_anchor = "fun start(bytes: ByteArray)"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationRouterSamplesTest.kt"
+test_anchor = "productionParserAcceptsActualHomeRouterRepliesAndEnrollmentRelations"
+
+[[fixes]]
+id = "android.invitation-loopback-transport"
+commits = []
+supplements = "android.invitation-wire"
+source = "clients/android/app/src/main/java/tv/plurx/app/invitations/InvitationApi.kt"
+source_anchor = "builder.post(bytes.toRequestBody(\"application/json\".toMediaType()))"
+test = "clients/android/app/src/test/java/tv/plurx/app/invitations/InvitationRouterSamplesTest.kt"
+test_anchor = "realLoopbackHomeTransportDecodesRedactedRouterSchemaAndUsesOnlySelectedHomeAuthority"
+[[fixes]]
+id = "apple.invitation-off-first"
+commits = ["d37f77c129242b57918a81307a19cf673d55a03e"]
+source = "clients/apple/Sources/InvitationClientModel.swift"
+source_anchor = "proof = try await reconcileOff(proof, profile: profile, owner: owner, ticket: ticket, api: api)"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionModelDrainsOfflineOffBeforeLoginRebindAndRevokedOn"
+
+[[fixes]]
+id = "apple.invitation-strict-wire"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationWire.swift"
+source_anchor = "try RemoteStrictJSON.check(data)"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testStrictInvitationEnvelopesRejectUnknownFieldsAndNoncanonicalNumbersProofs"
+
+[[fixes]]
+id = "apple.invitation-readiness"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationWire.swift"
+source_anchor = "eligible == (enabled && state == .ready)"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testContradictoryEligibleAndZeroEnabledConsentCannotEnterCache"
+
+[[fixes]]
+id = "apple.invitation-trusted-origin"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationWire.swift"
+source_anchor = "url.scheme == \"https\""
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testTicketRejectsUntrustedOriginOuterDialectAndGeneration"
+
+[[fixes]]
+id = "apple.invitation-once-proof"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationAPI.swift"
+source_anchor = "secret == nil ? value.1 != nil : value.1 == nil"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProvedRegistrationCannotSilentlyRotateMissingInstallationProof"
+
+[[fixes]]
+id = "apple.invitation-consent-pages"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationAPI.swift"
+source_anchor = "rows.count + page.count <= InvitationWire.maximumConsents"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testConsentPaginationKeepsMoreThanOnePageAndBoundsRepeatedCursor"
+
+[[fixes]]
+id = "apple.invitation-off-proof"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationAPI.swift"
+source_anchor = "grantSecret: enabled ? grant?.secret : nil"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testInvitationOffDoesNotRequireGrantOrForegroundRemoteMaster"
+
+[[fixes]]
+id = "apple.invitation-apns-binding"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationAPI.swift"
+source_anchor = "value.0.transport == \"apns\""
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testStartRejectsReplacementTransportBeforeClaimingProvider"
+
+[[fixes]]
+id = "apple.invitation-confirm-binding"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationAPI.swift"
+source_anchor = "value.generation == consent.generation"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testConfirmRefusesReplacementConsentGenerationTransportAndMismatchedGrant"
+
+[[fixes]]
+id = "apple.invitation-broker-proof"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationAPI.swift"
+source_anchor = "request.setValue(\"Bearer \" + (try InvitationWire.secret(ticket.secret))"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testBrokerClaimOnlySendsTicketProofAndRejectsInvalidAppleToken"
+
+[[fixes]]
+id = "apple.invitation-broker-generation"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationAPI.swift"
+source_anchor = "fields.count == 1"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testActualURLSessionRejectsSameAndDifferentlyCasedDuplicateGenerationHeaders"
+
+[[fixes]]
+id = "apple.invitation-offline-intent"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationSecureState.swift"
+source_anchor = "current.choices[key]?.intent == intent"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testConsentRefreshCannotOverrideNewerOfflineOffOrRetainMissingServerAuthority"
+
+[[fixes]]
+id = "apple.invitation-scope"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/RemoteSecretStorage.swift"
+source_anchor = "return \"origin-v1:\""
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testRemoteGrantProofRequiresExactCanonicalOriginInstanceAndAccount"
+
+[[fixes]]
+id = "apple.invitation-dedupe"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationNotificationBridge.swift"
+source_anchor = "now < $0.receivedAt || now - $0.receivedAt < 180"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testNotificationRollbackOffAndRetiredInstallationCannotRedisplayOrEnroll"
+
+[[fixes]]
+id = "apple.invitation-registration"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationNotificationBridge.swift"
+source_anchor = "if !force, registrationOwner == owner { return }"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testApnsFailureIsAdvisoryUntilExplicitRetryAndTokenNeverEnablesChoice"
+
+[[fixes]]
+id = "apple.invitation-task-drain"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationClientModel.swift"
+source_anchor = "if pendingTokenRefresh { pendingTokenRefresh = false; refresh() }"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionModelCoalescesTokenRotationAndDrainsTapAfterAwaitedReconcile"
+
+[[fixes]]
+id = "apple.invitation-rebind"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationClientModel.swift"
+source_anchor = "if proof.metadataNeedsRefresh {"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionRebindRecoversUnknownPhoneGenerationBeforeCas"
+
+[[fixes]]
+id = "apple.invitation-deadline"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationClientModel.swift"
+source_anchor = "let started = monotonic(), deadline = started + 120"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionEnrollmentExpiredStartCannotClaimAndRequiresFreshExplicitRetry"
+
+[[fixes]]
+id = "apple.invitation-recovery"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationClientModel.swift"
+source_anchor = "homePhonesOwner == owner"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionLostLocalProofListsAndDeletesSelectedHomeInstallationWithoutOtherProofs"
+
+[[fixes]]
+id = "apple.invitation-stale-recovery"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationClientModel.swift"
+source_anchor = "self.homePhones = phones; self.homePhonesOwner = owner"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionStaleAccountInstallReplyAndCorruptProfileCannotRestoreOldAuthority"
+
+[[fixes]]
+id = "apple.invitation-credential-observer"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationClientModel.swift"
+source_anchor = "Session.shared.observeAuthorizationChanges"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionSessionObserverRetiresOldLoginWhileRootStaysActive"
+
+[[fixes]]
+id = "apple.invitation-tap-intent"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationClientModel.swift"
+source_anchor = "choice.intent == handoff.choiceIntent"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionModelCoalescesTokenRotationAndDrainsTapAfterAwaitedReconcile"
+
+[[fixes]]
+id = "apple.invitation-root-handoff"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/PlurxApp.swift"
+source_anchor = "invitations.validateTapHandoff(handoff)"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionModelCoalescesTokenRotationAndDrainsTapAfterAwaitedReconcile"
+
+[[fixes]]
+id = "apple.invitation-sole-delegate"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/LocalReminders.swift"
+source_anchor = "InvitationNotificationBridge.shared.shouldPresent"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testNotificationRollbackOffAndRetiredInstallationCannotRedisplayOrEnroll"
+
+[[fixes]]
+id = "apple.invitation-selected-delete"
+commits = []
+supplements = "apple.invitation-off-first"
+source = "clients/apple/Sources/InvitationSettingsView.swift"
+source_anchor = "invitations.removeHomeInstallation(deleteHome)"
+test = "clients/apple/Tests/InvitationTests.swift"
+test_anchor = "testProductionLostLocalProofListsAndDeletesSelectedHomeInstallationWithoutOtherProofs"
+
+[[fixes]]
+id = "apple.current-visible-frame-evidence"
+commits = ["98826e725185e8214645f02b81b5668ed37a687c"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "enum PlaybackFirstOutputEvidence"
+test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
+test_anchor = "testVideoTTFFRejectsClockAndDimensionsWithoutLayerReadiness"
+
+[[fixes]]
+id = "apple.cancelled-black-frame-recovery-rearms-owner"
+commits = ["2dc76591683429735419e33acf68e98448bd9b59"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func queueBlackFrameRecovery"
+test = "clients/apple/Tests/AppleFrameEvidenceTests.swift"
+test_anchor = "testQueuedBlackFrameRecoveryRearmsAfterViewerActionSupersedesTrigger"
+
+[[fixes]]
+id = "apple.growing-resume-preparation-budget"
+commits = ["2bc3425f5a5f08160ca6bb121a21e0bf7f20efab"]
+source = "clients/apple/Sources/PlayerItemReadiness.swift"
+source_anchor = "enum PlayerItemReadiness"
+test = "clients/apple/Tests/AppleItemReadinessTests.swift"
+test_anchor = "testGrowingResumeWaitsForPublicationAtTwentyOneSeconds"
+
+[[fixes]]
+id = "apple.staged-poll-continuation-fence"
+commits = ["46bf6fe8a1438d4a3f22ab68afe8b7bb3cfcae61"]
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case recoveryEvidenceAfterStagedPoll ="
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
+
+[[fixes]]
+id = "android.prepared-video-surface-coordinate-space"
+commits = ["32b2111d9", "142d9f4e0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "host.width, host.height, output.surfaceWidth, output.surfaceHeight,"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PreparedVideoSurfaceRenderingTest.kt"
+test_anchor = "decoderFrameFillsThePreparedSurfaceWidth"
+
+[[fixes]]
+id = "android.playback-panel-light-theme-contrast"
+commits = []
+supplements = "android.prepared-video-surface-coordinate-space"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "color = if (selected) Accent else OnBg"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanelThemeTest.kt"
+test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
+
+# PR920 baseline correction: the Android status now names the real Gradle
+# build 152. The anchor stops before the build number: the number moves with
+# every versionCode bump and is already pinned to build.gradle.kts by
+# test_mobile_build_claims, so repeating it here only broke each bump. This
+# maps the documentation correction, not a new playback claim.
+[[fixes]]
+id = "android.build-152-baseline-claim"
+commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
+source = "clients/android/README.md"
+source_anchor = "> Status: **v0.3.0**, build `"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "test_repository_build_claims_match_release_inputs"
+
+[[fixes]]
+id = "apple.playback-buffer-limit-hold-wording"
+commits = ["f8f7e07ec34658b9590c95b24a0a71a191cfdcab"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "The server’s playback buffer limit has been reached."
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPlaybackBufferHoldsNameTheBufferLimit"
+
+[[fixes]]
+id = "web.playback-buffer-limit-hold-wording"
+commits = []
+supplements = "apple.playback-buffer-limit-hold-wording"
+source = "crates/plurxd/src/web/player/prepared-switch-measurement.js"
+source_anchor = "The server’s playback buffer limit has been reached."
+test = "tests/playback/web-control.test.js"
+test_anchor = "buffer capacity hold wording identifies the playback buffer for both scheduler codes"
+
+# Published Batch 03 repairs: source/test anchors, not execution receipts.
+[[fixes]]
+id = "android.compact-header-actions-wrap"
+commits = ["ef494262d70d507d74277906ddedf4ba84a75b04"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/HomeScreen.kt"
+source_anchor = "FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/HomeTopBarTest.kt"
+test_anchor = "liveTvAndSettingsFitNarrowPhonesAndLiveActionIsReachable"
+
+[[fixes]]
+id = "apple.cinema-developer-card-inventory"
+commits = ["7e38cadc0c73de80f73de23e66bd951371a16306"]
+source = "clients/apple/Sources/LiveTvSettingsView.swift"
+source_anchor = "Cinema remotes · advisory enablement"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+[[fixes]]
+id = "android.dolby-vision-profile-badge-parity"
+commits = ["6990f8791d827652f3c1f1c6f8738e0aea771916"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "get() = if (state != FactState.Source && activeLabel != null)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "aConvertedProfileSevenTitleShowsBothHalvesLit"
+
+[[fixes]]
+id = "android.hls-copy-target-arrival"
+commits = ["2ef81d673527ffcda2bf619f494ba6cbfe580149"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "internal fun copyPrerollHasRenderedProgress("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "hlsCopyPrerollSettlesBeforeTheDestinationDeadline"
+
+[[fixes]]
+id = "android.temporary-serving-fence-control-retry"
+commits = []
+supplements = "android.hls-copy-target-arrival"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = 'code in setOf("control_unavailable", "serving_fenced")'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "temporaryServingFenceReplaysThenResumesFreshControl"
+
+[[fixes]]
+id = "apple.temporary-serving-fence-control-retry"
+commits = ["bf956ba589c37c96a8985b5e8a4ea6a058faa3cb"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = 'code == "control_unavailable" || code == "serving_fenced"'
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testARetryHonoursTheServersRetryAfter"
+
+[[fixes]]
+id = "android.serving-fence-retry-after-header"
+commits = ["92d9f4e4ff2e99203f7b414f7e8296ae91b49978"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+source_anchor = 'failure(response.code, response.body?.string().orEmpty(), json, response.header("Retry-After"))'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlTransportTest.kt"
+test_anchor = "headerOnlyServingFenceCarriesTheServersDelay"
+
+[[fixes]]
+id = "apple.serving-fence-retry-after-header"
+commits = []
+supplements = "android.serving-fence-retry-after-header"
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = 'retryAfterHeader: response.value(forHTTPHeaderField: "Retry-After")'
+test = "clients/apple/Tests/PlaybackControlTransportTests.swift"
+test_anchor = "testHeaderOnlyServingFenceCarriesTheServersDelay"
+
+# DV effort corrective client anchors: source/test witnesses, not execution receipts.
+[[fixes]]
+id = "android.physical-key-public-window-callback"
+commits = ["696b37ff3e4cf664fab6fb98a71706f02ac297ab"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = "return nativeWindowCallback.dispatchKeyEvent(event)"
+test = "clients/android/app/src/test/java/tv/plurx/app/remote/RemoteReceiverTest.kt"
+test_anchor = "dedicatedPhysicalPlayPauseStopRetireCreditsAndPreservePhysicalScrub"
+
+[[fixes]]
+id = "web.accepted-control-processing-report"
+commits = ["0ebcd0cd318f307a3e81ab8bb2635cb6443bfb3d"]
+source = "crates/plurxd/src/web/player/directed-change.js"
+source_anchor = "p.effectiveProcessing=processing;"
+test = "tests/web/dv-processing-badge.test.js"
+test_anchor = "accepted current controls adopt late processing and omission clears the same generation"
+
+[[fixes]]
+id = "android.generation-bound-hdr10-enhancement"
+commits = ["e3970c07d6bceb36caf9d82bbc86a74223ff079d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "effectiveProcessing?.matches(activeGeneration, delivered) == true"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "hdr10EnhancedRequiresCurrentReportAndKeepsFelDetailSeparate"
+
+# Continuous-quality acceptance (#844) corrective client anchors: source/test witnesses, not execution receipts.
+[[fixes]]
+id = "android.auto-gate-settled-directed-change"
+commits = ["991289a62f6e4882649764ce11f4b22b13e72a18"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "playbackIntent.pendingSeek == null && !directedChangeOutstanding(directedChange) &&"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "onlyAnUnsettledDirectedChangeHoldsAuto"
+
+[[fixes]]
+id = "android.auto-keys-on-executing-quality"
+commits = ["0e7a7e010fa469591225e59826c17e89019193dc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "autoOwnsQualityOnlyWhileAutoExecutes"
+
+[[fixes]]
+id = "apple.handoff-switch-point-before-inspection"
+commits = ["20db2824dbb6c76e5402bac0af4321e43a0801bd"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "static func commitLeadWallMs(overlapRemainingMs: Int) -> Int? {"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testTheSharedCommitPlansItsSwitchPointBeforeInspectingIt"
+
+[[fixes]]
+id = "android.shared-audio-eof-without-video-transaction"
+commits = ["0f84d6f4b49a71726cfdd7bc373d743835da24ed"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousOutputEvidence.kt"
+source_anchor = '(resource.role == "video" && authorized.transactionIds.isEmpty()) ||'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityMediaTest.kt"
+test_anchor = "authorizedSharedAudioEofDoesNotRequireAVideoTransaction"
+
+[[fixes]]
+id = "android.owned-continuous-eof-journal"
+commits = ["36fa91abafe0de87b9f1e582e9459b81a6ac43c6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAttachment.kt"
+source_anchor = "private val readOnlyProbe = ContinuousReadOnlyProbe()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousOutputEvidenceTest.kt"
+test_anchor = "networkEofProbeRejectsMissingEofFailedAuthorizationAndForeignOwner"
+
+[[fixes]]
+id = "android.accepted-auto-presentation-journal"
+commits = ["d9e943bab036efd1c64e15ca42351a2f069f8dec"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAttachment.kt"
+source_anchor = "private val presented: (JsonObject, Long, ContinuousAcceptedPresentation?) -> Unit,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousOutputEvidenceTest.kt"
+test_anchor = "automaticJournalKeepsOnlyExactAcceptedBindingAndDecoderGeometry"
+
+[[fixes]]
+id = "android.prepared-failure-stage"
+commits = ["a4bfee05cbe52d7012c2905fb13a8462d1254120"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "internal enum class PreparedFailureReason {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "failure_report_keeps_exact_reason_phase_and_numeric_error_without_free_text"
+
+[[fixes]]
+id = "apple.prepared-metrics-successor-identity"
+commits = ["32ee48edb69add5530ebd882dd6306e5ad02aceb"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let incumbentState = (sessionId: sessionId, candidateId: autoActiveCandidateId,"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testPreparedMetricsBindSuccessorBeforeObservationAndRestoreIncumbentOnRollback"
+
+[[fixes]]
+id = "apple.cadence-presentation-timestamps"
+commits = ["3812d7d3e38bc272a351a00a31daa3434599b5f4"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "var presentationTimes: [Int64] = []"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testCompositionOffsetsCannotWidenDecodedFrameTolerance"
+
+[[fixes]]
+id = "apple.committed-successor-control"
+commits = ["1b7a23a13296c2a913b2f8c41aeefaf40cb26bb3"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "mutating func finishCommitted(viewerEpoch: Int, firstFrameUnixMs: Int) -> Attempt? {"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testFrameProvedQualityCommitSettlesOnlyItsOwnedProgressPin"
+
+[[fixes]]
+id = "apple.hls-fragment-cadence"
+commits = ["d8bb1038195c71c6254e24d98d15f83d882e3241"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "struct PreparedDecodedCadence {"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testFragmentCadenceResolvesRealVideoSampleDurationsAndDefaults"
+
+[[fixes]]
+id = "apple.unavailable-cadence-diagnostic"
+commits = ["44ae53aef1f2c26ee627f3c2ff8d94d722ae57e1"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = 'self?.noteSurfaceLogOnly("prepared_cadence:\(detail)")'
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testMissingMalformedAndOutOfIntervalCadenceCannotAuthorizeHandoff"
+
+[[fixes]]
+id = "apple.acceptance-launch-bearer"
+commits = ["6490e456ed692845c3ea68d33ddff70247466c3b"]
+source = "clients/apple/Sources/SettingsStore.swift"
+source_anchor = "func acceptanceBootstrapToken(active: Bool, argumentDomain: [String: Any]? = nil) -> String? {"
+test = "clients/apple/Tests/AcceptanceBootstrapTests.swift"
+test_anchor = "testAcceptanceBootstrapUsesArgumentBearerWithoutChangingVault"
+
+[[fixes]]
+id = "apple.prepared-commit-checkpoints"
+commits = ["69fd5b45d64f7eda92afce4beb4c4bc88951d27a"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = 'return preparedCommitFailure(at: "frame-duration")'
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreparedFailureDiagnosticExcludesResourceCredentials"
+
+[[fixes]]
+id = "apple.prepared-failure-context-until-settlement"
+commits = ["198b373308017c1b69ae328051f2bb486cba038c"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "// staging. Early disposal here erases the item's typed error and"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreparedFailureDiagnosticExcludesResourceCredentials"
+
+[[fixes]]
+id = "apple.typed-retained-preparation-failure"
+commits = ["e4c367634bbdce244a70eef0d1bfefc0b9e820c9"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "func preparedSuccessorErrorDetail(_ error: NSError?) -> String {"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreparedFailureDiagnosticExcludesResourceCredentials"
+
+[[fixes]]
+id = "android.measured-quality-after-switch"
+commits = ["20649359a0eafaca7e9116a0434d2f2d99db23b1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "val method = playbackDeliverySummary("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackInfoTest.kt"
+test_anchor = "switchedFrameOverridesTheInitialSessionTarget"
+
+[[fixes]]
+id = "android.relogin-negotiated-capabilities"
+commits = ["ca061b56bb5df172fd0c035ee241b821fa992772"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SettingsStore.kt"
+source_anchor = "suspend fun saveServerIdentity(origin: String, instanceId: String?, expectedOrigin: String? = null) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/AppViewModelTest.kt"
+test_anchor = "loginRehydratesNegotiatedCapabilitiesWithAutoOff"
+
+[[fixes]]
+id = "android.manual-intent-without-display-aware-auto"
+commits = ["41e4f6956d98f06755a17bfbe5bd5bd9c819d1d7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun applyQualityIntent(body: CreateSessionReq): CreateSessionReq {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "manualSessionCarriesIntentWithDisplayAwareAutoDisabled"
+
+# Continuous Auto link cost (#844 follow-up) corrective client anchors: source/test witnesses, not execution receipts.
+[[fixes]]
+id = "android.link-recovery-cheapest-costed-rung"
+commits = ["afacb6dbf0a625e110366cf3da3c96fe72d4cb5f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "?: costed.minByOrNull { it.peak_bps!! }?.takeIf { cheapest -> currentCost == null || cheapest.peak_bps!! < currentCost }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "linkPressureTakesTheCheapestCostedRungWhenNoLowerRungFits"
+
+[[fixes]]
+id = "android.continuous-cost-declared-link-rate"
+commits = ["c889f7df76658392a839967ab8e0285cf726203a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousEnrollment.kt"
+source_anchor = "internal fun continuousLinkRate(row: JsonObject): Long? = row.number(\"sustained_bps\") ?: row.number(\"peak_bps\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "continuousAutoCostsAreTheDeclaredLinkRateNotThePublicationCeiling"
+
+[[fixes]]
+id = "android.continuous-presented-rung-over-session-candidate"
+commits = ["52f63b8bb8a3e5924ffeb2f540ba5286e4f07b9a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "aContinuousMemberKeepsThePresentedRungOverTheSessionCandidate"
+
+[[fixes]]
+id = "android.display-upgrade-largest-affordable-rung"
+commits = ["115bf7de65e42a75ea057d810cc32a64f6b298d3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "}.minByOrNull { it.width.toLong() * it.height } ?: candidates.maxByOrNull { it.width.toLong() * it.height }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "aLadderBelowTheDisplayClimbsToItsLargestAffordableRung"
+
+
+[[fixes]]
+id = "android.continuous-rung-from-frame-on-screen"
+commits = ["3eca9584ea93c7e55f2619ef334f4b3099e30e10"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAttachment.kt"
+source_anchor = "return onScreenLoads(observed).singleOrNull()?.resource?.row?.text(\"candidate_id\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "// A lost presentation report left 480p; the frame on screen is 720p."

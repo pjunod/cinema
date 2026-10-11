@@ -46,6 +46,20 @@ data class User(
 @Serializable
 data class LoginResp(val token: String, val user: User)
 
+/**
+ * `GET /api/v1/features` — which optional sections the server has switched
+ * on, readable by any signed-in user (the switches themselves live in the
+ * admin-only `/settings`). Every field defaults to `true`: a server that
+ * predates the route, or omits a field, must never hide anything.
+ */
+@Serializable
+data class Features(
+    val live_tv: Boolean = true,
+    val recordings: Boolean = true,
+    val shared_libraries: Boolean = true,
+    val library_channels: Boolean = true,
+)
+
 @Serializable
 data class Library(
     val id: Long,
@@ -556,6 +570,31 @@ data class SourceSummary(
     val frame_rate: String? = null,
 )
 
+/** HTTP-only provenance, never forwarded as worker execution authority. */
+@Serializable
+data class MeasuredCandidateOutput(
+    val candidate_id: String,
+    val recipe_digest: List<Int>,
+    val route: String,
+    val artifact_id: String,
+    val output_identity: String,
+    val qualification: String,
+    val average_bps: Long,
+    val peak_bps: Long,
+) {
+    fun matches(candidate: QualityCandidate): Boolean = candidate.hasValidIdentity &&
+        candidate_id == candidate.id && recipe_digest == candidate.recipe_digest && route == candidate.route &&
+        Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(artifact_id) &&
+        Regex("[0-9a-f]{64}").matches(output_identity) && qualification == "complete_full_mux_rfc8216_v1" &&
+        average_bps > 0 && peak_bps >= average_bps
+}
+
+internal fun measuredCandidatePeak(candidate: QualityCandidate, outputs: List<MeasuredCandidateOutput>): Long? {
+    if (outputs.size > 64) return null
+    val matched = outputs.filter { it.matches(candidate) }
+    return matched.singleOrNull()?.peak_bps
+}
+
 /**
  * One advertised rung of the server's quality ladder (`transcode::Rung`), top
  * rung first and already filtered to what the source can feed — so the client's
@@ -618,6 +657,7 @@ data class Decision(
     val markers: List<Marker> = emptyList(),
     val ladder: List<Rung> = emptyList(),
     val quality_candidates: List<QualityCandidate> = emptyList(),
+    val measured_candidate_outputs: List<MeasuredCandidateOutput> = emptyList(),
     val quality_candidate_id: String? = null,
     val display_aware_auto_protocol: String? = null,
     val audio_offset_ms: Long = 0,
@@ -668,8 +708,44 @@ data class DolbyVisionFactsDto(
     val rpu_present: Boolean? = null,
 )
 
+data class EffectiveProcessingReport(
+    val generation: String,
+    val hdr10Enhanced: Boolean,
+    val felContributed: Boolean,
+    val appliedOperations: List<String>,
+) {
+    fun matches(active: String?, delivered: String?): Boolean = hdr10Enhanced && delivered == "hdr10" &&
+        active == generation && tv.plurx.app.player.PlaybackControl.isUuid(generation) &&
+        appliedOperations.isNotEmpty() && appliedOperations.size <= 16 &&
+        appliedOperations.all { it.isNotEmpty() && it.length <= 64 }
+
+    val detail: String get() {
+        val names = mapOf("PolynomialReshape" to "RPU polynomial mapping", "MmrReshape" to "RPU MMR mapping",
+            "RpuColorConversion" to "RPU color conversion", "TargetMapping" to "target mapping",
+            "CreativeTrimApplication" to "creative trims")
+        val metadata = appliedOperations.mapNotNull { names[it] }.joinToString(", ")
+        return "Dolby Vision–enhanced HDR10 · FEL used: ${if (felContributed) "yes" else "no"}" +
+            if (metadata.isEmpty()) "" else " · Applied: $metadata"
+    }
+
+    companion object {
+        fun fromJson(value: kotlinx.serialization.json.JsonElement?): EffectiveProcessingReport? {
+            val objectValue = value as? kotlinx.serialization.json.JsonObject ?: return null
+            fun string(key: String): String? = (objectValue[key] as? kotlinx.serialization.json.JsonPrimitive)
+                ?.takeIf { it.isString }?.content
+            fun boolean(key: String): Boolean? = (objectValue[key] as? kotlinx.serialization.json.JsonPrimitive)
+                ?.takeIf { !it.isString }?.content?.let { when (it) { "true" -> true; "false" -> false; else -> null } }
+            val operations = objectValue["applied_operations"] as? kotlinx.serialization.json.JsonArray ?: return null
+            val names = operations.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { item -> item.isString }?.content ?: return null }
+            return EffectiveProcessingReport(string("generation") ?: return null, boolean("hdr10_enhanced") ?: return null,
+                boolean("fel_contributed") ?: return null, names)
+        }
+    }
+}
+
 @Serializable
 data class HlsStart(
+    val effective_processing: kotlinx.serialization.json.JsonElement? = null,
     val session_id: String,
     val playlist_url: String,
     /**
@@ -696,6 +772,7 @@ data class HlsStart(
     /** The rungs this source can feed, top first — §5.6's quality menu. */
     val ladder: List<Rung> = emptyList(),
     val quality_candidates: List<QualityCandidate> = emptyList(),
+    val measured_candidate_outputs: List<MeasuredCandidateOutput> = emptyList(),
     val quality_candidate_id: String? = null,
     val display_aware_auto_protocol: String? = null,
     /**
@@ -813,6 +890,11 @@ data class PlaybackSessionStatus(
 @Serializable
 enum class ReopenReason {
     @kotlinx.serialization.SerialName("stall") Stall,
+    @kotlinx.serialization.SerialName("link") Link,
+    @kotlinx.serialization.SerialName("encode") Encode,
+    @kotlinx.serialization.SerialName("decode") Decode,
+    @kotlinx.serialization.SerialName("hold") Hold,
+    @kotlinx.serialization.SerialName("authority") Authority,
 }
 
 /**

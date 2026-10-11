@@ -1,0 +1,38 @@
+{
+  "argv": [
+    "/usr/bin/ffmpeg",
+    "-nostdin",
+    "-hide_banner",
+    "-n",
+    "-i",
+    "/work/hdr10.mkv",
+    "-map",
+    "0:v:0",
+    "-fps_mode",
+    "passthrough",
+    "-vf",
+    "zscale=matrixin=2020_ncl:primariesin=2020:transferin=smpte2084:rangein=limited:chromalin=center:matrix=gbr:primaries=2020:transfer=smpte2084:range=full:filter=point:chromal=center:dither=none,format=gbrp16le",
+    "-pix_fmt",
+    "rgb48le",
+    "-f",
+    "rawvideo",
+    "/work/decoded.rgb48le"
+  ],
+  "program_sha256": "249e6abb898538aeae5165a6cee0748b73f4791afb02e088d19bc5321dfe2a4e",
+  "input_sha256": {
+    "hdr10.mkv": "4c5a4608f08756316ae629a8a14a2981efa363d0cc06c4221e3d773fe6655f29"
+  },
+  "cwd": "/work",
+  "environment": {
+    "LD_LIBRARY_PATH": null,
+    "VK_ICD_FILENAMES": null,
+    "XDG_RUNTIME_DIR": null,
+    "LC_ALL": "C"
+  },
+  "exit": 0,
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "4fde1109cec4c7e009d2ec93fb5a6c743a937018899f16335d6119fcf5a12a63",
+  "output_sha256": {
+    "decoded.rgb48le": "d5076b5e6ec7737f553752b1ad0d59da4a5cd65dd54834d5f52a2e05abfad5af"
+  }
+}

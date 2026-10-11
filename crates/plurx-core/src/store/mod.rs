@@ -15,15 +15,77 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+pub mod sharing;
+pub use sharing::SharingStore;
+pub mod sharing_catalogue;
+pub use sharing_catalogue::SharingCatalogueStore;
+pub mod sharing_catalogue_artwork;
+pub use sharing_catalogue_artwork::SharingSourceArtworkStore;
+pub mod sharing_catalogue_source;
+pub use sharing_catalogue_source::SharingSourceCatalogueStore;
+pub mod sharing_catalogue_details;
+pub use sharing_catalogue_details::SharingSourceDetailsStore;
+pub mod sharing_file_locators;
+pub mod sharing_purpose_keys;
+pub use sharing_file_locators::SharingFileLocatorStore;
+pub use sharing_purpose_keys::SharingPurposeKeyStore;
+pub mod sharing_ingress_custody;
+mod sharing_receiver_delivery;
+pub use sharing_ingress_custody::SharingIngressCustodyStore;
+pub use sharing_receiver_delivery::SharingReceiverDeliveryStore;
+mod sharing_receiver_capsule_refresh;
+pub use sharing_receiver_capsule_refresh::ReceiverCleanupCapsules;
+mod sharing_receiver_ingress;
+pub use sharing_receiver_ingress::SharingReceiverIngressStore;
+pub mod sharing_receiver_orphans;
+pub mod sharing_receiver_progress;
+pub mod sharing_receiver_retirement;
+pub use sharing_receiver_retirement::SharingReceiverRetirementStore;
+pub mod sharing_receiver_sessions;
+pub use sharing_receiver_progress::SharingReceiverProgressStore;
+#[cfg(feature = "hiqlite-store")]
+pub(crate) mod sharing_source_schema;
+pub use sharing_receiver_sessions::SharingReceiverSessionStore;
+pub mod sharing_source_ingress_custody;
+pub mod sharing_source_sessions;
+pub use sharing_source_ingress_custody::SharingSourceIngressCustodyStore;
+pub use sharing_source_sessions::SharingSourceSessionStore;
+/// Application-owned measurement metadata grafted onto a stored FFprobe report.
+/// Source comparisons must omit this member; it is not emitted by FFprobe.
+pub const CONTENT_ENCODING_PROBE_KEY: &str = "plurx_content_encoding";
+
 pub mod classification;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_sharing;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
 mod dv_conversion;
+mod field_order_backfill;
+pub use field_order_backfill::{
+    field_order_backfill_page, FieldOrderBackfillPage, FieldOrderBackfillPort,
+};
 mod file_grants;
+pub mod invitations;
+pub use invitations::InvitationStore;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_invitations;
+pub mod remote;
+pub use remote::RemoteStore;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_remote;
 pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
+mod candidate_link;
+mod candidate_recovery;
+pub use candidate_recovery::{
+    CandidateRecoveryCause, CandidateRecoveryMemory, CandidateRecoveryObservation,
+    CandidateRecoveryScope,
+};
+mod continuous_family;
+mod prepared_output;
+pub use prepared_output::PreparedOutputSeal;
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(test)]
@@ -31,13 +93,52 @@ mod fragment_index_cluster;
 mod fragment_prune_tests;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
+mod quality_cancellation;
+mod quality_ledger;
+pub use continuous_family::{
+    ContinuousAudioDescription, ContinuousFamilyDescription, ContinuousVideoDescription,
+};
+pub use quality_cancellation::QualityCancellationReceipt;
+pub use quality_ledger::QualityLedgerSnapshot;
+mod jellyfin_catalog;
+pub use jellyfin_catalog::{
+    JellyfinCatalogArtwork, JellyfinCatalogIdentity, JellyfinCatalogLibrary,
+    JellyfinCatalogMissing, JellyfinCatalogMode, JellyfinCatalogPage, JellyfinCatalogQuery,
+    JellyfinCatalogSort, JellyfinCatalogStore,
+};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_catalog;
+mod jellyfin_identity;
+mod jellyfin_login;
+mod jellyfin_play;
+mod jellyfin_watch;
+pub use jellyfin_play::{
+    JellyfinPlay, JellyfinPlayActivation, JellyfinPlayScope, JellyfinPlayStore, NewJellyfinPlay,
+    JELLYFIN_PENDING_PLAYS_PER_LOGIN, JELLYFIN_PENDING_PLAYS_SERVER, JELLYFIN_PENDING_PLAY_TTL_MS,
+    JELLYFIN_TERMINAL_PLAY_TTL_MS, JELLYFIN_TOMBSTONES_PER_LOGIN,
+};
+pub use jellyfin_watch::{JellyfinProgressProvenance, JellyfinProgressWrite};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_play;
+pub use jellyfin_login::{
+    JellyfinClientFamily, JellyfinCompatibilityState, JellyfinLoginStore, JellyfinLoginWrite,
+};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_login;
 mod renditionplan;
+pub use jellyfin_identity::{JellyfinEntityId, JellyfinEntityKind, JellyfinIdentityStore};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_identity;
 mod sqlite;
 mod telemetry;
 mod timeline_annotations;
 
 mod publication;
 mod scan_identity_repair;
+mod schema_lineage;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub use schema_lineage::{validation_sqlite_bridge_rollback, validation_sqlite_union_fingerprint};
 mod sql_source;
 pub use scan_identity_repair::{
     plan_identity_repair, IdentityRepairBlocker, IdentityRepairCounts, IdentityRepairFile,
@@ -104,6 +205,7 @@ mod consistent_read_census;
 pub mod background_jobs;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
 pub mod background_jobs_artwork;
+mod background_jobs_copy_output;
 mod background_jobs_delivery;
 pub mod background_jobs_domain;
 pub mod background_jobs_embeddings;
@@ -126,6 +228,7 @@ pub mod background_jobs_subtitle;
 #[cfg(test)]
 mod background_jobs_tests;
 pub mod background_jobs_transcode;
+pub mod background_jobs_transcription;
 pub mod classification_schedule;
 pub mod offline_claim;
 pub mod offline_expiry;
@@ -223,6 +326,23 @@ pub struct TokenSummary {
 /// the HTTP layer can tell a client "you were signed out after N idle days"
 /// instead of a bare 401; an expired token's activity is never refreshed, so
 /// presenting it cannot slide it back to life.
+/// Which surface a login token was issued for. A Jellyfin compatibility
+/// login authenticates only the compatibility facade; native and Plex
+/// surfaces refuse it, so a token pulled off a shared TV is not a native
+/// account bearer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenAudience {
+    Native,
+    JellyfinCompatibility,
+}
+impl TokenAudience {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::JellyfinCompatibility => "jellyfin",
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub enum TokenAuthentication {
     Authenticated(User),
@@ -309,6 +429,38 @@ ALTER TABLE files ADD COLUMN max_cll INTEGER;
 ALTER TABLE files ADD COLUMN max_fall INTEGER;
 ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER;
 ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'));";
+
+/// Refuse sharing before the ownership rebuild and its writer floor are installed.
+/// This adapter is removed from common session SQL when those keys are switched.
+pub(crate) fn local_media_principal_id(
+    principal: &crate::playback_principal::PlaybackPrincipal,
+) -> Result<i64, StoreError> {
+    principal.local_user_id().ok_or_else(|| {
+        StoreError::Task("sharing principal requires the ownership migration".to_owned())
+    })
+}
+
+/// Frozen ownership rebuild; both backends must install the same statements.
+/// Incompatible writers must be drained before applying this schema.
+pub const MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA: &str =
+    include_str!("session_principal_rebuild.sql");
+
+/// Current-schema orchestration around the unchanged frozen ownership layout.
+/// Execute every statement atomically; unrelated watch triggers stay installed.
+pub fn media_session_principal_rebuild_schema() -> String {
+    let separator = "\n-- next statement\n";
+    let dependencies = jellyfin_watch::session_dependency_triggers().collect::<Vec<_>>();
+    let mut statements = dependencies
+        .iter()
+        .map(|(name, _)| format!("DROP TRIGGER {name};"))
+        .collect::<Vec<_>>();
+    statements.push(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.to_owned());
+    statements.extend(dependencies.into_iter().map(|(_, sql)| sql.to_owned()));
+    statements.join(separator)
+}
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod session_principal_tests;
 
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
@@ -495,7 +647,7 @@ pub(crate) fn validated_recovery_request(
     request: &crate::domain::ProducerRecoveryRequest,
 ) -> Result<crate::domain::ProducerRecoveryRequest, StoreError> {
     let (user_id, playback_id, recovery_epoch) = validated_epoch_key(
-        request.user_id,
+        local_media_principal_id(&request.principal)?,
         &request.playback_id,
         &request.recovery_epoch,
     )?;
@@ -530,7 +682,7 @@ pub(crate) fn validated_recovery_request(
         ));
     }
     Ok(crate::domain::ProducerRecoveryRequest {
-        user_id,
+        principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id,
         recovery_epoch,
         failed_incarnation_id: request.failed_incarnation_id.clone(),
@@ -588,7 +740,7 @@ pub(crate) fn encoded_recovery_restriction(
 /// a task error on the other.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recovery_reservation_from_row(
-    user_id: i64,
+    principal: crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
     recovery_epoch: &str,
     failed_incarnation_id: String,
@@ -601,6 +753,11 @@ pub(crate) fn recovery_reservation_from_row(
     created_at_ms: i64,
     updated_at_ms: i64,
 ) -> Result<crate::domain::ProducerRecoveryReservation, StoreError> {
+    if !principal.valid_admission_shape() {
+        return Err(StoreError::Task(
+            "stored recovery principal is invalid".to_owned(),
+        ));
+    }
     let decode_restriction = match stored_restriction {
         Some(stored) => Some(
             crate::domain::ContinuationDecodeRestriction::decode(&stored).map_err(|error| {
@@ -612,7 +769,7 @@ pub(crate) fn recovery_reservation_from_row(
     let state = crate::domain::ProducerRecoveryState::parse(state)
         .ok_or_else(|| StoreError::Task(format!("unknown recovery state {state}")))?;
     Ok(crate::domain::ProducerRecoveryReservation {
-        user_id,
+        principal,
         playback_id: playback_id.to_owned(),
         recovery_epoch: recovery_epoch.to_owned(),
         failed_incarnation_id,
@@ -906,8 +1063,8 @@ const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
     prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
-    AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE,
-    AUTH_SCHEMA_VERSION,
+    AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_BASELINE_VERSION,
+    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 pub use self::hiqlite::{
@@ -927,16 +1084,17 @@ pub use fragment_index_cluster::{
     AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, SubtitleBackfillCandidate, SubtitleBackfillDiagnostics,
-    SubtitleSourcePublication, SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM,
-    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
-    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
-    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
-    FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS, MAX_ACTIVE_ANALYSIS_REQUESTS,
-    MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS,
-    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS,
-    MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
+    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
+    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+    DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS,
+    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -1681,6 +1839,7 @@ pub mod keys {
     pub const CLUSTER_RESTORE_GENERATION: &str = "cluster.restore_generation";
     /// Runtime Library-channel playback switch. The feature is always compiled;
     /// absence is off so an upgrade never starts scheduled playback implicitly.
+    pub const JELLYFIN_COMPATIBILITY_ENABLED: &str = "compat.jellyfin.enabled";
     pub const LIBRARY_CHANNELS_ENABLED: &str = "library_channels.enabled";
     /// Runtime-only HDHomeRun live-TV configuration. The values are read
     /// as one snapshot and written with a generation CAS; the enable bit is
@@ -1733,6 +1892,13 @@ pub mod keys {
     /// Opt in to automatic expired-session takeover after the web/proxy
     /// interruption corpus passes. Kept separate from new-session placement.
     pub const CLUSTER_SESSION_TAKEOVER_ENABLED: &str = "cluster.session_takeover_enabled";
+    /// Operator switch for the cluster clock guard, read with
+    /// `stored_switch(.., false)`, so missing is off: clock evidence is
+    /// measured and reported (advisory refusals, Developer readiness) but
+    /// never refuses takeover, expiry, membership changes or readiness.
+    /// Startup is always advisory because this replicated key is unreadable
+    /// until the store is open.
+    pub const CLUSTER_CLOCK_GUARD_ENFORCED: &str = "cluster.clock_guard_enforced";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
@@ -1763,6 +1929,8 @@ pub mod keys {
     /// Requested rate-control family. Missing/`bitrate` preserves the legacy
     /// VBR path exactly; `quality` is validated against every usable encoder
     /// before an effective snapshot is published.
+    pub const VOD_REORDER_FRAMES: &str = "playback.vod_reorder_frames";
+    pub const CONTENT_AWARE_ENCODING: &str = "transcode.content_aware_encoding";
     pub const TRANSCODE_RATE_MODE: &str = "transcode.rate_mode";
     /// Optional integer quality override. Empty/absent means the calibrated
     /// per-family default; the value matters only when rate mode is quality.
@@ -1907,10 +2075,16 @@ pub mod keys {
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
     pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
+    /// Replicated Developer-tab override for K-04 bounded local catalogue
+    /// reads. Effective default is ON: a missing or unrecognised value falls
+    /// back through `stored_switch(value, default)` to the node's
+    /// `cluster.bounded_replica_reads` config seed (`true` unless
+    /// `PLURX_CLUSTER_BOUNDED_REPLICA_READS` says otherwise); only an explicit
+    /// "0"/"false"/"no"/"off" turns it off.
+    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     /// Content-addressed cluster coordination for VOD indexes. Missing/zero is
     /// off so an upgrade never starts full-library reads without the operator's
     /// topology measurement and explicit opt-in.
-    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
     /// Durable analysis retry budget. The settings API constrains this to a
     /// small positive range so an operator can tune slow media without making
@@ -1923,16 +2097,6 @@ pub mod keys {
     /// Forward subtitle materialization span. The settings API constrains this
     /// to 30–900 seconds and absent means the 200-second default.
     pub const SUBTITLE_WINDOW_SECS: &str = "playback.subtitle_window_secs";
-    /// Answer a subtitle segment whose sidecar has failed with `503` +
-    /// `Retry-After`, instead of a syntactically valid but empty track.
-    ///
-    /// Off by default, and the reason is measurement rather than caution:
-    /// AVPlayer gives a subtitle segment roughly two seconds and blocks the
-    /// muxed video while it waits, so how each engine reacts to a refusal on
-    /// that request — keeps playing video, or stalls the picture — has to be
-    /// observed per engine before this can flip. The Developer tab reports
-    /// what has been observed, advisory only; it never blocks the switch.
-    pub const SUBTITLE_NOT_READY_503: &str = "playback.subtitle_not_ready_503";
     /// Let the two PGS consumers — the overlay's stage and the burn sidecar —
     /// read a track the subtitle-source store kept, instead of demuxing the
     /// whole source. On when absent. Off makes both ignore the store entirely,
@@ -1964,9 +2128,24 @@ pub mod keys {
     /// request: missing diagnostic contracts are reported as advisory facts
     /// and never override an explicit enable.
     pub const AUTOMATIC_DECODER_RECOVERY: &str = "playback.automatic_decoder_recovery";
+    /// Use this worker's compatible Mac SDR/HDR10 processing for new plans.
+    /// Missing is off. Runtime observations are advisory and never rewrite
+    /// the saved choice; incompatible inputs retain their existing renderer.
+    pub const MACOS_VIDEO_PROCESSING_ENABLED: &str = "playback.macos_video_processing_enabled";
+    /// Separate opt-in for negotiated Mac HEVC output. Missing is off;
+    /// runtime readiness never refuses or rewrites the saved choice.
+    pub const MACOS_HEVC_OUTPUT_ENABLED: &str = "playback.macos_hevc_output_enabled";
     /// Operator override for HEVC copy without configuration/source proof.
     /// Off by default. Readiness is advisory and never prevents saving it.
     pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
+    /// Print `CODECS` on SDR (`avc1`) HLS master variants when the session's
+    /// frozen component facts are complete (S-10, HONEST-MASTER-PLAYLIST).
+    /// Missing and every off spelling are off, which is the pre-S-10 master:
+    /// AVPlayer filters variants on `CODECS` before it fetches a byte, and no
+    /// device has re-qualified the SDR string yet. HDR/Dolby Vision variants
+    /// are unaffected either way. Read once per session at create, so one
+    /// session's master never changes shape.
+    pub const PLAYBACK_SDR_MASTER_CODECS: &str = "playback.sdr_master_codecs";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.
@@ -1993,6 +2172,7 @@ pub mod keys {
     /// seed it, so a deployment that had turned it on keeps it on and can
     /// then find it in Settings.
     pub const PGS_OVERLAY: &str = "subtitles.pgs_overlay";
+    pub const SHARING_ENABLED: &str = "sharing_enabled";
     /// Convert a Dolby Vision Profile 7 title to Profile 8.1 so a Dolby Vision
     /// client sees Dolby Vision rather than HDR10.
     ///
@@ -2003,6 +2183,12 @@ pub mod keys {
     /// for the same reason as the overlay above: an operator turning off work
     /// their GPU is doing should be able to find the switch, and see it is off.
     pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
+    /// Opt-in preference for qualified DV rendering to HDR output. Missing is
+    /// off. Saving the preference does not establish a worker capability.
+    pub const DV_HDR_PROCESSING: &str = "playback.dolby_vision_hdr_processing";
+    /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
+    /// Missing is off; this never overrides the separate DV_CONVERT permission.
+    pub const DV_FEL_REENCODE: &str = "playback.dolby_vision_fel_reencode";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite
@@ -2058,6 +2244,14 @@ pub mod keys {
     /// made the trade backwards. Eviction is LRU, so what survives is what
     /// people actually come back to.
     pub const CACHE_MAX_GB: &str = "cache.max_gb";
+    /// Developer switch for complete-output preparation queued by a VOD start:
+    /// `off` (absent), `copy`, or `copy_and_encoded`. Off is the default — a
+    /// single play must not start a whole-title background encode unasked —
+    /// and turning it off cancels rows already queued.
+    pub const VOD_OUTPUT_PREPARATION: &str = "vod.output_preparation";
+    /// Developer switch for retaining a rolling session's complete output as a
+    /// reusable artifact. Absent means off.
+    pub const VOD_ROLLING_RETENTION: &str = "vod.rolling_retention";
     /// Last user id inspected by the bounded speculative-candidate fan-out.
     /// The singleton lease makes advancing this replicated cursor race-free.
     pub const CACHE_PRETRANSCODE_USER_CURSOR: &str = "cache.pretranscode_user_cursor";
@@ -2101,13 +2295,31 @@ pub mod keys {
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_DONE: &str = "jobs.video_codec_tag_backfilled";
     /// Node-local strictly-after cursor for the bounded sample-entry walk.
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_CURSOR: &str = "jobs.video_codec_tag_backfill_cursor";
-    /// Set after the bounded stored-probe walk has assigned every pre-column
-    /// file either its reporter token or the explicit `unknown` value.
-    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled";
+    /// Set after the bounded stored-probe walk has assigned every probed file
+    /// with a `NULL` field order either its reporter token or the explicit
+    /// `unknown` value.
+    ///
+    /// The second pass. The first (`jobs.field_order_backfilled`) stamped
+    /// itself done while the scanner still wrote `NULL` for a probe without
+    /// the key, so every row scanned after its stamp stayed `NULL`. The parsed
+    /// probe now always carries a token, and this pass sweeps those rows. The
+    /// first pass's stamp and cursors are left in place, as every superseded
+    /// backfill's are: deleting them would only make a not-yet-upgraded node
+    /// in a rolling deploy run the first pass again and re-create them.
+    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled_v2";
     /// Node-local strictly-after cursor for the field-order backfill.
-    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_cursor";
+    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_v2_cursor";
     pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
     pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
+    /// Set after every HDR row the stored-document backfill left `none` has
+    /// been considered for one bounded first-frame read. The walk starts only
+    /// after [`JOB_LUMINANCE_BACKFILL_DONE`], so no row that walk classifies
+    /// lands behind its cursor. A later rescan can still write `none` under a
+    /// passed id, but only after attempting the same frame read itself; such
+    /// a row waits for the file's next change.
+    pub const JOB_LUMINANCE_FRAME_BACKFILL_DONE: &str = "jobs.luminance_frame_backfilled";
+    /// Node-local strictly-after cursor for the first-frame luminance walk.
+    pub const JOB_LUMINANCE_FRAME_BACKFILL_CURSOR: &str = "jobs.luminance_frame_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
     /// object from decimal library id to `off`, `manual`, or `auto`. Missing
     /// libraries are always off: an upgrade must never rewrite media by
@@ -2148,6 +2360,13 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// single snapshot keeps those values mutually consistent and, on a
     /// replicated backend, avoids paying one linearizable read per field.
     async fn settings_snapshot(&self) -> Result<BTreeMap<String, String>, StoreError>;
+    /// One setting as this node's own replica holds it, read without
+    /// consensus and without a leader round trip.
+    ///
+    /// A hint and never an authorization: a follower may not have applied a
+    /// recent save yet. It tells an idle reader whether a consistent read is
+    /// owed at all; the consistent read stays the only thing that decides.
+    async fn local_setting_hint(&self, key: &str) -> Result<Option<String>, StoreError>;
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError>;
     /// Insert an immutable setting value. Returns false when the key already
     /// exists and leaves the first committed value unchanged.
@@ -2300,8 +2519,20 @@ pub trait UserStore: Send + Sync + 'static {
     /// the same snapshot as the token row. A live token's coalesced
     /// `last_seen_at` is refreshed exactly as before; an expired one is
     /// reported and left untouched.
-    async fn authenticate_token(&self, token_hash: &str)
-        -> Result<TokenAuthentication, StoreError>;
+    async fn authenticate_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<TokenAuthentication, StoreError> {
+        self.authenticate_token_for(token_hash, TokenAudience::Native)
+            .await
+    }
+    /// As [`authenticate_token`](Self::authenticate_token), for one audience:
+    /// a token of the other audience is `Unknown`.
+    async fn authenticate_token_for(
+        &self,
+        token_hash: &str,
+        audience: TokenAudience,
+    ) -> Result<TokenAuthentication, StoreError>;
     /// Resolve a token hash to its user (touching `last_seen_at`). An expired
     /// token resolves to nobody, so every caller that predates expiry — the
     /// Plex facade, recovery reads — honours the policy without knowing it.
@@ -3164,6 +3395,25 @@ pub trait MediaStore: Send + Sync + 'static {
         mastering_max_luminance: Option<i64>,
         source: &str,
     ) -> Result<bool, StoreError>;
+    /// HDR rows whose stored stream document carried no luminance record
+    /// (`luminance_source = 'none'`), strictly after `after_id` in ascending
+    /// id order: the candidates for the bounded first-frame read. Same
+    /// identity projection, so the write below is fenced to this snapshot.
+    async fn files_without_luminance_facts(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError>;
+    /// Record what the first frame carried and classify the row `frame`,
+    /// only while it is still `none` and still the exact source and probe
+    /// snapshot `files_without_luminance_facts` returned.
+    async fn set_file_frame_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+    ) -> Result<bool, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.
     ///
@@ -3213,6 +3463,15 @@ pub trait MediaStore: Send + Sync + 'static {
         mtime: i64,
         census_json: &str,
     ) -> Result<bool, StoreError>;
+    /// Persist a bounded, measured encoding result only for the source revision
+    /// that was analyzed. Reprobing replaces the containing JSON and invalidates it.
+    async fn merge_file_probe_content_encoding(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        report_json: &str,
+    ) -> Result<bool, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These
     /// are the records the retry job and the scan's repair pass exist for —
@@ -3225,9 +3484,13 @@ pub trait MediaStore: Send + Sync + 'static {
     async fn library_file_paths(&self, library_id: i64) -> Result<Vec<(i64, PathBuf)>, StoreError>;
     /// Establish the stable identity of the mounted roots for this library,
     /// or compare a later scanner's observation with cluster truth.
+    /// `configured_paths` is the path set the scan walked; when the library
+    /// no longer has exactly that set the answer is `ConfigurationChanged`
+    /// and nothing is established.
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
     ) -> Result<RootFingerprintStatus, StoreError>;
@@ -3246,6 +3509,19 @@ pub trait MediaStore: Send + Sync + 'static {
         gone_file_ids: &[i64],
         prune_limit: u64,
     ) -> Result<ReconcileOutcome, StoreError>;
+    /// Remove `file_ids` — files of the library that the caller found under
+    /// none of `configured_paths`, which is what an operator removing a
+    /// library path leaves behind — and the items that leaves empty, in one
+    /// transaction, only while the library's paths are still exactly
+    /// `configured_paths`. Unlike [`Self::reconcile_library`] this is not an
+    /// observation of the disk, so neither the root identity nor the prune
+    /// bound applies. At most `MAX_RECONCILE_FILE_IDS` ids per call.
+    async fn remove_files_outside_library_roots(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+    ) -> Result<RootRemovalOutcome, StoreError>;
     async fn delete_files(&self, ids: &[i64]) -> Result<u64, StoreError>;
     /// Remove items left childless/file-less after a scan. Returns rows removed.
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError>;
@@ -3307,7 +3583,14 @@ pub enum RootFingerprintStatus {
     Established,
     Matched,
     Unestablished,
-    Mismatch { expected: String },
+    Mismatch {
+        expected: String,
+    },
+    /// The library's configured paths are no longer the set the scan walked:
+    /// an operator edited them while it ran. Nothing was established or
+    /// compared — an identity taken from the outdated set would refuse every
+    /// later scan of the current one. The scan queued by the edit reconciles.
+    ConfigurationChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3340,6 +3623,52 @@ pub(crate) fn reconcile_payload_refusal(
     })
 }
 
+/// What [`MediaStore::remove_files_outside_library_roots`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootRemovalOutcome {
+    /// The given files were removed — except one a Dolby Vision conversion
+    /// is rewriting, the same exclusion reconcile makes — and with them the
+    /// items left empty.
+    Applied {
+        deleted_files: u64,
+        pruned_items: u64,
+    },
+    /// The library's configured paths are no longer the set the caller
+    /// classified against, or the library is gone. Nothing was removed.
+    ConfigurationChanged,
+}
+
+/// One root removal carries at most as many file ids as one reconcile, for
+/// the same reason: the replicated backend ships them as one JSON payload.
+pub(crate) fn root_removal_payload(file_ids: &[i64]) -> Result<(), StoreError> {
+    if file_ids.len() > MAX_RECONCILE_FILE_IDS {
+        return Err(StoreError::Task(format!(
+            "a root removal carries at most {MAX_RECONCILE_FILE_IDS} file ids, not {}",
+            file_ids.len()
+        )));
+    }
+    Ok(())
+}
+
+/// The JSON a library's `paths` column holds for `paths`.
+pub(crate) fn library_paths_json(paths: &[PathBuf]) -> Result<String, StoreError> {
+    serde_json::to_string(paths).map_err(|error| StoreError::Database(error.to_string()))
+}
+
+/// SQL predicate: library `library`'s configured paths are exactly the set in
+/// the JSON array `paths`. Set equality over the decoded strings, so neither
+/// order nor JSON spelling matters — the root fingerprint ignores order too.
+/// Both arguments are placeholders, spelled for the backend.
+pub(crate) fn library_paths_are_sql(library: &str, paths: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM libraries WHERE libraries.id = {library} \
+           AND NOT EXISTS (SELECT value FROM json_each(libraries.paths) \
+                           EXCEPT SELECT value FROM json_each({paths})) \
+           AND NOT EXISTS (SELECT value FROM json_each({paths}) \
+                           EXCEPT SELECT value FROM json_each(libraries.paths)))"
+    )
+}
+
 #[async_trait]
 pub trait WatchStore: Send + Sync + 'static {
     async fn watch_state(
@@ -3353,6 +3682,26 @@ pub trait WatchStore: Send + Sync + 'static {
         user_id: i64,
         item_ids: &[i64],
     ) -> Result<Vec<(i64, WatchState)>, StoreError>;
+    /// Commit only the original play/revision provenance. Final commits also
+    /// terminalize that exact active play atomically with the durable row.
+    /// Admission check only; the eventual write repeats the atomic fence.
+    async fn jellyfin_progress_is_current(
+        &self,
+        _write: &JellyfinProgressWrite,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Identity(
+            "compatibility progress unsupported by this Store".into(),
+        ))
+    }
+    async fn put_jellyfin_progress(
+        &self,
+        _write: JellyfinProgressWrite,
+        _expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        Err(StoreError::Identity(
+            "compatibility progress unsupported by this Store".into(),
+        ))
+    }
     /// Record playback progress; crossing 95% marks watched automatically.
     async fn put_progress(
         &self,
@@ -3418,6 +3767,22 @@ pub trait WatchStore: Send + Sync + 'static {
         item_id: i64,
         watched: bool,
     ) -> Result<Vec<i64>, StoreError>;
+    /// Trusted compatibility context permits only an unambiguous own-edit advance.
+    /// Native/Plex callers use `set_watched_tree`, whose origin is absent.
+    async fn set_watched_tree_with_origin(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        origin: Option<&JellyfinPlayScope>,
+    ) -> Result<Vec<i64>, StoreError> {
+        if origin.is_some() {
+            return Err(StoreError::Identity(
+                "manual origin unsupported by this Store".into(),
+            ));
+        }
+        self.set_watched_tree(user_id, item_id, watched).await
+    }
     /// Count the playable leaves under `item_id` and how many of them are
     /// watched. A playable item is its own leaf, so this answers for movies
     /// too — a movie is 1/1 or 0/1.
@@ -4288,6 +4653,15 @@ pub trait PlaybackTelemetryStore: Send + Sync + 'static {
 /// prior describes the network observed by one server node.
 #[async_trait]
 pub trait NetworkPriorStore: Send + Sync + 'static {
+    async fn observe_candidate_link(
+        &self,
+        value: &crate::domain::CandidateLinkObservation,
+        now_ms: i64,
+    ) -> Result<(), StoreError>;
+    async fn candidate_link_prior(
+        &self,
+        binding: &crate::domain::CandidateLinkBinding,
+    ) -> Result<Option<crate::domain::CandidateLinkPrior>, StoreError>;
     async fn observe_network_prior(
         &self,
         observation: &NetworkPriorObservation,
@@ -4458,6 +4832,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
     async fn ensure_library_root_fingerprint_fenced(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
         lease: &Lease,
@@ -4473,6 +4848,14 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
+    async fn remove_files_outside_library_roots_fenced(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<RootRemovalOutcome, StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn claim_cache_entry_fenced(
         &self,
@@ -4588,10 +4971,24 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
 /// client-controlled rows before inserting them.
 #[async_trait]
 pub trait MediaSessionStore: Send + Sync + 'static {
+    /// Optional failure attribution cannot create another recovery budget.
+    async fn observe_candidate_recovery(
+        &self,
+        _observation: &CandidateRecoveryObservation,
+        _now_ms: i64,
+    ) -> Result<Option<CandidateRecoveryMemory>, StoreError> {
+        Ok(None)
+    }
+    async fn candidate_recovery_memory(
+        &self,
+        _scope: &CandidateRecoveryScope,
+    ) -> Result<CandidateRecoveryMemory, StoreError> {
+        Ok(CandidateRecoveryMemory::default())
+    }
     #[allow(clippy::too_many_arguments)]
     async fn claim_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         request_fingerprint: &str,
         playback_id: &str,
@@ -4604,7 +5001,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// durable identity before producer placement.
     async fn record_library_channel_session_recipe(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         recipe_json: &str,
@@ -4613,7 +5010,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn assign_media_session_request_owner(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         owner_node_id: &str,
@@ -4624,6 +5021,26 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
+
+    /// Server-only, proof-bearing first Source activation. Backends without
+    /// the candidate conditional writer remain unavailable.
+    async fn activate_source_media_session(
+        &self,
+        _authority: &crate::sharing_source_sessions::SourceSessionWriteAuthority,
+        _activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        Ok(None)
+    }
+
+    /// B-only remote activation: current Local login/import proof and remote
+    /// side binding commit atomically with the ordinary blocked route.
+    async fn activate_receiver_media_session(
+        &self,
+        _authority: &crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority,
+        _activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        Ok(None)
+    }
 
     /// Stage a successor that exists without being current.
     ///
@@ -4659,6 +5076,12 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
+    /// Seal only the first private output choice of an unpublished reserved successor.
+    /// Backends without this conditional writer cannot publish first-capture preparations.
+    async fn seal_prepared_output(&self, _seal: &PreparedOutputSeal) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
     /// Record what a viewer is asking for, and return the ownership that
     /// results.
     ///
@@ -4674,7 +5097,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// was taken and nothing durable says so.
     async fn record_desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         digest: &str,
         canonical_form: &str,
@@ -4709,13 +5132,13 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// but a proof that the write chain reaches it does.
     async fn validation_playback_pointer_desired_revision(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<i64>, StoreError>;
 
     async fn validation_write_legacy_playback_pointer(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -4723,7 +5146,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError>;
 
@@ -4756,7 +5179,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// The staged successor for one playback, if there is one.
     async fn staged_media_session_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError>;
 
@@ -4786,7 +5209,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// with a successful advance for replay after the predecessor retires.
     async fn commit_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &crate::domain::MediaSessionPreparationCommitRequest,
     ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError>;
@@ -4807,7 +5230,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// owner's timer cannot tear down a successor after takeover.
     async fn abort_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &crate::domain::MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
@@ -4870,7 +5293,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// continuation still has to avoid it.
     async fn settle_producer_recovery(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         failed_incarnation_id: &str,
@@ -4886,7 +5309,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// or looking up a cached one.
     async fn producer_recovery_for_epoch(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError>;
@@ -4905,7 +5328,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// `Ok(false)` when there is no such row.
     async fn validation_corrupt_recovery_restriction(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         stored: &str,
@@ -4923,7 +5346,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// the same resolved request returns its durable route.
     async fn publish_media_session_activation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -4931,7 +5354,9 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     /// Replace the durable unobserved sentinel with one full, freshly minted
     /// not-before boundary. Exact ownership changes and terminal state fail
-    /// closed. A concurrent acknowledgement may return an already-ready row.
+    /// closed. A starting request owns activation confirmation, so handoff
+    /// recovery cannot arm it even when its claim deadline exceeds the lease.
+    /// A concurrent acknowledgement may return an already-ready row.
     async fn arm_media_session_handoff(
         &self,
         incarnation_id: &str,
@@ -4978,7 +5403,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn fail_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -4999,9 +5424,89 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// so commit-unknown reconciliation retains the identity it must fence.
     async fn media_session_route_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Bind actual verified family media into the exact active parent recipe.
+    /// Existing descriptions are immutable across restoration and owner epochs.
+    async fn bind_continuous_family(
+        &self,
+        generation: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        description: &ContinuousFamilyDescription,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Read the durable rendition transaction facts with their CAS revision.
+    async fn quality_ledger(
+        &self,
+        generation: &str,
+    ) -> Result<Option<QualityLedgerSnapshot>, StoreError>;
+
+    /// Exact scheduled/appended dependencies, retained independently of live
+    /// producer state. On lookup failure, callers must retain existing media.
+    async fn quality_reserved_intervals(
+        &self,
+        rendition_id: &str,
+    ) -> Result<Vec<crate::playback::continuous_quality::QualityInterval>, StoreError>;
+
+    /// Publish only under the exact active parent owner and observed revision.
+    /// Takeover may advance epoch, but may not replace the attachment identity.
+    async fn write_quality_ledger(
+        &self,
+        ledger: &crate::playback::continuous_quality::QualityLedger,
+        owner_node_id: &str,
+        expected_revision: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Reduce late completed append/presentation/disposal facts after End.
+    /// Cannot create a ledger, Prepare, schedule new media, or replace old pins.
+    /// The exact old JSON/revision and terminal parent owner fence the write.
+    async fn write_terminal_quality_transition(
+        &self,
+        expected: &QualityLedgerSnapshot,
+        request: &crate::playback::continuous_quality::QualityTransitionRequest,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<crate::playback::continuous_quality::QualityTransitionReceipt>, StoreError>;
+
+    /// Record independent target cancellation under the exact current owner.
+    /// At most 128 receipts belong to a generation; settled receipts for an
+    /// older recipe revision of the same client lifetime are pruned first.
+    /// Replays preserve the first timestamps and outcome; no parent session
+    /// or cache pin is changed.
+    async fn request_quality_cancellation(
+        &self,
+        receipt: &QualityCancellationReceipt,
+    ) -> Result<Option<QualityCancellationReceipt>, StoreError>;
+
+    async fn quality_cancellation_receipt(
+        &self,
+        receipt_key: &str,
+    ) -> Result<Option<QualityCancellationReceipt>, StoreError>;
+
+    /// Mark cleanup proven for this exact receipt; cannot change its identity.
+    /// Accepted from the receipt's owner, or from the parent's current live
+    /// owner after a takeover.
+    async fn settle_quality_cancellation(
+        &self,
+        receipt_key: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// A cancelled recipe intent may not be restaged by cadence or takeover.
+    async fn quality_intent_cancelled(
+        &self,
+        generation: &str,
+        client_instance_id: &str,
+        lifetime_id: &str,
+        recipe_revision: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Atomically store the first exact terminal-control acknowledgement and
     /// fence that exact owner route as ended. A conflicting identity/sequence
@@ -5018,6 +5523,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         session_id: &str,
         now_ms: i64,
     ) -> Result<Option<crate::domain::MediaSessionTerminalAck>, StoreError>;
+
+    /// Exact current Source owner only. Does not publish or authorize takeover.
+    async fn renew_source_media_session(
+        &self,
+        _authority: &crate::sharing_source_sessions::SourceOwnedRouteAuthority,
+        _renewal: &MediaSessionRenewal,
+        _now_ms: i64,
+        _lease_expires_at_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        Ok(None)
+    }
 
     async fn renew_media_sessions(
         &self,
@@ -5091,8 +5607,46 @@ pub struct FragmentIndexValidationBackfill {
     pub remaining: u64,
 }
 
+/// Bound one metadata projection's connection lease, including audiobook pages.
+pub const FRAGMENT_INDEX_STATUS_CHUNK: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexPresence {
+    Ready,
+    Unverified,
+    Absent,
+}
+
+#[derive(Clone, Debug)]
+pub struct FragmentIndexStatus {
+    pub file_id: i64,
+    pub argv_fingerprint: String,
+    pub presence: IndexPresence,
+    /// Zero unless this revision's publication proof still matches.
+    pub fragments: u32,
+    pub outcome: Option<crate::segplan::FragmentIndexOutcome>,
+}
+
+/// Test-only decoder counter scoped to one owned file-backed database.
+/// Its strong handle controls the registration lifetime; parallel tests on
+/// other databases cannot affect its positive/negative control.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn fragment_index_unpack_counter(
+    database: &std::path::Path,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    fragindex::unpack_counter(database)
+}
+
 #[async_trait]
 pub trait FragmentIndexStore: Send + Sync + 'static {
+    /// Metadata-only badge answers in input order, including duplicates.
+    /// The validation marker proves the payload; no packed rows leave SQLite.
+    /// Callers chunk at [`FRAGMENT_INDEX_STATUS_CHUNK`].
+    async fn fragment_index_status(
+        &self,
+        wanted: &[(i64, crate::segplan::SourceIdentity)],
+    ) -> Result<Vec<FragmentIndexStatus>, StoreError>;
+
     /// Store or replace one file's index.
     async fn put_fragment_index(
         &self,
@@ -5290,7 +5844,26 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
+    + SharingStore
+    + SharingCatalogueStore
+    + SharingFileLocatorStore
+    + SharingPurposeKeyStore
+    + SharingSourceArtworkStore
+    + SharingSourceCatalogueStore
+    + SharingSourceDetailsStore
+    + SharingReceiverSessionStore
+    + SharingIngressCustodyStore
+    + SharingReceiverDeliveryStore
+    + SharingReceiverIngressStore
+    + SharingReceiverProgressStore
+    + SharingReceiverRetirementStore
+    + SharingSourceSessionStore
+    + SharingSourceIngressCustodyStore
     + SettingsStore
+    + JellyfinCatalogStore
+    + JellyfinIdentityStore
+    + JellyfinLoginStore
+    + JellyfinPlayStore
     + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
@@ -5310,6 +5883,8 @@ pub trait Store:
     + PretranscodeJobStore
     + OfflinePackageStore
     + FileGrantStore
+    + RemoteStore
+    + InvitationStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
@@ -5327,7 +5902,26 @@ pub trait Store:
 
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
+        + SharingStore
+        + SharingCatalogueStore
+        + SharingFileLocatorStore
+        + SharingPurposeKeyStore
+        + SharingSourceArtworkStore
+        + SharingSourceCatalogueStore
+        + SharingSourceDetailsStore
+        + SharingReceiverSessionStore
+        + SharingIngressCustodyStore
+        + SharingReceiverDeliveryStore
+        + SharingReceiverIngressStore
+        + SharingReceiverProgressStore
+        + SharingReceiverRetirementStore
+        + SharingSourceSessionStore
+        + SharingSourceIngressCustodyStore
         + SettingsStore
+        + JellyfinCatalogStore
+        + JellyfinIdentityStore
+        + JellyfinLoginStore
+        + JellyfinPlayStore
         + BackgroundJobStore
         + DvConversionStore
         + MetricsStore
@@ -5348,6 +5942,8 @@ impl<T> Store for T where
         + PretranscodeJobStore
         + OfflinePackageStore
         + FileGrantStore
+        + RemoteStore
+        + InvitationStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore
@@ -5389,9 +5985,28 @@ pub async fn requeue_cluster_fragment_index_after_no_holder(
 pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
     watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    index_status_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    cluster_index_availability_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpStoreOperationCounts {
+    /// Physical node-local projection leases inside this request, on either
+    /// backend. This is not a SQL-statement or replicated-operation count.
+    #[must_use]
+    pub fn index_status_calls(&self) -> u64 {
+        self.index_status_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Batched cluster-artifact availability reads inside this request, on
+    /// either backend: one per
+    /// [`ClusterFragmentIndexStore::cluster_fragment_index_availability`]
+    /// call, whatever the number of probes in it.
+    #[must_use]
+    pub fn cluster_index_availability_calls(&self) -> u64 {
+        self.cluster_index_availability_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
     #[must_use]
     pub fn snapshot(&self) -> [u64; 3] {
         use std::sync::atomic::Ordering;
@@ -5412,11 +6027,10 @@ impl HttpStoreOperationCounts {
     fn record(&self, class_index: usize) {
         use std::sync::atomic::Ordering;
 
-        let _ = self.counts[class_index].fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| (current != u64::MAX).then(|| current.saturating_add(1)),
-        );
+        let _ =
+            self.counts[class_index].try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current != u64::MAX).then(|| current.saturating_add(1))
+            });
     }
 }
 
@@ -5450,6 +6064,22 @@ pub(super) fn record_http_watch_read() {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
         counts
             .watch_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+}
+
+pub(super) fn record_http_index_status_call() {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
+        counts
+            .index_status_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+}
+
+pub(super) fn record_http_cluster_index_availability_call() {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
+        counts
+            .cluster_index_availability_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     });
 }
@@ -6232,5 +6862,44 @@ mod item_sort_order_tests {
             );
             assert!(source.contains("item_sort_order_by(sort)"));
         }
+    }
+}
+
+#[cfg(test)]
+mod sharing_recovery_principal_tests {
+    use super::recovery_reservation_from_row;
+    use crate::playback_principal::PlaybackPrincipal;
+
+    #[test]
+    fn sharing_recovery_converter_preserves_complete_owner_and_refuses_invalid_local() {
+        let convert = |principal| {
+            recovery_reservation_from_row(
+                principal,
+                "playback",
+                "epoch",
+                "incarnation".to_owned(),
+                1,
+                1,
+                "a".repeat(64),
+                "b".repeat(64),
+                None,
+                "reserved",
+                1,
+                1,
+            )
+        };
+        let principal = PlaybackPrincipal::sharing(
+            uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000001").expect("grant UUID"),
+            &"a".repeat(64),
+        )
+        .expect("viewer key");
+        assert_eq!(
+            convert(principal.clone())
+                .expect("valid shared row")
+                .principal,
+            principal
+        );
+        assert!(convert(PlaybackPrincipal::LocalUser { user_id: 0 }).is_err());
+        assert!(convert(PlaybackPrincipal::LocalUser { user_id: -1 }).is_err());
     }
 }

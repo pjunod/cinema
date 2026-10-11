@@ -5,7 +5,7 @@
 //! non-API GET path.
 //!
 //! The app is not one file. `index.html` is a 97-line shell of markup and tags;
-//! the CSS and the JavaScript live in the sixty-six files of [`WEB_ASSETS`],
+//! the CSS and the JavaScript live in the eighty-two files of [`WEB_ASSETS`],
 //! which is also their load order. There is no bundler and no build step —
 //! `docs/clients/WEB-SHELL-LAYOUT.md` is the map, and adding a file means a row
 //! there, a row here, and a tag in the shell, or the tests below say so.
@@ -64,6 +64,8 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("hls.min.js",                             WebAsset::BodyScript,  include_str!("../web/hls.min.js")),
     ("core/app.js",                            WebAsset::BodyScript,  include_str!("../web/core/app.js")),
     ("core/api.js",                            WebAsset::BodyScript,  include_str!("../web/core/api.js")),
+    ("core/file-context.js",                   WebAsset::BodyScript,  include_str!("../web/core/file-context.js")),
+    ("core/shared-decision.js",                WebAsset::BodyScript,  include_str!("../web/core/shared-decision.js")),
     ("player/measurements.js",                 WebAsset::BodyScript,  include_str!("../web/player/measurements.js")),
     ("core/auth.js",                           WebAsset::BodyScript,  include_str!("../web/core/auth.js")),
     ("core/keyboard-reach.js",                 WebAsset::BodyScript,  include_str!("../web/core/keyboard-reach.js")),
@@ -83,6 +85,8 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("detail/preplay-selection.js",            WebAsset::BodyScript,  include_str!("../web/detail/preplay-selection.js")),
     ("detail/edit.js",                         WebAsset::BodyScript,  include_str!("../web/detail/edit.js")),
     ("player/player.js",                       WebAsset::BodyScript,  include_str!("../web/player/player.js")),
+    ("player/continuous-media.js",             WebAsset::BodyScript,  include_str!("../web/player/continuous-media.js")),
+    ("player/continuous-quality.js",           WebAsset::BodyScript,  include_str!("../web/player/continuous-quality.js")),
     ("player/session.js",                      WebAsset::BodyScript,  include_str!("../web/player/session.js")),
     ("player/prepared-replacement.js",         WebAsset::BodyScript,  include_str!("../web/player/prepared-replacement.js")),
     ("player/prepared-switch-measurement.js",  WebAsset::BodyScript,  include_str!("../web/player/prepared-switch-measurement.js")),
@@ -123,6 +127,18 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("layouts/theater.js",                     WebAsset::BodyScript,  include_str!("../web/layouts/theater.js")),
     ("pages/reader.js",                        WebAsset::BodyScript,  include_str!("../web/pages/reader.js")),
     ("pages/library-channels-page.js",         WebAsset::BodyScript,  include_str!("../web/pages/library-channels-page.js")),
+    ("pages/shared-artwork.js",                WebAsset::BodyScript,  include_str!("../web/pages/shared-artwork.js")),
+    ("pages/shared-libraries.js",              WebAsset::BodyScript,  include_str!("../web/pages/shared-libraries.js")),
+    ("pages/sharing-management.js",            WebAsset::BodyScript,  include_str!("../web/pages/sharing-management.js")),
+    ("core/remote-navigation.js",              WebAsset::BodyScript,  include_str!("../web/core/remote-navigation.js")),
+    ("core/remote-router.js",                  WebAsset::BodyScript,  include_str!("../web/core/remote-router.js")),
+    ("core/remote-guard.js", WebAsset::BodyScript, include_str!("../web/core/remote-guard.js")),
+    ("core/remote-client.js", WebAsset::BodyScript, include_str!("../web/core/remote-client.js")),
+    ("core/remote-receiver.js", WebAsset::BodyScript, include_str!("../web/core/remote-receiver.js")),
+    ("core/remote-controller.js", WebAsset::BodyScript, include_str!("../web/core/remote-controller.js")),
+    ("pages/remote-pairing.js", WebAsset::BodyScript, include_str!("../web/pages/remote-pairing.js")),
+    ("pages/settings-remote.js", WebAsset::BodyScript, include_str!("../web/pages/settings-remote.js")),
+    ("pages/remote.js", WebAsset::BodyScript, include_str!("../web/pages/remote.js")),
     ("router.js",                              WebAsset::BodyScript,  include_str!("../web/router.js")),
 ];
 

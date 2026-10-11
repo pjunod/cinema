@@ -1,0 +1,37 @@
+PASS every section is a route, grouped in the rail's order
+PASS the route names the section; storage is only the landing default
+PASS switching sections is a navigation, never a repaint around the router
+PASS render() keeps the cached aggregate across a section switch and rewrites bare routes
+PASS the rail marks the active section, shows counts it already has, and never fetches
+PASS a card's Save wakes on a change and sleeps again once saved
+PASS Playback saves per card, and each card writes only its own fields
+PASS PGS overlay saves either choice despite unmet readiness and reports a failed save
+PASS display Auto saves either choice with pending readiness and retains newer edits
+PASS quality switching renders the server's saved value
+PASS an older quality save never overwrites a newer draft
+PASS Durable retry preserves its UUID after a transport failure and sends an object body
+PASS Developer keeps only experiments; everyday controls retain their saves and advisory readiness
+PASS unmet subtitle readiness cannot refuse the saved cluster or backfill switches
+PASS server guidance sends disabled Live TV features to their current settings
+PASS late readiness success and failure update evidence without repainting moved settings
+PASS the guide's readiness rows are advisory and never disable the save
+PASS changing the guide source dirties the replacement card after its repaint
+PASS saving the guide rechecks the saved source and retires its draft
+PASS Live TV mutations repaint only the card that owns the saved fields
+PASS every asynchronous Live TV settings response is fenced to the Live TV route
+PASS an off-route Live TV write refreshes the shared settings cache without repainting
+PASS a rejected guide save reports into the replacement card
+PASS a rejected guide refresh reports into the replacement card
+PASS Verified decode states its cost, its prerequisites, and what this node measured
+PASS Automatic recovery is directly enabled and coverage remains advisory
+PASS Maintenance shows the stored subtitle tracks: size, what is riding now, and where to turn it off
+PASS a section route may name the element it lands on
+PASS Maintenance owns the timers, and each of its cards saves its own fields
+PASS Metadata holds the providers; Integrations holds the services
+PASS a library row reports; its drawer configures; only one drawer is open
+PASS the drawer's Save writes identity then schedule, and stops on the first refusal
+PASS password reset is a form with a confirm field, not two prompt() dialogs
+PASS the viewer's four appearance choices share one popover
+PASS HEVC override saves either choice without consulting advisory readiness
+PASS tone-map probe failures stay collapsed beneath the selected pipeline
+36/36 passed

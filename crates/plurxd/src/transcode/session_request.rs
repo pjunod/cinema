@@ -446,7 +446,7 @@ pub struct DeliveryCandidate {
 /// The durable identity a session reserves its recovery budget against.
 ///
 /// Three values that travel together because they are one thing: the ledger
-/// `media_session_producer_recovery` is keyed by `(user_id, playback_id,
+/// `media_session_producer_recovery` is keyed by `(owner_key, playback_id,
 /// recovery_epoch)`, and a reservation additionally names the incarnation that
 /// failed. `playback_id` is already on [`SessionRequest`] because a client
 /// supplies it; these three are not, and deliberately.
@@ -465,12 +465,33 @@ pub struct DeliveryCandidate {
 /// must treat it as "no reservation is possible" and not as a fresh grant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRecoveryIdentity {
-    pub user_id: i64,
+    pub principal: plurx_core::playback_principal::PlaybackPrincipal,
     /// The coordination identity of the generation being started, which is
     /// what a reservation records as the attempt that failed.
     pub incarnation_id: String,
     /// The server-owned budget identity. Empty means no budget.
     pub recovery_epoch: String,
+}
+
+pub(crate) fn principal_supersession_scope(
+    principal: &plurx_core::playback_principal::PlaybackPrincipal,
+) -> String {
+    match principal {
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+            serde_json::json!(["user_id", user_id]).to_string()
+        }
+        plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+            serde_json::json!(["principal", principal.owner_key()]).to_string()
+        }
+    }
+}
+
+impl SessionRecoveryIdentity {
+    /// Retain the existing local gate encoding; sharing gets a separate
+    /// typed namespace and never a synthetic numeric user.
+    pub(crate) fn supersession_scope(&self) -> String {
+        principal_supersession_scope(&self.principal)
+    }
 }
 
 /// What a client asked for, normalised. Two requests with the same
@@ -480,9 +501,16 @@ pub struct SessionRecoveryIdentity {
 /// Never emitted inside the strict legacy request envelope.
 #[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
+    /// Private exact artifact chosen using a live measured-cost proof. The
+    /// actual dispatch reacquires it; this is never client-supplied authority.
+    pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
     pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
     pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
+    /// Actual accepted atomic inputs, process-private like this whole context.
+    /// Worker restore reconstructs them from the authenticated binding.
+    pub(crate) planning_snapshot:
+        Option<std::sync::Arc<plurx_core::store::PlaybackPlanningSnapshot>>,
     /// Dispatch location for the exact process-bound recipe, never client wire.
     pub owner_node_id: Option<String>,
     pub candidate_id: plurx_core::playback::candidate::CandidateId,
@@ -492,13 +520,154 @@ pub struct CandidateExecutionContext {
     pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
 }
 
+/// Current ordinary source-owner selection, private to first preparation.
+/// An unavailable descriptor permits normal production, never cached acquisition.
+#[derive(Clone)]
+pub(crate) struct PreparedVodOwner {
+    pub(crate) node_id: String,
+    pub(crate) source_authority: Option<std::sync::Arc<crate::AppState>>,
+}
+
+/// Versioned worker media role for one continuous family generation.
+/// Legacy request JSON omits this field; older strict workers refuse it rather
+/// than silently materializing a muxed rendition under a video-only identity.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuousMediaRequest {
+    pub version: u32,
+    /// A controlled loader prepares a cold video child before requesting it.
+    /// Autonomous engines retain all advertised capacity through detach.
+    #[serde(default, skip_serializing_if = "continuous_media_is_autonomous")]
+    pub controlled: bool,
+    pub family_generation: String,
+    pub role: ContinuousMediaRole,
+    /// One additional catalog rung for a capacity-reserved autonomous master.
+    /// Omitted for a standalone role or the controlled active video/audio pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomous_companion: Option<plurx_core::playback::candidate::CandidateId>,
+    /// Exact second recipe from the same canonical catalog. Worker revalidation
+    /// scopes to these two shapes rather than discovering a new whole catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_catalog: Option<Box<plurx_core::playback::candidate::QualityCandidate>>,
+    /// Owner-verified immutable output proof, bound once in the durable parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_descriptor: Option<plurx_core::store::ContinuousFamilyDescription>,
+    /// Reconstructed from the same worker catalog and retained decoder caps.
+    #[serde(skip)]
+    pub companion_context: Option<Box<ContinuousCompanionContext>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContinuousCompanionContext {
+    pub height: i64,
+    pub candidate: CandidateExecutionContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuousMediaRole {
+    Video,
+    SharedAudio,
+}
+
+fn continuous_media_is_autonomous(controlled: &bool) -> bool {
+    !*controlled
+}
+
+impl ContinuousMediaRequest {
+    pub fn valid_for(&self, request: &SessionRequest) -> bool {
+        self.version == 1
+            && self.family_descriptor.as_ref().is_none_or(|description| {
+                description.valid()
+                    && description.mode
+                        == if self.controlled {
+                            "controlled"
+                        } else {
+                            "autonomous_reserved"
+                        }
+                    && self.role == ContinuousMediaRole::Video
+                    && self.autonomous_companion.is_some_and(|companion| {
+                        description
+                            .video
+                            .iter()
+                            .any(|row| row.candidate_id == companion)
+                    })
+                    && request.candidate_context.as_ref().is_none_or(|primary| {
+                        description
+                            .video
+                            .iter()
+                            .any(|row| row.candidate_id == primary.candidate_id)
+                    })
+            })
+            && uuid::Uuid::parse_str(&self.family_generation).is_ok()
+            && request.presentation == Presentation::Vod
+            && matches!(request.kind, SessionKind::Transcode { .. })
+            && !request.hdr10
+            && request.subtitle_burn.is_none()
+            && self.autonomous_companion.is_none_or(|id| {
+                self.role == ContinuousMediaRole::Video
+                    && request
+                        .candidate_context
+                        .as_ref()
+                        .is_none_or(|primary| primary.candidate_id != id)
+            })
+            && self.companion_catalog.as_ref().is_none_or(|companion| {
+                self.autonomous_companion == Some(companion.id)
+                    && companion.identity_matches()
+                    && companion.route == plurx_core::playback::candidate::CandidateRoute::Encode
+                    && companion.normalized_geometry
+                    && companion.grade == plurx_core::transcode::OutputGrade::Sdr
+            })
+            && self.companion_context.as_ref().is_none_or(|companion| {
+                self.autonomous_companion == Some(companion.candidate.candidate_id)
+                    && companion.height >= 2
+                    && companion.candidate.normalized_geometry
+                    && companion.candidate.grade == plurx_core::transcode::OutputGrade::Sdr
+                    && companion.candidate.profile.is_none_or(|profile| {
+                        profile == transcode::AutoQualityRateProfile::H264Sdr1440P30V1
+                            && companion.height == 1440
+                    })
+            })
+            && request.candidate_context.as_ref().is_none_or(|context| {
+                context.normalized_geometry
+                    && context.grade == plurx_core::transcode::OutputGrade::Sdr
+                    && context.profile.is_none_or(|profile| {
+                        profile == plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1
+                            && matches!(request.kind, SessionKind::Transcode { height: 1440 })
+                    })
+            })
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuous_media: Option<Box<ContinuousMediaRequest>>,
     #[serde(skip)]
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
+    /// Settings → Developer `playback.sdr_master_codecs`, read by the HTTP
+    /// create from the planning snapshot it already holds, so a rolling start
+    /// does not pay a second serial Store read for it. Never on the wire:
+    /// a request rebuilt from a durable recipe (owner takeover, a remote
+    /// worker, VOD resurrection) carries `None`, and its start reads the
+    /// switch's current value instead.
+    #[serde(skip)]
+    pub(crate) sdr_master_codecs: Option<bool>,
+    /// Trusted service policy, retained by durable and worker envelopes. Native
+    /// HTTP create never takes this from the client. A VOD-only request may
+    /// not allocate the rolling recovery engine, even when globally enabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) vod_only: bool,
+    /// Trusted passive route retention, independently selected by service ingress.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) passive_vod: bool,
+    /// Service-owned finite delivery ceiling. The ordinary native HTTP body
+    /// cannot set this. Worker envelopes retain it and require passive VOD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finite_bitrate_limit_bps: Option<u32>,
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
     pub playback_id: String,
@@ -523,6 +692,14 @@ pub struct SessionRequest {
     pub kind: SessionKind,
     pub start_seconds: f64,
     pub audio_index: Option<i64>,
+    /// Server-resolved audio bytes, frozen across cluster ownership, offline
+    /// production and prepared successors. No public create field accepts it.
+    /// Initial transcodes carry only `audio_claim` until the actual producer
+    /// chooses its route; this field then carries the retained producer answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_claim: Option<plurx_core::playback::audio::AudioClaim>,
     /// Subtitle stream to burn into the picture, chosen by the viewer.
     ///
     /// Only ever a *burn*: a text subtitle the client can render itself never
@@ -771,18 +948,27 @@ pub enum SessionKind {
 }
 
 /// Why a client is replacing an existing session. This is deliberately typed
-/// even while `stall` is the only server-normalized cause: an unknown future
-/// value must be refused, not accidentally treated as ordinary create.
+/// with closed cause vocabulary: unknown future values must be refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReopenReason {
     Stall,
+    Link,
+    Encode,
+    Decode,
+    Hold,
+    Authority,
 }
 
 impl ReopenReason {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Stall => "stall",
+            Self::Link => "link",
+            Self::Encode => "encode",
+            Self::Decode => "decode",
+            Self::Hold => "hold",
+            Self::Authority => "authority",
         }
     }
 }
@@ -802,6 +988,8 @@ pub(super) struct SessionOwner<'a> {
     pub(super) supersession_user: &'a str,
     pub(super) playback_id: &'a str,
     pub(super) automatic: bool,
+    /// The starting session's frozen `playback.sdr_master_codecs` choice.
+    pub(super) sdr_master_codecs: bool,
 }
 
 impl SessionKind {
@@ -829,9 +1017,13 @@ impl SessionRequest {
     /// For an Auto transcode the numeric height is excluded on purpose: a
     /// network-prior refresh between transport attempts may recompute it, but
     /// the same `request_id` must still recover the first persisted answer.
-    fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
+    pub(super) fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
         let kind = match self.kind {
-            SessionKind::Transcode { height: _ } if self.automatic => "ta".to_owned(),
+            SessionKind::Transcode { height: _ }
+                if self.automatic && self.continuous_media.is_none() =>
+            {
+                "ta".to_owned()
+            }
             SessionKind::Transcode { height } => format!("t{height}"),
             SessionKind::Copy {
                 aac,
@@ -869,6 +1061,21 @@ impl SessionRequest {
         } else {
             kind
         };
+        let kind = if self.vod_only {
+            format!("{kind}+vod-only")
+        } else {
+            kind
+        };
+        let kind = if self.passive_vod {
+            format!("{kind}+passive-vod-600-64-4096")
+        } else {
+            kind
+        };
+        let kind = if let Some(limit) = self.finite_bitrate_limit_bps {
+            format!("{kind}+finite-bitrate-v1:{limit}")
+        } else {
+            kind
+        };
         let kind = if let Some(context) = self.candidate_context.as_ref() {
             format!(
                 "{kind}+candidate:{}:{}",
@@ -878,10 +1085,26 @@ impl SessionRequest {
         } else {
             kind
         };
+        let kind = if let Some(media) = self.continuous_media.as_ref() {
+            let role = match media.role {
+                ContinuousMediaRole::Video => "video",
+                ContinuousMediaRole::SharedAudio => "shared_audio",
+            };
+            let role_identity = format!(
+                "{kind}+continuous:{}:{}:{role}",
+                media.version, media.family_generation
+            );
+            match media.autonomous_companion {
+                Some(id) => format!("{role_identity}:autonomous:{}", id.to_hex()),
+                None => role_identity,
+            }
+        } else {
+            kind
+        };
         // These strings are client-controlled. A typed JSON tuple keeps a
         // colon inside a username, playback id, or session id from producing
         // the same fingerprint as a different set of fields.
-        serde_json::json!([
+        let legacy = serde_json::json!([
             user_name,
             self.file_id,
             self.playback_id,
@@ -894,7 +1117,11 @@ impl SessionRequest {
             self.previous_session_id,
             self.reopen_reason.map(ReopenReason::as_str),
         ])
-        .to_string()
+        .to_string();
+        match &self.audio_claim {
+            Some(claim) => serde_json::json!([legacy, claim]).to_string(),
+            None => legacy,
+        }
     }
 
     pub(super) fn intent_fingerprint(&self, user_name: &str) -> String {
@@ -903,17 +1130,34 @@ impl SessionRequest {
 
     /// Fixed-width durable identity used by the replicated session claim.
     ///
-    /// Replicated request rows are already scoped by the immutable user id.
+    /// Replicated request rows are scoped by the canonical playback principal.
     /// Exclude the mutable username so an account rename cannot turn an
     /// otherwise identical idempotent replay into a conflict. The established
     /// process-local identity above keeps the username scope it has always had.
-    pub(crate) fn durable_intent_fingerprint(&self, user_id: i64) -> String {
-        let durable = serde_json::json!([user_id, self.intent_fingerprint_with_user_scope(None),]);
+    pub(crate) fn durable_intent_fingerprint(
+        &self,
+        principal: &plurx_core::playback_principal::PlaybackPrincipal,
+    ) -> String {
+        let intent = self.intent_fingerprint_with_user_scope(None);
+        // Keep local hashes byte-for-byte stable across the ownership upgrade.
+        let durable = match principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+                serde_json::json!([user_id, intent])
+            }
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+                serde_json::json!([principal.owner_key(), intent])
+            }
+        };
         hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
 }
 
 pub struct StartInfo {
+    /// Profile of an admitted, prepared processed presentation. Independent
+    /// of the physical transcode kind and its PQ base grade; never source tags.
+    pub(crate) processed_dv_profile: Option<u8>,
+    pub(crate) retained_output: Option<super::RetainedOutputFacts>,
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,
@@ -950,4 +1194,28 @@ pub struct StartInfo {
     /// session. A finished transcode-cache hit is seekable VOD to the client
     /// but still belongs to the 60-second rolling registry.
     pub control_lease_timeout_ms: u32,
+}
+
+#[cfg(test)]
+pub(crate) fn continuous_test_candidate_context(
+    id: plurx_core::playback::candidate::CandidateId,
+    digest: [u8; 32],
+    height: u32,
+) -> CandidateExecutionContext {
+    super::TranscodeManager::candidate_context(&plurx_core::playback::candidate::QualityCandidate {
+        id,
+        recipe_digest: digest,
+        route: plurx_core::playback::candidate::CandidateRoute::Encode,
+        planned_codec: None,
+        normalized_geometry: true,
+        width: height * 16 / 9,
+        height,
+        target_height: height,
+        average_bps: None,
+        peak_bps: None,
+        grade: plurx_core::transcode::OutputGrade::Sdr,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    })
 }

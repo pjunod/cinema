@@ -29,10 +29,16 @@ pub(crate) mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_auth_revocation;
+pub(crate) mod internal_clock;
 pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
+mod jellyfin;
+pub(crate) use jellyfin::{
+    standard_port_app as jellyfin_standard_port_app, StandardPort as JellyfinStandardPort,
+    StandardPortStatus as JellyfinStandardPortStatus,
+};
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
@@ -43,10 +49,40 @@ pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
 mod plex;
+pub(crate) mod plex_census;
 pub(crate) mod publication;
 mod reading;
+pub(crate) mod remote;
 mod scan;
 pub(crate) mod scan_identity;
+pub(crate) mod shared_artwork;
+pub(crate) mod shared_library;
+pub(crate) mod shared_playback;
+pub(crate) mod shared_receiver_assets;
+#[cfg(test)]
+mod shared_receiver_fixture;
+#[allow(
+    dead_code,
+    reason = "candidate Shared Start router remains unregistered pending actual relay qualification"
+)]
+pub(crate) mod shared_receiver_ingress;
+#[allow(dead_code)] // Owner remains unregistered until relay/control qualify.
+pub(crate) mod shared_receiver_playback;
+pub(crate) mod shared_source_assets;
+pub(crate) mod shared_source_playback;
+// Candidate projection helpers remain unregistered until Source/B lifecycle
+// authority and actual delivery binding are qualified.
+pub(crate) mod sharing;
+mod sharing_decision_decode;
+pub(crate) use sharing_decision_decode::bounded_decision_value;
+pub(crate) mod sharing_direct_wire;
+#[allow(dead_code)]
+pub(crate) mod sharing_playback_wire;
+#[allow(dead_code)]
+mod sharing_start_decode;
+pub(crate) use sharing_start_decode::{
+    decode_source_start_response, validate_source_start_request, DecodedSourceHlsStart,
+};
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
@@ -144,7 +180,7 @@ impl Default for HttpRouteMetrics {
 
 impl HttpRouteMetrics {
     fn saturating_add(target: &AtomicU64, amount: u64) {
-        let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = target.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != u64::MAX).then(|| current.saturating_add(amount))
         });
     }
@@ -236,7 +272,17 @@ fn http_route_group(path: &str) -> usize {
     // inventory test fails if a registered pattern is left unclassified.
     match path {
         // Authentication and identity administration.
-        "/api/v1/me"
+        "/jellyfin"
+        | "/jellyfin/"
+        | "/jellyfin/System/Info/Public"
+        | "/jellyfin/System/Info"
+        | "/jellyfin/Users/Public"
+        | "/jellyfin/Sessions/Capabilities"
+        | "/jellyfin/Sessions/Capabilities/Full"
+        | "/jellyfin/Users/AuthenticateByName"
+        | "/jellyfin/Users/{user_id}"
+        | "/jellyfin/Users/Me"
+        | "/api/v1/me"
         | "/api/v1/setup"
         | "/api/v1/auth/login"
         | "/api/v1/auth/logout"
@@ -253,7 +299,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/keys/{id}" => 0,
 
         // Home projections.
-        "/api/v1/home/previews" | "/api/v1/hubs" | "/hubs/search" => 1,
+        "/api/v1/home/previews" | "/api/v1/hubs" | "/api/v1/features" | "/hubs/search" => 1,
 
         // Library management, catalogue pages and schedules.
         "/api/v1/libraries"
@@ -317,17 +363,60 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/dvr/reminders"
         | "/api/v1/dvr/reminders/{id}"
         | "/api/v1/dvr/reminders/{id}/ack"
+        | "/jellyfin/Users/{user_id}/Views"
+        | "/jellyfin/UserViews/GroupingOptions"
+        | "/jellyfin/Library/VirtualFolders"
+        | "/jellyfin/DisplayPreferences/{id}"
+        | "/jellyfin/Items/{item_id}/Intros"
+        | "/jellyfin/MediaSegments/{item_id}"
+        | "/jellyfin/Items/{item_id}/LocalTrailers"
+        | "/jellyfin/Items/{item_id}/SpecialFeatures"
+        | "/jellyfin/UserViews"
+        | "/jellyfin/Items/Latest"
+        | "/jellyfin/Items/Resume"
+        | "/jellyfin/UserItems/Resume"
+        | "/jellyfin/Users/{user_id}/Items/Latest"
+        | "/jellyfin/Users/{user_id}/Items/Resume"
+        | "/jellyfin/Shows/Upcoming"
+        | "/jellyfin/Items/{item_id}/Similar"
+        | "/jellyfin/Shows/NextUp"
+        | "/jellyfin/Items"
+        | "/jellyfin/Users/{user_id}/Items"
+        | "/jellyfin/Items/{item_id}/Images/{kind}"
+        | "/jellyfin/Items/{item_id}/Images/{kind}/{index}"
+        | "/jellyfin/Items/{item_id}"
+        | "/jellyfin/Users/{user_id}/Items/{item_id}"
+        | "/jellyfin/Shows/{item_id}/Seasons"
+        | "/jellyfin/Shows/{item_id}/Episodes"
         | "/library/metadata/{key}"
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
         | "/api/v1/images/{filename}"
-        | "/api/v1/files/{id}/chapters/{index}/thumb" => 3,
+        | "/api/v1/files/{id}/chapters/{index}/thumb"
+        | "/api/v1/shared/imports/{import}/files/{locator}/chapters/{index}/thumb"
+        | "/api/v1/shared/imports/{import}/files/{locator}/hls/sessions"
+        | "/api/v1/shared/imports/{import}/files/{locator}/playback" => 3,
 
         // Search only; maintenance of the search index is a settings action.
-        "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
+        "/jellyfin/Search/Hints" | "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
 
         // Playback decisions, control, media bodies and watch state.
-        "/api/v1/items/{id}/progress"
+        "/jellyfin/Items/{item_id}/PlaybackInfo"
+        | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}"
+        | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{start_ticks}/{filename}"
+        | "/jellyfin/Videos/{item_id}/stream"
+        | "/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}"
+        | "/jellyfin/Videos/{item_id}/{filename}"
+        | "/jellyfin/Sessions/Logout"
+        | "/jellyfin/Sessions/Playing"
+        | "/jellyfin/Sessions/Playing/Progress"
+        | "/jellyfin/Sessions/Playing/Stopped"
+        | "/jellyfin/Sessions/Playing/Ping"
+        | "/jellyfin/Videos/ActiveEncodings"
+        | "/jellyfin/UserPlayedItems/{item_id}"
+        | "/jellyfin/Items/{item_id}/Download"
+        | "/jellyfin/Users/{user_id}/PlayedItems/{item_id}"
+        | "/api/v1/items/{id}/progress"
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
@@ -345,7 +434,14 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/subs/{subtitle}"
         | "/api/v1/files/{id}/subs/{index}/overlay.json"
         | "/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}"
+        | "/api/v1/shared/imports/{import}/files/{locator}/subs/{subtitle}"
+        | "/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay.json"
+        | "/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay/{generation}/objects/{object}"
+        | "/api/v1/shared/imports/{import}/files/{locator}/stream.mp4"
+        | "/api/v1/shared/imports/{import}/files/{locator}/direct"
         | "/api/v1/files/{id}/hls/sessions"
+        | "/api/v1/files/{id}/hls/continuous-sessions"
+        | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
@@ -363,9 +459,14 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}/subs/{index}/index.m3u8"
         | "/api/v1/hls/{session}/subs/{index}/{segment}"
         | "/api/v1/hls/{session}/status"
+        | "/api/v1/hls/{session}/quality-control"
+        | "/api/v1/hls/{session}/quality-schedule"
+        | "/api/v1/hls/{session}/quality-family"
         | "/api/v1/hls/{session}/control"
         | "/api/v1/hls/{session}"
         | "/api/v1/hls/{session}/{segment}"
+        | "/api/v1/hls/{session}/{role}/{rendition}/{kind}/{object}"
+        | "/api/v1/hls/{session}/{role}/{rendition}/index.m3u8"
         | "/api/v1/live-tv/readiness"
         | "/api/v1/live-tv/readiness/refresh"
         | "/api/v1/live-tv/channels"
@@ -394,6 +495,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/settings"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
+        | "/api/v1/developer/macos-video-processing/reprobe"
         | "/api/v1/scan"
         | "/api/v1/scan/status"
         | "/api/v1/scan/requests/{id}"
@@ -402,6 +504,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/activity/sessions/{id}"
         | "/api/v1/activity/offline/{id}"
         | "/api/v1/activity/producer"
+        | "/api/v1/activity/retained/{nonce}"
         | "/api/v1/activity/processes/{pid}"
         | "/api/v1/trakt/status"
         | "/api/v1/trakt/link"
@@ -411,6 +514,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/system/playback-events"
         | "/api/v1/system/library-shape"
         | "/api/v1/system/storage"
+        | "/api/v1/system/transcoder"
         | "/api/v1/system/search-index/rebuild"
         | "/api/v1/client-log"
         | "/api/v1/coming-soon"
@@ -430,6 +534,10 @@ fn http_route_group(path: &str) -> usize {
         | "/readyz"
         | "/metrics"
         | "/download/plurx-android.apk"
+        // The ordinary listener only refuses peer paths; peers use the
+        // separate sharing listener.
+        | "/sharing"
+        | "/sharing/{*path}"
         | "/identity" => 6,
 
         // Cluster administration and authenticated internal transport.
@@ -464,6 +572,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/fragment-index/{cache_key}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
+        | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
         | crate::subtitle_ranges::PATH
@@ -481,13 +590,14 @@ fn http_route_group(path: &str) -> usize {
         | crate::live_tv::RETIRE_PATH
         | crate::live_tv::RESUME_PATH
         | crate::live_tv::START_STATE_PATH
-        | crate::live_tv::DRAIN_PATH
         | crate::live_tv::GUIDE_PATH
         | crate::media_sessions::START_PATH
         | crate::media_sessions::ACTIVATE_PATH
         | crate::media_sessions::PREPARE_PATH
         | crate::media_sessions::ABORT_PATH
         | crate::media_sessions::RELAY_PATH
+        | hls::QUALITY_CONTROL_PATH
+        | hls::QUALITY_SCHEDULE_PATH
         | crate::media_sessions::CONTROL_PATH => 7,
         _ => 8,
     }
@@ -611,14 +721,24 @@ const PLEX_OUTCOMES: [&str; 4] = ["ok", "not_found", "unauthorized", "error"];
 /// in the binary that sends façade traffic, on libtest's parallel threads, and
 /// the adversarial review of PR #462 measured that race failing 34 runs in
 /// 400.
+///
+/// `cells` are this process's counts and keep the in-process meaning of
+/// `plurx_plex_requests_total`. `ledger` is the durable census (C-07 §8.5,
+/// [`plex_census`]): restored once at startup from the node's data directory,
+/// it adds what earlier processes counted, so one read of
+/// `plurx_plex_requests_since_census_total` covers every restart since the
+/// census began. A router built without a restore (every test router) has no
+/// ledger and exposes the process counter alone.
 pub(crate) struct PlexCensus {
-    cells: [AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()],
+    cells: [AtomicU64; plex_census::CELLS],
+    ledger: std::sync::OnceLock<plex_census::CensusLedger>,
 }
 
 impl Default for PlexCensus {
     fn default() -> Self {
         Self {
             cells: std::array::from_fn(|_| AtomicU64::new(0)),
+            ledger: std::sync::OnceLock::new(),
         }
     }
 }
@@ -679,7 +799,60 @@ impl PlexCensus {
                 ));
             }
         }
+        if let Some(ledger) = self.ledger.get() {
+            out.push_str(&ledger.prometheus(&self.cells));
+        }
         out
+    }
+
+    /// Restore the durable census from `data_dir` and write it back at once,
+    /// marked as running, so a crash before the first periodic write still
+    /// leaves a bounded gap. Never fails: an unusable file starts a new census
+    /// with the reason logged. `floor_unix_s` is the earliest clock reading
+    /// trusted (the build's source date); below it, or with no clock, nothing
+    /// is written until a later write sees a trustworthy one. Called once,
+    /// before the listener accepts; the returned start is what was logged.
+    pub(crate) async fn restore_durable(
+        &self,
+        data_dir: &std::path::Path,
+        now_unix_s: Option<u64>,
+        floor_unix_s: u64,
+    ) -> plex_census::CensusStart {
+        let (ledger, start) =
+            plex_census::CensusLedger::restore(data_dir, now_unix_s, floor_unix_s).await;
+        ledger.log_start(&start);
+        if self.ledger.set(ledger).is_err() {
+            tracing::warn!("the Plex façade census was already restored in this process");
+            return start;
+        }
+        if let Err(error) = self.flush_durable(now_unix_s, false).await {
+            tracing::warn!(
+                %error,
+                "could not write the Plex façade census at startup; the periodic write retries"
+            );
+        }
+        start
+    }
+
+    /// Write the durable census; `clean` records a clean stop and is final.
+    /// `Ok(false)` when there is no ledger, the clean stop already landed, or
+    /// the clock is unreadable or below the build's source date.
+    pub(crate) async fn flush_durable(
+        &self,
+        now_unix_s: Option<u64>,
+        clean: bool,
+    ) -> std::io::Result<bool> {
+        match self.ledger.get() {
+            Some(ledger) => ledger.flush(&self.cells, now_unix_s, clean).await,
+            None => Ok(false),
+        }
+    }
+
+    #[cfg(test)]
+    fn since_census(&self) -> Option<[u64; plex_census::CELLS]> {
+        self.ledger
+            .get()
+            .map(|ledger| ledger.since_census(&self.cells))
     }
 }
 
@@ -754,7 +927,7 @@ const HTTP_BODY_BUCKETS: [(u64, &str); 6] = [
 ];
 
 fn add_saturating(target: &AtomicU64, amount: u64) {
-    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = target.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         (current != u64::MAX).then(|| current.saturating_add(amount))
     });
 }
@@ -1317,15 +1490,31 @@ pub fn router(state: AppState) -> Router {
     // before the shared serving gate so media bodies and blocked GETs remain
     // unlimited while JSON work cannot occupy a request slot forever.
     let json_short = Router::new()
+        .merge(sharing::admin_router(state.clone()))
+        .merge(shared_library::viewer_router(state.clone()))
+        .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
+        .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
+        .route(
+            "/subtitle-transcription",
+            get(crate::subtitle_transcription::settings),
+        )
         .route("/subtitle-provider", get(subtitle_downloads::settings))
         // Advisory only. The Developer section lists what must be true
         // before each switch is safe; this is the other half — what this
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
+        .route(
+            "/developer/macos-video-processing/reprobe",
+            post(developer::reprobe_macos_video),
+        )
+        .route(
+            "/system/video-processing/reprobe",
+            post(developer::reprobe_video_processing),
+        )
         .merge(library_channels::collection_router())
         .nest("/library-channels", library_channels::router())
         .nest("/dvr", dvr::router())
@@ -1347,6 +1536,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/activity/producer",
             axum::routing::delete(system::stop_producer),
+        )
+        .route(
+            "/activity/retained/{nonce}",
+            axum::routing::delete(system::stop_retained_output),
         )
         .route(
             "/activity/processes/{pid}",
@@ -1479,6 +1672,14 @@ pub fn router(state: AppState) -> Router {
             "/users/{id}/devices/{prefix}",
             delete(users::revoke_user_device),
         )
+        .route(
+            "/subtitle-transcription",
+            put(crate::subtitle_transcription::update_settings),
+        )
+        .route(
+            "/files/{id}/subtitles/transcribe",
+            post(crate::subtitle_transcription::enqueue),
+        )
         .route("/settings", put(system::update_settings))
         .route(
             "/subtitle-provider",
@@ -1548,6 +1749,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/system/library-shape", get(system::library_shape))
         .route("/system/storage", post(system::remeasure_storage))
+        .route(
+            "/system/transcoder",
+            put(system::update_hardware_preference).post(system::optimize_transcoder),
+        )
         .route(
             "/system/search-index/rebuild",
             post(system::rebuild_search_index),
@@ -1691,6 +1896,14 @@ pub fn router(state: AppState) -> Router {
                 // browser holding the full 256 learned limits is about 40 KiB.
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route(
+            "/files/{id}/hls/continuous-candidates",
+            post(hls::continuous_candidates).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/continuous-sessions",
+            post(hls::create_continuous).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/files/{id}/hls/start", get(hls::start))
         .route(
             "/hls/{session}/master.m3u8",
@@ -1709,22 +1922,53 @@ pub fn router(state: AppState) -> Router {
         // Before the `{segment}` catch-all in intent, though the router
         // prefers the static segment regardless of registration order.
         .route("/hls/{session}/status", get(hls::status))
+        .route("/hls/{session}/quality-family", get(hls::continuous_family))
         .route(
             "/hls/{session}/control",
             post(hls::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_REQUEST_BYTES,
             )),
         )
+        .route(
+            "/hls/{session}/quality-control",
+            post(hls::quality_control).layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
+        .route(
+            "/hls/{session}/quality-schedule",
+            post(hls::quality_schedule)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
+        )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
-        .route("/images/{filename}", get(images::serve));
+        .route(
+            "/hls/{session}/{role}/{rendition}/{kind}/{object}",
+            get(hls::child_segment),
+        )
+        .route(
+            "/hls/{session}/{role}/{rendition}/index.m3u8",
+            get(hls::child_playlist),
+        )
+        .route("/images/{filename}", get(images::serve))
+        // Shared Start: the receiver actor owns dispatch, persistence and
+        // physical cleanup; the request is deadline-free like a local create.
+        .merge(shared_receiver_ingress::start_router())
+        // Shared pre-session file assets, relayed fresh from the Source, and
+        // the typed refusal for every shared file suffix B does not serve.
+        .merge(shared_receiver_assets::viewer_router(state.clone()))
+        .merge(shared_receiver_assets::closure_router())
+        // Shared direct play: GET/HEAD bytes bound to an exact B session.
+        .merge(shared_receiver_playback::direct_router());
 
     let api = Router::new()
         .merge(json_short)
         .merge(json_long)
         .merge(media)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            shared_receiver_playback::receiver_media,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             mutable_media_serving_gate,
@@ -1734,6 +1978,22 @@ pub fn router(state: AppState) -> Router {
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
     // which axum 0.8 rejects by default — `without_v07_checks` matches them
     // literally (we still use `{capture}` syntax for real captures).
+    // Every merged root family shares the literal-colon routing policy used
+    // by Plex; merging an ordinary router would turn those checks back on.
+    let jellyfin_json = Router::new()
+        .without_v07_checks()
+        .route("/jellyfin/", axum::routing::any(jellyfin::not_found))
+        .nest("/jellyfin", jellyfin::router())
+        .layer(axum::middleware::from_fn(json_long_deadline))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            jellyfin::enabled_gate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ))
+        .layer(axum::middleware::from_fn(jellyfin::cache_policy));
     let plex_short = Router::new()
         .without_v07_checks()
         .route("/identity", get(plex::identity))
@@ -1795,6 +2055,11 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
+        .route("/sharing", axum::routing::any(sharing::local_peer_refusal))
+        .route(
+            "/sharing/{*path}",
+            axum::routing::any(sharing::local_peer_refusal),
+        )
         .fallback(web::fallback)
         .layer(axum::middleware::from_fn(json_short_deadline));
 
@@ -1804,6 +2069,7 @@ pub fn router(state: AppState) -> Router {
     let public_media = Router::new()
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(internal_clock::PATH, get(internal_clock::snapshot))
         .route(
             cluster_operations::INTERNAL_PATH,
             get(cluster_operations::local),
@@ -1888,12 +2154,6 @@ pub fn router(state: AppState) -> Router {
             post(internal_live_tv::start_state).layer(DefaultBodyLimit::max(1_024)),
         )
         .route(
-            crate::live_tv::DRAIN_PATH,
-            post(internal_live_tv::drain).layer(DefaultBodyLimit::max(
-                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
-            )),
-        )
-        .route(
             crate::live_tv::GUIDE_PATH,
             post(internal_live_tv::guide).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
@@ -1921,6 +2181,7 @@ pub fn router(state: AppState) -> Router {
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
         )
+        .merge(shared_receiver_playback::internal_forwarding_router())
         .route(
             crate::media_sessions::ACTIVATE_PATH,
             post(internal_media_sessions::activate).layer(DefaultBodyLimit::max(
@@ -1940,22 +2201,39 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::sharing_connection_custody::CLOSE_PATH,
+            post(crate::sharing_connection_custody::close_http).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
             crate::media_sessions::RELAY_PATH,
             post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
         )
         .route(
+            hls::QUALITY_CONTROL_PATH,
+            post(internal_media_sessions::quality_control)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
+        .route(
+            hls::QUALITY_SCHEDULE_PATH,
+            post(internal_media_sessions::quality_schedule)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
+        )
+        .route(
             crate::media_sessions::CONTROL_PATH,
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
             )),
-        );
+        )
+        .merge(shared_source_playback::internal_forwarding_router());
 
     Router::new()
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
         .without_v07_checks()
         .nest("/api/v1", api)
+        .merge(remote::router())
+        .merge(jellyfin_json)
         .merge(plex_routes)
         .merge(public_short)
         .merge(public_media)
@@ -2015,6 +2293,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             || matches!(
                 path,
                 "/api/v1/me"
+                    | "/api/v1/features"
                     | "/api/v1/auth/login"
                     | "/api/v1/auth/logout"
                     | "/api/v1/activity"
@@ -2033,6 +2312,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/media"
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
+                | internal_clock::PATH
         )
     {
         return true;
@@ -2064,6 +2344,11 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
+                | hls::QUALITY_CONTROL_PATH
+                // Schedule mutations are control of an existing session: a
+                // node in maintenance keeps streaming it, so it must keep
+                // honouring the viewer's quality changes too.
+                | hls::QUALITY_SCHEDULE_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2090,7 +2375,16 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "live-tv", "sessions", _, _]
         ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let existing_media_control = (method == Method::POST
-        && matches!(segments.as_slice(), ["api", "v1", "hls", _, "control"]))
+        && matches!(
+            segments.as_slice(),
+            [
+                "api",
+                "v1",
+                "hls",
+                _,
+                "control" | "quality-control" | "quality-schedule"
+            ]
+        ))
         || (method == Method::DELETE
             && matches!(
                 segments.as_slice(),
@@ -2120,6 +2414,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
+    if remote::eligible(method, path) {
+        return true;
+    }
     if method == Method::GET
         && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
             || path.starts_with("/assets/")
@@ -2138,6 +2435,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
+                | internal_clock::PATH
         )
     {
         return true;
@@ -2186,6 +2484,10 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
+                    | hls::QUALITY_CONTROL_PATH
+                    // A learner can own a continuous session; every schedule
+                    // relayed to it arrives here.
+                    | hls::QUALITY_SCHEDULE_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH
             ))
@@ -2263,8 +2565,12 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             segments.as_slice(),
             ["api", "v1", "files", _, "hls", "sessions"]
+                // The continuous family create walks the same create path as
+                // `hls/sessions`, and its catalog read is the same kind of
+                // node-local, write-nothing POST as the caps-v2 decision.
+                | ["api", "v1", "files", _, "hls", "continuous-sessions" | "continuous-candidates"]
                 | ["api", "v1", "files", _, "publication"]
-                | ["api", "v1", "hls", _, "control"]
+                | ["api", "v1", "hls", _, "control" | "quality-control" | "quality-schedule"]
                 // The caps-v2 spelling of the decision read. It is a POST only
                 // because its capabilities are a JSON document rather than a
                 // query string — it writes nothing, and a learner that answers
@@ -2333,6 +2639,13 @@ async fn cluster_capacity_gate(
 
 fn safe_trace_target(uri: &Uri) -> String {
     let mut segments = uri.path().split('/').collect::<Vec<_>>();
+    if segments.len() >= 7
+        && segments[1].eq_ignore_ascii_case("jellyfin")
+        && segments[2].eq_ignore_ascii_case("videos")
+        && segments[5].eq_ignore_ascii_case("hls")
+    {
+        segments[4] = "[REDACTED]";
+    }
     for marker in ["media", "hls", "publication", "sessions", "starts"] {
         if let Some(index) = segments.iter().position(|segment| *segment == marker) {
             let is_capability_route = match marker {
@@ -2384,6 +2697,7 @@ pub(crate) enum ReadinessFailure {
     Maintenance,
     QuorumUnavailable,
     StoreUnavailable,
+    ClockUnbounded,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2391,6 +2705,21 @@ pub(crate) struct ReadinessEvaluation {
     pub(crate) ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<ReadinessFailure>,
+}
+
+/// Shared Store-free clock consequence for readiness and operations status.
+///
+/// Only while the operator has turned the clock guard on: otherwise one
+/// skewed node would take every node's `/readyz` down. The measurement stays
+/// visible in the Developer readiness rows and the clock metrics either way.
+fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
+    let guard = state.membership.clock_guard();
+    (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
+        ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::ClockUnbounded),
+        },
+    )
 }
 
 /// One typed readiness decision shared by `/readyz` and cluster status.
@@ -2409,10 +2738,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
     // when an isolated node needs to self-fence promptly.
     if state.serving.is_quorum_managed() {
         return if state.serving.is_ready() {
-            ReadinessEvaluation {
+            clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
                 ready: true,
                 reason: None,
-            }
+            })
         } else {
             ReadinessEvaluation {
                 ready: false,
@@ -2421,10 +2750,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
         };
     }
     match state.store.ping().await {
-        Ok(()) => ReadinessEvaluation {
+        Ok(()) => clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
             ready: true,
             reason: None,
-        },
+        }),
         Err(error) => {
             tracing::warn!(%error, "readiness probe failed");
             ReadinessEvaluation {
@@ -2451,6 +2780,10 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             reason: Some(ReadinessFailure::StoreUnavailable),
             ..
         } => (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::ClockUnbounded),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "clock unbounded\n"),
         ReadinessEvaluation {
             ready: false,
             reason: None,
@@ -2505,6 +2838,11 @@ async fn mutable_media_serving_gate(
 }
 
 #[cfg(test)]
+pub(crate) fn source_actor_test_state() -> AppState {
+    tests::test_state_without_router()
+}
+
+#[cfg(test)]
 mod tests {
     use std::io::Write;
     use std::sync::Arc;
@@ -2520,9 +2858,55 @@ mod tests {
 
     use super::*;
 
+    mod public_copy_wire;
+
     async fn slow_test_handler() -> &'static str {
         tokio::time::sleep(Duration::from_millis(40)).await;
         "ok"
+    }
+
+    #[tokio::test]
+    async fn clock_route_refuses_household_and_forged_proofs_without_timing() {
+        let (app, _) = test_app_with_state();
+        for bearer in [None, Some("household-session")] {
+            let mut request = Request::builder().uri(internal_clock::PATH);
+            if let Some(bearer) = bearer {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).expect("clock request"))
+                .await
+                .expect("clock route");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response
+                .headers()
+                .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("refusal body")
+                .to_bytes();
+            assert!(!String::from_utf8_lossy(&body).contains("received_unix_ms"));
+        }
+        let request = Request::builder()
+            .uri(internal_clock::PATH)
+            .header(peer_transport::NODE_HEADER, "peer")
+            .header(peer_transport::TARGET_HEADER, "test-node")
+            .header(peer_transport::TIMESTAMP_HEADER, "1")
+            .header(
+                peer_transport::NONCE_HEADER,
+                "123e4567-e89b-42d3-a456-426614174000",
+            )
+            .header(peer_transport::SIGNATURE_HEADER, "a".repeat(128))
+            .body(Body::empty())
+            .expect("forged clock request");
+        let response = app.oneshot(request).await.expect("forged clock route");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!response
+            .headers()
+            .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
     }
 
     async fn watch_write_handler(
@@ -3721,6 +4105,7 @@ mod tests {
             "json_short",
             "json_long",
             "media",
+            "jellyfin_json",
             "plex_short",
             "plex_media",
             "public_short",
@@ -3819,6 +4204,7 @@ mod tests {
             ("let json_short", "let json_long", "/api/v1"),
             ("let json_long", "let media", "/api/v1"),
             ("let media", "let api", "/api/v1"),
+            ("let jellyfin_json", "let plex_short", ""),
             ("let plex_short", "let plex_media", ""),
             ("let plex_media", "let plex_routes", ""),
             ("let public_short", "let public_media", ""),
@@ -3842,6 +4228,7 @@ mod tests {
             }
         }
         for (source, prefix) in [
+            (include_str!("jellyfin.rs"), "/jellyfin"),
             (include_str!("dvr.rs"), "/api/v1/dvr"),
             (
                 include_str!("library_channels.rs"),
@@ -3880,6 +4267,7 @@ mod tests {
             "/api/v1/files/8/hls/start",
             "/api/v1/hls/session/index.m3u8",
             crate::media_pool::SNAPSHOT_PATH,
+            internal_clock::PATH,
         ] {
             assert!(learner_route_eligible(&Method::GET, path), "{path}");
         }
@@ -3934,6 +4322,14 @@ mod tests {
             // that have migrated, and nothing else in this matrix would say so.
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::POST, "/api/v1/hls/session-8/control"),
+            (Method::POST, "/api/v1/hls/session-8/quality-control"),
+            // A learner entry node and a learner-owned continuous session
+            // must both accept schedule mutations, and a learner must be
+            // able to start the family it would serve.
+            (Method::POST, "/api/v1/hls/session-8/quality-schedule"),
+            (Method::POST, hls::QUALITY_SCHEDULE_PATH),
+            (Method::POST, "/api/v1/files/8/hls/continuous-sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-candidates"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
@@ -3949,6 +4345,7 @@ mod tests {
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::POST, hls::QUALITY_CONTROL_PATH),
             // The relay was in the matrix and had never been asserted. It is
             // the highest-traffic path a learner ingress originates: every
             // segment of media owned by another node goes through it.
@@ -4006,6 +4403,9 @@ mod tests {
             (Method::POST, internal_auth_revocation::PATH),
             (Method::POST, "/api/v1/auth/login"),
             (Method::POST, "/api/v1/auth/logout"),
+            // Read beside /me so a client signed in to a node under
+            // maintenance still lists only the sections that are on.
+            (Method::GET, "/api/v1/features"),
             (Method::POST, "/api/v1/cluster/election"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b/maintenance"),
             (
@@ -4015,8 +4415,14 @@ mod tests {
             (Method::GET, "/api/v1/hls/session/index.m3u8"),
             (Method::GET, "/api/v1/publication/session/chapter.xhtml"),
             (Method::DELETE, "/api/v1/hls/session"),
+            (Method::POST, "/api/v1/hls/session/quality-control"),
+            // An existing continuous session keeps streaming in maintenance,
+            // so its schedule (public and owner relay) stays reachable.
+            (Method::POST, "/api/v1/hls/session/quality-schedule"),
+            (Method::POST, hls::QUALITY_SCHEDULE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::POST, hls::QUALITY_CONTROL_PATH),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
                 Method::GET,
@@ -4053,6 +4459,8 @@ mod tests {
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::GET, "/api/v1/files/8/direct"),
             (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-candidates"),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::GET, "/api/v1/live-tv/readiness"),
@@ -4064,7 +4472,6 @@ mod tests {
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             (Method::POST, crate::live_tv::START_PATH),
             (Method::POST, crate::live_tv::ACTIVATE_PATH),
-            (Method::POST, crate::live_tv::DRAIN_PATH),
             (Method::POST, crate::live_tv::GUIDE_PATH),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
@@ -4186,6 +4593,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn quality_control_routes_bound_bodies_and_require_peer_auth() {
+        let app = test_app();
+        for path in [
+            format!("/api/v1/hls/{}/quality-control", uuid::Uuid::new_v4()),
+            hls::QUALITY_CONTROL_PATH.to_owned(),
+        ] {
+            let oversized = Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; hls::QUALITY_CONTROL_MAX_BYTES + 1]))
+                .expect("quality control test request or response");
+            assert_eq!(
+                app.clone()
+                    .oneshot(oversized)
+                    .await
+                    .expect("quality control test request or response")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        let unsigned = Request::builder()
+            .method("POST")
+            .uri(hls::QUALITY_CONTROL_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("quality control test request or response");
+        assert_eq!(
+            app.oneshot(unsigned)
+                .await
+                .expect("quality control test request or response")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
+        let app = test_app();
+        for path in [
+            format!("/api/v1/hls/{}/quality-schedule", uuid::Uuid::new_v4()),
+            hls::QUALITY_SCHEDULE_PATH.to_owned(),
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; hls::QUALITY_SCHEDULE_MAX_BYTES + 1]))
+                .expect("oversized schedule");
+            assert_eq!(
+                app.clone()
+                    .oneshot(request)
+                    .await
+                    .expect("response")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        let unsigned = Request::builder()
+            .method("POST")
+            .uri(hls::QUALITY_SCHEDULE_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("unsigned schedule");
+        assert_eq!(
+            app.oneshot(unsigned).await.expect("response").status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
     #[test]
     fn trace_targets_omit_queries_and_redact_capability_paths() {
         let ordinary: Uri = "/api/v1/search?q=secret&X-Plex-Token=credential"
@@ -4208,6 +4686,15 @@ mod tests {
             safe_trace_target(&hls),
             "/api/v1/hls/[REDACTED]/seg00001.ts"
         );
+
+        for path in [
+            "/jellyfin/Videos/item/play-secret/hls/seg00001.ts?ApiKey=credential",
+            "/JELLYFIN/VIDEOS/item/play-secret/HLS/seg00001.ts?apikey=credential",
+        ] {
+            let uri: Uri = path.parse().expect("compatibility HLS URI");
+            let target = safe_trace_target(&uri);
+            assert!(!target.contains("play-secret") && !target.contains("credential"));
+        }
 
         let publication: Uri = "/api/v1/publication/session-secret/OEBPS/chapter.xhtml"
             .parse()
@@ -4513,6 +5000,8 @@ mod tests {
         assert_exact_store_inventory(
             include_str!("images.rs"),
             &[
+                "shared_materialize_original:store.source_art_snapshot",
+                "shared_artwork_asset:store.source_art_snapshot",
                 "sweep_content_orphans:store.referenced_artwork_filenames",
                 "sweep_content_orphans:store.artwork_filename_is_referenced",
                 "sweep_content_orphans:store.prune_unreferenced_book_cover_origins",
@@ -4669,6 +5158,99 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn macos_processing_choice_persists_without_runtime_readiness() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        for enabled in [false, true, false, true] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    serde_json::json!({"macos_video_processing_enabled": enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["macos_video_processing_enabled"], enabled);
+            assert_eq!(state.transcode.macos_video_processing_enabled(), enabled);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED)
+                    .await
+                    .expect("Mac processing regression fixture or settings lookup")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+            let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            let item = readiness["items"]
+                .as_array()
+                .expect("Mac processing regression fixture or settings lookup")
+                .iter()
+                .find(|item| item["id"] == "macos_video_processing")
+                .expect("Mac processing regression fixture or settings lookup");
+            assert_eq!(item["enabled"], enabled);
+            let qualification = item["requirements"]
+                .as_array()
+                .expect("readiness requirements")
+                .iter()
+                .find(|requirement| requirement["id"] == "delivery_qualification")
+                .expect("delivery qualification requirement");
+            assert_eq!(qualification["status"], "unobservable");
+        }
+        // Reload durable choice independently of observation state.
+        state.transcode.set_macos_video_processing_enabled(false);
+        state.transcode.publish_macos_video_processing().await;
+        assert!(state.transcode.macos_video_processing_enabled());
+    }
+
+    #[tokio::test]
+    async fn macos_processing_reprobe_requires_admin_and_preserves_saved_choice() {
+        let (app, state) = test_app_with_state();
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/developer/macos-video-processing/reprobe",
+                None,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let admin = setup_admin(&app).await;
+        state
+            .transcode
+            .apply_macos_video_processing_setting(true)
+            .await
+            .expect("Mac processing regression fixture or settings lookup");
+        // Settle through the real cancellation branch; no hardware child runs.
+        state.shutdown.cancel();
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/developer/macos-video-processing/reprobe",
+                Some(&admin),
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["accepted"], true);
+        state.transcode.reprobe_macos_video(&state.shutdown).await;
+        assert!(state.transcode.macos_video_processing_enabled());
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED)
+                .await
+                .expect("Mac processing regression fixture or settings lookup")
+                .as_deref(),
+            Some("1")
+        );
+    }
+
     fn test_app() -> Router {
         test_app_with_state().0
     }
@@ -4746,9 +5328,14 @@ mod tests {
     /// server into a condition a request cannot create, like a pre-transcode
     /// pass already running.
     pub(super) fn test_app_with_state() -> (Router, AppState) {
+        let state = test_state_without_router();
+        (router(state.clone()), state)
+    }
+
+    pub(super) fn test_state_without_router() -> AppState {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
-        let state = AppState::new(
+        AppState::new(
             "test".into(),
             Arc::new(store),
             test_dirs(&base),
@@ -4756,8 +5343,7 @@ mod tests {
             Default::default(),
             Default::default(),
             Arc::new(crate::logbuf::LogBuffer::new(64)),
-        );
-        (router(state.clone()), state)
+        )
     }
 
     // HTTP scan fixtures run the production durable consumer independently.
@@ -4806,6 +5392,101 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    #[tokio::test]
+    async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknown() {
+        use plurx_core::cluster::clock::PeerClockOffset;
+        let (app, state) = test_app_with_state();
+        state.serving.validation_set_ready(true).await;
+        let clock = state.membership.clock_guard();
+        let publish = |offset_us| {
+            let ticket = clock.roster(&["peer".to_owned()]);
+            assert!(clock.publish(
+                ticket,
+                std::collections::BTreeMap::from([(
+                    "peer".to_owned(),
+                    PeerClockOffset::Bounded {
+                        offset_us,
+                        uncertainty_us: 1_000,
+                        observed_at: std::time::Instant::now(),
+                    },
+                )]),
+            ));
+        };
+        assert!(evaluate_readiness(&state).await.ready, "standalone NoPeers");
+        publish(2_500_000);
+        publish(2_500_000);
+        assert!(
+            evaluate_readiness(&state).await.ready
+                && cluster_operations::operations_readiness(&state).ready,
+            "an unbounded clock is advisory while the guard is not enforced"
+        );
+        assert_eq!(
+            call_text(&app, get("/readyz", None)).await.0,
+            StatusCode::OK
+        );
+        clock.set_enforced(true);
+        publish(0);
+        publish(2_500_000);
+        for _ in 0..3 {
+            assert!(
+                evaluate_readiness(&state).await.ready,
+                "reads are not rounds"
+            );
+        }
+        publish(2_500_000);
+        assert_eq!(
+            evaluate_readiness(&state).await.reason,
+            Some(ReadinessFailure::ClockUnbounded)
+        );
+        assert_eq!(
+            cluster_operations::operations_readiness(&state).reason,
+            Some(ReadinessFailure::ClockUnbounded),
+            "the Store-free operations projection uses the same consequence"
+        );
+        assert_eq!(
+            call_text(&app, get("/readyz", None)).await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "clock unbounded\n".to_owned()
+            )
+        );
+        assert_eq!(
+            call_text(&app, get("/healthz", None)).await.0,
+            StatusCode::OK
+        );
+        state.serving.validation_set_ready(false).await;
+        assert_eq!(
+            evaluate_readiness(&state).await.reason,
+            Some(ReadinessFailure::QuorumUnavailable),
+            "the existing quorum failure keeps precedence"
+        );
+        assert_eq!(
+            cluster_operations::operations_readiness(&state).reason,
+            Some(ReadinessFailure::QuorumUnavailable)
+        );
+        state.serving.validation_set_ready(true).await;
+        clock.roster_failed();
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "Unknown is not positive violation"
+        );
+        publish(2_500_000);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "failed round reset the streak"
+        );
+        publish(0);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "healthy round resets the streak"
+        );
+        clock.roster(&["replacement".to_owned()]);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "new peer remains Unknown"
+        );
     }
 
     #[tokio::test]
@@ -5694,6 +6375,103 @@ mod tests {
                 "a scan key reached {uri} with {status}: {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn features_tell_every_signed_in_viewer_which_sections_to_list() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(&app, get("/api/v1/features", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+        // A viewer cannot read /settings, which is why this projection exists.
+        assert_eq!(
+            call(&app, get("/api/v1/settings", Some(&viewer))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, off) = call(&app, get("/api/v1/features", Some(&viewer))).await;
+        assert_eq!(status, StatusCode::OK, "{off}");
+        assert_eq!(
+            off,
+            json!({"live_tv":false,"recordings":false,"shared_libraries":false,"library_channels":false})
+        );
+        let saved = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"sharing_enabled":true,"library_channels_enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(saved.0, StatusCode::OK, "{}", saved.1);
+        let (_, on) = call(&app, get("/api/v1/features", Some(&viewer))).await;
+        assert_eq!(on["shared_libraries"], true, "{on}");
+        assert_eq!(on["library_channels"], true, "{on}");
+        assert_eq!(on["live_tv"], false, "{on}");
+        assert_eq!(on["recordings"], false, "{on}");
+    }
+
+    #[test]
+    fn features_read_each_switch_with_the_settings_parser() {
+        use plurx_core::store::keys;
+        let snapshot = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            system::FeaturesDto::from_snapshot(&snapshot(&[]), "node-a"),
+            system::FeaturesDto {
+                live_tv: false,
+                recordings: false,
+                shared_libraries: false,
+                library_channels: false,
+            }
+        );
+        assert_eq!(
+            system::FeaturesDto::from_snapshot(
+                &snapshot(&[
+                    (keys::LIVE_TV_ENABLED, "1"),
+                    (keys::DVR_ENABLED, "true"),
+                    (keys::SHARING_ENABLED, "on"),
+                    (keys::LIBRARY_CHANNELS_ENABLED, "1"),
+                ]),
+                "node-a",
+            ),
+            system::FeaturesDto {
+                live_tv: true,
+                recordings: true,
+                shared_libraries: true,
+                library_channels: true,
+            }
+        );
+        // Each switch moves only its own section.
+        let dvr_only =
+            system::FeaturesDto::from_snapshot(&snapshot(&[(keys::DVR_ENABLED, "1")]), "node-a");
+        assert!(dvr_only.recordings && !dvr_only.live_tv);
+        assert!(!dvr_only.shared_libraries && !dvr_only.library_channels);
     }
 
     #[tokio::test]
@@ -8093,6 +8871,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_tv_legacy_fenced_owner_attestation_is_still_accepted_and_ignored() {
+        // No shipped client constructs `live_tv_fenced_owner` today, but the
+        // Apple and Android settings models still define it and an older
+        // client may send it. #537 removed the attestation's meaning, not the
+        // field: a save carrying it must be accepted, must not stage a
+        // handoff barrier, and must leave placement on the answering node.
+        use plurx_core::store::keys;
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_settings(&[
+                (keys::LIVE_TV_DEVICE_IPV4, "10.42.4.20"),
+                (keys::LIVE_TV_CONFIG_GENERATION, "3"),
+            ])
+            .await
+            .expect("seed Live TV settings");
+        let attestation = json!({
+            "owner_node_id": "lost-owner-a",
+            "drain_before_generation": 3,
+            "stopped_and_restart_prevented": true,
+        });
+        // Beside a real Live TV field, the way the legacy client model sends it.
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_owner_node_id": "replacement-b",
+                    "live_tv_max_sessions": 2,
+                    "live_tv_fenced_owner": attestation.clone(),
+                    "live_tv_config_generation": 3,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_max_sessions"], 2);
+        assert_eq!(saved["live_tv_owner_node_id"], state.node_id);
+        assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
+        assert_eq!(saved["live_tv_transition_drain_before"], 0);
+        assert_eq!(saved["live_tv_config_generation"], 4);
+
+        // Alone, it is still a Live TV save: accepted under the generation
+        // CAS, changing nothing but the generation.
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_fenced_owner": attestation, "live_tv_config_generation": 4}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_max_sessions"], 2);
+        assert_eq!(saved["live_tv_owner_node_id"], state.node_id);
+        assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
+        assert_eq!(saved["live_tv_transition_drain_before"], 0);
+        assert_eq!(saved["live_tv_config_generation"], 5);
+    }
+
+    #[tokio::test]
     async fn live_tv_placement_and_ingest_refuse_household_bearers_before_admission() {
         let (app, state) = test_app_with_state();
         let admin = setup_admin(&app).await;
@@ -8180,6 +9022,54 @@ mod tests {
     /// values; the manager carries the separately validated effective answer
     /// used by sessions.
     #[tokio::test]
+    async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        for (enabled, frames) in [(true, 2), (false, 0)] {
+            let (status, result) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"content_aware_encoding": enabled, "vod_reorder_frames": frames}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(result["content_aware_encoding"], enabled);
+            assert_eq!(result["vod_reorder_frames"], frames);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
+                    .await
+                    .expect("fixture succeeds")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"content_aware_encoding": true, "vod_reorder_frames": 3}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
+                .await
+                .expect("fixture succeeds")
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[tokio::test]
     async fn rate_control_settings_validate_publish_and_restore() {
         use plurx_core::transcode::{EffectiveRateControl, Encoder};
 
@@ -8187,8 +9077,28 @@ mod tests {
         let admin = setup_admin(&app).await;
         let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(initial["transcode_rate_mode"], "bitrate");
+        assert!(
+            initial["transcode_rate_mode"].is_null(),
+            "an unset pair must read back as unset, not as the family default a client \
+             would then write back as an explicit bitrate pin: {initial}"
+        );
         assert!(initial["transcode_quality"].is_null(), "{initial}");
+        let family = state.transcode.encoder_for_preference("");
+        assert_eq!(
+            initial["transcode_rate_mode_default"],
+            family.default_rate_mode().as_str(),
+            "{initial}"
+        );
+        assert_eq!(
+            initial["transcode_rate_mode_default_encoder"],
+            family.family_name(),
+            "{initial}"
+        );
+        assert_eq!(
+            initial["transcode_quality_default"],
+            family.default_quality(),
+            "{initial}"
+        );
 
         let (status, bad) = call(
             &app,
@@ -8261,6 +9171,83 @@ mod tests {
             state.transcode.effective_rate_control(Encoder::Software),
             EffectiveRateControl::Vbr
         );
+        assert_eq!(
+            state
+                .store
+                .get_setting_pair(
+                    plurx_core::store::keys::TRANSCODE_RATE_MODE,
+                    plurx_core::store::keys::TRANSCODE_QUALITY,
+                )
+                .await
+                .expect("settings pair")
+                .0
+                .as_deref(),
+            Some("bitrate"),
+            "an explicit bitrate persists as an explicit choice"
+        );
+
+        // An unrelated Save must not touch the pair.
+        let (status, unrelated) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "stream_readrate": "4" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{unrelated}");
+        assert_eq!(unrelated["transcode_rate_mode"], "bitrate");
+
+        // JSON null is the explicit "return to each family's default".
+        let (status, cleared) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "transcode_rate_mode": null,
+                    "transcode_quality": null
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["transcode_rate_mode"].is_null(), "{cleared}");
+        assert!(cleared["transcode_quality"].is_null(), "{cleared}");
+        let (stored_mode, stored_quality) = state
+            .store
+            .get_setting_pair(
+                plurx_core::store::keys::TRANSCODE_RATE_MODE,
+                plurx_core::store::keys::TRANSCODE_QUALITY,
+            )
+            .await
+            .expect("settings pair");
+        assert_eq!(
+            crate::transcode::normalize_rate_control_request(
+                stored_mode.as_deref(),
+                stored_quality.as_deref(),
+            ),
+            (None, None, false),
+            "the cleared pair must read back as unset, not as an explicit bitrate"
+        );
+        assert_eq!(
+            state.transcode.effective_rate_control(Encoder::Software),
+            EffectiveRateControl::Vbr,
+            "every family default is still Bitrate"
+        );
+
+        // A null mode still travels as one complete pair.
+        let (status, half) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "transcode_rate_mode": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{half}");
     }
 
     #[tokio::test]
@@ -8704,6 +9691,199 @@ mod tests {
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
         (router(state.clone()), state, fixture)
+    }
+
+    #[tokio::test]
+    async fn shared_token_only_revocation_preserves_other_device_reader_grants() {
+        let (app, state) = test_app_with_state();
+        let reader_token = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let login = auth::login_user(
+            &state,
+            None,
+            &axum::http::HeaderMap::new(),
+            auth::LoginRequest {
+                username: "paul".into(),
+                password: "supersecret".into(),
+                device: Some("compatibility fixture".into()),
+            },
+        )
+        .await
+        .expect("shared login");
+        let reader_hash = plurx_core::auth::hash_token(&reader_token);
+        let compat_hash = plurx_core::auth::hash_token(&login.token);
+        let reader_grant = plurx_core::auth::hash_token("fixture-reader-grant");
+        let compat_grant = plurx_core::auth::hash_token("fixture-compat-grant");
+        for (id, token_hash, source_token_hash) in [
+            ("reader", &reader_grant, &reader_hash),
+            ("compat", &compat_grant, &compat_hash),
+        ] {
+            state
+                .store
+                .create_file_grant(plurx_core::store::NewFileGrant {
+                    id: id.into(),
+                    token_hash: token_hash.clone(),
+                    file_id: seeded.file,
+                    user_id: login.user.id,
+                    source_token_hash: source_token_hash.clone(),
+                    created_at: 1_000,
+                    expires_at: i64::MAX,
+                })
+                .await
+                .expect("file grant");
+        }
+        assert_eq!(
+            extract::authenticate_user_token(&state, &login.token)
+                .await
+                .expect("shared authority")
+                .id,
+            login.user.id
+        );
+        let exclusion =
+            internal_auth_revocation::ClusterCacheRevocation::begin_digest(&state, &compat_hash)
+                .await
+                .expect("exact revocation exclusion");
+        auth::revoke_token_under_exclusion(&state, &compat_hash, exclusion)
+            .await
+            .expect("token-only revoke");
+        assert!(extract::authenticate_user_token(&state, &login.token)
+            .await
+            .is_err());
+        assert_eq!(
+            extract::authenticate_user_token(&state, &reader_token)
+                .await
+                .expect("other device stays signed in")
+                .id,
+            login.user.id
+        );
+        let reader = state
+            .store
+            .file_grant_by_hash(&reader_grant)
+            .await
+            .expect("reader lookup")
+            .expect("reader row");
+        assert!(reader.source_active);
+        assert_eq!(reader.revoked_at, None);
+        let retired = state
+            .store
+            .file_grant_by_hash(&compat_grant)
+            .await
+            .expect("own grant lookup")
+            .expect("own grant row");
+        assert!(!retired.source_active);
+        // Native logout retains its existing broader file-grant revocation.
+        let (status, body) = call(
+            &app,
+            post("/api/v1/auth/logout", Some(&reader_token), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(state
+            .store
+            .file_grant_by_hash(&reader_grant)
+            .await
+            .expect("native scope lookup")
+            .expect("reader row")
+            .revoked_at
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn compatibility_login_replaces_only_its_scope_after_password_verification() {
+        let (app, state) = test_app_with_state();
+        let native = setup_admin(&app).await;
+        let headers = axum::http::HeaderMap::new();
+        let request = || auth::LoginRequest {
+            username: "paul".into(),
+            password: "supersecret".into(),
+            device: Some("living room".into()),
+        };
+        let family = plurx_core::store::JellyfinClientFamily::Infuse;
+        let first =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
+                .await
+                .expect("initial compatibility login");
+        let other =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-two", family)
+                .await
+                .expect("other device login");
+        let android = auth::login_jellyfin_user(
+            &state,
+            None,
+            &headers,
+            request(),
+            "device-one",
+            plurx_core::store::JellyfinClientFamily::AndroidTv,
+        )
+        .await
+        .expect("other family login");
+        let mut bad = request();
+        bad.password = "wrong".into();
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, bad, "device-one", family).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        extract::authenticate_compatibility_token(&state, &first.token)
+            .await
+            .expect("failed password preserves old login");
+        // A compatibility login is not a native bearer.
+        assert!(matches!(
+            extract::authenticate_user_token(&state, &first.token).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        assert!(matches!(
+            extract::authenticate_compatibility_token(&state, &native).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        let next =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
+                .await
+                .expect("replacement login");
+        assert!(
+            extract::authenticate_compatibility_token(&state, &first.token)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            extract::authenticate_user_token(&state, &native)
+                .await
+                .expect("native token")
+                .id,
+            first.user.id
+        );
+        for token in [&other.token, &android.token, &next.token] {
+            assert_eq!(
+                extract::authenticate_compatibility_token(&state, token)
+                    .await
+                    .expect("unrelated or fresh compatibility token")
+                    .id,
+                first.user.id
+            );
+        }
+        let tokens = state
+            .store
+            .list_tokens_for_user(first.user.id)
+            .await
+            .expect("token inventory");
+        assert_eq!(
+            tokens.len(),
+            4,
+            "replacement creates no orphan native tokens"
+        );
+        let mut oversized = request();
+        oversized.password = "x".repeat(auth::MAX_PASSWORD_BYTES + 1);
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, oversized, "device-one", family)
+                .await,
+            Err(super::error::ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, request(), "", family).await,
+            Err(super::error::ApiError::BadRequest(_))
+        ));
+        extract::authenticate_compatibility_token(&state, &next.token)
+            .await
+            .expect("validation refusals preserve current login");
     }
 
     async fn login_device(app: &Router, device: &str) -> String {
@@ -9246,6 +10426,14 @@ mod tests {
             .iter()
             .any(|a| a["label"] == "Queued scan for Recordings · waiting for a worker"));
         assert!(!activities.to_string().contains("Scanning Recordings"));
+        let (status, detail) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["clustered"], false);
+        assert!(detail.get("activity_nodes").is_none());
+        let (status, queued) =
+            call(&app, get("/api/v1/cluster/jobs?state=queued", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queued["jobs"][0]["library_id"], library.id);
 
         let record = state
             .store
@@ -9590,6 +10778,54 @@ mod tests {
         assert_eq!(users.as_array().expect("array").len(), 1);
     }
 
+    /// One stored content-analysis switch, read one way by Settings, the
+    /// Developer card and the serving path. Missing is off for all three: the
+    /// card used to report it on while creates answered "shared preparation
+    /// is disabled", and Settings reported a hand-written `true` as off while
+    /// the queue and the serving path treated it as on.
+    #[tokio::test]
+    async fn content_analysis_switch_reads_the_same_in_settings_and_developer() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        for (stored, expected) in [
+            (None, false),
+            (Some("true"), true),
+            (Some(" On "), true),
+            (Some("1"), true),
+            (Some("off"), false),
+            (Some("0"), false),
+        ] {
+            if let Some(value) = stored {
+                state
+                    .store
+                    .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, value)
+                    .await
+                    .expect("store the switch");
+            }
+            let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                settings["vod_index_cluster_cache"],
+                json!(expected),
+                "Settings read {stored:?}"
+            );
+            let (status, readiness) =
+                call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK);
+            let card = readiness["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .find(|item| item["id"] == "content_analysis_repair")
+                .expect("content analysis card");
+            assert_eq!(
+                card["enabled"],
+                json!(expected),
+                "Developer read {stored:?}"
+            );
+        }
+    }
+
     /// The Developer section's prerequisite rows, and the rule that they are
     /// reporting rather than deciding.
     ///
@@ -9620,6 +10856,19 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "cinema_remote_control",
+                "cinema_remote_invitations",
+                "macos_video_processing",
+                "macos_hevc_output",
+                "cinema_sharing",
+                // Jellyfin compatibility: one advisory row (pinned-client
+                // qualification) that never gates the switch.
+                "jellyfin_compatibility",
+                // The clock guard's enforcement switch. All four rows are
+                // advisory; on this standalone fixture there is no remote
+                // member to observe, so coverage and the consequence row are
+                // `met` and the offset and NTP rows `unobservable`.
+                "cluster_clock",
                 "durable_cluster_work",
                 "bounded_catalogue_reads",
                 "cluster_backup",
@@ -9635,16 +10884,25 @@ mod tests {
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
+                // S-10's SDR master CODECS switch, off by default. Its one
+                // row is `unknown`: the device re-qualification is a
+                // physical result this daemon cannot read.
+                "sdr_master_codecs",
                 "content_analysis_repair",
                 "live_hls_recovery",
                 "pgs_overlay",
                 "subtitle_stored_sources",
                 "subtitle_cluster_sources",
                 "subtitle_backfill",
-                "subtitle_not_ready_503",
                 "chapter_thumbnails",
                 "dolby_vision_convert",
-                "source_probe_comparison"
+                "dolby_vision_hdr_processing",
+                "dolby_vision_fel_reencode",
+                "source_probe_comparison",
+                "output_preparation",
+                "rolling_retention",
+                "display_aware_auto",
+                "network_priors"
             ],
             "every Developer card with prerequisites needs a row here: {body}"
         );
@@ -9698,15 +10956,47 @@ mod tests {
                         | "durable_capacity"
                         | "durable_scratch"
                         | "probe_reporter_named"
+                        | "sources_match_their_scan_whole"
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"
                         | "local_cache"
                         | "free_space"
                         | "chapter_thumbs_cache_space"
+                        | "output_node_idle"
+                        | "output_storage_ownership"
+                        | "retention_same_filesystem"
                 )
             })
             .collect::<Vec<_>>();
+        // Startup inventory may settle between the two readiness requests.
+        // Its status must report the same snapshot as its evidence; this
+        // empty fixture owns no preparation media or pending cleanup.
+        let ownership = items
+            .iter()
+            .find(|item| item["id"] == "output_preparation")
+            .expect("output preparation card")["requirements"]
+            .as_array()
+            .expect("output preparation requirements")
+            .iter()
+            .find(|row| row["id"] == "output_storage_ownership")
+            .expect("private storage ownership row");
+        let evidence = ownership["evidence"].as_str().expect("storage evidence");
+        let inventory_complete = evidence.contains("Startup inventory complete: true.");
+        assert_eq!(
+            ownership["status"],
+            if inventory_complete {
+                "met"
+            } else {
+                "unavailable"
+            },
+            "inventory status and evidence must describe the same snapshot"
+        );
+        assert_eq!(
+            evidence,
+            format!("Private media: 0 bytes. Pending cleanup: 0 owners, 0 bytes, oldest 0 seconds, failure none. Cold/unknown cache: 0 bytes. Startup inventory complete: {inventory_complete}. Completion keeps storage capacity until cleanup settles."),
+            "the empty fixture must report its actual owned storage"
+        );
         // The free-space row reads this host's disk, so it is either.
         for id in ["stored_source_self_test", "stored_source_free_space"] {
             assert!(
@@ -9750,13 +11040,31 @@ mod tests {
                 // The ffmpeg row is absent here because the fixture never
                 // probed a build.
                 "chapter_thumbs_work",
+                // The clock guard's: no committed remote member, so nothing
+                // is uncovered and current evidence would refuse nothing.
+                "consequence",
+                "coverage",
                 "durable_queue",
                 "durable_role",
+                // Display-aware Auto on a single node owns every session.
+                "local_session_owner",
+                // Output preparation and rolling retention: the budget is the
+                // 50 GB unset default; the job list, mode, Stop and live
+                // bytes are statements of what this node reads.
+                "output_budget",
+                "output_jobs",
+                "output_mode",
+                "output_stop",
+                // Network priors' two rows say what the switch does.
+                "priors_cold_start",
+                "priors_history",
+                "retention_budget",
+                "retention_cleanup_pending",
+                "retention_live_bytes",
                 "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
-                "sources_match_their_scan_whole",
                 "stored_source_producer",
                 "tuner_reserve",
                 "watch_floor"
@@ -9780,6 +11088,15 @@ mod tests {
                 seen.get(id).map(String::as_str),
                 Some("unobservable"),
                 "{id} claimed to have read something this process cannot reach: {body}"
+            );
+        }
+        // The clock guard has no member offset to bound here, and this process
+        // never reads a node's time-synchronisation daemon.
+        for id in ["upper_bound", "ntp"] {
+            assert_eq!(
+                seen.get(id).map(String::as_str),
+                Some("unobservable"),
+                "{id} claimed a clock fact this standalone node cannot read: {body}"
             );
         }
         // Statements about this build, true whatever the deployment looks
@@ -10113,6 +11430,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn retired_subtitle_transport_refusal_is_absent_from_settings_and_readiness() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting("playback.subtitle_not_ready_503", "1")
+            .await
+            .expect("retain old choice without deleting operator data");
+        let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert!(settings.get("subtitle_not_ready_503").is_none());
+        let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        assert!(!readiness["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["id"] == "subtitle_not_ready_503"));
+    }
+
     /// Both new switches answer from the store on the next request, and the
     /// settings page and the readiness route agree with the server about what
     /// the stored string means.
@@ -10130,13 +11466,11 @@ mod tests {
         let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(settings["pgs_overlay"], serde_json::json!(false));
         assert_eq!(settings["dolby_vision_convert"], serde_json::json!(true));
-        assert_eq!(settings["subtitle_not_ready_503"], serde_json::json!(false));
         assert!(!state
             .pgs_overlay_enabled()
             .await
             .expect("read the overlay switch"));
         assert!(state.transcode.dv_convert_enabled().await);
-        assert!(!state.subtitle_not_ready_503().await);
 
         // Both keys set on every row, because a leftover from the previous
         // one would make this pass by accident.
@@ -10151,17 +11485,6 @@ mod tests {
             state
                 .store
                 .put_setting(plurx_core::store::keys::PGS_OVERLAY, overlay_value)
-                .await
-                .expect("store a hand-written value");
-            // The subtitle refusal is read in the same three places and takes
-            // the same default-off spelling, so it rides the same rows rather
-            // than getting a census of its own.
-            state
-                .store
-                .put_setting(
-                    plurx_core::store::keys::SUBTITLE_NOT_READY_503,
-                    overlay_value,
-                )
                 .await
                 .expect("store a hand-written value");
             state
@@ -10191,9 +11514,6 @@ mod tests {
                     settings["dolby_vision_convert"].clone(),
                     reported("pgs_overlay"),
                     reported("dolby_vision_convert"),
-                    state.subtitle_not_ready_503().await,
-                    settings["subtitle_not_ready_503"].clone(),
-                    reported("subtitle_not_ready_503"),
                 ),
                 (
                     overlay,
@@ -10202,12 +11522,201 @@ mod tests {
                     serde_json::json!(convert),
                     serde_json::json!(overlay),
                     serde_json::json!(convert),
-                    overlay,
-                    serde_json::json!(overlay),
-                    serde_json::json!(overlay),
                 ),
                 "{stored}: the server, the settings page and the readiness route must \
                  not disagree about one stored string"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion_override() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let fields = [
+            (
+                "dolby_vision_hdr_processing",
+                plurx_core::store::keys::DV_HDR_PROCESSING,
+            ),
+            (
+                "dolby_vision_fel_reencode",
+                plurx_core::store::keys::DV_FEL_REENCODE,
+            ),
+        ];
+        let (_, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        for (field, key) in fields {
+            assert_eq!(initial[field], false);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(key)
+                    .await
+                    .expect("read persisted preference"),
+                None
+            );
+        }
+        assert_eq!(initial["dolby_vision_convert"], true);
+        // Each new preference can be on or off with either conversion permission.
+        // Missing backend evidence never changes the saved choices or permission.
+        for convert in [false, true] {
+            for hdr in [false, true] {
+                for fel in [false, true] {
+                    let (status, saved) = call(
+                        &app,
+                        put(
+                            "/api/v1/settings",
+                            Some(&admin),
+                            json!({
+                                "dolby_vision_convert": convert,
+                                "dolby_vision_hdr_processing": hdr,
+                                "dolby_vision_fel_reencode": fel,
+                            }),
+                        ),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK, "{saved}");
+                    let (_, read) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+                    let (_, readiness) =
+                        call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+                    for ((field, key), want) in fields.into_iter().zip([hdr, fel]) {
+                        assert_eq!(saved[field], want);
+                        assert_eq!(read[field], want);
+                        assert_eq!(
+                            state
+                                .store
+                                .get_setting(key)
+                                .await
+                                .expect("read persisted preference")
+                                .as_deref(),
+                            Some(if want { "1" } else { "0" })
+                        );
+                        let item = readiness["items"]
+                            .as_array()
+                            .expect("readiness items")
+                            .iter()
+                            .find(|item| item["id"] == field)
+                            .expect("preference readiness item");
+                        assert_eq!(item["enabled"], want);
+                        assert_eq!(item["setting"], field);
+                        let requirements = item["requirements"]
+                            .as_array()
+                            .expect("readiness requirements");
+                        assert_eq!(requirements.len(), 4);
+                        assert_eq!(requirements[0]["status"], "unmet");
+                        assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    }
+                    assert_eq!(read["dolby_vision_convert"], convert);
+                    assert_eq!(state.transcode.dv_convert_enabled().await, convert);
+                }
+            }
+        }
+        // Partial settings writes preserve the independent choices, and use the
+        // same handwritten switch parsing as the administrative readiness view.
+        for (raw, want) in [(" TRUE ", true), ("off", false), ("nonsense", false)] {
+            for (field, key) in fields {
+                state
+                    .store
+                    .put_setting(key, raw)
+                    .await
+                    .expect("write handwritten preference");
+                let (_, read) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+                let (_, readiness) =
+                    call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+                assert_eq!(read[field], want);
+                let item = readiness["items"]
+                    .as_array()
+                    .expect("readiness items")
+                    .iter()
+                    .find(|item| item["id"] == field)
+                    .expect("preference readiness item");
+                assert_eq!(item["enabled"], want);
+            }
+        }
+        call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "dolby_vision_hdr_processing": true, "dolby_vision_fel_reencode": false,
+                }),
+            ),
+        )
+        .await;
+        let (status, partial) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"dolby_vision_fel_reencode": true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(partial["dolby_vision_hdr_processing"], true);
+        assert_eq!(partial["dolby_vision_fel_reencode"], true);
+        assert_eq!(partial["dolby_vision_convert"], true);
+    }
+
+    #[tokio::test]
+    async fn dv_processing_preferences_are_admin_settings_and_never_mix_with_live_tv_cas() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        for (field, key) in [
+            (
+                "dolby_vision_hdr_processing",
+                plurx_core::store::keys::DV_HDR_PROCESSING,
+            ),
+            (
+                "dolby_vision_fel_reencode",
+                plurx_core::store::keys::DV_FEL_REENCODE,
+            ),
+        ] {
+            assert_eq!(
+                call(&app, put("/api/v1/settings", None, json!({field: true})))
+                    .await
+                    .0,
+                StatusCode::UNAUTHORIZED
+            );
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({
+                        field: true, "live_tv_enabled": false, "live_tv_config_generation": 0,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(key)
+                    .await
+                    .expect("read persisted preference"),
+                None
+            );
+            let (status, _) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({
+                        field: true, "auth_token_idle_days": 0,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(key)
+                    .await
+                    .expect("read persisted preference"),
+                None
             );
         }
     }
@@ -10245,6 +11754,117 @@ mod tests {
             !state.transcode.dv_convert_enabled().await,
             "the transcoder reads the switch, not the value this process booted with"
         );
+    }
+
+    #[tokio::test]
+    async fn transcoder_optimization_is_admin_only_node_scoped_and_admitted() {
+        let (app, state) = test_app_with_state();
+        let request = json!({"node_id": state.node_id});
+        assert_eq!(
+            call(&app, post("/api/v1/system/transcoder", None, request))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/system/transcoder",
+                    Some(&admin),
+                    json!({"node_id":"different-node"})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        let permit = state
+            .transcode
+            .admit_transcoder_benchmark()
+            .await
+            .expect("idle admission");
+        assert!(state.transcode.admit_transcoder_benchmark().await.is_none());
+        assert!(!state.transcode.pretranscode_worker_idle());
+        drop(permit);
+        assert!(state.transcode.pretranscode_worker_idle());
+    }
+
+    #[tokio::test]
+    async fn hardware_preference_is_admin_only_node_scoped_and_pending_restart() {
+        let (app, state) = test_app_with_state();
+        let request = json!({"node_id": state.node_id, "preference": "qsv"});
+        assert_eq!(
+            call(
+                &app,
+                put("/api/v1/system/transcoder", None, request.clone())
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::HWACCEL, "nvenc")
+            .await
+            .expect("global preference");
+        for (node, preference, expected) in [
+            ("different-node", "qsv", StatusCode::CONFLICT),
+            (state.node_id.as_str(), "unknown", StatusCode::BAD_REQUEST),
+        ] {
+            assert_eq!(
+                call(
+                    &app,
+                    put(
+                        "/api/v1/system/transcoder",
+                        Some(&admin),
+                        json!({"node_id": node, "preference": preference})
+                    )
+                )
+                .await
+                .0,
+                expected
+            );
+        }
+        let (status, result) = call(
+            &app,
+            put("/api/v1/system/transcoder", Some(&admin), request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["restart_required"], true);
+        assert_eq!(
+            state
+                .store
+                .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
+                .await
+                .expect("saved node preference")
+                .as_deref(),
+            Some("qsv")
+        );
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::HWACCEL)
+                .await
+                .expect("saved node preference")
+                .as_deref(),
+            Some("nvenc")
+        );
+        assert_eq!(
+            state
+                .store
+                .get_setting(&crate::state::node_hwaccel_key("different-node"))
+                .await
+                .expect("saved node preference"),
+            None
+        );
+        let (status, system) = call(&app, get("/api/v1/system", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(system["hwaccel_requested"], "qsv");
+        assert_eq!(system["hwaccel_pref"], state.system.hwaccel_pref);
     }
 
     #[tokio::test]
@@ -10710,6 +12330,7 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             [
                 "analysis",
+                "clustered",
                 "deliveries",
                 // Recording and Live TV both run on one unreplicated node, so
                 // their keys are in the base payload rather than behind the
@@ -10721,6 +12342,8 @@ mod tests {
                 // P-02 §3.2); node-local, so not a clustered-only field.
                 "processes",
                 "producing",
+                "retained_output",
+                "retained_output_node",
                 "scans",
                 "sessions",
                 "trakt",
@@ -10731,6 +12354,10 @@ mod tests {
             .map(str::to_owned)
             .collect(),
             "SQLite includes local analysis and worker health"
+        );
+        assert_eq!(
+            detail["clustered"], false,
+            "SQLite reports its standalone role"
         );
         assert_eq!(detail["analysis"]["enabled"], false);
         assert_eq!(detail["analysis"]["total"], 0);
@@ -11959,6 +13586,765 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "token revocation must apply to the next preview request"
         );
+    }
+
+    /// Runs only in a disposable namespace with an assigned CGNAT fixture IP.
+    /// The production endpoint validator, DNS, pinned dialer and both routers
+    /// remain in the path. This proves protocol recovery, not Tailscale topology.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires an isolated CGNAT network; run explicitly with PLURX_SHARING_FIXTURE_IP"]
+    async fn sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart() {
+        use plurx_core::{
+            config::{SharingEgressConfig, SharingNetworkConfig},
+            sharing::{MutationOutcome, StoredImport},
+            sharing_tls::{LiveNodeTls, SharingTlsListener},
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let address: std::net::IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+            .expect("explicit disposable fixture address")
+            .parse()
+            .expect("numeric fixture address");
+        assert!(plurx_core::sharing::is_tailnet_address(address));
+        let temporary = tempfile::tempdir().expect("fixture TLS directory");
+        let tls = Arc::new(
+            LiveNodeTls::open(
+                &temporary.path().join("tls"),
+                crate::state::clock_ms() / 1000,
+            )
+            .expect("generated source TLS"),
+        );
+        let (pin, _) = tls.status().expect("public source pin");
+        let socket = tokio::net::TcpListener::bind((address, 0))
+            .await
+            .expect("isolated source listener");
+        let port = socket.local_addr().expect("fixture port").port();
+        let acceptor = SharingTlsListener::new(socket, tls);
+        let (source_app, source) = test_app_with_state();
+        let source_admin = setup_admin(&source_app).await;
+        let seeded = seed_content(&source).await;
+        source
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable source");
+        let endpoints = json!([{"ipv4":address.to_string(),"ipv6":null,
+            "ts_fqdn":"source.fixture.ts.net","port":port,"spki_sha256":pin}]);
+        assert_eq!(
+            call(
+                &source_app,
+                put(
+                    "/api/v1/sharing/endpoints",
+                    Some(&source_admin),
+                    json!({"expected_revision":0,"endpoints":endpoints})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let invitation = call(
+            &source_app,
+            post(
+                "/api/v1/sharing/invitations",
+                Some(&source_admin),
+                json!({"library_ids":[seeded.lib.to_string()]}),
+            ),
+        )
+        .await;
+        assert_eq!(invitation.0, StatusCode::OK);
+        let peer_router = sharing::peer_router(source.clone());
+        let lose_claim = Arc::new(AtomicBool::new(true));
+        let lose_rotation = Arc::new(AtomicBool::new(true));
+        let server = ScanWorker(tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = tokio::select! {
+                    accepted = acceptor.accept() => accepted.expect("fixture TLS acceptance"),
+                    _ = connections.join_next(), if !connections.is_empty() => continue,
+                };
+                let router = peer_router.clone();
+                let claim = lose_claim.clone();
+                let rotation = lose_rotation.clone();
+                connections.spawn(async move {
+                    let service = hyper::service::service_fn(
+                        move |request: Request<hyper::body::Incoming>| {
+                            let router = router.clone();
+                            let claim = claim.clone();
+                            let rotation = rotation.clone();
+                            async move {
+                                let drop_response = request.method() == "POST"
+                                    && match request.uri().path() {
+                                        "/sharing/v1/claims" => claim.swap(false, Ordering::SeqCst),
+                                        "/sharing/v1/grant/rotation" => {
+                                            rotation.swap(false, Ordering::SeqCst)
+                                        }
+                                        _ => false,
+                                    };
+                                let response = router
+                                    .oneshot(request.map(Body::new))
+                                    .await
+                                    .expect("source router");
+                                if drop_response && response.status().is_success() {
+                                    // The router has committed, but Hyper sends no response.
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionReset,
+                                        "synthetic committed response loss",
+                                    ));
+                                }
+                                Ok::<_, std::io::Error>(response)
+                            }
+                        },
+                    );
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        }));
+        let (_, mut recipient) = test_app_with_state();
+        let network = SharingNetworkConfig {
+            bind: "127.0.0.1:32444".parse().expect("unused listener config"),
+            egress: SharingEgressConfig::LocalAddress { address },
+            ..SharingNetworkConfig::default()
+        };
+        let restart = |state: &AppState| {
+            Arc::new(crate::sharing::SharingManager::new(
+                state.sharing.key.clone(),
+                temporary.path().join("recipient-unused-tls"),
+                network.clone(),
+            ))
+        };
+        recipient.sharing = restart(&recipient);
+        let recipient_app = router(recipient.clone());
+        let recipient_admin = setup_admin(&recipient_app).await;
+        recipient
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable recipient");
+        let response = call(
+            &recipient_app,
+            post(
+                "/api/v1/sharing/imports",
+                Some(&recipient_admin),
+                json!({"invitation":invitation.1["invitation"]}),
+            ),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{response:?}");
+        let id: uuid::Uuid = response.1["import"]["id"]
+            .as_str()
+            .expect("import ID")
+            .parse()
+            .expect("UUID");
+        let load = |state: AppState| async move {
+            state
+                .store
+                .sharing_import(id)
+                .await
+                .expect("durable read")
+                .expect("retained import")
+        };
+        let claiming: StoredImport = load(recipient.clone()).await;
+        assert_eq!(claiming.summary.state, "claiming");
+        assert!(claiming.claim.is_some());
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("committed claim")
+                .len(),
+            1
+        );
+        recipient
+            .store
+            .put_setting(
+                plurx_core::store::keys::SERVER_NAME,
+                "Recipient renamed after the ambiguous claim",
+            )
+            .await
+            .expect("rename recipient");
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_import(&recipient, claiming)
+            .await
+            .expect("recover claim after restart");
+        let pending = load(recipient.clone()).await;
+        assert_eq!(pending.summary.state, "pending");
+        assert!(pending.claim.is_none());
+        let local = recipient
+            .store
+            .sharing_identity(crate::state::clock_ms())
+            .await
+            .expect("recipient identity");
+        let before =
+            crate::sharing::ImportCredential::open(&recipient.sharing, local.server_id, &pending)
+                .expect("confirmed pending metadata");
+        assert!(before.pending_expires_at_ms.is_some());
+        let grants = source
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("exact replay");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            source
+                .store
+                .approve_share(grants[0].grant.id, 1, crate::state::clock_ms())
+                .await
+                .expect("source approval"),
+            MutationOutcome::Applied
+        );
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_import(&recipient, pending)
+            .await
+            .expect("recover approval");
+        let active = load(recipient.clone()).await;
+        assert_eq!(active.summary.state, "active");
+        assert!(
+            recipient
+                .sharing
+                .resume_rotation(&recipient, active, true)
+                .await
+                .is_err(),
+            "source commits the rotation and loses its response"
+        );
+        assert!(recipient
+            .store
+            .sharing_import_rotation(id)
+            .await
+            .expect("pending replacement")
+            .is_some());
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("source generation")[0]
+                .grant
+                .credential_generation,
+            2
+        );
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_rotation(&recipient, load(recipient.clone()).await, false)
+            .await
+            .expect("recover rotation through old status-only authority");
+        assert!(recipient
+            .store
+            .sharing_import_rotation(id)
+            .await
+            .expect("settled replacement")
+            .is_none());
+        let recovered = crate::sharing::ImportCredential::open(
+            &recipient.sharing,
+            local.server_id,
+            &load(recipient.clone()).await,
+        )
+        .expect("recovered credential");
+        assert_ne!(recovered.credential.expose(), before.credential.expose());
+        assert_eq!(
+            recovered.pending_expires_at_ms,
+            before.pending_expires_at_ms
+        );
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("no duplicate grant")
+                .len(),
+            1
+        );
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn sharing_http_isolates_peer_routes_and_saves_without_readiness() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let peer = sharing::peer_router(state.clone());
+        for path in [
+            "/sharing/v1/identity",
+            "/sharing/v2/identity",
+            "/api/v1/users",
+        ] {
+            let response = peer
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("private response");
+            assert_eq!(response.headers()["cache-control"], "no-store", "{path}");
+        }
+        let response = app
+            .clone()
+            .oneshot(get("/api/v1/sharing/settings", None))
+            .await
+            .expect("private admin response");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            call(&app, get("/sharing/v1/identity", None)).await.0,
+            StatusCode::NOT_FOUND
+        );
+        for path in ["/api/v1/settings", "/api/v1/users", "/healthz", "/"] {
+            assert_eq!(
+                call(&peer, get(path, None)).await.0,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        let (status, body) = call(&peer, get("/sharing/v2/identity", None)).await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(body["code"], "sharing_protocol_unsupported");
+        assert_eq!(
+            call(&peer, get("/sharing/v1/identity", None)).await.1["code"],
+            "sharing_disabled"
+        );
+        let invitation = plurx_core::sharing::Invitation {
+            identity: plurx_core::sharing::SharingIdentity {
+                server_id: uuid::Uuid::new_v4(),
+                catalogue_epoch: uuid::Uuid::new_v4(),
+                created_at_ms: crate::state::clock_ms(),
+            },
+            name: "Unreachable synthetic source".into(),
+            endpoints: vec![plurx_core::sharing::Endpoint {
+                ipv4: "100.101.102.103"
+                    .parse()
+                    .expect("synthetic tailnet address"),
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: 32443,
+                spki_sha256: "a".repeat(64),
+            }],
+            id: uuid::Uuid::new_v4(),
+            secret: plurx_core::sharing::new_secret().expect("synthetic invitation"),
+            expires_at_ms: crate::state::clock_ms() + 60_000,
+        }
+        .encode()
+        .expect("bounded invitation");
+        let refused = call(
+            &app,
+            post(
+                "/api/v1/sharing/imports",
+                Some(&admin),
+                json!({"invitation":invitation.expose()}),
+            ),
+        )
+        .await;
+        assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refused.1["code"], "sharing_disabled");
+        assert!(state
+            .store
+            .sharing_imports()
+            .await
+            .expect("off cannot reserve an import")
+            .is_empty());
+        assert_eq!(
+            call(
+                &app,
+                put("/api/v1/sharing/settings", None, json!({"enabled":true}))
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/sharing/settings",
+                Some(&admin),
+                json!({"enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["enabled"], true);
+        assert_eq!(state.sharing.status().topology_qualification, "pending");
+        let transport = call(&app, get("/api/v1/sharing/status", Some(&admin))).await;
+        assert_eq!(transport.0, StatusCode::OK);
+        assert_eq!(transport.1["node_id"], state.node_id);
+        assert_eq!(transport.1["observation_scope"], "local_node");
+        assert!(transport.1["observed_at_ms"]
+            .as_i64()
+            .is_some_and(|at| at > 0));
+        assert_eq!(transport.1["serve"], "unknown");
+        assert_eq!(transport.1["tailscale_node_key_expiry"], "unknown");
+        let readiness = call(&app, get("/api/v1/developer/readiness", Some(&admin)))
+            .await
+            .1;
+        let sharing = readiness["items"]
+            .as_array()
+            .expect("readiness items")
+            .iter()
+            .find(|item| item["id"] == "cinema_sharing")
+            .expect("sharing advisory card");
+        assert_eq!(sharing["setting"], "sharing_enabled");
+        assert_eq!(sharing["requirements"][2]["status"], "unknown");
+        for enabled in [false, true] {
+            let saved = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"sharing_enabled":enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(saved.0, StatusCode::OK);
+            assert_eq!(saved.1["sharing_enabled"], enabled);
+            assert_eq!(
+                call(&app, get("/api/v1/sharing/settings", Some(&admin)))
+                    .await
+                    .1["enabled"],
+                enabled
+            );
+        }
+        let identity = call(&peer, get("/sharing/v1/identity", None)).await;
+        assert_eq!(identity.0, StatusCode::OK);
+        assert!(identity.1.get("libraries").is_none());
+        assert_eq!(
+            call(&peer, get("/sharing/v1/grant", Some(&admin))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/sharing/settings",
+                    Some(&admin),
+                    json!({"enabled":false})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&peer, get("/sharing/v1/identity", None)).await.1["code"],
+            "sharing_disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_http_assignment_snapshot_is_complete_private_and_admin_only() {
+        use plurx_core::{secrets::SharingSecretPurpose, sharing::*};
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let identity = state.store.sharing_identity(1000).await.expect("identity");
+        let id = uuid::Uuid::new_v4();
+        let source = SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: 1000,
+        };
+        let envelope = state
+            .sharing
+            .key
+            .seal_sharing(
+                SharingSecretPurpose::Credential,
+                identity.server_id,
+                id,
+                "assignment fixture secret",
+            )
+            .expect("sealed");
+        state
+            .store
+            .create_share_import(NewImport {
+                id,
+                source: source.clone(),
+                source_name: "Assignment Source".into(),
+                claim_id: uuid::Uuid::new_v4(),
+                credential: envelope.clone(),
+                claim_secret: state
+                    .sharing
+                    .key
+                    .seal_sharing(
+                        SharingSecretPurpose::Claim,
+                        identity.server_id,
+                        id,
+                        "assignment fixture invitation",
+                    )
+                    .expect("sealed claim"),
+                endpoints: vec![Endpoint {
+                    ipv4: "100.101.102.103".parse().expect("address"),
+                    ipv6: None,
+                    ts_fqdn: "source.fixture.ts.net".into(),
+                    port: 32443,
+                    spki_sha256: "a".repeat(64),
+                }],
+                now_ms: 1000,
+            })
+            .await
+            .expect("import");
+        let path = format!("/api/v1/sharing/imports/{id}/assignments");
+        let libraries_path = format!("/api/v1/sharing/imports/{id}/libraries");
+        assert_eq!(
+            call(&app, get(&libraries_path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, get(&path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let user = state
+            .store
+            .create_user("assignment-reader", "synthetic hash", false)
+            .await
+            .expect("user");
+        let reader = "assignment-reader-token";
+        state
+            .store
+            .create_token(&plurx_core::auth::hash_token(reader), user.id, None)
+            .await
+            .expect("reader token");
+        assert_eq!(
+            call(&app, get(&path, Some(reader))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get(&libraries_path, Some(reader))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get(&libraries_path, Some(&admin))).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let (status, empty) = call(&app, get(&path, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["state"], "claiming");
+        assert_eq!(empty["assignments"], json!([]));
+        state
+            .store
+            .settle_share_claim(id, uuid::Uuid::new_v4(), true, 1001)
+            .await
+            .expect("active");
+        state
+            .store
+            .assign_share_viewers(
+                id,
+                1,
+                vec![Assignment {
+                    library_id: SourceId::parse("9007199254740993").expect("lossless"),
+                    user_id: user.id,
+                }],
+                1002,
+            )
+            .await
+            .expect("assign");
+        let response = app
+            .clone()
+            .oneshot(get(&path, Some(&admin)))
+            .await
+            .expect("response");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("body");
+        let value: Value = serde_json::from_slice(&bytes).expect("snapshot");
+        assert_eq!(
+            value,
+            json!({"import_id":id,"server_id":source.server_id,"catalogue_epoch":source.catalogue_epoch,"lifecycle_generation":1,"expected_assignment_generation":2,"state":"active","assignments":[{"library_id":"9007199254740993","user_ids":[user.id]}]})
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("assignment fixture"));
+        assert_eq!(
+            call(
+                &app,
+                get(
+                    &format!(
+                        "/api/v1/sharing/imports/{}/assignments",
+                        uuid::Uuid::new_v4()
+                    ),
+                    Some(&admin)
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_http_rejects_secret_bearing_unknown_fields_and_oversized_claims() {
+        let (_, state) = test_app_with_state();
+        state
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable sharing");
+        let peer = sharing::peer_router(state.clone());
+        let secret = plurx_core::sharing::new_secret().expect("synthetic secret");
+        let mut payload = json!({"invitation_id":uuid::Uuid::new_v4(),"invitation_secret":secret.expose(),"claim_id":uuid::Uuid::new_v4(),"recipient_server_id":uuid::Uuid::new_v4(),"recipient_name":"Fixture","grant_credential":secret.expose()});
+        payload[secret.expose()] = json!("unknown secret authorization field");
+        let response = call_text(&peer, post("/sharing/v1/claims", None, payload)).await;
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(!response.1.contains(secret.expose()));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/sharing/v1/claims")
+            .body(Body::from("x".repeat(16 * 1024 + 1)))
+            .expect("bounded request");
+        assert_eq!(call(&peer, request).await.0, StatusCode::BAD_REQUEST);
+        assert!(state
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("no claims created")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
+        use plurx_core::{secrets::Secret, sharing::Invitation};
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let endpoints = json!([{"ipv4":"100.101.102.103","ipv6":null,"ts_fqdn":"source.fixture.ts.net","port":32443,"spki_sha256":"a".repeat(64)}]);
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/sharing/endpoints",
+                    Some(&admin),
+                    json!({"expected_revision":0,"endpoints":endpoints})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        for libraries in [
+            json!([]),
+            json!(["-1"]),
+            json!([seeded.lib.to_string(), seeded.lib.to_string()]),
+            json!(["9223372036854775807"]),
+        ] {
+            let response = call(
+                &app,
+                post(
+                    "/api/v1/sharing/invitations",
+                    Some(&admin),
+                    json!({"library_ids":libraries}),
+                ),
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(response.1["code"], "sharing_invalid_request");
+        }
+        let (status, created) = call(
+            &app,
+            post(
+                "/api/v1/sharing/invitations",
+                Some(&admin),
+                json!({"library_ids":[seeded.lib.to_string()]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let invitation = Invitation::parse(&Secret::from_cleartext(
+            created["invitation"]
+                .as_str()
+                .expect("once-only invitation"),
+        ))
+        .expect("bounded invitation");
+        call(
+            &app,
+            put(
+                "/api/v1/sharing/settings",
+                Some(&admin),
+                json!({"enabled":true}),
+            ),
+        )
+        .await;
+        let peer = sharing::peer_router(state.clone());
+        let credential = plurx_core::sharing::new_secret().expect("fixture grant");
+        let request = json!({"invitation_id":invitation.id,"invitation_secret":invitation.secret.expose(),"claim_id":uuid::Uuid::new_v4(),"recipient_server_id":uuid::Uuid::new_v4(),"recipient_name":"Unverified fixture","grant_credential":credential.expose()});
+        let first = call(&peer, post("/sharing/v1/claims", None, request.clone())).await;
+        assert_eq!(first.0, StatusCode::OK);
+        let replay = call(&peer, post("/sharing/v1/claims", None, request)).await;
+        assert_eq!(first.1, replay.1);
+        let grant_id = first.1["grant_id"].as_str().expect("grant ID");
+        let peer_get = |path: &str, credential: &Secret| {
+            Request::builder()
+                .uri(path)
+                .header(
+                    "authorization",
+                    format!("CinemaShare {}", credential.expose()),
+                )
+                .body(Body::empty())
+                .expect("fixture peer request")
+        };
+        let pending = call(&peer, peer_get("/sharing/v1/grant", &credential)).await;
+        assert_eq!(pending.1["state"], "pending");
+        assert!(pending.1.get("library_ids").is_none());
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/endpoints", &credential))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let approval_path = format!("/api/v1/sharing/exports/{grant_id}/approve");
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    &approval_path,
+                    Some(&admin),
+                    json!({"expected_mutation_generation":1,"pairing_code":"0".repeat(16)})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(call(&app,post(&approval_path,Some(&admin),json!({"expected_mutation_generation":1,"pairing_code":pending.1["pairing_code"]}))).await.0,StatusCode::OK);
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/endpoints", &credential))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let replacement = plurx_core::sharing::new_secret().expect("replacement credential");
+        let rotation = uuid::Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/sharing/v1/grant/rotation")
+            .header(
+                "authorization",
+                format!("CinemaShare {}", credential.expose()),
+            )
+            .body(Body::from(
+                serde_json::to_vec(
+                    &json!({"request_id":rotation,"grant_credential":replacement.expose()}),
+                )
+                .expect("synthetic body"),
+            ))
+            .expect("rotation");
+        assert_eq!(call(&peer, request).await.0, StatusCode::OK);
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/grant", &credential))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let status_path = format!("/sharing/v1/grant/rotation/{rotation}?grant_id={grant_id}");
+        assert_eq!(
+            call(&peer, peer_get(&status_path, &credential)).await.1["confirmed"],
+            true
+        );
+        assert_eq!(
+            call(&peer, peer_get(&status_path, &replacement)).await.1["confirmed"],
+            true
+        );
+        let active = call(&peer, peer_get("/sharing/v1/grant", &replacement)).await;
+        assert_eq!(active.1["state"], "active");
+        assert_eq!(active.1["credential_generation"], 2);
+        assert_eq!(active.1["scope_generation"], 1);
     }
 
     // ---- seeded integration surface -----------------------------------------
@@ -14276,6 +16662,41 @@ mod tests {
             resuming.contains(&h.video),
             "a partially-watched home video belongs in continue-watching: {hubs}"
         );
+    }
+
+    /// The real start route must keep its authoritative presence check even
+    /// when detail has a newer, bounded observation cache. A poisoned detail
+    /// probe is counted through the router, not an unused cache instance.
+    #[tokio::test]
+    async fn playback_decision_does_not_probe_detail_availability() {
+        let (_, mut state) = test_state();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        state.detail_availability =
+            crate::availability::AvailabilityCache::with_test_probe(move |_| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    false
+                }
+            });
+        let app = router(state.clone());
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let (status, body) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{}/decision?vcodec=h264&acodec=aac&container=mp4&hdr=0",
+                    seeded.file
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["method"], "direct_play");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// A big remux gets told to go through MSE; an ordinary direct play does
@@ -17796,6 +20217,75 @@ mod tests {
             .await;
     }
 
+    /// S-05: with VOD switched off (`playback.vod_presentation=0`) the
+    /// rolling engine is the only presentation left, so an ordinary create
+    /// is served by it and attributed to `vod_disabled`. The surface
+    /// contract's `vod_disabled` row (`stopped`, start-only) still has a
+    /// source: the answer reaches a client when the operator has also
+    /// switched live recovery off (and on a VOD-only compatibility request).
+    #[tokio::test]
+    async fn vod_switched_off_is_served_by_the_retained_engine_unless_recovery_is_off() {
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, s.file, 16).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_PRESENTATION, "0")
+            .await
+            .expect("switch VOD off");
+        let reason = crate::transcode::LIVE_RECOVERY_LABELS
+            .iter()
+            .position(|label| *label == "vod_disabled")
+            .expect("vod_disabled is a recovery reason");
+        let before = crate::transcode::live_recovery_snapshot();
+
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "pb-vod-off", "copy": true }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "VOD switched off must not fail playback: {body}"
+        );
+        assert_eq!(body["vod"], false, "{body}");
+        assert!(
+            crate::transcode::live_recovery_snapshot()[reason] > before[reason],
+            "the session is attributed to the switch that chose it"
+        );
+        state
+            .transcode
+            .stop_session(
+                body["session_id"].as_str().expect("session id"),
+                "test cleanup",
+            )
+            .await;
+
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("switch live recovery off");
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "pb-vod-off-no-recovery", "copy": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["code"], "vod_disabled", "{body}");
+    }
+
     /// All four routes at once, each under its own name, from the three places
     /// that actually know: the transcode manager, the progressive registry,
     /// and the direct-play registry that S2 added because nothing else held
@@ -18687,6 +21177,108 @@ mod tests {
             activity["deliveries"][0]["presentation"], "live-recovery",
             "{activity}"
         );
+    }
+
+    /// S-05: an HEVC copy whose source has no parameter-set proof is
+    /// something only VOD cannot build — the VOD copy deletes in-band
+    /// parameter sets and needs the proof that doing so is safe, while the
+    /// rolling copy keeps them. Under the shipped default the start falls
+    /// back to the retained engine instead of answering
+    /// `hevc_configuration_unverified` and failing playback.
+    #[tokio::test]
+    async fn unproven_hevc_copy_uses_live_recovery() {
+        use plurx_core::domain::ProbeResult;
+
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let file = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("file read")
+            .expect("file");
+        std::fs::copy(plurx_core::testfixtures::source("closed-gop"), &file.path)
+            .expect("real HEVC source");
+        let held = std::fs::File::open(&file.path).expect("held fixture source");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
+        let metadata = std::fs::metadata(&file.path).expect("fixture metadata");
+        let mtime = metadata
+            .modified()
+            .expect("fixture mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture after Unix epoch")
+            .as_secs() as i64;
+        state
+            .store
+            .upsert_file(
+                file.item_id,
+                &file.path.to_string_lossy(),
+                i64::try_from(metadata.len()).expect("fixture size"),
+                mtime,
+                &ProbeResult {
+                    duration_ms: Some(12_000),
+                    container: Some("matroska".into()),
+                    video_codec: Some("hevc".into()),
+                    video_profile: Some("Main".into()),
+                    width: Some(640),
+                    height: Some(360),
+                    bit_depth: Some(8),
+                    bitrate: file.bitrate,
+                    audio_streams: file.audio_streams.clone(),
+                    subtitle_streams: file.subtitle_streams.clone(),
+                    raw_json: Some(raw_json),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("refresh fixture probe");
+        assert!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+                .await
+                .expect("setting read")
+                .is_none(),
+            "this asserts the shipped default"
+        );
+
+        let (status, started) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", seeded.file),
+                Some(&admin),
+                json!({
+                    "playback_id": "unproven-hevc-live-recovery",
+                    "request_id": "unproven-hevc-live-recovery-attempt",
+                    "copy": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a missing HEVC proof must not fail playback: {started}"
+        );
+        assert_eq!(started["vod"], false, "{started}");
+
+        let (_, activity) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(
+            activity["deliveries"][0]["presentation"], "live-recovery",
+            "{activity}"
+        );
+        // Do not leave a copy running in this CPU-sensitive binary.
+        state
+            .transcode
+            .stop_session(started["session_id"].as_str().expect("session id"), "test")
+            .await;
     }
 
     /// A file whose subtitle list can express every native-subtitle refusal:
@@ -19779,6 +22371,7 @@ mod tests {
                         codec: "truehd".into(),
                         channels: Some(8),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -19807,6 +22400,7 @@ mod tests {
                         codec: "aac".into(),
                         channels: Some(2),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -20014,6 +22608,7 @@ mod tests {
                         codec: "aac".into(),
                         channels: Some(2),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: None,
                         title: None,
                         default: true,

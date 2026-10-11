@@ -1,5 +1,13 @@
 //! Frozen encoded-VOD recipes and per-generation foreground capacity.
 
+#[cfg(target_os = "linux")]
+#[path = "dv_runtime.rs"]
+pub(crate) mod dv_runtime;
+
+#[cfg(any(target_os = "linux", test))]
+#[path = "dv_report_lifetime.rs"]
+pub(crate) mod dv_report_lifetime;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -7,9 +15,121 @@ use std::time::{Duration, Instant};
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::SourceIdentity;
 use plurx_core::transcode::{
-    vod_pipe_args, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions, VodFrameGrid,
+    vod_pipe_args_with_source_clock, Pacing, ResolvedTranscode, TranscodeExecution,
+    TranscodeOptions, VodFrameGrid,
 };
 use sha2::{Digest, Sha256};
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod dv_failed_episode {
+    use plurx_core::transcode::dv_processing::{DvDestination, DvDigest};
+    use sha2::{Digest, Sha256};
+    fn ledger() -> &'static std::sync::Mutex<std::collections::VecDeque<DvDigest>> {
+        static LEDGER: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<DvDigest>>> =
+            std::sync::OnceLock::new();
+        LEDGER.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+    }
+    pub(crate) fn key(
+        playback: &str,
+        source: &str,
+        backend: &DvDigest,
+        settings: i64,
+        destination: DvDestination,
+    ) -> DvDigest {
+        let bytes = serde_json::to_vec(&(
+            "plurx.dv.failed-playback-episode.v1",
+            playback,
+            source,
+            backend,
+            settings,
+            destination,
+        ))
+        .expect("DV episode identity");
+        DvDigest::new(hex::encode(Sha256::digest(bytes))).expect("DV episode digest")
+    }
+    pub(crate) fn failed(key: &DvDigest) -> bool {
+        ledger().lock().expect("DV failed episodes").contains(key)
+    }
+    pub(crate) fn refuse(key: &DvDigest) {
+        let mut ledger = ledger().lock().expect("DV failed episodes");
+        if !ledger.contains(key) {
+            if ledger.len() == 128 {
+                ledger.pop_front();
+            }
+            ledger.push_back(key.clone());
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn failed_later_window_excludes_fresh_create_without_predecessor_fields() {
+            let backend = DvDigest::new("12".repeat(32)).expect("valid focused control");
+            let first = key(
+                "failure-after-first-window",
+                "source-a",
+                &backend,
+                41,
+                DvDestination::Hdr10,
+            );
+            assert!(
+                !failed(&first),
+                "the initial completed window can select processing"
+            );
+            refuse(&first);
+            let fresh = key(
+                "failure-after-first-window",
+                "source-a",
+                &backend,
+                41,
+                DvDestination::Hdr10,
+            );
+            assert!(
+                failed(&fresh),
+                "fresh creation must use the ordinary route after later refusal"
+            );
+            for changed in [
+                key(
+                    "new-playback",
+                    "source-a",
+                    &backend,
+                    41,
+                    DvDestination::Hdr10,
+                ),
+                key(
+                    "failure-after-first-window",
+                    "source-b",
+                    &backend,
+                    41,
+                    DvDestination::Hdr10,
+                ),
+                key(
+                    "failure-after-first-window",
+                    "source-a",
+                    &backend,
+                    42,
+                    DvDestination::Hdr10,
+                ),
+                key(
+                    "failure-after-first-window",
+                    "source-a",
+                    &backend,
+                    41,
+                    DvDestination::Profile81,
+                ),
+                key(
+                    "failure-after-first-window",
+                    "source-a",
+                    &DvDigest::new("34".repeat(32)).expect("valid focused control"),
+                    41,
+                    DvDestination::Hdr10,
+                ),
+            ] {
+                assert!(!failed(&changed));
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 use crate::seam_hooks::AsyncPause;
@@ -17,16 +137,68 @@ use crate::seam_hooks::{HookFuture, HookReady};
 
 use crate::admission::{
     Admissions, HwSlot, LiveWait, PoolSnapshot, Priority, SwPermit, TranscodeResourceEstimate,
+    Workload,
 };
+
+/// Freeze the encoder allowance without reducing whole-pipeline accounting.
+pub(crate) fn frozen_software_threads(work: &Workload<'_>, budget: usize) -> u32 {
+    work.software_threads().min(budget).max(1) as u32
+}
+
+/// The CPU threads a frozen encoder needs from the software budget before
+/// any admission can succeed, whatever else the pool holds.
+pub(crate) fn frozen_admission_floor(
+    resources: &TranscodeResourceEstimate,
+    software_threads: Option<u32>,
+) -> usize {
+    if resources.hardware_slot {
+        // Hardware output ignores the software encoder cap. Its CPU decode
+        // and filter estimate remains the operative policy floor.
+        resources.cpu_threads
+    } else {
+        resources
+            .cpu_threads
+            .min(software_threads.map_or(resources.cpu_threads, |threads| threads as usize))
+    }
+}
+
+/// Current policy must still allow the frozen encoder. The shared admission
+/// pool owns the conservative pipeline claim and its isolated oversize rule.
+pub(crate) fn try_admit_frozen_bundle(
+    admissions: &Admissions,
+    hardware_limit: usize,
+    software_budget: usize,
+    resources: &TranscodeResourceEstimate,
+    software_threads: Option<u32>,
+    priority: Priority,
+    claim: Option<u64>,
+) -> Result<crate::admission::TranscodePermit, bool> {
+    if frozen_admission_floor(resources, software_threads) > software_budget {
+        return Err(true);
+    }
+    admissions
+        .try_admit_bundle_claiming(hardware_limit, software_budget, resources, priority, claim)
+        .ok_or(false)
+}
 
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
     pub source_object_version: String,
+    pub source_clock: plurx_core::transcode::VodSourceClock,
     pub plan: ResolvedTranscode,
+    /// Worker-selected processing decision frozen with this rendition. A saved
+    /// switch or catalog DV label cannot create a selected backend plan.
+    pub dv_processing: plurx_core::transcode::dv_processing::DvSelection,
+    #[cfg(target_os = "linux")]
+    pub dv_runtime: Option<Arc<dv_runtime::RuntimeRecipe>>,
+    /// A soundtrack producer owns its AAC recipe independently of video.
+    pub shared_audio: Option<plurx_core::transcode::VodSharedAudioRecipe>,
     pub resources: TranscodeResourceEstimate,
     pub options: TranscodeOptions,
     pub grid: VodFrameGrid,
+    /// Saved operator choice, frozen for this rendition and hashed into identity.
+    pub reorder_frames: bool,
     pub subtitle: Option<Arc<std::fs::File>>,
     pub subtitle_digest: Option<String>,
     pub ffmpeg_build: String,
@@ -76,6 +248,11 @@ pub(crate) struct ActiveProductionEvidence {
 }
 
 impl CandidateProductionProofs {
+    #[cfg(test)]
+    pub(crate) fn record_for_test(&self, recipe: [u8; 32], proof: ActiveProductionEvidence) {
+        self.record(recipe, proof);
+    }
+
     pub(crate) fn get(&self, recipe: [u8; 32]) -> Option<ActiveProductionEvidence> {
         let now = Instant::now();
         let mut rows = self.rows.lock().expect("candidate production proofs");
@@ -230,9 +407,10 @@ impl std::fmt::Debug for Encoding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Encoding")
+            .field("dv_processing", &self.dv_processing)
             .field("decoder", &self.plan.decode().backend())
             .field("encoder", &self.plan.encoder())
-            .field("resources", &self.resources)
+            .field("resources", &self.resources())
             .field("options", &self.options)
             .field("grid", &self.grid)
             .finish_non_exhaustive()
@@ -251,12 +429,279 @@ pub(crate) struct PermitRefusal {
     pub pool: PoolSnapshot,
 }
 
-/// Kept by the pipe owner until the exact process has been reaped. The permit
-/// is not kept by a dormant rendition, an HTTP waiter, or a cache hit.
-#[derive(Debug)]
+impl std::fmt::Display for PermitRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:?} priority; hardware {}/{} in use; software {}/{} threads in use; \
+             {} live waiter(s); background {}; {} reservation(s){}",
+            self.priority,
+            self.pool.hardware_used,
+            self.hardware_limit,
+            self.pool.software_used,
+            self.software_budget,
+            self.pool.live_waiting,
+            if self.pool.background_active {
+                "holds a permit"
+            } else {
+                "idle"
+            },
+            self.pool.reservations,
+            if self.over_budget {
+                "; the plan needs more threads than the whole software budget"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
+/// Ordinary producers retain this until their exact process is reaped.
+/// A bounded family may additionally retain the same reservation for its
+/// attachment lifetime; a retiring worker's clone keeps capacity owned even
+/// when its parent has already ended.
+#[derive(Debug, Clone)]
 pub(crate) struct EncodePermit {
+    _reservation: Arc<EncodeReservation>,
+}
+
+#[derive(Debug)]
+struct EncodeReservation {
     _hardware: Option<HwSlot>,
     _software: Option<SwPermit>,
+    worker_claimed: std::sync::atomic::AtomicBool,
+}
+
+/// Weak link from one immutable rendition to its exact retained capacity.
+/// A cached rendition owns no admission by itself. Parents may adopt the
+/// running worker's credit, and later workers borrow that same entitlement.
+#[derive(Debug, Default)]
+pub(crate) struct RetainedEncodeAdmission {
+    reservation: Mutex<std::sync::Weak<EncodeReservation>>,
+}
+/// Stabilize the weak binding during a family's one atomic pool decision.
+/// This synchronous guard is held only after all asynchronous policy reads.
+pub(crate) struct RetainedEncodeBinding<'a> {
+    reservation: std::sync::MutexGuard<'a, std::sync::Weak<EncodeReservation>>,
+}
+
+impl RetainedEncodeAdmission {
+    pub(crate) fn lock_binding(&self) -> RetainedEncodeBinding<'_> {
+        RetainedEncodeBinding {
+            reservation: self
+                .reservation
+                .lock()
+                .expect("retained rendition admission"),
+        }
+    }
+
+    pub(crate) fn current(&self) -> Option<EncodePermit> {
+        self.lock_binding().current()
+    }
+
+    pub(crate) fn bind(&self, admitted: EncodePermit) -> EncodePermit {
+        self.lock_binding().bind(admitted)
+    }
+}
+
+impl RetainedEncodeBinding<'_> {
+    pub(crate) fn current(&self) -> Option<EncodePermit> {
+        self.reservation.upgrade().map(|reservation| EncodePermit {
+            _reservation: reservation,
+        })
+    }
+
+    pub(crate) fn bind(&mut self, admitted: EncodePermit) -> EncodePermit {
+        if let Some(existing) = self.reservation.upgrade() {
+            // An attachment arriving while ordinary admission was in flight
+            // already owns this rendition's exact credit. Release the newly
+            // admitted duplicate and preserve the existing worker claim.
+            EncodePermit {
+                _reservation: existing,
+            }
+        } else {
+            *self.reservation = Arc::downgrade(&admitted._reservation);
+            admitted
+        }
+    }
+}
+
+/// Exclusive process ownership, retained by the producer slot until reap.
+/// Retaining a family reservation never grants concurrent use of its capacity.
+#[derive(Debug)]
+pub(crate) struct EncodeWorkerPermit {
+    reservation: Arc<EncodeReservation>,
+}
+
+impl EncodePermit {
+    pub(crate) fn retained_resources(&self) -> crate::admission::RetainedTranscodePermit<'_> {
+        crate::admission::RetainedTranscodePermit {
+            hardware: self._reservation._hardware.as_ref(),
+            software: self._reservation._software.as_ref(),
+        }
+    }
+
+    pub(crate) fn family_id(&self) -> Option<u64> {
+        self.retained_resources().family_id()
+    }
+
+    pub(crate) fn try_claim_worker(self) -> Option<EncodeWorkerPermit> {
+        self._reservation
+            .worker_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok()?;
+        Some(EncodeWorkerPermit {
+            reservation: self._reservation,
+        })
+    }
+}
+
+impl EncodeWorkerPermit {
+    /// Borrow the reservation owned by this exclusive generation worker.
+    pub(crate) fn retained_resources(&self) -> crate::admission::RetainedTranscodePermit<'_> {
+        crate::admission::RetainedTranscodePermit {
+            hardware: self.reservation._hardware.as_ref(),
+            software: self.reservation._software.as_ref(),
+        }
+    }
+}
+
+impl Drop for EncodeWorkerPermit {
+    fn drop(&mut self) {
+        self.reservation
+            .worker_claimed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl From<crate::admission::TranscodePermit> for EncodePermit {
+    fn from(bundle: crate::admission::TranscodePermit) -> Self {
+        let (hardware, software) = bundle.into_parts();
+        Self {
+            _reservation: Arc::new(EncodeReservation {
+                _hardware: hardware,
+                _software: software,
+                worker_claimed: std::sync::atomic::AtomicBool::new(false),
+            }),
+        }
+    }
+}
+
+/// Conservative Source copy pipeline estimate: bounded input codec, audio
+/// encoder, filter and mux/fragment work. This is the existing governor's
+/// reservation, not a process CPU quota or a one-thread profiling claim.
+pub(crate) const SOURCE_COPY_CPU_THREADS: usize = 4;
+
+#[allow(dead_code)] // The owned Source actor retains and consumes the actual permit.
+pub(crate) enum SourceCopyPermitRead {
+    Admitted(EncodePermit),
+    Capacity,
+    Unavailable,
+}
+impl EncodePermit {
+    /// One Source copy attempt, as a live start: a single admission against
+    /// the node's current pool policy. Later generations of an attached
+    /// rendition use this; a first start waits with [`Self::admit_source_copy`].
+    #[allow(dead_code)] // The owned Source actor acquires before first activation.
+    pub(crate) async fn try_source_copy(
+        admissions: &Admissions,
+        store: &dyn plurx_core::store::Store,
+    ) -> SourceCopyPermitRead {
+        let _waiting = admissions.wait_for_slot();
+        let Some((hardware_limit, software_budget)) = source_copy_policy(store).await else {
+            return SourceCopyPermitRead::Unavailable;
+        };
+        Self::try_source_copy_under(admissions, hardware_limit, software_budget)
+    }
+
+    /// Wait for a Source copy permit until `deadline`, as a live start.
+    ///
+    /// The waiter is registered for the whole wait, the way `admit_live`
+    /// holds its queue guard: background work is told to yield for as long as
+    /// this start is queuing, and cannot take the capacity back between two
+    /// attempts. Pool policy is node state read once per wait, under the same
+    /// bound every encoder admission uses. A budget below the copy's own
+    /// estimate cannot change during that wait and is refused at once;
+    /// anything else is retried on the manager's admission cadence, clamped
+    /// to the deadline.
+    pub(crate) async fn admit_source_copy(
+        admissions: &Admissions,
+        store: &dyn plurx_core::store::Store,
+        deadline: Instant,
+    ) -> SourceCopyPermitRead {
+        let _waiting = admissions.wait_for_slot();
+        let Some((hardware_limit, software_budget)) = source_copy_policy(store).await else {
+            return SourceCopyPermitRead::Unavailable;
+        };
+        if software_budget < SOURCE_COPY_CPU_THREADS {
+            return SourceCopyPermitRead::Capacity;
+        }
+        loop {
+            if let admitted @ SourceCopyPermitRead::Admitted(_) =
+                Self::try_source_copy_under(admissions, hardware_limit, software_budget)
+            {
+                return admitted;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return SourceCopyPermitRead::Capacity;
+            }
+            tokio::time::sleep(crate::transcode::ADMISSION_POLL.min(deadline - now)).await;
+        }
+    }
+
+    fn try_source_copy_under(
+        admissions: &Admissions,
+        hardware_limit: usize,
+        software_budget: usize,
+    ) -> SourceCopyPermitRead {
+        let resources = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: SOURCE_COPY_CPU_THREADS,
+            decoder_threads: Some(1),
+        };
+        if software_budget < SOURCE_COPY_CPU_THREADS {
+            return SourceCopyPermitRead::Capacity;
+        }
+        let Some(bundle) = admissions.try_admit_bundle(
+            hardware_limit,
+            software_budget,
+            &resources,
+            Priority::Live,
+        ) else {
+            return SourceCopyPermitRead::Capacity;
+        };
+        SourceCopyPermitRead::Admitted(bundle.into())
+    }
+}
+
+/// The node's pool policy for a Source copy: hardware cap and software
+/// budget, defaulted exactly as encoder admission defaults them. A read that
+/// fails or outlives its bound closes admission.
+async fn source_copy_policy(store: &dyn plurx_core::store::Store) -> Option<(usize, usize)> {
+    let Ok(Ok((hardware, software))) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        store.get_setting_pair(
+            plurx_core::store::keys::MAX_HW_SESSIONS,
+            plurx_core::store::keys::SW_POOL_THREADS,
+        ),
+    )
+    .await
+    else {
+        return None;
+    };
+    let hardware_limit = hardware
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(crate::admission::DEFAULT_MAX_HW_SESSIONS);
+    let software_budget = software
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(crate::admission::software_budget);
+    Some((hardware_limit, software_budget))
 }
 
 impl Encoding {
@@ -267,10 +712,16 @@ impl Encoding {
     ) -> Arc<Encoding> {
         Arc::new(Encoding {
             source_object_version: self.source_object_version.clone(),
+            source_clock: self.source_clock,
             plan: self.plan.clone(),
+            dv_processing: self.dv_processing.clone(),
+            #[cfg(target_os = "linux")]
+            dv_runtime: self.dv_runtime.clone(),
+            shared_audio: self.shared_audio.clone(),
             resources: self.resources,
             options: self.options.clone(),
             grid: self.grid,
+            reorder_frames: self.reorder_frames,
             subtitle: self.subtitle.clone(),
             subtitle_digest: self.subtitle_digest.clone(),
             ffmpeg_build: self.ffmpeg_build.clone(),
@@ -321,10 +772,15 @@ impl Encoding {
             active,
             ..ActiveProductionWindow::default()
         };
-        self.production_proofs.remove(self.candidate_recipe);
+        if self.shared_audio.is_none() {
+            self.production_proofs.remove(self.candidate_recipe);
+        }
     }
 
     pub(crate) fn note_active_segment(&self, generation: u64, entry: u32, end_ms: i64) {
+        if self.shared_audio.is_some() {
+            return;
+        }
         let mut window = self.active_production.lock().expect("active production");
         let proof = window.observe(Instant::now(), generation, entry, end_ms);
         if let (Some(recipe), Some(proof)) = (self.candidate_recipe, proof) {
@@ -335,6 +791,9 @@ impl Encoding {
     }
 
     pub(crate) fn active_production_evidence(&self) -> Option<ActiveProductionEvidence> {
+        if self.shared_audio.is_some() {
+            return None;
+        }
         self.active_production
             .lock()
             .expect("active production")
@@ -376,6 +835,29 @@ impl Encoding {
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
     ) -> Option<EncodePermit> {
+        self.try_permit_with_priority(policy, None).await
+    }
+
+    /// The finite output-preparation owner uses real background resources;
+    /// it never registers foreground demand or borrows a handoff claim.
+    pub(crate) async fn try_background_permit(&self) -> Option<EncodePermit> {
+        self.try_permit_with_priority(
+            self.store.get_setting_pair(
+                plurx_core::store::keys::MAX_HW_SESSIONS,
+                plurx_core::store::keys::SW_POOL_THREADS,
+            ),
+            Some(Priority::Background),
+        )
+        .await
+    }
+
+    async fn try_permit_with_priority(
+        &self,
+        policy: impl std::future::Future<
+            Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
+        >,
+        preparation_priority: Option<Priority>,
+    ) -> Option<EncodePermit> {
         // Pool policy is current node state, not immutable media identity.
         // A failed policy read closes admission; an existing child's permit
         // remains owned until reap and is never confiscated underneath it.
@@ -400,7 +882,8 @@ impl Encoding {
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or_else(crate::admission::software_budget);
         let mut queued = self.queued.lock().expect("VOD encoder admission");
-        let priority = self.priority();
+        // Preserve ordinary promotion's post-policy-read observation.
+        let priority = preparation_priority.unwrap_or_else(|| self.priority());
         if priority == Priority::Live {
             queued.get_or_insert_with(|| self.admissions.wait_for_slot());
         }
@@ -414,28 +897,24 @@ impl Encoding {
             });
             None
         };
-        // The shared pool deliberately admits one oversize job when otherwise
-        // idle. A frozen VOD recipe cannot shrink its thread demand on retry,
-        // so an operator lowering the budget below that exact plan is an
-        // explicit refusal rather than an oversize exception.
-        if self.resources.cpu_threads > software_budget {
-            return refuse(true);
-        }
-        let claim = *self.handoff_claim.lock().expect("VOD handoff claim");
-        let Some(bundle) = self.admissions.try_admit_bundle_claiming(
+        // A shared-audio producer admits its own bounded AAC estimate, never
+        // the video recipe it was resolved beside.
+        let claim = (priority != Priority::Background)
+            .then(|| *self.handoff_claim.lock().expect("VOD handoff claim"))
+            .flatten();
+        let bundle = match try_admit_frozen_bundle(
+            &self.admissions,
             hardware_limit,
             software_budget,
-            &self.resources,
+            &self.resources(),
+            self.admission_software_threads(),
             priority,
             claim,
-        ) else {
-            return refuse(false);
+        ) {
+            Ok(bundle) => bundle,
+            Err(over_budget) => return refuse(over_budget),
         };
-        let (hardware, software) = bundle.into_parts();
-        let permit = EncodePermit {
-            _hardware: hardware,
-            _software: software,
-        };
+        let permit = EncodePermit::from(bundle);
         queued.take();
         self.handoff_claim.lock().expect("VOD handoff claim").take();
         self.handoff_wait
@@ -445,6 +924,25 @@ impl Encoding {
             .expect("VOD encoder refusal")
             .take();
         Some(permit)
+    }
+
+    /// The video recipe's software-encoder cap does not bound the AAC
+    /// producer: shared audio's fixed estimate is its whole floor.
+    fn admission_software_threads(&self) -> Option<u32> {
+        self.shared_audio
+            .is_none()
+            .then_some(self.options.software_threads)
+            .flatten()
+    }
+
+    /// `Some(floor)` when no permit can ever be granted under
+    /// `software_budget`: the frozen plan alone needs more CPU threads than
+    /// the whole budget. The same rule admission applies, asked before a
+    /// rendition is named, so such a plan is refused at create instead of
+    /// parking demand on the materialize deadline.
+    pub(crate) fn unadmittable_software_floor(&self, software_budget: usize) -> Option<usize> {
+        let floor = frozen_admission_floor(&self.resources(), self.admission_software_threads());
+        (floor > software_budget).then_some(floor)
     }
 
     pub fn cancel_wait(&self) {
@@ -491,7 +989,7 @@ impl Encoding {
             && self.admissions.speculative_fits_after_release(
                 refusal.hardware_limit,
                 refusal.software_budget,
-                &self.resources,
+                &self.resources(),
                 released,
             )
     }
@@ -503,35 +1001,233 @@ impl Encoding {
         self.queued.lock().expect("VOD encoder admission").is_some()
     }
 
+    pub(crate) fn resources(&self) -> TranscodeResourceEstimate {
+        if self.shared_audio.is_some() {
+            TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: plurx_core::transcode::VOD_SHARED_AUDIO_CPU_THREADS,
+                decoder_threads: Some(1),
+            }
+        } else {
+            self.resources
+        }
+    }
+
+    pub(crate) fn media_plan(&self, duration_ms: i64) -> plurx_core::segplan::SegmentPlan {
+        if let Some(audio) = &self.shared_audio {
+            audio.plan_on_grid(duration_ms, self.grid)
+        } else {
+            // Typed audio delivery owns the budget; a copied or downmixed
+            // track is never planned at the transitional scalar rate.
+            let audio_rate = if self.plan.options().input_has_audio {
+                self.options.audio_budget_kbps()
+            } else {
+                0
+            };
+            self.grid.plan(
+                duration_ms,
+                u64::from(self.options.video_bitrate_kbps.saturating_add(audio_rate)) * 1000,
+            )
+        }
+    }
+
+    /// Container-inclusive delivery ceiling, enforced before publication and
+    /// again on cached child delivery. Average rate stays unknown for JIT media.
+    pub(crate) fn continuous_peak_bps(
+        &self,
+        plan: &plurx_core::segplan::SegmentPlan,
+    ) -> Option<u64> {
+        if self.shared_audio.is_none()
+            && (self.plan.options().input_has_audio
+                || self.options.video_sample_envelope
+                    != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50)
+        {
+            return None;
+        }
+        let shortest = plan
+            .entries
+            .iter()
+            .map(|entry| entry.duration_ticks)
+            .min()?;
+        if shortest == 0 || plan.timescale == 0 {
+            return None;
+        }
+        let (rate, burst) = if self.shared_audio.is_some() {
+            (
+                u128::from(self.options.audio_bitrate_kbps) * 2_000,
+                64 * 1024 * 8,
+            )
+        } else {
+            let nominal = u128::from(self.options.video_bitrate_kbps) * 1_000;
+            (nominal * 3, nominal * 2 + 256 * 1024 * 8)
+        };
+        u64::try_from(rate + (burst * u128::from(plan.timescale)).div_ceil(u128::from(shortest)))
+            .ok()
+    }
+
+    /// The rate this continuous rendition needs from a link: the encoder's
+    /// VBV cap for video, the configured rate for the shared soundtrack. It is
+    /// the same figure the candidate catalog advertises for the encode route,
+    /// split by role. [`Self::continuous_peak_bps`] stays the publication
+    /// ceiling; nothing enforces this value, and it is always below it.
+    pub(crate) fn continuous_sustained_bps(&self) -> Option<u64> {
+        if self.shared_audio.is_some() {
+            return Some(u64::from(self.options.audio_bitrate_kbps) * 1000);
+        }
+        if self.plan.options().input_has_audio
+            || self.options.video_sample_envelope
+                != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+        {
+            return None;
+        }
+        Some(plurx_core::transcode::vbv_maxrate_bps(
+            self.options.video_bitrate_kbps,
+        ))
+    }
+
+    pub(crate) fn continuous_object_fits(
+        &self,
+        plan: &plurx_core::segplan::SegmentPlan,
+        index: u32,
+        bytes: u64,
+    ) -> Option<bool> {
+        let peak = self.continuous_peak_bps(plan)?;
+        let entry = plan.entry(index)?;
+        Some(
+            u128::from(bytes) * 8 * u128::from(plan.timescale)
+                <= u128::from(peak) * u128::from(entry.duration_ticks),
+        )
+    }
+
     pub fn args(&self, file: &MediaFile, start_seconds: f64, duration_seconds: f64) -> Vec<String> {
         let mut options = self.options.clone();
         options.start_seconds = start_seconds;
         let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
             .expect("frozen VOD execution remains valid");
-        vod_pipe_args(file, &self.plan, &execution, self.grid, duration_seconds)
+        #[cfg(target_os = "linux")]
+        if let Some(runtime) = &self.dv_runtime {
+            let output = self
+                .plan
+                .completed_reconstructed_output(runtime.encoder)
+                .expect("verified reconstructed output encoder");
+            return plurx_core::transcode::vod_completed_reconstructed_pipe_args(
+                file,
+                &output,
+                &execution,
+                self.grid,
+                duration_seconds,
+                "/proc/self/fd/3",
+                "/proc/self/fd/4",
+                self.source_clock,
+            )
+            .expect("verified reconstructed VOD recipe remains valid");
+        }
+        if let Some(audio) = &self.shared_audio {
+            // This input is the source duration, not an already rounded plan
+            // end. Re-rounding the latter could add another whole video frame.
+            let duration_ms = (duration_seconds * 1_000.0).round() as i64;
+            let end_seconds = self.grid.shared_audio_end_ticks(duration_ms) as f64
+                / f64::from(plurx_core::transcode::VOD_AUDIO_RATE);
+            audio
+                .args_with_source_clock(&execution, end_seconds, self.source_clock)
+                .expect("frozen soundtrack execution remains valid")
+        } else {
+            vod_pipe_args_with_source_clock(
+                file,
+                &self.plan,
+                &execution,
+                self.grid,
+                duration_seconds,
+                self.reorder_frames,
+                self.source_clock,
+            )
+        }
+    }
+
+    /// The encoder of the admitted, prepared processing graph, rather than
+    /// the software source-decode plan used to build its input contract.
+    pub(crate) fn delivered_encoder_label(&self) -> &'static str {
+        #[cfg(target_os = "linux")]
+        if let Some(runtime) = &self.dv_runtime {
+            if matches!(&self.dv_processing,
+                plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
+                    if plurx_core::transcode::dv_processing::DvProductionRegistry.permits(plan))
+            {
+                return match runtime.encoder {
+                    plurx_core::transcode::Encoder::Software => "software (x265)",
+                    encoder => encoder.label(),
+                };
+            }
+        }
+        self.plan.encoder().label()
+    }
+
+    pub(crate) fn preserves_processed_dv(&self) -> bool {
+        matches!(&self.dv_processing,
+            plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
+                if plurx_core::transcode::dv_processing::DvProductionRegistry.permits(plan)
+                    && plan.destination() == plurx_core::transcode::dv_processing::DvDestination::Profile81)
+    }
+    pub(crate) fn processed_dv_supplemental(&self) -> Option<String> {
+        if !self.preserves_processed_dv() {
+            return None;
+        }
+        let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) = &self.dv_processing
+        else {
+            return None;
+        };
+        plan.profile81_level()
+            .map(|level| format!("dvhe.08.{level:02}"))
     }
 
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
         let mut hash = Sha256::new();
-        hash.update(b"immutable-vod-encoded-v1\0");
+        hash.update(if self.shared_audio.is_some() {
+            b"immutable-vod-shared-aac-v1\0".as_slice()
+        } else {
+            b"immutable-vod-encoded-v1\0".as_slice()
+        });
         hash.update((self.source_object_version.len() as u64).to_le_bytes());
         hash.update(self.source_object_version.as_bytes());
+        hash.update(self.source_clock.identity());
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());
-        hash.update(self.plan.plan_digest().as_bytes());
+        if let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) =
+            &self.dv_processing
+        {
+            // Only a byte-changing qualified graph enters the output key.
+            // Disabled/unavailable preferences keep the existing cache identity.
+            hash.update(b"plurx.vod.dv-processing.v1\0");
+            hash.update(plan.semantic_digest().as_str().as_bytes());
+        }
+        hash.update(
+            self.shared_audio
+                .as_ref()
+                .map_or_else(
+                    || self.plan.plan_digest(),
+                    |audio| audio.digest().to_owned(),
+                )
+                .as_bytes(),
+        );
+        if self.shared_audio.is_none() {
+            hash.update(b"vod-reorder-choice-v1\0");
+            hash.update([u8::from(self.reorder_frames)]);
+        }
         for argument in self.args(file, 0.0, duration_seconds) {
             hash.update((argument.len() as u64).to_le_bytes());
             hash.update(argument.as_bytes());
         }
         // The same descriptor path may hold different selected subtitle
         // streams; argv alone cannot name their source-stream identity.
-        if let Some(burn) = &self.options.subtitle_burn {
-            hash.update(burn.subtitle_index.to_le_bytes());
-            hash.update([u8::from(burn.bitmap)]);
-        }
-        if let Some(digest) = &self.subtitle_digest {
-            hash.update(digest.as_bytes());
+        if self.shared_audio.is_none() {
+            if let Some(burn) = &self.options.subtitle_burn {
+                hash.update(burn.subtitle_index.to_le_bytes());
+                hash.update([u8::from(burn.bitmap)]);
+            }
+            if let Some(digest) = &self.subtitle_digest {
+                hash.update(digest.as_bytes());
+            }
         }
         SourceIdentity::new(
             file.size.max(0) as u64,
@@ -661,5 +1357,90 @@ mod production_evidence_tests {
             },
         );
         assert!(proofs.get(recipe).is_none());
+    }
+}
+
+#[cfg(test)]
+mod source_copy_admission_tests {
+    use super::*;
+    use plurx_core::store::SettingsStore;
+
+    /// The handoff gap `admit_live` closes. A copy start waiting for CPU must
+    /// stay queued across its attempts, or background work is not told to
+    /// yield and may take the capacity back in the gap between two of them.
+    #[tokio::test]
+    async fn a_source_copy_wait_stays_queued_until_capacity_frees() {
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("policy store");
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "4")
+            .await
+            .expect("policy");
+        let admissions = Admissions::new();
+        let copy = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: SOURCE_COPY_CPU_THREADS,
+            decoder_threads: Some(1),
+        };
+        let held = admissions
+            .try_admit_bundle(1, 4, &copy, Priority::Live)
+            .expect("the whole software pool");
+        let waiting = {
+            let admissions = admissions.clone();
+            tokio::spawn(async move {
+                EncodePermit::admit_source_copy(
+                    &admissions,
+                    &store,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !admissions.live_is_waiting() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the copy start queues");
+        // Several refused attempts later, it is still the one queued start.
+        tokio::time::sleep(crate::transcode::ADMISSION_POLL * 3).await;
+        assert_eq!(admissions.snapshot().live_waiting, 1);
+        assert!(!waiting.is_finished());
+        drop(held);
+        let admitted = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the freed capacity admits the waiter")
+            .expect("admission task");
+        assert!(matches!(admitted, SourceCopyPermitRead::Admitted(_)));
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert_eq!(admissions.software_in_use(), SOURCE_COPY_CPU_THREADS);
+        drop(admitted);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    /// A budget below the copy's own estimate cannot change during one wait,
+    /// which reads policy once, so it is refused without waiting out the
+    /// deadline or leaving a queued start behind.
+    #[tokio::test]
+    async fn a_source_copy_wait_refuses_an_insufficient_budget_at_once() {
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("policy store");
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3")
+            .await
+            .expect("policy");
+        let admissions = Admissions::new();
+        let read = tokio::time::timeout(
+            Duration::from_secs(2),
+            EncodePermit::admit_source_copy(
+                &admissions,
+                &store,
+                Instant::now() + Duration::from_secs(30),
+            ),
+        )
+        .await
+        .expect("refused without waiting for the deadline");
+        assert!(matches!(read, SourceCopyPermitRead::Capacity));
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert_eq!(admissions.software_in_use(), 0);
     }
 }

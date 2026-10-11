@@ -1,0 +1,16 @@
+{
+  "status": "fresh replay completed; adversarial approval pending",
+  "fresh_replay": "review-replay3, exact command in receipt.json and log in fresh-replay.log",
+  "source": "execution-source-hashes.json is frozen v3 source used before measurements; source-hashes.json is final source including explicit post-replay-source-delta.json",
+  "historical_logs": [
+    "historical-logs/scalar-gpu.log",
+    "historical-logs/replay-attempt1.log",
+    "historical-logs/trim-fixture-generation.log",
+    "historical-logs/checker-tests.log",
+    "historical-logs/fixture-check.log",
+    "historical-logs/render-refusal-controls.log"
+  ],
+  "historical_scope": "Prior failed/provisional attempts retained only for chronology; excluded from current pass evidence",
+  "registration": "Original pre-outcome registration is session-declared command chronology, not independently timestamped; within-replay immutable hash is separate",
+  "inventory": "SHA256SUMS.json binds every retained regular file except itself"
+}

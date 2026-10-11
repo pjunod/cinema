@@ -90,7 +90,7 @@ function watchTrackRow(which,tracks,selected,label,offChip){
   const names=rest.slice(0,3).map(t=>langName(t.language)||"Untagged");
   const summary=which==="audio"
     ?`<b>${rest.length}</b> more`
-    :`<b>${rest.length}</b> available${names.length?" · "+esc(names.join(", "))+(rest.length>names.length?` +${rest.length-names.length}`:""):""}`;
+    :`<b>${tracks.length}</b> available${names.length?" · "+esc(names.join(", "))+(rest.length>names.length?` +${rest.length-names.length}`:""):""}`;
   return `<div class="watch-trks">${current}<button type="button" class="watch-trkmore" data-watch-fold="${which}">${summary}</button>${watchFoldButton(which,false)}</div>`;
 }
 function watchDeliveryRow(f){
@@ -175,13 +175,13 @@ function watchToggleEpisodeRows(){
   document.getElementById("watch-episodes").classList.toggle("watch-rows",WATCH.rows);
   const button=document.getElementById("watch-row-toggle");button.textContent=WATCH.rows?"Cards":"Rows";button.setAttribute("aria-pressed",String(WATCH.rows));
 }
-async function watchPlayEpisode(id){
+async function watchPlayEpisode(id,prepared=null){
   const w=WATCH;if(!w||w.accepted===String(id))return false;
   const load=++w.load;
   const attempt=PLAY_OPEN_GATE.begin("episode");
   const current=()=>WATCH===w&&w.load===load&&PLAY_OPEN_GATE.current(attempt);
   try{
-    const page=await loadItem(id,current);
+    const page=await loadItem(id,current,prepared?.page);
     if(!current()||!page)return false;
     const pf=page.playable;
     if(!pf){toast("This episode has no available file.");return false;}
@@ -236,8 +236,15 @@ function watchRenderPlaying(){
 function watchInspectEpisode(id){
   const e=WATCH?.episodes?.find(e=>exactWireId(e)===id);if(!e)return;
   const d=document.getElementById("watch-details");
-  d.innerHTML=`<button class="ghost" onclick="this.closest('dialog').close()">Close details</button><h2>${esc(e.title)}</h2><p>${esc(e.overview||"No synopsis available.")}</p><button data-watch-play="${esc(id)}">Play</button>`;
-  d.querySelector('[data-watch-play]').addEventListener('click',()=>{d.close();watchPlayEpisode(id);});watchRenderPlaying();d.showModal();
+  d.innerHTML=`<button class="ghost" data-remote-watch-close onclick="this.closest('dialog').close()">Close details</button><h2>${esc(e.title)}</h2><p>${esc(e.overview||"No synopsis available.")}</p><button data-watch-play="${esc(id)}">Play</button>`;
+  const opener=/** @type {HTMLElement|null} */(document.activeElement),w=WATCH,elements=/** @type {HTMLButtonElement[]} */([d.querySelector('[data-remote-watch-close]'),d.querySelector('[data-watch-play]')]);
+  const close=()=>{d.close();if(opener?.isConnected)opener.focus({preventScroll:true});else document.getElementById("pbplay")?.focus();};
+  elements[0].onclick=close;
+  elements[1].addEventListener('click',()=>{close();watchPlayEpisode(id);});watchRenderPlaying();d.showModal();
+  cinemaRemoteOwnPresentation(d,"player",()=>WATCH===w&&w.episodes?.includes(e),close,[
+    {id:"episode:close",element:elements[0],label:"Close details",activate:()=>{close();return "applied";}},
+    {id:"episode:play:"+id,element:elements[1],label:"Play episode",activate:()=>{close();watchPlayEpisode(id);return "applied";}}
+  ]);
 }
 // Chapters.
 //
@@ -250,7 +257,7 @@ function watchChapters(){
   return file?.chapters||[];
 }
 function watchChapterThumbUrl(file,i){
-  return tok(`/api/v1/files/${encodeURIComponent(file.id)}/chapters/${i}/thumb?v=${encodeURIComponent(String(file.mtime||file.size||0))}`);
+  return tok(playbackFileUrl(playbackFileContextForFile(file),`chapters/${i}/thumb`,{v:String(file.mtime||file.size||0)}));
 }
 function watchRulerHtml(chapters,totalMs,cls){
   if(!chapters.length||!totalMs)return "";

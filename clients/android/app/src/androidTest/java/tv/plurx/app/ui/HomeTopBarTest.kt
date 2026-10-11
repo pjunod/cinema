@@ -24,19 +24,28 @@ class HomeTopBarTest {
     @Test
     fun liveTvAndSettingsFitNarrowPhonesAndLiveActionIsReachable() {
         var opened = false
+        var settingsOpened = false
         compose.setContent {
             Box(Modifier.width(320.dp)) {
                 HomeTopBar(theme = ThemeId.Classic, username = "viewer", formFactor = FormFactor.Compact,
-                    side = 20.dp, onRefresh = {}, onSearch = {}, onOpenSettings = {},
+                    side = 20.dp, onRefresh = {}, onSearch = {}, onOpenSettings = { settingsOpened = true },
                     safeInsets = WindowInsets(0, 0, 0, 0), onOpenLiveTv = { opened = true })
             }
         }
         val live = compose.onNodeWithContentDescription("Live TV").assertIsDisplayed().assertHasClickAction()
-        val settings = compose.onNodeWithContentDescription("Settings").assertIsDisplayed()
+        val settings = compose.onNodeWithContentDescription("Settings").assertIsDisplayed().assertHasClickAction()
+        for (label in listOf("Refresh", "Search", "Live TV", "Recordings", "Library channels", "Downloads", "Settings")) {
+            val action = compose.onNodeWithContentDescription(label).assertIsDisplayed().assertHasClickAction()
+            val bounds = action.getUnclippedBoundsInRoot()
+            assertTrue("$label starts inside the narrow viewport", bounds.left >= 0.dp)
+            assertTrue("$label ends inside the narrow viewport", bounds.right <= 320.dp)
+        }
         assertTrue(live.getUnclippedBoundsInRoot().right <= 320.dp)
         assertTrue(settings.getUnclippedBoundsInRoot().right <= 320.dp)
         live.performClick()
         compose.runOnIdle { assertTrue(opened) }
+        settings.performClick()
+        compose.runOnIdle { assertTrue(settingsOpened) }
     }
 
     @Test

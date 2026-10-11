@@ -1,0 +1,25 @@
+{
+  "files": [
+    {
+      "file": "write_receipt.py",
+      "executed_sha256": "a782831fdce4068b385c3d8ed73b10d3847c4664bc173ee9d40e1985b19a7fb8",
+      "final_sha256": "0f3f5f189174e9ac802e11272b5b5f2be99435e9cc5b62b9111d7fd298e6518f"
+    },
+    {
+      "file": "verify_refusals.py",
+      "executed_sha256": "885742379cc6e2c22c4153ede85867ed0a4ef3aa501b905b43855e8070a2d555",
+      "final_sha256": "7841046cb78885bce9beedf54f50a3a78f3b7dfb29919226afa852ddf30cf931"
+    },
+    {
+      "file": "test_replay_contracts.py",
+      "executed_sha256": "895ef61962e774e9bf859d446358b573bdb80e2b2088a687d95fd4ae595b271b",
+      "final_sha256": "3f0173c8cf52f6baf2705ba48a2bed0166a430d3ff6478933d0c3c73d39ea046"
+    }
+  ],
+  "changes": [
+    "Receipt provenance wording only: historical receipt hashes recorded but only specified fields compared",
+    "Packaging: missing empty refusal outputs directory means no output, non-directory/output still refused; two focused controls added"
+  ],
+  "measurement_changes": false,
+  "checks": "Finalizer and focused replay contracts rerun against the same completed fresh replay; numeric checks unchanged"
+}

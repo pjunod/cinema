@@ -1,0 +1,22 @@
+[
+  {
+    "repo": "erazortt/DoViBaker",
+    "sha": "ffba39830b694ddca0bf5f73dcf1b462713bb7f4",
+    "archive_sha256": "44629eb984103ebf517e2399b9f4354cc7f8ae2d3614b247e5f48a9f213e8807"
+  },
+  {
+    "repo": "quietvoid/dovi_tool",
+    "sha": "83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+    "archive_sha256": "57d13f03d04a7a1b3d7dcb139b976dc3748c745c1720d4b6e44b61e5ef67b69b"
+  },
+  {
+    "repo": "sekrit-twc/timecube",
+    "sha": "ab023ecf3245a600a3b131917571c67cec738ea3",
+    "archive_sha256": "2cef5b90d463e4ac8d143bbd70323e5bae93adee4253928f55f2dbe71f14b87c"
+  },
+  {
+    "repo": "sekrit-twc/graphengine",
+    "sha": "509c1c3a9a3561945a1acd3b9bb1219763fe7c57",
+    "archive_sha256": "a4ddaae7dcb81e30d09915c25c27aecb799d0a5e64df1cf43158a86e6940d0fb"
+  }
+]

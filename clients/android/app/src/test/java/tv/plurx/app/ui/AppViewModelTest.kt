@@ -9,8 +9,57 @@ import org.junit.Test
 import retrofit2.HttpException
 import retrofit2.Response
 import tv.plurx.app.data.HlsStart
+import tv.plurx.app.data.Server
+import tv.plurx.app.data.Session
 
 class AppViewModelTest {
+    @Test fun loginRehydratesNegotiatedCapabilitiesWithAutoOff() = runBlocking {
+        val owner = Session.PlaybackAuthorization("http://lab.invalid", "owned-lab", 1)
+        var protocol: String? = null
+        var decoderContract: String? = null
+        var auto = false
+        val refreshed = refreshAuthenticatedServerInfo({ owner }, {
+            Server(playback_display_aware_auto = false, display_aware_auto_protocol = "route-v1",
+                decoder_compaction_contract = "measured-test-contract")
+        }, { info ->
+            protocol = info.display_aware_auto_protocol
+            decoderContract = info.decoder_compaction_contract
+            auto = info.playback_display_aware_auto
+        })
+        assertEquals(true, refreshed)
+        assertEquals("route-v1", protocol)
+        assertEquals("measured-test-contract", decoderContract)
+        assertEquals(false, auto)
+    }
+
+    @Test fun delayedBootstrapCannotApplyAfterProfileOrCredentialChanges() = runBlocking {
+        val original = Session.PlaybackAuthorization("http://lab-a.invalid", "owned-a", 1)
+        for (replacement in listOf(
+            Session.PlaybackAuthorization("http://lab-b.invalid", "owned-b", 2),
+            Session.PlaybackAuthorization(original.origin, "new-owned-a", 2),
+        )) {
+            var owner = original
+            var applied = false
+            val refreshed = refreshAuthenticatedServerInfo({ owner }, {
+                owner = replacement
+                Server(display_aware_auto_protocol = "route-v1")
+            }, { applied = true })
+            assertEquals(false, refreshed)
+            assertEquals(false, applied)
+            assertEquals(replacement, owner)
+        }
+    }
+
+    @Test fun unavailableBootstrapKeepsTheAuthenticatedProfile() = runBlocking {
+        val owner = Session.PlaybackAuthorization("http://lab.invalid", "owned-lab", 1)
+        var applied = false
+        val refreshed = refreshAuthenticatedServerInfo({ owner }, { throw IOException("owned lab unavailable") },
+            { applied = true })
+        assertEquals(false, refreshed)
+        assertEquals(false, applied)
+        assertEquals("owned-lab", owner.token)
+    }
+
     @Test
     fun liveRecoveryPresentationIsAPlayableHlsSession() {
         val recovery = HlsStart(

@@ -1,0 +1,26 @@
+[
+  {
+    "asset": "animation-bf0",
+    "browser": "safari",
+    "status": "failed",
+    "error": "The operation was aborted due to timeout"
+  },
+  {
+    "asset": "animation-bf2",
+    "browser": "safari",
+    "status": "failed",
+    "error": "The operation was aborted due to timeout"
+  },
+  {
+    "asset": "live-action-bf0",
+    "browser": "safari",
+    "status": "failed",
+    "error": "The operation was aborted due to timeout"
+  },
+  {
+    "asset": "live-action-bf2",
+    "browser": "safari",
+    "status": "failed",
+    "error": "The operation was aborted due to timeout"
+  }
+]

@@ -18,7 +18,7 @@
 
 **Feature enablement [confirmed]:** PGS overlay is behind `subtitles.pgs_overlay`, default off (`crates/plurxd/src/state.rs:731-736`). `PLURX_HLS_CLOSED_CAPTIONS_NONE` and `PLURX_HLS_FORCED_AUTOSELECT` are read-once env rungs, off (`hls.rs:11398-11417`). PGS overlay M4 (auto-select an overlay) and M5 have no implementation in the tree.
 
-**Deployed server versions [confirmed, timestamped 2026-09-16 ~20:15 UTC via `/api/v1/server`]:** nynuc and m6 report build `v0.3.0-2633-gc9e4edf4` (built 19:37 UTC); nuc4 reports `v0.3.0-2609-g74bd6631` (built 15:36 UTC); nuc3 is a learner and does not answer that route. No subtitle-related commit lies between `74bd6631` and `c9e4edf4`.
+**Deployed server versions [confirmed, timestamped 2026-09-16 ~20:15 UTC via `/api/v1/server`]:** media1 and lab6 report build `v0.3.0-2633-gc9e4edf4` (built 19:37 UTC); lab4 reports `v0.3.0-2609-g74bd6631` (built 15:36 UTC); lab3 is a learner and does not answer that route. No subtitle-related commit lies between `74bd6631` and `c9e4edf4`.
 
 **Deployed client builds [not verified]:** which Apple / Android builds are installed on the physical devices was not checked. Everything below about client behaviour describes the source at the baseline, not necessarily what is on the Apple TV.
 

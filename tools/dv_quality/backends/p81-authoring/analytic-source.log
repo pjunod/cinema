@@ -1,0 +1,28 @@
+{
+  "scope": "analytic-control",
+  "kind": "independent-arithmetic",
+  "method": "Closed-form declared identity polynomial + S=1/1024,T=S/2 residual rr/1024, followed by supplied standard P81 fixed coefficients. Independent Python integer evaluation; no independent Dolby decoding/reference fidelity approval.",
+  "width": 16,
+  "height": 16,
+  "frames": 1,
+  "output_format": "rgb48le",
+  "color_domain": "BT2020 PQ full-range under standard-P7-matrix assumption",
+  "bl_y_code": "400+2*x+y",
+  "bl_uv_codes": [
+    512,
+    512
+  ],
+  "el_code": "512 + (16 if (x+y+c)%2 else -16)",
+  "coefficient_log2_denom": 23,
+  "nlq_slope": 8192,
+  "nlq_threshold": 4096,
+  "unbounded_vdr_in_max": 1,
+  "bounded_vdr_in_max": "2/1024",
+  "expected_hashes": {
+    "nonzero": "9a396cea95201037cc78089f928d11c71f53c919d7d2f9c3e5d60d16b8227f5d",
+    "zero": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+    "disabled": "25d58035aafb4a21f81561a42c4122f73c71d92909c411da56b2415c73cb7d23",
+    "bounded": "0c032192c773ae2c945029edf4e1d44c82445e75641b0df4e086c2181b813891"
+  },
+  "independent_dv_reference": null
+}

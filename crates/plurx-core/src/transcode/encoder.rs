@@ -16,6 +16,419 @@ pub enum Encoder {
     VideoToolbox,
 }
 
+/// The delivered codec, independent of the source codec or dynamic range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoCodec {
+    H264,
+    Hevc,
+}
+
+impl VideoCodec {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::Hevc => "hevc",
+        }
+    }
+
+    fn measured_encoder(
+        self,
+        bit_depth: u8,
+        grade: OutputGrade,
+        encoder: Encoder,
+    ) -> Option<&'static str> {
+        match (self, bit_depth, grade, encoder) {
+            (Self::H264, 8, OutputGrade::Sdr, family) => Some(family.video_codec()),
+            // Preserve the Main10 measurements and the subsequently published
+            // VAAPI HDR graph; the output tuple remains explicit.
+            (Self::Hevc, 8, OutputGrade::Sdr, Encoder::VideoToolbox) => Some("hevc_videotoolbox"),
+            (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::VideoToolbox) => {
+                Some("hevc_videotoolbox")
+            }
+            (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Software) => Some("libx265"),
+            (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Qsv) => Some("hevc_qsv"),
+            (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Vaapi) => Some("hevc_vaapi"),
+            _ => None,
+        }
+    }
+}
+
+/// One resolved output tuple. Qualification is capability/measurement evidence,
+/// not an operator switch. Boot validation remains owned by the node resolver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputCodecContract {
+    pub codec: VideoCodec,
+    pub bit_depth: u8,
+    pub grade: OutputGrade,
+    pub rate_control: EffectiveRateControl,
+    pub encoder: Encoder,
+    pub pipeline: super::Pipeline,
+}
+
+impl OutputCodecContract {
+    /// Preserve today's selection while making every dimension explicit.
+    pub fn resolve(
+        encoder: Encoder,
+        pipeline: super::Pipeline,
+        rate_control: EffectiveRateControl,
+    ) -> Option<Self> {
+        Self::resolve_with_codec(encoder, pipeline, rate_control, None)
+    }
+
+    /// Explicit codec requests are frozen by negotiation before this resolver;
+    /// absent requests retain the incumbent grade-based selection.
+    pub fn resolve_with_codec(
+        encoder: Encoder,
+        pipeline: super::Pipeline,
+        rate_control: EffectiveRateControl,
+        requested_codec: Option<VideoCodec>,
+    ) -> Option<Self> {
+        let grade = pipeline.output_grade();
+        let (default_codec, bit_depth) = match grade {
+            OutputGrade::Sdr => (VideoCodec::H264, 8),
+            OutputGrade::Hdr10 => (VideoCodec::Hevc, 10),
+        };
+        // The incumbent HDR10 argument builder is bitrate-bounded regardless
+        // of the supplied quality preference. Publish what it actually emits,
+        // without changing the legacy options or their recipe identity.
+        let rate_control = match grade {
+            OutputGrade::Hdr10 => EffectiveRateControl::Vbr,
+            OutputGrade::Sdr => rate_control,
+        };
+        let codec = requested_codec.unwrap_or(default_codec);
+        let contract = Self {
+            codec,
+            bit_depth,
+            grade,
+            rate_control,
+            encoder,
+            pipeline,
+        };
+        contract.qualified().then_some(contract)
+    }
+
+    pub fn qualified(self) -> bool {
+        self.pipeline.output_grade() == self.grade
+            && self.pipeline.pairs_with(self.encoder)
+            && (self.grade != OutputGrade::Hdr10 || self.rate_control == EffectiveRateControl::Vbr)
+            && (self.codec != VideoCodec::Hevc
+                || self.grade != OutputGrade::Sdr
+                || (self.encoder == Encoder::VideoToolbox
+                    && matches!(
+                        self.pipeline,
+                        super::Pipeline::VtScaleSdr | super::Pipeline::Cpu
+                    )
+                    && self.rate_control == EffectiveRateControl::Vbr))
+            && self.encoder_name().is_some()
+    }
+
+    pub fn encoder_name(self) -> Option<&'static str> {
+        self.codec
+            .measured_encoder(self.bit_depth, self.grade, self.encoder)
+    }
+}
+
+/// Encode independently validated reconstructed PQ pictures. This is separate
+/// from OutputCodecContract: it grants no ordinary HDR/Dolby pipeline pairing
+/// and provides no processing receipt or decoder capability authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletedReconstructedOutputContract {
+    encoder: Encoder,
+    input: super::pipeline::ReconstructedPqInput,
+}
+impl CompletedReconstructedOutputContract {
+    pub(super) fn resolve(encoder: Encoder) -> Option<Self> {
+        let input = super::pipeline::ReconstructedPqInput::Rgb48Bt2020Pq;
+        input.pairs_with(encoder).then_some(Self { encoder, input })
+    }
+    pub fn encoder(self) -> Encoder {
+        self.encoder
+    }
+    pub fn encoder_name(self) -> &'static str {
+        if self.encoder == Encoder::Nvenc {
+            "hevc_nvenc"
+        } else {
+            "libx265"
+        }
+    }
+    pub fn input_contract(self) -> super::pipeline::ReconstructedPqInput {
+        self.input
+    }
+    pub fn grade(self) -> OutputGrade {
+        OutputGrade::Hdr10
+    }
+    pub fn codec(self) -> VideoCodec {
+        VideoCodec::Hevc
+    }
+    pub fn bit_depth(self) -> u8 {
+        10
+    }
+    pub fn rate_control(self) -> EffectiveRateControl {
+        EffectiveRateControl::Vbr
+    }
+    pub fn pixel_format(self) -> &'static str {
+        if self.encoder == Encoder::Nvenc {
+            "p010le"
+        } else {
+            "yuv420p10le"
+        }
+    }
+    pub fn encode_args(
+        self,
+        bitrate_kbps: u32,
+        force_idr: bool,
+        software_threads: Option<u32>,
+    ) -> Vec<String> {
+        if self.encoder == Encoder::Software {
+            return Encoder::Software.hdr10_encode_args(bitrate_kbps, force_idr, software_threads);
+        }
+        let mut args: Vec<String> = [
+            "-c:v",
+            "hevc_nvenc",
+            "-preset",
+            "p4",
+            "-profile:v",
+            "main10",
+            "-pix_fmt",
+            "p010le",
+            "-surfaces",
+            "4",
+            "-bf",
+            "0",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        // Inherit the same bounded bitrate and explicit PQ color contract,
+        // without software-only x265 options or a changed source decoder.
+        let bounded = Encoder::Software.hdr10_encode_args(bitrate_kbps, false, None);
+        for pair in bounded.chunks_exact(2) {
+            if !matches!(pair[0].as_str(), "-c:v" | "-preset" | "-x265-params") {
+                args.extend_from_slice(pair);
+            }
+        }
+        if force_idr {
+            args.extend(["-forced-idr".into(), "1".into()]);
+        }
+        args
+    }
+}
+
+#[cfg(test)]
+mod output_codec_contract_tests {
+    use super::*;
+    use crate::transcode::Pipeline;
+
+    const FAMILIES: [Encoder; 5] = [
+        Encoder::Software,
+        Encoder::Nvenc,
+        Encoder::Qsv,
+        Encoder::Vaapi,
+        Encoder::VideoToolbox,
+    ];
+
+    #[test]
+    fn reconstructed_nvenc_contract_preserves_ordinary_hdr_refusal_and_bounds() {
+        assert!(OutputCodecContract::resolve(
+            Encoder::Nvenc,
+            Pipeline::Hdr10Passthrough,
+            EffectiveRateControl::Vbr
+        )
+        .is_none());
+        assert!(OutputCodecContract::resolve(
+            Encoder::Nvenc,
+            Pipeline::DoviPassthrough,
+            EffectiveRateControl::Vbr
+        )
+        .is_none());
+        let contract = CompletedReconstructedOutputContract::resolve(Encoder::Nvenc)
+            .expect("reconstructed NVENC");
+        assert_eq!(contract.input_contract().pixel_format(), "rgb48le");
+        let args = contract.encode_args(4000, true, Some(1));
+        for pair in [
+            ["-c:v", "hevc_nvenc"],
+            ["-preset", "p4"],
+            ["-profile:v", "main10"],
+            ["-pix_fmt", "p010le"],
+            ["-surfaces", "4"],
+            ["-bf", "0"],
+            ["-forced-idr", "1"],
+            ["-b:v", "4000k"],
+            ["-maxrate", "6000k"],
+            ["-bufsize", "8000k"],
+            ["-color_trc", "smpte2084"],
+        ] {
+            assert!(args.windows(2).any(|actual| actual == pair));
+        }
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "-x265-params" || arg == "-hwaccel"));
+        assert!(CompletedReconstructedOutputContract::resolve(Encoder::Qsv).is_none());
+        let software = CompletedReconstructedOutputContract::resolve(Encoder::Software)
+            .expect("software fallback");
+        assert_eq!(
+            software.encode_args(4000, true, Some(1)),
+            Encoder::Software.hdr10_encode_args(4000, true, Some(1))
+        );
+    }
+
+    #[test]
+    fn the_qualified_table_matches_todays_selection() {
+        for family in FAMILIES {
+            for grade in [OutputGrade::Sdr, OutputGrade::Hdr10] {
+                let legacy = match grade {
+                    OutputGrade::Sdr => Some(family.video_codec()),
+                    OutputGrade::Hdr10 => match family {
+                        Encoder::Software => Some("libx265"),
+                        Encoder::Qsv => Some("hevc_qsv"),
+                        Encoder::Vaapi => Some("hevc_vaapi"),
+                        Encoder::VideoToolbox => Some("hevc_videotoolbox"),
+                        _ => None,
+                    },
+                };
+                assert_eq!(family.video_codec_for(grade), legacy);
+            }
+            for pipeline in crate::transcode::PIPELINE_CANDIDATES
+                .iter()
+                .copied()
+                .chain([
+                    Pipeline::DoviTonemapx,
+                    Pipeline::DoviPassthrough,
+                    Pipeline::Hdr10Passthrough,
+                ])
+            {
+                let old = pipeline.pairs_with(family)
+                    && family.video_codec_for(pipeline.output_grade()).is_some();
+                assert_eq!(
+                    OutputCodecContract::resolve(family, pipeline, EffectiveRateControl::Vbr)
+                        .is_some(),
+                    old
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unqualified_tuple_is_never_selectable() {
+        for family in FAMILIES {
+            for depth in [8, 10] {
+                let contract = OutputCodecContract {
+                    codec: VideoCodec::Hevc,
+                    bit_depth: depth,
+                    grade: OutputGrade::Sdr,
+                    rate_control: EffectiveRateControl::Vbr,
+                    encoder: family,
+                    pipeline: Pipeline::Cpu,
+                };
+                assert_eq!(
+                    contract.qualified(),
+                    family == Encoder::VideoToolbox && depth == 8
+                );
+            }
+        }
+        let mut contract = OutputCodecContract::resolve(
+            Encoder::Software,
+            Pipeline::DoviPassthrough,
+            EffectiveRateControl::Vbr,
+        )
+        .expect("the incumbent software Main10 graph remains qualified");
+        contract.bit_depth = 8;
+        assert!(!contract.qualified());
+        contract.bit_depth = 10;
+        contract.pipeline = Pipeline::Cpu;
+        assert!(!contract.qualified());
+    }
+
+    #[test]
+    fn output_codec_contract_preserves_encoder_argv_for_every_legacy_tuple() {
+        for family in FAMILIES {
+            for pipeline in crate::transcode::PIPELINE_CANDIDATES
+                .iter()
+                .copied()
+                .chain([
+                    Pipeline::DoviTonemapx,
+                    Pipeline::DoviPassthrough,
+                    Pipeline::Hdr10Passthrough,
+                ])
+            {
+                for rate in [
+                    EffectiveRateControl::Vbr,
+                    EffectiveRateControl::Qvbr {
+                        quality: family.default_quality(),
+                    },
+                ] {
+                    let Some(contract) = OutputCodecContract::resolve(family, pipeline, rate)
+                    else {
+                        continue;
+                    };
+                    for forced_idr in [false, true] {
+                        let old = family.encode_args_for(
+                            pipeline.output_grade(),
+                            6000,
+                            rate,
+                            forced_idr,
+                            Some(2),
+                        );
+                        let explicit = contract.encoder.encode_args_for(
+                            contract.grade,
+                            6000,
+                            contract.rate_control,
+                            forced_idr,
+                            Some(2),
+                        );
+                        assert_eq!(
+                            explicit,
+                            old,
+                            "{} / {}",
+                            family.family_name(),
+                            pipeline.name()
+                        );
+                        assert_eq!(
+                            contract.encoder_name(),
+                            family.video_codec_for(pipeline.output_grade())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_codec_contract_hdr10_reports_vbr_and_refuses_malformed_qvbr() {
+        for encoder in [Encoder::Software, Encoder::Qsv] {
+            let supplied = EffectiveRateControl::Qvbr { quality: 22 };
+            let contract =
+                OutputCodecContract::resolve(encoder, Pipeline::Hdr10Passthrough, supplied)
+                    .expect("incumbent Main10 graph resolves");
+            assert_eq!(contract.rate_control, EffectiveRateControl::Vbr);
+            assert!(contract.qualified());
+            assert_eq!(
+                encoder.encode_args_for(OutputGrade::Hdr10, 6000, supplied, false, Some(2)),
+                encoder.encode_args_for(
+                    contract.grade,
+                    6000,
+                    contract.rate_control,
+                    false,
+                    Some(2)
+                ),
+            );
+            assert!(!OutputCodecContract {
+                rate_control: supplied,
+                ..contract
+            }
+            .qualified());
+        }
+        let supplied = EffectiveRateControl::Qvbr { quality: 22 };
+        assert_eq!(
+            OutputCodecContract::resolve(Encoder::Software, Pipeline::Cpu, supplied)
+                .expect("incumbent SDR graph resolves")
+                .rate_control,
+            supplied
+        );
+    }
+}
+
 /// The dynamic-range contract of the bytes a re-encode puts on the wire.
 ///
 /// Not a preference and not a property of the source: this describes the
@@ -174,6 +587,19 @@ impl EffectiveRateControl {
     }
 }
 
+/// The VBV rate cap, in kbit/s, that every bounded encode is configured with
+/// for a `bitrate_kbps` target. Over any window the encoder keeps its output
+/// within this rate plus one VBV buffer, so it is the rate a rendition needs
+/// from a link, not the per-object worst case.
+pub fn vbv_maxrate_kbps(bitrate_kbps: u32) -> u32 {
+    bitrate_kbps * 3 / 2
+}
+
+/// [`vbv_maxrate_kbps`] in bit/s.
+pub fn vbv_maxrate_bps(bitrate_kbps: u32) -> u64 {
+    u64::from(vbv_maxrate_kbps(bitrate_kbps)) * 1000
+}
+
 impl Encoder {
     /// Stable queue/capability family name.
     pub fn family_name(self) -> &'static str {
@@ -252,17 +678,11 @@ impl Encoder {
     /// init, upload and encode graph before a session may select it; a driver
     /// that cannot reproduce the measurement falls back.
     pub fn video_codec_for(self, grade: OutputGrade) -> Option<&'static str> {
-        match grade {
-            OutputGrade::Sdr => Some(self.video_codec()),
-            // Measured: jellyfin-ffmpeg7 7.1.4-3, 2 cores, 1080p —
-            // Profile 5 decode -> tonemapx passthrough -> libx265 Main10
-            // veryfast at 11.0 fps, against 20.3 fps for today's SDR chain.
-            OutputGrade::Hdr10 => match self {
-                Encoder::Software => Some("libx265"),
-                Encoder::Qsv => Some("hevc_qsv"),
-                Encoder::Nvenc | Encoder::Vaapi | Encoder::VideoToolbox => None,
-            },
-        }
+        let (codec, depth) = match grade {
+            OutputGrade::Sdr => (VideoCodec::H264, 8),
+            OutputGrade::Hdr10 => (VideoCodec::Hevc, 10),
+        };
+        codec.measured_encoder(depth, grade, self)
     }
 
     /// Human label for logs/UI.
@@ -309,6 +729,7 @@ impl Encoder {
             (Encoder::Qsv, OutputGrade::Hdr10) => {
                 Some("format=p010le,hwupload=extra_hw_frames=64,format=qsv")
             }
+            (Encoder::Vaapi, OutputGrade::Hdr10) => Some("format=p010le,hwupload"),
             _ => self.filter_suffix(),
         }
     }
@@ -380,6 +801,44 @@ impl Encoder {
         )
     }
 
+    /// Emit the resolved output tuple. HEVC SDR never inherits the H.264
+    /// quality preset or profile; the exact native route uses bounded VBR.
+    pub fn encode_args_for_codec(
+        self,
+        codec: VideoCodec,
+        grade: OutputGrade,
+        bitrate_kbps: u32,
+        rate_control: EffectiveRateControl,
+        force_idr: bool,
+        software_threads: Option<u32>,
+    ) -> Vec<String> {
+        let mut args = self.encode_args_for(
+            grade,
+            bitrate_kbps,
+            rate_control,
+            force_idr,
+            software_threads,
+        );
+        if codec == VideoCodec::Hevc && grade == OutputGrade::Sdr {
+            assert_eq!(
+                self,
+                Encoder::VideoToolbox,
+                "only the observed native SDR encoder is admitted"
+            );
+            assert_eq!(rate_control, EffectiveRateControl::Vbr);
+            args[1] = "hevc_videotoolbox".to_owned();
+            args.extend([
+                "-profile:v".to_owned(),
+                "main".to_owned(),
+                "-allow_sw".to_owned(),
+                "0".to_owned(),
+                "-tag:v".to_owned(),
+                "hvc1".to_owned(),
+            ]);
+        }
+        args
+    }
+
     /// [`Encoder::encode_args`] for a chosen [`OutputGrade`].
     ///
     /// [`OutputGrade::Sdr`] delegates to the pre-M5 body byte-for-byte; the
@@ -408,7 +867,7 @@ impl Encoder {
             return self.hdr10_encode_args(bitrate_kbps, force_idr, software_threads);
         }
         let br = format!("{bitrate_kbps}k");
-        let maxrate = format!("{}k", bitrate_kbps * 3 / 2);
+        let maxrate = format!("{}k", vbv_maxrate_kbps(bitrate_kbps));
         let bufsize = format!("{}k", bitrate_kbps * 2);
         let idr = force_idr.then(|| self.forced_idr_flag()).flatten();
         let bounded = |v: Vec<&str>, include_target: bool| -> Vec<String> {
@@ -525,15 +984,43 @@ impl Encoder {
         let codec = self
             .video_codec_for(OutputGrade::Hdr10)
             .unwrap_or("libx265");
-        let mut args: Vec<String> = ["-c:v", codec, "-preset", "veryfast"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let mut args: Vec<String> = ["-c:v", codec].into_iter().map(str::to_owned).collect();
         match self {
+            Encoder::VideoToolbox => {
+                args.extend([
+                    "-profile:v".to_owned(),
+                    "main10".to_owned(),
+                    "-allow_sw".to_owned(),
+                    "0".to_owned(),
+                    "-tag:v".to_owned(),
+                    "hvc1".to_owned(),
+                ]);
+            }
             Encoder::Qsv => {
-                args.extend(["-profile:v".to_owned(), "main10".to_owned()]);
+                args.extend([
+                    "-preset".to_owned(),
+                    "veryfast".to_owned(),
+                    "-profile:v".to_owned(),
+                    "main10".to_owned(),
+                ]);
+            }
+            Encoder::Vaapi => {
+                // VAAPI accepts P010 surfaces and has no x265/preset options.
+                // Force IDR at each requested I-frame; VOD adds its own grid.
+                args.extend([
+                    "-profile:v".to_owned(),
+                    "main10".to_owned(),
+                    "-tier:v".to_owned(),
+                    "high".to_owned(),
+                    "-level:v".to_owned(),
+                    "4".to_owned(),
+                    "-idr_interval".to_owned(),
+                    "0".to_owned(),
+                ]);
             }
             _ => args.extend([
+                "-preset".to_owned(),
+                "veryfast".to_owned(),
                 "-x265-params".to_owned(),
                 "hdr10=1:repeat-headers=1".to_owned(),
             ]),
@@ -542,7 +1029,7 @@ impl Encoder {
             "-b:v".to_owned(),
             format!("{bitrate_kbps}k"),
             "-maxrate".to_owned(),
-            format!("{}k", bitrate_kbps * 3 / 2),
+            format!("{}k", vbv_maxrate_kbps(bitrate_kbps)),
             "-bufsize".to_owned(),
             format!("{}k", bitrate_kbps * 2),
             "-color_primaries".to_owned(),
@@ -567,7 +1054,7 @@ impl Encoder {
 }
 
 /// The DRI render node for VAAPI, overridable via `PLURX_VAAPI_DEVICE`.
-fn vaapi_device() -> String {
+pub(super) fn vaapi_device() -> String {
     std::env::var("PLURX_VAAPI_DEVICE")
         .ok()
         .filter(|v| !v.is_empty())
@@ -682,6 +1169,9 @@ pub struct EncoderCaps {
     pub forced_idr: ForcedIdr,
     #[serde(default)]
     pub quality_rc: QualityRc,
+    /// Completed exact-node experiments; absent cells retain legacy flags.
+    #[serde(default)]
+    pub sdr_avc: Vec<super::QualifiedSdrAvc>,
 }
 
 impl EncoderCaps {
@@ -744,6 +1234,7 @@ pub fn parse_encoder_list(output: &str) -> EncoderCaps {
         // that is what `validate` measures.
         forced_idr: ForcedIdr::default(),
         quality_rc: QualityRc::default(),
+        sdr_avc: Vec::new(),
     }
 }
 
@@ -852,6 +1343,72 @@ fn validation_args(
     args.extend(encoder.encode_args(PROBE_BITRATE_KBPS, rate_control, force_idr, None));
     args.extend(["-f".into(), "null".into(), "-".into()]);
     args
+}
+
+/// Compare a fixed 240-frame 720p SDR workload using production VBR flags.
+/// Discard the warm-up and use the median of three complete encodes.
+pub async fn benchmark_encoder(
+    ffmpeg: &str,
+    encoder: Encoder,
+    force_idr: bool,
+    software_threads: u32,
+) -> Option<f64> {
+    let args = benchmark_args(encoder, force_idr, software_threads);
+    let mut times = Vec::new();
+    for pass in 0..4 {
+        let mut command = tokio::process::Command::new(ffmpeg);
+        command.args(&args).stdin(std::process::Stdio::null());
+        let start = std::time::Instant::now();
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            crate::process::output_job_owned(
+                &mut command,
+                crate::process::ChildWork::background("transcoder benchmark"),
+            ),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        if !output.status.success() || !benchmark_completed(&output.stdout) {
+            return None;
+        }
+        if pass > 0 {
+            times.push(start.elapsed().as_secs_f64());
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    Some(240.0 / times[1])
+}
+
+fn benchmark_args(encoder: Encoder, force_idr: bool, software_threads: u32) -> Vec<String> {
+    let mut args = validation_args(encoder, EffectiveRateControl::Vbr, force_idr);
+    *args
+        .iter_mut()
+        .find(|arg| arg.starts_with("testsrc="))
+        .expect("probe source") = "testsrc2=size=1280x720:rate=30:duration=8".into();
+    args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into()]);
+    if encoder == Encoder::Software {
+        let at = args
+            .iter()
+            .rposition(|arg| arg == "-f")
+            .expect("null output");
+        args.splice(
+            at..at,
+            ["-threads".into(), software_threads.max(1).to_string()],
+        );
+    }
+    args
+}
+
+fn benchmark_completed(output: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(output);
+    text.lines().any(|line| line == "progress=end")
+        && text
+            .lines()
+            .filter_map(|line| line.strip_prefix("frame="))
+            .filter_map(|value| value.trim().parse::<u32>().ok())
+            .next_back()
+            == Some(240)
 }
 
 /// What one family's probe concluded.
@@ -1239,6 +1796,7 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         validate_quality_rate_control(ffmpeg_bin, Encoder::Software, software_quality, false).await;
     caps.quality_rc
         .set_supported(Encoder::Software, software_quality_rc);
+    caps.sdr_avc = super::avc_qualification::qualify(ffmpeg_bin, &caps).await;
     tracing::info!(
         nvenc = caps.nvenc,
         qsv = caps.qsv,
@@ -1257,6 +1815,44 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn benchmark_uses_the_production_software_thread_allocation() {
+        let args = benchmark_args(Encoder::Software, false, 3);
+        assert!(args.windows(2).any(|pair| pair == ["-threads", "3"]));
+        let production = Encoder::Software.encode_args(
+            PROBE_BITRATE_KBPS,
+            EffectiveRateControl::Vbr,
+            false,
+            Some(3),
+        );
+        assert!(production.windows(2).any(|pair| pair == ["-threads", "3"]));
+    }
+
+    #[test]
+    fn benchmark_requires_all_frames_and_a_completed_progress_report() {
+        assert!(benchmark_completed(
+            b"frame=10\nprogress=continue\nframe=240\nprogress=end\n"
+        ));
+        for output in [
+            b"frame=0\nprogress=end\n".as_slice(),
+            b"frame=239\nprogress=end\n",
+            b"frame=240\nprogress=continue\n",
+            b"",
+            b"frame=oops\nprogress=end\n",
+        ] {
+            assert!(!benchmark_completed(output));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a real FFmpeg with libx264"]
+    async fn benchmark_real_cpu_emits_a_complete_positive_measurement() {
+        let fps = benchmark_encoder("ffmpeg", Encoder::Software, false, 3)
+            .await
+            .expect("complete CPU benchmark");
+        assert!(fps.is_finite() && fps > 0.0);
+    }
 
     #[test]
     fn decoder_inventory_advertises_only_canonical_portable_video_decoders() {
@@ -1396,9 +1992,38 @@ mod tests {
         }
     }
 
-    /// Only the software and QSV HDR10 encoders have completed the real-node
-    /// output and throughput measurements. Absence remains a refusal, not an
-    /// invitation to infer support from `ffmpeg -encoders`.
+    /// Hardware HDR recipes remain explicit by family; absence is a refusal.
+    /// Runtime graph proofs and qualification evidence are separate from argv.
+    #[test]
+    fn vaapi_hdr10_uses_p010_main10_without_software_encoder_options() {
+        assert_eq!(
+            Encoder::Vaapi.video_codec_for(OutputGrade::Hdr10),
+            Some("hevc_vaapi")
+        );
+        assert_eq!(
+            Encoder::Vaapi.filter_suffix_for(OutputGrade::Hdr10),
+            Some("format=p010le,hwupload")
+        );
+        let args = Encoder::Vaapi.encode_args_for(
+            OutputGrade::Hdr10,
+            20_000,
+            EffectiveRateControl::Vbr,
+            false,
+            None,
+        );
+        assert!(args.windows(2).any(|w| w == ["-profile:v", "main10"]));
+        assert!(args.windows(2).any(|w| w == ["-color_trc", "smpte2084"]));
+        assert!(!args.iter().any(|v| v == "-preset" || v == "-x265-params"));
+        assert_eq!(
+            Encoder::Vaapi.video_codec_for(OutputGrade::Sdr),
+            Some("h264_vaapi")
+        );
+        assert_eq!(
+            Encoder::Vaapi.filter_suffix_for(OutputGrade::Sdr),
+            Some("format=nv12,hwupload")
+        );
+    }
+
     #[test]
     fn software_and_qsv_have_measured_hevc_main10_encoders() {
         assert_eq!(
@@ -1409,13 +2034,11 @@ mod tests {
             Encoder::Qsv.video_codec_for(OutputGrade::Hdr10),
             Some("hevc_qsv")
         );
-        for encoder in [Encoder::Nvenc, Encoder::Vaapi, Encoder::VideoToolbox] {
-            assert_eq!(
-                encoder.video_codec_for(OutputGrade::Hdr10),
-                None,
-                "{encoder:?} has an unmeasured HEVC Main10 encoder at best"
-            );
-        }
+        assert_eq!(
+            Encoder::VideoToolbox.video_codec_for(OutputGrade::Hdr10),
+            Some("hevc_videotoolbox")
+        );
+        assert_eq!(Encoder::Nvenc.video_codec_for(OutputGrade::Hdr10), None);
     }
 
     /// Every colour term of a grade comes from the grade, so the PQ/8-bit

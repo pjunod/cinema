@@ -1,0 +1,48 @@
+Input #0, nut, from '/work/reconstructed.nut':
+  Metadata:
+    encoder         : Lavf59.27.100
+  Duration: 00:00:00.21, start: 0.000000, bitrate: 5686 kb/s
+  Stream #0:0: Video: rawvideo (RGB0 / 0x30424752), rgb48le, 64x64, 24 fps, 24 tbr, 64k tbn
+Stream mapping:
+  Stream #0:0 -> #0:0 (rawvideo (native) -> hevc (libx265))
+x265 [info]: HEVC encoder version 3.5+1-f0c1022b6
+x265 [info]: build info [Linux][GCC 12.2.0][32 bit][noasm] 10bit
+x265 [info]: using cpu capabilities: NEON
+x265 [info]: Main 10 profile, Level-1 (Main tier)
+x265 [warning]: Too few rows/columns, --wpp disabled
+x265 [error]: Failed to genrate CPU mask
+x265 [info]: Thread pool created using 1 threads
+x265 [info]: Slices                              : 1
+x265 [info]: frame threads / pool features       : 1 / none
+libnuma: Warning: Cannot read node cpumask from sysfs
+x265 [warning]: Source height < 720p; disabling lookahead-slices
+numa_sched_setaffinity_v2_int() failed: Invalid argument
+set_mempolicy: Operation not permitted
+set_mempolicy: Operation not permitted
+numa_sched_setaffinity_v2_int() failed: Invalid argument
+set_mempolicy: Operation not permitted
+set_mempolicy: Operation not permitted
+x265 [info]: Coding QT: max CU size, min CU size : 32 / 16
+x265 [info]: Residual QT: max TU size, max depth : 32 / 1 inter / 1 intra
+x265 [info]: ME / range / subpel / merge         : dia / 57 / 0 / 2
+x265 [info]: Lookahead / bframes / badapt        : 5 / 0 / 0
+x265 [info]: b-pyramid / weightp / weightb       : 0 / 0 / 0
+x265 [info]: References / ref-limit  cu / depth  : 1 / off / off
+x265 [info]: Rate Control                        : CQP-0
+x265 [info]: tools: rd=2 psy-rd=2.00 early-skip rskip mode=1 tmvp fast-intra
+x265 [info]: tools: strong-intra-smoothing deblock
+Output #0, matroska, to '/work/hdr10.mkv':
+  Metadata:
+    encoder         : Lavf59.27.100
+  Stream #0:0: Video: hevc, yuv420p10le(tv, bt2020nc/bt2020/smpte2084, progressive), 64x64, q=2-31, 24 fps, 1k tbn
+    Metadata:
+      encoder         : Lavc59.37.100 libx265
+    Side data:
+      cpb: bitrate max/min/avg: 0/0/0 buffer size: 0 vbv_delay: N/A
+frame=    1 fps=0.0 q=0.0 size=       3kB time=00:00:00.00 bitrate=N/A speed=   0x    frame=    6 fps=0.0 q=0.0 Lsize=       9kB time=00:00:00.00 bitrate=N/A speed=   0x    
+video:6kB audio:0kB subtitle:0kB other streams:0kB global headers:2kB muxing overhead: 55.941822%
+x265 [info]: frame I:      1, Avg QP:0.00  kb/s: 153.02  
+x265 [info]: frame P:      5, Avg QP:0.00  kb/s: 92.43   
+x265 [info]: consecutive B-frames: 100.0% 
+
+encoded 6 frames in 0.01s (752.63 fps), 102.53 kb/s, Avg QP:0.00

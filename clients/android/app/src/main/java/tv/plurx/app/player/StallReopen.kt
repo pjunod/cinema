@@ -330,7 +330,7 @@ internal class SessionCreateCoordinator(
                 // disappeared. An ordinary same-recipe repair carries no
                 // binding, so retrying every 400 under a new identity would
                 // duplicate a request rejected for another reason.
-                if (body.previous_session_id == null || body.reopen_reason == null ||
+                if (body.previous_session_id == null || body.reopen_reason != tv.plurx.app.data.ReopenReason.Stall ||
                     !isBadRequest(failure)
                 ) throw failure
                 if (!isCurrent()) return@withLock null

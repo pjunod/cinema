@@ -1,0 +1,23 @@
+{
+  "source_commit": "1cc9468936e3737a3e6993269cc18e06ace8e534",
+  "wrapper_commit": "65904bfade2f6715945f52e5e070f990d7436be8",
+  "run_id": 4000,
+  "ui_index": 3979,
+  "job_id": 41558,
+  "task_id": 15515,
+  "result": "failure without compiler completion",
+  "started_at_from_log": "2026-10-03T07:04:37.4446084Z",
+  "run_stopped_at": "2026-10-03T07:26:46Z",
+  "configured_timeout_minutes": 30,
+  "last_log_timestamp": "2026-10-03T07:13:35.7692144Z",
+  "observations": [
+    "Runner gha-m6-general-03 UUID1c596a83-c2aa-417e-82f9-47946499236e became offline; all four m6 general runner registrations were offline.",
+    "No compiler error or final exit/cleanup output in the job log.",
+    "m6 host remained reachable, uptime12days, no kernel OOM entries in requested interval.",
+    "Existing CI Incus instances reported Running; a read-only guest unit listing did not respond and was terminated locally. No runner/container/host mutation performed."
+  ],
+  "diagnosis": "Runner connectivity/liveness failure; exact underlying cause unproven. No inference of OOM or source error.",
+  "next_action": "Only Windows retry on verified online baremetal/high-cpu pool, same source/container/toolchain/command.",
+  "log": "selective-windows-41558.log.gz",
+  "log_sha256": "159b2e8e96043315e82f73e78dfb44bb8572b29aac01a5fb8afe0e12853311b0"
+}

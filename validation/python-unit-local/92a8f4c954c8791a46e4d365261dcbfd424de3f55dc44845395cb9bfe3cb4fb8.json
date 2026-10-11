@@ -1,0 +1,22 @@
+{
+  "branch": "codex/s10-public-create-wire-control",
+  "command": "PYTHONPATH=tests/validation python3 -m unittest -v test_runner.CatalogCase.test_ci_scope_keeps_expensive_jobs_on_their_affected_surfaces",
+  "output": "test_ci_scope_keeps_expensive_jobs_on_their_affected_surfaces (test_runner.CatalogCase.test_ci_scope_keeps_expensive_jobs_on_their_affected_surfaces) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.211s\n\nOK\n",
+  "repository": 1,
+  "result": {
+    "count": 1,
+    "errors": 0,
+    "expected_failures": 0,
+    "failed": 0,
+    "skipped": 0,
+    "unexpected_successes": 0
+  },
+  "source_commit": "9165ec8c95154983340d0956235815096b5427b4",
+  "suite": "validation",
+  "test_file": "tests/validation/test_runner.py",
+  "test_file_sha256": "9b47aa4e70938a3faa601a67310d31b1385c673ade01b771b36c70e444d3ba27",
+  "test_ids": [
+    "test_runner.CatalogCase.test_ci_scope_keeps_expensive_jobs_on_their_affected_surfaces"
+  ],
+  "version": 1
+}

@@ -171,6 +171,13 @@ Add to `DeliveryView`:
 pub subtitle_readiness: Option<String>,
 ```
 
+The October reliability repair adds optional `subtitle_revision` beside
+`subtitle_readiness`: an opaque equality token for the ready source, track and
+window/whole-track representation. Clients retry once for the first ready of
+an intent and once for a changed revision, including ready-window to
+ready-whole-track without observing warming. See the
+[completion ledger](../clients/SUBTITLE-RELIABILITY-COMPLETION.md).
+
 Rules, each with its reason:
 
 - **Populated only when the request's `selection.subtitle.mode` names a

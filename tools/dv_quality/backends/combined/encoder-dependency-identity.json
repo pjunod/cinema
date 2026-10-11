@@ -1,0 +1,1086 @@
+{
+  "schema": 1,
+  "scope": "observed immutable image binaries/ELF closure; not source rebuild or quality qualification",
+  "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+  "platform": "linux/arm64",
+  "ffmpeg_version": "ffmpeg version 5.1.9-0+deb12u1 Copyright (c) 2000-2026 the FFmpeg developers\nbuilt with gcc 12 (Debian 12.2.0-14+deb12u1)\nconfiguration: --prefix=/usr --extra-version=0+deb12u1 --toolchain=hardened --libdir=/usr/lib/aarch64-linux-gnu --incdir=/usr/include/aarch64-linux-gnu --arch=arm64 --enable-gpl --disable-stripping --enable-gnutls --enable-ladspa --enable-libaom --enable-libass --enable-libbluray --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libflite --enable-libfontconfig --enable-libfreetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libjack --enable-libmp3lame --enable-libmysofa --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libpulse --enable-librabbitmq --enable-librist --enable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libtheora --enable-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-libwebp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-libzmq --enable-libzvbi --enable-lv2 --enable-omx --enable-openal --enable-opencl --enable-opengl --enable-sdl2 --disable-sndio --enable-libjxl --enable-pocketsphinx --enable-librsvg --enable-libdc1394 --enable-libdrm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-libx264 --enable-libplacebo --enable-librav1e --enable-shared\nlibavutil      57. 28.100 / 57. 28.100\nlibavcodec     59. 37.100 / 59. 37.100\nlibavformat    59. 27.100 / 59. 27.100\nlibavdevice    59.  7.100 / 59.  7.100\nlibavfilter     8. 44.100 /  8. 44.100\nlibswscale      6.  7.100 /  6.  7.100\nlibswresample   4.  7.100 /  4.  7.100\nlibpostproc    56.  6.100 / 56.  6.100\n",
+  "x265_package": "3.5-2+b1",
+  "development_packages": "x265/zimg development packages absent; CLI encoding available",
+  "ldd": {
+    "/usr/bin/ffmpeg": "\tlinux-vdso.so.1 (0x0000ffffb784c000)\n\tlibavdevice.so.59 => /lib/aarch64-linux-gnu/libavdevice.so.59 (0x0000ffffb7750000)\n\tlibavfilter.so.8 => /lib/aarch64-linux-gnu/libavfilter.so.8 (0x0000ffffb6c30000)\n\tlibavformat.so.59 => /lib/aarch64-linux-gnu/libavformat.so.59 (0x0000ffffb6960000)\n\tlibavcodec.so.59 => /lib/aarch64-linux-gnu/libavcodec.so.59 (0x0000ffffb5770000)\n\tlibpostproc.so.56 => /lib/aarch64-linux-gnu/libpostproc.so.56 (0x0000ffffb5740000)\n\tlibswresample.so.4 => /lib/aarch64-linux-gnu/libswresample.so.4 (0x0000ffffb5700000)\n\tlibswscale.so.6 => /lib/aarch64-linux-gnu/libswscale.so.6 (0x0000ffffb5660000)\n\tlibavutil.so.57 => /lib/aarch64-linux-gnu/libavutil.so.57 (0x0000ffffb5470000)\n\tlibm.so.6 => /lib/aarch64-linux-gnu/libm.so.6 (0x0000ffffb53c0000)\n\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffffb5210000)\n\t/lib/ld-linux-aarch64.so.1 (0x0000ffffb7810000)\n\tlibraw1394.so.11 => /lib/aarch64-linux-gnu/libraw1394.so.11 (0x0000ffffb51e0000)\n\tlibavc1394.so.0 => /lib/aarch64-linux-gnu/libavc1394.so.0 (0x0000ffffb51c0000)\n\tlibrom1394.so.0 => /lib/aarch64-linux-gnu/librom1394.so.0 (0x0000ffffb51a0000)\n\tlibiec61883.so.0 => /lib/aarch64-linux-gnu/libiec61883.so.0 (0x0000ffffb5170000)\n\tlibjack.so.0 => /lib/aarch64-linux-gnu/libjack.so.0 (0x0000ffffb5100000)\n\tlibdrm.so.2 => /lib/aarch64-linux-gnu/libdrm.so.2 (0x0000ffffb50c0000)\n\tlibopenal.so.1 => /lib/aarch64-linux-gnu/libopenal.so.1 (0x0000ffffb4fc0000)\n\tlibxcb.so.1 => /lib/aarch64-linux-gnu/libxcb.so.1 (0x0000ffffb4f70000)\n\tlibxcb-shm.so.0 => /lib/aarch64-linux-gnu/libxcb-shm.so.0 (0x0000ffffb4f40000)\n\tlibxcb-shape.so.0 => /lib/aarch64-linux-gnu/libxcb-shape.so.0 (0x0000ffffb4f10000)\n\tlibxcb-xfixes.so.0 => /lib/aarch64-linux-gnu/libxcb-xfixes.so.0 (0x0000ffffb4ee0000)\n\tlibcdio_paranoia.so.2 => /lib/aarch64-linux-gnu/libcdio_paranoia.so.2 (0x0000ffffb4eb0000)\n\tlibcdio_cdda.so.2 => /lib/aarch64-linux-gnu/libcdio_cdda.so.2 (0x0000ffffb4e80000)\n\tlibdc1394.so.25 => /lib/aarch64-linux-gnu/libdc1394.so.25 (0x0000ffffb4df0000)\n\tlibasound.so.2 => /lib/aarch64-linux-gnu/libasound.so.2 (0x0000ffffb4cd0000)\n\tlibcaca.so.0 => /lib/aarch64-linux-gnu/libcaca.so.0 (0x0000ffffb4be0000)\n\tlibGL.so.1 => /lib/aarch64-linux-gnu/libGL.so.1 (0x0000ffffb4ae0000)\n\tlibpulse.so.0 => /lib/aarch64-linux-gnu/libpulse.so.0 (0x0000ffffb4a70000)\n\tlibSDL2-2.0.so.0 => /lib/aarch64-linux-gnu/libSDL2-2.0.so.0 (0x0000ffffb48a0000)\n\tlibXv.so.1 => /lib/aarch64-linux-gnu/libXv.so.1 (0x0000ffffb4880000)\n\tlibX11.so.6 => /lib/aarch64-linux-gnu/libX11.so.6 (0x0000ffffb4720000)\n\tlibXext.so.6 => /lib/aarch64-linux-gnu/libXext.so.6 (0x0000ffffb46e0000)\n\tlibpocketsphinx.so.3 => /lib/aarch64-linux-gnu/libpocketsphinx.so.3 (0x0000ffffb4670000)\n\tlibsphinxbase.so.3 => /lib/aarch64-linux-gnu/libsphinxbase.so.3 (0x0000ffffb4610000)\n\tlibbs2b.so.0 => /lib/aarch64-linux-gnu/libbs2b.so.0 (0x0000ffffb45e0000)\n\tliblilv-0.so.0 => /lib/aarch64-linux-gnu/liblilv-0.so.0 (0x0000ffffb45b0000)\n\tlibrubberband.so.2 => /lib/aarch64-linux-gnu/librubberband.so.2 (0x0000ffffb4540000)\n\tlibmysofa.so.1 => /lib/aarch64-linux-gnu/libmysofa.so.1 (0x0000ffffb4510000)\n\tlibflite_cmu_us_awb.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_awb.so.1 (0x0000ffffb4120000)\n\tlibflite_cmu_us_kal.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_kal.so.1 (0x0000ffffb3fa0000)\n\tlibflite_cmu_us_kal16.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_kal16.so.1 (0x0000ffffb3ba0000)\n\tlibflite_cmu_us_rms.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_rms.so.1 (0x0000ffffb3720000)\n\tlibflite_cmu_us_slt.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_slt.so.1 (0x0000ffffb3330000)\n\tlibflite.so.1 => /lib/aarch64-linux-gnu/libflite.so.1 (0x0000ffffb32d0000)\n\tlibfribidi.so.0 => /lib/aarch64-linux-gnu/libfribidi.so.0 (0x0000ffffb32a0000)\n\tlibplacebo.so.208 => /lib/aarch64-linux-gnu/libplacebo.so.208 (0x0000ffffb2b90000)\n\tlibass.so.9 => /lib/aarch64-linux-gnu/libass.so.9 (0x0000ffffb2b40000)\n\tlibva.so.2 => /lib/aarch64-linux-gnu/libva.so.2 (0x0000ffffb2af0000)\n\tlibstdc++.so.6 => /lib/aarch64-linux-gnu/libstdc++.so.6 (0x0000ffffb28d0000)\n\tlibvidstab.so.1.1 => /lib/aarch64-linux-gnu/libvidstab.so.1.1 (0x0000ffffb28a0000)\n\tlibzmq.so.5 => /lib/aarch64-linux-gnu/libzmq.so.5 (0x0000ffffb27d0000)\n\tlibzimg.so.2 => /lib/aarch64-linux-gnu/libzimg.so.2 (0x0000ffffb2760000)\n\tlibOpenCL.so.1 => /lib/aarch64-linux-gnu/libOpenCL.so.1 (0x0000ffffb2730000)\n\tlibfontconfig.so.1 => /lib/aarch64-linux-gnu/libfontconfig.so.1 (0x0000ffffb26c0000)\n\tlibfreetype.so.6 => /lib/aarch64-linux-gnu/libfreetype.so.6 (0x0000ffffb25e0000)\n\tlibz.so.1 => /lib/aarch64-linux-gnu/libz.so.1 (0x0000ffffb25a0000)\n\tlibxml2.so.2 => /lib/aarch64-linux-gnu/libxml2.so.2 (0x0000ffffb23e0000)\n\tlibbz2.so.1.0 => /lib/aarch64-linux-gnu/libbz2.so.1.0 (0x0000ffffb23b0000)\n\tlibgme.so.0 => /lib/aarch64-linux-gnu/libgme.so.0 (0x0000ffffb2340000)\n\tlibopenmpt.so.0 => /lib/aarch64-linux-gnu/libopenmpt.so.0 (0x0000ffffb2120000)\n\tlibchromaprint.so.1 => /lib/aarch64-linux-gnu/libchromaprint.so.1 (0x0000ffffb20e0000)\n\tlibbluray.so.2 => /lib/aarch64-linux-gnu/libbluray.so.2 (0x0000ffffb2070000)\n\tlibgnutls.so.30 => /lib/aarch64-linux-gnu/libgnutls.so.30 (0x0000ffffb1e20000)\n\tlibrabbitmq.so.4 => /lib/aarch64-linux-gnu/librabbitmq.so.4 (0x0000ffffb1de0000)\n\tlibrist.so.4 => /lib/aarch64-linux-gnu/librist.so.4 (0x0000ffffb1d90000)\n\tlibsrt-gnutls.so.1.5 => /lib/aarch64-linux-gnu/libsrt-gnutls.so.1.5 (0x0000ffffb1cb0000)\n\tlibssh-gcrypt.so.4 => /lib/aarch64-linux-gnu/libssh-gcrypt.so.4 (0x0000ffffb1c00000)\n\tlibvpx.so.7 => /lib/aarch64-linux-gnu/libvpx.so.7 (0x0000ffffb19e0000)\n\tlibwebpmux.so.3 => /lib/aarch64-linux-gnu/libwebpmux.so.3 (0x0000ffffb19b0000)\n\tlibwebp.so.7 => /lib/aarch64-linux-gnu/libwebp.so.7 (0x0000ffffb1930000)\n\tliblzma.so.5 => /lib/aarch64-linux-gnu/liblzma.so.5 (0x0000ffffb18e0000)\n\tlibdav1d.so.6 => /lib/aarch64-linux-gnu/libdav1d.so.6 (0x0000ffffb17d0000)\n\tlibrsvg-2.so.2 => /lib/aarch64-linux-gnu/librsvg-2.so.2 (0x0000ffffb0e50000)\n\tlibgobject-2.0.so.0 => /lib/aarch64-linux-gnu/libgobject-2.0.so.0 (0x0000ffffb0dd0000)\n\tlibglib-2.0.so.0 => /lib/aarch64-linux-gnu/libglib-2.0.so.0 (0x0000ffffb0c70000)\n\tlibcairo.so.2 => /lib/aarch64-linux-gnu/libcairo.so.2 (0x0000ffffb0b40000)\n\tlibzvbi.so.0 => /lib/aarch64-linux-gnu/libzvbi.so.0 (0x0000ffffb0aa0000)\n\tlibsnappy.so.1 => /lib/aarch64-linux-gnu/libsnappy.so.1 (0x0000ffffb0a70000)\n\tlibaom.so.3 => /lib/aarch64-linux-gnu/libaom.so.3 (0x0000ffffb0690000)\n\tlibcodec2.so.1.0 => /lib/aarch64-linux-gnu/libcodec2.so.1.0 (0x0000ffffaf670000)\n\tlibgsm.so.1 => /lib/aarch64-linux-gnu/libgsm.so.1 (0x0000ffffaf640000)\n\tlibjxl.so.0.7 => /lib/aarch64-linux-gnu/libjxl.so.0.7 (0x0000ffffaf490000)\n\tlibjxl_threads.so.0.7 => /lib/aarch64-linux-gnu/libjxl_threads.so.0.7 (0x0000ffffaf460000)\n\tlibmp3lame.so.0 => /lib/aarch64-linux-gnu/libmp3lame.so.0 (0x0000ffffaf3d0000)\n\tlibopenjp2.so.7 => /lib/aarch64-linux-gnu/libopenjp2.so.7 (0x0000ffffaf350000)\n\tlibopus.so.0 => /lib/aarch64-linux-gnu/libopus.so.0 (0x0000ffffaf2d0000)\n\tlibrav1e.so.0 => /lib/aarch64-linux-gnu/librav1e.so.0 (0x0000ffffaf0e0000)\n\tlibshine.so.3 => /lib/aarch64-linux-gnu/libshine.so.3 (0x0000ffffaf0c0000)\n\tlibspeex.so.1 => /lib/aarch64-linux-gnu/libspeex.so.1 (0x0000ffffaf080000)\n\tlibSvtAv1Enc.so.1 => /lib/aarch64-linux-gnu/libSvtAv1Enc.so.1 (0x0000ffffaea00000)\n\tlibtheoraenc.so.1 => /lib/aarch64-linux-gnu/libtheoraenc.so.1 (0x0000ffffae9b0000)\n\tlibtheoradec.so.1 => /lib/aarch64-linux-gnu/libtheoradec.so.1 (0x0000ffffae970000)\n\tlibtwolame.so.0 => /lib/aarch64-linux-gnu/libtwolame.so.0 (0x0000ffffae930000)\n\tlibvorbis.so.0 => /lib/aarch64-linux-gnu/libvorbis.so.0 (0x0000ffffae8f0000)\n\tlibvorbisenc.so.2 => /lib/aarch64-linux-gnu/libvorbisenc.so.2 (0x0000ffffae830000)\n\tlibx264.so.164 => /lib/aarch64-linux-gnu/libx264.so.164 (0x0000ffffae5d0000)\n\tlibx265.so.199 => /lib/aarch64-linux-gnu/libx265.so.199 (0x0000ffffae2f0000)\n\tlibxvidcore.so.4 => /lib/aarch64-linux-gnu/libxvidcore.so.4 (0x0000ffffae1f0000)\n\tlibsoxr.so.0 => /lib/aarch64-linux-gnu/libsoxr.so.0 (0x0000ffffae180000)\n\tlibva-drm.so.2 => /lib/aarch64-linux-gnu/libva-drm.so.2 (0x0000ffffae150000)\n\tlibva-x11.so.2 => /lib/aarch64-linux-gnu/libva-x11.so.2 (0x0000ffffae120000)\n\tlibvdpau.so.1 => /lib/aarch64-linux-gnu/libvdpau.so.1 (0x0000ffffae0f0000)\n\tlibdb-5.3.so => /lib/aarch64-linux-gnu/libdb-5.3.so (0x0000ffffadf30000)\n\tlibgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1 (0x0000ffffadef0000)\n\tlibsndio.so.7.0 => /lib/aarch64-linux-gnu/libsndio.so.7.0 (0x0000ffffadec0000)\n\tlibpthread.so.0 => /lib/aarch64-linux-gnu/libpthread.so.0 (0x0000ffffade90000)\n\tlibdl.so.2 => /lib/aarch64-linux-gnu/libdl.so.2 (0x0000ffffade60000)\n\tlibXau.so.6 => /lib/aarch64-linux-gnu/libXau.so.6 (0x0000ffffade40000)\n\tlibXdmcp.so.6 => /lib/aarch64-linux-gnu/libXdmcp.so.6 (0x0000ffffade20000)\n\tlibcdio.so.19 => /lib/aarch64-linux-gnu/libcdio.so.19 (0x0000ffffaddd0000)\n\tlibusb-1.0.so.0 => /lib/aarch64-linux-gnu/libusb-1.0.so.0 (0x0000ffffadda0000)\n\tlibslang.so.2 => /lib/aarch64-linux-gnu/libslang.so.2 (0x0000ffffad9c0000)\n\tlibncursesw.so.6 => /lib/aarch64-linux-gnu/libncursesw.so.6 (0x0000ffffad960000)\n\tlibtinfo.so.6 => /lib/aarch64-linux-gnu/libtinfo.so.6 (0x0000ffffad910000)\n\tlibGLdispatch.so.0 => /lib/aarch64-linux-gnu/libGLdispatch.so.0 (0x0000ffffad780000)\n\tlibGLX.so.0 => /lib/aarch64-linux-gnu/libGLX.so.0 (0x0000ffffad720000)\n\tlibpulsecommon-16.1.so => /usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so (0x0000ffffad680000)\n\tlibdbus-1.so.3 => /lib/aarch64-linux-gnu/libdbus-1.so.3 (0x0000ffffad600000)\n\tlibsamplerate.so.0 => /lib/aarch64-linux-gnu/libsamplerate.so.0 (0x0000ffffad470000)\n\tlibXcursor.so.1 => /lib/aarch64-linux-gnu/libXcursor.so.1 (0x0000ffffad450000)\n\tlibXi.so.6 => /lib/aarch64-linux-gnu/libXi.so.6 (0x0000ffffad420000)\n\tlibXfixes.so.3 => /lib/aarch64-linux-gnu/libXfixes.so.3 (0x0000ffffad3f0000)\n\tlibXrandr.so.2 => /lib/aarch64-linux-gnu/libXrandr.so.2 (0x0000ffffad3d0000)\n\tlibXss.so.1 => /lib/aarch64-linux-gnu/libXss.so.1 (0x0000ffffad3b0000)\n\tlibgbm.so.1 => /lib/aarch64-linux-gnu/libgbm.so.1 (0x0000ffffad380000)\n\tlibwayland-egl.so.1 => /lib/aarch64-linux-gnu/libwayland-egl.so.1 (0x0000ffffad350000)\n\tlibwayland-client.so.0 => /lib/aarch64-linux-gnu/libwayland-client.so.0 (0x0000ffffad320000)\n\tlibwayland-cursor.so.0 => /lib/aarch64-linux-gnu/libwayland-cursor.so.0 (0x0000ffffad2f0000)\n\tlibxkbcommon.so.0 => /lib/aarch64-linux-gnu/libxkbcommon.so.0 (0x0000ffffad280000)\n\tlibdecor-0.so.0 => /lib/aarch64-linux-gnu/libdecor-0.so.0 (0x0000ffffad250000)\n\tlibblas.so.3 => /lib/aarch64-linux-gnu/libblas.so.3 (0x0000ffffad1d0000)\n\tliblapack.so.3 => /lib/aarch64-linux-gnu/liblapack.so.3 (0x0000ffffacc60000)\n\tlibserd-0.so.0 => /lib/aarch64-linux-gnu/libserd-0.so.0 (0x0000ffffacc20000)\n\tlibsord-0.so.0 => /lib/aarch64-linux-gnu/libsord-0.so.0 (0x0000ffffacbf0000)\n\tlibsratom-0.so.0 => /lib/aarch64-linux-gnu/libsratom-0.so.0 (0x0000ffffacbc0000)\n\tlibflite_usenglish.so.1 => /lib/aarch64-linux-gnu/libflite_usenglish.so.1 (0x0000ffffacb80000)\n\tlibflite_cmulex.so.1 => /lib/aarch64-linux-gnu/libflite_cmulex.so.1 (0x0000ffffacac0000)\n\tliblcms2.so.2 => /lib/aarch64-linux-gnu/liblcms2.so.2 (0x0000ffffaca40000)\n\tlibvulkan.so.1 => /lib/aarch64-linux-gnu/libvulkan.so.1 (0x0000ffffac9a0000)\n\tlibepoxy.so.0 => /lib/aarch64-linux-gnu/libepoxy.so.0 (0x0000ffffac840000)\n\tlibharfbuzz.so.0 => /lib/aarch64-linux-gnu/libharfbuzz.so.0 (0x0000ffffac720000)\n\tlibgomp.so.1 => /lib/aarch64-linux-gnu/libgomp.so.1 (0x0000ffffac6b0000)\n\tlibbsd.so.0 => /lib/aarch64-linux-gnu/libbsd.so.0 (0x0000ffffac670000)\n\tlibsodium.so.23 => /lib/aarch64-linux-gnu/libsodium.so.23 (0x0000ffffac610000)\n\tlibpgm-5.3.so.0 => /lib/aarch64-linux-gnu/libpgm-5.3.so.0 (0x0000ffffac5a0000)\n\tlibnorm.so.1 => /lib/aarch64-linux-gnu/libnorm.so.1 (0x0000ffffac460000)\n\tlibgssapi_krb5.so.2 => /lib/aarch64-linux-gnu/libgssapi_krb5.so.2 (0x0000ffffac3f0000)\n\tlibexpat.so.1 => /lib/aarch64-linux-gnu/libexpat.so.1 (0x0000ffffac3a0000)\n\tlibpng16.so.16 => /lib/aarch64-linux-gnu/libpng16.so.16 (0x0000ffffac340000)\n\tlibbrotlidec.so.1 => /lib/aarch64-linux-gnu/libbrotlidec.so.1 (0x0000ffffac310000)\n\tlibicuuc.so.72 => /lib/aarch64-linux-gnu/libicuuc.so.72 (0x0000ffffac0f0000)\n\tlibmpg123.so.0 => /lib/aarch64-linux-gnu/libmpg123.so.0 (0x0000ffffac080000)\n\tlibvorbisfile.so.3 => /lib/aarch64-linux-gnu/libvorbisfile.so.3 (0x0000ffffac060000)\n\tlibudfread.so.0 => /lib/aarch64-linux-gnu/libudfread.so.0 (0x0000ffffac040000)\n\tlibp11-kit.so.0 => /lib/aarch64-linux-gnu/libp11-kit.so.0 (0x0000ffffabef0000)\n\tlibidn2.so.0 => /lib/aarch64-linux-gnu/libidn2.so.0 (0x0000ffffabea0000)\n\tlibunistring.so.2 => /lib/aarch64-linux-gnu/libunistring.so.2 (0x0000ffffabcd0000)\n\tlibtasn1.so.6 => /lib/aarch64-linux-gnu/libtasn1.so.6 (0x0000ffffabc90000)\n\tlibnettle.so.8 => /lib/aarch64-linux-gnu/libnettle.so.8 (0x0000ffffabc20000)\n\tlibhogweed.so.6 => /lib/aarch64-linux-gnu/libhogweed.so.6 (0x0000ffffabbb0000)\n\tlibgmp.so.10 => /lib/aarch64-linux-gnu/libgmp.so.10 (0x0000ffffabb10000)\n\tlibssl.so.3 => /lib/aarch64-linux-gnu/libssl.so.3 (0x0000ffffaba50000)\n\tlibcrypto.so.3 => /lib/aarch64-linux-gnu/libcrypto.so.3 (0x0000ffffab5f0000)\n\tlibmbedcrypto.so.7 => /lib/aarch64-linux-gnu/libmbedcrypto.so.7 (0x0000ffffab550000)\n\tlibcjson.so.1 => /lib/aarch64-linux-gnu/libcjson.so.1 (0x0000ffffab520000)\n\tlibgcrypt.so.20 => /lib/aarch64-linux-gnu/libgcrypt.so.20 (0x0000ffffab420000)\n\tlibgpg-error.so.0 => /lib/aarch64-linux-gnu/libgpg-error.so.0 (0x0000ffffab3d0000)\n\tlibcairo-gobject.so.2 => /lib/aarch64-linux-gnu/libcairo-gobject.so.2 (0x0000ffffab3a0000)\n\tlibgdk_pixbuf-2.0.so.0 => /lib/aarch64-linux-gnu/libgdk_pixbuf-2.0.so.0 (0x0000ffffab350000)\n\tlibgio-2.0.so.0 => /lib/aarch64-linux-gnu/libgio-2.0.so.0 (0x0000ffffab140000)\n\tlibpangocairo-1.0.so.0 => /lib/aarch64-linux-gnu/libpangocairo-1.0.so.0 (0x0000ffffab110000)\n\tlibpango-1.0.so.0 => /lib/aarch64-linux-gnu/libpango-1.0.so.0 (0x0000ffffab080000)\n\tlibffi.so.8 => /lib/aarch64-linux-gnu/libffi.so.8 (0x0000ffffab050000)\n\tlibpcre2-8.so.0 => /lib/aarch64-linux-gnu/libpcre2-8.so.0 (0x0000ffffaafa0000)\n\tlibpixman-1.so.0 => /lib/aarch64-linux-gnu/libpixman-1.so.0 (0x0000ffffaaee0000)\n\tlibxcb-render.so.0 => /lib/aarch64-linux-gnu/libxcb-render.so.0 (0x0000ffffaaeb0000)\n\tlibXrender.so.1 => /lib/aarch64-linux-gnu/libXrender.so.1 (0x0000ffffaae90000)\n\tlibhwy.so.1 => /lib/aarch64-linux-gnu/libhwy.so.1 (0x0000ffffaae60000)\n\tlibbrotlienc.so.1 => /lib/aarch64-linux-gnu/libbrotlienc.so.1 (0x0000ffffaadb0000)\n\tlibogg.so.0 => /lib/aarch64-linux-gnu/libogg.so.0 (0x0000ffffaad80000)\n\tlibnuma.so.1 => /lib/aarch64-linux-gnu/libnuma.so.1 (0x0000ffffaad50000)\n\tlibX11-xcb.so.1 => /lib/aarch64-linux-gnu/libX11-xcb.so.1 (0x0000ffffaad20000)\n\tlibxcb-dri3.so.0 => /lib/aarch64-linux-gnu/libxcb-dri3.so.0 (0x0000ffffaacf0000)\n\tlibudev.so.1 => /lib/aarch64-linux-gnu/libudev.so.1 (0x0000ffffaaca0000)\n\tlibsndfile.so.1 => /lib/aarch64-linux-gnu/libsndfile.so.1 (0x0000ffffaabf0000)\n\tlibsystemd.so.0 => /lib/aarch64-linux-gnu/libsystemd.so.0 (0x0000ffffaab00000)\n\tlibasyncns.so.0 => /lib/aarch64-linux-gnu/libasyncns.so.0 (0x0000ffffaaad0000)\n\tlibwayland-server.so.0 => /lib/aarch64-linux-gnu/libwayland-server.so.0 (0x0000ffffaaa90000)\n\tlibgfortran.so.5 => /lib/aarch64-linux-gnu/libgfortran.so.5 (0x0000ffffaa910000)\n\tlibgraphite2.so.3 => /lib/aarch64-linux-gnu/libgraphite2.so.3 (0x0000ffffaa8d0000)\n\tlibmd.so.0 => /lib/aarch64-linux-gnu/libmd.so.0 (0x0000ffffaa8a0000)\n\tlibkrb5.so.3 => /lib/aarch64-linux-gnu/libkrb5.so.3 (0x0000ffffaa7b0000)\n\tlibk5crypto.so.3 => /lib/aarch64-linux-gnu/libk5crypto.so.3 (0x0000ffffaa760000)\n\tlibcom_err.so.2 => /lib/aarch64-linux-gnu/libcom_err.so.2 (0x0000ffffaa730000)\n\tlibkrb5support.so.0 => /lib/aarch64-linux-gnu/libkrb5support.so.0 (0x0000ffffaa700000)\n\tlibbrotlicommon.so.1 => /lib/aarch64-linux-gnu/libbrotlicommon.so.1 (0x0000ffffaa6c0000)\n\tlibicudata.so.72 => /lib/aarch64-linux-gnu/libicudata.so.72 (0x0000ffffa88d0000)\n\tlibgmodule-2.0.so.0 => /lib/aarch64-linux-gnu/libgmodule-2.0.so.0 (0x0000ffffa88a0000)\n\tlibjpeg.so.62 => /lib/aarch64-linux-gnu/libjpeg.so.62 (0x0000ffffa8820000)\n\tlibmount.so.1 => /lib/aarch64-linux-gnu/libmount.so.1 (0x0000ffffa8790000)\n\tlibselinux.so.1 => /lib/aarch64-linux-gnu/libselinux.so.1 (0x0000ffffa8740000)\n\tlibpangoft2-1.0.so.0 => /lib/aarch64-linux-gnu/libpangoft2-1.0.so.0 (0x0000ffffa8700000)\n\tlibthai.so.0 => /lib/aarch64-linux-gnu/libthai.so.0 (0x0000ffffa86e0000)\n\tlibFLAC.so.12 => /lib/aarch64-linux-gnu/libFLAC.so.12 (0x0000ffffa8670000)\n\tlibcap.so.2 => /lib/aarch64-linux-gnu/libcap.so.2 (0x0000ffffa8640000)\n\tlibzstd.so.1 => /lib/aarch64-linux-gnu/libzstd.so.1 (0x0000ffffa8580000)\n\tliblz4.so.1 => /lib/aarch64-linux-gnu/liblz4.so.1 (0x0000ffffa8530000)\n\tlibkeyutils.so.1 => /lib/aarch64-linux-gnu/libkeyutils.so.1 (0x0000ffffa8500000)\n\tlibresolv.so.2 => /lib/aarch64-linux-gnu/libresolv.so.2 (0x0000ffffa84d0000)\n\tlibblkid.so.1 => /lib/aarch64-linux-gnu/libblkid.so.1 (0x0000ffffa8450000)\n\tlibdatrie.so.1 => /lib/aarch64-linux-gnu/libdatrie.so.1 (0x0000ffffa8420000)\n",
+    "/usr/bin/ffprobe": "\tlinux-vdso.so.1 (0x0000ffffa1afc000)\n\tlibavdevice.so.59 => /lib/aarch64-linux-gnu/libavdevice.so.59 (0x0000ffffa1a10000)\n\tlibavfilter.so.8 => /lib/aarch64-linux-gnu/libavfilter.so.8 (0x0000ffffa0ef0000)\n\tlibavformat.so.59 => /lib/aarch64-linux-gnu/libavformat.so.59 (0x0000ffffa0c20000)\n\tlibavcodec.so.59 => /lib/aarch64-linux-gnu/libavcodec.so.59 (0x0000ffff9fa30000)\n\tlibpostproc.so.56 => /lib/aarch64-linux-gnu/libpostproc.so.56 (0x0000ffff9fa00000)\n\tlibswresample.so.4 => /lib/aarch64-linux-gnu/libswresample.so.4 (0x0000ffff9f9c0000)\n\tlibswscale.so.6 => /lib/aarch64-linux-gnu/libswscale.so.6 (0x0000ffff9f920000)\n\tlibavutil.so.57 => /lib/aarch64-linux-gnu/libavutil.so.57 (0x0000ffff9f730000)\n\tlibm.so.6 => /lib/aarch64-linux-gnu/libm.so.6 (0x0000ffff9f680000)\n\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff9f4d0000)\n\t/lib/ld-linux-aarch64.so.1 (0x0000ffffa1ab0000)\n\tlibraw1394.so.11 => /lib/aarch64-linux-gnu/libraw1394.so.11 (0x0000ffff9f4a0000)\n\tlibavc1394.so.0 => /lib/aarch64-linux-gnu/libavc1394.so.0 (0x0000ffff9f480000)\n\tlibrom1394.so.0 => /lib/aarch64-linux-gnu/librom1394.so.0 (0x0000ffff9f460000)\n\tlibiec61883.so.0 => /lib/aarch64-linux-gnu/libiec61883.so.0 (0x0000ffff9f430000)\n\tlibjack.so.0 => /lib/aarch64-linux-gnu/libjack.so.0 (0x0000ffff9f3c0000)\n\tlibdrm.so.2 => /lib/aarch64-linux-gnu/libdrm.so.2 (0x0000ffff9f380000)\n\tlibopenal.so.1 => /lib/aarch64-linux-gnu/libopenal.so.1 (0x0000ffff9f280000)\n\tlibxcb.so.1 => /lib/aarch64-linux-gnu/libxcb.so.1 (0x0000ffff9f230000)\n\tlibxcb-shm.so.0 => /lib/aarch64-linux-gnu/libxcb-shm.so.0 (0x0000ffff9f200000)\n\tlibxcb-shape.so.0 => /lib/aarch64-linux-gnu/libxcb-shape.so.0 (0x0000ffff9f1d0000)\n\tlibxcb-xfixes.so.0 => /lib/aarch64-linux-gnu/libxcb-xfixes.so.0 (0x0000ffff9f1a0000)\n\tlibcdio_paranoia.so.2 => /lib/aarch64-linux-gnu/libcdio_paranoia.so.2 (0x0000ffff9f170000)\n\tlibcdio_cdda.so.2 => /lib/aarch64-linux-gnu/libcdio_cdda.so.2 (0x0000ffff9f140000)\n\tlibdc1394.so.25 => /lib/aarch64-linux-gnu/libdc1394.so.25 (0x0000ffff9f0b0000)\n\tlibasound.so.2 => /lib/aarch64-linux-gnu/libasound.so.2 (0x0000ffff9ef90000)\n\tlibcaca.so.0 => /lib/aarch64-linux-gnu/libcaca.so.0 (0x0000ffff9eea0000)\n\tlibGL.so.1 => /lib/aarch64-linux-gnu/libGL.so.1 (0x0000ffff9eda0000)\n\tlibpulse.so.0 => /lib/aarch64-linux-gnu/libpulse.so.0 (0x0000ffff9ed30000)\n\tlibSDL2-2.0.so.0 => /lib/aarch64-linux-gnu/libSDL2-2.0.so.0 (0x0000ffff9eb60000)\n\tlibXv.so.1 => /lib/aarch64-linux-gnu/libXv.so.1 (0x0000ffff9eb40000)\n\tlibX11.so.6 => /lib/aarch64-linux-gnu/libX11.so.6 (0x0000ffff9e9e0000)\n\tlibXext.so.6 => /lib/aarch64-linux-gnu/libXext.so.6 (0x0000ffff9e9a0000)\n\tlibpocketsphinx.so.3 => /lib/aarch64-linux-gnu/libpocketsphinx.so.3 (0x0000ffff9e930000)\n\tlibsphinxbase.so.3 => /lib/aarch64-linux-gnu/libsphinxbase.so.3 (0x0000ffff9e8d0000)\n\tlibbs2b.so.0 => /lib/aarch64-linux-gnu/libbs2b.so.0 (0x0000ffff9e8a0000)\n\tliblilv-0.so.0 => /lib/aarch64-linux-gnu/liblilv-0.so.0 (0x0000ffff9e870000)\n\tlibrubberband.so.2 => /lib/aarch64-linux-gnu/librubberband.so.2 (0x0000ffff9e800000)\n\tlibmysofa.so.1 => /lib/aarch64-linux-gnu/libmysofa.so.1 (0x0000ffff9e7d0000)\n\tlibflite_cmu_us_awb.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_awb.so.1 (0x0000ffff9e3e0000)\n\tlibflite_cmu_us_kal.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_kal.so.1 (0x0000ffff9e260000)\n\tlibflite_cmu_us_kal16.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_kal16.so.1 (0x0000ffff9de60000)\n\tlibflite_cmu_us_rms.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_rms.so.1 (0x0000ffff9d9e0000)\n\tlibflite_cmu_us_slt.so.1 => /lib/aarch64-linux-gnu/libflite_cmu_us_slt.so.1 (0x0000ffff9d5f0000)\n\tlibflite.so.1 => /lib/aarch64-linux-gnu/libflite.so.1 (0x0000ffff9d590000)\n\tlibfribidi.so.0 => /lib/aarch64-linux-gnu/libfribidi.so.0 (0x0000ffff9d560000)\n\tlibplacebo.so.208 => /lib/aarch64-linux-gnu/libplacebo.so.208 (0x0000ffff9ce50000)\n\tlibass.so.9 => /lib/aarch64-linux-gnu/libass.so.9 (0x0000ffff9ce00000)\n\tlibva.so.2 => /lib/aarch64-linux-gnu/libva.so.2 (0x0000ffff9cdb0000)\n\tlibstdc++.so.6 => /lib/aarch64-linux-gnu/libstdc++.so.6 (0x0000ffff9cb90000)\n\tlibvidstab.so.1.1 => /lib/aarch64-linux-gnu/libvidstab.so.1.1 (0x0000ffff9cb60000)\n\tlibzmq.so.5 => /lib/aarch64-linux-gnu/libzmq.so.5 (0x0000ffff9ca90000)\n\tlibzimg.so.2 => /lib/aarch64-linux-gnu/libzimg.so.2 (0x0000ffff9ca20000)\n\tlibOpenCL.so.1 => /lib/aarch64-linux-gnu/libOpenCL.so.1 (0x0000ffff9c9f0000)\n\tlibfontconfig.so.1 => /lib/aarch64-linux-gnu/libfontconfig.so.1 (0x0000ffff9c980000)\n\tlibfreetype.so.6 => /lib/aarch64-linux-gnu/libfreetype.so.6 (0x0000ffff9c8a0000)\n\tlibz.so.1 => /lib/aarch64-linux-gnu/libz.so.1 (0x0000ffff9c860000)\n\tlibxml2.so.2 => /lib/aarch64-linux-gnu/libxml2.so.2 (0x0000ffff9c6a0000)\n\tlibbz2.so.1.0 => /lib/aarch64-linux-gnu/libbz2.so.1.0 (0x0000ffff9c670000)\n\tlibgme.so.0 => /lib/aarch64-linux-gnu/libgme.so.0 (0x0000ffff9c600000)\n\tlibopenmpt.so.0 => /lib/aarch64-linux-gnu/libopenmpt.so.0 (0x0000ffff9c3e0000)\n\tlibchromaprint.so.1 => /lib/aarch64-linux-gnu/libchromaprint.so.1 (0x0000ffff9c3a0000)\n\tlibbluray.so.2 => /lib/aarch64-linux-gnu/libbluray.so.2 (0x0000ffff9c330000)\n\tlibgnutls.so.30 => /lib/aarch64-linux-gnu/libgnutls.so.30 (0x0000ffff9c0e0000)\n\tlibrabbitmq.so.4 => /lib/aarch64-linux-gnu/librabbitmq.so.4 (0x0000ffff9c0a0000)\n\tlibrist.so.4 => /lib/aarch64-linux-gnu/librist.so.4 (0x0000ffff9c050000)\n\tlibsrt-gnutls.so.1.5 => /lib/aarch64-linux-gnu/libsrt-gnutls.so.1.5 (0x0000ffff9bf70000)\n\tlibssh-gcrypt.so.4 => /lib/aarch64-linux-gnu/libssh-gcrypt.so.4 (0x0000ffff9bec0000)\n\tlibvpx.so.7 => /lib/aarch64-linux-gnu/libvpx.so.7 (0x0000ffff9bca0000)\n\tlibwebpmux.so.3 => /lib/aarch64-linux-gnu/libwebpmux.so.3 (0x0000ffff9bc70000)\n\tlibwebp.so.7 => /lib/aarch64-linux-gnu/libwebp.so.7 (0x0000ffff9bbf0000)\n\tliblzma.so.5 => /lib/aarch64-linux-gnu/liblzma.so.5 (0x0000ffff9bba0000)\n\tlibdav1d.so.6 => /lib/aarch64-linux-gnu/libdav1d.so.6 (0x0000ffff9ba90000)\n\tlibrsvg-2.so.2 => /lib/aarch64-linux-gnu/librsvg-2.so.2 (0x0000ffff9b110000)\n\tlibgobject-2.0.so.0 => /lib/aarch64-linux-gnu/libgobject-2.0.so.0 (0x0000ffff9b090000)\n\tlibglib-2.0.so.0 => /lib/aarch64-linux-gnu/libglib-2.0.so.0 (0x0000ffff9af30000)\n\tlibcairo.so.2 => /lib/aarch64-linux-gnu/libcairo.so.2 (0x0000ffff9ae00000)\n\tlibzvbi.so.0 => /lib/aarch64-linux-gnu/libzvbi.so.0 (0x0000ffff9ad60000)\n\tlibsnappy.so.1 => /lib/aarch64-linux-gnu/libsnappy.so.1 (0x0000ffff9ad30000)\n\tlibaom.so.3 => /lib/aarch64-linux-gnu/libaom.so.3 (0x0000ffff9a950000)\n\tlibcodec2.so.1.0 => /lib/aarch64-linux-gnu/libcodec2.so.1.0 (0x0000ffff99930000)\n\tlibgsm.so.1 => /lib/aarch64-linux-gnu/libgsm.so.1 (0x0000ffff99900000)\n\tlibjxl.so.0.7 => /lib/aarch64-linux-gnu/libjxl.so.0.7 (0x0000ffff99750000)\n\tlibjxl_threads.so.0.7 => /lib/aarch64-linux-gnu/libjxl_threads.so.0.7 (0x0000ffff99720000)\n\tlibmp3lame.so.0 => /lib/aarch64-linux-gnu/libmp3lame.so.0 (0x0000ffff99690000)\n\tlibopenjp2.so.7 => /lib/aarch64-linux-gnu/libopenjp2.so.7 (0x0000ffff99610000)\n\tlibopus.so.0 => /lib/aarch64-linux-gnu/libopus.so.0 (0x0000ffff99590000)\n\tlibrav1e.so.0 => /lib/aarch64-linux-gnu/librav1e.so.0 (0x0000ffff993a0000)\n\tlibshine.so.3 => /lib/aarch64-linux-gnu/libshine.so.3 (0x0000ffff99380000)\n\tlibspeex.so.1 => /lib/aarch64-linux-gnu/libspeex.so.1 (0x0000ffff99340000)\n\tlibSvtAv1Enc.so.1 => /lib/aarch64-linux-gnu/libSvtAv1Enc.so.1 (0x0000ffff98cc0000)\n\tlibtheoraenc.so.1 => /lib/aarch64-linux-gnu/libtheoraenc.so.1 (0x0000ffff98c70000)\n\tlibtheoradec.so.1 => /lib/aarch64-linux-gnu/libtheoradec.so.1 (0x0000ffff98c30000)\n\tlibtwolame.so.0 => /lib/aarch64-linux-gnu/libtwolame.so.0 (0x0000ffff98bf0000)\n\tlibvorbis.so.0 => /lib/aarch64-linux-gnu/libvorbis.so.0 (0x0000ffff98bb0000)\n\tlibvorbisenc.so.2 => /lib/aarch64-linux-gnu/libvorbisenc.so.2 (0x0000ffff98af0000)\n\tlibx264.so.164 => /lib/aarch64-linux-gnu/libx264.so.164 (0x0000ffff98890000)\n\tlibx265.so.199 => /lib/aarch64-linux-gnu/libx265.so.199 (0x0000ffff985b0000)\n\tlibxvidcore.so.4 => /lib/aarch64-linux-gnu/libxvidcore.so.4 (0x0000ffff984b0000)\n\tlibsoxr.so.0 => /lib/aarch64-linux-gnu/libsoxr.so.0 (0x0000ffff98440000)\n\tlibva-drm.so.2 => /lib/aarch64-linux-gnu/libva-drm.so.2 (0x0000ffff98410000)\n\tlibva-x11.so.2 => /lib/aarch64-linux-gnu/libva-x11.so.2 (0x0000ffff983e0000)\n\tlibvdpau.so.1 => /lib/aarch64-linux-gnu/libvdpau.so.1 (0x0000ffff983b0000)\n\tlibdb-5.3.so => /lib/aarch64-linux-gnu/libdb-5.3.so (0x0000ffff981f0000)\n\tlibgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1 (0x0000ffff981b0000)\n\tlibsndio.so.7.0 => /lib/aarch64-linux-gnu/libsndio.so.7.0 (0x0000ffff98180000)\n\tlibpthread.so.0 => /lib/aarch64-linux-gnu/libpthread.so.0 (0x0000ffff98150000)\n\tlibdl.so.2 => /lib/aarch64-linux-gnu/libdl.so.2 (0x0000ffff98120000)\n\tlibXau.so.6 => /lib/aarch64-linux-gnu/libXau.so.6 (0x0000ffff98100000)\n\tlibXdmcp.so.6 => /lib/aarch64-linux-gnu/libXdmcp.so.6 (0x0000ffff980e0000)\n\tlibcdio.so.19 => /lib/aarch64-linux-gnu/libcdio.so.19 (0x0000ffff98090000)\n\tlibusb-1.0.so.0 => /lib/aarch64-linux-gnu/libusb-1.0.so.0 (0x0000ffff98060000)\n\tlibslang.so.2 => /lib/aarch64-linux-gnu/libslang.so.2 (0x0000ffff97c80000)\n\tlibncursesw.so.6 => /lib/aarch64-linux-gnu/libncursesw.so.6 (0x0000ffff97c20000)\n\tlibtinfo.so.6 => /lib/aarch64-linux-gnu/libtinfo.so.6 (0x0000ffff97bd0000)\n\tlibGLdispatch.so.0 => /lib/aarch64-linux-gnu/libGLdispatch.so.0 (0x0000ffff97a40000)\n\tlibGLX.so.0 => /lib/aarch64-linux-gnu/libGLX.so.0 (0x0000ffff979e0000)\n\tlibpulsecommon-16.1.so => /usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so (0x0000ffff97940000)\n\tlibdbus-1.so.3 => /lib/aarch64-linux-gnu/libdbus-1.so.3 (0x0000ffff978c0000)\n\tlibsamplerate.so.0 => /lib/aarch64-linux-gnu/libsamplerate.so.0 (0x0000ffff97730000)\n\tlibXcursor.so.1 => /lib/aarch64-linux-gnu/libXcursor.so.1 (0x0000ffff97710000)\n\tlibXi.so.6 => /lib/aarch64-linux-gnu/libXi.so.6 (0x0000ffff976e0000)\n\tlibXfixes.so.3 => /lib/aarch64-linux-gnu/libXfixes.so.3 (0x0000ffff976b0000)\n\tlibXrandr.so.2 => /lib/aarch64-linux-gnu/libXrandr.so.2 (0x0000ffff97690000)\n\tlibXss.so.1 => /lib/aarch64-linux-gnu/libXss.so.1 (0x0000ffff97670000)\n\tlibgbm.so.1 => /lib/aarch64-linux-gnu/libgbm.so.1 (0x0000ffff97640000)\n\tlibwayland-egl.so.1 => /lib/aarch64-linux-gnu/libwayland-egl.so.1 (0x0000ffff97610000)\n\tlibwayland-client.so.0 => /lib/aarch64-linux-gnu/libwayland-client.so.0 (0x0000ffff975e0000)\n\tlibwayland-cursor.so.0 => /lib/aarch64-linux-gnu/libwayland-cursor.so.0 (0x0000ffff975b0000)\n\tlibxkbcommon.so.0 => /lib/aarch64-linux-gnu/libxkbcommon.so.0 (0x0000ffff97540000)\n\tlibdecor-0.so.0 => /lib/aarch64-linux-gnu/libdecor-0.so.0 (0x0000ffff97510000)\n\tlibblas.so.3 => /lib/aarch64-linux-gnu/libblas.so.3 (0x0000ffff97490000)\n\tliblapack.so.3 => /lib/aarch64-linux-gnu/liblapack.so.3 (0x0000ffff96f20000)\n\tlibserd-0.so.0 => /lib/aarch64-linux-gnu/libserd-0.so.0 (0x0000ffff96ee0000)\n\tlibsord-0.so.0 => /lib/aarch64-linux-gnu/libsord-0.so.0 (0x0000ffff96eb0000)\n\tlibsratom-0.so.0 => /lib/aarch64-linux-gnu/libsratom-0.so.0 (0x0000ffff96e80000)\n\tlibflite_usenglish.so.1 => /lib/aarch64-linux-gnu/libflite_usenglish.so.1 (0x0000ffff96e40000)\n\tlibflite_cmulex.so.1 => /lib/aarch64-linux-gnu/libflite_cmulex.so.1 (0x0000ffff96d80000)\n\tliblcms2.so.2 => /lib/aarch64-linux-gnu/liblcms2.so.2 (0x0000ffff96d00000)\n\tlibvulkan.so.1 => /lib/aarch64-linux-gnu/libvulkan.so.1 (0x0000ffff96c60000)\n\tlibepoxy.so.0 => /lib/aarch64-linux-gnu/libepoxy.so.0 (0x0000ffff96b00000)\n\tlibharfbuzz.so.0 => /lib/aarch64-linux-gnu/libharfbuzz.so.0 (0x0000ffff969e0000)\n\tlibgomp.so.1 => /lib/aarch64-linux-gnu/libgomp.so.1 (0x0000ffff96970000)\n\tlibbsd.so.0 => /lib/aarch64-linux-gnu/libbsd.so.0 (0x0000ffff96930000)\n\tlibsodium.so.23 => /lib/aarch64-linux-gnu/libsodium.so.23 (0x0000ffff968d0000)\n\tlibpgm-5.3.so.0 => /lib/aarch64-linux-gnu/libpgm-5.3.so.0 (0x0000ffff96860000)\n\tlibnorm.so.1 => /lib/aarch64-linux-gnu/libnorm.so.1 (0x0000ffff96720000)\n\tlibgssapi_krb5.so.2 => /lib/aarch64-linux-gnu/libgssapi_krb5.so.2 (0x0000ffff966b0000)\n\tlibexpat.so.1 => /lib/aarch64-linux-gnu/libexpat.so.1 (0x0000ffff96660000)\n\tlibpng16.so.16 => /lib/aarch64-linux-gnu/libpng16.so.16 (0x0000ffff96600000)\n\tlibbrotlidec.so.1 => /lib/aarch64-linux-gnu/libbrotlidec.so.1 (0x0000ffff965d0000)\n\tlibicuuc.so.72 => /lib/aarch64-linux-gnu/libicuuc.so.72 (0x0000ffff963b0000)\n\tlibmpg123.so.0 => /lib/aarch64-linux-gnu/libmpg123.so.0 (0x0000ffff96340000)\n\tlibvorbisfile.so.3 => /lib/aarch64-linux-gnu/libvorbisfile.so.3 (0x0000ffff96320000)\n\tlibudfread.so.0 => /lib/aarch64-linux-gnu/libudfread.so.0 (0x0000ffff96300000)\n\tlibp11-kit.so.0 => /lib/aarch64-linux-gnu/libp11-kit.so.0 (0x0000ffff961b0000)\n\tlibidn2.so.0 => /lib/aarch64-linux-gnu/libidn2.so.0 (0x0000ffff96160000)\n\tlibunistring.so.2 => /lib/aarch64-linux-gnu/libunistring.so.2 (0x0000ffff95f90000)\n\tlibtasn1.so.6 => /lib/aarch64-linux-gnu/libtasn1.so.6 (0x0000ffff95f50000)\n\tlibnettle.so.8 => /lib/aarch64-linux-gnu/libnettle.so.8 (0x0000ffff95ee0000)\n\tlibhogweed.so.6 => /lib/aarch64-linux-gnu/libhogweed.so.6 (0x0000ffff95e70000)\n\tlibgmp.so.10 => /lib/aarch64-linux-gnu/libgmp.so.10 (0x0000ffff95dd0000)\n\tlibssl.so.3 => /lib/aarch64-linux-gnu/libssl.so.3 (0x0000ffff95d10000)\n\tlibcrypto.so.3 => /lib/aarch64-linux-gnu/libcrypto.so.3 (0x0000ffff958b0000)\n\tlibmbedcrypto.so.7 => /lib/aarch64-linux-gnu/libmbedcrypto.so.7 (0x0000ffff95810000)\n\tlibcjson.so.1 => /lib/aarch64-linux-gnu/libcjson.so.1 (0x0000ffff957e0000)\n\tlibgcrypt.so.20 => /lib/aarch64-linux-gnu/libgcrypt.so.20 (0x0000ffff956e0000)\n\tlibgpg-error.so.0 => /lib/aarch64-linux-gnu/libgpg-error.so.0 (0x0000ffff95690000)\n\tlibcairo-gobject.so.2 => /lib/aarch64-linux-gnu/libcairo-gobject.so.2 (0x0000ffff95660000)\n\tlibgdk_pixbuf-2.0.so.0 => /lib/aarch64-linux-gnu/libgdk_pixbuf-2.0.so.0 (0x0000ffff95610000)\n\tlibgio-2.0.so.0 => /lib/aarch64-linux-gnu/libgio-2.0.so.0 (0x0000ffff95400000)\n\tlibpangocairo-1.0.so.0 => /lib/aarch64-linux-gnu/libpangocairo-1.0.so.0 (0x0000ffff953d0000)\n\tlibpango-1.0.so.0 => /lib/aarch64-linux-gnu/libpango-1.0.so.0 (0x0000ffff95340000)\n\tlibffi.so.8 => /lib/aarch64-linux-gnu/libffi.so.8 (0x0000ffff95310000)\n\tlibpcre2-8.so.0 => /lib/aarch64-linux-gnu/libpcre2-8.so.0 (0x0000ffff95260000)\n\tlibpixman-1.so.0 => /lib/aarch64-linux-gnu/libpixman-1.so.0 (0x0000ffff951a0000)\n\tlibxcb-render.so.0 => /lib/aarch64-linux-gnu/libxcb-render.so.0 (0x0000ffff95170000)\n\tlibXrender.so.1 => /lib/aarch64-linux-gnu/libXrender.so.1 (0x0000ffff95150000)\n\tlibhwy.so.1 => /lib/aarch64-linux-gnu/libhwy.so.1 (0x0000ffff95120000)\n\tlibbrotlienc.so.1 => /lib/aarch64-linux-gnu/libbrotlienc.so.1 (0x0000ffff95070000)\n\tlibogg.so.0 => /lib/aarch64-linux-gnu/libogg.so.0 (0x0000ffff95040000)\n\tlibnuma.so.1 => /lib/aarch64-linux-gnu/libnuma.so.1 (0x0000ffff95010000)\n\tlibX11-xcb.so.1 => /lib/aarch64-linux-gnu/libX11-xcb.so.1 (0x0000ffff94fe0000)\n\tlibxcb-dri3.so.0 => /lib/aarch64-linux-gnu/libxcb-dri3.so.0 (0x0000ffff94fb0000)\n\tlibudev.so.1 => /lib/aarch64-linux-gnu/libudev.so.1 (0x0000ffff94f60000)\n\tlibsndfile.so.1 => /lib/aarch64-linux-gnu/libsndfile.so.1 (0x0000ffff94eb0000)\n\tlibsystemd.so.0 => /lib/aarch64-linux-gnu/libsystemd.so.0 (0x0000ffff94dc0000)\n\tlibasyncns.so.0 => /lib/aarch64-linux-gnu/libasyncns.so.0 (0x0000ffff94d90000)\n\tlibwayland-server.so.0 => /lib/aarch64-linux-gnu/libwayland-server.so.0 (0x0000ffff94d50000)\n\tlibgfortran.so.5 => /lib/aarch64-linux-gnu/libgfortran.so.5 (0x0000ffff94bd0000)\n\tlibgraphite2.so.3 => /lib/aarch64-linux-gnu/libgraphite2.so.3 (0x0000ffff94b90000)\n\tlibmd.so.0 => /lib/aarch64-linux-gnu/libmd.so.0 (0x0000ffff94b60000)\n\tlibkrb5.so.3 => /lib/aarch64-linux-gnu/libkrb5.so.3 (0x0000ffff94a70000)\n\tlibk5crypto.so.3 => /lib/aarch64-linux-gnu/libk5crypto.so.3 (0x0000ffff94a20000)\n\tlibcom_err.so.2 => /lib/aarch64-linux-gnu/libcom_err.so.2 (0x0000ffff949f0000)\n\tlibkrb5support.so.0 => /lib/aarch64-linux-gnu/libkrb5support.so.0 (0x0000ffff949c0000)\n\tlibbrotlicommon.so.1 => /lib/aarch64-linux-gnu/libbrotlicommon.so.1 (0x0000ffff94980000)\n\tlibicudata.so.72 => /lib/aarch64-linux-gnu/libicudata.so.72 (0x0000ffff92b90000)\n\tlibgmodule-2.0.so.0 => /lib/aarch64-linux-gnu/libgmodule-2.0.so.0 (0x0000ffff92b60000)\n\tlibjpeg.so.62 => /lib/aarch64-linux-gnu/libjpeg.so.62 (0x0000ffff92ae0000)\n\tlibmount.so.1 => /lib/aarch64-linux-gnu/libmount.so.1 (0x0000ffff92a50000)\n\tlibselinux.so.1 => /lib/aarch64-linux-gnu/libselinux.so.1 (0x0000ffff92a00000)\n\tlibpangoft2-1.0.so.0 => /lib/aarch64-linux-gnu/libpangoft2-1.0.so.0 (0x0000ffff929c0000)\n\tlibthai.so.0 => /lib/aarch64-linux-gnu/libthai.so.0 (0x0000ffff929a0000)\n\tlibFLAC.so.12 => /lib/aarch64-linux-gnu/libFLAC.so.12 (0x0000ffff92930000)\n\tlibcap.so.2 => /lib/aarch64-linux-gnu/libcap.so.2 (0x0000ffff92900000)\n\tlibzstd.so.1 => /lib/aarch64-linux-gnu/libzstd.so.1 (0x0000ffff92840000)\n\tliblz4.so.1 => /lib/aarch64-linux-gnu/liblz4.so.1 (0x0000ffff927f0000)\n\tlibkeyutils.so.1 => /lib/aarch64-linux-gnu/libkeyutils.so.1 (0x0000ffff927c0000)\n\tlibresolv.so.2 => /lib/aarch64-linux-gnu/libresolv.so.2 (0x0000ffff92790000)\n\tlibblkid.so.1 => /lib/aarch64-linux-gnu/libblkid.so.1 (0x0000ffff92710000)\n\tlibdatrie.so.1 => /lib/aarch64-linux-gnu/libdatrie.so.1 (0x0000ffff926e0000)\n"
+  },
+  "files": {
+    "/lib/aarch64-linux-gnu/libFLAC.so.12": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libFLAC.so.12.0.0",
+      "bytes": 329592,
+      "sha256": "206e6ad0e4d3e3f1b12ba86f84a6d196a0118e3442aabc1f89f714b777670985"
+    },
+    "/lib/aarch64-linux-gnu/libGL.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libGL.so.1.7.0",
+      "bytes": 985192,
+      "sha256": "99c2cde6f0586ad932d13c9cc344e752c694cd3d45a33d3b2633e0c971d7cef8"
+    },
+    "/lib/aarch64-linux-gnu/libGLX.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libGLX.so.0.0.0",
+      "bytes": 199032,
+      "sha256": "e2a6d5ea771bd4ab1b751528ba48264b41b63bce344041da599e37da251880a7"
+    },
+    "/lib/aarch64-linux-gnu/libGLdispatch.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libGLdispatch.so.0.0.0",
+      "bytes": 1575160,
+      "sha256": "6d6da001d8112cdef30a72ed62b97f7e274cd81469effa759a133f9ba2c30c61"
+    },
+    "/lib/aarch64-linux-gnu/libOpenCL.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libOpenCL.so.1.0.0",
+      "bytes": 69048,
+      "sha256": "70967cbdce6f24fa921e0c1a624508bc0e1c2b36a0de9b7dcc31badfb174cd04"
+    },
+    "/lib/aarch64-linux-gnu/libSDL2-2.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libSDL2-2.0.so.0.2600.5",
+      "bytes": 1862400,
+      "sha256": "72457d21f5a6874e98a89b537ea96a8f7204399a3938dc2a0e41f2a82ed44a59"
+    },
+    "/lib/aarch64-linux-gnu/libSvtAv1Enc.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libSvtAv1Enc.so.1.4.1",
+      "bytes": 3251568,
+      "sha256": "0d3e9f60dc22febe13c3462dbe20b75f2bb0b06b223847943a537737b8eabb15"
+    },
+    "/lib/aarch64-linux-gnu/libX11-xcb.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libX11-xcb.so.1.0.0",
+      "bytes": 67216,
+      "sha256": "a8c34d18723a629b829906851d6702174e7054efed12bfdabd81f8410a43926a"
+    },
+    "/lib/aarch64-linux-gnu/libX11.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libX11.so.6.4.0",
+      "bytes": 1329712,
+      "sha256": "8371115a64330431c1e0f332ea668bbff10a11bef18e0800b5306ffdca595e1a"
+    },
+    "/lib/aarch64-linux-gnu/libXau.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXau.so.6.0.0",
+      "bytes": 14416,
+      "sha256": "d43657a20d5b1b779e91e417f31e3deaccbcede10d7dd38991e31b86e550152b"
+    },
+    "/lib/aarch64-linux-gnu/libXcursor.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXcursor.so.1.0.2",
+      "bytes": 43600,
+      "sha256": "b7dd4653fbc6d3349fe0b0175f23503df5adde69a7396637f3b3427deb0e3a4e"
+    },
+    "/lib/aarch64-linux-gnu/libXdmcp.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXdmcp.so.6.0.0",
+      "bytes": 22576,
+      "sha256": "cff589ca553d339123ba32528cdf45f071761624aef1ebb4b3970fe9180b7e3b"
+    },
+    "/lib/aarch64-linux-gnu/libXext.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXext.so.6.4.0",
+      "bytes": 134696,
+      "sha256": "136fdffc957db4f1af62ca787fdd5f00053c2477e68ce93d52a57952acb1f8ea"
+    },
+    "/lib/aarch64-linux-gnu/libXfixes.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXfixes.so.3.1.0",
+      "bytes": 67640,
+      "sha256": "366080bac4e91b8af31cbfda6259b77eb5de13eac014535e36937f5f01523579"
+    },
+    "/lib/aarch64-linux-gnu/libXi.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXi.so.6.1.0",
+      "bytes": 67888,
+      "sha256": "6f3240dcf0ba88f56d42c9229aa9cc2aef9055d47238c73afa193370318c0e17"
+    },
+    "/lib/aarch64-linux-gnu/libXrandr.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXrandr.so.2.2.0",
+      "bytes": 43200,
+      "sha256": "35fcdeb241810de83bda62ccc3f4d46103ab9f45d32369aef01fa2f5b4a3fee9"
+    },
+    "/lib/aarch64-linux-gnu/libXrender.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXrender.so.1.3.0",
+      "bytes": 43408,
+      "sha256": "3bd2f69bfdb9174410d0545400ee9214b87a629b8cd2668b9aadfd6c7305c11a"
+    },
+    "/lib/aarch64-linux-gnu/libXss.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXss.so.1.0.0",
+      "bytes": 14416,
+      "sha256": "9fa00315c7f3652aae0c14a4eeb12bca3129459f89006fe1bc9bdc08acbac033"
+    },
+    "/lib/aarch64-linux-gnu/libXv.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libXv.so.1.0.0",
+      "bytes": 22752,
+      "sha256": "95001a07b3e03f44960de57327880eb32713c86c206f65f234a89ae387169aca"
+    },
+    "/lib/aarch64-linux-gnu/libaom.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libaom.so.3.6.0",
+      "bytes": 3629312,
+      "sha256": "3e178f02ce634d3ff4bec9a173eed0ac8a84f01bdb4700412adb20f24b27bd02"
+    },
+    "/lib/aarch64-linux-gnu/libasound.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libasound.so.2.0.0",
+      "bytes": 1116648,
+      "sha256": "9fade6b3aedf1ba944e6795b52b74378f2f89166b92ee542582171416a76572d"
+    },
+    "/lib/aarch64-linux-gnu/libass.so.9": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libass.so.9.2.1",
+      "bytes": 198808,
+      "sha256": "1a8717219807355038f91c53c2f13248e98935394a8b74098987e4677f976970"
+    },
+    "/lib/aarch64-linux-gnu/libasyncns.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libasyncns.so.0.3.1",
+      "bytes": 67352,
+      "sha256": "a091ad63ec4ea5e8a60b4536def0240e01b73212e2f2ec53faf71c663d95a5d9"
+    },
+    "/lib/aarch64-linux-gnu/libavc1394.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libavc1394.so.0.3.0",
+      "bytes": 18504,
+      "sha256": "dac75db542d5cc9d9ae7d8032fe58df73cc60e8a8e7efa8e407f31a01b78b340"
+    },
+    "/lib/aarch64-linux-gnu/libavcodec.so.59": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libavcodec.so.59.37.100",
+      "bytes": 12656888,
+      "sha256": "ef225aae8f9eb9ec1739a42cb982c3e51a66d32e5290757661b2d69f4bc774bd"
+    },
+    "/lib/aarch64-linux-gnu/libavdevice.so.59": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libavdevice.so.59.7.100",
+      "bytes": 198584,
+      "sha256": "1abf954a06a7a25d2969fa6d0c49785f24d04fbfc1527ae8cd6d49a51458f87a"
+    },
+    "/lib/aarch64-linux-gnu/libavfilter.so.8": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libavfilter.so.8.44.100",
+      "bytes": 11542584,
+      "sha256": "2f08efe8a7b5045b7b5d9035219a8f16e5da1494657dd6099fc6ba66b7cd6fc5"
+    },
+    "/lib/aarch64-linux-gnu/libavformat.so.59": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libavformat.so.59.27.100",
+      "bytes": 2820568,
+      "sha256": "c365bacbafbddf1f94202b7d48348d9e1ed8c2e1b7052f0a0fc896a2a120d9ad"
+    },
+    "/lib/aarch64-linux-gnu/libavutil.so.57": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libavutil.so.57.28.100",
+      "bytes": 790208,
+      "sha256": "4383f1003bd58375c01b9505a6df62831c22c3f0233f35dd1fef7860edf02d49"
+    },
+    "/lib/aarch64-linux-gnu/libblas.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/blas/libblas.so.3.11.0",
+      "bytes": 395032,
+      "sha256": "b5d925f010a892efffc835df6ffc5874fa517f9718221d1cdf1158ac889824b2"
+    },
+    "/lib/aarch64-linux-gnu/libblkid.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libblkid.so.1.1.0",
+      "bytes": 396248,
+      "sha256": "5315fa2b1a050713f155a90d2faa4c64187626f4a580e6e05d2d40190e086363"
+    },
+    "/lib/aarch64-linux-gnu/libbluray.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libbluray.so.2.4.3",
+      "bytes": 330704,
+      "sha256": "47f7215ce0be0ab24c156980e822ce40b7de6c83fc0ac41c2724ff9028e28fa0"
+    },
+    "/lib/aarch64-linux-gnu/libbrotlicommon.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libbrotlicommon.so.1.0.9",
+      "bytes": 133232,
+      "sha256": "eb58e3a7decc81cb3bf7dbd3d2db8f5000b473b4fd3b6c2f6b7afbccf6d7dd60"
+    },
+    "/lib/aarch64-linux-gnu/libbrotlidec.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libbrotlidec.so.1.0.9",
+      "bytes": 67688,
+      "sha256": "ee7db2a46ad6a5bc2a164827cfbe21b930450c1b0954594fa4e2aafb156977c3"
+    },
+    "/lib/aarch64-linux-gnu/libbrotlienc.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libbrotlienc.so.1.0.9",
+      "bytes": 591864,
+      "sha256": "40f62a0ba115cc7e6f24cd7c82ebdf1808b84158b87b79a04308b74fa1053885"
+    },
+    "/lib/aarch64-linux-gnu/libbs2b.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libbs2b.so.0.0.0",
+      "bytes": 67440,
+      "sha256": "32b9a410bd7057276a513d160078952e26820fc5c170ca29ce97ed6f1cc24b5e"
+    },
+    "/lib/aarch64-linux-gnu/libbsd.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libbsd.so.0.11.7",
+      "bytes": 133944,
+      "sha256": "24f2bb08fed31a04a80f4d0d0145f4cc5f42543af07a364b1fafdd3d2dcbe137"
+    },
+    "/lib/aarch64-linux-gnu/libbz2.so.1.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libbz2.so.1.0.4",
+      "bytes": 70504,
+      "sha256": "636189620fb8ac7497a8dfba3c77c001f0c27814b16ad822bcf4b8e11f1ffbf7"
+    },
+    "/lib/aarch64-linux-gnu/libc.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libc.so.6",
+      "bytes": 1651408,
+      "sha256": "e4ac8ae1d81e4865e3aadedb962879cf9415903b3f2ba81ec75e9962b86ab8b0"
+    },
+    "/lib/aarch64-linux-gnu/libcaca.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcaca.so.0.99.20",
+      "bytes": 855688,
+      "sha256": "ccbf0d443fd6ebfdcf59e7efea839931e126f5d4cbecf77d8f5872eb4db20123"
+    },
+    "/lib/aarch64-linux-gnu/libcairo-gobject.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcairo-gobject.so.2.11600.0",
+      "bytes": 67272,
+      "sha256": "7adb9c79db6e46f09d0454ac9f4e344f3e7e90cfd0da2736217199e19c9a6b7f"
+    },
+    "/lib/aarch64-linux-gnu/libcairo.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcairo.so.2.11600.0",
+      "bytes": 1183080,
+      "sha256": "01695f7f120f8f3593f7810443a07ad97d6fb0ced86d9494d27f1ee23d2b2008"
+    },
+    "/lib/aarch64-linux-gnu/libcap.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcap.so.2.66",
+      "bytes": 67552,
+      "sha256": "dcb3587efc518852f7a1430594526ee9d7334126a9afb46f23cfa60f1b2d1927"
+    },
+    "/lib/aarch64-linux-gnu/libcdio.so.19": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcdio.so.19.0.0",
+      "bytes": 200952,
+      "sha256": "2a40d74334b76c54f8337c5f730e034aeacc27f1d7844fdd8f25ac90faff2652"
+    },
+    "/lib/aarch64-linux-gnu/libcdio_cdda.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcdio_cdda.so.2.0.0",
+      "bytes": 67512,
+      "sha256": "3080682aa0ff891dd6dad6c341b4cdd2ff175120619a4704c6b4426fa2cf0369"
+    },
+    "/lib/aarch64-linux-gnu/libcdio_paranoia.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcdio_paranoia.so.2.0.0",
+      "bytes": 67536,
+      "sha256": "4707379d8acd91a9628eb16b8851729ab5e23e507d1243eb32f4b77cd9ac99af"
+    },
+    "/lib/aarch64-linux-gnu/libchromaprint.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libchromaprint.so.1.5.1",
+      "bytes": 133544,
+      "sha256": "133696c31b0efdaa164b9a64efb8e1230f1dc9439775cea5c749d099bfcaea5b"
+    },
+    "/lib/aarch64-linux-gnu/libcjson.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcjson.so.1.7.15",
+      "bytes": 67376,
+      "sha256": "8ecd198a3e2de3c471c139dd8ce4fd881d7c000b8b6e989acd2f0016310bff76"
+    },
+    "/lib/aarch64-linux-gnu/libcodec2.so.1.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcodec2.so.1.0",
+      "bytes": 16833104,
+      "sha256": "d48a23ec472ede3b0146eb22233aad863504d23eaca536ce3ce8c7ba1eed6999"
+    },
+    "/lib/aarch64-linux-gnu/libcom_err.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcom_err.so.2.1",
+      "bytes": 67432,
+      "sha256": "da3488ef5ec0962c5b7ac5a22108c1f4259fe0ecb1cbe0014dcfb83700493c56"
+    },
+    "/lib/aarch64-linux-gnu/libcrypto.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libcrypto.so.3",
+      "bytes": 4532392,
+      "sha256": "6ca49d148cc9fff2ee82e46019f508d736cef6b3f15f2f5cbbc86457df9b05ce"
+    },
+    "/lib/aarch64-linux-gnu/libdatrie.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libdatrie.so.1.4.0",
+      "bytes": 67432,
+      "sha256": "f79a360f5f78aabb1f3db902db986914e8b32926002ab165c7a001b8b75d657a"
+    },
+    "/lib/aarch64-linux-gnu/libdav1d.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libdav1d.so.6.6.0",
+      "bytes": 790448,
+      "sha256": "bfe1f19c4d8590a49fc10ec96415063094b52dd53aaede18366dc4220d6f93fb"
+    },
+    "/lib/aarch64-linux-gnu/libdb-5.3.so": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libdb-5.3.so",
+      "bytes": 1717464,
+      "sha256": "d2350d17e88d6693eff10fd95ad01581728609ac3017aead4d8c3952bf9f3232"
+    },
+    "/lib/aarch64-linux-gnu/libdbus-1.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libdbus-1.so.3.32.4",
+      "bytes": 395336,
+      "sha256": "e35b314463bc7d7e48d542b13941c49172abb2ba8e8fe5b1f54e6a50b636bdfc"
+    },
+    "/lib/aarch64-linux-gnu/libdc1394.so.25": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libdc1394.so.25.0.0",
+      "bytes": 234240,
+      "sha256": "87db33da3c078fc15037ef0f40c8fc447838110d8d406a14c604c3d22593d48d"
+    },
+    "/lib/aarch64-linux-gnu/libdecor-0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libdecor-0.so.0.100.1",
+      "bytes": 67832,
+      "sha256": "e06075dfbe40aa12c27b3a3517d1d4a725687f559f23c855c4fc90e97c5e45ea"
+    },
+    "/lib/aarch64-linux-gnu/libdl.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libdl.so.2",
+      "bytes": 67528,
+      "sha256": "e5e9474a683596d59cc9e13246bc83878433e53c3befbabd73e3da9ccb5fe174"
+    },
+    "/lib/aarch64-linux-gnu/libdrm.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libdrm.so.2.4.0",
+      "bytes": 133896,
+      "sha256": "2d9d3c8d24be2cabf6ff8af026928ffc6b1f7782d4b8f19f859f6a0918a40ab3"
+    },
+    "/lib/aarch64-linux-gnu/libepoxy.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libepoxy.so.0.0.0",
+      "bytes": 1336848,
+      "sha256": "dfe8ad352337ddfbca073464780c5393da6401b92a96a3506adef344d490cec5"
+    },
+    "/lib/aarch64-linux-gnu/libexpat.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libexpat.so.1.8.10",
+      "bytes": 198712,
+      "sha256": "4da3eb8010076d0c9ca494ca3d7a179d1697093ceb7fdc05ca701bb2a4359fff"
+    },
+    "/lib/aarch64-linux-gnu/libffi.so.8": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libffi.so.8.1.2",
+      "bytes": 68000,
+      "sha256": "cbae420bdec2903fa5943664504b3540091651ac0af76403741a8c14d5b018da"
+    },
+    "/lib/aarch64-linux-gnu/libflite.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libflite.so.2.2",
+      "bytes": 264128,
+      "sha256": "4d4ea75a7ebf23368adcd051b91ce186089fab01f0ce04c394c724b62bc05585"
+    },
+    "/lib/aarch64-linux-gnu/libflite_cmu_us_awb.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libflite_cmu_us_awb.so.2.2",
+      "bytes": 3999664,
+      "sha256": "7e67c028689c5b866a3770921b024b3a0411a838fc2b7297c1826848c7ecbaef"
+    },
+    "/lib/aarch64-linux-gnu/libflite_cmu_us_kal.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libflite_cmu_us_kal.so.2.2",
+      "bytes": 1509304,
+      "sha256": "42f9577dabbcfe79e608a665fd64ad7d4c82bcb435c51757b84254df70b73fd2"
+    },
+    "/lib/aarch64-linux-gnu/libflite_cmu_us_kal16.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libflite_cmu_us_kal16.so.2.2",
+      "bytes": 4065208,
+      "sha256": "8d3d3076e832dcbca9064be2b0525d80b291751d599de56507eb989039989cdc"
+    },
+    "/lib/aarch64-linux-gnu/libflite_cmu_us_rms.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libflite_cmu_us_rms.so.2.2",
+      "bytes": 4655024,
+      "sha256": "3aaaf51a3085b20b8fb50bed9373f09d45110ab7c88b6c49a93783772bbe437b"
+    },
+    "/lib/aarch64-linux-gnu/libflite_cmu_us_slt.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libflite_cmu_us_slt.so.2.2",
+      "bytes": 4065200,
+      "sha256": "0885f934684a73f65269845855323b2479e213b1d9c788331a329c882d8ea1e9"
+    },
+    "/lib/aarch64-linux-gnu/libflite_cmulex.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libflite_cmulex.so.2.2",
+      "bytes": 657416,
+      "sha256": "d60d84be2de3ea73b0ba80e849d4ced47a70c801762378d6e7730ef7a3b3e395"
+    },
+    "/lib/aarch64-linux-gnu/libflite_usenglish.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libflite_usenglish.so.2.2",
+      "bytes": 198664,
+      "sha256": "ecaac969a592cad4f4a345b5dc8787717462a047df4cb36a611e4c5636ad6000"
+    },
+    "/lib/aarch64-linux-gnu/libfontconfig.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libfontconfig.so.1.12.0",
+      "bytes": 330656,
+      "sha256": "3c8297dc27acfe453110b4633d89d0254215aa735b50ed1e86f54426356aa3d8"
+    },
+    "/lib/aarch64-linux-gnu/libfreetype.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libfreetype.so.6.18.3",
+      "bytes": 788568,
+      "sha256": "aeb963698e88c23790f2db1bf36abdf650152253f7b25cdb90fee080c5e09c4a"
+    },
+    "/lib/aarch64-linux-gnu/libfribidi.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libfribidi.so.0.4.0",
+      "bytes": 108720,
+      "sha256": "1517d417be4bb654ec0c99a10287b76528e946801bbdab98e6e911098ed93970"
+    },
+    "/lib/aarch64-linux-gnu/libgbm.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgbm.so.1.0.0",
+      "bytes": 68480,
+      "sha256": "e3d658722199ad8e4c79f4d1338c7d3a0a036ee9603585ce661a6e94b8ef446d"
+    },
+    "/lib/aarch64-linux-gnu/libgcc_s.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgcc_s.so.1",
+      "bytes": 133448,
+      "sha256": "046856f95f4636f1fc7c3a12bf4f3cd5634c2fc5145c3fdf7395d4f349fa69c7"
+    },
+    "/lib/aarch64-linux-gnu/libgcrypt.so.20": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgcrypt.so.20.4.1",
+      "bytes": 1000296,
+      "sha256": "01c8f6929c4c5853f8204a727e2be5fc3f7cef3f850e2818558800aa5f78c80e"
+    },
+    "/lib/aarch64-linux-gnu/libgdk_pixbuf-2.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgdk_pixbuf-2.0.so.0.4200.10",
+      "bytes": 198760,
+      "sha256": "15e8d2f10782f9e7f27e94e04713dd934ec2a72661d6247fcf3e9c84be3b4576"
+    },
+    "/lib/aarch64-linux-gnu/libgfortran.so.5": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgfortran.so.5.0.0",
+      "bytes": 1448584,
+      "sha256": "bb3541fee5d2b78473a0f5e30aa7a77d6ab06a1ee4ab6d2592370dd3addbcbb9"
+    },
+    "/lib/aarch64-linux-gnu/libgio-2.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgio-2.0.so.0.7400.6",
+      "bytes": 2100616,
+      "sha256": "bd9f40d91ca9595f3c6dbc6ebd45b4366dd6ab0024edb0a214e1c8f609e3a63a"
+    },
+    "/lib/aarch64-linux-gnu/libglib-2.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libglib-2.0.so.0.7400.6",
+      "bytes": 1314544,
+      "sha256": "e27388803d2f938cc01918316f2d1700ae3b650f1b3a62d5a4f2585717e28185"
+    },
+    "/lib/aarch64-linux-gnu/libgme.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgme.so.0.6.3",
+      "bytes": 329672,
+      "sha256": "913641ea26eda7180ad854bb17fb49bb15d92646e43e482d97fcb27f699fcc09"
+    },
+    "/lib/aarch64-linux-gnu/libgmodule-2.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgmodule-2.0.so.0.7400.6",
+      "bytes": 67584,
+      "sha256": "01213eba05eede42181e91dd10378b9700185ff458405165854307347a7d8131"
+    },
+    "/lib/aarch64-linux-gnu/libgmp.so.10": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgmp.so.10.4.1",
+      "bytes": 529184,
+      "sha256": "391b336ee37cd47a1d4748ba2d15bd125c1a082864f7bca9c92612f8a0ac305e"
+    },
+    "/lib/aarch64-linux-gnu/libgnutls.so.30": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgnutls.so.30.34.3",
+      "bytes": 2303440,
+      "sha256": "a28310df0a36465608473face05bf89b87759804bd0df83b161d564b9804b3fc"
+    },
+    "/lib/aarch64-linux-gnu/libgobject-2.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgobject-2.0.so.0.7400.6",
+      "bytes": 462704,
+      "sha256": "9d89f4f6dc1193398fa0f30c297c89b691756a601a99c8f2b58e21d10a2f576e"
+    },
+    "/lib/aarch64-linux-gnu/libgomp.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgomp.so.1.0.0",
+      "bytes": 331264,
+      "sha256": "9d8c6a6175f6a7cda286c80f4de577edd58077ac3f4102356ec546869d170d30"
+    },
+    "/lib/aarch64-linux-gnu/libgpg-error.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgpg-error.so.0.33.1",
+      "bytes": 198640,
+      "sha256": "44c67a9e7a5cfc227e84dcb8f96463103c12415286a8e003bc66abebc4b1f6bd"
+    },
+    "/lib/aarch64-linux-gnu/libgraphite2.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgraphite2.so.3.2.1",
+      "bytes": 133232,
+      "sha256": "fc6684eb88315e757d87b2eb9691573d8550bd6f88c9cd007bc8a5467467a723"
+    },
+    "/lib/aarch64-linux-gnu/libgsm.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgsm.so.1.0.19",
+      "bytes": 67504,
+      "sha256": "466ebf68fda7f783edb3f1bd8064244b1785b8a82932394ad8e418b01669d726"
+    },
+    "/lib/aarch64-linux-gnu/libgssapi_krb5.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libgssapi_krb5.so.2.2",
+      "bytes": 334904,
+      "sha256": "9d35dc9f4a4ad1b3e2a97412ae1147c78a2ba28729c0eba07f2c4e52ba254153"
+    },
+    "/lib/aarch64-linux-gnu/libharfbuzz.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libharfbuzz.so.0.60000.0",
+      "bytes": 1052200,
+      "sha256": "2b79a236dc9ff8f991a3123dae97eba4193c9f70d3c2a45b731b64d3b5b8677e"
+    },
+    "/lib/aarch64-linux-gnu/libhogweed.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libhogweed.so.6.6",
+      "bytes": 329656,
+      "sha256": "07ffe03d318b7819b94988a810b153909257f72fba0b1843ced7bc619312a93c"
+    },
+    "/lib/aarch64-linux-gnu/libhwy.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libhwy.so.1.0.3",
+      "bytes": 67528,
+      "sha256": "2578d4ee12af92839ca1557fae274b9c1e69d41b0c20e14ccab682b16550c914"
+    },
+    "/lib/aarch64-linux-gnu/libicudata.so.72": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libicudata.so.72.1",
+      "bytes": 31262336,
+      "sha256": "d0619595f7b31f7ee5210a2a195f0367fc7251e80a0489ce6405c31f6efea23d"
+    },
+    "/lib/aarch64-linux-gnu/libicuuc.so.72": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libicuuc.so.72.1",
+      "bytes": 2099352,
+      "sha256": "7796e0b797561d4e63693dcebf48b69342f96b22069486c83c850772ce8a9d45"
+    },
+    "/lib/aarch64-linux-gnu/libidn2.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libidn2.so.0.3.8",
+      "bytes": 198664,
+      "sha256": "7a596ba5e585c8132d02ec8c3e83f15b1767ade6b735a4f0814ced6d0f1bf985"
+    },
+    "/lib/aarch64-linux-gnu/libiec61883.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libiec61883.so.0.1.1",
+      "bytes": 67424,
+      "sha256": "79de055616a5c4dfec565c34a14dc65050f83fcb8374de0bbef72d293c789406"
+    },
+    "/lib/aarch64-linux-gnu/libjack.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libjack.so.0.1.0",
+      "bytes": 395512,
+      "sha256": "56b154cb1e775c90399b555064a8c836f3cb173d0a8cd70291759e14c4b7658b"
+    },
+    "/lib/aarch64-linux-gnu/libjpeg.so.62": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libjpeg.so.62.3.0",
+      "bytes": 395264,
+      "sha256": "4021b9b82df1affabe252aec393c00f2ec61b7ab570e760f4b4cf76db9b449ab"
+    },
+    "/lib/aarch64-linux-gnu/libjxl.so.0.7": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libjxl.so.0.7.0",
+      "bytes": 1707168,
+      "sha256": "17fb2030e4e42e7c6426375521e9fcfaf4e018bee3aba9090740075ec56cf55d"
+    },
+    "/lib/aarch64-linux-gnu/libjxl_threads.so.0.7": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libjxl_threads.so.0.7.0",
+      "bytes": 67776,
+      "sha256": "217ee0bca806cb4649e3d96a303eb2f30669fce771f7d3aa891989b4d019cecb"
+    },
+    "/lib/aarch64-linux-gnu/libk5crypto.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libk5crypto.so.3.1",
+      "bytes": 199352,
+      "sha256": "3b52aaddb3db517a635e711ba055b2a86adccacab4186a444ab4ae398cdffba5"
+    },
+    "/lib/aarch64-linux-gnu/libkeyutils.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libkeyutils.so.1.10",
+      "bytes": 67432,
+      "sha256": "8364aac5e87ae71e5f659163f7672d8ae7d936f2ccb45d0aaec645a006952ed1"
+    },
+    "/lib/aarch64-linux-gnu/libkrb5.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libkrb5.so.3.3",
+      "bytes": 928752,
+      "sha256": "9521937afd55582d7714f7e20b5bf1ba53016221cb069edec49a3c2d58cdbe60"
+    },
+    "/lib/aarch64-linux-gnu/libkrb5support.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libkrb5support.so.0.1",
+      "bytes": 68576,
+      "sha256": "cb761561cbf732abfbeeb105bda4a8c28685b6da3ebe1be066430c1fe564a8db"
+    },
+    "/lib/aarch64-linux-gnu/liblapack.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/lapack/liblapack.so.3.11.0",
+      "bytes": 5642008,
+      "sha256": "ee1bf1c17befe1449af7e3ed2d488a92819298d34e8b7e22f7e066ad09e43810"
+    },
+    "/lib/aarch64-linux-gnu/liblcms2.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/liblcms2.so.2.0.14",
+      "bytes": 406248,
+      "sha256": "c50b8d19c2876818bf2ac45db06fef04dd5580dda8c39aff2c9443389b8e5b5d"
+    },
+    "/lib/aarch64-linux-gnu/liblilv-0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/liblilv-0.so.0.24.14",
+      "bytes": 108336,
+      "sha256": "4fc43f130ffcbad0293559a41855a98e96f3fa4853af2d9a9d007e57709e26a2"
+    },
+    "/lib/aarch64-linux-gnu/liblz4.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/liblz4.so.1.9.4",
+      "bytes": 199056,
+      "sha256": "43109ed13afa34ff991ed73c4d520c5056378949b17d77c50d5773c5aa851439"
+    },
+    "/lib/aarch64-linux-gnu/liblzma.so.5": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/liblzma.so.5.4.1",
+      "bytes": 198584,
+      "sha256": "530e774de0f3fd8754351f387f52db6a0cb134b350e43d80044dea7109400f17"
+    },
+    "/lib/aarch64-linux-gnu/libm.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libm.so.6",
+      "bytes": 591960,
+      "sha256": "3c4cb3be0b974edf05f023f85ab15107fb5afc2687163593d0d4cf8e80c17b39"
+    },
+    "/lib/aarch64-linux-gnu/libmbedcrypto.so.7": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libmbedcrypto.so.2.28.3",
+      "bytes": 526408,
+      "sha256": "26474dbfbfe62fdc403ed9143c0767b3b3eb79cd643e72c7f4acbb0a0dd5575e"
+    },
+    "/lib/aarch64-linux-gnu/libmd.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libmd.so.0.0.5",
+      "bytes": 67704,
+      "sha256": "be8d151f2f06935db812859f575ec818af7fd93eaab0ec4e7dae9e5ad7ca38bb"
+    },
+    "/lib/aarch64-linux-gnu/libmount.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libmount.so.1.1.0",
+      "bytes": 461432,
+      "sha256": "c4feeb360a1bc2996da81bfe08dd9f1453558513cea012e2c45752a9833d5a83"
+    },
+    "/lib/aarch64-linux-gnu/libmp3lame.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libmp3lame.so.0.0.0",
+      "bytes": 329616,
+      "sha256": "75fc8d8c3a348016aabdf40f4ca844cacea9dcb217a6d36e32db86d476445b60"
+    },
+    "/lib/aarch64-linux-gnu/libmpg123.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libmpg123.so.0.47.0",
+      "bytes": 332024,
+      "sha256": "baa2f9293279475fc072cce39aed982f1d5bdd1ddedeb86ac85b10966a7db160"
+    },
+    "/lib/aarch64-linux-gnu/libmysofa.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libmysofa.so.1.3.0",
+      "bytes": 67352,
+      "sha256": "f8347b0382bd5180888f34eabf88794b824c3c9abacc58e26df2afe64b99e84a"
+    },
+    "/lib/aarch64-linux-gnu/libncursesw.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libncursesw.so.6.4",
+      "bytes": 264048,
+      "sha256": "7f6d39c5f0568ac3e32d718cebb15d29f16c0f2da19dcd27d4b41f466f7f2f5a"
+    },
+    "/lib/aarch64-linux-gnu/libnettle.so.8": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libnettle.so.8.6",
+      "bytes": 329736,
+      "sha256": "d534bf67fcfa3c9bbead7a0a3d55244764eab87de1f85143948e6edbb74c4749"
+    },
+    "/lib/aarch64-linux-gnu/libnorm.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libnorm.so.1",
+      "bytes": 477120,
+      "sha256": "d3659ac6ab9cd76b3de8cb2b3e27fa3c0855618254b7dc1d35044f6fb14b9dd1"
+    },
+    "/lib/aarch64-linux-gnu/libnuma.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libnuma.so.1.0.0",
+      "bytes": 68656,
+      "sha256": "6ebfecf8e676f5f24da979933e4a8014888e5754b450fd54125022b7e59bca82"
+    },
+    "/lib/aarch64-linux-gnu/libogg.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libogg.so.0.8.5",
+      "bytes": 67352,
+      "sha256": "06cdba8cc8ba4d32cbe26d64dbff9ca5124345757ea6b1a1a62594cffc20cfd8"
+    },
+    "/lib/aarch64-linux-gnu/libopenal.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libopenal.so.1.19.1",
+      "bytes": 921024,
+      "sha256": "9bcff6eeedfd40543a31d0d39399b4c1390b51e9ee2b1c9db1399123222eb98b"
+    },
+    "/lib/aarch64-linux-gnu/libopenjp2.so.7": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libopenjp2.so.2.5.0",
+      "bytes": 395664,
+      "sha256": "fc0b32089ccdcbea19154e9af132f7bcdc5942a8301444de8f61d95ebcc221c9"
+    },
+    "/lib/aarch64-linux-gnu/libopenmpt.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libopenmpt.so.0.3.3",
+      "bytes": 1837304,
+      "sha256": "df9083ec1e9165234a41017bcb8956f216d2001cd42c264045d97bb27e5ce524"
+    },
+    "/lib/aarch64-linux-gnu/libopus.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libopus.so.0.8.0",
+      "bytes": 395672,
+      "sha256": "70eda5b43974a0adfc9eea77f2a1c3dc0a49f68dd181b8cb1816e73bb2d38ccb"
+    },
+    "/lib/aarch64-linux-gnu/libp11-kit.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libp11-kit.so.0.3.0",
+      "bytes": 1351264,
+      "sha256": "d6cb9154d510d036aa7270369ba602df62e45caf9c410f6de2e60dca32e3a80e"
+    },
+    "/lib/aarch64-linux-gnu/libpango-1.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpango-1.0.so.0.5000.12",
+      "bytes": 462192,
+      "sha256": "d5a9acb5692963bb69ce900e25f0e8ca4dc9921baf9dd4dc541c3c19fc23705f"
+    },
+    "/lib/aarch64-linux-gnu/libpangocairo-1.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpangocairo-1.0.so.0.5000.12",
+      "bytes": 67472,
+      "sha256": "16673fb15d0894d90afec50b6f656314ea1ec0990e8f1e5a916504868d656753"
+    },
+    "/lib/aarch64-linux-gnu/libpangoft2-1.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpangoft2-1.0.so.0.5000.12",
+      "bytes": 132888,
+      "sha256": "1ec1f2f9882aa9603cbde923afc3ee5f35b2eb60e96bc149854009d4e9f49155"
+    },
+    "/lib/aarch64-linux-gnu/libpcre2-8.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpcre2-8.so.0.11.2",
+      "bytes": 592440,
+      "sha256": "cabf859fab34e77fba3ab3485878cc19014327246a7c6aa21ac0d2d1a32dcc81"
+    },
+    "/lib/aarch64-linux-gnu/libpgm-5.3.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpgm-5.3.so.0.0.128",
+      "bytes": 318576,
+      "sha256": "31afed762f9d8010e48b9bc8f29bcf40efb2f216d5bce26e8e3cbbb776b2fc81"
+    },
+    "/lib/aarch64-linux-gnu/libpixman-1.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpixman-1.so.0.42.2",
+      "bytes": 657360,
+      "sha256": "e999186992ae77d42b482821f8a37115b88f02f914f6f7ac29d301baa3c3f097"
+    },
+    "/lib/aarch64-linux-gnu/libplacebo.so.208": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libplacebo.so.208",
+      "bytes": 7282600,
+      "sha256": "1b88e28e9cadc396acf28a8705af0209fe78efd3169ef56154bba155df6eb813"
+    },
+    "/lib/aarch64-linux-gnu/libpng16.so.16": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpng16.so.16.39.0",
+      "bytes": 264040,
+      "sha256": "07cf81c68cc0971f8672ee6669aaaa668cb6fab3255c8d45960139db0cf91a01"
+    },
+    "/lib/aarch64-linux-gnu/libpocketsphinx.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpocketsphinx.so.3.0.0",
+      "bytes": 330208,
+      "sha256": "066bc9ee3e71c9a8864c67f66f7e55f6e071879b29a996c973fe32aaf8f7b3fb"
+    },
+    "/lib/aarch64-linux-gnu/libpostproc.so.56": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpostproc.so.56.6.100",
+      "bytes": 67512,
+      "sha256": "e19f8193118174f7d62e44c2c399e010b4a426c29844e374e94ad41145a3ee7d"
+    },
+    "/lib/aarch64-linux-gnu/libpthread.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpthread.so.0",
+      "bytes": 67528,
+      "sha256": "434dcd27f22fc8bf236c0c00541a1e503d302aa796c333729a2cd15a4cfe4814"
+    },
+    "/lib/aarch64-linux-gnu/libpulse.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libpulse.so.0.24.2",
+      "bytes": 330728,
+      "sha256": "c69d82ff2e1f4963b81dd02f9a0042314430607da73119bf4d925d027f403953"
+    },
+    "/lib/aarch64-linux-gnu/librabbitmq.so.4": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/librabbitmq.so.4.5.0",
+      "bytes": 132968,
+      "sha256": "49e20800116b1f95f27dcbc8c4168742d24139d8af68b4c1b8269e32f43fcf0f"
+    },
+    "/lib/aarch64-linux-gnu/librav1e.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/librav1e.so.0.5.1",
+      "bytes": 1902752,
+      "sha256": "bca6b427baa4d6655f0a9a12a11757d3bf5746d643ea1dcffa90ad748c6fe93e"
+    },
+    "/lib/aarch64-linux-gnu/libraw1394.so.11": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libraw1394.so.11.1.0",
+      "bytes": 64544,
+      "sha256": "104cf651c370f61f84543e6c0c0c20e3f9c54ee7193afd460366c274be25b6ea"
+    },
+    "/lib/aarch64-linux-gnu/libresolv.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libresolv.so.2",
+      "bytes": 68232,
+      "sha256": "5f3769c75e5eca6ff14f2c7a22bcc8cfeeef31da9545434a281a5fdd1f66d6f0"
+    },
+    "/lib/aarch64-linux-gnu/librist.so.4": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/librist.so.4.2.0",
+      "bytes": 157640,
+      "sha256": "f2162328f4fb64864f14a355217eedd2213c16dd67d7948c21533796c2030644"
+    },
+    "/lib/aarch64-linux-gnu/librom1394.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/librom1394.so.0.3.0",
+      "bytes": 14320,
+      "sha256": "0c4200f7c6436ad33906519746a935ce374333091fcc7767276dee652df46506"
+    },
+    "/lib/aarch64-linux-gnu/librsvg-2.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/librsvg-2.so.2.48.0",
+      "bytes": 9903480,
+      "sha256": "e9b09fc0a7ddd0c66cff5bf2c66c0f25b5745af93421a9346805cacb1e951095"
+    },
+    "/lib/aarch64-linux-gnu/librubberband.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/librubberband.so.2.2.1",
+      "bytes": 395200,
+      "sha256": "aea07024a216cfb8d1e8a5813b4939bb8cfd6f9633e6cd5a4c5aba5120a3a0bc"
+    },
+    "/lib/aarch64-linux-gnu/libsamplerate.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsamplerate.so.0.2.2",
+      "bytes": 1509704,
+      "sha256": "c08e1733f91fc8826ff91270946c25f9d26eaef617c914cec495df0912551a07"
+    },
+    "/lib/aarch64-linux-gnu/libselinux.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libselinux.so.1",
+      "bytes": 198800,
+      "sha256": "6f51339a6f92f88785dfcfdb13194c3d10cb10ccee1d0ddb5b3e3445145c761c"
+    },
+    "/lib/aarch64-linux-gnu/libserd-0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libserd-0.so.0.30.16",
+      "bytes": 132968,
+      "sha256": "adf0dfdcd9d5f05e250a42ba89cb81a4d81ac1f098b59cde4af83a751b1b2b66"
+    },
+    "/lib/aarch64-linux-gnu/libshine.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libshine.so.3.0.1",
+      "bytes": 38904,
+      "sha256": "17d9b66958eb3c1f160dad2ea4fd8a02fae3cd708070e83fc57a9eb6e3d7a79d"
+    },
+    "/lib/aarch64-linux-gnu/libslang.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libslang.so.2.3.3",
+      "bytes": 2278888,
+      "sha256": "716e07b6df4d85a45ec555d85b5f9ef47a5cf653b92379bf2d68b97c6d6b6a9c"
+    },
+    "/lib/aarch64-linux-gnu/libsnappy.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsnappy.so.1.1.9",
+      "bytes": 67912,
+      "sha256": "a7d0b9c57589f9a55153189ed41c68fe6541778e1178f09abdc3038595715813"
+    },
+    "/lib/aarch64-linux-gnu/libsndfile.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsndfile.so.1.0.35",
+      "bytes": 595024,
+      "sha256": "fd9d43a318e52cdf4d3e79d344e4cbff00dc3ed85346eb05c1d6553297f1d46d"
+    },
+    "/lib/aarch64-linux-gnu/libsndio.so.7.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsndio.so.7.2",
+      "bytes": 67760,
+      "sha256": "1dc7015db86b9bf122384c7e9799d6980c02ff7ed8173bd9c5a62680bdd06e47"
+    },
+    "/lib/aarch64-linux-gnu/libsodium.so.23": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsodium.so.23.3.0",
+      "bytes": 264368,
+      "sha256": "a36a376d94f004f9276187376e998d9f511627229c49647493d47e2e9db0ced6"
+    },
+    "/lib/aarch64-linux-gnu/libsord-0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsord-0.so.0.16.15",
+      "bytes": 67352,
+      "sha256": "49875184dbfca5d546b14143c4fa11ccb2ccc4679e7359e87ab3dcd00c0a9fdc"
+    },
+    "/lib/aarch64-linux-gnu/libsoxr.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsoxr.so.0.1.2",
+      "bytes": 137552,
+      "sha256": "2075ac18317e78b2dd6a1d5d5168f1df4963d46c5e5c55de8c5ba513674c1746"
+    },
+    "/lib/aarch64-linux-gnu/libspeex.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libspeex.so.1.5.2",
+      "bytes": 132968,
+      "sha256": "598a3e7480d86ae3e3678976a358a5c012d41aa04bc89a99d60efaf555dd2582"
+    },
+    "/lib/aarch64-linux-gnu/libsphinxbase.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsphinxbase.so.3.0.0",
+      "bytes": 329816,
+      "sha256": "17dc9d40ef3c4ca16127d4abf41e8b96a4e63832e78f5cb522623862afe6e963"
+    },
+    "/lib/aarch64-linux-gnu/libsratom-0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsratom-0.so.0.6.14",
+      "bytes": 67352,
+      "sha256": "8e3e06c2682970768dca5641b927af40f222ae9d5352d12df668e2e041a01216"
+    },
+    "/lib/aarch64-linux-gnu/libsrt-gnutls.so.1.5": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsrt-gnutls.so.1.5.1",
+      "bytes": 854608,
+      "sha256": "6403a1fb47700cac80342329aef064db855bca725da6e66844b76ae367836f45"
+    },
+    "/lib/aarch64-linux-gnu/libssh-gcrypt.so.4": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libssh-gcrypt.so.4.9.6",
+      "bytes": 597032,
+      "sha256": "d44b40c4e008ce01777db4c47b90e888383381f1e4536cf0879112f426efdc84"
+    },
+    "/lib/aarch64-linux-gnu/libssl.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libssl.so.3",
+      "bytes": 737192,
+      "sha256": "9e171264a6651d714938e83d81277d16524c150a36eaa59ce56e79b9cdbea7ce"
+    },
+    "/lib/aarch64-linux-gnu/libstdc++.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.30",
+      "bytes": 2174296,
+      "sha256": "532f3a12d7b8fef6cc7a064ea106b6c4ab2365674b73e743e4a385d4ffb6c8ab"
+    },
+    "/lib/aarch64-linux-gnu/libswresample.so.4": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libswresample.so.4.7.100",
+      "bytes": 133048,
+      "sha256": "fa2b69c72723e924675e886d72e0a2f31573edb9419a05fda9f3e9e38ee73767"
+    },
+    "/lib/aarch64-linux-gnu/libswscale.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libswscale.so.6.7.100",
+      "bytes": 526264,
+      "sha256": "3c033d6be3ff86b01255aa76aae56986bdf61d9f26ada40b8ab64468d7cd571f"
+    },
+    "/lib/aarch64-linux-gnu/libsystemd.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libsystemd.so.0.35.0",
+      "bytes": 923696,
+      "sha256": "e38e0c11131d330c9a49a4a7f9437f8cf9d6a198355a47ecff02bc4aabe52171"
+    },
+    "/lib/aarch64-linux-gnu/libtasn1.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libtasn1.so.6.6.3",
+      "bytes": 133048,
+      "sha256": "9ca4614b9dabf3c2a094dda8a0be33144144ded8094827db8ababcfc22f09d6a"
+    },
+    "/lib/aarch64-linux-gnu/libthai.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libthai.so.0.3.1",
+      "bytes": 40880,
+      "sha256": "7b407835f19c4dc914538515e9793e450fb811f56f12747e0e3176c3fd60e21d"
+    },
+    "/lib/aarch64-linux-gnu/libtheoradec.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libtheoradec.so.1.1.4",
+      "bytes": 133200,
+      "sha256": "c4055ada0f38c34a785e8527d278218e6b77e9d48fff7c4e5b6437b0c5ecac56"
+    },
+    "/lib/aarch64-linux-gnu/libtheoraenc.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libtheoraenc.so.1.1.2",
+      "bytes": 198736,
+      "sha256": "c6aee41b3b360cdfa0d44fd8ab58c63c27a6c4b492a00c8309d15b32c8603c28"
+    },
+    "/lib/aarch64-linux-gnu/libtinfo.so.6": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libtinfo.so.6.4",
+      "bytes": 199896,
+      "sha256": "3486c8bf9712132d1834a4800d5002e37d4edc670daa9652b3d470eb813aec55"
+    },
+    "/lib/aarch64-linux-gnu/libtwolame.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libtwolame.so.0.0.0",
+      "bytes": 120680,
+      "sha256": "0c6fd905ed8a7f2abb27fced631fba3a41ac2dca53f3622223e31c9cd4247de2"
+    },
+    "/lib/aarch64-linux-gnu/libudev.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libudev.so.1.7.5",
+      "bytes": 199104,
+      "sha256": "215857660d2d9ff00d8d653188fc9bd77b25cb2492d275be4b25fe500981da95"
+    },
+    "/lib/aarch64-linux-gnu/libudfread.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libudfread.so.0.1.0",
+      "bytes": 34584,
+      "sha256": "93f4c690019b4f6e3241adcc82d3eefbb4a878758ae88151a530ecb5e3db8a8a"
+    },
+    "/lib/aarch64-linux-gnu/libunistring.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libunistring.so.2.2.0",
+      "bytes": 1771448,
+      "sha256": "58aceeb77aed45910b4f5abc1d2c51a964a10d5008609e0b4b57dd4e7eeba570"
+    },
+    "/lib/aarch64-linux-gnu/libusb-1.0.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libusb-1.0.so.0.3.0",
+      "bytes": 117784,
+      "sha256": "68e5f56b93ee03b203fa59eb9785075b11703b38b27a273a27bc73da7ffc5847"
+    },
+    "/lib/aarch64-linux-gnu/libva-drm.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libva-drm.so.2.1700.0",
+      "bytes": 67672,
+      "sha256": "5934b3a557e1ddf288398cf68977a9effc511b648c028a8dcb8041e62a023ef4"
+    },
+    "/lib/aarch64-linux-gnu/libva-x11.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libva-x11.so.2.1700.0",
+      "bytes": 68096,
+      "sha256": "d152f65d3e2eea42a15ed6c30825f51a0186ad1f7ce6432176d55e46ad3af4cb"
+    },
+    "/lib/aarch64-linux-gnu/libva.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libva.so.2.1700.0",
+      "bytes": 199088,
+      "sha256": "b46f33c9b27e3328f821be56c17089c0caeb6e1fdb543999bb7909b0cc68dbef"
+    },
+    "/lib/aarch64-linux-gnu/libvdpau.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libvdpau.so.1.0.0",
+      "bytes": 67520,
+      "sha256": "0279bdc79aee06b7c3f683c3f549df9c3c23c8984f6e214a8921df6369d73cea"
+    },
+    "/lib/aarch64-linux-gnu/libvidstab.so.1.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libvidstab.so.1.1",
+      "bytes": 76720,
+      "sha256": "9c8cd50959ba5b5474d0d075d0fe325c97d0b26271781619f3b77df654e3b351"
+    },
+    "/lib/aarch64-linux-gnu/libvorbis.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libvorbis.so.0.4.9",
+      "bytes": 165736,
+      "sha256": "7a47392715d2868d0ea2d1fe1a4e955fe3ba519da15a9b3d0c8ad3568551d72f"
+    },
+    "/lib/aarch64-linux-gnu/libvorbisenc.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libvorbisenc.so.2.0.12",
+      "bytes": 653216,
+      "sha256": "8393e8bb008aa47eb7074a6d06229bbbd5b2d104fcbe186f6a23f6f4955b0123"
+    },
+    "/lib/aarch64-linux-gnu/libvorbisfile.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libvorbisfile.so.3.3.8",
+      "bytes": 34616,
+      "sha256": "719c0288d8fc1b553d084be0c55ff72917f8159de438686d3701c97128128358"
+    },
+    "/lib/aarch64-linux-gnu/libvpx.so.7": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libvpx.so.7.1.0",
+      "bytes": 2099296,
+      "sha256": "fc45eecdaa40cd1b6198a1f858986fee1d01cfeb2f4dec15e1663e8101032185"
+    },
+    "/lib/aarch64-linux-gnu/libvulkan.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libvulkan.so.1.3.239",
+      "bytes": 526896,
+      "sha256": "605f52f426f01a2c468ecd920b3de31452fde495f2c0d99602fffb93e782767c"
+    },
+    "/lib/aarch64-linux-gnu/libwayland-client.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libwayland-client.so.0.21.0",
+      "bytes": 68872,
+      "sha256": "7c9ee217c9e88c9701adb27efc0cf1f90a8b1cdf0f385cca937ea35c270cdadd"
+    },
+    "/lib/aarch64-linux-gnu/libwayland-cursor.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libwayland-cursor.so.0.21.0",
+      "bytes": 80184,
+      "sha256": "ad9c4d80e3c64ba31ed24f3960f4aaff1b8b9baeeb7a56781112c92e15f63d8f"
+    },
+    "/lib/aarch64-linux-gnu/libwayland-egl.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libwayland-egl.so.1.21.0",
+      "bytes": 67384,
+      "sha256": "947171c2237aba34ba44ab9edca941eb9f72c8f3425dc1ba45b89c2be6a0d52e"
+    },
+    "/lib/aarch64-linux-gnu/libwayland-server.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libwayland-server.so.0.21.0",
+      "bytes": 134656,
+      "sha256": "97f8e645fa0ccf4413683344e883569740d796b5f122c93d61dcce57f870afc6"
+    },
+    "/lib/aarch64-linux-gnu/libwebp.so.7": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libwebp.so.7.1.5",
+      "bytes": 395832,
+      "sha256": "1ab72fb2daf8e77fe157201f14d284bcb8bad0e3942cef6cd0f8923965254496"
+    },
+    "/lib/aarch64-linux-gnu/libwebpmux.so.3": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libwebpmux.so.3.0.10",
+      "bytes": 67792,
+      "sha256": "2ce4e101f93d89b261aacc8a6f15fd4e36eec2277e5529dfec57e088eb049cdb"
+    },
+    "/lib/aarch64-linux-gnu/libx264.so.164": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libx264.so.164",
+      "bytes": 1379576,
+      "sha256": "f8212c5fc1f48bf09f312bdd18f9d7e981f1d5e67e51b476ae8fcaafc5f523af"
+    },
+    "/lib/aarch64-linux-gnu/libx265.so.199": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libx265.so.199",
+      "bytes": 2828696,
+      "sha256": "b4a38c48eb31ea9987d60c53113034484b99f3fd065fea422c269e734d6dc523"
+    },
+    "/lib/aarch64-linux-gnu/libxcb-dri3.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxcb-dri3.so.0.1.0",
+      "bytes": 67608,
+      "sha256": "17c6579239f7f2ac06212a4c2d42b44104c0faf4568415f5d8bee91ac7972cae"
+    },
+    "/lib/aarch64-linux-gnu/libxcb-render.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxcb-render.so.0.0.0",
+      "bytes": 67784,
+      "sha256": "b3351688e53eb0e42338f87c9b379a03e65cd62f90402915d9780bcbe14cbb88"
+    },
+    "/lib/aarch64-linux-gnu/libxcb-shape.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxcb-shape.so.0.0.0",
+      "bytes": 67560,
+      "sha256": "32d7ccca4f8e851af66892b7b7afeffd03d77f536fbbe1b6c0b60124e7e10981"
+    },
+    "/lib/aarch64-linux-gnu/libxcb-shm.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxcb-shm.so.0.0.0",
+      "bytes": 67576,
+      "sha256": "4cefd6bc21493a15bfca3c88e7c3b14136acccc94b56c841a0f354f5c8cb9490"
+    },
+    "/lib/aarch64-linux-gnu/libxcb-xfixes.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxcb-xfixes.so.0.0.0",
+      "bytes": 67568,
+      "sha256": "9401aca80a6548817079452bf49ec1f496a4539c8011c5f5fc534ab1d1b95e84"
+    },
+    "/lib/aarch64-linux-gnu/libxcb.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxcb.so.1.1.0",
+      "bytes": 199544,
+      "sha256": "a1087fa3ff008f9b38c7dc70f3f4734fc26cb513025c033acc4e3a9b17475aa4"
+    },
+    "/lib/aarch64-linux-gnu/libxkbcommon.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxkbcommon.so.0.0.0",
+      "bytes": 330360,
+      "sha256": "bdaa3b24c59ef1766494d62f8ac13bbe6434d461b5691b8126ca03ec60021888"
+    },
+    "/lib/aarch64-linux-gnu/libxml2.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxml2.so.2.9.14",
+      "bytes": 1708736,
+      "sha256": "630352d8686c5cfb5d4fd061d250f0365e05c220b963b3ba0b9f041110a379e2"
+    },
+    "/lib/aarch64-linux-gnu/libxvidcore.so.4": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libxvidcore.so.4.3",
+      "bytes": 453312,
+      "sha256": "480d84578ff7e8417b0a1b68a23e1c6f85fa7ffbbdca4116cfc93425265597fd"
+    },
+    "/lib/aarch64-linux-gnu/libz.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libz.so.1.2.13",
+      "bytes": 133520,
+      "sha256": "ffb1ab496e6eced03ab679075f9f2c415c7728a145cc7f63d614497102d73822"
+    },
+    "/lib/aarch64-linux-gnu/libzimg.so.2": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libzimg.so.2.0.0",
+      "bytes": 326568,
+      "sha256": "54ca2f6530167f92f1f0b847a5c27804a97d7b6253c6577f838a32480e8f0f58"
+    },
+    "/lib/aarch64-linux-gnu/libzmq.so.5": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libzmq.so.5.2.4",
+      "bytes": 790512,
+      "sha256": "2bc6819c24151f9015b7a798e977c716e36f6dacefe3c83d6123a3e9197e5297"
+    },
+    "/lib/aarch64-linux-gnu/libzstd.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libzstd.so.1.5.4",
+      "bytes": 657352,
+      "sha256": "63ff891e4316be1d30a8e551ded6cbb0283772105b352103608e60c06c95ac15"
+    },
+    "/lib/aarch64-linux-gnu/libzvbi.so.0": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/libzvbi.so.0.13.2",
+      "bytes": 572496,
+      "sha256": "eeb8c1fc61daedc5b1f13351fd883f008ffbfaf71c342006f957a35941edf675"
+    },
+    "/lib/ld-linux-aarch64.so.1": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+      "bytes": 202912,
+      "sha256": "17538b8f9889a470c061f69a8fea8124da89627311cd16546c133a89f09056df"
+    },
+    "/usr/bin/ffmpeg": {
+      "resolved_path": "/usr/bin/ffmpeg",
+      "bytes": 330136,
+      "sha256": "249e6abb898538aeae5165a6cee0748b73f4791afb02e088d19bc5321dfe2a4e"
+    },
+    "/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so": {
+      "resolved_path": "/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so",
+      "bytes": 526456,
+      "sha256": "0430110d7a0e159f1692938e828f4f569e98031fc2c4331e7af68525d27634dc"
+    },
+    "/usr/bin/ffprobe": {
+      "resolved_path": "/usr/bin/ffprobe",
+      "bytes": 203680,
+      "sha256": "5f47ad172b221b4e5bfaacfd9dd0aab092d02d83dd990a331ad8d62ac47817f1"
+    }
+  },
+  "package_versions_sha256": "4198d75680f8a2bc44685ee833b5db44a1f2b6861db965a16dd4938246234ee4"
+}

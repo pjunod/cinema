@@ -485,6 +485,10 @@ impl Cluster {
     /// Two real voters, joined, with node A holding the local identity that
     /// every case below installs as the tuner owner.
     async fn start() -> Self {
+        Self::start_with_remote_proxy(None).await
+    }
+
+    async fn start_with_remote_proxy(proxy: Option<&remote_owner_forwarding::RemoteProxy>) -> Self {
         let root = canonical_tempdir();
         let mut ports = reserved_ports(6).into_iter();
         let mut a_http = ports.next().expect("A http");
@@ -582,6 +586,16 @@ impl Cluster {
             ),
         )
         .expect("node B config");
+        if let Some(proxy) = proxy {
+            use std::io::Write;
+            let mut config = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&b_config)
+                .expect("append test proxy");
+            writeln!(config, "artwork_url = \"http://127.0.0.1:{}\"", proxy.port)
+                .expect("proxy origin");
+            proxy.set_target(format!("http://127.0.0.1:{}", b_http.port));
+        }
         let b_port = b_http.port;
         b_http.release();
         b_raft.release();
@@ -1291,3 +1305,6 @@ async fn a_second_watch_starts_warm_and_the_real_probe_agrees() {
         answered_in[0], answered_in[1]
     );
 }
+
+#[path = "remote_owner_forwarding/mod.rs"]
+mod remote_owner_forwarding;

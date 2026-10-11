@@ -10,7 +10,7 @@
 let PREPLAY={};
 // Replaced, never mutated: prePlayPreview() compares identity after its await
 // to notice that a later change superseded the answer it is holding.
-function prePlaySelection(fileId){ return PREPLAY[fileId]||null; }
+function prePlaySelection(fileId){ return PREPLAY[playbackFileKey(fileId)]||null; }
 function clearPrePlay(){ PREPLAY={}; }
 // Which selection a play() call runs with. An internal reopen — a quality
 // change, a subtitles-off restart — is still THIS playback, and it keeps the
@@ -26,7 +26,7 @@ function clearPrePlay(){ PREPLAY={}; }
 // for the rest of the session. The carry belongs to an open playback, not to
 // the file.
 function playbackSelection(player, fileId){
-  return (player&&player.fileId===fileId&&player.preplay)
+  return (samePlaybackFile(player,fileId)&&player.preplay)
     ? player.preplay : prePlaySelection(fileId);
 }
 function prePlaySelectionQuery(sel){
@@ -41,7 +41,8 @@ function prePlaySelectionQuery(sel){
 // (docs/PLAYBACK.md), which is what stops an untouched picker from turning a
 // direct play into a remux for nothing.
 function decisionUrl(fileId, force, sel){
-  return `/files/${fileId}/decision?${CAPS_Q}&force=${force}${prePlaySelectionQuery(sel)}`;
+  return playbackFileApiPath(fileId,"decision",{...playbackFileQueryFromLegacy(CAPS_Q),
+    ...playbackFileQueryFromLegacy(`force=${force}${prePlaySelectionQuery(sel)}`)});
 }
 // The same question, with the capabilities as a document.
 //
@@ -53,12 +54,20 @@ function decisionUrl(fileId, force, sel){
 // statuses. A document carrying the progressive packaging constraint never
 // does: dropping even [] would silently turn a restrictive claim into the
 // unrestricted legacy path. Serving nodes therefore roll before this client.
-async function askDecision(fileId, force, sel, signal=null){
+async function askDecision(fileId, force, sel, signal=null, incumbent=null){
   const query=`force=${force}${prePlaySelectionQuery(sel)}`;
+  const context=playbackFileContext(fileId);
+  if(context.source_ref.kind!=="local"){
+    const selected={force,...playbackFileQueryFromLegacy(query)};
+    for(const field of ["audio","subtitle","audio_offset_ms"])if(Object.hasOwn(selected,field))selected[field]=Number(selected[field]);
+    return SHARED_DECISION.decision(context,selected,signal);
+  }
   const caps=currentCapsDocument();
+  const linkReceipt=force==='auto'&&typeof candidateLinkReceipt==='function'
+    ? candidateLinkReceipt(incumbent,fileId):null;
   try{
-    const decision=await api(`/files/${fileId}/decision?${query}`,
-      {method:"POST", body:{caps},signal});
+    const decision=await api(playbackFileApiPath(fileId,"decision",playbackFileQueryFromLegacy(query)),
+      {method:"POST", body:{caps},signal,linkReceipt});
     // The create must act on the exact settled snapshot that produced this
     // decision, even if the page refreshes capability state in between.
     Object.defineProperty(decision,"_capsSnapshot",{value:caps,enumerable:false});
@@ -69,7 +78,7 @@ async function askDecision(fileId, force, sel, signal=null){
       &&caps.progressive_hevc_sample_entries!==null;
     if(!constrained && e && (e.status===404 || e.status===405 || e.status===400)
       &&e.code!=="invalid_capabilities"&&e.code!=="unsupported_hevc_delivery"){
-      return api(decisionUrl(fileId, force, sel),{signal});
+      return api(decisionUrl(fileId, force, sel),{signal,linkReceipt});
     }
     throw e;
   }
@@ -80,39 +89,43 @@ async function askDecision(fileId, force, sel, signal=null){
 // that is what stops an untouched picker from turning a direct play into a
 // remux for no reason.
 function setPrePlay(fileId, kind, raw){
-  const cur=PREPLAY[fileId]||{audio:null,subtitle:null};
+  const cur=PREPLAY[playbackFileKey(fileId)]||{audio:null,subtitle:null};
   const next=Object.assign({},cur);
   next[kind] = raw===""||raw==null ? null : Number(raw);
-  PREPLAY[fileId] = (next.audio==null&&next.subtitle==null) ? null : next;
+  PREPLAY[playbackFileKey(fileId)] = (next.audio==null&&next.subtitle==null) ? null : next;
   prePlayPreview(fileId);
 }
 function prePlayPickers(f){
-  const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
-  const find=f.subtitle_search_enabled?`<button class="ghost sm" onclick="findSubtitles(${f.id})">Find subtitles</button><div id="subtitle-search-${f.id}"></div>`:"";
-  // Nothing to choose between: one audio track and no subtitles at all.
   if(!f.available) return "";
-  if(auds.length<2 && !subs.length) return find;
+  const context=playbackFileContextForFile(f);
+  if(context.source_ref.kind!=="local") playbackFileReject();
+  const id=context.source_ref.file_id, idArg=esc(JSON.stringify(id));
+  const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
+  const find=f.subtitle_search_enabled?`<button class="ghost sm" onclick="findSubtitles(${idArg})">Find subtitles</button><div id="subtitle-search-${id}"></div>`:"";
+  const generate=typeof ME!=="undefined"&&ME&&ME.is_admin&&f.video_codec?`<button class="ghost sm" onclick="generateSubtitles(${idArg},this)">Generate subtitles</button><div id="subtitle-generate-${id}" role="status" aria-live="polite"></div>`:"";
+  // Nothing to choose between: one audio track and no subtitles at all.
+  if(auds.length<2 && !subs.length) return find+generate;
   const pd=f.playback_defaults||{}, ad=pd.audio||{}, sd=pd.subtitle||{};
-  const sel=prePlaySelection(f.id)||{audio:null,subtitle:null};
+  const sel=prePlaySelection(context)||{audio:null,subtitle:null};
   const defAudio=auds.find(a=>a.index===ad.selected_index);
   const defSub=subs.find(s=>s.index===sd.selected_index);
   const opt=(value,label,on)=>`<option value="${esc(String(value))}"${on?" selected":""}>${esc(label)}</option>`;
   const audioField=auds.length>1?`<div class="ppfield">
-      <label for="pp-a-${f.id}">Audio</label>
-      <select id="pp-a-${f.id}" onchange="setPrePlay(${f.id},'audio',this.value)">
+      <label for="pp-a-${id}">Audio</label>
+      <select id="pp-a-${id}" onchange="setPrePlay(${idArg},'audio',this.value)">
         ${opt("",defAudio?`Default · ${audioFactLabel(defAudio)}`:"Default",sel.audio==null)}
         ${auds.map(a=>opt(a.index,audioFactLabel(a),sel.audio===a.index)).join("")}
       </select></div>`:"";
   const subField=subs.length?`<div class="ppfield">
-      <label for="pp-s-${f.id}">Subtitles</label>
-      <select id="pp-s-${f.id}" onchange="setPrePlay(${f.id},'subtitle',this.value)">
+      <label for="pp-s-${id}">Subtitles</label>
+      <select id="pp-s-${id}" onchange="setPrePlay(${idArg},'subtitle',this.value)">
         ${opt("",defSub?`Default · ${subFactLabel(defSub)}`:"Default · Off",sel.subtitle==null)}
         ${opt(-1,"Off",sel.subtitle===-1)}
         ${subs.map(s=>opt(s.index,subFactLabel(s),sel.subtitle===s.index)).join("")}
       </select></div>`:"";
   return `<div class="preplay">
-    <div class="pprow">${audioField}${subField}</div>${find}
-    <div class="ppnote" id="pp-n-${f.id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`;
+    <div class="pprow">${audioField}${subField}</div>${find}${generate}
+    <div class="ppnote" id="pp-n-${id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`;
 }
 // Criterion 7, said out loud rather than merely implemented: this is one
 // playback's choice, and Settings → Playback defaults is untouched by it.
@@ -179,12 +192,12 @@ function prePlayBurnNeeded(decision, index){
 // What a pre-play selection means for the cold start, decided in one place so
 // it can be reasoned about — and checked — without standing a player up.
 //
-// `subtitle` is null unless the viewer chose one explicitly. The server echoes
-// its OWN policy subtitle in `selection` for an audio-only request, and reading
-// that echo as a choice would burn a track nobody asked for into a film that
-// was direct-playing.
+// A transcode decision's default subtitle is part of its candidate recipe.
+// Carry it on the first create, while leaving defaults on copy routes to the
+// existing subtitle setup. An echoed `selection` alone is not a viewer choice.
 function prePlayApplication(decision, selection){
-  const sub=selection&&selection.subtitle!=null?selection.subtitle:null;
+  const sub=selection&&selection.subtitle!=null?selection.subtitle:
+    decision.method==='transcode'?(decision.subtitles||[]).find(s=>s.default)?.index??null:null;
   const action=prePlayBurnNeeded(decision, sub)
     ? PlaybackPolicy.subtitleBurnAction({requiresBurn:true,
         deliveredRange:decision.delivered_dynamic_range})
@@ -303,7 +316,7 @@ function episodeRow(ep){
   const epw=ep.watch, epdur=itemDurMs(ep);
   if(epw && !epw.watched && epw.position_ms>3000 && epdur) bits.push(`<span class="epleft">${esc(fmtDur(Math.max(0,epdur-epw.position_ms))+" left")}</span>`);
   if(ep.watch&&ep.watch.watched) bits.push('<span class="epwatched">✓ Watched</span>');
-  return `<div class="eprow" onclick="location.hash='#/item/${itemId}'">
+  return `<div class="eprow" data-remote-item="${itemId}" onclick="location.hash='#/item/${itemId}'">
     ${epThumb(ep)}
     <div style="min-width:0">
       <div class="eptitle">${ep.episode_number!=null?esc(ep.episode_number+". "):""}${esc(ep.title)}</div>
@@ -321,24 +334,39 @@ let AUTOPLAY=null;
 // player resolves it later regardless of which layout drew the page, so it is
 // data, not presentation, and a layout that forgot to do it would break
 // playback rather than just look different.
-async function loadItem(id,isCurrent=()=>true){
-  const [d, libs]=await Promise.all([api(`/items/${id}`), libsCached()]);
+async function loadItem(id,isCurrent=()=>true,preparedPage=null){
+  let page=preparedPage&&preparedPage.id===String(id)?preparedPage:null;
+  if(!page){
+    const [d,libs]=await Promise.all([api(`/items/${id}`),libsCached()]);
+    if(!isCurrent())return null;
+    page=itemPageModel(id,d,libs);
+  }
   if(!isCurrent())return null;
-  const it=d.item;
-  // A pre-play track choice belongs to the item it was made on. Arriving at
-  // another one starts from the server's defaults again — the alternative is a
-  // French audio track chosen for one film quietly applying to the next.
+  acceptItemPage(page);
+  return page;
+}
+// Preparing another episode must not clear this episode's track selection or
+// publish file mappings. Model construction is read-only; acceptance owns those
+// effects when the existing item/playback lifecycle actually takes the page.
+function acceptItemPage(page){
   clearPrePlay();
+  page.files.forEach(f=>{ITEM_FOR_FILE[playbackFileKey(f.fileContext)]=page.id;});
+}
+function itemPageModel(id,d,libs){
+  const it=d.item;
   const lib=libs.find(l=>l.id===it.library_id);
-  d.files.forEach(f=>{
-    ITEM_FOR_FILE[f.id]=String(id);
+  const files=d.files.map(original=>{
+    const f={...original};
+    f.fileContext=playbackFileContextForFile(f);
+    f.id=f.fileContext.source_ref.file_id;
     // File DTOs are item-scoped and do not repeat their library id. The
     // conversion status endpoint publishes modes per library, so bind the
     // already-loaded item authority once instead of issuing per-file reads.
     f.library_id=it.library_id;
     f.subtitle_search_enabled=it.kind==="movie"||it.kind==="episode";
+    return f;
   });
-  const files=d.files, children=d.children||[], ancestors=d.ancestors||[];
+  const children=d.children||[], ancestors=d.ancestors||[];
   const best=files[0], multi=files.length>1;
   const runtime=it.runtime_ms||(best&&best.duration_ms)||0;
   // Resume threshold in ONE place. Three seconds is "you actually started it"
@@ -419,7 +447,9 @@ function playbackMetaFor(p,file){
   return m;
 }
 function playCall(p,file,startMs){
-  return `play(${file.id},${esc(JSON.stringify(p.item.title))},${Math.max(0,startMs||0)},${file.duration_ms||0},${esc(JSON.stringify(playbackMetaFor(p,file)))})`;
+  const context=playbackFileContextForFile(file);
+  if(context.source_ref.kind!=="local") playbackFileReject();
+  return `play(${esc(JSON.stringify(context.source_ref.file_id))},${esc(JSON.stringify(p.item.title))},${Math.max(0,startMs||0)},${file.duration_ms||0},${esc(JSON.stringify(playbackMetaFor(p,file)))})`;
 }
 function exactWireId(value){
   return String(value&&value.id_text!=null?value.id_text:value&&value.id);
@@ -655,8 +685,9 @@ function chapterList(p){
 }
 async function viewItem(id,isCurrent=()=>true){
   const generation=PAGE_RENDER_GENERATION;
+  const prepared=takeAutoplayNextPreparation(id);
   layoutChrome("home",`<div class="empty">Loading…</div>`);
-  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`);
+  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`,prepared?.page);
   if(!page)return;
   if(!isCurrent()||generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
   WATCH_ITEM_PAGE=page;
@@ -727,7 +758,7 @@ function classicItemBody(p){
     if(playable){
       body+=`<div class="actions">
         <button class="btnplay" onclick='${playCall(p,playable,start)}'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play audiobook'}</button>
-        ${resume?`<button class="ghost" onclick='${playCall(p,p.files.find(f=>f.available),0)}'>Start over</button>`:''}
+        ${resume?`<button class="ghost" data-remote-start-over onclick='${playCall(p,p.files.find(f=>f.available),0)}'>Start over</button>`:''}
         ${watchBtn}${channelBtn}</div>`;
       const rem=resume?Math.max(0,runtime-resume):runtime, pend=endsAt(rem);
       if(rem) body+=`<div class="playinfo">${resume?fmtDur(rem)+" left":fmtDur(rem)}${pend?" · ends ~"+pend:""}</div>`;
@@ -736,7 +767,7 @@ function classicItemBody(p){
     }
     body+=d.files.map((v,i)=>{
       const miss=!v.available, part=d.files.length>1?`Part ${i+1}`:'Audiobook';
-      const head=`<div class="vh"><span class="vbadges"><span class="vt">${esc(part)}</span>${specBadges(v)}${miss?'<span class="missbadge">missing</span>':''}</span>${!miss?`<button class="ghost sm" onclick='${playCall(p,v,0)}'>▶ Play</button>`:''}</div>`;
+      const head=`<div class="vh"><span class="vbadges"><span class="vt">${esc(part)}</span>${specBadges(v)}${miss?'<span class="missbadge">missing</span>':''}</span>${!miss?`<button class="ghost sm" data-remote-file="${esc(v.id)}" data-remote-file-start="0" onclick='${playCall(p,v,0)}'>▶ Play</button>`:''}</div>`;
       return `<div class="version">${head}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}</div>`;
     }).join("");
     body+=chapterList(p);
@@ -750,7 +781,7 @@ function classicItemBody(p){
     if(playable){
       body+=`<div class="actions">
         <button class="btnplay" onclick='${playCall(p,playable,resume)}'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play'}</button>
-        ${resume?`<button class="ghost" onclick='${playCall(p,playable,0)}'>Start over</button>`:''}
+        ${resume?`<button class="ghost" data-remote-start-over onclick='${playCall(p,playable,0)}'>Start over</button>`:''}
         ${watchBtn}${channelBtn}</div>`;
       const pdur=playable.duration_ms||runtime||0, prem=resume?Math.max(0,pdur-resume):pdur, pend=endsAt(prem);
       if(prem) body+=`<div class="playinfo">${resume?fmtDur(prem)+" left":fmtDur(prem)}${pend?" · ends ~"+pend:""}</div>`;
@@ -764,7 +795,7 @@ function classicItemBody(p){
       // to tell apart, or when a file is missing. A single version is already
       // badged in the hero, so its block is just the spec detail.
       const header=(multi||miss)
-        ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='${playCall(p,v,resume)}'>▶ Play</button>`:''}</div>`
+        ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" data-remote-file="${esc(v.id)}" data-remote-file-start="resume" onclick='${playCall(p,v,resume)}'>▶ Play</button>`:''}</div>`
         : '';
       return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}${fileAdminActions(v,it.id)}</div>`;
     }).join("");
@@ -798,4 +829,23 @@ function classicItemBody(p){
         ${it.overview?`<p class="overview">${esc(it.overview)}</p>`:''}
         ${body}</div>
     </div></div>`;
+}
+
+async function generateSubtitles(fileId,button){
+  const panel=document.getElementById(`subtitle-generate-${fileId}`);
+  if(!panel||!button)return;
+  button.disabled=true;
+  panel.textContent="Requesting local transcription…";
+  try{
+    const result=await api(`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`,{method:"POST",body:{}});
+    if(!panel.isConnected)return;
+    if(result.outcome!=="accepted"&&result.outcome!=="existing"){
+      const reasons={queue_full:"The background queue is full. Try again after current work finishes.",source_changed:"The media file changed. Refresh this page before trying again.",conflict:"Another request changed this job. Refresh Activity to see its current state.",no_demand:"This file does not need transcription for the configured language."};
+      panel.textContent=reasons[result.outcome]||"Transcription was not queued. Check Activity and transcription settings.";
+      return;
+    }
+    panel.innerHTML=`${result.outcome==="existing"?"This transcription is already queued or running.":"Transcription queued."} <a href="#/activity">Follow progress or stop it in Activity</a>. Refresh this title after completion to select the generated captions.`;
+  }catch(error){
+    if(panel.isConnected){panel.textContent=error.message||"Could not request transcription.";const link=document.createElement("a");link.href="#/settings/developer";link.textContent=" Configure offline transcription";panel.append(link);}
+  }finally{if(button.isConnected)button.disabled=false;}
 }

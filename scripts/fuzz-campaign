@@ -2,7 +2,7 @@
 # Run one bounded libFuzzer campaign and record what it did.
 #
 #   scripts/fuzz-campaign <target> [seconds]                  # run, then summarise
-#   scripts/fuzz-campaign --summarize <target> <log> <status>  # summarise an existing log
+#   scripts/fuzz-campaign --summarize <target> <log> <status> <before>
 #
 # The four parser targets live in their own cargo-fuzz package, fuzz/parsers/,
 # so a run is `cargo fuzz run --fuzz-dir fuzz/parsers <target>` over the seed
@@ -61,6 +61,10 @@ summarize() {
     executions="$(grep -Eo '^#[0-9]+' "$log" 2>/dev/null | tail -1 | tr -d '#')"
   fi
   executions="${executions:-0}"
+  if [[ "$status" == "0" && "$executions" == "0" ]]; then
+    echo "no executed fuzz inputs recorded in $log; no clean campaign receipt" >&2
+    return 1
+  fi
   if [[ "$status" == "0" ]]; then
     outcome="budget spent, no finding"
   else
@@ -78,9 +82,12 @@ summarize() {
 }
 
 if [[ "${1:-}" == "--summarize" ]]; then
-  [[ $# -eq 4 ]] || { echo "usage: $0 --summarize <target> <log> <status>" >&2; exit 2; }
-  summarize "$2" "$3" "$4" "?"
-  exit 0
+  [[ $# -eq 5 && "$5" =~ ^[0-9]+$ ]] || {
+    echo "usage: $0 --summarize <target> <log> <status> <corpus-before-count>" >&2
+    exit 2
+  }
+  summarize "$2" "$3" "$4" "$5"
+  exit $?
 fi
 
 TARGET="${1:-}"
@@ -98,5 +105,5 @@ cargo "+$TOOLCHAIN" fuzz run --fuzz-dir fuzz/parsers "$TARGET" "fuzz/parsers/cor
   -- -max_total_time="$SECONDS_BUDGET" -print_final_stats=1 2>&1 | tee "$LOG"
 STATUS="${PIPESTATUS[0]}"
 
-summarize "$TARGET" "$LOG" "$STATUS" "$BEFORE"
+summarize "$TARGET" "$LOG" "$STATUS" "$BEFORE" || exit $?
 exit "$STATUS"

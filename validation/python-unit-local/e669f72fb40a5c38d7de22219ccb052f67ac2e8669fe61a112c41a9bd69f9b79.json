@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-hdr-reference-scoring",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_doc_status_audit.py",
+  "test_file_sha256": "58ccb669583560721f146959f8250f48d62908a701980396919211be1cb087dd",
+  "test_ids": ["test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions"],
+  "command": "python3 -m unittest tests.operations.test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed tests.operations.test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve tests.operations.test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions -v",
+  "output": "test_every_docs_markdown_file_is_listed (tests.operations.test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed) ... ok\ntest_relative_links_between_documents_resolve (tests.operations.test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve) ... ok\ntest_current_index_has_no_mechanical_contradictions (tests.operations.test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 0.544s\n\nOK\n",
+  "provenance_note": "Verbatim successful toolbe5396 output. This document imports only its one named same-file ID from the three-method successful invocation; the separate index record imports the other two.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}

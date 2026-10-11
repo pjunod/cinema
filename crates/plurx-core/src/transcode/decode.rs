@@ -14,7 +14,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
-    EffectiveRateControl, Encoder, OutputGrade, Pipeline, SubtitleBurn, ToneMap, TranscodeOptions,
+    EffectiveRateControl, Encoder, MacosProcessingAvailability, MacosProcessingContext,
+    MacosProcessingGraph, MacosProcessingIdentity, MacosProcessingSelection, OutputGrade, Pipeline,
+    SubtitleBurn, ToneMap, TranscodeOptions,
 };
 use crate::domain::{
     ContinuationDecodeRestriction, DecodeRestrictionError, DolbyVisionFacts, MediaFile, ScanType,
@@ -41,6 +43,21 @@ pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 3;
 pub enum Deinterlace {
     None,
     BwdifSendFrame,
+}
+
+/// Effective output signaling correction for a renderer that consumes HDR
+/// static metadata without previously removing it from its SDR output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMetadataPolicy {
+    ConsumedHdrStaticV1,
+}
+
+impl OutputMetadataPolicy {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ConsumedHdrStaticV1 => "consumed_hdr_static_v1",
+        }
+    }
 }
 
 /// Bounded content verification for a source whose container reports an
@@ -166,6 +183,7 @@ pub enum DecodeBackend {
     Cuda,
     Qsv,
     Vaapi,
+    V4l2Request,
 }
 
 impl DecodeBackend {
@@ -176,7 +194,40 @@ impl DecodeBackend {
             Self::Cuda => "cuda",
             Self::Qsv => "qsv",
             Self::Vaapi => "vaapi",
+            Self::V4l2Request => "v4l2_request",
         }
+    }
+
+    /// FFmpeg's method name, independently of the durable backend identity.
+    pub fn hwaccel_method(self) -> &'static str {
+        match self {
+            Self::Software => "none",
+            Self::V4l2Request => "drm",
+            _ => self.name(),
+        }
+    }
+
+    pub fn hardware_frame_format(self) -> Option<&'static str> {
+        match self {
+            Self::Software => None,
+            Self::VideoToolbox => Some("videotoolbox_vld"),
+            Self::Cuda => Some("cuda"),
+            Self::Qsv => Some("qsv"),
+            Self::Vaapi => Some("vaapi"),
+            Self::V4l2Request => Some("drm_prime"),
+        }
+    }
+
+    /// Shared by startup probes and production; optional implicit output is
+    /// retained for the existing CUDA and VideoToolbox production paths.
+    pub fn input_args(self, explicit_hardware_frames: bool) -> Vec<String> {
+        let mut args = vec!["-hwaccel".into(), self.hwaccel_method().into()];
+        if explicit_hardware_frames {
+            if let Some(format) = self.hardware_frame_format() {
+                args.extend(["-hwaccel_output_format".into(), format.into()]);
+            }
+        }
+        args
     }
 
     /// Every backend, in declaration order.
@@ -185,12 +236,13 @@ impl DecodeBackend {
     /// so it is checked by a test that matches exhaustively over the variants:
     /// adding one fails to compile there, and the arm it makes you write is
     /// the reminder to extend this list and [`Self::parse`] with it.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Software,
         Self::VideoToolbox,
         Self::Cuda,
         Self::Qsv,
         Self::Vaapi,
+        Self::V4l2Request,
     ];
 
     /// The exact inverse of [`Self::name`], and no more than that.
@@ -225,6 +277,7 @@ impl DecodeBackend {
             "cuda" => Some(Self::Cuda),
             "qsv" => Some(Self::Qsv),
             "vaapi" => Some(Self::Vaapi),
+            "v4l2_request" => Some(Self::V4l2Request),
             _ => None,
         }
     }
@@ -236,6 +289,7 @@ impl DecodeEvidence {
     pub fn name(self) -> &'static str {
         match self {
             Self::Qualified => "qualified_selection",
+            Self::Operational => "operational_selection",
             Self::LegacyUnverified => "legacy_unverified_selection",
         }
     }
@@ -247,6 +301,8 @@ impl DecodeEvidence {
 #[serde(rename_all = "snake_case")]
 pub enum DecodeEvidence {
     Qualified,
+    /// Startup decoded, transferred and encoded this class; no performance or health qualification.
+    Operational,
     LegacyUnverified,
 }
 
@@ -256,6 +312,8 @@ pub enum DecodeEvidence {
 pub enum CapabilityStatus {
     Unavailable,
     Advertised,
+    /// A bounded production-shaped probe succeeded, without a qualified envelope.
+    Operational,
     Qualified,
     Rejected,
 }
@@ -308,6 +366,9 @@ pub enum DecodeReason {
 #[serde(rename_all = "snake_case")]
 pub enum FrameDomain {
     SystemMemory,
+    VideoToolbox,
+    Cuda,
+    DrmPrime,
     Qsv,
     Vaapi,
     Vulkan,
@@ -318,6 +379,9 @@ impl FrameDomain {
     fn name(self) -> &'static str {
         match self {
             Self::SystemMemory => "system_memory",
+            Self::VideoToolbox => "videotoolbox",
+            Self::Cuda => "cuda",
+            Self::DrmPrime => "drm_prime",
             Self::Qsv => "qsv",
             Self::Vaapi => "vaapi",
             Self::Vulkan => "vulkan",
@@ -1853,6 +1917,8 @@ pub struct DecodePolicySnapshot {
     compatibility_value: Option<String>,
     policy_revision: u32,
     artifact_qualification: ArtifactQualification,
+    macos_processing: Option<MacosProcessingContext>,
+    linux_dolby: Option<super::LinuxDolbyContext>,
 }
 
 impl DecodePolicySnapshot {
@@ -1871,6 +1937,8 @@ impl DecodePolicySnapshot {
             compatibility_value,
             policy_revision: LEGACY_DECODE_POLICY_REVISION,
             artifact_qualification: ArtifactQualification::Unqualified,
+            macos_processing: None,
+            linux_dolby: None,
         }
     }
 
@@ -1903,6 +1971,26 @@ impl DecodePolicySnapshot {
 
     pub fn artifact_qualification(&self) -> ArtifactQualification {
         self.artifact_qualification
+    }
+
+    #[must_use]
+    pub fn with_macos_processing(mut self, context: MacosProcessingContext) -> Self {
+        self.macos_processing = Some(context);
+        self
+    }
+
+    #[must_use]
+    pub fn with_linux_dolby(mut self, context: super::LinuxDolbyContext) -> Self {
+        self.linux_dolby = Some(context);
+        self
+    }
+
+    pub fn linux_dolby(&self) -> Option<&super::LinuxDolbyContext> {
+        self.linux_dolby.as_ref()
+    }
+
+    pub fn macos_processing(&self) -> Option<&MacosProcessingContext> {
+        self.macos_processing.as_ref()
     }
 }
 
@@ -1999,15 +2087,55 @@ impl AttemptRestrictions {
     }
 }
 
+/// The codec envelope an immutable video rendition promises. This is output
+/// recipe data, distinct from whether a feature is enabled in client settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoSampleEnvelope {
+    EncoderDefault,
+    ContinuousAvcHigh50,
+}
+
+/// Level 5.0 frame-size and macroblock-rate limits, using the exact rational
+/// output cadence. VBR admission bounds both the 3/2 peak and the two-second
+/// coded-picture buffer below High's conservative VCL limits.
+pub(super) fn continuous_avc_envelope_accepts(
+    width: u32,
+    height: u32,
+    rate_numerator: u32,
+    rate_denominator: u32,
+    bitrate_kbps: u32,
+) -> bool {
+    let width_mbs = u64::from(width).div_ceil(16);
+    let height_mbs = u64::from(height).div_ceil(16);
+    let frame_mbs = width_mbs.saturating_mul(height_mbs);
+    width > 0
+        && height > 0
+        && width.is_multiple_of(2)
+        && height.is_multiple_of(2)
+        && rate_numerator > 0
+        && rate_denominator > 0
+        && bitrate_kbps > 0
+        && frame_mbs <= 22_080
+        && width_mbs * width_mbs <= 8 * 22_080
+        && height_mbs * height_mbs <= 8 * 22_080
+        && frame_mbs * u64::from(rate_numerator) <= 589_824 * u64::from(rate_denominator)
+        && u64::from(bitrate_kbps) * 3 <= 337_500
+        && u64::from(bitrate_kbps) * 2 <= 168_750
+}
+
 /// Semantic subset of today's transcode options. Execution coordinates,
 /// paths, pacing, and thread reservations intentionally do not enter it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscodeMediaOptions {
+    pub output_codec: Option<super::VideoCodec>,
+    pub strict_dolby: Option<super::StrictDolbyPolicy>,
+    pub video_sample_envelope: VideoSampleEnvelope,
     pub target_height: i64,
     pub video_bitrate_kbps: u32,
     pub effective_rate_control: EffectiveRateControl,
     pub audio_channels: u32,
     pub audio_bitrate_kbps: u32,
+    pub audio: Option<crate::playback::audio::AudioDelivery>,
     pub audio_index: Option<i64>,
     pub audio_offset_ms: i64,
     pub input_has_audio: bool,
@@ -2036,14 +2164,19 @@ impl TranscodeMediaOptions {
             |nits| (u32::try_from(nits).unwrap_or(1000), ToneMapPeakSource::Cll),
         );
         Self {
+            output_codec: options.output_codec,
+            strict_dolby: options.strict_dolby.clone(),
+            video_sample_envelope: options.video_sample_envelope,
             target_height: options.target_height,
             video_bitrate_kbps: options.video_bitrate_kbps,
             effective_rate_control: options.effective_rate_control,
             audio_channels: options.audio_channels,
             audio_bitrate_kbps: options.audio_bitrate_kbps,
+            audio: options.audio.clone(),
             audio_index: options.audio_index,
             audio_offset_ms: source.audio_offset_ms,
-            input_has_audio: !source.audio_streams.is_empty(),
+            input_has_audio: !source.audio_streams.is_empty()
+                && options.video_sample_envelope != VideoSampleEnvelope::ContinuousAvcHigh50,
             tone_map: options.tone_map,
             tone_map_peak_nits,
             tone_map_peak_source,
@@ -2105,10 +2238,12 @@ pub struct TranscodeRequest {
 
 impl TranscodeRequest {
     pub fn new(encoder: Encoder, options: TranscodeMediaOptions) -> Self {
+        let normalized_geometry =
+            options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50;
         Self {
             encoder,
             options,
-            normalized_geometry: false,
+            normalized_geometry,
             rate_profile: None,
         }
     }
@@ -2116,6 +2251,15 @@ impl TranscodeRequest {
     /// Opt in only for routes whose complete normalized recipe is supported.
     pub fn with_normalized_geometry(mut self) -> Self {
         self.normalized_geometry = true;
+        self
+    }
+
+    /// A video-only, normalized H.264 High level 5.0 recipe. The soundtrack
+    /// is resolved separately and shared by every compatible rendition.
+    pub fn with_continuous_avc_video(mut self) -> Self {
+        self.normalized_geometry = true;
+        self.options.input_has_audio = false;
+        self.options.video_sample_envelope = VideoSampleEnvelope::ContinuousAvcHigh50;
         self
     }
 
@@ -2178,7 +2322,7 @@ impl AutoQualityRateProfile {
     /// Wire peak includes the actual resolved audio budget. Input pacing is
     /// excluded from encode sustainability and never turns this into link proof.
     pub fn peak_bitrate_bps(self, audio_bitrate_kbps: u32) -> u64 {
-        u64::from(self.video_bitrate_kbps()) * 1500 + u64::from(audio_bitrate_kbps) * 1000
+        super::vbv_maxrate_bps(self.video_bitrate_kbps()) + u64::from(audio_bitrate_kbps) * 1000
     }
 
     pub fn bandwidth(self, audio_bitrate_kbps: u32) -> OutputBandwidth {
@@ -2224,6 +2368,8 @@ pub struct PresentationContract {
     output_codec: String,
     output_encoder: String,
     output_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sdr_avc: Option<super::QualifiedSdrAvc>,
     output_pixel_format: String,
     output_dynamic_range: String,
     output_transfer: String,
@@ -2239,6 +2385,8 @@ pub struct PresentationContract {
     effective_height: Option<u32>,
     audio_channels: u32,
     audio_bitrate_kbps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<crate::playback::audio::AudioDelivery>,
     audio_index: Option<i64>,
     subtitle_index: Option<i64>,
     subtitle_rendering: SubtitleRendering,
@@ -2260,6 +2408,10 @@ impl PresentationContract {
 
     pub fn output_profile(&self) -> Option<&str> {
         self.output_profile.as_deref()
+    }
+
+    pub fn sdr_avc(&self) -> Option<&super::QualifiedSdrAvc> {
+        self.sdr_avc.as_ref()
     }
 
     pub fn output_pixel_format(&self) -> &str {
@@ -2405,12 +2557,139 @@ pub struct ResolvedTranscode {
     source_identity: DecodeSourceIdentity,
     source_binding: PlanSourceBinding,
     output_contract: PresentationContract,
+    codec_contract: super::OutputCodecContract,
     input_dynamic_range: Option<DynamicRangeClass>,
     routing_dynamic_range: Option<String>,
     deinterlace: Deinterlace,
+    macos_processing_identity: Option<MacosProcessingIdentity>,
+    macos_processing_selection: Option<MacosProcessingSelection>,
+    output_metadata_policy: Option<OutputMetadataPolicy>,
+}
+
+/// A reconstructed-output encoder attached to its unchanged source plan.
+/// Ordinary producer entry points accept ResolvedTranscode, never this wrapper.
+#[derive(Debug, Clone, Copy)]
+pub struct CompletedReconstructedOutputPlan<'a> {
+    source: &'a ResolvedTranscode,
+    codec: super::encoder::CompletedReconstructedOutputContract,
+}
+impl<'a> CompletedReconstructedOutputPlan<'a> {
+    pub fn source_plan(&self) -> &'a ResolvedTranscode {
+        self.source
+    }
+    pub fn encoder(&self) -> Encoder {
+        self.codec.encoder()
+    }
+    pub fn encoder_name(&self) -> &'static str {
+        self.codec.encoder_name()
+    }
+    pub fn input_contract(&self) -> super::pipeline::ReconstructedPqInput {
+        self.codec.input_contract()
+    }
+    pub fn codec_contract(&self) -> &super::encoder::CompletedReconstructedOutputContract {
+        &self.codec
+    }
+    pub fn encode_args(&self, bitrate_kbps: u32, force_idr: bool) -> Vec<String> {
+        self.codec.encode_args(bitrate_kbps, force_idr, Some(1))
+    }
 }
 
 impl ResolvedTranscode {
+    /// Select only the encode half of an independently reconstructed PQ route.
+    /// Source binding, decode, ordinary options and their digest stay unchanged.
+    pub fn completed_reconstructed_output(
+        &self,
+        encoder: Encoder,
+    ) -> Option<CompletedReconstructedOutputPlan<'_>> {
+        if self.output_contract.output_grade() != OutputGrade::Hdr10
+            || self.output_contract.output_codec() != "hevc"
+            || self.options.subtitle_burn.is_some()
+            || self.options.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
+        {
+            return None;
+        }
+        let codec = super::encoder::CompletedReconstructedOutputContract::resolve(encoder)?;
+        Some(CompletedReconstructedOutputPlan {
+            source: self,
+            codec,
+        })
+    }
+
+    pub fn output_metadata_policy(&self) -> Option<OutputMetadataPolicy> {
+        self.output_metadata_policy
+    }
+
+    pub fn macos_processing_identity(&self) -> Option<&MacosProcessingIdentity> {
+        self.macos_processing_identity.as_ref()
+    }
+
+    /// Selected processing and strict recovery must launch the frozen binary.
+    /// Ordinary plans retain their existing executable selection behavior.
+    pub fn captured_processing_ffmpeg_sha256(&self) -> Option<&str> {
+        self.options
+            .strict_dolby
+            .as_ref()
+            .map(super::StrictDolbyPolicy::ffmpeg_sha256)
+            .or_else(|| {
+                self.macos_processing_identity
+                    .as_ref()
+                    .map(MacosProcessingIdentity::ffmpeg_sha256)
+            })
+    }
+
+    pub fn macos_processing_selection(&self) -> Option<MacosProcessingSelection> {
+        self.macos_processing_selection
+    }
+
+    /// Bind only a completed exact-node experiment to this output plan. The
+    /// caller supplies the resolved OUTPUT grid; VOD must rebind after choosing
+    /// its fps-filter grid rather than reuse a source's average cadence.
+    pub fn with_sdr_avc_qualification(
+        mut self,
+        caps: &super::EncoderCaps,
+        cadence: Option<Rational>,
+        forced_idr: bool,
+    ) -> Self {
+        if self.output_contract.sdr_avc.take().is_some()
+            && self.codec_contract.grade == OutputGrade::Sdr
+        {
+            self.output_contract.output_profile =
+                (self.encoder == Encoder::Software).then(|| "high".to_owned());
+        }
+        let (Some(width), Some(height), Some(cadence)) = (
+            self.output_contract.effective_width,
+            self.output_contract.effective_height,
+            cadence,
+        ) else {
+            return self;
+        };
+        if self.codec_contract.codec != super::VideoCodec::H264
+            || self.output_contract.width_rule != OutputWidthRule::PreserveAspectEven
+            || self.codec_contract.grade != OutputGrade::Sdr
+            || u64::from(cadence.numerator()) > 60 * u64::from(cadence.denominator())
+        {
+            return self;
+        }
+        self.output_contract.sdr_avc = caps
+            .sdr_avc
+            .iter()
+            .find(|proof| {
+                proof.matches(
+                    self.encoder,
+                    (width, height),
+                    cadence,
+                    self.options.video_bitrate_kbps,
+                    self.options.effective_rate_control,
+                    forced_idr,
+                )
+            })
+            .cloned();
+        if self.output_contract.sdr_avc.is_some() {
+            self.output_contract.output_profile = Some("high".to_owned());
+        }
+        self
+    }
+
     pub fn decode(&self) -> &ResolvedDecode {
         &self.decode
     }
@@ -2429,6 +2708,11 @@ impl ResolvedTranscode {
 
     pub fn output_contract(&self) -> &PresentationContract {
         &self.output_contract
+    }
+
+    /// Delivered dimensions, resolved from this node's graph, never the source codec.
+    pub fn codec_contract(&self) -> &super::OutputCodecContract {
+        &self.codec_contract
     }
 
     pub fn input_dynamic_range(&self) -> Option<DynamicRangeClass> {
@@ -2566,7 +2850,31 @@ impl ResolvedTranscode {
             },
         );
         feed("encoder", self.encoder.label().as_bytes());
+        if let Some(proof) = self.output_contract.sdr_avc() {
+            // Conditional: old/unqualified plans retain their exact digest.
+            // Qualified software changes level flags too, so it is not exempt
+            // from cache identity merely because its old profile was High.
+            feed("sdr_avc_codec", proof.codec().as_bytes());
+            feed(
+                "sdr_avc_grid",
+                format!(
+                    "{}/{}",
+                    proof.cadence().numerator(),
+                    proof.cadence().denominator()
+                )
+                .as_bytes(),
+            );
+        }
         let options = &self.options;
+        // Preserve established standalone artifact keys. The new explicit
+        // envelope has its own semantic namespace and never aliases them.
+        if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50 {
+            feed(
+                "video_sample_envelope",
+                b"continuous-avc-high50-bt709-colr-v4",
+            );
+        }
+
         feed("height", options.target_height.to_string().as_bytes());
         feed(
             "video_bitrate",
@@ -2588,6 +2896,42 @@ impl ResolvedTranscode {
             "audio_index",
             options.audio_index.unwrap_or(-1).to_string().as_bytes(),
         );
+        if let Some(audio) = &options.audio {
+            use crate::playback::audio::AudioAction;
+            feed(
+                "audio_action",
+                match audio.action {
+                    AudioAction::None => b"none",
+                    AudioAction::Copy { .. } => b"copy",
+                    AudioAction::Encode { .. } => b"encode",
+                },
+            );
+            feed("audio_codec", audio.codec().unwrap_or("none").as_bytes());
+            match &audio.action {
+                AudioAction::Encode {
+                    layout,
+                    sample_rate,
+                    ..
+                } => {
+                    feed(
+                        "audio_layout",
+                        layout.as_deref().unwrap_or("default").as_bytes(),
+                    );
+                    feed("audio_sample_rate", sample_rate.to_string().as_bytes());
+                }
+                AudioAction::Copy { .. } | AudioAction::None => {
+                    feed("audio_layout", b"source");
+                    feed("audio_sample_rate", b"source");
+                }
+            }
+            // The incumbent fold (no filter) keeps its historical spelling so
+            // no existing key moves; a measured fold feeds its exact filter
+            // chain, so any change to its gains or limiter is a new key.
+            match audio.downmix_filter() {
+                Some(filter) => feed("audio_downmix", filter.as_bytes()),
+                None => feed("audio_downmix", b"default"),
+            }
+        }
         feed(
             "audio_offset_ms",
             options.audio_offset_ms.to_string().as_bytes(),
@@ -2663,6 +3007,7 @@ impl ResolvedTranscode {
             feed("normalization_version", b"upright-square-v1");
             if let Some(profile) = geometry.rate_profile {
                 feed("auto_quality_rate_profile", profile.name().as_bytes());
+                feed("avc_high50_signaling", b"level-idc-constraints-v1");
             }
             if let Some(rate) = geometry.frame_rate {
                 feed(
@@ -2723,6 +3068,24 @@ impl ResolvedTranscode {
                 SubtitleRendering::BitmapBurn => b"bitmap_burn",
             },
         );
+        // Only effective Apple processing changes identity. Pending probes,
+        // disabled settings and unsupported inputs preserve existing hashes.
+        if let Some(identity) = &self.macos_processing_identity {
+            feed("macos_processing_v1", identity.digest().as_bytes());
+        }
+        if let Some(super::StrictDolbyImplementation::LinuxVaapi(identity)) = self
+            .options
+            .strict_dolby
+            .as_ref()
+            .map(super::StrictDolbyPolicy::implementation)
+        {
+            feed("strict_dolby_linux_vaapi_v1", identity.digest().as_bytes());
+        }
+        if let Some(policy) = self.output_metadata_policy {
+            // A scoped signaling correction rotates only the affected output
+            // routes. Existing SDR and HDR-preserving recipes retain identity.
+            feed("output_metadata_policy", policy.name().as_bytes());
+        }
         hex::encode(digest.finalize())
     }
 
@@ -2836,13 +3199,115 @@ pub fn resolve_transcode(
     let codec = facts.codec().ok_or(PlanError::MissingCodec)?;
     let mut options = request.options.clone();
     validate_media_options(&options)?;
+    if options.strict_dolby.is_some() && !options.pipeline.requires_strict_dovi() {
+        options.pipeline = Pipeline::DoviStrictTonemapx;
+    }
+
+    let linux_strict_decoder =
+        select_linux_strict_p5(policy, facts, &options, request, restrictions);
+    if options
+        .strict_dolby
+        .as_ref()
+        .is_some_and(|strict| strict.linux_identity().is_some())
+        && linux_strict_decoder.is_none()
+    {
+        return Err(PlanError::IncompatibleRenderer);
+    }
+    if linux_strict_decoder.is_some() {
+        options.pipeline = Pipeline::DoviStrictTonemapx;
+        if options.strict_dolby.is_none() {
+            options.strict_dolby = Some(super::StrictDolbyPolicy::new_linux(
+                policy
+                    .linux_dolby()
+                    .expect("selected Linux strict graph has captured context")
+                    .clone(),
+            ));
+        }
+    }
+
+    let mut macos_processing_selection = policy
+        .macos_processing()
+        .map(|context| select_macos_processing(context, request, facts, policy, restrictions));
+    if macos_processing_selection == Some(MacosProcessingSelection::Selected) {
+        options.pipeline = if let Some(pipeline) = policy.macos_processing().and_then(|context| {
+            select_strict_p5_pipeline(context, request, facts, policy, restrictions)
+        }) {
+            pipeline
+        } else if options.pipeline.output_grade() == OutputGrade::Hdr10 {
+            Pipeline::VtScaleHdr10
+        } else {
+            match facts.dynamic_range_class() {
+                Some(DynamicRangeClass::Sdr) => Pipeline::VtScaleSdr,
+                Some(DynamicRangeClass::Hdr10 | DynamicRangeClass::Hlg) => Pipeline::VtToneMapMetal,
+                _ => unreachable!("macOS selection validates the exact color class"),
+            }
+        };
+    } else if matches!(
+        options.pipeline,
+        Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10
+    ) {
+        // Recovery re-resolves the selected plan's media options. Software
+        // decode must reach the existing grade-preserving renderer downgrade,
+        // even if the saved Mac preference or readiness has changed. This
+        // restriction cannot execute a Mac graph and needs no Mac identity.
+        // Unrestricted explicit Mac requests still require authorization.
+        let software_restricted = restrictions.permits(DecodeBackend::Software)
+            && (policy.force_software_decode()
+                || !restrictions.permits(DecodeBackend::VideoToolbox));
+        let host_recovery = options.output_codec == Some(super::VideoCodec::Hevc)
+            && policy.macos_processing().is_some_and(|context| {
+                let graph = match options.pipeline {
+                    Pipeline::VtScaleSdr => MacosProcessingGraph::HevcSdrHost,
+                    Pipeline::VtScaleHdr10 => MacosProcessingGraph::HevcHdr10Host,
+                    _ => return false,
+                };
+                context.hevc_output_enabled()
+                    && context.graph(graph) == MacosProcessingAvailability::Available
+                    && options
+                        .pipeline
+                        .fallback()
+                        .is_some_and(|pipeline| context.permits(pipeline))
+            });
+        if host_recovery {
+            options.pipeline = options.pipeline.fallback().expect("observed host recovery");
+            macos_processing_selection = Some(MacosProcessingSelection::CapabilityFallback);
+        } else if !software_restricted {
+            return Err(PlanError::IncompatibleRenderer);
+        }
+    }
+    if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50
+        && (!request.normalized_geometry
+            || options.input_has_audio
+            || options.subtitle_burn.is_some()
+            || options.pipeline.output_grade() != OutputGrade::Sdr
+            || options.output_codec == Some(super::VideoCodec::Hevc))
+    {
+        return Err(PlanError::InvalidMediaOption("continuous_video_envelope"));
+    }
+
+    if options.pipeline.requires_strict_dovi() {
+        authorize_strict_p5(policy, facts, &options, request.encoder)?;
+        if options.strict_dolby.is_none() {
+            options.strict_dolby = Some(super::StrictDolbyPolicy::new(
+                policy
+                    .macos_processing()
+                    .expect("authorized strict P5 context")
+                    .identity()
+                    .clone(),
+            ));
+        }
+    }
+
     let deinterlace = Deinterlace::for_scan_type(facts.scan_type());
     if deinterlace == Deinterlace::BwdifSendFrame
         && matches!(
             options.pipeline,
-            Pipeline::VppQsv
+            Pipeline::TonemapCuda
+                | Pipeline::VppQsv
                 | Pipeline::TonemapVaapi
                 | Pipeline::Libplacebo
+                | Pipeline::LibplaceboSoftware
+                | Pipeline::LibplaceboVaapi
                 | Pipeline::TonemapOpencl
         )
     {
@@ -2853,6 +3318,7 @@ pub fn resolve_transcode(
     if !options.pipeline.pairs_with(request.encoder)
         || !options.pipeline.handles(facts.routing_dynamic_range())
         || (facts.requires_dolby_rpu_processing()
+            && !options.pipeline.requires_strict_dovi()
             && !matches!(
                 options.pipeline,
                 Pipeline::DoviTonemapx | Pipeline::DoviPassthrough
@@ -2871,6 +3337,34 @@ pub fn resolve_transcode(
     };
 
     let (mut preferred, mut reason) = preferred_backend(request.encoder, options.pipeline, facts);
+    // Request decode is independent of the encoder. Require the exact known
+    // class and CPU transfer exercised at startup; generic DRM advertisement
+    // must never inherit Legacy's speculative hardware admission.
+    if request.encoder == Encoder::Software
+        && options.pipeline == Pipeline::Cpu
+        && facts.normalization_transform_known()
+        && facts.rotation_degrees() == Some(0)
+        && matches!(facts.codec(), Some("hevc"))
+        && matches!(
+            (facts.profile(), facts.pixel_format(), facts.bit_depth()),
+            (Some("main"), Some("yuv420p"), Some(8))
+                | (Some("main 10"), Some("yuv420p10le"), Some(10))
+        )
+    {
+        let surface = surface_contract(
+            DecodeBackend::V4l2Request,
+            options.pipeline,
+            facts,
+            request.encoder,
+            subtitle_rendering,
+        );
+        if capabilities.status(DecodeBackend::V4l2Request, facts, &surface)
+            == CapabilityStatus::Operational
+        {
+            preferred = DecodeBackend::V4l2Request;
+            reason = DecodeReason::MeasuredPreference;
+        }
+    }
     if let Some(required) = restrictions.required {
         preferred = required;
         reason = DecodeReason::ContinuationRestriction;
@@ -2896,7 +3390,37 @@ pub fn resolve_transcode(
         reason = DecodeReason::CompatibilityExclusion;
     }
 
-    if !pipeline_accepts_decode(options.pipeline, preferred) {
+    // FFmpeg skips autorotation on opaque hardware frames. The initial
+    // request path has no post-download transform, including continuations:
+    // scalar zero alone cannot rule out a mirrored or malformed matrix.
+    if preferred == DecodeBackend::V4l2Request
+        && (!facts.normalization_transform_known() || facts.rotation_degrees() != Some(0))
+    {
+        if restrictions.required == Some(DecodeBackend::V4l2Request) {
+            return Err(PlanError::IncompatibleRenderer);
+        }
+        preferred = DecodeBackend::Software;
+        reason = DecodeReason::CompatibilityExclusion;
+    }
+
+    if let Some(decoder) = linux_strict_decoder {
+        preferred = decoder;
+        reason = if policy.force_software_decode() {
+            DecodeReason::OperatorSoftwareOverride
+        } else if restrictions.required.is_some() {
+            DecodeReason::ContinuationRestriction
+        } else {
+            DecodeReason::MeasuredPreference
+        };
+    }
+    if !pipeline_accepts_decode(options.pipeline, preferred)
+        && !(preferred == DecodeBackend::Vaapi
+            && options.pipeline == Pipeline::DoviStrictTonemapx
+            && options
+                .strict_dolby
+                .as_ref()
+                .is_some_and(|strict| strict.linux_identity().is_some()))
+    {
         if preferred == DecodeBackend::Software {
             options.pipeline = grade_preserving_software_renderer(options.pipeline)?;
         } else {
@@ -2927,15 +3451,25 @@ pub fn resolve_transcode(
         );
         match capabilities.status(preferred, facts, &preferred_surface) {
             CapabilityStatus::Qualified => (preferred, DecodeEvidence::Qualified, reason),
-            CapabilityStatus::Advertised if policy.plan_policy() == DecodePlanPolicy::Legacy => {
+            CapabilityStatus::Operational if policy.plan_policy() == DecodePlanPolicy::Legacy => {
+                (preferred, DecodeEvidence::Operational, reason)
+            }
+            CapabilityStatus::Advertised
+                if policy.plan_policy() == DecodePlanPolicy::Legacy
+                    && preferred != DecodeBackend::V4l2Request =>
+            {
                 (preferred, DecodeEvidence::LegacyUnverified, reason)
             }
-            CapabilityStatus::Unavailable if policy.plan_policy() == DecodePlanPolicy::Legacy => {
+            CapabilityStatus::Unavailable
+                if policy.plan_policy() == DecodePlanPolicy::Legacy
+                    && preferred != DecodeBackend::V4l2Request =>
+            {
                 // The old route inferred hardware decode from the encoder and
                 // did not carry an independent input capability inventory.
                 (preferred, DecodeEvidence::LegacyUnverified, reason)
             }
             CapabilityStatus::Rejected
+            | CapabilityStatus::Operational
             | CapabilityStatus::Unavailable
             | CapabilityStatus::Advertised => {
                 if !restrictions.permits(DecodeBackend::Software) {
@@ -2960,18 +3494,51 @@ pub fn resolve_transcode(
         }
     };
 
+    if options
+        .strict_dolby
+        .as_ref()
+        .is_some_and(|strict| strict.linux_identity().is_some())
+        && !options
+            .strict_dolby
+            .as_ref()
+            .and_then(|strict| strict.linux_observed_context())
+            .is_some_and(|context| context.permits_source(backend, request.encoder, facts))
+    {
+        return Err(PlanError::IncompatibleRenderer);
+    }
+
     // `None` means the inventory did not name an implementation, so the
     // command names none either and FFmpeg selects its default. The digest
     // records the absence rather than a decoder nobody measured.
-    let software_decoder = if backend == DecodeBackend::Software {
+    let software_decoder = if backend == DecodeBackend::Software && options.strict_dolby.is_some() {
+        if capabilities
+            .software_decoder(codec)
+            .is_some_and(|implementation| implementation != "hevc")
+        {
+            return Err(PlanError::SoftwareDecoderUnavailable);
+        }
+        Some("hevc".to_owned())
+    } else if backend == DecodeBackend::Software {
         capabilities.software_decoder(codec).map(str::to_owned)
     } else {
         None
     };
-    let output_grade = options.pipeline.output_grade();
-    let output_encoder = request
-        .encoder
-        .video_codec_for(output_grade)
+    let codec_contract = super::OutputCodecContract::resolve_with_codec(
+        request.encoder,
+        options.pipeline,
+        options.effective_rate_control,
+        options.output_codec,
+    )
+    .ok_or(PlanError::IncompatibleRenderer)?;
+    if request.encoder == Encoder::VideoToolbox && codec_contract.codec == super::VideoCodec::Hevc {
+        authorize_macos_hevc(policy, facts, &options)?;
+    }
+    if options.pipeline.requires_strict_dovi() {
+        authorize_strict_p5(policy, facts, &options, request.encoder)?;
+    }
+    let output_grade = codec_contract.grade;
+    let output_encoder = codec_contract
+        .encoder_name()
         .ok_or(PlanError::IncompatibleRenderer)?;
     let surface = surface_contract(
         backend,
@@ -3043,6 +3610,45 @@ pub fn resolve_transcode(
     } else {
         effective_output_geometry(facts, requested_max_height)
     };
+    if options
+        .strict_dolby
+        .as_ref()
+        .is_some_and(|strict| strict.linux_identity().is_some())
+    {
+        let (width, height) =
+            effective_geometry.ok_or(PlanError::InvalidFact("output_geometry"))?;
+        if !options
+            .strict_dolby
+            .as_ref()
+            .and_then(|strict| strict.linux_observed_context())
+            .is_some_and(|context| {
+                context.permits_output(backend, request.encoder, facts, width, height)
+            })
+        {
+            return Err(PlanError::IncompatibleRenderer);
+        }
+    }
+    if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50 {
+        let (width, height) =
+            effective_geometry.ok_or(PlanError::InvalidFact("output_geometry"))?;
+        let rate = facts
+            .frame_rate()
+            .value()
+            .ok_or(PlanError::InvalidFact("frame_rate"))?;
+        if options.effective_rate_control != EffectiveRateControl::Vbr
+            || deinterlace != Deinterlace::None
+            || facts.frame_rate().provenance() == FrameRateProvenance::Nominal
+            || !continuous_avc_envelope_accepts(
+                width,
+                height,
+                rate.numerator(),
+                rate.denominator(),
+                options.video_bitrate_kbps,
+            )
+        {
+            return Err(PlanError::InvalidMediaOption("continuous_video_envelope"));
+        }
+    }
     if let Some(profile) = request.rate_profile {
         let (width, height) =
             effective_geometry.ok_or(PlanError::InvalidFact("output_geometry"))?;
@@ -3064,21 +3670,24 @@ pub fn resolve_transcode(
     }
     let output_contract = PresentationContract {
         output_grade,
-        output_codec: match output_grade {
-            OutputGrade::Sdr => "h264",
-            OutputGrade::Hdr10 => "hevc",
-        }
-        .to_owned(),
+        output_codec: codec_contract.codec.name().to_owned(),
         output_encoder: output_encoder.to_owned(),
         output_profile: match output_grade {
+            OutputGrade::Sdr if codec_contract.codec == super::VideoCodec::Hevc => {
+                Some("main".to_owned())
+            }
             OutputGrade::Hdr10 => Some("main10".to_owned()),
             OutputGrade::Sdr
-                if request.encoder == Encoder::Software || request.rate_profile.is_some() =>
+                if request.encoder == Encoder::Software
+                    || request.rate_profile.is_some()
+                    || options.video_sample_envelope
+                        == VideoSampleEnvelope::ContinuousAvcHigh50 =>
             {
                 Some("high".to_owned())
             }
             OutputGrade::Sdr => None,
         },
+        sdr_avc: None,
         output_pixel_format: output_grade.pixel_format().to_owned(),
         output_dynamic_range: output_grade.delivered_dynamic_range().to_owned(),
         output_transfer: output_grade.transfer().to_owned(),
@@ -3096,6 +3705,7 @@ pub fn resolve_transcode(
         effective_height: effective_geometry.map(|geometry| geometry.1),
         audio_channels: options.audio_channels,
         audio_bitrate_kbps: options.audio_bitrate_kbps,
+        audio: options.audio.clone(),
         audio_index: options.audio_index,
         subtitle_index: options
             .subtitle_burn
@@ -3104,6 +3714,39 @@ pub fn resolve_transcode(
         subtitle_rendering,
         audio_offset_ms: options.audio_offset_ms,
     };
+    if macos_processing_selection == Some(MacosProcessingSelection::Selected)
+        && !options.pipeline.requires_strict_dovi()
+        && !matches!(
+            options.pipeline,
+            Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10
+        )
+    {
+        macos_processing_selection = Some(MacosProcessingSelection::CapabilityFallback);
+    }
+    let macos_processing_identity = if let Some(strict) = &options.strict_dolby {
+        strict.macos_identity().cloned()
+    } else if matches!(
+        options.pipeline,
+        Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10
+    ) || (request.encoder == Encoder::VideoToolbox
+        && codec_contract.codec == super::VideoCodec::Hevc)
+    {
+        let context = policy
+            .macos_processing()
+            .expect("selected Mac graph has context");
+        Some(if subtitle_rendering == SubtitleRendering::TextBurn {
+            context.text_identity().clone()
+        } else {
+            context.identity().clone()
+        })
+    } else {
+        if macos_processing_selection == Some(MacosProcessingSelection::Selected) {
+            macos_processing_selection = Some(MacosProcessingSelection::CapabilityFallback);
+        }
+        None
+    };
+    let output_metadata_policy =
+        super::output_metadata_policy_for(options.pipeline, options.tone_map, facts.is_hdr());
     Ok(ResolvedTranscode {
         artifact_qualification: policy.artifact_qualification(),
         decode: ResolvedDecode {
@@ -3122,10 +3765,492 @@ pub fn resolve_transcode(
         source_identity: facts.source_identity.clone(),
         source_binding: facts.binding,
         output_contract,
+        codec_contract,
         input_dynamic_range: facts.dynamic_range,
         routing_dynamic_range: facts.routing_dynamic_range().map(str::to_owned),
         deinterlace,
+        macos_processing_identity,
+        macos_processing_selection,
+        output_metadata_policy,
     })
+}
+
+fn strict_p5_source(facts: &DecodeFacts) -> bool {
+    let dolby = facts.dolby_vision();
+    facts.codec() == Some("hevc")
+        && facts.profile() == Some("main 10")
+        && facts.bit_depth() == Some(10)
+        && facts.pixel_format() == Some("yuv420p10le")
+        && facts.dynamic_range_class() == Some(DynamicRangeClass::DolbyVision)
+        && dolby.profile == Some(5)
+        && dolby.bl_compat_id == Some(0)
+        && dolby.el_present == Some(false)
+        && dolby.rpu_present == Some(true)
+        && facts.color_space() == Some("ipt-c2")
+        && facts.color_range() == Some("pc")
+        && facts.scan_type() == ScanType::Progressive
+        && facts.normalization_transform_known()
+        && facts.rotation_degrees() == Some(0)
+        && facts.sample_aspect_ratio() == Rational::new(1, 1)
+        && facts
+            .width()
+            .is_some_and(|width| width >= 2 && width.is_multiple_of(2))
+        && facts
+            .height()
+            .is_some_and(|height| height >= 2 && height.is_multiple_of(2))
+        && facts.frame_rate().provenance() == FrameRateProvenance::Average
+}
+
+fn strict_p5_graph(pipeline: Pipeline) -> Option<MacosProcessingGraph> {
+    match pipeline {
+        Pipeline::DoviStrictTonemapx => Some(MacosProcessingGraph::P5SoftwareCpu),
+        Pipeline::VtDoviTonemapx => Some(MacosProcessingGraph::P5VtTonemapx),
+        Pipeline::VtDoviMetal => Some(MacosProcessingGraph::P5VtMetal),
+        Pipeline::DoviMetal => Some(MacosProcessingGraph::P5SoftwareMetal),
+        _ => None,
+    }
+}
+
+fn authorize_strict_p5(
+    policy: &DecodePolicySnapshot,
+    facts: &DecodeFacts,
+    options: &TranscodeMediaOptions,
+    encoder: Encoder,
+) -> Result<(), PlanError> {
+    if let Some(identity) = options
+        .strict_dolby
+        .as_ref()
+        .and_then(super::StrictDolbyPolicy::linux_identity)
+    {
+        // A pending reprobe publishes no observation. The plan's captured
+        // context then authorizes it, exactly as `select_linux_strict_p5`
+        // admits it; a current report with another identity still refuses.
+        let authorized = match policy.linux_dolby() {
+            Some(current) => current.identity() == identity,
+            None => options
+                .strict_dolby
+                .as_ref()
+                .and_then(super::StrictDolbyPolicy::linux_observed_context)
+                .is_some_and(|captured| captured.identity() == identity),
+        };
+        if !authorized
+            || options.pipeline != Pipeline::DoviStrictTonemapx
+            || !strict_p5_source(facts)
+            || options.subtitle_burn.is_some()
+            || options.output_codec == Some(super::VideoCodec::Hevc)
+        {
+            return Err(PlanError::IncompatibleRenderer);
+        }
+        return Ok(());
+    }
+    let context = policy
+        .macos_processing()
+        .ok_or(PlanError::IncompatibleRenderer)?;
+    let graph = strict_p5_graph(options.pipeline).ok_or(PlanError::IncompatibleRenderer)?;
+    if (!context.enabled() && options.strict_dolby.is_none())
+        || !(encoder == Encoder::VideoToolbox
+            || (encoder == Encoder::Software
+                && options.pipeline == Pipeline::DoviStrictTonemapx
+                && options.strict_dolby.is_some()))
+        || !strict_p5_source(facts)
+        || options.subtitle_burn.is_some()
+        || options.output_codec == Some(super::VideoCodec::Hevc)
+        || !context.permits(options.pipeline)
+        || context.graph(graph) != MacosProcessingAvailability::Available
+        || options
+            .strict_dolby
+            .as_ref()
+            .is_some_and(|strict| strict.macos_identity() != Some(context.identity()))
+    {
+        return Err(PlanError::IncompatibleRenderer);
+    }
+    Ok(())
+}
+
+fn select_linux_strict_p5(
+    policy: &DecodePolicySnapshot,
+    facts: &DecodeFacts,
+    options: &TranscodeMediaOptions,
+    request: &TranscodeRequest,
+    restrictions: &AttemptRestrictions,
+) -> Option<DecodeBackend> {
+    let captured = options
+        .strict_dolby
+        .as_ref()
+        .and_then(|strict| strict.linux_observed_context());
+    let context = captured.or_else(|| policy.linux_dolby())?;
+    // Pending reprobe has no new observation. A positively different current
+    // identity still refuses recovery; launch fences independently validate
+    // the captured objects rather than reacquiring the report's package.
+    if captured.is_some()
+        && policy
+            .linux_dolby()
+            .is_some_and(|current| current.identity() != context.identity())
+    {
+        return None;
+    }
+    if !strict_p5_source(facts)
+        || !matches!(
+            options.pipeline,
+            Pipeline::DoviTonemapx | Pipeline::DoviStrictTonemapx
+        )
+        || options.subtitle_burn.is_some()
+        || options.output_codec == Some(super::VideoCodec::Hevc)
+        || request.rate_profile.is_some()
+        || options
+            .strict_dolby
+            .as_ref()
+            .is_some_and(|strict| strict.linux_identity() != Some(context.identity()))
+    {
+        return None;
+    }
+    let (width, height) =
+        effective_output_geometry(facts, u32::try_from(options.target_height).ok()?)?;
+    [DecodeBackend::Vaapi, DecodeBackend::Software]
+        .into_iter()
+        .find(|backend| {
+            restrictions.permits(*backend)
+                && restrictions
+                    .required
+                    .is_none_or(|required| required == *backend)
+                && (!policy.force_software_decode() || *backend == DecodeBackend::Software)
+                && context.permits_output(*backend, request.encoder, facts, width, height)
+        })
+}
+
+fn select_strict_p5_pipeline(
+    context: &MacosProcessingContext,
+    request: &TranscodeRequest,
+    facts: &DecodeFacts,
+    policy: &DecodePolicySnapshot,
+    restrictions: &AttemptRestrictions,
+) -> Option<Pipeline> {
+    if (!context.enabled() && request.options.strict_dolby.is_none())
+        || !strict_p5_source(facts)
+        || !(request.encoder == Encoder::VideoToolbox
+            || (request.encoder == Encoder::Software && request.options.strict_dolby.is_some()))
+        || request.options.subtitle_burn.is_some()
+        || request.options.pipeline.output_grade() != OutputGrade::Sdr
+        || request.options.output_codec == Some(super::VideoCodec::Hevc)
+        || request.rate_profile.is_some()
+        || !matches!(
+            request.options.pipeline,
+            Pipeline::Cpu
+                | Pipeline::DoviTonemapx
+                | Pipeline::DoviStrictTonemapx
+                | Pipeline::VtDoviTonemapx
+                | Pipeline::VtDoviMetal
+                | Pipeline::DoviMetal
+        )
+    {
+        return None;
+    }
+    let retained = request.options.strict_dolby.is_some();
+    let candidates = if retained {
+        [
+            request.options.pipeline,
+            Pipeline::DoviStrictTonemapx,
+            Pipeline::DoviStrictTonemapx,
+            Pipeline::DoviStrictTonemapx,
+        ]
+    } else {
+        [
+            Pipeline::VtDoviMetal,
+            Pipeline::VtDoviTonemapx,
+            Pipeline::DoviMetal,
+            Pipeline::DoviStrictTonemapx,
+        ]
+    };
+    candidates.into_iter().find(|pipeline| {
+        let backend = if pipeline.requires_software_decode() {
+            DecodeBackend::Software
+        } else {
+            DecodeBackend::VideoToolbox
+        };
+        (!policy.force_software_decode() || backend == DecodeBackend::Software)
+            && pipeline.pairs_with(request.encoder)
+            && restrictions.permits(backend)
+            && context.permits(*pipeline)
+            && strict_p5_graph(*pipeline)
+                .is_some_and(|graph| context.graph(graph) == MacosProcessingAvailability::Available)
+    })
+}
+
+fn authorize_macos_hevc(
+    policy: &DecodePolicySnapshot,
+    facts: &DecodeFacts,
+    options: &TranscodeMediaOptions,
+) -> Result<(), PlanError> {
+    let context = policy
+        .macos_processing()
+        .ok_or(PlanError::IncompatibleRenderer)?;
+    if options.output_codec != Some(super::VideoCodec::Hevc)
+        || !context.hevc_output_enabled()
+        || options.subtitle_burn.is_some()
+        || options.effective_rate_control != EffectiveRateControl::Vbr
+        || options.video_sample_envelope != VideoSampleEnvelope::EncoderDefault
+        || facts.scan_type() != ScanType::Progressive
+        || !facts.normalization_transform_known()
+        || facts.rotation_degrees() != Some(0)
+        || facts.sample_aspect_ratio() != Rational::new(1, 1)
+        || facts
+            .width()
+            .is_none_or(|width| width < 2 || width % 2 != 0)
+        || facts
+            .height()
+            .is_none_or(|height| height < 2 || height % 2 != 0)
+        || facts.frame_rate().provenance() != FrameRateProvenance::Average
+        || facts.color_range() != Some("tv")
+    {
+        return Err(PlanError::IncompatibleRenderer);
+    }
+    if !matches!(
+        (
+            facts.codec(),
+            facts.profile(),
+            facts.bit_depth(),
+            facts.pixel_format()
+        ),
+        (
+            Some("h264"),
+            Some("baseline" | "constrained baseline" | "main" | "high"),
+            Some(8),
+            Some("yuv420p")
+        ) | (Some("hevc"), Some("main"), Some(8), Some("yuv420p"))
+            | (Some("hevc"), Some("main 10"), Some(10), Some("yuv420p10le"))
+    ) {
+        return Err(PlanError::IncompatibleRenderer);
+    }
+    let graph = match (
+        facts.dynamic_range_class(),
+        options.pipeline,
+        options.pipeline.output_grade(),
+    ) {
+        (Some(DynamicRangeClass::Sdr), Pipeline::VtScaleSdr, OutputGrade::Sdr)
+            if facts.color_space() == Some("bt709")
+                && facts.color_primaries() == Some("bt709")
+                && facts.color_transfer() == Some("bt709") =>
+        {
+            MacosProcessingGraph::HevcSdr
+        }
+        (Some(DynamicRangeClass::Sdr), Pipeline::Cpu, OutputGrade::Sdr)
+            if facts.color_space() == Some("bt709")
+                && facts.color_primaries() == Some("bt709")
+                && facts.color_transfer() == Some("bt709") =>
+        {
+            MacosProcessingGraph::HevcSdrHost
+        }
+        (Some(DynamicRangeClass::Hdr10), Pipeline::VtScaleHdr10, OutputGrade::Hdr10)
+            if facts.bit_depth() == Some(10)
+                && facts.color_space() == Some("bt2020nc")
+                && facts.color_primaries() == Some("bt2020")
+                && facts.color_transfer() == Some("smpte2084") =>
+        {
+            MacosProcessingGraph::HevcHdr10
+        }
+        (Some(DynamicRangeClass::Hdr10), Pipeline::Hdr10Passthrough, OutputGrade::Hdr10)
+            if facts.bit_depth() == Some(10)
+                && facts.color_space() == Some("bt2020nc")
+                && facts.color_primaries() == Some("bt2020")
+                && facts.color_transfer() == Some("smpte2084") =>
+        {
+            MacosProcessingGraph::HevcHdr10Host
+        }
+        _ => return Err(PlanError::IncompatibleRenderer),
+    };
+    if context.graph(graph) != MacosProcessingAvailability::Available
+        || !context.permits(options.pipeline)
+    {
+        return Err(PlanError::IncompatibleRenderer);
+    }
+    Ok(())
+}
+
+fn select_macos_processing(
+    context: &MacosProcessingContext,
+    request: &TranscodeRequest,
+    facts: &DecodeFacts,
+    policy: &DecodePolicySnapshot,
+    restrictions: &AttemptRestrictions,
+) -> MacosProcessingSelection {
+    use MacosProcessingSelection as Selection;
+    if select_strict_p5_pipeline(context, request, facts, policy, restrictions).is_some() {
+        return Selection::Selected;
+    }
+    if !context.enabled() {
+        return Selection::Disabled;
+    }
+    if policy.force_software_decode() {
+        return Selection::DecoderOverride;
+    }
+    if !restrictions.permits(DecodeBackend::VideoToolbox) {
+        return Selection::RecoveryRestriction;
+    }
+    let options = &request.options;
+    if request.encoder != Encoder::VideoToolbox
+        || !matches!(
+            options.pipeline,
+            Pipeline::Cpu
+                | Pipeline::VtScaleSdr
+                | Pipeline::VtToneMapMetal
+                | Pipeline::VtScaleHdr10
+                | Pipeline::Hdr10Passthrough
+        )
+        || (options.pipeline.output_grade() == OutputGrade::Hdr10
+            && options.subtitle_burn.is_some())
+        || (request.rate_profile.is_some()
+            && !(request.rate_profile == Some(AutoQualityRateProfile::H264Sdr1440P30V1)
+                && request.normalized_geometry
+                && options.pipeline.output_grade() == OutputGrade::Sdr
+                && options.output_codec != Some(super::VideoCodec::Hevc)
+                && facts.scan_type() == ScanType::Progressive
+                && matches!(
+                    facts.dynamic_range_class(),
+                    Some(DynamicRangeClass::Sdr | DynamicRangeClass::Hdr10)
+                )))
+        || !matches!(
+            options.video_sample_envelope,
+            VideoSampleEnvelope::EncoderDefault | VideoSampleEnvelope::ContinuousAvcHigh50
+        )
+    {
+        return Selection::PresentationConstraint;
+    }
+    // ContinuousAvcHigh50 retains the existing normalized, video-only VBR
+    // envelope admission and its High5.0 encoder/sample-clock owners below.
+    // The proved Mac graphs can transport that unchanged presentation recipe.
+    // Opaque VT frames do not inherit CPU rotation/SAR/rate normalization.
+    // Initial graphs preserve only a proved progressive, upright, even raster
+    // with square pixels and a known constant cadence.
+    if !matches!(
+        facts.scan_type(),
+        ScanType::Progressive | ScanType::Interlaced(_)
+    ) || (matches!(facts.scan_type(), ScanType::Interlaced(_))
+        && options.subtitle_burn.is_some())
+        || !facts.normalization_transform_known()
+        || facts.rotation_degrees() != Some(0)
+        || facts.sample_aspect_ratio() != Rational::new(1, 1)
+        || facts
+            .width()
+            .is_none_or(|width| width < 2 || width % 2 != 0)
+        || facts
+            .height()
+            .is_none_or(|height| height < 2 || height % 2 != 0)
+        || facts.frame_rate().provenance() != FrameRateProvenance::Average
+    {
+        return Selection::PresentationConstraint;
+    }
+    // The interlace extension observes H.2648-bit TFF/BFF. MPEG-2/A53
+    // recordings and unobserved interlaced HEVC remain incumbent routes;
+    // the live-only caption suppression is not copied into file output.
+    if matches!(facts.scan_type(), ScanType::Interlaced(_))
+        && (facts.codec() != Some("h264") || facts.bit_depth() != Some(8))
+    {
+        return Selection::IncompatibleInput;
+    }
+    let codec_supported = matches!(
+        (
+            facts.codec(),
+            facts.profile(),
+            facts.bit_depth(),
+            facts.pixel_format()
+        ),
+        (
+            Some("h264"),
+            Some("baseline" | "constrained baseline" | "main" | "high"),
+            Some(8),
+            Some("yuv420p")
+        ) | (Some("hevc"), Some("main"), Some(8), Some("yuv420p"))
+            | (Some("hevc"), Some("main 10"), Some(10), Some("yuv420p10le"))
+    );
+    if !codec_supported || facts.color_range() != Some("tv") {
+        return Selection::IncompatibleInput;
+    }
+    let (pipeline, availability) = match facts.dynamic_range_class() {
+        Some(DynamicRangeClass::Sdr)
+            if facts.color_space() == Some("bt709")
+                && facts.color_primaries() == Some("bt709")
+                && facts.color_transfer() == Some("bt709") =>
+        {
+            if options.output_codec == Some(super::VideoCodec::Hevc)
+                && (!context.hevc_output_enabled()
+                    || options.subtitle_burn.is_some()
+                    || facts.scan_type() != ScanType::Progressive)
+            {
+                return Selection::PresentationConstraint;
+            }
+            let graph = match options.subtitle_burn.as_ref() {
+                None if matches!(facts.scan_type(), ScanType::Interlaced(_)) => {
+                    MacosProcessingGraph::SdrBwdifFrame
+                }
+                None if options.output_codec == Some(super::VideoCodec::Hevc) => {
+                    MacosProcessingGraph::HevcSdr
+                }
+                None => MacosProcessingGraph::SdrScale,
+                Some(burn) if burn.bitmap => MacosProcessingGraph::SdrBitmapBurn,
+                Some(_) => MacosProcessingGraph::SdrTextBurn,
+            };
+            (Pipeline::VtScaleSdr, context.graph(graph))
+        }
+        Some(DynamicRangeClass::Hdr10)
+            if facts.bit_depth() == Some(10)
+                && facts.color_space() == Some("bt2020nc")
+                && facts.color_primaries() == Some("bt2020")
+                && facts.color_transfer() == Some("smpte2084") =>
+        {
+            if options.pipeline.output_grade() == OutputGrade::Hdr10 {
+                if !context.hevc_output_enabled() || facts.scan_type() != ScanType::Progressive {
+                    return Selection::PresentationConstraint;
+                }
+                return match context.graph(MacosProcessingGraph::HevcHdr10) {
+                    MacosProcessingAvailability::Available
+                        if context.permits(Pipeline::VtScaleHdr10) =>
+                    {
+                        Selection::Selected
+                    }
+                    MacosProcessingAvailability::Available => Selection::RecoveryRestriction,
+                    MacosProcessingAvailability::Pending => Selection::ProbePending,
+                    MacosProcessingAvailability::Unavailable => Selection::RuntimeProbeFailed,
+                };
+            }
+            if options.tone_map == ToneMap::None {
+                return Selection::PresentationConstraint;
+            }
+            let graph = match options.subtitle_burn.as_ref() {
+                None => MacosProcessingGraph::Hdr10Metal,
+                Some(burn) if burn.bitmap => MacosProcessingGraph::Hdr10BitmapBurn,
+                Some(_) => MacosProcessingGraph::Hdr10TextBurn,
+            };
+            (Pipeline::VtToneMapMetal, context.graph(graph))
+        }
+        Some(DynamicRangeClass::Hlg)
+            if facts.bit_depth() == Some(10)
+                && facts.color_space() == Some("bt2020nc")
+                && facts.color_primaries() == Some("bt2020")
+                && facts.color_transfer() == Some("arib-std-b67") =>
+        {
+            if options.tone_map == ToneMap::None {
+                return Selection::PresentationConstraint;
+            }
+            let graph = match options.subtitle_burn.as_ref() {
+                None => MacosProcessingGraph::HlgMetal,
+                Some(burn) if burn.bitmap => MacosProcessingGraph::HlgBitmapBurn,
+                Some(_) => MacosProcessingGraph::HlgTextBurn,
+            };
+            (Pipeline::VtToneMapMetal, context.graph(graph))
+        }
+        _ => return Selection::IncompatibleInput,
+    };
+    if options.pipeline != Pipeline::Cpu && options.pipeline != pipeline {
+        return Selection::IncompatibleInput;
+    }
+    if !context.permits(pipeline) {
+        return Selection::RecoveryRestriction;
+    }
+    match availability {
+        MacosProcessingAvailability::Pending => Selection::ProbePending,
+        MacosProcessingAvailability::Unavailable => Selection::RuntimeProbeFailed,
+        MacosProcessingAvailability::Available => Selection::Selected,
+    }
 }
 
 fn effective_output_geometry(facts: &DecodeFacts, requested_max_height: u32) -> Option<(u32, u32)> {
@@ -3141,6 +4266,26 @@ fn effective_output_geometry(facts: &DecodeFacts, requested_max_height: u32) -> 
 }
 
 fn validate_media_options(options: &TranscodeMediaOptions) -> Result<(), PlanError> {
+    if let Some(audio) = &options.audio {
+        if !audio.valid_snapshot() {
+            return Err(PlanError::InvalidMediaOption("audio_delivery"));
+        }
+        match &audio.action {
+            crate::playback::audio::AudioAction::Encode {
+                channels,
+                bitrate_kbps,
+                ..
+            } if options.audio_channels != u32::from(*channels)
+                || options.audio_bitrate_kbps != *bitrate_kbps =>
+            {
+                return Err(PlanError::InvalidMediaOption("audio_delivery"));
+            }
+            crate::playback::audio::AudioAction::Copy { .. } if options.audio_offset_ms != 0 => {
+                return Err(PlanError::InvalidMediaOption("audio_delivery"));
+            }
+            _ => {}
+        }
+    }
     if options.target_height < 2 {
         return Err(PlanError::InvalidMediaOption("target_height"));
     }
@@ -3171,10 +4316,17 @@ fn validate_media_options(options: &TranscodeMediaOptions) -> Result<(), PlanErr
 
 fn pipeline_accepts_decode(pipeline: Pipeline, backend: DecodeBackend) -> bool {
     match pipeline {
+        Pipeline::VtDoviTonemapx | Pipeline::VtDoviMetal => backend == DecodeBackend::VideoToolbox,
+        Pipeline::DoviStrictTonemapx | Pipeline::DoviMetal => backend == DecodeBackend::Software,
+        Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10 => {
+            backend == DecodeBackend::VideoToolbox
+        }
+        Pipeline::TonemapCuda => backend == DecodeBackend::Cuda,
         Pipeline::VppQsv => backend == DecodeBackend::Qsv,
-        Pipeline::TonemapVaapi => backend == DecodeBackend::Vaapi,
+        Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => backend == DecodeBackend::Vaapi,
         Pipeline::DoviTonemapx | Pipeline::DoviPassthrough => backend == DecodeBackend::Software,
         Pipeline::Libplacebo
+        | Pipeline::LibplaceboSoftware
         | Pipeline::TonemapOpencl
         | Pipeline::Hdr10Passthrough
         | Pipeline::Cpu => true,
@@ -3207,6 +4359,7 @@ fn software_evidence(
         }
         CapabilityStatus::Unavailable
         | CapabilityStatus::Advertised
+        | CapabilityStatus::Operational
         | CapabilityStatus::Rejected => {
             Err(PlanError::CapabilityUnavailable(DecodeBackend::Software))
         }
@@ -3222,8 +4375,19 @@ fn preferred_backend(
         return (DecodeBackend::Software, DecodeReason::RendererRequirement);
     }
     match pipeline {
+        Pipeline::VtDoviTonemapx
+        | Pipeline::VtDoviMetal
+        | Pipeline::VtScaleSdr
+        | Pipeline::VtToneMapMetal
+        | Pipeline::VtScaleHdr10 => {
+            return (
+                DecodeBackend::VideoToolbox,
+                DecodeReason::RendererRequirement,
+            );
+        }
+        Pipeline::TonemapCuda => return (DecodeBackend::Cuda, DecodeReason::LegacyPreference),
         Pipeline::VppQsv => return (DecodeBackend::Qsv, DecodeReason::LegacyPreference),
-        Pipeline::TonemapVaapi => {
+        Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => {
             return (DecodeBackend::Vaapi, DecodeReason::LegacyPreference);
         }
         _ => {}
@@ -3258,51 +4422,103 @@ fn surface_contract(
 ) -> DecodeSurfaceContract {
     let ten_bit = facts.bit_depth().is_some_and(|depth| depth >= 10) || facts.is_hdr();
     let decode_domain = match backend {
+        DecodeBackend::VideoToolbox
+            if matches!(
+                pipeline,
+                Pipeline::VtDoviTonemapx
+                    | Pipeline::VtDoviMetal
+                    | Pipeline::VtScaleSdr
+                    | Pipeline::VtToneMapMetal
+                    | Pipeline::VtScaleHdr10
+            ) =>
+        {
+            FrameDomain::VideoToolbox
+        }
+        DecodeBackend::Cuda if pipeline == Pipeline::TonemapCuda => FrameDomain::Cuda,
         DecodeBackend::Qsv => FrameDomain::Qsv,
         DecodeBackend::Vaapi => FrameDomain::Vaapi,
+        DecodeBackend::V4l2Request => FrameDomain::DrmPrime,
         DecodeBackend::Software | DecodeBackend::VideoToolbox | DecodeBackend::Cuda => {
             FrameDomain::SystemMemory
         }
     };
     let vendor_native = matches!(
         (decode_domain, pipeline),
-        (FrameDomain::Qsv, Pipeline::VppQsv) | (FrameDomain::Vaapi, Pipeline::TonemapVaapi)
+        (FrameDomain::Cuda, Pipeline::TonemapCuda)
+            | (FrameDomain::Qsv, Pipeline::VppQsv)
+            | (
+                FrameDomain::Vaapi,
+                Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
+            )
     );
-    let decoder_download_format =
-        if matches!(decode_domain, FrameDomain::Qsv | FrameDomain::Vaapi) && !vendor_native {
-            Some(if ten_bit { "p010le" } else { "nv12" }.to_owned())
-        } else {
-            None
-        };
+    let decoder_download_format = if decode_domain == FrameDomain::DrmPrime {
+        // The Pi FFmpeg DRM transfer converts SAND to planar 4:2:0;
+        // preserve Main10 rather than requesting its lossy NV12 option.
+        Some(if ten_bit { "yuv420p10le" } else { "yuv420p" }.to_owned())
+    } else if matches!(decode_domain, FrameDomain::Qsv | FrameDomain::Vaapi) && !vendor_native {
+        Some(if ten_bit { "p010le" } else { "nv12" }.to_owned())
+    } else {
+        None
+    };
     let renderer_domain = match pipeline {
+        Pipeline::VtDoviMetal | Pipeline::DoviMetal => FrameDomain::VideoToolbox,
+        Pipeline::DoviStrictTonemapx | Pipeline::VtDoviTonemapx => FrameDomain::SystemMemory,
+        Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10 => {
+            FrameDomain::VideoToolbox
+        }
+        Pipeline::TonemapCuda => FrameDomain::Cuda,
         Pipeline::VppQsv => FrameDomain::Qsv,
         Pipeline::TonemapVaapi => FrameDomain::Vaapi,
-        Pipeline::Libplacebo => FrameDomain::Vulkan,
+        Pipeline::Libplacebo | Pipeline::LibplaceboVaapi => FrameDomain::Vulkan,
         Pipeline::TonemapOpencl if facts.is_hdr() => FrameDomain::OpenCl,
         Pipeline::TonemapOpencl
+        | Pipeline::LibplaceboSoftware
         | Pipeline::DoviTonemapx
         | Pipeline::DoviPassthrough
         | Pipeline::Hdr10Passthrough
         | Pipeline::Cpu => FrameDomain::SystemMemory,
     };
     let renderer_upload_format = match renderer_domain {
+        FrameDomain::VideoToolbox if pipeline == Pipeline::DoviMetal => Some("p010le".to_owned()),
+        FrameDomain::Vulkan if pipeline == Pipeline::LibplaceboVaapi => None,
         FrameDomain::Vulkan => decoder_download_format
             .clone()
             .or_else(|| facts.pixel_format.clone()),
         FrameDomain::OpenCl => Some("p010le".to_owned()),
-        FrameDomain::Qsv | FrameDomain::Vaapi | FrameDomain::SystemMemory => None,
+        FrameDomain::VideoToolbox
+        | FrameDomain::Cuda
+        | FrameDomain::Qsv
+        | FrameDomain::Vaapi
+        | FrameDomain::SystemMemory
+        | FrameDomain::DrmPrime => None,
     };
     let renderer_download_format = match pipeline {
+        Pipeline::DoviStrictTonemapx
+        | Pipeline::VtDoviTonemapx
+        | Pipeline::VtDoviMetal
+        | Pipeline::DoviMetal => None,
         Pipeline::Libplacebo => Some("nv12".to_owned()),
         Pipeline::TonemapOpencl if facts.is_hdr() => Some("nv12".to_owned()),
-        Pipeline::VppQsv | Pipeline::TonemapVaapi
+        Pipeline::VtScaleSdr
+        | Pipeline::VtToneMapMetal
+        | Pipeline::VtScaleHdr10
+        | Pipeline::TonemapCuda
+        | Pipeline::VppQsv
+        | Pipeline::TonemapVaapi
+        | Pipeline::LibplaceboVaapi
             if subtitle_rendering != SubtitleRendering::None =>
         {
             Some("nv12".to_owned())
         }
-        Pipeline::VppQsv
+        Pipeline::VtScaleSdr
+        | Pipeline::VtToneMapMetal
+        | Pipeline::VtScaleHdr10
+        | Pipeline::TonemapCuda
+        | Pipeline::VppQsv
         | Pipeline::TonemapVaapi
+        | Pipeline::LibplaceboVaapi
         | Pipeline::TonemapOpencl
+        | Pipeline::LibplaceboSoftware
         | Pipeline::DoviTonemapx
         | Pipeline::DoviPassthrough
         | Pipeline::Hdr10Passthrough
@@ -3310,6 +4526,9 @@ fn surface_contract(
     };
     let rendered_domain = if renderer_download_format.is_some() {
         FrameDomain::SystemMemory
+    } else if pipeline == Pipeline::LibplaceboVaapi {
+        // The renderer's Vulkan output is hardware-mapped back to VA-API.
+        FrameDomain::Vaapi
     } else {
         renderer_domain
     };
@@ -3327,7 +4546,15 @@ fn surface_contract(
             Some("p010le".to_owned())
         }
         Some(FrameDomain::Qsv | FrameDomain::Vaapi) => Some("nv12".to_owned()),
-        Some(FrameDomain::SystemMemory | FrameDomain::Vulkan | FrameDomain::OpenCl) | None => None,
+        Some(
+            FrameDomain::VideoToolbox
+            | FrameDomain::SystemMemory
+            | FrameDomain::Cuda
+            | FrameDomain::Vulkan
+            | FrameDomain::OpenCl
+            | FrameDomain::DrmPrime,
+        )
+        | None => None,
     };
     DecodeSurfaceContract {
         decode_domain,
@@ -3337,6 +4564,38 @@ fn surface_contract(
         renderer_download_format,
         encoder_upload_domain,
         encoder_upload_format,
-        required_side_data: pipeline.requires_software_decode(),
+        required_side_data: pipeline.requires_software_decode() || pipeline.requires_strict_dovi(),
+    }
+}
+
+#[cfg(test)]
+mod software_vulkan_tests {
+    use super::*;
+
+    #[test]
+    fn request_decoder_planar_download_feeds_software_frame_vulkan_renderer() {
+        let facts = DecodeFacts::from_ffprobe_json(
+            &serde_json::json!({"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc",
+                "profile": "Main 10", "pix_fmt": "yuv420p10le", "width": 3840, "height": 2160,
+                "color_transfer": "smpte2084", "color_primaries": "bt2020", "color_space": "bt2020nc"}]}),
+            DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("fixture source digest is valid"),
+        ).expect("Main10 fixture produces valid decode facts");
+        assert!(pipeline_accepts_decode(
+            Pipeline::LibplaceboSoftware,
+            DecodeBackend::V4l2Request
+        ));
+        let surface = surface_contract(
+            DecodeBackend::V4l2Request,
+            Pipeline::LibplaceboSoftware,
+            &facts,
+            Encoder::Software,
+            SubtitleRendering::None,
+        );
+        assert_eq!(surface.decode_domain(), FrameDomain::DrmPrime);
+        assert_eq!(surface.decoder_download_format(), Some("yuv420p10le"));
+        assert_eq!(surface.renderer_domain(), FrameDomain::SystemMemory);
+        assert_eq!(surface.renderer_upload_format(), None);
+        assert_eq!(surface.renderer_download_format(), None);
+        assert_eq!(surface.encoder_upload_domain(), None);
     }
 }

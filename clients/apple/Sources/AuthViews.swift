@@ -237,7 +237,7 @@ struct ConnectView: View {
 }
 
 #if os(iOS)
-private struct QRCodeScannerView: UIViewControllerRepresentable {
+struct QRCodeScannerView: UIViewControllerRepresentable {
     let onScanned: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onScanned: onScanned) }

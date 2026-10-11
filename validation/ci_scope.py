@@ -140,9 +140,21 @@ WEB_LAYOUT_PATHS = (
     "tests/playback/player-input-contract.json",
     "tests/playback/playback-info-fields.json",
     "tests/ui-structure.golden",
-    "tests/web/jsconfig-generated.test.js",
-    "tests/web/player-typedef.test.js",
-    "tests/web/tsc-baseline.tsv",
+    # The fast lane's web job runs `make web-unit-check`, so the tests it runs
+    # and the fixtures they read select it: every file under tests/playback
+    # (the JSON/TOML case tables are inputs, not just the *.test.js files),
+    # tests/web, and the two non-web files tests/web/hls-seek.test.js holds to
+    # the vendored hls.js version. (A diff of THIRD-PARTY-NOTICES.md alone is
+    # still docs-only and runs no surface; the entry selects this job whenever
+    # the notices change beside anything that is not documentation, such as
+    # the vendored hls.min.js itself.) Native-client and server sources a few of
+    # those tests also read deliberately do not: an Android or Rust edit would
+    # otherwise run this job and the merge-queue layout sweep on every change,
+    # and each of those surfaces has its own lane.
+    "tests/playback/**",
+    "tests/web/**",
+    "THIRD-PARTY-NOTICES.md",
+    "scripts/subtitle-readiness-browser-check",
     "tools/web-types/**",
 )
 
@@ -180,8 +192,12 @@ RELEASE_BUILD_PATHS = (
     "Cargo.toml",
     "**/Cargo.toml",
     "**/build.rs",
+    # build.rs includes these with #[path]; `**/build.rs` alone misses them.
+    "crates/plurxd/build_support/**",
     "Dockerfile",
     "rust-toolchain.toml",
+    # Copied into the runtime-assets stage that package-smoke builds.
+    "scripts/build-static-ffprobe",
     "scripts/ci-buildkit-prune",
     "scripts/ci-execution-mode",
     "scripts/release-package-candidate",

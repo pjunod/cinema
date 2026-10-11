@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "stage": "cache",
+  "mode": "flush",
+  "argv": [
+    "cache_probe",
+    "normal.mkv",
+    "normal/epoch-0-bl-frame-000.rpu.rbsp",
+    "normal/epoch-0-bl-frame-001.rpu.rbsp",
+    "flush"
+  ],
+  "process_returncode": 0,
+  "shell_status": 0,
+  "consumed_before": {
+    "cache_probe": "002a10be33e8f70904bc37c59e7c8cbb8c7d67a9646005947b63fc0ff22ffc4e",
+    "normal.mkv": "e3bbe2f2e388632e54756d5d2549607de41e4ab62a13c56bac7411bbd699faf8",
+    "normal/epoch-0-bl-frame-000.rpu.rbsp": "0fc7d08be47bfc989a25e2a25ef8d2c4a1cc099b23bb89ce7edadbd711dc7618",
+    "normal/epoch-0-bl-frame-001.rpu.rbsp": "91ac288fa63a5b84d3ff12c24337bade411d7ba1746282ded2f75bd589e260c6"
+  },
+  "consumed_after": {
+    "cache_probe": "002a10be33e8f70904bc37c59e7c8cbb8c7d67a9646005947b63fc0ff22ffc4e",
+    "normal.mkv": "e3bbe2f2e388632e54756d5d2549607de41e4ab62a13c56bac7411bbd699faf8",
+    "normal/epoch-0-bl-frame-000.rpu.rbsp": "0fc7d08be47bfc989a25e2a25ef8d2c4a1cc099b23bb89ce7edadbd711dc7618",
+    "normal/epoch-0-bl-frame-001.rpu.rbsp": "91ac288fa63a5b84d3ff12c24337bade411d7ba1746282ded2f75bd589e260c6"
+  },
+  "outputs": {
+    "cache-flush.jsonl": "0d6a99686de5fc572a3f31fef1d95a5be89b672a82cdf01d7343260d07c54a6a",
+    "cache-flush.stderr": "45f0054bfe6b4bfa37405d025821e5dad67ee3557e077c9f39eb3177ca35a4c6",
+    "cache-flush.status": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  }
+}

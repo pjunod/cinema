@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-gradient-vui",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_codec_gradient_frame_grade.py",
+  "test_file_sha256": "1797d615076cb0c6a384bf5262aa68ddaeb7a67fbd1c1d3fca945f1659fc1f96",
+  "test_ids": ["test_codec_gradient_frame_grade.GradientFrameGradeTests.test_gradient_final_frame_grade_is_metadata_only_and_refusal_stays_strict"],
+  "command": "python3 -m unittest tests.operations.test_codec_gradient_frame_grade.GradientFrameGradeTests.test_gradient_final_frame_grade_is_metadata_only_and_refusal_stays_strict",
+  "output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}

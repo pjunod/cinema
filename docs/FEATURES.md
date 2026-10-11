@@ -70,7 +70,8 @@ books, and home media.
   default, hearing-impaired/SDH), and chapters.
 - **Incremental rescan:** unchanged files are skipped by size + mtime, so a
   rescan of a large library is cheap. Vanished files are reconciled (the item
-  reflects what's actually on disk).
+  reflects what's actually on disk), and removing a path from a library
+  removes the items under it.
 - **Repairable inspection.** A file whose probe failed — bad permissions, an
   unmounted share, a half-copied download — is retried on every scan, because
   the fixes for all three leave size and mtime untouched and it would otherwise
@@ -372,6 +373,15 @@ the physical Apple/Android device matrix remains a release acceptance step.
   matches for missing configured languages. Each source revision can hold
   eight downloaded tracks of at most 256 KiB each. Provider quotas still
   apply. See [operation and setup](OPERATIONS.md#download-missing-subtitles).
+- **Generate missing subtitles offline.** Administrators can choose **Generate
+  subtitles** on a local title's detail page. Configure the optional worker in
+  **Settings → Developer** with an installed whisper.cpp executable and model,
+  a spoken language and an optional missing-language sweep interval. Activity
+  shows queued/running work and owns Stop. Generated WebVTT is labelled as
+  machine-generated and appears in the ordinary subtitle picker on all
+  clients; no media-library file is modified. CPU execution is bounded and
+  models are never downloaded by the job. See
+  [offline transcription](OPERATIONS.md#generate-subtitles-offline).
 - **Track facts are ready before playback.** Every file in the native item-detail
   response carries its complete audio/subtitle lists plus `playback_defaults`:
   the exact audio and subtitle indices the shared server policy would select,
@@ -468,11 +478,12 @@ and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
   only as a sidecar, never as a native rendition, because converting them to
   WebVTT while slicing segments would discard the positioning and typography
   the release was authored with — picking one in a session burns it instead.
-  Bitmap subs (PGS/VobSub) are a picture rather than text, so there is nothing
-  to hand a `<track>` — picking one restarts the stream as a transcode with the
-  subtitle drawn into the frames. The menu says `burned in` on those, because
-  that restart is a cost worth knowing about before you choose between two
-  English tracks.
+  Bitmap subtitles are pictures. PGS-capable Apple and Android clients receive
+  `pgs-v1` bitmap overlays while the video session and delivered HDR/Dolby Vision
+  range stay unchanged. Clients without that capability, and other bitmap
+  formats such as VobSub, retain supported burn/refusal policy; selecting a
+  burn may reopen the stream, and an unsupported HDR burn is explicitly
+  refused. The menu identifies overlay and burn routes before selection.
 - **Copy-video segments are cut where a player loses nothing:** on an HEVC or
   H.264 copy session, plurx does the segmenting itself and places a boundary
   only in front of a keyframe with no leading picture to discard — every
@@ -519,7 +530,7 @@ The DVR schedules exact guide airings or manual channel/time windows, writes
 on the configured tuner owner, and links finalized media into the ordinary
 recordings library.
 
-- **The page says what is on.** A channel row carries the network chip, the
+- **The page says what is on.** A channel row carries the station logo, the
   number and callsign, the programme on now with a bar running to its end,
   and what is next. Two views of the same page share every piece of state
   behind one switch: a dense **list** beside the player for surfing, and the
@@ -527,6 +538,19 @@ recordings library.
   never stops the stream and never refetches — it is a re-render of the browse
   region. A protected channel is dimmed rather than hidden, with a
   `Hide protected` filter for a lineup that is mostly DRM.
+- **Station artwork comes from the guide.** Every client — the web list, grid
+  and current-programme details; the Apple and Android list rows, grid
+  headers, programme details, picture badge and fullscreen identity — draws
+  HDHomeRun's full-color station image on a neutral tile, matched by channel
+  id. Which address is used is one rule in the shared guide contract
+  (`station_logo` in `tests/playback/live-tv-guide-cases.json`), so the three
+  clients cannot disagree: only an `https://` address of printable ASCII with
+  a plain host and no embedded credentials, at most 512 characters. Channel
+  numbers and names stay visible beside it; missing or failed artwork leaves a
+  callsign fallback, and loading a logo never delays tuning. The web omits the
+  page referrer; the native clients fetch artwork on a dedicated connection
+  that never carries the account's token or cookies and never follows a
+  redirect off HTTPS.
 - **Source format and live reception stay distinct.** Every channel row and
   guide row uses compact badges for the facts the tuner advertises — `HD` or
   `SD`, video codec and audio codec — and leaves a badge out when the device
@@ -875,14 +899,39 @@ browse and play directly against plurx — validated end-to-end with
 `python-plexapi`. plex.tv is never contacted. Detail: [CLIENTS.md](CLIENTS.md),
 [ARCHITECTURE.md](ARCHITECTURE.md) §5.
 
-**Web settings:** Live TV owns tuner enablement, owner recovery, guide
-configuration, recording, library-channel playback and subject matching.
-Playback owns player defaults, chapter thumbnails, and advanced server
-delivery, including Live HLS recovery, protocol compatibility, verified decode
-artifacts and automatic decode recovery. Analysis owns the durable index queue.
-Metadata owns search and classification settings. Maintenance owns Windows
-conversion and runtime readiness alongside Dolby Vision disk conversion.
-Cluster owns automatic transport-recovery guidance.
+**Jellyfin-compat (experimental, off by default):** a `/jellyfin` façade so
+Infuse 8.5.6 and Jellyfin for Android TV 0.19.10 connect to plurx as if it
+were Jellyfin Server 10.11.11: sign-in, movie/TV browsing and search, artwork,
+direct play, native VOD over HLS, audio choice, embedded or sidecar subtitles
+(VTT/SRT) chosen from each client's subtitle profile, skip markers, watch
+progress and watched marks. Every play runs on the native media owners. The
+switch is Settings → Developer → *Allow Jellyfin clients*; physical client
+qualification is still open. Detail: [OPERATIONS.md](OPERATIONS.md#jellyfin-client-compatibility),
+[PLAYBACK.md](PLAYBACK.md#jellyfin-clients--the-same-media-owners-another-protocol),
+[JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md).
+
+**Web settings:** Live TV owns the Live TV enable (its first card), tuner
+configuration, owner recovery, deinterlace cadence, guide configuration,
+recording, library-channel playback and subject matching. Playback owns
+player defaults, chapter thumbnails, quality switching, the second player in
+this browser, the PGS subtitle overlay, and advanced server delivery,
+including Live HLS recovery, protocol compatibility, verified decode
+artifacts and automatic decode recovery. Analysis owns the durable index
+queue and subtitle backfill. Metadata owns search and classification
+settings. Maintenance owns Windows conversion and runtime readiness
+alongside Dolby Vision disk conversion, and stored PGS tracks. Cluster owns
+automatic transport-recovery guidance and, below the health board, a
+*Cluster settings* section: media placement and session takeover, local
+catalogue reads, the clock guard, portable backup and shared subtitle
+tracks. These moved out of Developer on 2026-10-10.
+
+On a standalone server, Cluster shows only “Clustering is not enabled.”
+It does not load or poll cluster membership, operations, or logs, and
+does not draw the Cluster settings section (remote placement and takeover,
+replica reads, clock enforcement, cluster backup, and peer subtitles). Local analysis, storage budgets,
+stored subtitles, Live TV, and sharing between separate Cinemas remain
+available. Presentation follows explicit configuration or persisted network membership,
+not the number of peers currently reachable, and leaves saved settings unchanged.
 
 Developer holds only features that are not yet fully active or fully
 tested, and every card there says what it is waiting on before it leaves:

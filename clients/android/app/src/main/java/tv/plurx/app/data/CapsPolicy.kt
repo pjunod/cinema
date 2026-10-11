@@ -31,6 +31,8 @@ data class DeviceCaps(
     val audio: List<String>,
     val containers: List<String>,
     val transports: List<String>,
+    // Decoder enumeration alone does not prove the HLS/fMP4 transport.
+    val hls_hevc_sample_entries: List<String>? = null,
     val display: DisplayCaps,
     val learned_limits: List<LearnedLimit> = emptyList(),
     // ALWAYS, because kotlinx omits a property equal to its default and an
@@ -39,6 +41,17 @@ data class DeviceCaps(
     // claim would never reach the wire at all.
     @EncodeDefault(EncodeDefault.Mode.ALWAYS)
     val subtitle_overlays: List<String> = listOf(PGS_OVERLAY_PROTOCOL),
+    // The current route's reach per codec (AUDIO-RESOLVED-INDEPENDENTLY.md
+    // §3.1). Omitted when empty, which is the legacy audio contract.
+    val audio_sinks: List<AudioSinkClaim> = emptyList(),
+)
+
+@Serializable
+data class AudioSinkClaim(
+    val codec: String,
+    val max_channels: Int,
+    val passthrough: Boolean = false,
+    val sample_rates_hz: List<Int> = emptyList(),
 )
 
 @Serializable
@@ -238,6 +251,9 @@ internal fun capsDocument(
     hdrTypes: Set<Int>,
     decoderDolbyVisionProfiles: List<Int>,
     client: ClientInfo,
+    audioSinks: List<AudioSinkClaim> = emptyList(),
+    hlsHevcSampleEntries: List<String>? = null,
+    displayAwareAuto: Boolean = true,
 ): DeviceCaps {
     val dvProfiles = decoderDolbyVisionProfiles.takeIf {
         HdrType.DOLBY_VISION in hdrTypes
@@ -245,19 +261,33 @@ internal fun capsDocument(
     return DeviceCaps(
         v = 2,
         client = client,
-        video = video.videoEntries(presentationTransfers(hdrTypes), dvProfiles),
+        // Explicit HLS HEVC needs its measured decoder envelope independently
+        // of Display-aware Auto. Other codecs retain the legacy policy.
+        video = video.videoEntries(presentationTransfers(hdrTypes), dvProfiles).map { entry ->
+            if (displayAwareAuto || (entry.codec == "hevc" && !hlsHevcSampleEntries.isNullOrEmpty())) {
+                entry
+            } else {
+                entry.copy(profiles = emptyList(), max_height = video.maxHeights.getValue(entry.codec),
+                    max_width = null, max_frame_rate = null)
+            }
+        }.let(::compactVideoEntries),
         audio = audio,
         containers = DIRECT_PLAY_CONTAINERS.split(','),
         transports = listOf("progressive", "hls"),
+        hls_hevc_sample_entries = hlsHevcSampleEntries,
         display = DisplayCaps(
             hdr = displayIsHdr(hdrTypes),
             dolby_vision = HdrType.DOLBY_VISION in hdrTypes,
         ),
+        audio_sinks = audioSinks,
     )
 }
 
-internal fun shouldFallBackToLegacyDecision(statusCode: Int): Boolean =
-    statusCode == 400 || statusCode == 404 || statusCode == 405
+internal fun shouldFallBackToLegacyDecision(
+    statusCode: Int,
+    caps: DeviceCaps? = null,
+): Boolean = caps?.hls_hevc_sample_entries == null &&
+    (statusCode == 400 || statusCode == 404 || statusCode == 405)
 
 /**
  * Normalize MediaCodec evidence into the two server capability fields.
@@ -357,6 +387,45 @@ internal fun audioCodecClaims(
     )
     claim("truehd", "audio/true-hd" in decoders, AudioSinkEncoding.DOLBY_TRUEHD)
     return claimed.toList()
+}
+
+/**
+ * The route claim the server negotiates audio from.
+ *
+ * A codec this device decodes reaches the route's PCM channel count
+ * ([LiveSinkFacts.aacChannels]: the HDMI sink's advertised PCM channels on a
+ * television, stereo on a handset or the panel's own speakers); Media3
+ * resamples whatever it decodes. AC-3/E-AC-3 that the *sink* accepts as a
+ * bitstream are claimed as passthrough at the format's own channel count —
+ * the receiver decodes them. Only codecs the server's negotiation
+ * understands are claimed; DTS and TrueHD stay in the codec list alone.
+ */
+internal fun audioSinkClaims(
+    decoders: Set<String>,
+    sinkEncodings: Set<Int>,
+    pcmChannels: Int,
+): List<AudioSinkClaim> {
+    val channels = pcmChannels.coerceIn(LiveSinkFacts.MIN_AAC_CHANNELS, 8)
+    val decodedRates = listOf(44_100, 48_000, 88_200, 96_000)
+    val dolbyRates = listOf(32_000, 44_100, 48_000)
+    val claims = mutableListOf(
+        AudioSinkClaim("aac", channels, false, decodedRates),
+        AudioSinkClaim("mp3", minOf(2, channels), false, listOf(32_000, 44_100, 48_000)),
+        AudioSinkClaim("flac", channels, false, decodedRates),
+    )
+    fun dolby(codec: String, decoderMime: String, formatChannels: Int, vararg encodings: Int) {
+        val bitstream = encodings.any { it in sinkEncodings }
+        when {
+            bitstream -> claims += AudioSinkClaim(codec, formatChannels, true, dolbyRates)
+            decoderMime in decoders -> claims += AudioSinkClaim(codec, minOf(formatChannels, channels), false, dolbyRates)
+        }
+    }
+    dolby("ac3", "audio/ac3", 6, AudioSinkEncoding.AC3)
+    // Plain E-AC-3 is what the server sends; Media3 checks ENCODING_E_AC3
+    // for it, so a sink that only advertises the JOC (Atmos) variant earns
+    // no plain E-AC-3 passthrough claim.
+    dolby("eac3", "audio/eac3", 8, AudioSinkEncoding.E_AC3)
+    return claims
 }
 
 /**

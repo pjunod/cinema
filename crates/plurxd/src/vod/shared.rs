@@ -36,6 +36,38 @@ impl Shared {
             let Some(candidate) = pending.front().cloned() else {
                 break;
             };
+            let Ok(_dependency_guard) = self.rendition_build_gate(&candidate.key).try_lock_owned()
+            else {
+                if let Some(candidate) = pending.pop_front() {
+                    pending.push_back(candidate);
+                }
+                continue;
+            };
+            match super::preparation_storage::has_private_marker(&candidate.path).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    pending.pop_front();
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::vodserve",  %error, "encoded cache ownership unreadable; cleanup deferred");
+                    break;
+                }
+            }
+            match self.store.quality_reserved_intervals(&candidate.key).await {
+                Ok(intervals) if intervals.is_empty() => {}
+                Ok(_) => {
+                    if let Some(candidate) = pending.pop_front() {
+                        pending.push_back(candidate);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %candidate.key,
+                        %error, "retaining obsolete media with unknown continuous dependencies");
+                    break;
+                }
+            }
             if let Err(error) = self.store.forget_rendition_plan(&candidate.key).await {
                 tracing::warn!(
                     target: "plurxd::vodserve",
@@ -175,6 +207,7 @@ impl Shared {
                 owners: 1,
                 retry_pending: false,
                 watchdog: None,
+                verdict: None,
             },
         );
         let owner = MaterializeDemand {
@@ -225,6 +258,27 @@ impl Shared {
             if !expired || rendition.failure().is_some() {
                 return;
             }
+            // Name the phase the deadline caught rather than calling every
+            // expiry a producer failure: a rendition parked on a refused
+            // encoder permit never had a producer to fail.
+            let verdict = rendition.materialize_verdict(index, rendition.slot.belief().await);
+            tracing::warn!(
+                target: "plurxd::vodserve",
+                rendition = %rendition.key,
+                entry = index,
+                verdict = ?verdict,
+                "materialize deadline expired"
+            );
+            {
+                let mut clocks = rendition.demand_since.lock().expect("demand lock");
+                let Some(clock) = clocks
+                    .get_mut(&index)
+                    .filter(|clock| clock.started == started)
+                else {
+                    return;
+                };
+                clock.verdict = Some(verdict.clone());
+            }
             if index != INIT_DEMAND_INDEX {
                 // A slow, cancelled, or superseded segment request cannot
                 // prove that this shared producer is unhealthy. Settle only
@@ -241,15 +295,9 @@ impl Shared {
                 {
                     return;
                 }
-                shared.pool.fail_entry(
-                    &rendition.key,
-                    index,
-                    &format!(
-                        "materializing {} exceeded the {:.1}s producer deadline",
-                        segment_name(u64::from(index)),
-                        rendition.materialize_budget.as_secs_f64()
-                    ),
-                );
+                shared
+                    .pool
+                    .expire_entry(&rendition.key, index, verdict.wait_outcome());
                 drop(clocks);
                 rendition.kick();
             } else {
@@ -259,7 +307,7 @@ impl Shared {
             // Preserve expiry long enough for a normal Retry-After cycle to
             // receive its typed failure, then forget an abandoned HTTP retry.
             // An old task never removes a newer episode for this same entry.
-            tokio::time::sleep(PENDING_RETRY_AFTER.saturating_mul(2)).await;
+            tokio::time::sleep(MATERIALIZE_EXPIRY_RETAINED).await;
             let mut demands = rendition.demand_since.lock().expect("demand lock");
             if demands
                 .get(&index)
@@ -281,6 +329,7 @@ impl Shared {
 
     /// Find or build the rendition for `key`, spawning its driver. `None`
     /// means the plan came out empty and the caller returns a typed refusal.
+    #[cfg(test)]
     pub(super) async fn attach_rendition(
         self: &Arc<Shared>,
         key: &str,
@@ -290,6 +339,32 @@ impl Shared {
         duration_ms: i64,
         settings: &VodSettings,
     ) -> Result<Option<RenditionAttachment>, String> {
+        self.attach_rendition_with_storage(
+            key,
+            identity,
+            index,
+            recipe,
+            duration_ms,
+            settings,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn attach_rendition_with_storage(
+        self: &Arc<Shared>,
+        key: &str,
+        identity: &SourceIdentity,
+        index: Option<FragmentIndex>,
+        recipe: Recipe,
+        duration_ms: i64,
+        settings: &VodSettings,
+        private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+    ) -> Result<Option<RenditionAttachment>, String> {
+        if let Some(storage) = private_storage.as_ref() {
+            storage.bind(key)?;
+        }
         let build_guard = self.rendition_build_gate(key).lock_owned().await;
         // Once exact-key admission succeeds, transfer the entire slow
         // Store/filesystem/head/build transaction to a detached owner before
@@ -311,6 +386,7 @@ impl Shared {
                     duration_ms,
                     settings,
                     build_guard,
+                    private_storage,
                 )
                 .await
         });
@@ -329,6 +405,7 @@ impl Shared {
         duration_ms: i64,
         settings: VodSettings,
         build_guard: tokio::sync::OwnedMutexGuard<()>,
+        private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         // Single-flight only this key. No Store, filesystem, process, manifest,
@@ -345,6 +422,10 @@ impl Shared {
                     }));
                 }
                 Some(existing) => {
+                    if let Some(storage) = existing.private_storage.as_ref() {
+                        storage.release();
+                        return Err("private incarnation requires storage cleanup".into());
+                    }
                     // A failed (or closed) handle cannot answer new readers.
                     // Publish closed first, but leave the exact handle in the
                     // map until its accounting facts have been collected. If
@@ -379,6 +460,9 @@ impl Shared {
                 if admitted {
                     sub_saturating(&self.completed_cache, claimed);
                 } else {
+                    if stale.private_storage.is_some() {
+                        return Err("private incarnation requires storage cleanup".into());
+                    }
                     sub_saturating(&self.working_set, claimed);
                 }
                 tracing::info!(
@@ -388,15 +472,30 @@ impl Shared {
             }
         }
 
+        let phase_started = Instant::now();
         let plan = self
             .stored_plan(key, &identity, &index, &recipe, duration_ms)
             .await?;
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            phase = "stored_plan", elapsed_ms = phase_started.elapsed().as_millis(),
+            "rendition attachment phase completed");
         if plan.is_empty() {
             return Ok(None);
         }
+        let phase_started = Instant::now();
         let rendition = self
-            .build_rendition(key, index, recipe, plan, &settings)
+            .build_rendition_with_storage(
+                key,
+                index,
+                recipe,
+                plan,
+                &settings,
+                private_storage.clone(),
+            )
             .await?;
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            phase = "build_rendition", elapsed_ms = phase_started.elapsed().as_millis(),
+            "rendition attachment phase completed");
         let adopted_bytes = rendition.manifest.lock().await.materialized_bytes();
         let (rendition, installed) = {
             let mut renditions = self.renditions.lock().await;
@@ -412,10 +511,16 @@ impl Shared {
             }
         };
         if installed {
-            if adopted_bytes > 0 {
+            if let Some(storage) = private_storage.as_ref() {
+                storage.installed(&rendition);
+            }
+            if adopted_bytes > 0 && private_storage.is_none() {
                 self.working_set.fetch_add(adopted_bytes, Relaxed);
             }
             let _driver = spawn_driver(Arc::clone(self), Arc::clone(&rendition));
+            if adopted_bytes > 0 && private_storage.is_none() {
+                self.preparation_storage.adopt(self, &rendition).await;
+            }
             self.hooks.get().after_rendition_installed().await;
         }
         // From this point cancellation leaves a registered, correctly
@@ -454,12 +559,7 @@ impl Shared {
             return Ok(plan);
         }
         let plan = if let Some(encoding) = &recipe.encoding {
-            encoding.grid.plan(
-                duration_ms,
-                (encoding.options.video_bitrate_kbps + encoding.options.audio_bitrate_kbps)
-                    .saturating_mul(1000)
-                    .into(),
-            )
+            encoding.media_plan(duration_ms)
         } else {
             let index = index.as_ref().expect("copy recipe has a fragment index");
             let policy = shipped_policy(index.timescale);
@@ -497,6 +597,7 @@ impl Shared {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn build_rendition(
         self: &Arc<Shared>,
         key: &str,
@@ -505,13 +606,58 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
     ) -> Result<Arc<Rendition>, String> {
-        let source = crate::fragment_index_cluster::open_source_fence(
-            &recipe.file,
-            recipe.source_object_version.as_deref(),
-        )
-        .await?;
+        self.build_rendition_with_storage(key, index, recipe, plan, settings, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build_rendition_with_storage(
+        self: &Arc<Shared>,
+        key: &str,
+        index: Option<FragmentIndex>,
+        recipe: Recipe,
+        plan: SegmentPlan,
+        settings: &VodSettings,
+        private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+    ) -> Result<Arc<Rendition>, String> {
+        let source = if key.starts_with("source-") {
+            crate::fragment_index_cluster::open_source_playback_fence(
+                &recipe.file,
+                recipe.source_object_version.as_deref(),
+            )
+            .await?
+        } else {
+            crate::fragment_index_cluster::open_source_fence(
+                &recipe.file,
+                recipe.source_object_version.as_deref(),
+            )
+            .await?
+        };
         let dir = RenditionDir::new(self.base.join(key));
         let mut existed = tokio::fs::metadata(dir.path()).await.is_ok();
+        if let Some(storage) = private_storage.as_ref() {
+            if existed {
+                return Err("private namespace already exists; cleanup required".into());
+            }
+            storage.create_marker(&dir).await?;
+        } else if super::preparation_storage::has_private_marker(dir.path())
+            .await
+            .map_err(|error| format!("checking private cache ownership: {error}"))?
+        {
+            return Err(
+                "private preparation scratch cannot be adopted as ordinary playback".into(),
+            );
+        }
+        let protected = !self
+            .store
+            .quality_reserved_intervals(key)
+            .await
+            .map_err(|error| format!("reading continuous media dependencies: {error}"))?
+            .is_empty();
+        if protected && !existed {
+            return Err("a reserved rendition has lost its immutable directory; attachment repair is required".into());
+        }
+
         let encoded_process = recipe
             .encoding
             .as_ref()
@@ -521,6 +667,9 @@ impl Shared {
                 match tokio::fs::read_to_string(dir.path().join(ENCODED_PROCESS_NAME)).await {
                     Ok(owner) if owner.trim() == process => {}
                     Ok(_) => {
+                        if protected {
+                            return Err("a reserved rendition belongs to an earlier encoder process; attachment repair is required".into());
+                        }
                         tokio::fs::remove_dir_all(dir.path())
                             .await
                             .map_err(|error| {
@@ -529,6 +678,9 @@ impl Shared {
                         existed = false;
                     }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        if protected {
+                            return Err("a reserved rendition has no encoder process marker; attachment repair is required".into());
+                        }
                         // An encoded directory without its generation marker
                         // is unverifiable. Never adopt it under a new marker.
                         tokio::fs::remove_dir_all(dir.path())
@@ -580,6 +732,12 @@ impl Shared {
             match load_identity(&dir.path().join(IDENTITY_NAME)).await {
                 Some(identity) => {
                     if !report.init_present && manifest.materialized_count() > 0 {
+                        if key.starts_with("source-") {
+                            return Err(crate::transcode::vod_refusal_error(
+                                "vod_source_head_pending",
+                                "Source cached-head recovery needs owned admitted activation",
+                            ));
+                        }
                         // Handoff §5's missing-init arm, and it cannot wait
                         // for the next ordinary generation: a fully adopted
                         // manifest has no gap, so the scheduler answers Idle
@@ -629,6 +787,11 @@ impl Shared {
                                 // Mismatch (or an unverifiable head): purge to
                                 // planned-only and establish fresh — before
                                 // the counters below, so nothing is adopted.
+                                if protected {
+                                    return Err(format!(
+                                        "a reserved rendition's init cannot be verified: {why}"
+                                    ));
+                                }
                                 let freed = dir.purge(&mut manifest).await;
                                 if let Some(error) = freed.error {
                                     tracing::warn!(
@@ -661,6 +824,9 @@ impl Shared {
                 None => {
                     // No identity means nothing on disk is verifiable: purge
                     // to planned-only and establish fresh.
+                    if protected {
+                        return Err("a reserved rendition has no immutable init identity; attachment repair is required".into());
+                    }
                     if manifest.materialized_count() > 0 || dir.has_init().await {
                         let freed = dir.purge(&mut manifest).await;
                         if let Some(error) = freed.error {
@@ -702,8 +868,16 @@ impl Shared {
             completed_cache_budget: settings.completed_cache_bytes,
             materialize_budget: settings.materialize_budget,
             manifest: Mutex::new(manifest),
+            output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
+            private_storage,
+            copy_preparation: StdMutex::new(None),
+            preparation_epoch: AtomicU64::new(0),
+            retained_offer: StdMutex::new(None),
+            cancelled_preparation_epoch: AtomicU64::new(0),
             identity: Mutex::new(identity_state),
-            slot: ProducerSlot::new(),
+            slot: Arc::new(ProducerSlot::new()),
+            source_owners: SourceRenditionOwners::default(),
+            retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),
@@ -729,6 +903,7 @@ impl Shared {
             handoff: StdMutex::new(None),
             handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
+            fragment_received: StdMutex::new(None),
         });
         Ok(rendition)
     }
@@ -741,7 +916,7 @@ impl Shared {
         rendition: &Rendition,
         manifest: &mut Manifest,
     ) {
-        if manifest.is_admitted() {
+        if rendition.private_storage.is_some() || manifest.is_admitted() {
             return;
         }
         let budgets = Budgets {
@@ -825,6 +1000,12 @@ impl Shared {
         let Some(rendition) = rendition else {
             return;
         };
+        if let Some(storage) = rendition.private_storage.as_ref() {
+            if rendition.preparation().is_none() {
+                storage.release();
+            }
+            return;
+        }
         if !rendition.readers.lock().await.is_empty() {
             return;
         }
@@ -835,6 +1016,15 @@ impl Shared {
             .is_some_and(|since| since.elapsed() > ttl);
         if !dormant {
             return;
+        }
+        match self.store.quality_reserved_intervals(key).await {
+            Ok(intervals) if intervals.is_empty() => {}
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                    %error, "retaining dormant media with unknown continuous dependencies");
+                return;
+            }
         }
         // Keep the manifest fence through the short exact map removal. That
         // makes admission and purge mutually exclusive without ever holding

@@ -1,16 +1,26 @@
 # Dolby Vision-Safe PGS Subtitle Overlay Plan
 
-**Status:** open · **Reconciled:** 2026-09-20
+**Status:** historical design; server and native clients built, overlay enabled;
+corpus and output-mode evidence remains individually scoped ·
+**Reconciled:** 2026-10-09.
 
-> Status: Architecture approved for Milestone 0 feasibility work. Production
-> implementation and rollout remain paused until the milestone is accepted.
-> Current evidence: [PGS-OVERLAY-M0-FEASIBILITY.md](PGS-OVERLAY-M0-FEASIBILITY.md).
->
-> Scope: Apple and Android playback clients, the plurxd subtitle service, and
-> the playback policy that selects between text renditions, bitmap overlays,
-> and legacy burn-in.
+The [subtitle completion ledger](SUBTITLE-RELIABILITY-COMPLETION.md) owns
+current work. The [startup record](PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md)
+records the September 24 two-device startup bar and deployed enablement.
+The [M0 evidence](PGS-OVERLAY-M0-FEASIBILITY.md) retains the parser audit and
+its original limits. The design below is retained as the historical contract:
+its old build versions, paused-rollout status and default-off gate statements
+are superseded by the startup record and completion ledger. They are not new
+requirements to disable a working feature or repeat earned evidence.
 
-## 1. Executive summary
+As of the October 9 read-only fleet inspection, `subtitles.pgs_overlay=1`.
+PGS-capable Apple and Android clients draw `pgs-v1` images while preserving the
+video session and requested range; other clients retain burn/refusal policy.
+This proves configured enablement, not every corpus or output mode. PiP and
+external playback limitations remain explicit, and physical Apple TV and
+iPhone 18 testing is excluded by the user's instruction for the current effort.
+
+## 1. Original executive summary
 
 plurx currently has two subtitle delivery paths:
 

@@ -89,6 +89,17 @@ jobs:
             PLURX_BUILD_SHA=${{ github.sha }}
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=cluster-store-shard-{0}', matrix.shard_index) || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=cluster-store-shard-{0}', matrix.shard_index) || '' }}
+      # `validation.store_shard run` launches the binary with RUST_MIN_STACK
+      # raised to 8 MiB (TEST_THREAD_STACK_BYTES): this is a debug build, and
+      # the replicated migration tests from old markers overflow libtest's
+      # 2 MiB default and abort the whole shard.
+      #
+      # Not covered here: `tests/schema_lineage_upgrade.rs`, the end-to-end
+      # test of the schema-lineage bridge, is a separate test binary that
+      # Dockerfile.store-shard does not export. It runs only in
+      # `make cluster-store-check` (the legacy Store lane and the
+      # cluster-store backstop), so in accelerated mode no pull-request lane
+      # runs it.
       - name: Run the assigned Store tests once
         id: store_shard
         if: steps.build_store_binary.outcome == 'success'

@@ -933,3 +933,75 @@ class CommittedMediaOriginTest {
         )
     }
 }
+
+class PreparedActiveWallBudgetTest {
+    @Test fun explicitPausePreservesRemainingFirstFrameBudget() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true)
+        assertFalse(budget.update(2_100, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertFalse(budget.update(62_100, true))
+        assertEquals(3_000L, budget.remainingMs)
+        assertFalse(budget.update(65_099, true))
+        assertTrue(budget.update(65_100, true))
+        assertEquals(0L, budget.remainingMs)
+    }
+
+    @Test fun preparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline() {
+        val budget = PreparedActiveWallBudget(5_000, 11_100, false,
+            overlapBoundMs = 12_000, overlapStartedAtMs = 100)
+        assertEquals(1_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(12_099, false))
+        assertTrue(budget.update(12_100, false))
+        assertEquals(5_000L, budget.remainingMs)
+        val spent = PreparedActiveWallBudget(5_000, 20_100, true,
+            overlapBoundMs = 12_000, overlapStartedAtMs = 100)
+        assertEquals(0L, spent.remainingOverlapMs)
+    }
+
+    @Test fun pauseParksObservationButPhysicalOverlapStillExpires() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true, overlapBoundMs = 12_000)
+        assertFalse(budget.update(2_100, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertEquals(10_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(1_100, false))
+        assertEquals(10_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(12_099, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(12_100, false))
+        assertEquals(0L, budget.remainingOverlapMs)
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(12_101, true))
+    }
+
+    @Test fun activeStallsRemainBoundedAndBackwardSamplesCannotRefillBudget() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true)
+        assertFalse(budget.update(2_100, true))
+        assertFalse(budget.update(1_100, true))
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(5_100, true))
+        assertEquals(0L, budget.remainingMs)
+        assertTrue(budget.update(90_000, false))
+    }
+}
+
+
+class PreparedFailureDiagnosticTest {
+    private fun snapshot(seek: Boolean = true, warm: Boolean? = true, error: Int? = null) =
+        PreparedFailureDiagnostic(PreparedFailureReason.OVERLAP_WATCHDOG,
+            PreparationPhase.METADATA_READY, 3, 2, true, seek, true, warm,
+            12_000, 1080, error)
+
+    @Test fun completed_buffer_does_not_claim_unobserved_seek_or_warm_frame() {
+        assertEquals("seek_not_observed", snapshot(seek = false).observedWaitGate)
+        assertEquals("warm_frame_unproven", snapshot(warm = false).observedWaitGate)
+        assertEquals("meeting_or_commit_pending", snapshot().observedWaitGate)
+    }
+
+    @Test fun failure_report_keeps_exact_reason_phase_and_numeric_error_without_free_text() {
+        val detail = snapshot(error = 4003).copy(reason = PreparedFailureReason.PLAYER_ERROR).detail()
+        assertTrue(detail.contains("reason=PLAYER_ERROR phase=METADATA_READY"))
+        assertTrue(detail.contains("elapsed_ms=12000 target_height=1080 error_code=4003"))
+        assertFalse(detail.contains("http"))
+        assertFalse(detail.contains("retained_current"))
+    }
+}

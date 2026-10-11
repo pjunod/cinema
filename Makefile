@@ -52,6 +52,10 @@ unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TE
 unit-core: ## Run plurx-core with replicated-store tests and enforce the count floor
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib
 
+.PHONY: unit-broker
+unit-broker: test-socket-permission-check ## Run focused notification broker security and provider contracts
+	$(CARGO) test --locked -p plurx-notification-broker
+
 test: unit ## Run the fast Rust test lane
 
 test-full: test-socket-permission-check ## Run every Rust test, including replicated and daemon contracts
@@ -1108,10 +1112,19 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 
 .PHONY: cluster-store-check
+# 8 MiB test threads: in a debug build, one poll of the hundred-step replicated
+# migration loop needs more than libtest's default 2 MiB, so every test that
+# opens a store from an old marker (v47, v65) aborted the whole binary with a
+# stack overflow. Release builds are unaffected; this is a debug-frame bound.
 cluster-store-check: ## Run the Store contracts against SQLite and three voters
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract -- --test-threads=1
+	# The only end-to-end test of the schema-lineage bridge: a real three-voter
+	# cluster carried from each private and canonical marker to the head.
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
+	  --test schema_lineage_upgrade -- --test-threads=1
 
 .PHONY: cluster-harness-check
 cluster-harness-check: ## Run replicated growth and topology harness contracts
@@ -1454,6 +1467,21 @@ ui-check: ## Sweep every layout and fail if the structural golden moved
 control-browser-check: ## Run the shipped playback-control reporter in a real browser
 	@scripts/control-reporter-browser-check
 
+# Real focus ownership uses a headed disposable Chromium. Linux lanes supply
+# Xvfb; live Router acceptance keeps its explicit synthetic-fixture requirement.
+.PHONY: cinema-remote-browser-check
+cinema-remote-browser-check: ## Run Cinema browser contracts with provisioned Playwright
+	@export PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}"; \
+		node="$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}"; \
+		if [ "$$(uname -s)" = Linux ]; then set -- xvfb-run -a "$$node"; else set -- "$$node"; fi; \
+		"$$@" --test tests/web/cinema-remote-direction.browser.cjs tests/web/cinema-remote.browser.cjs tests/web/cinema-remote-live.browser.cjs tests/web/cinema-remote-couch.browser.cjs
+
+.PHONY: library-rows-browser-check
+library-rows-browser-check: ## Test grouped library rows with the provisioned Playwright browser
+	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
+		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
+		--test tests/web/library-rows.browser.cjs
+
 # Regenerating the golden is a deliberate act that shows up in a git diff, never
 # a side effect of a normal run — a golden that rewrites itself asserts nothing.
 # Run this when you MEANT to change the UI, then read the diff before committing.
@@ -1465,56 +1493,24 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 # so a JS syntax error in it compiles, links, passes every Rust test, and then
 # serves a blank page; and the theme tables are data, so a token pair that
 # fails contrast is not a type error anywhere. Run this on any web change.
+.PHONY: effort-web-static-check
+effort-web-static-check: ## Lint current web source without behavior or browser fixtures
+	@scripts/js-check
+	@node scripts/web-jsconfig --check
+	@scripts/web-types
+	@node scripts/web-shape-check
+	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
+		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
+		--allow scripts/contrast-allow.txt
+
 .PHONY: media-preparation-browser-check
 media-preparation-browser-check: ## Focused media-info browser regression (PLAYWRIGHT_MODULE may name an installed Playwright)
 	@node --test tests/web/media-preparation.browser.cjs
 
 .PHONY: web-check
-web-check: ## Test playback policy, embedded JS, and every shipped theme
-	@node tests/playback/web-policy.test.js
-	@node --test tests/playback/web-media-recovery.test.js
-	@node tests/playback/web-control.test.js
-	@node --test tests/playback/seek-control.test.js
+web-check: web-unit-check ## Test playback policy, embedded JS, and every shipped theme
 	@scripts/web-hls-startup-browser-check
 	@scripts/subtitle-readiness-browser-check
-	@node tests/playback/player-input-contract.test.js
-	@node tests/playback/playback-surface-contract.test.js
-	@node tests/web/player-dom.test.js
-	# A startup that never presented a frame must not post position 0 over a
-	# resume point. One failed session used to erase it for good.
-	@node --test tests/web/progress-never-presented.test.js
-	@node --test tests/web/seek-telemetry.test.js
-	@node tests/web/nav-keyboard.test.js
-	@node tests/web/reader.test.js
-	@node tests/web/library-channels.test.js
-	@node tests/web/live-tv.test.js
-	@node tests/web/layout-containment.test.js
-	@node tests/web/calm-library.test.js
-	@node tests/web/page-read-budget.test.js
-	@node --test tests/web/media-preparation.test.js
-	@node tests/web/theme-family.test.js
-	@node tests/web/activity-node-names.test.js
-	# Every child process is listed with its priority class and a stop (P-02 §3.2).
-	@node tests/web/activity-processes.test.js
-	@node tests/web/analysis-node-names.test.js
-	@node --test tests/web/analysis-reconciliation.test.js
-	@node tests/web/settings-sections.test.js
-	@node --test tests/web/subtitle-downloads.test.js
-	# A cluster fault must reach the panel, not the login page.
-	@node tests/web/cluster-recovery-session.test.js
-	# An idle-expired sign-in lands on the login page saying why.
-	@node tests/web/session-expiry.test.js
-	@node tests/web/read-after.test.js
-	# The validation runner already has this as `web-membership`, but this is
-	# the target a web change reaches for, and the Cluster panel is a web
-	# surface like any other here. Two seconds.
-	@node tests/web/cluster-membership.test.js
-	@node --test tests/web/error-reporter.test.js
-	# The split shell is sixty-five plain scripts in one scope: the order they
-	# are served in is a load order. One reads them, one runs them.
-	@node tests/web/asset-order.test.js
-	@node tests/web/asset-load.test.js
-	@node tests/web/asset-layout.test.js
 	@scripts/js-check
 	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
 	# against a per-file baseline that only shrinks. The file list is generated
@@ -1527,6 +1523,93 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
 		--allow scripts/contrast-allow.txt
 
+.PHONY: web-unit-check
+# Every Node test of the web client and its playback policy, with no browser
+# and no TypeScript: about two minutes on two cores. The fast lane's web job
+# runs exactly this, so a web pull request executes the same tests web-check
+# does apart from the two real-browser scripts.
+web-unit-check: ## Run every Node web and playback test (no browser)
+	@node --test tests/web/cinema-remote-client.test.js
+	@node --test tests/web/cinema-remote-controller.test.js
+	@node --test tests/web/cinema-remote-guard.test.js
+	@node --test tests/web/cinema-remote-receiver.test.js
+	@node --test tests/web/cinema-remote-settings.test.js
+	@node --test tests/web/cinema-remote-ui.test.js
+	@node --test tests/web/cinema-remote.test.js
+	@node tests/playback/web-policy.test.js
+	@node --test tests/playback/web-media-recovery.test.js
+	@node tests/playback/web-control.test.js
+	@node --test tests/playback/seek-control.test.js
+	@node tests/playback/player-input-contract.test.js
+	@node tests/playback/playback-surface-contract.test.js
+	@node tests/web/player-dom.test.js
+	# A startup that never presented a frame must not post position 0 over a
+	# resume point. One failed session used to erase it for good.
+	@node --test tests/web/progress-never-presented.test.js
+	@node --test tests/web/seek-telemetry.test.js
+	# Continuous quality: protocol refusals, adapter reservations, fMP4 inspection.
+	@node --test tests/web/continuous-quality.test.js tests/web/continuous-adapter.test.js tests/web/continuous-media.test.js
+	@node tests/web/nav-keyboard.test.js
+	@node tests/web/reader.test.js
+	@node tests/web/library-channels.test.js
+	@node tests/web/library-rows.test.js
+	@node tests/web/live-tv.test.js
+	@node tests/web/layout-containment.test.js
+	@node tests/web/calm-library.test.js
+	@node tests/web/page-read-budget.test.js
+	@node --test tests/web/media-preparation.test.js
+	@node tests/web/theme-family.test.js
+	@node tests/web/activity-node-names.test.js
+	# Every child process is listed with its priority class and a stop (P-02 §3.2).
+	@node tests/web/activity-processes.test.js
+	@node tests/web/analysis-node-names.test.js
+	@node --test tests/web/analysis-reconciliation.test.js
+	@node tests/web/settings-sections.test.js
+	# HDR10-E appears only for an accepted current-generation processing report.
+	@node --test tests/web/dv-processing-badge.test.js
+	@node --test tests/web/subtitle-downloads.test.js
+	# A cluster fault must reach the panel, not the login page.
+	@node tests/web/cluster-recovery-session.test.js
+	# An idle-expired sign-in lands on the login page saying why.
+	@node tests/web/session-expiry.test.js
+	# The Transcoding backend buttons send objects, not pre-serialized strings.
+	@node --test tests/web/transcoder-backend-requests.test.js
+	@node tests/web/read-after.test.js
+	# The validation runner already has this as `web-membership`, but this is
+	# the target a web change reaches for, and the Cluster panel is a web
+	# surface like any other here. Two seconds.
+	@node tests/web/cluster-membership.test.js
+	@node --test tests/web/error-reporter.test.js
+	@node --test tests/playback/current-main-effort-quality.test.js
+	@node --test tests/playback/frame-diagnostics.test.js
+	@node tests/playback/network-shaping.test.js
+	@node --test tests/playback/preparation-measurement.test.js
+	@node --test tests/playback/frame-clock.test.js
+	@node --test tests/playback/quality-cancellation.test.js
+	# Every tests/{web,playback}/*.test.js is run here or is required by a test
+	# that is; tests/operations/test_web_test_inventory.py fails a pull request
+	# that adds one this recipe would not run.
+	@node --test tests/web/content-analysis-failures.test.js
+	@node --test tests/web/dvr-visibility.test.js
+	@node --test tests/web/grid-poster-derivatives.test.js
+	@node --test tests/web/hls-seek.test.js
+	@node --test tests/web/local-search.test.js
+	@node --test tests/web/ui-baseline-capture-clamp.test.js
+	# The split shell is sixty-five plain scripts in one scope: the order they
+	# are served in is a load order. One reads them, one runs them.
+	@node --test tests/web/file-context.test.js
+	@node --test tests/web/shared-decision.test.js
+	@node --test tests/web/shared-libraries.test.js
+	@node --test tests/web/sharing-protocol-cases.test.js
+	@node --test tests/web/shared-artwork.test.js
+	@node --test tests/web/sharing-management.test.js
+	@node tests/web/asset-order.test.js
+	@node tests/web/asset-load.test.js
+	@node tests/web/asset-layout.test.js
+	@node --test tests/web/continuous-media-worker.test.js
+	@node --test tests/web/hitch-lifecycle.test.js
+	@node --test tests/web/section-nav.test.js
+
 ## ---- packaging & setup -------------------------------------------------
 
 # What a build from this tree stamps into the binary. Keep in step with
@@ -1534,6 +1617,18 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 VERSION := $(shell sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
 BUILD_REF := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
+# The commit's committer time. Image builds pass it as SOURCE_DATE_EPOCH so the
+# binary's built_at stamp and BuildKit's image timestamps are the same on every
+# build of one commit (crates/plurxd/build_support/source_date.rs). `.git` is
+# outside the build context, so the build script cannot read it there itself.
+#
+# Empty for a `-dirty` tree: HEAD's time would date a binary that is not HEAD,
+# so the build script falls back to the clock. And `:=`, not `?=`: the image is
+# stamped with this checkout's BUILD_REF and BUILD_SHA, so its date comes from
+# the same checkout, never from a SOURCE_DATE_EPOCH some other tool left
+# exported in the shell. A deliberate override is still
+# `make docker SOURCE_DATE_EPOCH=<seconds>`, which Make lets win.
+SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
 
 .PHONY: version
@@ -1541,8 +1636,23 @@ version: ## Print the version and git build stamp a build would report
 	@echo "$(VERSION) ($(BUILD_REF))"
 
 .PHONY: docker
-docker: ## Build the container image
-	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" -t plurx/plurxd:latest .
+#
+# Without PLURX_LINUX_DOLBY_PACKAGE this builds the `runtime` stage on either
+# architecture: the same image `make docker-up` (Compose) builds and the fleet
+# runs. The audited amd64 Dolby media package is an input, not a precondition:
+# its producer (`linux-dolby-package-export`) is not yet qualified, so a node
+# cannot make one, and a `make docker` that refuses until it can is a build
+# nobody can run. When the package is supplied, amd64 installs it through
+# scripts/build-linux-dolby-ffmpeg --step docker-build.
+docker: ## Build the container image (amd64 + PLURX_LINUX_DOLBY_PACKAGE adds the audited Dolby media package)
+	@set -eu; platform="$${DOCKER_DEFAULT_PLATFORM:-linux/$$(uname -m)}"; \
+	case "$$platform" in linux/amd64|linux/x86_64) arch=amd64 ;; linux/arm64|linux/aarch64) arch=arm64 ;; \
+	*) echo "Unsupported container platform $$platform" >&2; exit 1 ;; esac; \
+	if test "$$arch" = amd64 && test -n "$${PLURX_LINUX_DOLBY_PACKAGE:-}"; then \
+	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --source-date-epoch "$(SOURCE_DATE_EPOCH)"; \
+	else \
+	  docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .; \
+	fi
 
 .PHONY: container-smoke
 container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
@@ -1577,6 +1687,9 @@ container-smoke: docker ## Build, start, probe, restart, re-probe, then back up 
 # `-f` also moves the project directory to the repo root, so `deploy/.env` stops
 # being read on the way past.
 #
+# Generate one temporary hardware overlay, keeping the selected base and host
+# override files. The same COMPOSE_FILE applies to the proof and rollout; the
+# trap removes only this invocation's overlay, including on failure.
 # Resolve Compose first so shell variables, deploy/.env, defaults, and override
 # files are evaluated with the same precedence as the mutation below. The
 # checker refuses a health grace shorter than snapshot recovery plus the named
@@ -1593,7 +1706,11 @@ container-smoke: docker ## Build, start, probe, restart, re-probe, then back up 
 # not a way to overrule somebody who chose to fail fast.
 .PHONY: docker-startup-budget-check
 docker-startup-budget-check: ## Prove the resolved Compose startup budget before deployment
-	cd deploy && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
+	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
+	  && compose_files="$$(python3 ../scripts/docker-hardware --output "$$hardware")" \
+	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
+	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget
 
 # The mutation below is character-for-character what somebody runs by hand in
@@ -1608,9 +1725,13 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 # `compose up` applies another is not a preflight.
 .PHONY: docker-up
 docker-up: ## Build + (re)start Compose after its startup budget passes
-	cd deploy && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
+	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
+	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
+	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe
@@ -1622,7 +1743,11 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 # swap the artifact after it was inspected.
 .PHONY: docker-image-up
 docker-image-up: ## Pull + (re)start the prebuilt image after its startup budget passes
-	cd deploy && image_ref="$$(docker compose config --images plurxd)" \
+	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
+	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
+	  && compose_files="$$(python3 ../scripts/docker-hardware --output "$$hardware")" \
+	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
+	  && image_ref="$$(docker compose config --images plurxd)" \
 	  && test -n "$$image_ref" \
 	  && docker compose pull plurxd \
 	  && image_id="$$(docker image inspect --format '{{.Id}}' "$$image_ref")" \
@@ -1673,6 +1798,20 @@ release-check: ## Verify the tree is ready to tag the current version
 # `make install INSTALL_FLAGS='--binary ~/Downloads/plurxd'` to skip the build
 # or `make install-docker INSTALL_FLAGS=--dry-run` to see the plan first.
 INSTALL_FLAGS ?=
+PI_SETUP_FLAGS ?=
+
+.PHONY: pi-setup pi-upgrade pi-status pi-uninstall
+pi-setup: ## Set up Pi server and HDMI playback (Docker default; native/systemd selectable)
+	@python3 deploy/pi-setup install $(PI_SETUP_FLAGS)
+
+pi-upgrade: ## Upgrade an owned Pi installation, preserving its choices and data
+	@python3 deploy/pi-setup upgrade $(PI_SETUP_FLAGS)
+
+pi-status: ## Report the Pi installation, runtime and readiness
+	@python3 deploy/pi-setup status $(PI_SETUP_FLAGS)
+
+pi-uninstall: ## Remove an owned Pi installation while retaining data and browser profiles
+	@python3 deploy/pi-setup uninstall $(PI_SETUP_FLAGS)
 
 .PHONY: install install-linux install-macos install-windows install-docker install-binary uninstall uninstall-docker
 install: ## Install plurxd as a service on this OS (systemd, launchd, or the Windows service)
@@ -1909,3 +2048,7 @@ ripwire-doctor:
 	./scripts/ripwire doctor
 ripwire-smoke:
 	./scripts/ripwire-smoke
+
+.PHONY: web-shared-artwork-browser-check
+web-shared-artwork-browser-check: ## Qualify actual Shared artwork decode and retirement in isolated Chromium
+	@python3 tests/web/shared-artwork.browser.py

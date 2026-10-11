@@ -1,6 +1,6 @@
 # Honest master playlist — say what this session delivers, not what the file is
 
-**Status:** implementation blocked on fleet and device evidence · **Executes:** Q7 / F-stream-14 / A11 /
+**Status:** open — M1–M5 code on `main` since 2026-10-04 (#793); M3–M6 fleet/device acceptance open; SDR `CODECS` printing is behind the Developer switch `playback.sdr_master_codecs`, **default off** (2026-10-04, [below](#the-sdr-codecs-developer-switch)) until the §5.4 device re-qualification is recorded · **Executes:** Q7 / F-stream-14 / A11 /
 F-apple-11 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -431,13 +431,14 @@ about `constraint_set*_flag` nobody has read.
 `bitrate_for_height` (`transcode.rs:27519-27526`) is the only other place
 the rung's identity turns into numbers; nothing in this plan changes it.
 
-**This changes recipe identity.** `encode_args_for`'s output is part of the
-argument list a recipe hashes, so adding `-profile:v` / `-level` to the
-hardware families invalidates every cached SDR transcode produced by those
-families. That is correct — the bytes genuinely differ — and it must be in
-the PR body, with the note that software-encoded entries are unaffected
-because `-profile:v high` was already there. The rung-derived `CODECS`
-string is playlist metadata and does not itself invalidate anything.
+**This changes recipe identity for measured cells only.** The resolved plan's
+digest conditionally includes the measured codec and rational output grid
+when a successful exact-family experiment admits profile/level flags.
+Qualified hardware entries change, and qualified software entries also change
+because their explicit level is new even though High profile was already
+present. Untested/refused cells keep the incumbent arguments and digest.
+Frozen codec metadata follows that same immutable plan; no universal triplet
+is inferred from a height.
 
 ### 3.4 Peak and average, separately, with the overhead named
 
@@ -491,14 +492,16 @@ of every corpus fixture at every rung; if a 2 s segment bursts past
 `maxrate + audio + overhead`, the declared peak rises to the measurement and
 the plan says so in the PR body rather than quietly clamping.
 
-Copy/remux sessions do not use `file.bitrate` or ffprobe `max_bit_rate` as a
-peak. M5 reads the output fragment index's exact segment byte ranges and
-durations and computes both attributes from the same bytes the playlist names;
-that naturally includes remux/container overhead. A prepared copy successor
-uses its own frozen index facts. There is no scaled-average fallback: if the
-index cannot provide a complete bound before master publication, M5 remains
-blocked and the path is not claimed honest. This is the concrete decision for
-§7's former open question 2.
+Copy/remux sessions must not call `file.bitrate` or ffprobe `max_bit_rate` a
+measured peak. **2026-10-01 source correction:** the existing fragment index
+contains video-only pipe lengths, not full selected audio/container output.
+It cannot provide the formerly proposed exact full-wire bound. The phased
+M5 implementation therefore observes successful full-mux VOD materialization
+and complete retained coverage (§5.5). A prepared successor captures its own
+compatible complete artifact receipt; a shared source or video rung is not
+enough. Arbitrary cold-copy first-publication remains open rather than using
+a prefix maximum, scaled average or guessed overhead. Legacy publication is
+not thereby claimed honest.
 
 ### 3.5 Where the numbers live
 
@@ -666,7 +669,7 @@ answer and never waits for an init object it cannot produce. AVC fMP4 masters
 are attempt media, and the frozen-presentation fingerprint is version 2 so
 the changed publication contract cannot collide with the older shape.
 
-### 5.3 M3 — forced profile/level on hardware, and a rung-derived string
+### 5.3 M3 — qualified profile/level/cadence, and a frozen output string
 
 Code: §3.3, both halves. This is the recipe-identity PR; the body states
 which cached entries invalidate and why.
@@ -685,10 +688,10 @@ Tests:
 
 | Test | Asserts |
 |---|---|
-| `every_sdr_family_forces_a_profile` | `encode_args_for(Sdr, ..)` contains `-profile:v high` for all five families |
+| `only_exact_qualified_plans_change_encoder_flags_and_recipe_identity` | Only measured family/raster/cadence/rate-control cells gain High/level flags; unsupported or refused cells retain their original argv |
 | `the_declared_level_covers_the_resolved_grid` | 360/480/720/1080/2160 at 59.94/60 map to §3.3; >60 stays unqualified |
 | `a_family_that_refused_the_probe_keeps_its_old_arguments` | caps with the new verdict false -> argv identical to `0f02b7ea`'s |
-| `the_recipe_hash_changes_for_a_family_that_gained_the_flags` | two hashes differ; a software recipe's hash does not |
+| `the_recipe_hash_changes_for_a_family_that_gained_the_flags` | qualified flags change the digest, including software when it gains an explicit level; unqualified argv and digest remain unchanged |
 
 Bitstream acceptance — the level in the argv must equal the level in the
 SPS. Per enabled family on a node that has it, for every rung at 23.976,
@@ -713,7 +716,24 @@ the GPT prompt in §6).
 
 ### 5.4 M4 — re-qualify the SDR ruling on the named devices, then print `CODECS`
 
-No code lands until the device run reports. The run uses
+**2026-10-01 ordering ruling:** implementation may be prepared and integrated
+on the effort branch before physical-device qualification. This does not
+waive the device acceptance below or qualify a release. The bounded M4
+implementation freezes explicit video and audio component provenance;
+unknown components do not gain a fabricated AAC or universal AVC label.
+Qualified encoder output or the actual M2 AVC init supplies video identity;
+the resolved output-audio decision supplies audio identity, including proven
+absence. SDR `CODECS` is emitted only when both components are complete.
+The copied codec name `aac` alone does not prove AAC-LC rather than HE-AAC;
+without a frozen output AudioSpecificConfig it remains incomplete. Resolved
+AAC encoding retains the native encoder's established output contract.
+HDR declarations, variant topology and prepared-owner identity are retained.
+There is no temporary diagnostic switch. **Superseded 2026-10-04:** printing
+SDR `CODECS` now waits behind the Developer switch described in
+[The SDR `CODECS` Developer switch](#the-sdr-codecs-developer-switch), default
+off, so the unqualified string does not reach a device by default.
+
+The required qualification run uses
 `master_playlist_diagnostic`'s existing shapes
 (`?diagnostic=video-only`, `video-only-codecs`) so one attribute changes at
 a time, against a build carrying M2 and M3 but with §3.6 not yet applied
@@ -749,6 +769,54 @@ and one HDR master.
 ### 5.5 M5 — peak and average, measured
 
 Code: §3.4 and §3.5.
+
+**2026-10-01 phased implementation ruling and arithmetic correction:** start
+with one bounded metadata reducer and the existing VOD sink's successfully
+materialized full mux bytes. Complete coverage means every immutable entry,
+including audio tails, with the exact output identity. A complete retained
+artifact receipt can supply a compatible **new** frozen presentation; later
+observations must never rewrite an issued master or update a successor from
+its predecessor. Partial coverage, conflicting duplicates, invalid durations,
+gaps or checked-arithmetic overflow remain unknown, not a measured bound.
+No duplicate payload buffers or new scheduler are needed.
+
+**2026-10-01 actual-source retention boundary:** the bounded reducer and
+successful full-mux VOD observer are implemented; their completed-output
+notification comes only after a real trailer and successful final/tail writes,
+not `Outcome::Ran` (which also describes a killed pipe). Observations use the
+exact six-decimal playlist durations and source/recipe/init/execution identity.
+Metadata is capped at 8192 entries and 131072 examined RFC windows. Adopted
+unobserved objects, duplicate publication or a changed execution stay unknown;
+ordinary legacy playback is not refused because measurement is unavailable.
+
+The frozen **consumer remains open**. Failed renditions can be replaced under
+the same recipe directory, and older session GETs still open that directory's
+paths. A recipe match or collector nonce cannot make replacement bytes part
+of an older measured artifact. Before exposing a complete-retained receipt,
+bind GETs and replacement to a proven generation-distinct artifact retention
+boundary, then capture the eligible receipt once at new-session attachment.
+Earlier sessions keep None. Contradictory regeneration must be refused before
+mutation without destroying the incumbent or rewriting its master. Until that
+seam is proved, the observer does not publish measured bandwidth on the wire.
+This is a finite implementation remainder, not device evidence alone or a
+reason to reject cold titles. Existing normalized predictive classes remain
+unchanged and must not be relabelled as measured title output.
+
+RFC 8216 §4.1 defines peak over contiguous windows whose total duration is
+0.5–1.5 target durations. Average is total media bits divided by total wire
+`EXTINF` duration, not the unweighted mean of segment rates. The stronger
+original per-segment burst acceptance remains a separate measurement.
+The sample shell calculation below is a legacy burst diagnostic, not the RFC
+peak or duration-weighted average algorithm.
+
+Rolling-copy/PUT collection and arbitrary cold-copy exact first-publication
+bounds remain a finite follow-up, explicitly open. A prefix, video-only index,
+nominal encoder rate or guessed container overhead cannot prove them. Complete
+background preparation costs full-source I/O and remux work (plus an audio
+encode when selected); retaining the actual completed rendition avoids the
+separate byte-count/boundary regeneration proof. No hidden whole-film startup
+wait, forced transcode or rejection of playable titles is authorized. Device,
+corpus, fetched-wire equality and prepared-successor acceptance remain open.
 
 Measurement protocol, on media1 against the `scripts/bench` corpus
 (`scripts/bench fixtures` builds it; the fixtures are `1080p-h264`,
@@ -900,7 +968,8 @@ new `HlsContext` fields plus the `"version"` bump), which is per-session
 and invalidates nothing on disk; M2 moves fMP4 AVC masters from generation
 metadata to attempt media; **M3 changes recipe identity for the hardware
 families that gain `-profile:v`/`-level`, invalidating their cached SDR
-transcodes** — software-encoded entries are unaffected. No schema, no
+transcodes, including software cells that gain an explicit level**.
+Unqualified cells retain their old identity. No schema, no
 settings key and no metric changes.
 
 Rollback: each milestone reverts independently. M3's revert re-invalidates
@@ -945,14 +1014,313 @@ fleet.
    full transcodes publish MPEG-TS and do not. Treating every `avc1` context as
    init-derived would turn a truthful static fallback into a permanent pending
    playlist on the MPEG-TS path.
-3. **No advisory switch is added.** M1 and M2 make existing declarations more
-   exact. M3–M6 are withheld until their required observations exist, so a
-   Developer setting would expose an unqualified contract rather than useful
-   readiness information.
+3. **No advisory switch is added for M1–M3, M5 or M6.** M1 and M2 make
+   existing declarations more exact. M3, M5 and M6 are withheld until their
+   required observations exist, so a Developer setting would expose an
+   unqualified contract rather than useful readiness information. **M4's SDR
+   `CODECS` is the exception (2026-10-04):** it was integrated before the
+   device run under the 2026-10-01 ordering ruling, so it ships behind
+   `playback.sdr_master_codecs`, default off — see below.
+
+### The SDR `CODECS` Developer switch
+
+Decided 2026-10-04 (Paul's assumed ruling, recorded for confirmation). The
+SDR arm of `master_playlist_with_shape` (`playlist_text.rs`, the
+`else if shape.codecs` branch) prints `CODECS` only when both hold:
+
+- the session's `FrozenHlsCodecFacts` are complete (`complete_sdr_codecs`,
+  unchanged), and
+- the session was **created** with Settings → Developer
+  `playback.sdr_master_codecs` on (`FrozenHlsCodecFacts::sdr_master_codecs`).
+
+Off — the default and every unrecognised stored spelling — is exactly the
+pre-S-10 master: SDR variants carry no `CODECS`, the version stays 7, and the
+complete facts are still frozen (and still drive bandwidth and identity).
+The HDR/Dolby Vision branch never reads the switch; its `VIDEO-RANGE`,
+`CODECS` and `SUPPLEMENTAL-CODECS` are what they were before S-10.
+
+**Fixed when the session is created.** The HTTP create reads the switch in
+the planning snapshot it already takes (`QUALITY_PLANNING_KEYS`) and carries
+it on the request (`SessionRequest::sdr_master_codecs`, never serialized);
+the session stores it in its codec facts, never read per playlist request. A
+session rebuilt after an owner takeover or VOD resurrection has no create
+behind it and reads the current value:
+
+| Path | Where it is read | Where it is kept |
+|---|---|---|
+| VOD (encoded and copy) | the create's snapshot value; without one, `TranscodeManager::vod_settings`' existing settings batch — no extra Store read either way | `vod::Session::sdr_master_codecs`, beside `block_budget`; returned by `VodServe::hls_facts` |
+| Rolling transcode, cached, retained | the create's snapshot value; `sdr_master_codecs_switch` reads the Store only when the request carries none (takeover, a request rebuilt from its recipe) | `FrozenHlsPresentation.context.codec_facts` |
+| Rolling copy | same, in `start_copy_with_audio_offset` | same |
+
+Carrying the key in `QUALITY_PLANNING_KEYS` does not move planning bindings:
+`PlanningBinding` digests the file, probe and reorder policy, not settings,
+and every `playback.*` write already advances the playback-input generation
+whether or not a snapshot reads the key. The switch is serialized into the
+facts only when on, so every off session's presentation fingerprint is
+byte-for-byte unchanged and an on session seals a different master contract.
+
+One limit: a VOD session **resurrected** from its durable recipe (idle reap
+or owner takeover), and a rolling session taken over by a new owner, is a new
+incarnation and reads the switch's current value, exactly as it re-reads its
+block budget. Carrying the value in `RemoteStartRequest`
+would be a durable-format change on a `deny_unknown_fields` struct that an
+older node in a mixed-version cluster would refuse to parse. AVPlayer reads
+the master once per item, so this only matters if a client re-fetches the
+master of a resurrected handle after the switch was flipped.
+
+Readiness (`GET /api/v1/developer/readiness`, item `sdr_master_codecs`) has
+one advisory row, `sdr_codecs_device_requalification`, which is
+`unknown` by construction: no observation this daemon can make proves it. The card's graduation line: it leaves
+Developer when the Apple TV and iPhone device check confirms every SDR
+variant is still offered; then the default becomes on and the switch is
+removed (with `FrozenHlsCodecFacts::sdr_master_codecs` collapsing back into
+`complete_sdr_codecs`).
 
 ---
 
 ## Execution log
+
+**2026-10-01 remaining-output implementation claim:** the new owned
+`codex/s10-remaining-output` branch connects real rolling-copy rename and PUT
+commit observations to bounded complete full-mux accounting. ENDLIST alone,
+queued bytes, body replacement, a stale attempt or an abnormal producer exit
+cannot qualify a reusable output. These collectors do not themselves grant
+retained-body authority or revise an issued presentation.
+
+For normalized, exactly resolved automatic copy candidates, a distinct
+version-one `CopyOutputPrepare` payload uses the existing bounded job lane,
+claim, cancellation, lease and settlement owners. It does not reinterpret
+`TranscodePrepare` or add a scheduler. The actual VOD driver owns a finite
+private preparation incarnation, domain-separated from the ordinary key by
+the reservation nonce while preserving the canonical recipe and full logical,
+audio and physical-source tuple. It creates no viewer, GET or frontier demand
+and never retires an ordinary partial rendition.
+
+The full-footprint reservation charges init, metadata, media and in-flight
+bytes before writes. Only successful media already present in the node's real
+working-set total receives a temporary ordinary-horizon exclusion. Release
+removes that exclusion, not the physical charge; retained conversion is once
+only, under the existing allowance and GC. Complete verified original-epoch
+output assembles privately. Exact queue settlement records historical
+completion, then independent post-await source/engine/attachment validation
+must succeed before registry exposure. SQL success is not cross-filesystem
+atomic visibility and is never later acquisition authority.
+
+A process-private attachment observation advances only after a real successful
+foreground graph commit. Installation, the existing 250 ms preparation
+watchdog and final check-plus-exposure all compare its captured value. No await
+occurs under the short exposure guard; issued immutable bodies remain intact.
+Only successfully settled and exposed artifacts receive an unforgeable local
+prepared-origin seal. Compatible new attachments still reacquire exact bytes,
+playlist, logical/audio/source facts and issued identity; no worker/public
+field or durable recipe alias grants this authority. Ordinary cold playback
+remains uncaptured and playable without a whole-film wait.
+
+The actual rolling producer emits MPEG-TS `seg%05d.ts`, not always fMP4.
+Metadata collection therefore supports self-initializing TS without inventing
+an init or codec fact. Complete measurement requires segment zero, media
+sequence zero (or its standard absent default), every committed media member
+exactly once and no omitted known tail. fMP4 requires its actual MAP/init;
+TS with a MAP or ambiguous mixed container remains unknown. An ENDLIST seek
+suffix cannot qualify a title cost. These guards never reject playback or
+promote collector numbers to retained-body authority.
+
+Twelve new focused IDs have passed individually once so far; failed-only
+retries and precursor source attribution remain in the development receipt.
+Current-base composition, normal hook/compiler and independent review are
+still required. **Still open:** manual-copy preparation and its original
+first-publication acceptance, rolling/PUT retained-consumer qualification,
+arbitrary source/audio/corpus coverage, fetched-wire equality and physical
+device/fleet acceptance. This implementation claim is not complete M5.
+
+**2026-10-01 durable completed-output continuation:** PR #680 landed as
+`35275de3d86c48bcb6787033911ba5e68626bfa7`; its retained-artifact implementation
+is the starting point, not repeated work. The next owned branch adds a private
+versioned, bounded atomic completion manifest and lazy exact byte/provenance
+validation to the real typed Restore consumer. Startup examines only bounded
+metadata; it does not hash a film or create a second preparation scheduler.
+Original execution nonce, epoch, process-salted recipe, playlist and init stay
+immutable. An explicit resolved logical delivery tuple is checked against the
+current source/request separately; old bodies never authorize a new producer
+or a post-restart repair. Restart-loaded artifacts do not become candidate
+proposal cost authority. Absent, invalid, timed-out or incompatible provenance
+is unavailable proof: issued Restore refuses before replacing a session,
+while ordinary uncaptured playback remains available and captured None remains
+None. Registry reservations and init/media leases retain existing bounded GC.
+The issued identity seals the ordered actual member hashes/lengths, logical
+tuple, original production origin and artifact UUID; Restore compares against
+the caller's independently retained seal, never self-declared manifest facts.
+Only the verified normal trailer completes the original Sink epoch. Retiring
+an all-done child does not revoke its published bytes; mixed-epoch or repeated
+publication still poisons measurement. Seven new focused IDs have individually
+passed once (four before seal hardening, plus the repaired real consumer and
+two new seal/trailer negative controls); earlier failures remain recorded.
+Sole review45 identified that healthy rendition sharing discarded the incoming
+logical tuple. The repair preserves that tuple outside the moved Recipe and
+checks it during lazy reacquisition and final attachment; ordinary differing
+requests receive no borrowed proof rather than losing playback. The shared
+process-salted production key remains unchanged. One additional real-consumer
+regression checks same-key reuse, exact-tuple success, differing-tuple issued
+refusal/incumbent preservation and ordinary uncaptured playback.
+The new branch requires its own focused once-per-PR receipts and independent
+review; no earlier unit pass is claimed as its evidence. Rolling-copy/PUT,
+arbitrary cold-copy preparation and physical/corpus acceptance remain open.
+
+**2026-10-01 retained VOD implementation boundary:** the candidate now retains
+complete successful full-mux output under generation-distinct private hardlink
+names, including init and tail. A session captures its receipt once; earlier
+`None` stays `None`. Init/media GETs and streamed bodies hold the artifact,
+not mutable recipe paths. Missing names may be repaired only from exact
+source/execution/init identity and byte digests; a conflicting repair refuses
+that artifact without poisoning an ordinary producer or rebinding an old
+master. A new presentation may use a separately completed receipt.
+
+Retention has one pre-clone assembly reservation, at most 64 artifacts,
+8,192 entry metadata records and the reducer's 131,072 examined-window cap.
+An OS file lease owns the private namespace. Bounded orphan/GC batches keep
+unknown or failed cleanup charged; unowned, symlinked or unresolved namespaces
+make measurement unavailable, not ordinary playback unavailable. No second
+scheduler, payload copy, whole-title cold wait or startup media scan is added.
+The private lease coordinates cooperating builds; it does not establish that
+an older daemon respects a shared-cache rollout or certify deployed images.
+Fresh bounded node advertisements negotiate receipt metadata in both
+directions; old/unknown peers receive the old strict envelope. Durable restore
+requires the exact issued artifact; legacy absence cannot acquire later facts.
+
+Actual candidate cost is a private retained proof, bound to accepted full
+candidate/digest, source version, selected audio, grade, actual recipe and
+complete output incarnation. Reader and dispatch reacquire this identity.
+Planned ladder budgets and `complete_cache` alone are not measured cost. A
+bounded optional public HTTP sidecar carries advisory complete-full-mux RFC
+cost provenance; core candidate identity and strict worker wire stay unchanged.
+Its public response/client integration belongs to the coordinated A05
+continuation. This implementation candidate still needs its remaining focused
+consumer/compatibility checks and independent review. Rolling-copy/PUT,
+persisted arbitrary cold-copy preparation and original fleet/device/corpus
+acceptance remain open; this is not complete M5 qualification.
+
+**2026-10-01 M3 continuation:** the earlier M3–M6 evidence-only classification
+did not establish the encoder qualification code. This continuation owns
+bounded node-local profile/level/cadence experiments and frozen SDR identity,
+not SDR master emission (M4), bandwidth measurements (M5), or device/fleet
+acceptance. The selected node FFmpeg must complete a real encode whose SPS,
+`avcC` and every fMP4 sample duration agree. A proposed table cell is not a
+codec identity; untested/refused cells retain the incumbent arguments.
+
+The local matrix has a 30-second budget, with a three-second child deadline
+and bounded cleanup, 8 MiB encoded-output and 1 MiB trace ceilings. It covers
+the five proposed rung heights and four named cadences, with both 852- and
+854-wide 480p experiments because the shipping even-rounded raster is 852.
+Family, exact raster, rational cadence, target bitrate, effective rate-control
+value and forced-IDR mode must match a completed experiment. Non-matching
+cells, including rates above 60 fps, do not inherit another cell's evidence.
+The final VOD fps grid is bound before its recipe and presentation freeze.
+Legacy-rung qualification is restricted to `PreserveAspectEven` contracts;
+the newer upright/square candidate route retains its separately explicit
+profile/level and full candidate/recipe identity instead of inheriting this
+matrix's flags or triplet.
+
+Qualified software also gains a level flag: its recipe identity must change.
+The older software-cache-unchanged claim applied only to the profile flag and
+does not cover this implementation. Unqualified plans keep their old recipe
+digest and encoder arguments. Local Homebrew FFmpeg 9 development observations
+are not shipped FFmpeg 8 or fleet qualification evidence.
+
+**2026-10-01 manual-copy reachability continuation:** the existing worker lane
+also accepts a closed version-two server-resolved manual Copy intent, without
+inventing candidate context. Source metadata and the full resolved audio,
+offset, delivery, grade, video and engine intent are bound together. A later
+compatible new attachment can acquire only the actually settled, locally
+minted private artifact after physical/source/logical/engine revalidation;
+persisted job success and restart manifests cannot mint this capability.
+The initial uncaptured attachment remains uncaptured. This does not make
+unknown full-tail facts available before preparation completes, and does not
+implement cold encoded preparation or waive original corpus/device evidence.
+
+**2026-10-02 encoded preparation continuation (in progress):** a distinct closed
+version-one `EncodedOutputPrepare` intent uses the existing node-affine
+preparation lane, not speculative `TranscodePrepare` or live-wait admission.
+The actual foreground resolver supplies selected audio delivery and offset,
+subtitle/body digest, output grade, geometry, executable and engine identity.
+The worker recomputes the full intent against held current source bytes before
+using the existing Background resource bundle and finite VOD preparation
+reservation. Normal complete output is privately retained before exact job
+settlement; only successful settlement plus post-await physical/logical/owner
+revalidation exposes the process-private origin to a compatible new attachment.
+Historical SQL success alone grants no attachment or artifact authority.
+
+The new real consumer case has passed once with selected EAC3-to-AAC delivery
+and a 250ms offset, without invented candidate context. Production migrations
+SQLite93/Hiqlite69 follow the immutable independently owned recovery92/68
+parent; a new actual SQLite upgrade case passes once. This is not yet a frozen
+or independently reviewed implementation. Rolling-copy/PUT
+complete observations still require actual retained consumer authority before
+their rates can become wire facts. Exact first-master facts for an unseen tail
+without a whole-film foreground wait, and original fleet/device/corpus
+qualification, remain explicit acceptance boundaries rather than guessed costs.
+
+**2026-10-03 private union canonical-carrier repair (source prepared, not
+qualified):** compiler inspection of the historical `814888d4` + `34252101`
+union exposed that the stored automatic preparation intent retained an id and
+digest but could not recreate the accepted client caps, row and atomic planning
+binding. The original manual encoded once-pass above deliberately had no
+candidate context; it is not evidence for automatic reconstruction.
+
+The two existing private preparation payloads now optionally retain the existing
+strict `CandidateCatalogContext` at enqueue. Absent carriers are omitted during
+serialization, preserving legacy/manual payload bytes and dedupe identity. The
+entire payload still has the existing 16 KiB bound; canonical caps/count checks,
+closed intent checks and worker unknown-field refusal are not relaxed. No
+worker/public reorder field, schema migration, setting or scheduler is added.
+The effective reorder choice stays bound to the same atomic planning snapshot,
+planning binding and VOD recipe digest. The private response-cost sidecar is
+not selected-candidate authority and is deliberately absent on internal jobs.
+
+Claimed automatic work reconstructs the exact current authority through the
+shared restore/catalog chain before opening a producer, then checks the stored
+source, audio, route, geometry, grade, owner and execution intent. An older
+automatic task without original canonical evidence cannot manufacture it from
+a digest. Its existing fence stops that single unverifiable task; a genuine
+fresh foreground enqueue is the existing replan path. Old records remain
+parseable/listable/cancellable, manual work is unchanged, and backend failure
+continues through the retry lifecycle. Older strict readers cannot accept
+carrier-containing automatic payloads: mixed-reader eligibility is **not
+claimed**, and this source record is not deployment acceptance.
+
+Selected reconstruction preserves availability errors from the actual catalog
+computation: failed source opens, executable/runtime capture, encoder/probe
+selection and unavailable recipe identity are retryable, not a missing-row
+permanent stop. The claimed worker's actual Store row lookup distinguishes
+missing/changed source metadata (fenced `source_changed`) from a Store error
+(retry). Library/source-open unavailability does not prove disappearance.
+
+**2026-10-03 inherited ingress-deadline amendment (source only):** worker Start
+passes its original early-handler deadline into canonical restore, before the
+startup-budget scope is installed. Takeover passes its existing deadline while
+retaining the outer timeout. Restore clamps that remaining caller allowance to
+the existing 2-second catalog cap rather than starting an independent new
+allowance. The compatibility/test wrapper retains the existing bounded entry;
+the same still-unexecuted combined metadata control covers an expired explicit
+entry and current-authority compatibility restoration. Authentication,
+ownership, strict wire, restart drain and startup policy are unchanged.
+
+The `/decision` measured-cost projection acquires an actual source/settings
+snapshot matching the accepted local row's binding, within one existing 100 ms
+advisory deadline. A mismatch removes only the advisory cost, not the catalog,
+manual choice or ordinary playback. The catalog and restore checks preserve
+the newer signed composition offsets, frame grids, quality and selected audio.
+
+The existing new combined reorder/metadata control is extended but remains
+unexecuted. One distinct real automatic canonical-carrier enqueue → claim →
+completed output → compatible new attachment regression is added in
+[encoded_preparation.rs](../../crates/plurxd/src/vod/tests/encoded_preparation.rs)
+and also remains unexecuted. Three typed-recovery/decision controls have changed
+source semantics and their earlier successes remain historical, not current
+qualification. The original twenty-error compiler raw and subsequent controller
+cleanup failure remain retained; no new compiler success, test success,
+current-parent qualification, corpus/device observation or M5 completion is
+claimed by this preparation. Current-parent integration and exact-tree checks
+must precede the first observations of these new controls.
 
 Executing sessions append one row per logical milestone in the single plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
@@ -960,10 +1328,62 @@ claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
 trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
+**2026-10-02 rolling-copy/PUT retained-consumer continuation:** actual successful
+copyseg and lane-zero PUT commits optionally hardlink their complete output
+members under the existing retained namespace OS lease. Existing configured
+allowance is reserved before linking; refusal leaves ordinary playback and
+scratch accounting unchanged. A collection reserves at most the remaining
+allowance, with the existing 64-artifact limit, 8,192-object GET-inventory
+limit (including the playlist), and a finite deadline of four source durations
+plus 300 seconds, capped at 24 hours. The same collector releases charges only
+after exact owned unlink. Pending collection and body owners retain their
+leases; no second registry, scheduler, or payload buffer is introduced.
+
+**Review59 correction:** optional member capture synchronously reserves and
+charges its single owned operation, then returns without awaiting hardlink I/O
+inside Copy publication or the PUT commit mutex. A busy or expired optional
+owner refuses only proof collection; completion alone may join that owner
+within its existing bounded wait. Proof-enabled initial launches use the exact
+captured executable path, not a second resolution of its configured symlink.
+An actual verified-GET integrity failure permanently refuses that exact
+artifact's acquisition entry while preserving issued body owners and charged
+collector cleanup. Attachment samples irreversible refusal after source
+verification yields, both before and after registration. Exact retained lookup precedes encoder and scratch
+admission; its preferred graph uses the existing read-only workload/bundle
+thread policy, and a later hardware demotion never broadens compatibility.
+
+Only the original normal successful child/reader completion, verified source
+duration, full canonical zero-origin ENDLIST and exact committed inventory can
+mint this process-private artifact. Source bytes are inherited through the
+actual producer descriptor; full resolved source/audio/offset/grade/route/argv
+and executable/engine facts bind its lookup. Retry refuses predecessor proof.
+On non-Linux Unix, two source demuxers remain unqualified because `/dev/fd`
+shares offsets; ordinary arguments and playback remain available.
+
+A compatible NEW local attachment reacquires actual retained bytes and current
+source/engine facts before sealing measured average/contiguous-window peak in
+its frozen presentation. Existing cached GET snapshot validation and body
+leases authenticate the actual playlist/media bytes. No old attachment is
+rebound, and no restart manifest, queue result, telemetry row, or remote field
+creates rolling acquisition authority. The registry's memory-only GET
+inventory is not a serialized cache-health or durable recovery proof.
+
+The new real-copy consumer and refusal/source-replacement controls each passed
+once; the original inventory control remains source-bound. Independent review,
+current-source compiler/static/hook checks and the effort gate still precede
+landing. This is bounded implementation, not original S10 completion:
+unseen-tail exact first-publication without whole-film foreground waiting,
+fetched-wire corpus equality, per-segment burst acceptance, named-device codec
+compatibility and fleet qualification remain open.
+
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Bounded `avcC` parsing, fMP4 normalization, MPEG-TS bypass and attempt-media classification passed focused tests. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M6 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | needs: fleet encoder/SPS qualification, named-device SDR `CODECS` re-qualification, measured corpus peak/average/overhead, and Apple-panel before/after observations. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review [#3318](http://192.168.4.7:3000/noirr/plurx/pulls/419#issuecomment-3318) | `9ca2cb23` | Resolved all four findings: structural selected-track `stsd`/`avcC` identity with decoy/duplicate/typed-refusal tests; coherent encoded-VOD no-upscale/unprobed geometry; cadence-safe proposed levels with 23.976/29.97/59.94/60 evidence; copy/remux/prepared-successor fragment-index peak contract. Pinned 1.97.1 focused AVC (4), fMP4 AVC (2), MPEG-TS (1), VOD geometry (2), affected Clippy, rustfmt, docs index and diff check green; no broad unit. |
+| 2026-10-04 | claude-opus-5-5 | session_018v5UHLRMwraYsWVcGK7bA3 | Containment of the main merge (D2, D3) | pending | Output preparation and rolling retention become Developer switches, default off (`vod.output_preparation`, `vod.rolling_retention`). Preparation runs on the pre-transcode worker without the speculative schedule; disabled kinds are drained by cancel-only passes; rows carry a seven-day deadline; Activity Stop cancels. Retention gains a disk free-space guard (unused grants counted), prompt `abandon()`, a whole-queue time-budgeted collector, same-filesystem refusal, ENOSPC shedding, and Activity rows with Stop. See OPERATIONS "Complete-output preparation and rolling retention". |
+| 2026-10-02 | gpt-6.1-sol | agent:/root/k06_pr725_adversarial_sol61 | M5 public Create and fetched-wire development control | pending independent review | One genuinely new ignored method passed once on exact frozen `574e88dea` /tree `8bd154b8` (parent effort `102669d27`), under the admitted Darwin FFmpeg9.0.1 watchdog. Actual public HTTP Create and GETs, exact retained source/audio tuple, independently calculated mux rates, immutable first masters, public DELETE and listener reuse asserted; external terminal zero and owned-session absence proved. One input/one media segment is not shipping Linux8.1.3, variable-window/corpus, unseen-tail, whole-film, native/device or fleet qualification. Current composition/compiler/static/gate and a different independent reviewer remain required; no successful replay. |
+| 2026-10-02 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M5 rolling/PUT retained consumers | [#706](http://forge.lan:3000/noirr/plurx/pulls/706) | Optional successful commit hardlinks share existing namespace/count/allowance/cleanup; original verified completion and exact process-private source/recipe/engine binding precede a compatible NEW attachment. Five original focused successes retain historical source attribution; five new review59 controls passed once, including real integrity/producer-admission and post-await refusal controls. Same sole review59 disposition remains required. No restart/telemetry authority, old-owner rebinding, unseen-tail or physical qualification claim. |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M3 claim | pending draft | Own clone `plurx-s10-m3-sol61`, branch `codex/s10-m3-encoder-qualification`, original actual effort `903201a24`; pinned Rust 1.97.1 baseline passed before Rust edits. M1/M2, output-codec and audio contracts retained; no M4/M5 or fleet/device acceptance claim. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://forge.lan:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://forge.lan:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#419](http://forge.lan:3000/noirr/plurx/pulls/419) | Bounded `avcC` parsing, fMP4 normalization, MPEG-TS bypass and attempt-media classification passed focused tests. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M6 | [#419](http://forge.lan:3000/noirr/plurx/pulls/419) | needs: fleet encoder/SPS qualification, named-device SDR `CODECS` re-qualification, measured corpus peak/average/overhead, and Apple-panel before/after observations. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review [#3318](http://forge.lan:3000/noirr/plurx/pulls/419#issuecomment-3318) | `9ca2cb23` | Resolved all four findings: structural selected-track `stsd`/`avcC` identity with decoy/duplicate/typed-refusal tests; coherent encoded-VOD no-upscale/unprobed geometry; cadence-safe proposed levels with 23.976/29.97/59.94/60 evidence; copy/remux/prepared-successor fragment-index peak contract. Pinned 1.97.1 focused AVC (4), fMP4 AVC (2), MPEG-TS (1), VOD geometry (2), affected Clippy, rustfmt, docs index and diff check green; no broad unit. |

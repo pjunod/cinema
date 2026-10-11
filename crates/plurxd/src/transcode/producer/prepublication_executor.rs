@@ -61,6 +61,9 @@ pub(super) async fn execute_prepublication_transcode_retry(
     first_reason: crate::playback_control::ProducerDecisionReason,
     sid: &str,
 ) -> Result<(), String> {
+    if let Some(proof) = &session.rolling_provenance {
+        proof.refuse();
+    }
     // The actor names exactly one of the two frozen recipes. Resolve the name
     // rather than assuming the colour-safe one: a qualified decode fault
     // installs the software-decode alternate, and installing the wrong one
@@ -139,6 +142,11 @@ pub(super) async fn execute_prepublication_transcode_retry(
     )));
     let transaction = async {
         terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        if let Some(proof) = session.rolling_provenance.as_ref() {
+            proof
+                .rewind_reaped_input()
+                .map_err(|error| format!("resetting held retry input: {error}"))?;
+        }
         retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)
             .await
@@ -220,7 +228,10 @@ pub(super) async fn execute_prepublication_transcode_retry(
                     {
                         #[cfg(unix)]
                         let descriptors = FfmpegDescriptors::from_raw_fds(
-                            None,
+                            session
+                                .rolling_provenance
+                                .as_ref()
+                                .map(|proof| proof.source_fd()),
                             None,
                             session
                                 .subtitle_handle
@@ -327,6 +338,9 @@ async fn execute_prepublication_copy_retry(
     first_reason: crate::playback_control::ProducerDecisionReason,
     sid: &str,
 ) -> Result<(), String> {
+    if let Some(proof) = &session.rolling_provenance {
+        proof.refuse();
+    }
     if actor_recipe != &retry.actor_recipe {
         return Err(format!(
             "actor copy retry recipe did not match immutable executor recipe ({first_reason:?})"
@@ -343,6 +357,11 @@ async fn execute_prepublication_copy_retry(
     )));
     let transaction = async {
         terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        if let Some(proof) = session.rolling_provenance.as_ref() {
+            proof
+                .rewind_reaped_input()
+                .map_err(|error| format!("resetting held copy fallback input: {error}"))?;
+        }
         retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)
             .await
@@ -373,7 +392,15 @@ async fn execute_prepublication_copy_retry(
                     &retry.runtime_cache,
                     {
                         #[cfg(unix)]
-                        let descriptors = FfmpegDescriptors::default();
+                        let descriptors = FfmpegDescriptors::from_raw_fds(
+                            session
+                                .rolling_provenance
+                                .as_ref()
+                                .map(|proof| proof.source_fd()),
+                            None,
+                            None,
+                            false,
+                        );
                         #[cfg(windows)]
                         let descriptors = windows_session_descriptors(&session)?;
                         descriptors
@@ -482,7 +509,7 @@ async fn publish_copy_reader_outcome(
     sid: &str,
     producer_attempt: u64,
     outcome: copyseg::Outcome,
-) {
+) -> bool {
     let classification = match outcome {
         copyseg::Outcome::Completed(counts) => {
             tracing::info!(
@@ -531,7 +558,7 @@ async fn publish_copy_reader_outcome(
                 counts = %copyseg::summary(&counts),
                 "copy segmenter stopped after lifecycle teardown"
             );
-            return;
+            return false;
         }
     };
     let deadline = Instant::now() + COPY_READER_INGRESS_TIMEOUT;
@@ -548,7 +575,9 @@ async fn publish_copy_reader_outcome(
             ?rejection,
             "copy reader classification was not accepted by the exact producer attempt"
         );
+        return false;
     }
+    classification == crate::playback_control::CopyProducerExitClassification::Completed
 }
 
 #[allow(clippy::too_many_arguments)] // one copy producer's worth of identity
@@ -581,6 +610,16 @@ pub(super) fn spawn_copy_reader_owner(
         let stdout = Arc::new(Mutex::new(stdout));
         let reader_stdout = Arc::clone(&stdout);
         let worker_sid = sid.clone();
+        let measurement = Arc::new(std::sync::Mutex::new(
+            crate::rolling_output::RollingOutputMeasurement::default(),
+        ));
+        *session
+            .copy_output_measurement
+            .lock()
+            .expect("copy observation lock") = Some(Arc::clone(&measurement));
+        let retained = session.rolling_collection.clone();
+        let worker_measurement = Arc::clone(&measurement);
+        let measurement_dir = dir.clone();
         // The completion barrier is installed *before* the worker is spawned
         // and moved into it, so there is no instant in which retirement can
         // observe no writer for a reader that is about to exist. Registration
@@ -621,7 +660,7 @@ pub(super) fn spawn_copy_reader_owner(
         let worker = tokio::spawn(async move {
             let _writer = writer;
             let mut stdout = reader_stdout.lock_owned().await;
-            copyseg::run(
+            copyseg::run_observed_retained(
                 &mut *stdout,
                 dir,
                 &worker_sid,
@@ -629,6 +668,8 @@ pub(super) fn spawn_copy_reader_owner(
                 &source,
                 video,
                 grants,
+                Some(worker_measurement),
+                retained,
             )
             .await
         });
@@ -668,9 +709,51 @@ pub(super) fn spawn_copy_reader_owner(
                 return;
             }
         };
-        publish_copy_reader_outcome(&session, &sid, producer_attempt, outcome).await;
+        if publish_copy_reader_outcome(&session, &sid, producer_attempt, outcome).await {
+            let playlist = tokio::time::timeout(
+                COPY_READER_INGRESS_TIMEOUT,
+                plurx_core::transcode::manifest::read_bounded_playlist(
+                    &measurement_dir,
+                    "index.m3u8",
+                ),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
+            if !session.control.is_retired()
+                && session.control.current_producer_attempt() == producer_attempt
+            {
+                let observed = playlist
+                    .as_deref()
+                    .and_then(|playlist| measurement.lock().ok()?.complete(playlist));
+                record_output_observation(&session, &sid, producer_attempt, observed).await;
+            }
+        }
         drop(stdout);
     });
+}
+
+/// Explicitly observational: these numbers are not an artifact/candidate
+/// promise and never amend the session's already frozen master.
+async fn record_output_observation(
+    session: &Session,
+    sid: &str,
+    attempt: u64,
+    observation: Option<plurx_core::output_measurement::CompleteOutputRates>,
+) {
+    if let Some(rates) = observation {
+        let provenance = match session.rolling_provenance.as_ref() {
+            Some(proof) if proof.current(attempt).await => Some(hex::encode(proof.binding())),
+            _ => None,
+        };
+        tracing::info!(target: "plurxd::transcode", session = %session_log_id(sid), producer_attempt = attempt,
+            held_production_identity = ?provenance,
+            wire_bytes = rates.wire_bytes, duration_micros = rates.duration_micros,
+            average_bps = rates.average_bps, rfc_peak_bps = rates.rfc_peak_bps,
+            segment_burst_bps = rates.segment_burst_bps,
+            "complete full-mux output observed; reusable retained authority not issued");
+    }
 }
 
 /// Refuse every further upload from the reaped attempt before its directory
@@ -695,7 +778,7 @@ async fn retire_upload_lane(session: &Session) {
 pub(super) fn transcode_output_bitrate(opts: &TranscodeOptions) -> Option<f64> {
     let kbps = opts
         .video_bitrate_kbps
-        .saturating_add(opts.audio_bitrate_kbps);
+        .saturating_add(opts.audio_budget_kbps());
     (kbps > 0).then(|| f64::from(kbps) * 1_000.0)
 }
 
@@ -758,6 +841,32 @@ async fn classify_successful_transcode_exit(
         .control
         .classify_producer_exit_before(evidence, probe.deadline)
         .await;
+    if matches!(disposition, Ok(crate::playback_control::RollingProducerCompletionDisposition::CompleteVerifiedDuration
+        | crate::playback_control::RollingProducerCompletionDisposition::CompleteUnverifiedDuration))
+        && !session.control.is_retired()
+        && session.control.current_producer_attempt() == probe.producer_attempt
+        && session.compatibility_producer_attempt() == probe.producer_attempt
+    {
+        record_output_observation(session, sid, probe.producer_attempt,
+            session.upload.as_ref().and_then(|upload| upload.observed_complete_output())).await;
+        // The actor emits this probe only after a successful child exit and,
+        // for copy pipes, the accepted completed-reader fact. Unverified source
+        // duration is observational only and cannot mint a full-title artifact.
+        if matches!(disposition, Ok(crate::playback_control::RollingProducerCompletionDisposition::CompleteVerifiedDuration)) {
+            if let (Some(collection), Some(playlist)) = (&session.rolling_collection, bytes.as_deref()) {
+                let copy_measurement = session.copy_output_measurement.lock().expect("copy observation lock").clone();
+                let inventory = match copy_measurement {
+                    Some(measurement) => measurement.lock().ok().and_then(|measurement| measurement.complete_inventory(playlist)),
+                    None => session.upload.as_ref().and_then(|upload| upload.observed_complete_inventory()),
+                };
+                if let Some(inventory) = inventory {
+                    let _ = collection.finish(inventory, playlist, probe.producer_attempt).await;
+                }
+            }
+        } else if let Some(collection) = &session.rolling_collection {
+            collection.refuse();
+        }
+    }
     tracing::info!(
         target: "plurxd::transcode",
         session = %session_log_id(sid),

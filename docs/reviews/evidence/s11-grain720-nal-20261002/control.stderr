@@ -1,0 +1,14 @@
+test_new_idr_headers_cross_ts_and_pes_without_frame_inference (__main__.S11NALNewControls.test_new_idr_headers_cross_ts_and_pes_without_frame_inference) ... ok
+test_new_non_idr_i_slice_and_sei_65_byte_are_not_idr (__main__.S11NALNewControls.test_new_non_idr_i_slice_and_sei_65_byte_are_not_idr) ... ok
+test_new_transport_truncation_continuity_crc_and_program_ambiguity_refuse (__main__.S11NALNewControls.test_new_transport_truncation_continuity_crc_and_program_ambiguity_refuse) ... ok
+test_new_missing_aud_multiple_pictures_and_shared_pes_pts_refuse (__main__.S11NALNewControls.test_new_missing_aud_multiple_pictures_and_shared_pes_pts_refuse) ... ok
+test_new_parameter_references_and_invalid_idr_prefix_refuse (__main__.S11NALNewControls.test_new_parameter_references_and_invalid_idr_prefix_refuse) ... ok
+test_new_missing_marker_duplicate_and_continuation_pts_refuse (__main__.S11NALNewControls.test_new_missing_marker_duplicate_and_continuation_pts_refuse) ... ok
+test_new_two_auds_two_independent_pts_have_two_actual_access_units (__main__.S11NALNewControls.test_new_two_auds_two_independent_pts_have_two_actual_access_units) ... ok
+test_new_held_root_hash_symlink_traversal_and_path_swap_refuse (__main__.S11NALNewControls.test_new_held_root_hash_symlink_traversal_and_path_swap_refuse) ... ok
+test_new_exclusive_output_root_and_duplicate_json_refuse (__main__.S11NALNewControls.test_new_exclusive_output_root_and_duplicate_json_refuse) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.006s
+
+OK

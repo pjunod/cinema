@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "kind": "AC4_package_preservation",
+  "argv": [
+    "/experiment/dolby-full-strict-package/ffmpeg",
+    "-hide_banner",
+    "-nostdin",
+    "-y",
+    "-i",
+    "/experiment/qualification-media/ac4-broadcast.ts",
+    "-map",
+    "0:a:0",
+    "-t",
+    "5",
+    "-vn",
+    "-ac",
+    "2",
+    "-ar",
+    "48000",
+    "-c:a",
+    "pcm_s16le",
+    "/experiment/qualification-media/ac4-strict-package.wav"
+  ],
+  "exit_code": 0,
+  "ffmpeg_sha256": "91d4f841e0b607bcc2db3c7ea66ddad0dcff0370a39f1f67fb6a6cc1a7f64495",
+  "source_sha256": "1198188445e56eee0787f2da1864189afb1674d777249091b6dbf2c736c48384",
+  "limits": [
+    "Five-second standalone audio decode/downmix, no daemon/client acceptance",
+    "Concurrent Rust compilation; no performance claim"
+  ],
+  "current": {
+    "frames": 239999,
+    "sample_rate": 48000,
+    "channels": 2,
+    "sample_width": 2
+  },
+  "baseline": {
+    "frames": 239999,
+    "sample_rate": 48000,
+    "channels": 2,
+    "sample_width": 2
+  },
+  "pcm_bytes_identical": true,
+  "current_pcm_sha256": "28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7",
+  "baseline_pcm_sha256": "28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7",
+  "reference_argv": [
+    "/experiment/native-candidate/final-package/ffmpeg",
+    "-hide_banner",
+    "-nostdin",
+    "-y",
+    "-i",
+    "/experiment/qualification-media/ac4-broadcast.ts",
+    "-map",
+    "0:a:0",
+    "-t",
+    "5",
+    "-vn",
+    "-ac",
+    "2",
+    "-ar",
+    "48000",
+    "-c:a",
+    "pcm_s16le",
+    "/experiment/qualification-media/ac4-exact-reference.wav"
+  ],
+  "reference_exit_code": 0,
+  "reference_ffmpeg_sha256": "f043b55df439a90743faf539ce88b723c84eb8baa0ae3323a894c87b459b85ef",
+  "exact_reference_pcm_sha256": "28e6cfb582fa02e02824583e4a4a1d12e95d1ee5a3b67725c718959c697558c7",
+  "exact_paired_pcm_identical": true,
+  "source_url": "https://samples.ffmpeg.org/A-codecs/ac-4/KDAF.ts"
+}

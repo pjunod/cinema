@@ -1,0 +1,28 @@
+{
+  "scope": "harness_attempts_before_success",
+  "attempts": [
+    {
+      "host": "lab6",
+      "phase": "preflight",
+      "result": "refused_active_viewer",
+      "production_active_sessions": 1,
+      "media_or_container_created": false
+    },
+    {
+      "host": "lab3",
+      "phase": "startup",
+      "result": "health404_before_normal_API",
+      "count": 2,
+      "fix": "bounded wait through the startup clock-only router; no application behavior changed"
+    },
+    {
+      "host": "lab3",
+      "phase": "post_ready_receipt_extraction",
+      "package_ready": true,
+      "ready_elapsed_seconds": 131.93862103717402,
+      "result": "empty legacy table visited before replicated database",
+      "fix": "skip empty package rows and collect reports from all owned SQLite databases"
+    }
+  ],
+  "cleanup": "Every attempted container/network/private-data directory removed; no raw log or database exported."
+}

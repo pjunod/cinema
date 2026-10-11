@@ -806,8 +806,11 @@ class SelfHost:
         # "Indexed", while slower hosts render "Index pending" from the exact
         # same database. Focused API and web-policy tests cover both states;
         # this structural golden needs one reproducible one.
+        # Developer renders the shipped remote-management card. Enable its
+        # server API only in this disposable fixture, so listing an empty
+        # account is a valid 200 response rather than a disabled-feature 503.
         api(self.base_url, "/settings", self.token, "PUT",
-            {"vod_index_mins": 0})
+            {"vod_index_mins": 0, "cinema_remote_control": True})
         libs = []
         for name, kind, share in LIBRARIES:
             library = api(self.base_url, "/libraries", self.token, "POST", {
@@ -1504,6 +1507,16 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     page.on("console", note_console)
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
 
+    # The seeded server leaves Live TV, DVR, Sharing and Library channels
+    # switched off, and every layout lists only switched-on sections. Answer
+    # /features with all four on so this sweep keeps pinning the complete
+    # nav; hiding a switched-off section is covered by
+    # tests/web/section-nav.test.js. The request itself is still logged.
+    page.route("**/api/v1/features", lambda intercepted: intercepted.fulfill(
+        status=200, content_type="application/json", body=json.dumps({
+            "live_tv": True, "recordings": True,
+            "shared_libraries": True, "library_channels": True,
+        })))
     if name in {"live-tv", "live-tv-grid"}:
         # Layout captures never lease a household tuner. The browser fixture
         # separately exercises media and session lifecycle.

@@ -3,6 +3,7 @@
 // One page-scoped poller at a time; routing away always clears it.
 let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
 function pagePhaseName(route){
+  if(route.startsWith("#/shared")) return "shared";
   if(route==="#/live-tv") return "live-tv";
   if(route.startsWith("#/recordings")) return "recordings";
   if(route==="#/library-channels") return "library-channels";
@@ -54,7 +55,15 @@ function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
   PAGE_TIMER=timer;
 }
 async function render(){
+  cancelNextEpisodePreparation(PLAYER);
+  if(AUTOPLAY_NEXT_PREPARED&&location.hash!==`#/item/${AUTOPLAY_NEXT_PREPARED.page.id}`)
+    clearAutoplayNextPreparation();
   const generation=++PAGE_RENDER_GENERATION;
+  CinemaRemote.clear();
+  cinemaRemoteRouteChanged();
+  if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
+  if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
+  if(typeof sharingRouteChanged==="function")sharingRouteChanged();
   if(WATCH)closePlayer({routeLeave:true});
   if(!TOKEN||!ME) return boot();
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
@@ -88,10 +97,12 @@ async function render(){
   dvrRouteChanged(h);
   try{
     if(h.startsWith("#/read/")) await viewReader(h.split("/")[2],h.split("/")[3]);
+    else if(h==="#/shared"||h.startsWith("#/shared/")) await viewSharedCatalogue(generation);
     else if(h.startsWith("#/item/")) await viewItem(h.split("/")[2]);
     else if(h.startsWith("#/library/")) await viewLibrary(h.split("/")[2]);
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
+    else if(h==="#/remote") await viewRemote(generation);
     else if(h==="#/activity") await viewActivity(generation);
     else if(h==="#/live-tv") await viewLiveTv(generation);
     else if(h.startsWith("#/recordings")) await viewRecordings(generation);
@@ -104,7 +115,15 @@ async function render(){
     // pending offset never survives the route that was on screen when it was
     // armed. Without it, switching layout on Settings scrolled the NEXT page.
     if(generation===PAGE_RENDER_GENERATION) restoreScroll();
-    if(generation===PAGE_RENDER_GENERATION) markBootReady();
+    if(generation===PAGE_RENDER_GENERATION){
+      markBootReady();
+      cinemaRemoteReceiverSync();
+      cinemaRemoteSuggest();
+      if(CINEMA_REMOTE_RETURN&&CINEMA_REMOTE_RETURN.route===location.hash){
+        if(LIB_VIEW&&CINEMA_REMOTE_RETURN.route.match(/^#\/(library|category)\//)) libGoPage(CINEMA_REMOTE_RETURN.page);
+        CinemaRemote.focusById(CINEMA_REMOTE_RETURN.id); CINEMA_REMOTE_RETURN=null;
+      }
+    }
   }catch(e){
     if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m){ m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure(h,generation,"render_error"); markBootReady(); }else toast(e.message); }
   }

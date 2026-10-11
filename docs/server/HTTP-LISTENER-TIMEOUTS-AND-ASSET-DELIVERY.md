@@ -592,6 +592,52 @@ Report exact text of any error; do not retry more than once.
 
 ---
 
+## 8. 2026-10-08 static HTTP sample — not the waterfall or reader bar
+
+At 02:05:40 UTC a bounded, unauthenticated LAN observer acquired the shell
+and five responses each for four assets from the existing media1 deployment.
+The prior 02:00:27 identity read recorded source `8e242787c5112d6ba2bd66b2d30c4dd0a0bbc2a4`,
+container `f491ba50d1f1` and image
+`sha256:e9e82cd3769e2c2023b4bcd6204e8e20ea3e58693c650ecfea896a75785d9836`.
+The four identity bodies equal that source's immutable Git blobs and each
+served version tag equals its SHA-256 prefix. This compares those served
+bytes, not every executable byte or every asset. Other fleet images differ;
+this is not uniform-fleet qualification.
+
+| Sampled asset | Identity body bytes | Gzip body bytes |
+|---|---:|---:|
+| `player/player.js` | 95,884 | 28,540 |
+| `hls.min.js` | 543,243 | 163,207 |
+| `app.css` | 473,076 | 217,031 |
+| `reader.js` sidecar | 19,561 | 5,805 |
+
+For each asset, identity and `gzip;q=0` returned the same bytes without a
+content encoding; gzip decoded to those bytes and had a distinct ETag.
+Both conditional representations returned empty 304s with the matching
+ETag, `Vary: Accept-Encoding` and immutable cache policy: eight actual 304s.
+The shell returned `nosniff`, `Referrer-Policy: same-origin` and CSP
+`frame-ancestors 'none'; base-uri 'none'; object-src 'none'`.
+
+The 21-response sample retained 2,691,202 body bytes in a 0.722542-second
+helper interval. Neither number is browser page weight, a cold/warm median
+or time-to-usable UI. The initial attempt fetched only the shell and stopped
+on a sidecar/page-name ambiguity; its raw body remains preserved, not counted
+as a product failure or silently rewritten as a successful run.
+
+Private receipt SHA-256:
+`d70cf1f2d9f5a5bee14b4991847d4cd7d2b1a0a36fd7ef2e12af4210e6de94ea`.
+One independent Sol 6.1 adversarial evidence review found no actionable
+P1/P2 within this sample, report SHA-256
+`aa66f15689ee218cd1cba6a261311627e3858528f4597a9cb52d0e878f76f92e`.
+Raw bodies, selected response headers, source witnesses and both attempts
+are retained by the architecture coordinator. No units were replayed.
+
+The full §6.3 before/after waterfall, three-run medians and HARs remain
+unproved, as do §6.4 browser/native book paging and §6.2 listener/handler
+soak. A visible Chrome sign-in page is not reader or performance evidence.
+No production deployment, authentication, settings change or full C-01
+Done claim accompanies this sample.
+
 ## Execution log
 
 Executing sessions append one row per milestone PR (see the
@@ -604,4 +650,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c01_builder | M1–M3 (single PR at explicit user direction) | #395 | Draft implementation complete. Rust 1.97.1: focused listener, route-deadline, asset-delivery, security-header, publication-frame, and preserved serve/connect-info tests pass; `cargo check -p plurxd --all-targets --locked` and rustfmt pass; 25 body-limit registrations preserved; dependency tree has no duplicate `hyper`/`hyper-util`. `node --test tests/web/`: 51/51 pass. Baseline #394 independently reproduces the unrelated `first_media_retains_advancing_deadline_and_published_failure_is_immutable` failure, the Android `behindLiveWindow.attached()` `make web-check` failure, and four existing Clippy `-D warnings` findings; C-01 does not touch those files. Needs after merge: §6.2 lab1 listener/metric soak, §6.3 cold/warm waterfall HARs, and §6.4 browser/native reader device prompt; no deployment or device authority was available during implementation. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c01_builder | Adversarial findings | #395 | Merged current `main` at `f73a9187` without rewriting history. Finding #3067 addressed: listener accept errors now retry after a shutdown-aware one-second backoff; `If-None-Match: *` returns 304 for identity and gzip representations; production route inventory pins the HLS segment route to `media`, and a paused-clock request drives the production router, authenticated logout handler, and real digest-revocation fence beyond the short deadline before proving revocation. Focused regressions, Rust 1.97.1 check/rustfmt, ownership inventory, and scoped Clippy pass. Full Clippy remains red only on the four independently reproduced current-main findings recorded above. |
-| 2026-09-20 | gpt-5.6-sol | agent:/root/c01_builder | Broad-unit disposition | #395 | The one permitted exact-findings-head `make unit` run was stopped after about 12 minutes when four untouched transcode tests remained parked in Tokio with no child process or CPU use; it was not restarted. All C-01 regressions reached by that run passed. The exact hanging tests and partial unrelated failures are recorded in [PR comment #3085](http://192.168.4.7:3000/noirr/plurx/pulls/395#issuecomment-3085). Main later advanced through #399; it was merged additively, focused Rust 1.97.1 checks passed, and the branch remains draft until the already-running #398 replacement lane settles. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c01_builder | Broad-unit disposition | #395 | The one permitted exact-findings-head `make unit` run was stopped after about 12 minutes when four untouched transcode tests remained parked in Tokio with no child process or CPU use; it was not restarted. All C-01 regressions reached by that run passed. The exact hanging tests and partial unrelated failures are recorded in [PR comment #3085](http://forge.lan:3000/noirr/plurx/pulls/395#issuecomment-3085). Main later advanced through #399; it was merged additively, focused Rust 1.97.1 checks passed, and the branch remains draft until the already-running #398 replacement lane settles. |

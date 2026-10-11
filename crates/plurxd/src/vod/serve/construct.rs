@@ -25,18 +25,31 @@ impl VodServe {
     /// admission after its durable pointer commit. A copy rendition has no
     /// encoder and therefore needs no transition.
     pub(crate) async fn promote_prepared_session(&self, session_id: &str) -> bool {
-        let rendition = self
-            .shared
-            .sessions
-            .lock()
-            .await
-            .get(session_id)
-            .and_then(|session| session.rendition.clone());
-        let Some(rendition) = rendition else {
-            return false;
+        let renditions = {
+            let sessions = self.shared.sessions.lock().await;
+            let Some(session) = sessions
+                .get(session_id)
+                .filter(|session| session.tombstone.is_none())
+            else {
+                return false;
+            };
+            let Some(root) = session.rendition.as_ref() else {
+                return false;
+            };
+            std::iter::once(Arc::clone(root))
+                .chain(
+                    session
+                        .children
+                        .iter()
+                        .map(|child| Arc::clone(&child.rendition)),
+                )
+                .collect::<Vec<_>>()
         };
-        if let Some(encoding) = rendition.recipe.encoding.as_ref() {
-            encoding.promote();
+        for rendition in renditions {
+            if let Some(encoding) = rendition.recipe.encoding.as_ref() {
+                encoding.promote();
+            }
+            rendition.kick();
         }
         true
     }
@@ -134,9 +147,12 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                retained_logical: None,
+                measured_candidate: None,
                 file: file.clone(),
                 audio_index: None,
                 aac: true,
+                audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,
@@ -154,9 +170,17 @@ impl VodServe {
             completed_cache_budget: 50 << 30,
             materialize_budget: Duration::from_secs(30),
             manifest: Mutex::new(Manifest::new(plan.clone())),
+            output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
+            private_storage: None,
+            copy_preparation: StdMutex::new(None),
+            preparation_epoch: AtomicU64::new(0),
+            retained_offer: StdMutex::new(None),
+            cancelled_preparation_epoch: AtomicU64::new(0),
             plan,
             identity: Mutex::new(IdentityState::default()),
-            slot: ProducerSlot::new(),
+            slot: Arc::new(ProducerSlot::new()),
+            source_owners: SourceRenditionOwners::default(),
+            retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),
@@ -178,17 +202,27 @@ impl VodServe {
             handoff: StdMutex::new(None),
             handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
+            fragment_received: StdMutex::new(None),
         });
 
         let lifecycle = self.shared.session_lifecycle(session_id);
         let _lifecycle = lifecycle.lock().await;
-        let previous = self
+        let (previous, children) = self
             .shared
             .sessions
             .lock()
             .await
-            .get(session_id)
-            .and_then(|session| session.rendition.as_ref().map(Arc::clone));
+            .get_mut(session_id)
+            .map(|session| {
+                (
+                    session.rendition.as_ref().map(Arc::clone),
+                    std::mem::take(&mut session.children),
+                )
+            })
+            .unwrap_or_default();
+        for child in children {
+            child.detach(&self.shared.pool).await;
+        }
         if let Some(previous) = previous {
             previous.detach_reader(&self.shared.pool, session_id).await;
         }
@@ -196,6 +230,9 @@ impl VodServe {
         self.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                children: Vec::new(),
+                passive_grant: None,
+                retained_output: None,
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(file.clone()),
@@ -211,6 +248,7 @@ impl VodServe {
                 },
                 supersession_user: "[\"user_id\",1]".to_owned(),
                 block_budget: Duration::from_secs(1),
+                sdr_master_codecs: false,
                 lifecycle: Arc::clone(&lifecycle),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
@@ -329,6 +367,7 @@ impl VodServe {
                 cluster_index_root,
                 cluster_membership,
                 sessions: Mutex::new(HashMap::new()),
+                passive_grants: passive_grant::Registry::default(),
                 preparing_sessions: StdMutex::new(HashMap::new()),
                 session_lifecycles: StdMutex::new(HashMap::new()),
                 rendition_builds: StdMutex::new(HashMap::new()),
@@ -336,7 +375,11 @@ impl VodServe {
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
                 pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
+                preparation_media: AtomicU64::new(0),
+                preparation_storage: preparation_storage::StorageRegistry::default(),
+                preparation_attachment: StdMutex::new(0),
                 completed_cache: AtomicU64::new(0),
+                retained_artifacts: retained::RetainedArtifactRegistry::default(),
                 terminal_eviction_cursor: AtomicU64::new(0),
                 hooks: crate::seam_hooks::HookSlot::new(&NoopVodSharedHooks),
             }),
@@ -390,12 +433,65 @@ impl VodServe {
             }))
     }
 
+    /// Item detail's cluster-artifact fallback, batched. Each lookup names a
+    /// file, a copy pipeline and the source object version taken from a stat
+    /// the caller already made; the answer is [`Self::cluster_index_available`]'s
+    /// for each, in order, from one Store read per
+    /// [`plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK`] lookups and no
+    /// filesystem access at all.
+    pub(crate) async fn cluster_index_availability(
+        &self,
+        lookups: &[(&MediaFile, CopyVideoOptions, String)],
+    ) -> Result<Vec<bool>, String> {
+        let Some(node_id) = self.shared.cluster_node_id.as_deref() else {
+            return Ok(vec![false; lookups.len()]);
+        };
+        if lookups.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return Ok(vec![false; lookups.len()]);
+        }
+        let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+        let probes: Vec<plurx_core::store::ClusterIndexAvailabilityProbe> = lookups
+            .iter()
+            .map(
+                |(file, video, object_version)| plurx_core::store::ClusterIndexAvailabilityProbe {
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    object_version: object_version.clone(),
+                    pipeline_sha256: crate::fragment_index_cluster::pipeline_digest(
+                        file, &engine, *video,
+                    ),
+                },
+            )
+            .collect();
+        let mut present = Vec::with_capacity(probes.len());
+        for chunk in probes.chunks(plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK) {
+            let answers = self
+                .shared
+                .store
+                .cluster_fragment_index_availability(node_id, chunk)
+                .await
+                .map_err(|error| format!("reading cluster index catalog: {error}"))?;
+            if answers.len() != chunk.len() {
+                return Err("cluster index availability batch lost input order".to_owned());
+            }
+            present.extend(answers);
+        }
+        Ok(present)
+    }
+
     pub(super) async fn try_cluster_fragment_index(
         &self,
         file: &MediaFile,
         video: CopyVideoOptions,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<(FragmentIndex, String, String)>, String> {
+        if let Some(viewer) = viewer {
+            viewer.require_local_authority().map_err(str::to_owned)?;
+        }
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
             return Err("the fragment-index engine changed; restart is required".to_owned());
         }
@@ -462,14 +558,14 @@ impl VodServe {
                 .await
                 .map_err(|error| format!("queueing the exact v2 artifact: {error}"))?;
             if queued {
-                if let Some(viewer) = viewer.filter(|viewer| viewer.user_id > 0) {
+                if let Some(viewer) = viewer {
                     self.shared
                         .store
                         .join_artifact_viewer(plurx_core::store::ArtifactViewerInterest {
                             cache_key: cache_key.clone(),
                             file_id: file.id,
                             target_node_id: node_id.to_owned(),
-                            user_id: viewer.user_id,
+                            principal: viewer.principal.clone(),
                             playback_id: viewer.playback_id.clone(),
                             now_ms: crate::fragment_index_cluster::unix_ms(),
                         })

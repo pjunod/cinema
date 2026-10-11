@@ -1,0 +1,168 @@
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Peak level dB: -0.496106
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] RMS level dB: -4.015650
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Peak level dB: -0.513208
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] RMS level dB: -4.015650
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Peak level dB: -0.496106
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] RMS level dB: -4.015650
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fab0c001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x746244001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Peak level dB: -1.283215
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] RMS level dB: -5.017174
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Peak level dB: -1.288288
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] RMS level dB: -5.017174
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Peak level dB: -1.283215
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] RMS level dB: -5.017174
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x7096b8001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Peak level dB: 4.654745
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] RMS level dB: 1.644445
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Peak level dB: 4.654745
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] RMS level dB: 1.644445
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Peak level dB: 4.654745
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] RMS level dB: 1.644445
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x704320001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Peak level dB: -0.496106
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] RMS level dB: -4.015650
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Peak level dB: -0.513208
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] RMS level dB: -4.015650
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Peak level dB: -0.496106
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] RMS level dB: -4.015650
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x73c548001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x77d424001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Peak level dB: -1.283215
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] RMS level dB: -5.017174
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Peak level dB: -1.288288
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] RMS level dB: -5.017174
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Peak level dB: -1.283215
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] RMS level dB: -5.017174
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76dc18001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Peak level dB: 4.654745
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] RMS level dB: 1.644445
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Peak level dB: 4.654745
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] RMS level dB: 1.644445
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Peak level dB: 4.654745
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] RMS level dB: 1.644445
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/5.1-side-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x729280001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Peak level dB: -0.471510
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] RMS level dB: -4.016328
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Peak level dB: -0.474166
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] RMS level dB: -4.016328
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Peak level dB: -0.471510
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] RMS level dB: -4.016328
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-m4a-astats.stderr [Parsed_astats_0 @ 0x7fa314001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Peak level dB: -1.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] RMS level dB: -4.010297
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-limited-wav-astats.stderr [Parsed_astats_0 @ 0x78ea04001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Peak level dB: -1.823842
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] RMS level dB: -5.017223
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Peak level dB: -1.846189
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] RMS level dB: -5.017223
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Peak level dB: -1.823842
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] RMS level dB: -5.017223
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-margin2-m4a-astats.stderr [Parsed_astats_0 @ 0x76ec08001ac0] Number of Infs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Channel: 1
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Peak level dB: 5.649765
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] RMS level dB: 2.639465
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Channel: 2
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Peak level dB: 5.649765
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] RMS level dB: 2.639465
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Number of NaNs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Number of Infs: 0
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Peak level dB: 5.649765
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] RMS level dB: 2.639465
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Number of NaNs: 0.000000
+/var/tmp/plurx-s09-m4.mKtfS7/7.1-all-pan-wav-astats.stderr [Parsed_astats_0 @ 0x71053c001ac0] Number of Infs: 0.000000

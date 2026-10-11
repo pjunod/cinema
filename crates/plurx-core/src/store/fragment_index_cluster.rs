@@ -12,6 +12,16 @@ use crate::error::StoreError;
 use crate::fmp4::{CutClass, PromotionInputs};
 use crate::segplan::{FragmentIndex, IndexRow, SourceIdentity, SEGPLAN_VERSION};
 
+pub(crate) fn analysis_live_viewer_clause(now: &str) -> String {
+    format!(
+        "(analysis_requests.component = 'fragment_index' AND EXISTS (
+        SELECT 1 FROM background_job_waiters viewer
+        WHERE viewer.request_scope = 'playback-analysis'
+          AND viewer.job_id = analysis_requests.request_id
+          AND viewer.state = 'pending' AND viewer.deadline_ms > {now}))"
+    )
+}
+
 pub const CLUSTER_FRAGMENT_INDEX_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS cluster_fragment_index_sources (
     node_id          TEXT NOT NULL,
@@ -1791,6 +1801,80 @@ pub struct ClusterFragmentIndexArtifact {
     pub built_at_ms: i64,
 }
 
+/// One item-detail question for
+/// [`ClusterFragmentIndexStore::cluster_fragment_index_availability`]: does
+/// this node's attestation of the source object the caller just observed name
+/// a published cluster artifact for this pipeline?
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterIndexAvailabilityProbe {
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub object_version: String,
+    pub pipeline_sha256: String,
+}
+
+pub(crate) fn check_cluster_index_availability_batch(
+    probes: &[ClusterIndexAvailabilityProbe],
+) -> Result<(), StoreError> {
+    if probes.len() > super::FRAGMENT_INDEX_STATUS_CHUNK {
+        return Err(StoreError::Task(
+            "cluster index availability batch exceeds 256 probes".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The logical cache key each probe resolves to through `attested` (this
+/// node's source attestations for the probes' files), with the attested
+/// source digest. Shared by both backends so they answer identically.
+pub(crate) fn cluster_index_availability_keys(
+    probes: &[ClusterIndexAvailabilityProbe],
+    attested: &[FragmentIndexSourceObservation],
+) -> Vec<Option<(String, String)>> {
+    probes
+        .iter()
+        .map(|probe| {
+            let observation = attested.iter().find(|observation| {
+                observation.file_id == probe.file_id
+                    && observation.object_version == probe.object_version
+            })?;
+            let key = cluster_fragment_index_key(
+                probe.file_id,
+                probe.source_size,
+                probe.source_mtime,
+                &observation.source_sha256,
+                &probe.pipeline_sha256,
+            )?;
+            Some((key, observation.source_sha256.clone()))
+        })
+        .collect()
+}
+
+/// Whether each keyed probe has a published artifact: `artifacts` pairs each
+/// logical key with the artifact its head currently resolves to. The same
+/// acceptance the single-file lookup applies.
+pub(crate) fn cluster_index_availability_answers(
+    probes: &[ClusterIndexAvailabilityProbe],
+    keyed: &[Option<(String, String)>],
+    artifacts: &[(String, ClusterFragmentIndexArtifact)],
+) -> Vec<bool> {
+    probes
+        .iter()
+        .zip(keyed)
+        .map(|(probe, keyed)| {
+            keyed.as_ref().is_some_and(|(key, source_sha256)| {
+                artifacts.iter().any(|(logical, artifact)| {
+                    logical == key
+                        && artifact.source_size == probe.source_size
+                        && artifact.source_sha256 == *source_sha256
+                        && artifact.pipeline_sha256 == probe.pipeline_sha256
+                })
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterFragmentIndexLocation {
     pub cache_key: String,
@@ -1900,6 +1984,27 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         pipeline_version: Option<&str>,
         now_ms: i64,
         lease_expires_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.claim_analysis_request_for_capacity(
+            node_id,
+            pipeline_version,
+            now_ms,
+            lease_expires_ms,
+            false,
+        )
+        .await
+    }
+
+    /// A busy playback node may attest only work with an unexpired viewer.
+    /// Both candidate selection and the fenced claim recheck that interest;
+    /// ordinary maintenance remains idle-only and consumes no retry attempt.
+    async fn claim_analysis_request_for_capacity(
+        &self,
+        node_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+        lease_expires_ms: i64,
+        viewer_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     async fn renew_analysis_request(
@@ -2113,6 +2218,17 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         &self,
         cache_key: &str,
     ) -> Result<Option<ClusterFragmentIndexArtifact>, StoreError>;
+
+    /// Item detail's cluster-artifact fallback for a bounded batch, in input
+    /// order: [`Self::fragment_index_source`] then
+    /// [`Self::cluster_fragment_index_artifact`] for every probe, as one
+    /// Store call. Callers chunk at
+    /// [`FRAGMENT_INDEX_STATUS_CHUNK`](super::FRAGMENT_INDEX_STATUS_CHUNK).
+    async fn cluster_fragment_index_availability(
+        &self,
+        node_id: &str,
+        probes: &[ClusterIndexAvailabilityProbe],
+    ) -> Result<Vec<bool>, StoreError>;
 
     async fn enqueue_cluster_fragment_index(
         &self,

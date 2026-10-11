@@ -1,0 +1,8 @@
+[
+  {
+    "asset": "animation-bf2",
+    "browser": "safari",
+    "status": "failed",
+    "error": "Safari POST /session: The operation was aborted due to timeout"
+  }
+]

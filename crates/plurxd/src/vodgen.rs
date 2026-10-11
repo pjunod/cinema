@@ -103,6 +103,11 @@ pub struct Generation {
     /// Encoded AAC begins before video so its transform/overlap state is
     /// warm at the cut. Its origin is a film-global 1024-sample boundary.
     pub encoded_audio_anchor: Option<u64>,
+    /// Frozen output cadence; copy generations have no encoded grid.
+    pub encoded_frame_ticks: Option<u32>,
+    /// Explicit reconstructed video phase on the encoder's AAC-preroll
+    /// clock, validated before this publisher sees the private output.
+    pub encoded_video_origin: Option<u64>,
     pub identity: InitIdentity,
     /// Rewrite this generation's Dolby Vision RPUs to Profile 8.1 as its
     /// fragments arrive.
@@ -137,6 +142,11 @@ pub struct Generation {
 /// (`RenditionDir::materialize` under its manifest lock); kept as a trait so
 /// this module tests against memory.
 pub trait Sink: Send + Sync {
+    /// Metadata-only notification after a verified trailer and every final
+    /// planned/tail materialization succeeded. A killed pipe never calls it.
+    fn completed_output(&self) -> impl std::future::Future<Output = ()> + Send {
+        std::future::ready(())
+    }
     fn materialize(
         &self,
         entry: u32,
@@ -180,6 +190,7 @@ where
         warned_memory: false,
         encoded_entry,
         encoded_init: None,
+        audio_segmenter: None,
     };
     let mut buf = vec![0u8; READ_CHUNK];
 
@@ -265,6 +276,7 @@ struct GenerationRun<'a, S> {
     warned_memory: bool,
     encoded_entry: u32,
     encoded_init: Option<Init>,
+    audio_segmenter: Option<plurx_core::fmp4::PlannedAudioSegmenter>,
 }
 
 impl<S: Sink> GenerationRun<'_, S> {
@@ -284,6 +296,30 @@ impl<S: Sink> GenerationRun<'_, S> {
                 self.video_id = served.video().map(|video| video.id);
                 if self.generation.index.is_none() {
                     self.encoded_init = Some(served.clone());
+                }
+                if self.generation.index.is_none()
+                    && served.video().is_none()
+                    && !self.generation.plan.entries.is_empty()
+                    && self
+                        .generation
+                        .plan
+                        .entries
+                        .iter()
+                        .all(|entry| entry.kind == PlanEntryKind::AudioTail)
+                {
+                    if self.generation.encoded_audio_anchor.is_none() {
+                        return Err(landing_failed(
+                            "shared AAC generation has no film-clock anchor".into(),
+                        ));
+                    }
+                    self.audio_segmenter = Some(
+                        plurx_core::fmp4::PlannedAudioSegmenter::new(
+                            served.clone(),
+                            self.generation.plan.clone(),
+                            self.generation.start_entry,
+                        )
+                        .map_err(|error| landing_failed(error.to_string()))?,
+                    );
                 }
                 if self.generation.convert_dolby_vision {
                     match crate::dvpipe::Converter::for_init(&served) {
@@ -319,14 +355,41 @@ impl<S: Sink> GenerationRun<'_, S> {
     }
 
     async fn on_fragment(&mut self, fragment: Fragment, reader_held: usize) -> Result<(), Outcome> {
-        self.validate_encoded_fragment(&fragment)?;
         // Before anything measures it. The landing matcher compares video
         // byte counts against the index, and the index for a converting
         // identity was built from converted fragments — so the count taken
         // here has to be the converted one or the match is against the wrong
         // stream.
         let mut fragment = fragment;
+        self.place_reconstructed_video(&mut fragment)?;
+        self.validate_encoded_fragment(&fragment)?;
         self.place_encoded_audio(&mut fragment)?;
+        if let Some(segmenter) = self.audio_segmenter.as_mut() {
+            if fragment.tracks.is_empty() {
+                return Ok(());
+            }
+            // place_encoded_audio uses the same relative origin as muxed VOD;
+            // the independent soundtrack cutter requires absolute film ticks.
+            let origin = self
+                .generation
+                .plan
+                .entry(self.generation.start_entry)
+                .expect("audio plan validated at init")
+                .start_ticks;
+            for track in &mut fragment.tracks {
+                track.base_decode_time = track
+                    .base_decode_time
+                    .checked_add(origin)
+                    .ok_or_else(|| landing_failed("shared AAC film clock overflow".into()))?;
+            }
+            let published = segmenter
+                .push(fragment)
+                .map_err(|error| landing_failed(error.to_string()))?;
+            for segment in published {
+                self.deliver(segment).await?;
+            }
+            return Ok(());
+        }
         if let Some(converter) = self.converter.as_mut() {
             let before = converter.report().source_profile;
             if let Err(refused) = converter.convert(&mut fragment) {
@@ -387,7 +450,7 @@ impl<S: Sink> GenerationRun<'_, S> {
         let Some(init) = &self.encoded_init else {
             return Ok(());
         };
-        let Some(video) = init.video().and_then(|video| fragment.track(video.id)) else {
+        let Some(_) = init.video().and_then(|video| fragment.track(video.id)) else {
             return Ok(());
         };
         let Some(entry) = self.generation.plan.entry(self.encoded_entry) else {
@@ -401,17 +464,51 @@ impl<S: Sink> GenerationRun<'_, S> {
             .entry(self.generation.start_entry)
             .expect("start entry")
             .start_ticks;
-        if !plurx_core::fmp4::classify(fragment, init).is_clean()
-            || video.base_decode_time != entry.start_ticks - origin
-            || video.duration() != entry.duration_ticks
-            || video.samples().any(|sample| sample.cto != 0)
-        {
-            return Err(landing_failed(format!(
-                "encoded entry {} does not match its clean frame grid: dts {}, duration {}, expected {} + {}",
-                entry.index, video.base_decode_time, video.duration(), entry.start_ticks - origin, entry.duration_ticks,
-            )));
-        }
+        let frame_ticks = self
+            .generation
+            .encoded_frame_ticks
+            .ok_or_else(|| landing_failed("encoded recipe has no frozen frame cadence".into()))?;
+        let start = entry
+            .start_ticks
+            .checked_sub(origin)
+            .ok_or_else(|| landing_failed("encoded entry precedes generation origin".into()))?;
+        plurx_core::fmp4::validate_encoded_grid(
+            fragment,
+            init,
+            self.generation.plan.timescale,
+            start,
+            entry.duration_ticks,
+            frame_ticks,
+        )
+        .map_err(|reason| landing_failed(format!("encoded entry {}: {reason}", entry.index)))?;
         self.encoded_entry += 1;
+        Ok(())
+    }
+
+    fn place_reconstructed_video(&self, fragment: &mut Fragment) -> Result<(), Outcome> {
+        let Some(origin) = self.generation.encoded_video_origin else {
+            return Ok(());
+        };
+        let init = self
+            .encoded_init
+            .as_ref()
+            .ok_or_else(|| landing_failed("reconstructed video has no encoded init".into()))?;
+        let video = init
+            .video()
+            .ok_or_else(|| landing_failed("reconstructed output has no video track".into()))?;
+        if video.timescale != self.generation.plan.timescale {
+            return Err(landing_failed(
+                "reconstructed video clock differs from the plan".into(),
+            ));
+        }
+        for track in &mut fragment.tracks {
+            if track.track_id == video.id {
+                track.base_decode_time =
+                    track.base_decode_time.checked_sub(origin).ok_or_else(|| {
+                        landing_failed("reconstructed video precedes its validated origin".into())
+                    })?;
+            }
+        }
         Ok(())
     }
 
@@ -544,21 +641,21 @@ impl<S: Sink> GenerationRun<'_, S> {
             .served
             .take()
             .expect("the landing buffer fills only after the init");
-        let segmenter = match Segmenter::following(
-            init,
-            self.generation.policy,
-            u64::from(start_entry),
-            starts,
-        ) {
-            Ok(segmenter) => {
-                segmenter.retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets)
-            }
-            Err(error) => {
-                return Err(Outcome::Failed(Failure::Stream(format!(
-                    "placing the generation against its plan: {error}"
-                ))))
-            }
+        let following = if self.generation.encoded_audio_anchor.is_some() {
+            Segmenter::following_encoded
+        } else {
+            Segmenter::following
         };
+        let segmenter =
+            match following(init, self.generation.policy, u64::from(start_entry), starts) {
+                Ok(segmenter) => segmenter
+                    .retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets),
+                Err(error) => {
+                    return Err(Outcome::Failed(Failure::Stream(format!(
+                        "placing the generation against its plan: {error}"
+                    ))))
+                }
+            };
         self.segmenter = Some(segmenter);
 
         // Drop the first `discards` video-carrying fragments — the index
@@ -636,6 +733,16 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// End of pipe: land whatever is still undecided, then publish the tail
     /// if — and only if — ffmpeg's trailer says the film really ended.
     async fn finish(&mut self, complete: bool) -> Outcome {
+        if let Some(segmenter) = self.audio_segmenter.take() {
+            if complete && !segmenter.complete() {
+                return landing_failed(
+                    "shared AAC ended before its promised sample interval".into(),
+                );
+            }
+            return Outcome::Ran {
+                produced_through: self.produced_through,
+            };
+        }
         if self.served.is_none() && self.segmenter.is_none() {
             return Outcome::Failed(Failure::Stream(
                 "the pipe ended before its moov arrived".into(),
@@ -703,6 +810,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                 )))
             }
         }
+        self.sink.completed_output().await;
         Outcome::Ran {
             produced_through: self.produced_through,
         }
@@ -753,6 +861,241 @@ mod tests {
     use plurx_core::transcode::{copy_pipe_args, Pacing};
 
     use crate::fragindex::{index_stream, DolbyVisionPass, IndexOutcome};
+
+    #[tokio::test]
+    async fn reconstructed_nonzero_window_publishes_aligned_video_and_aac_timestamps() {
+        let mut command = std::process::Command::new(testfixtures::ffmpeg());
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-copyts",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:r=24:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=4",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-vf",
+            "format=yuv420p10le,settb=1/24,setpts=PTS+48",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "pools=none:frame-threads=1:wpp=0",
+            "-threads:v",
+            "1",
+            "-bf",
+            "0",
+            "-g",
+            "48",
+            "-c:a",
+            "aac",
+            "-af",
+            "asettb=expr=1/48000,asetpts=PTS+1024",
+            "-threads:a",
+            "1",
+            "-ar",
+            "48000",
+            "-enc_time_base:v",
+            "1:24",
+            "-video_track_timescale",
+            "24",
+            "-fps_mode:v",
+            "passthrough",
+            "-avoid_negative_ts",
+            "disabled",
+            "-use_editlist",
+            "0",
+            "-movflags",
+            "+empty_moov+delay_moov+default_base_moof+frag_keyframe+frag_discont",
+            "-t",
+            "4.021333333",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]);
+        let feed = testfixtures::run(&mut command);
+        let init = muxer_init(&feed);
+        let video_id = init.video().expect("encoded video").id;
+        let audio_id = init
+            .tracks
+            .iter()
+            .find(|track| track.kind == plurx_core::fmp4::TrackKind::Audio)
+            .expect("encoded AAC")
+            .id;
+        let identity =
+            InitIdentity::establish(&init, Default::default()).expect("encoded init identity");
+        let grid = plurx_core::transcode::VodFrameGrid::new(24, 1).expect("video clock");
+        let generation = Generation {
+            plan: grid.plan(4_000, 0),
+            index: None,
+            encoded_frame_ticks: Some(1),
+            encoded_audio_anchor: Some(0),
+            encoded_video_origin: Some(48),
+            identity,
+            start_entry: 1,
+            policy: CutPolicy::new(2, 2, 48_000_000, 15, 24),
+            convert_dolby_vision: false,
+            retain_hevc_parameter_sets: true,
+        };
+        let sink = MemSink::default();
+        let outcome = run(&feed[..], generation, &sink, "reconstructed-audio").await;
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Ran {
+                    produced_through: Some(1)
+                }
+            ),
+            "{outcome:?}"
+        );
+        let writes = sink.taken();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, 1);
+        let mut reader = FragmentReader::new();
+        reader.push(&init.bytes);
+        reader.push(&writes[0].1);
+        let mut first_video = None;
+        let mut first_audio = None;
+        let mut video_frames = 0;
+        let mut video_end = 0;
+        let mut audio_end = 0;
+        while let Some(unit) = reader.next_unit().expect("actual published boxes") {
+            if let Unit::Fragment(fragment) = unit {
+                for track in fragment.tracks {
+                    if track.track_id == video_id {
+                        first_video.get_or_insert(track.base_decode_time);
+                        video_frames += track.sample_count();
+                        video_end = video_end.max(
+                            track.base_decode_time
+                                + track
+                                    .samples()
+                                    .map(|sample| u64::from(sample.duration))
+                                    .sum::<u64>(),
+                        );
+                    }
+                    if track.track_id == audio_id {
+                        first_audio.get_or_insert(track.base_decode_time);
+                        audio_end = audio_end.max(
+                            track.base_decode_time
+                                + track
+                                    .samples()
+                                    .map(|sample| u64::from(sample.duration))
+                                    .sum::<u64>(),
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(first_video, Some(48));
+        assert_eq!(first_audio, Some(96_256));
+        assert_eq!(video_frames, 48);
+        assert_eq!(video_end, 96);
+        assert!(
+            (192_000..=193_024).contains(&audio_end),
+            "AAC reaches the same window end: {audio_end}"
+        );
+        assert!(
+            first_audio.expect("actual audio") - first_video.expect("actual video") * 2_000 < 1_024,
+            "AAC remains within one packet of the same film cut"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_profile81_authoring_reaches_the_real_publisher() {
+        use plurx_core::transcode::dv_processing::dv_author_profile81_window;
+        let encoded = include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/authored.mp4");
+        let rpus = vec![
+            include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/frame-000.nal").to_vec(),
+            include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/frame-001.nal").to_vec(),
+            include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/frame-002.nal").to_vec(),
+        ];
+        let mut reader = FragmentReader::new();
+        reader.push(encoded);
+        let Some(Unit::Init(mut base_init)) = reader.next_unit().expect("fixture init") else {
+            panic!("missing init")
+        };
+        plurx_core::fmp4::remove_dolby_vision_record(&mut base_init).expect("base config");
+        let video = base_init.video().expect("video").id;
+        let mut base = base_init.bytes.clone();
+        while let Some(unit) = reader.next_unit().expect("fixture fragment") {
+            if let Unit::Fragment(mut fragment) = unit {
+                plurx_core::fmp4::rewrite_video_samples(
+                    &mut fragment,
+                    &base_init.tracks,
+                    video,
+                    |sample| {
+                        let mut output = Vec::new();
+                        let mut at = 0;
+                        while at < sample.len() {
+                            let length = u32::from_be_bytes(
+                                sample[at..at + 4].try_into().expect("NAL length"),
+                            ) as usize;
+                            let end = at + 4 + length;
+                            if (sample[at + 4] >> 1) & 63 != 62 {
+                                output.extend_from_slice(&sample[at..end]);
+                            }
+                            at = end;
+                        }
+                        Ok(output)
+                    },
+                )
+                .expect("strip control RPU");
+                base.extend_from_slice(&fragment.bytes);
+            }
+        }
+        assert!(
+            reader.saw_trailer(),
+            "the retained encoder actually completed"
+        );
+        // Preserve its authentic completion input. The author rebuilds the
+        // random-access trailer after changing sample sizes.
+        let mut offset = 0;
+        while offset < encoded.len() {
+            let length =
+                u32::from_be_bytes(encoded[offset..offset + 4].try_into().expect("box length"))
+                    as usize;
+            if &encoded[offset + 4..offset + 8] == b"mfra" {
+                base.extend_from_slice(&encoded[offset..offset + length]);
+            }
+            offset += length;
+        }
+        let feed = dv_author_profile81_window(&base, (64, 64), 24000, 48048, 1001, &rpus, 1)
+            .expect("completed author");
+        let init = muxer_init(&feed);
+        let grid = plurx_core::transcode::VodFrameGrid::new(24000, 1001).expect("grid");
+        let generation = Generation {
+            plan: grid.plan(125, 0),
+            index: None,
+            encoded_frame_ticks: Some(1001),
+            encoded_audio_anchor: None,
+            encoded_video_origin: Some(48048),
+            identity: InitIdentity::establish(&init, Default::default())
+                .expect("authored identity"),
+            start_entry: 0,
+            policy: CutPolicy::new(2, 2, 48_000_000, 15, 24000),
+            convert_dolby_vision: false,
+            retain_hevc_parameter_sets: false,
+        };
+        let sink = MemSink::default();
+        let outcome = run(&feed[..], generation, &sink, "completed-p81").await;
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Ran {
+                    produced_through: Some(0)
+                }
+            ),
+            "P81 publisher outcome: {outcome:?}"
+        );
+        assert_eq!(sink.taken().len(), 1);
+    }
 
     /// A sink that remembers what it was handed and can start refusing.
     #[derive(Default)]
@@ -1099,6 +1442,8 @@ mod tests {
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
             encoded_audio_anchor: None,
+            encoded_frame_ticks: None,
+            encoded_video_origin: None,
             identity: film.identity.clone(),
             start_entry,
             policy: film.policy,
@@ -1472,6 +1817,65 @@ mod tests {
         assert_eq!(produced_through, Some(1));
     }
 
+    #[tokio::test]
+    async fn completed_output_notification_requires_real_trailer_and_successful_tail_writes() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        #[derive(Default)]
+        struct ObservedSink {
+            inner: MemSink,
+            completed: AtomicU32,
+        }
+        impl Sink for ObservedSink {
+            async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> std::io::Result<()> {
+                self.inner.materialize(entry, bytes).await
+            }
+            async fn completed_output(&self) {
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let film = film().await;
+        let full = ObservedSink::default();
+        assert!(matches!(
+            run(
+                &film.feed[..],
+                generation(&film, 0),
+                &full,
+                "measurement-full"
+            )
+            .await,
+            Outcome::Ran { .. }
+        ));
+        assert_eq!(full.completed.load(Ordering::Relaxed), 1);
+        let truncated = ObservedSink::default();
+        let cut = fragment_boundary_cut(&film.feed, 4);
+        assert!(matches!(
+            run(
+                &film.feed[..cut],
+                generation(&film, 0),
+                &truncated,
+                "measurement-cut"
+            )
+            .await,
+            Outcome::Ran { .. }
+        ));
+        assert_eq!(truncated.completed.load(Ordering::Relaxed), 0);
+        let refused = ObservedSink {
+            inner: MemSink::refusing(1, std::io::ErrorKind::Other),
+            completed: AtomicU32::new(0),
+        };
+        assert!(matches!(
+            run(
+                &film.feed[..],
+                generation(&film, 0),
+                &refused,
+                "measurement-refused"
+            )
+            .await,
+            Outcome::Failed(_)
+        ));
+        assert_eq!(refused.completed.load(Ordering::Relaxed), 0);
+    }
+
     /// The production pipe with its audio outrunning the plan: the fixture's
     /// 12 s of film against 12.3 s of tone, under a plan whose probe said the
     /// tracks are equal — the shape of a tail the plan skipped. The plan
@@ -1525,6 +1929,8 @@ mod tests {
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
             encoded_audio_anchor: None,
+            encoded_frame_ticks: None,
+            encoded_video_origin: None,
             identity,
             start_entry: 0,
             policy: film.policy,

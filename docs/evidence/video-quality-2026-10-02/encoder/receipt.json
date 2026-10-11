@@ -1,0 +1,29 @@
+{
+  "source_commit": "1942cf0ca93c01d535ca2f92d138b9410890dc1c",
+  "scope": "offline_encoder_screen_non_acceptance",
+  "decision": "retain bitrate; no production settings or defaults changed",
+  "remote_scratch_removed": true,
+  "remote_container_removed": true,
+  "remote_active_sessions_after": 0,
+  "source_snapshot": "cfb52bf402e603523f6fd5b3d71b6ffa2c751565",
+  "deployed_source": "4fa50b79e4b3b196797a9b7a1a7a4abd2184ea43",
+  "failed_attempts": [
+    "Missing isolated render group; no encoding completed.",
+    "Wrong isolated user for scratch; no output encoded.",
+    "Grain reference hit size cap (248 frames); rerun with larger bounded reference allowance produced288 source/baseline/candidate frames."
+  ],
+  "sha256": {
+    "qsv-screen-summary.json": "a5edbb41f774c727c774bfde82217d95b0130f4d4e29b780f8362bd4ab58cccb",
+    "failed-gpu-group.json": "1c2b225240caf2c088ee4657e2542aac115e9ecb5c8fb332d2d5695efc7ad69d",
+    "failed-scratch-user.json": "038f4601da254425838b035dad7146a058a808c61b31516dc17a721dd5e6448d",
+    "incomplete-grain.json": "7648e21569459f7eb6f644bc7044e20fcffafd3d65b783f53260323c4f6bf5fd",
+    "capture-runner-final.py": "be5a543525fad331593eb978d1d07c8d8aaeee22e51ff9e30980d2244bb19648",
+    "run-remote.sh": "ccaab0de854a27b6226cc1ee20df5e01cc994da4d9615b0ec91bbc2768cbdc0f",
+    "run-grain.sh": "74dad4ce3f49bcebbcb1f6a750b9c079704d2815fe7129e8e03bbc9b493dcc4e"
+  },
+  "validation": [
+    "python3 -m unittest discover -s tests/operations -p test_encoder_calibration_screen.py (13 tests)",
+    "python3 -m unittest discover -s tests/operations -p test_bench_rate_control.py (56 tests)",
+    "pinned rustc1.97.1 example build; normal catalog/fmt/workspaceClippy-Dwarnings/JS hook passed"
+  ]
+}

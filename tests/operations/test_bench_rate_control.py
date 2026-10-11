@@ -197,6 +197,7 @@ class FullApi:
         self.settings = {
             "transcode_rate_mode": "bitrate",
             "transcode_quality": None,
+            "transcode_rate_mode_default": "bitrate",
             "api_secret": "must-not-leak",
         }
         self.puts = []
@@ -1008,6 +1009,78 @@ class RateControlBenchCase(unittest.TestCase):
             "transcode_quality": None,
         })
 
+    def test_an_unset_rate_mode_is_restored_as_unset_never_as_the_displayed_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus, references = write_corpus(root)
+            server_manifest = write_server_manifest(root, references)
+            api = FullApi(references)
+            api.settings["transcode_rate_mode"] = None
+            with mock.patch.dict(G, patched_harness()):
+                report = BENCH["rate_control_report"](
+                    harness_args(root, corpus, server_manifest), api=api
+                )
+            self.assertTrue(report["passed"], report["failures"])
+            self.assertEqual(api.puts[-1], {
+                "transcode_rate_mode": None,
+                "transcode_quality": None,
+            })
+            self.assertIsNone(api.settings["transcode_rate_mode"])
+            self.assertNotIn({"transcode_rate_mode": "bitrate", "transcode_quality": None},
+                             api.puts[2:])
+
+    def test_unset_restore_failure_reports_the_clear_as_the_manual_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus, references = write_corpus(root)
+            server_manifest = write_server_manifest(root, references)
+            api = FullApi(references, active_counts=[0, 0, 0], default_active=1)
+            api.settings["transcode_rate_mode"] = None
+            with mock.patch.dict(G, patched_harness()):
+                report = BENCH["rate_control_report"](
+                    harness_args(root, corpus, server_manifest), api=api
+                )
+            failure = next(
+                failure for failure in report["failures"]
+                if failure["code"] == "setting_restore_failed"
+            )
+            self.assertEqual(failure["required_manual_restore"], {
+                "transcode_rate_mode": None,
+                "transcode_quality": None,
+            })
+
+    def test_explicit_rate_mode_and_quality_are_restored_exactly(self):
+        api = FullApi({})
+        api.settings.update({"transcode_rate_mode": "quality", "transcode_quality": 19})
+        contract = BENCH["setting_contract"](api.call("/settings"))
+        BENCH["restore_rate_settings"](api, contract, 0.0, 1.0)
+        self.assertEqual(api.puts, [{"transcode_rate_mode": "quality", "transcode_quality": 19}])
+
+    def test_server_that_cannot_report_unset_is_refused_before_any_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus, references = write_corpus(root)
+            server_manifest = write_server_manifest(root, references)
+            api = FullApi(references)
+            del api.settings["transcode_rate_mode_default"]
+            with mock.patch.dict(G, patched_harness()):
+                report = BENCH["rate_control_report"](
+                    harness_args(root, corpus, server_manifest), api=api
+                )
+            self.assertFalse(report["passed"])
+            self.assertEqual(api.puts, [])
+            self.assertTrue(any(
+                failure["code"] == "harness_error"
+                and "explicit bitrate" in failure["detail"]
+                for failure in report["failures"]
+            ), report["failures"])
+        with self.assertRaises(BENCH["BenchError"]):
+            BENCH["setting_contract"]({
+                "transcode_rate_mode": "cq",
+                "transcode_quality": None,
+                "transcode_rate_mode_default": "bitrate",
+            })
+
     def test_full_subset_is_diagnostic_nonzero_even_when_measurements_pass(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1586,6 +1659,45 @@ class RateControlBenchCase(unittest.TestCase):
             self.assertEqual(first.read_bytes(), second.read_bytes())
             with self.assertRaises(ValueError):
                 BENCH["write_json"](Path(directory) / "nan.json", {"value": float("nan")})
+
+
+class CodecQualificationFixtureTests(unittest.TestCase):
+    def test_pq_tags_do_not_establish_genuine_profile_five(self):
+        fake = SimpleNamespace(returncode=0, stdout=json.dumps({"streams": [{
+            "codec_type": "video", "codec_name": "hevc", "color_transfer": "smpte2084",
+        }]}), stderr="")
+        with mock.patch.dict(G, sh=mock.Mock(return_value=fake)):
+            with self.assertRaisesRegex(BENCH["BenchError"], "genuine Profile 5"):
+                BENCH["probe_fixture"]("input.mkv", "dv-p5")
+            fake.stdout = json.dumps({"streams": [{"codec_type": "video", "codec_name": "hevc", "side_data_list": [{"dv_profile": 5, "rpu_present_flag": 1}]}]})
+            self.assertEqual(len(BENCH["probe_fixture"]("input.mkv", "dv-p5")), 1)
+
+    def test_pgs_fixture_carries_a_real_subtitle_not_preburned_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            commands = []
+            def run(command):
+                commands.append(command)
+                if command[0] == "ffprobe":
+                    return SimpleNamespace(returncode=0, stdout=json.dumps({"streams": [{"codec_type": "video"}, {"codec_name": "hdmv_pgs_subtitle"}]}), stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            with mock.patch.dict(G, sh=run):
+                BENCH["build_fixture"](directory, "burn-pgs", BENCH["FIXTURES"]["burn-pgs"])
+            mux = next(command for command in commands if command[0] == "ffmpeg")
+            self.assertIn("2:s:0", mux)
+            self.assertEqual(mux[mux.index("-c:s") + 1], "copy")
+            self.assertNotIn("-filter_complex", mux)
+            self.assertNotIn("-shortest", mux)
+            self.assertEqual(mux[mux.index("-t") + 1], str(BENCH["DURATION"]))
+            self.assertTrue(any(command[0] == "ffprobe" for command in commands))
+
+    def test_missing_dv_input_and_failed_generator_fail_loudly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"PLURX_DV_P5_FIXTURE": ""}):
+                with self.assertRaisesRegex(BENCH["BenchError"], "genuine Profile 5"):
+                    BENCH["build_fixture"](directory, "dv-p5", BENCH["FIXTURES"]["dv-p5"])
+            with mock.patch.dict(G, sh=mock.Mock(return_value=SimpleNamespace(returncode=1, stdout="", stderr="encode failure"))):
+                with self.assertRaisesRegex(BENCH["BenchError"], "fixture encode failed"):
+                    BENCH["build_fixture"](directory, "sport", BENCH["FIXTURES"]["sport"])
 
 
 if __name__ == "__main__":

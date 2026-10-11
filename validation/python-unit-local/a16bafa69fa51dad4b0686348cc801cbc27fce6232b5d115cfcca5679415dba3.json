@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-real-frame-control",
+  "suite": "operations",
+  "test_file": "tests/operations/test_rolling_grid_acquire.py",
+  "test_file_sha256": "afe77f76ae2b38aab7b96d1a3a9571229ebb6518b4f31df6316f7fb4a3a2d42a",
+  "command": "python3 -m unittest tests.operations.test_rolling_grid_acquire.RollingAcquireOwnershipTests.test_frame_cadence_waits_after_response_without_hiding_real_refusal -v",
+  "output": "test_frame_cadence_waits_after_response_without_hiding_real_refusal (tests.operations.test_rolling_grid_acquire.RollingAcquireOwnershipTests.test_frame_cadence_waits_after_response_without_hiding_real_refusal) ... ok\nRan 1 test in 0.127s\nOK\nExit code: 0; tool chunk e0fdcf.",
+  "test_ids": [
+    "test_rolling_grid_acquire.RollingAcquireOwnershipTests.test_frame_cadence_waits_after_response_without_hiding_real_refusal"
+  ],
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  },
+  "source_attribution": "Original own worktree execution on current effort ae83960b, before metadata commit. Full executed controller scripts/rolling-grid-acquire SHA309ad1ccf456b11f5985a9bf257a8b62272013d24cdef0b6ace744644d72906c; its literal PAGE UTF-8 SHA251f67302c17b299077830e01b0e93b88273799dcfcd4597b663d4cd5a508d0b was independently extracted read-only during sole review60, not a new test execution. Test file hash identifies exact executed source; later receipt and documentation additions do not relabel this as a later execution. Synthetic Node execution of the actual reviewed page with delayed response, progressing frames, one in-flight exchange and terminal real-refusal behavior; not browser or media qualification."
+}

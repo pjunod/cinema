@@ -174,6 +174,9 @@ enum SourceChunk {
 }
 
 enum SourceRequest {
+    ItemIdentityWatermark {
+        reply: oneshot::Sender<Result<Option<i64>, StoreError>>,
+    },
     Count {
         table: TablePlan,
         for_import: bool,
@@ -242,6 +245,9 @@ impl SourceReader {
 
             while let Some(request) = receiver.blocking_recv() {
                 match request {
+                    SourceRequest::ItemIdentityWatermark { reply } => {
+                        let _ = reply.send(source_item_identity_watermark(&source));
+                    }
                     SourceRequest::Count {
                         table,
                         for_import,
@@ -294,6 +300,12 @@ impl SourceReader {
         Ok((Self { requests }, metadata))
     }
 
+    async fn item_identity_watermark(&self) -> Result<Option<i64>, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.send(SourceRequest::ItemIdentityWatermark { reply })
+            .await?;
+        receive_source(response).await
+    }
     async fn count(&self, table: TablePlan, for_import: bool) -> Result<i64, StoreError> {
         let (reply, response) = oneshot::channel();
         self.send(SourceRequest::Count {
@@ -368,6 +380,19 @@ impl SourceReader {
     }
 }
 
+fn source_item_identity_watermark(source: &Connection) -> Result<Option<i64>, StoreError> {
+    let present = source.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )?;
+    if present == 0 {
+        return Ok(None);
+    }
+    let value=source.query_row("SELECT high_water FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)",[],|r|r.get::<_,i64>(0)).map_err(|_|import_error("invalid or interrupted source item identity allocator"))?;
+    Ok(Some(value))
+}
+
 async fn receive_source<T>(
     response: oneshot::Receiver<Result<T, StoreError>>,
 ) -> Result<T, StoreError> {
@@ -377,6 +402,21 @@ async fn receive_source<T>(
 }
 
 const TABLES: &[TablePlan] = &[
+    TablePlan {
+        name: "jellyfin_entity_ids",
+        columns: &[
+            "wire_id",
+            "entity_kind",
+            "native_id",
+            "incarnation",
+            "retired",
+        ],
+        order_by: "wire_id",
+        minimum_schema: 98,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
     TablePlan {
         name: "background_jobs",
         columns: &[
@@ -541,6 +581,41 @@ const TABLES: &[TablePlan] = &[
         ],
         order_by: "token_hash",
         minimum_schema: 2,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "jellyfin_login_tokens",
+        columns: &["token_hash", "user_id", "device_digest", "client_family"],
+        order_by: "token_hash",
+        minimum_schema: 99,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "jellyfin_plays",
+        columns: &[
+            "play_id",
+            "user_id",
+            "token_digest",
+            "device_digest",
+            "client_family",
+            "playback_id",
+            "item_id",
+            "file_id",
+            "item_wire_id",
+            "file_wire_id",
+            "payload",
+            "state",
+            "expires_at_ms",
+            "manual_revision",
+            "native_incarnation_id",
+            "direct_grant_id",
+        ],
+        order_by: "play_id",
+        minimum_schema: 100,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -715,6 +790,8 @@ const TABLES: &[TablePlan] = &[
             "duration_ms",
             "watched",
             "updated_at",
+            "manual_revision",
+            "manual_origin",
         ],
         order_by: "user_id, item_id",
         minimum_schema: 2,
@@ -907,9 +984,29 @@ const TABLES: &[TablePlan] = &[
             "discontinuity_sequence",
             "updated_at_ms",
             "drain_deadline_ms",
+            "recovery_epoch",
         ],
         order_by: "incarnation_id",
         minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "candidate_recovery",
+        columns: &[
+            "scope",
+            "recipe",
+            "cause",
+            "event_id",
+            "user_id",
+            "playback_id",
+            "recovery_epoch",
+            "created_ms",
+            "quality_step",
+        ],
+        order_by: "scope, recipe, cause",
+        minimum_schema: super::candidate_recovery::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -930,6 +1027,60 @@ const TABLES: &[TablePlan] = &[
         ],
         order_by: "session_id",
         minimum_schema: 32,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    // The three continuous-quality tables travel with `media_sessions`: an
+    // imported active parent without its ledger would lose the reserved
+    // intervals that keep scheduled media from eviction, and without its
+    // cancellation receipts and preparation owners a cancelled quality intent
+    // could be restaged or committed by the rebuilt cluster. All three are
+    // brand-new tables, so `minimum_schema` is the whole story.
+    TablePlan {
+        name: "quality_cancellation_receipts",
+        columns: &[
+            "receipt_key",
+            "generation",
+            "session_id",
+            "owner_node_id",
+            "owner_epoch",
+            "client_instance_id",
+            "lifetime_id",
+            "recipe_revision",
+            "accepted_sequence",
+            "state",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "receipt_key",
+        minimum_schema: super::sqlite::QUALITY_CANCELLATION_SQLITE_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "quality_preparation_owners",
+        columns: &["staged_incarnation_id", "cancellation_key"],
+        order_by: "staged_incarnation_id",
+        minimum_schema: super::sqlite::QUALITY_CANCELLATION_SQLITE_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "continuous_quality_ledgers",
+        columns: &[
+            "generation",
+            "owner_node_id",
+            "owner_epoch",
+            "revision",
+            "attachment_id",
+            "ledger_json",
+            "updated_at_ms",
+        ],
+        order_by: "generation",
+        minimum_schema: super::sqlite::QUALITY_LEDGER_SQLITE_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -1286,6 +1437,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at",
             "last_access_at",
             "expires_at",
+            "audio_recipe",
         ],
         order_by: "id",
         minimum_schema: 14,
@@ -1744,6 +1896,238 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    TablePlan {
+        name: "sharing_identity",
+        columns: &["singleton", "server_id", "catalogue_epoch", "created_at_ms"],
+        order_by: "singleton",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_invitations",
+        columns: &[
+            "id",
+            "token_hash",
+            "library_ids_json",
+            "created_at_ms",
+            "expires_at_ms",
+            "state",
+            "claim_id",
+            "claim_digest",
+        ],
+        order_by: "id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_exports",
+        columns: &[
+            "id",
+            "invitation_id",
+            "recipient_server_id",
+            "recipient_name",
+            "token_hash",
+            "scope_generation",
+            "credential_generation",
+            "catalogue_generation",
+            "mutation_generation",
+            "state",
+            "pending_expires_at_ms",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_export_libraries",
+        columns: &["grant_id", "library_id"],
+        order_by: "grant_id, library_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_imports",
+        columns: &[
+            "id",
+            "source_server_id",
+            "catalogue_epoch",
+            "source_name",
+            "claim_id",
+            "remote_grant_id",
+            "credential_envelope",
+            "claim_envelope",
+            "endpoints_json",
+            "assignment_generation",
+            "lifecycle_generation",
+            "endpoint_generation",
+            "observed_scope_generation",
+            "observed_credential_generation",
+            "observed_catalogue_generation",
+            "observed_endpoint_revision",
+            "state",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &["credential_envelope", "claim_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_viewers",
+        columns: &["user_id", "viewer_id"],
+        order_by: "user_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_assignments",
+        columns: &["import_id", "remote_library_id", "user_id", "enabled"],
+        order_by: "import_id, remote_library_id, user_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_watch",
+        columns: &[
+            "source_server_id",
+            "catalogue_epoch",
+            "remote_library_id",
+            "remote_item_id",
+            "user_id",
+            "position_ms",
+            "duration_ms",
+            "watched",
+            "sequence",
+            "updated_at_ms",
+        ],
+        order_by: "source_server_id, catalogue_epoch, remote_item_id, user_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_rotations",
+        columns: &[
+            "grant_id",
+            "request_id",
+            "old_hash",
+            "new_hash",
+            "created_at_ms",
+            "expires_at_ms",
+        ],
+        order_by: "grant_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_import_rotations",
+        columns: &[
+            "import_id",
+            "request_id",
+            "credential_envelope",
+            "created_at_ms",
+            "expires_at_ms",
+        ],
+        order_by: "import_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &["credential_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_catalogue_revisions",
+        columns: &["library_id", "order_revision"],
+        order_by: "library_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_endpoint_manifest",
+        columns: &["singleton", "endpoints_json", "revision"],
+        order_by: "singleton",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_relay_upstream",
+        columns: &[
+            "incarnation_id",
+            "import_id",
+            "lifecycle_generation",
+            "assignment_generation",
+            "remote_library_id",
+            "remote_item_id",
+            "remote_file_id",
+            "remote_revision",
+            "source_request_id",
+            "source_session_id",
+            "source_incarnation_id",
+            "endpoint_revision",
+            "capability_envelope",
+            "source_position_ms",
+            "dispatch_envelope",
+        ],
+        order_by: "incarnation_id",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &["capability_envelope", "dispatch_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_delivery_grants",
+        columns: &[
+            "token_hash",
+            "incarnation_id",
+            "source_token_hash",
+            "state",
+            "deadline_ms",
+        ],
+        order_by: "token_hash",
+        minimum_schema: 104,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    // Preserve unresolved physical debts as diagnostic custody. Imported rows
+    // never confer a driver handle or a closure receipt in this process boot.
+    TablePlan {
+        name: "sharing_ingress_custody",
+        columns: &[
+            "principal_kind",
+            "incarnation_id",
+            "owner_identity",
+            "custody_json",
+            "revision",
+        ],
+        order_by: "principal_kind, incarnation_id",
+        minimum_schema: 105,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
 ];
 
 /// Groups import rows into transactions bounded by serialized bytes.
@@ -1943,6 +2327,27 @@ impl HiqliteAuthStore {
         self.refuse_unsealed_source_credentials(&source, schema_version)
             .await?;
         self.verify_empty_import_target().await?;
+        let identity_allocator = self
+            .target_count(
+                "sqlite_master",
+                Some("type='table' AND name='item_identity_watermark'".into()),
+            )
+            .await?
+            == 1;
+        let source_watermark = source.item_identity_watermark().await?;
+        if source_watermark.is_some() && !identity_allocator {
+            return Err(import_error(
+                "source item identity allocator unavailable on import target",
+            ));
+        }
+        if identity_allocator {
+            let changed = self.client().execute("UPDATE item_identity_watermark SET importing=1 WHERE singleton=1 AND importing=0 AND high_water=0",params!()).await?;
+            if changed != 1 {
+                return Err(import_error(
+                    "item identity import target is not fresh; discard incoming target",
+                ));
+            }
+        }
         // A fresh queue schema has an empty seal marker. The backup supplies
         // its own marker; older backups are sealed only after parity is proved.
         self.client()
@@ -2029,6 +2434,11 @@ impl HiqliteAuthStore {
                 .await?;
         }
 
+        if identity_allocator {
+            self.client().execute("UPDATE item_identity_watermark SET high_water=max(high_water,$1) WHERE singleton=1 AND importing=1",params!(source_watermark.unwrap_or(0))).await?;
+            self.client().execute("INSERT INTO sharing_catalogue_revisions(library_id,order_revision) SELECT id,1 FROM libraries WHERE true ON CONFLICT(library_id) DO NOTHING",params!()).await?;
+            self.client().execute("UPDATE item_identity_watermark SET importing=0 WHERE singleton=1 AND importing=1",params!()).await?;
+        }
         Ok(SqliteImportReport {
             source_schema_version: schema_version,
             backup_sha256: metadata.backup_sha256,
@@ -2077,6 +2487,16 @@ impl HiqliteAuthStore {
     }
 
     async fn verify_empty_import_target(&self) -> Result<(), StoreError> {
+        // Device credentials are never imported: restore cannot resurrect
+        // pairings. A nonempty target is refused before any import write.
+        // authority: refuse import before writes if the target retains live device credentials.
+        let remote = self.client().query_consistent_map::<CountRow,_>("SELECT (SELECT count(*) FROM remote_receivers)+(SELECT count(*) FROM remote_grants)+(SELECT count(*) FROM invitation_phones)+(SELECT count(*) FROM invitation_consents)+(SELECT count(*) FROM invitation_events) AS count",params!()).await?;
+        if !matches!(remote.as_slice(),[r] if r.count==0) {
+            return Err(StoreError::Migration(
+                "import target has Cinema remote credentials".into(),
+            ));
+        }
+
         for table in TABLES {
             let filter = import_filter_sql(*table);
             let rows = self
@@ -2582,8 +3002,19 @@ fn unsealed_credential_rows(source: &Connection, table: TablePlan) -> Result<u64
         // either, so it fails closed with everything else rather than reading
         // as "nothing to check here".
         let sealed = (0..table.sealed_columns.len()).all(|index| {
-            row.get::<_, String>(index)
-                .is_ok_and(|value| SealedSecret::from_stored(value).is_wrapped())
+            row.get::<_, Option<String>>(index).is_ok_and(|value| {
+                value.map_or(
+                    matches!(
+                        table.sealed_columns[index],
+                        "claim_envelope" | "capability_envelope" | "dispatch_envelope"
+                    ),
+                    |value| {
+                        // The not-dispatched marker is not a credential.
+                        (table.sealed_columns[index] == "dispatch_envelope" && value == "none")
+                            || SealedSecret::from_stored(value).is_wrapped()
+                    },
+                )
+            })
         });
         if !sealed {
             unsealed = unsealed
@@ -2763,7 +3194,13 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
         .columns
         .iter()
         .map(|column| {
-            if table.name == "media_playback_pointers"
+            if table.name == "watch_state" && *column == "manual_origin" {
+                // Origin is mutation context, never restored authority. Replaying
+                // it could advance an otherwise fenced binding during import.
+                "NULL".to_owned()
+            } else if table.name == "watch_state" && *column == "manual_revision" && schema_version < 101 {
+                "0".to_owned()
+            } else if table.name == "media_playback_pointers"
                 && *column == "desired_revision"
                 && schema_version < 49
             {
@@ -2846,6 +3283,11 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
             {
                 "0".to_owned()
             } else if table.name == "media_sessions"
+                && *column == "recovery_epoch"
+                && schema_version < 53
+            {
+                "''".to_owned()
+            } else if table.name == "media_sessions"
                 && *column == "drain_deadline_ms"
                 && schema_version < 51
             {
@@ -2915,6 +3357,9 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                         "author" | "book_work_id" | "book_edition_id" | "book_metadata_source"
                     )
                     && schema_version < 21)
+                || (table.name == "offline_packages"
+                    && *column == "audio_recipe"
+                    && schema_version < super::sqlite::OFFLINE_AUDIO_RECIPE_SCHEMA)
             {
                 "NULL".to_owned()
             } else if table.name == "offline_packages"
@@ -3198,6 +3643,32 @@ mod tests {
     }
 
     #[test]
+    fn pre_audio_recipe_offline_projection_preserves_legacy_audio_and_current_snapshot() {
+        use crate::store::sqlite::{MIGRATIONS, OFFLINE_AUDIO_RECIPE_SCHEMA};
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "offline_packages")
+            .copied()
+            .expect("offline table import contract");
+        // The column lands at v92 on the composed chain; the effort's private
+        // numbering (v88) is a different migration on main.
+        assert_eq!(OFFLINE_AUDIO_RECIPE_SCHEMA, 92);
+        assert_eq!(
+            MIGRATIONS[OFFLINE_AUDIO_RECIPE_SCHEMA as usize - 1],
+            "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;"
+        );
+        assert!(value_projection(table, 88, false).ends_with("expires_at, NULL"));
+        assert!(
+            value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA - 1, false)
+                .ends_with("expires_at, NULL")
+        );
+        assert!(value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA, false)
+            .ends_with("expires_at, audio_recipe"));
+        assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
+            .ends_with("expires_at, audio_recipe"));
+    }
+
+    #[test]
     fn pre_v54_offline_projection_supplies_unspent_recovery_claim() {
         let table = TABLES
             .iter()
@@ -3392,6 +3863,9 @@ mod tests {
         assert!(names.contains(&"media_playback_pointers"));
         assert!(names.contains(&"media_sessions"));
         assert!(names.contains(&"media_session_terminal_acks"));
+        assert!(names.contains(&"quality_cancellation_receipts"));
+        assert!(names.contains(&"quality_preparation_owners"));
+        assert!(names.contains(&"continuous_quality_ledgers"));
         assert!(names.contains(&"cache_storage_members"));
         assert!(names.contains(&"cache_consumer_pins"));
         assert!(names.contains(&"cluster_fragment_index_sources"));
@@ -3429,7 +3903,35 @@ mod tests {
         assert!(names.contains(&"live_tv_resource_records"));
         // The revision/nonce is reconstructed above the greatest restored epoch.
         assert!(!names.contains(&"live_tv_resource_revision"));
-        assert_eq!(names.len(), 70, "review every imported durable table");
+        for name in [
+            "sharing_identity",
+            "sharing_invitations",
+            "sharing_exports",
+            "sharing_export_libraries",
+            "sharing_imports",
+            "sharing_viewers",
+            "sharing_assignments",
+            "sharing_watch",
+            "sharing_rotations",
+            "sharing_import_rotations",
+            "sharing_catalogue_revisions",
+            "sharing_endpoint_manifest",
+            "sharing_relay_upstream",
+            "sharing_delivery_grants",
+            "sharing_ingress_custody",
+        ] {
+            assert!(names.contains(&name), "durable sharing table: {name}");
+        }
+        // Authenticated candidate failures are replicated: any node may serve
+        // the next attempt, and each must refuse the recipe that failed. The
+        // Link samples beside them are one node's measurements and never
+        // reach Raft.
+        assert!(names.contains(&"candidate_recovery"));
+        assert!(!names.contains(&"candidate_link_priors"));
+        assert!(names.contains(&"jellyfin_login_tokens"));
+        assert!(names.contains(&"jellyfin_entity_ids"));
+        assert!(names.contains(&"jellyfin_plays"));
+        assert_eq!(names.len(), 92, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
@@ -3518,6 +4020,132 @@ mod tests {
             current.ends_with("storage_id, generation_id, publication_generation"),
             "{current}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a05_recovery_import_preserves_spent_scope_and_legacy_epoch_projection() {
+        let sessions = TABLES
+            .iter()
+            .find(|t| t.name == "media_sessions")
+            .copied()
+            .expect("recovery import fixture");
+        let memory = TABLES
+            .iter()
+            .find(|t| t.name == "candidate_recovery")
+            .copied()
+            .expect("recovery import fixture");
+        let introduced = crate::store::candidate_recovery::SQLITE_INTRODUCED_SCHEMA;
+        assert_eq!(
+            introduced, 96,
+            "candidate_recovery lands at v96 on the composed chain"
+        );
+        assert_eq!(memory.minimum_schema, introduced);
+        for version in [51_i64, 53, introduced - 1, introduced] {
+            let dir = tempfile::tempdir().expect("recovery import fixture");
+            let path = dir.path().join("source.db");
+            let source = Connection::open(&path).expect("recovery import fixture");
+            crate::store::sqlite::SqliteStore::apply_migrations_for_test(&source, version)
+                .expect("recovery import fixture");
+            source
+                .execute(
+                    "INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,1)",
+                    rusqlite::params![keys::INSTANCE_ID, "a05-import"],
+                )
+                .expect("recovery import fixture");
+            source.execute("INSERT INTO media_sessions(incarnation_id,session_id,user_id,playback_id,request_fingerprint,owner_node_id,owner_epoch,lease_expires_at_ms,state,recipe_json,response_json,updated_at_ms) VALUES('incarnation','session',42,'player','request','owner',7,9000,'active','{}','{}',1)", []).expect("recovery import fixture");
+            if version >= 53 {
+                source.execute("UPDATE media_sessions SET recovery_epoch='d23b2032-2910-469a-bf76-3c0b12735028'", []).expect("recovery import fixture");
+            }
+            if version >= memory.minimum_schema {
+                for (recipe, step) in [("11".repeat(32), 1_i64), ("22".repeat(32), 0)] {
+                    source.execute("INSERT INTO candidate_recovery(scope,recipe,cause,event_id,user_id,playback_id,recovery_epoch,created_ms,quality_step) VALUES('exact-authenticated-scope',?1,'decode','original-event',42,'player','d23b2032-2910-469a-bf76-3c0b12735028',1234,?2)", rusqlite::params![recipe,step]).expect("recovery import fixture");
+                }
+            }
+            drop(source);
+            let hash = sha256_file(&path).expect("recovery import fixture");
+            let (reader, _) = SourceReader::open(&path, &hash, version)
+                .await
+                .expect("recovery import fixture");
+            let rows = reader
+                .import_chunk(sessions, version, SourceChunk::Offset(0))
+                .await
+                .expect("recovery import fixture");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].last(),
+                Some(&Param::Text(if version < 53 {
+                    String::new()
+                } else {
+                    "d23b2032-2910-469a-bf76-3c0b12735028".to_owned()
+                }))
+            );
+            if version < memory.minimum_schema {
+                // Production import_table skips before asking an older source
+                // for a table it cannot contain; parity uses an empty digest.
+                let source = Connection::open(&path).expect("recovery import fixture");
+                assert_eq!(
+                    source_digest(&source, version, memory).expect("recovery import fixture"),
+                    OrderedRowsHasher::new().finish()
+                );
+                continue;
+            }
+            assert_eq!(
+                reader
+                    .count(memory, true)
+                    .await
+                    .expect("recovery import fixture"),
+                2
+            );
+            let recovered = reader
+                .import_chunk(memory, version, SourceChunk::Offset(0))
+                .await
+                .expect("recovery import fixture");
+            assert_eq!(recovered.len(), 2);
+            let target = Connection::open_in_memory().expect("recovery import fixture");
+            target
+                .execute_batch(crate::store::candidate_recovery::SCHEMA)
+                .expect("recovery import fixture");
+            for row in recovered {
+                let values: Vec<rusqlite::types::Value> = row
+                    .into_iter()
+                    .map(|value| match value {
+                        Param::Text(text) => rusqlite::types::Value::Text(text),
+                        Param::Integer(number) => rusqlite::types::Value::Integer(number),
+                        _ => panic!("unexpected recovery import type"),
+                    })
+                    .collect();
+                let sql = format!(
+                    "INSERT INTO candidate_recovery({}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    memory.columns.join(",")
+                );
+                target
+                    .execute(&sql, rusqlite::params_from_iter(values))
+                    .expect("recovery import fixture");
+            }
+            let original = Connection::open(&path).expect("recovery import fixture");
+            assert_eq!(
+                source_digest(&original, version, memory).expect("recovery import fixture"),
+                source_digest(&target, version, memory).expect("recovery import fixture")
+            );
+            let spent: i64 = target.query_row("SELECT SUM(quality_step) FROM candidate_recovery WHERE recovery_epoch='d23b2032-2910-469a-bf76-3c0b12735028' AND created_ms=1234 AND event_id='original-event'", [], |row| row.get(0)).expect("recovery import fixture");
+            assert_eq!(
+                spent, 1,
+                "import preserves original spent admission without replay or timestamp refresh"
+            );
+            let mut statement = target
+                .prepare("SELECT recipe FROM candidate_recovery ORDER BY recipe")
+                .expect("recovery import fixture");
+            let recipes = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("recovery import fixture")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("recovery import fixture");
+            assert_eq!(
+                recipes,
+                vec!["11".repeat(32), "22".repeat(32)],
+                "full recipe identities survive import"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3724,7 +4352,7 @@ mod tests {
                 .await
                 .expect("read source import chunk");
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].len(), 20, "media session import parameter count");
+            assert_eq!(rows[0].len(), 21, "media session import parameter count");
             let expected_terminal = if schema_version < 34 {
                 Param::Null
             } else {
@@ -3762,6 +4390,7 @@ mod tests {
                     } else {
                         Param::Integer(9_876)
                     },
+                    Param::Text(String::new()),
                 ],
                 "schema v{schema_version} import row",
             );

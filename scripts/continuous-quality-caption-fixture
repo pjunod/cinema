@@ -1,0 +1,68 @@
+#!/usr/bin/env node
+"use strict";
+// Owned MP4 stream-copy recipe; never generates or reencodes its incumbent.
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const {spawn, spawnSync} = require('node:child_process');
+function probe(file) {
+  const r=spawnSync('ffprobe',['-v','error','-show_streams','-of','json',file],{encoding:'utf8',maxBuffer:1048576,timeout:30000});
+  if(r.status!==0) throw new Error('fixture stream probe failed');
+  return JSON.parse(r.stdout).streams;
+}
+function run(command,args) {
+  return new Promise((resolve,reject)=>{
+    const child=spawn(command,args,{stdio:['ignore','pipe','pipe']});
+    const digest=crypto.createHash('sha256');let lines=0,bytes=0;
+    const timer=setTimeout(()=>child.kill('SIGKILL'),180000);
+    child.stdout.on('data',chunk=>{digest.update(chunk);bytes+=chunk.length;for(const b of chunk)if(b===10)lines++;});
+    // No filenames/command-line/private stderr retained in the packet receipt.
+    child.stderr.resume();child.on('error',error=>{clearTimeout(timer);reject(error);});
+    child.on('close',code=>{clearTimeout(timer);if(code!==0)reject(new Error(`${command} failed (${code})`));
+      else resolve({sha256:digest.digest('hex'),lines,bytes});});
+  });
+}
+async function packets(file,stream) {
+  return run('ffprobe',['-v','error','-select_streams',stream,'-show_packets','-show_data_hash','sha256',
+    '-show_entries','packet=pts,dts,duration,data_hash:packet_side_data=','-of','compact',file]);
+}
+function stamp(seconds) {const h=Math.floor(seconds/3600),m=Math.floor(seconds/60)%60,s=seconds%60;
+  return [h,m,s].map(n=>String(n).padStart(2,'0')).join(':')+',000';}
+function fileHash(file) {
+  const digest=crypto.createHash('sha256'),buffer=Buffer.alloc(1048576),fd=fs.openSync(file,'r');
+  try {let n;while((n=fs.readSync(fd,buffer,0,buffer.length,null))>0)digest.update(buffer.subarray(0,n));}
+  finally {fs.closeSync(fd);}return digest.digest('hex');
+}
+async function remuxFixture(source,output,receipt) {
+  for(const name of [output,receipt])if(fs.existsSync(name))throw new Error('refusing existing output or receipt');
+  const streams=probe(source),video=streams.find(s=>s.codec_type==='video'),audio=streams.find(s=>s.codec_type==='audio');
+  if(video?.codec_name!=='mpeg4'||audio?.codec_name!=='aac'||video.width!==1920||video.height!==1080
+    || !/^1\/\d+$/.test(video.time_base)|| !/^1\/\d+$/.test(audio.time_base))throw new Error('source is not the expected clock-bearing MPEG4/AAC MP4');
+  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'cq-caption-recipe-'));
+  try {
+    const subtitle=path.join(temporary,'captions.srt');let text='';
+    for(let i=0;i<450;i++)text+=`${i+1}\n${stamp(i*4)} --> ${stamp(i*4+4)}\nCQ caption ${String(i+1).padStart(4,'0')}\n\n`;
+    fs.writeFileSync(subtitle,text,{flag:'wx'});
+    await run('ffmpeg',['-hide_banner','-loglevel','error','-nostdin','-n','-copyts','-i',source,'-f','srt','-i',subtitle,
+      '-map','0:v:0','-map','0:a:0','-map','1:s:0','-c:v','copy','-c:a','copy','-c:s','mov_text',
+      '-video_track_timescale',video.time_base.split('/')[1],'-avoid_negative_ts','disabled',
+      '-metadata:s:s:0','language=eng','-metadata:s:s:0','title=CQ deterministic captions','-disposition:s:0','0',output]);
+    const copied=probe(output),checks=[];
+    for(const [kind,selector] of [['video','v:0'],['audio','a:0']]) {
+      const original=streams.find(s=>s.codec_type===kind),after=copied.find(s=>s.codec_type===kind);
+      const before=await packets(source,selector),result=await packets(output,selector);
+      checks.push({kind,time_base_before:original.time_base,time_base_after:after?.time_base,before,after:result,
+        identical:original.time_base===after?.time_base&&before.sha256===result.sha256&&before.lines===result.lines&&before.lines>0});
+    }
+    const passed=checks.every(row=>row.identical)&&copied.some(s=>s.codec_type==='subtitle'&&s.codec_name==='mov_text');
+    fs.writeFileSync(receipt,JSON.stringify({scope:'stream-copy remux; complete AV packet payload hashes, integer PTS/DTS/durations and time bases; no runtime or physical acceptance',
+      status:passed?'verified':'failed',source_sha256:fileHash(source),output_sha256:fileHash(output),caption_count:450,caption_sha256:crypto.createHash('sha256').update(text).digest('hex'),checks},null,2)+'\n',{flag:'wx'});
+    if(!passed)throw new Error('remux did not preserve complete AV packet bytes/timestamps; failed fixture and receipt retained');
+  } finally {fs.rmSync(temporary,{recursive:true,force:true});}
+}
+module.exports={remuxFixture,fileHash};
+if(require.main===module){const args=process.argv.slice(2);
+  if(args.includes('--help'))process.stdout.write('Usage: continuous-quality-caption-fixture SOURCE.mp4 NEW.mp4 NEW_RECEIPT.json\nNo reencode; deterministic captions; full AV packet/timestamp equality required.\n');
+  else if(args.length!==3){process.stderr.write('three explicit owned paths required\n');process.exitCode=1;}
+  else remuxFixture(...args).catch(error=>{process.stderr.write(error.message+'\n');process.exitCode=1;});}

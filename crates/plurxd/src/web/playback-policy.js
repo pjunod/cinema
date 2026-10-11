@@ -5,6 +5,20 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  // A callback submitted for an expected future display can legitimately
+  // lead the element clock by that interval. Larger unexplained future PTS
+  // is uncertain metadata, not a new baseline for backward/skip counters.
+  function frameMetadataAheadOfClock(meta, {nowMs, currentTime, playbackRate = 1, nominalSeconds = 0} = {}) {
+    if (!Number.isFinite(meta?.mediaTime) || !Number.isFinite(nowMs)
+        || !Number.isFinite(currentTime) || currentTime < 0
+        || !Number.isFinite(playbackRate) || playbackRate <= 0) return false;
+    const futureMs = Number.isFinite(meta.expectedDisplayTime)
+      ? Math.max(0, meta.expectedDisplayTime - nowMs) : 0;
+    // Retain coarse 100ms clock rounding and low-frame-rate presentation.
+    const tolerance = Math.max(0.2, Number.isFinite(nominalSeconds) && nominalSeconds > 0 ? 2 * nominalSeconds : 0);
+    return meta.mediaTime - currentTime > tolerance + futureMs * playbackRate / 1000;
+  }
+
   const DEFAULTS = Object.freeze({
     lostPerMinute: 6,
     minimumSeconds: 150,
@@ -340,6 +354,8 @@
     recentSpeed = null,
     activeSupplyStall = false,
     supplyStalls = 0,
+    decodeStalls = 0,
+    decodeStepConsumed = false,
     lastStallAtMs = null,
     nowMs = 0,
     lastSwitchAtMs = null,
@@ -419,7 +435,8 @@
 
     if (
       namedSuppression ||
-      (starvation && !freshBandwidthCliff && causeKind !== "capacity-shortfall")
+      (starvation && !freshBandwidthCliff &&
+        causeKind !== "capacity-shortfall" && causeKind !== "decode-failed")
     ) {
       return {
         height: current.height,
@@ -441,6 +458,23 @@
       return {height: current.height, reason: "switch-budget", action: "suppressed",
         emergency: false, mildSamples: 0, upgradeSinceMs: null,
         evidence: {kind: causeKind, budget_left: 0}};
+    }
+
+    // A named decoder failure belongs to one rung. Report the height for the
+    // adapter to retain; another failure on that height is for compatibility
+    // recovery, not another quality step.
+    const blocked = blockedHeights instanceof Set
+      ? blockedHeights
+      : new Set(Array.isArray(blockedHeights) ? blockedHeights : []);
+    if (causeFresh && causeKind === "decode-failed" && decodeStalls > 0) {
+      const target = available[currentIndex - 1];
+      if (decodeStepConsumed || !target) {
+        return {height: current.height, reason: "decode", action: "suppressed",
+          emergency: false, mildSamples: 0, upgradeSinceMs: null};
+      }
+      return {height: target.height, reason: "decode", action: "switch",
+        blockedHeights: [current.height], emergency: false,
+        mildSamples: 0, upgradeSinceMs: null};
     }
 
     const severe = freshBandwidthCliff;
@@ -530,9 +564,6 @@
     // A rung that already failed this playback is not a candidate. The
     // dwell/hold timers alone cannot end a loop whose every cycle looks new:
     // a rung that fails and is re-entered on schedule oscillates forever.
-    const blocked = blockedHeights instanceof Set
-      ? blockedHeights
-      : new Set(Array.isArray(blockedHeights) ? blockedHeights : []);
     const next = nextCandidate
       && nextCandidate.height <= playerCeiling
       && !blocked.has(nextCandidate.height)
@@ -840,6 +871,12 @@
       // without it the viewer is sent back to the start of a film they were
       // ninety minutes into. Absent, null or unparseable stays `null` — a
       // guessed position is worse than no position.
+      // Only this typed refusal carries an unpublished start's release
+      // capability. Other failures and malformed ids cannot name a resource.
+      ...(parsed.code === "media_session_handoff_pending"
+        && typeof parsed.pending_session_id === "string"
+        && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(parsed.pending_session_id)
+        ? { pending_session_id: parsed.pending_session_id } : {}),
       position_ms:
         parsed.film_position_ms != null &&
         Number.isFinite(Number(parsed.film_position_ms))
@@ -1071,6 +1108,7 @@
     "media_owner_lost",
     "media_owner_transition",
     "producer_failed",
+    "segment_publication_failed",
     "producer_exited",
     "producer_ended",
     "session_gone",
@@ -2215,7 +2253,20 @@
     }
     return encodes.at(-1) || null;
   }
-  function decideCandidateTransition({state, sample, candidates, currentId, target = null, aspect = null}) {
+  // Link pressure has already proved the link cannot carry the current rung.
+// The largest lower rung whose cost fits the link is the answer. When none
+// fits, the cheapest costed lower rung is the smallest deficit, provided it
+// costs less than the current rung (demand); otherwise holding is no worse.
+// An uncosted rung is never chosen for a link cause.
+function linkRecoveryCandidate(lower, link, demand) {
+  const costed = lower.filter(candidate => candidate.peak_bps > 0);
+  const fitting = costed.find(candidate => candidate.peak_bps <= link * 0.95);
+  if (fitting) return fitting;
+  const cheapest = costed.reduce((best, candidate) => !best || candidate.peak_bps < best.peak_bps ? candidate : best, null);
+  return cheapest && !(demand > 0 && cheapest.peak_bps >= demand) ? cheapest : null;
+}
+
+function decideCandidateTransition({state, sample, candidates, currentId, target = null, aspect = null}) {
     const now = sample.now_ms;
     const next = {...state, switchTimesMs:(state.switchTimesMs || []).filter(at =>
       at <= now && now - at < 3600000), blockedCandidates:[...(state.blockedCandidates || [])]};
@@ -2251,20 +2302,24 @@
     const severe = sample.cause === "link" && link > 0 && demand > 0
       && link * 10 < demand * 7 && draining;
     const lowMargin = sample.cause === "link" && link > 0 && demand > 0
-      && link < demand * 1.2 && draining;
-    next.mildSamples = lowMargin ? (next.mildSamples || 0) + 1 : 0;
+      && link < demand * 1.2;
+    // A routine HLS refill is not recovered link headroom. Retain consecutive
+    // fresh low-margin observations across it, but require draining when
+    // actually choosing a downgrade. Otherwise the two-second refill cycle
+    // can reset every one-second observation and postpone pressure forever.
+    next.mildSamples = lowMargin ? Math.min(2, (next.mildSamples || 0) + 1) : 0;
     const emergency = severe || sample.cause === "decode";
-    const pressure = severe || next.mildSamples >= 2 || ["encode", "decode"].includes(sample.cause);
+    const pressure = severe || next.mildSamples >= 2 && draining
+      || ["encode", "decode"].includes(sample.cause);
     const area = candidate => candidate.width * candidate.height;
     let chosen;
     if (pressure) {
       // Recovery may attempt an unproved compatible encode: requiring an
       // already-running producer makes a cold original impossible to rescue.
       // The owner still bounds preparation and validates the actual successor.
-      const lower = eligible.filter(candidate => area(candidate) < area(current)
-        && (sample.cause !== "link" || candidate.peak_bps > 0 && candidate.peak_bps <= link * 0.95))
+      const lower = eligible.filter(candidate => area(candidate) < area(current))
         .sort((a, b) => area(b) - area(a));
-      chosen = severe ? lower.find(candidate => candidate.peak_bps > 0 && candidate.peak_bps <= link * 0.95) : lower[0];
+      chosen = sample.cause === "link" ? linkRecoveryCandidate(lower, link, demand) : lower[0];
     } else chosen = selectQualityCandidate({candidates:eligible,target,aspect,transfer:sample.transfer,
       allowTrial:!sample.natural_boundary});
     if (!chosen || chosen.id === currentId) {
@@ -2334,6 +2389,7 @@
     nativeHlsAvailable,
     hlsTransport,
     copyAudioNeedsTranscode,
+    frameMetadataAheadOfClock,
     initialRoute,
     indexPendingFallback,
     fallbackAction,

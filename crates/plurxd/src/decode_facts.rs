@@ -25,6 +25,39 @@ use plurx_core::transcode::{
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
+#[cfg(target_os = "macos")]
+mod macos_wasm;
+#[cfg(target_os = "linux")]
+mod pi_namespace;
+
+/// Internal synchronous launcher dispatch; normal daemon startup stays unchanged.
+pub(crate) fn dispatch_probe_bootstrap() -> Option<std::io::Result<()>> {
+    #[cfg(target_os = "linux")]
+    {
+        pi_namespace::dispatch()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn probe_launch_path(
+    snapshot: &ExecutableSnapshot,
+    mode: ProbeLaunchMode,
+) -> Result<PathBuf, DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    {
+        pi_namespace::launch_path(snapshot, mode)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mode;
+        Ok(snapshot_execution_path(snapshot))
+    }
+}
+
 const MAX_PROBE_STDOUT_BYTES: usize = 256 * 1024;
 const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
 const MAX_PROBE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
@@ -271,7 +304,7 @@ impl DecodePlanFallbackReason {
 
 impl DecodeFactMetrics {
     fn saturating_add(target: &AtomicU64, amount: u64) {
-        let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = target.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != u64::MAX).then(|| current.saturating_add(amount))
         });
     }
@@ -340,20 +373,25 @@ impl DecodeFactMetrics {
                     let _ = writeln!(
                         out,
                         "plurx_decode_facts_phase_seconds_bucket{{phase=\"{}\",outcome=\"{}\",le=\"{}\"}} {}",
-                        phase.label(), outcome.label(), upper, cumulative
+                        phase.label(),
+                        outcome.label(),
+                        upper,
+                        cumulative
                     );
                 }
                 let count = cell.count.load(Ordering::Relaxed);
                 let _ = writeln!(
                     out,
                     "plurx_decode_facts_phase_seconds_bucket{{phase=\"{}\",outcome=\"{}\",le=\"+Inf\"}} {count}",
-                    phase.label(), outcome.label()
+                    phase.label(),
+                    outcome.label()
                 );
                 let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
                 let _ = writeln!(
                     out,
                     "plurx_decode_facts_phase_seconds_sum{{phase=\"{}\",outcome=\"{}\"}} {seconds:.9}",
-                    phase.label(), outcome.label()
+                    phase.label(),
+                    outcome.label()
                 );
                 let _ = writeln!(
                     out,
@@ -446,6 +484,8 @@ pub(crate) enum ProbeStreamSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeLaunchMode {
     Production,
+    #[cfg(all(test, target_os = "linux"))]
+    ProductionNamespace,
     #[cfg(test)]
     Fixture,
     #[cfg(all(test, target_os = "linux"))]
@@ -503,7 +543,8 @@ impl ProbeLaunchMode {
             #[cfg(test)]
             Self::Fixture => false,
             #[cfg(all(test, target_os = "linux"))]
-            Self::ProductionPidfdOpenFailure
+            Self::ProductionNamespace
+            | Self::ProductionPidfdOpenFailure
             | Self::ProductionPidfdReadFailure
             | Self::ProductionSupervisorDelay
             | Self::ProductionSupervisorReceiveFailure
@@ -724,6 +765,8 @@ pub(crate) struct DecodeFactSource {
     /// The class and purpose of every probe run for this source: the
     /// caller's, since only it knows whether a viewer is waiting.
     work: crate::process_control::ChildWork,
+    projection: ProbeProjection,
+    seed: Option<FreshFactSeed>,
     /// The observation delays; see [`DecodeFactSourceHooks`]. Shared by
     /// clones, since a clone is the same source.
     hooks: Arc<dyn DecodeFactSourceHooks>,
@@ -739,6 +782,8 @@ impl DecodeFactSource {
             handle,
             offset_gate,
             work,
+            projection: ProbeProjection::Decoder,
+            seed: None,
             hooks: Arc::new(NoopDecodeFactSourceHooks),
         }
     }
@@ -791,10 +836,11 @@ struct ProbeFileIdentity {
     content_digest: String,
 }
 
-/// Startup-bound FFprobe identity. Production collection accepts only an
-/// operator-trusted, self-contained Linux ELF, copies its primary image into a
-/// sealed anonymous executable, and prevents that child from performing a
-/// later exec. This binds the primary image; it is not a sandbox for malicious
+/// Startup-bound parser identity. Linux executes an operator-trusted,
+/// self-contained ELF from a sealed anonymous descriptor and prevents later
+/// exec. macOS interprets no native parser: a package companion is compiled
+/// from immutable copied WebAssembly bytes with only held-source/result
+/// capabilities; its generated image cannot create a process or load code. This binds the primary image; it is not a sandbox for malicious
 /// parser behavior such as interpreting or mapping readable bytes as code.
 /// Path revalidation before and after collection detects replacement of the
 /// configured artifact without allowing a transient swap to choose another
@@ -805,6 +851,7 @@ pub(crate) struct DecodeProbeIdentity {
     executable_file: Arc<std::fs::File>,
     executable_snapshot: Arc<ExecutableSnapshot>,
     build_digest: String,
+    reporter: String,
     file: ProbeFileIdentity,
     snapshot_file: ProbeFileIdentity,
     launch_mode: ProbeLaunchMode,
@@ -813,8 +860,12 @@ pub(crate) struct DecodeProbeIdentity {
 #[derive(Debug)]
 struct ExecutableSnapshot {
     file: std::fs::File,
-    // Non-Linux test fixtures execute an owned temporary path. Production
-    // support is Linux-only and uses a sealed anonymous descriptor.
+    #[cfg(target_os = "macos")]
+    parser: Option<Arc<macos_wasm::Parser>>,
+    #[cfg(target_os = "macos")]
+    parser_image_digest: Option<String>,
+    // Non-Linux fixtures execute an owned temporary path. macOS production
+    // instead uses the compiled immutable parser above, never this pathname.
     #[cfg(not(target_os = "linux"))]
     _path: tempfile::TempPath,
 }
@@ -865,6 +916,24 @@ impl DecodeProbeIdentity {
             .await
             .map_err(|_| DecodeFactError::CacheInvariant)?;
         let executable = resolve_executable(bin)?;
+        #[cfg(target_os = "macos")]
+        let executable = if launch_mode.is_production() {
+            let companion = executable
+                .parent()
+                .ok_or_else(|| {
+                    DecodeFactError::ProbeIdentity(
+                        "configured FFprobe has no package directory".into(),
+                    )
+                })?
+                .join("plurx-source-parser.wasm");
+            std::fs::canonicalize(companion).map_err(|error| {
+                DecodeFactError::ProbeIdentity(format!(
+                    "packaged capability-bound source parser is unavailable: {error}"
+                ))
+            })?
+        } else {
+            executable
+        };
         let executable_file = Arc::new(
             std::fs::File::open(&executable)
                 .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?,
@@ -890,6 +959,13 @@ impl DecodeProbeIdentity {
             None,
         )
         .await?;
+        #[cfg(target_os = "macos")]
+        if launch_mode.is_production()
+            && executable_snapshot.parser_image_digest.as_deref()
+                != Some(before.content_digest.as_str())
+        {
+            return Err(DecodeFactError::ProbeChanged);
+        }
         if snapshot_file.content_digest != before.content_digest {
             return Err(DecodeFactError::ProbeChanged);
         }
@@ -902,16 +978,29 @@ impl DecodeProbeIdentity {
         if before != after {
             return Err(DecodeFactError::ProbeChanged);
         }
-        let digest_input = serde_json::json!({
+        #[allow(unused_mut)]
+        let mut digest_input = serde_json::json!({
             "canonical_path": &executable,
             "content_digest": &before.content_digest,
             "version": &version,
         });
+        #[cfg(target_os = "macos")]
+        if launch_mode.is_production() {
+            digest_input["parser_abi"] = serde_json::Value::String(macos_wasm::ABI_ID.into());
+        }
         Ok(Self {
             executable,
             executable_file,
             executable_snapshot,
             build_digest: hex::encode(Sha256::digest(digest_input.to_string().as_bytes())),
+            reporter: String::from_utf8_lossy(&version)
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or_default()
+                .chars()
+                .take(160)
+                .collect(),
             file: before,
             snapshot_file,
             launch_mode,
@@ -920,6 +1009,10 @@ impl DecodeProbeIdentity {
 
     pub(crate) fn executable(&self) -> &Path {
         &self.executable
+    }
+
+    pub(crate) fn content_digest(&self) -> &str {
+        &self.file.content_digest
     }
 
     pub(crate) fn build_digest(&self) -> &str {
@@ -969,7 +1062,21 @@ fn require_direct_probe_executable(file: &std::fs::File) -> Result<(), DecodeFac
     {
         require_self_contained_linux_elf(file)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::FileExt;
+        let mut magic = [0; 8];
+        file.read_exact_at(&mut magic, 0)
+            .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+        if magic == *b"\0asm\x01\0\0\0" {
+            Ok(())
+        } else {
+            Err(DecodeFactError::ProbeIdentity(
+                "source parser must be a capability-bound WebAssembly image".into(),
+            ))
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = file;
         Err(DecodeFactError::UnsupportedPlatform)
@@ -2541,6 +2648,20 @@ fn configure_probe_execution(
     arguments: &[OsString],
     class: crate::process_control::ChildClass,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    if command.as_std().get_program() == OsStr::new("/usr/bin/bwrap") {
+        return pi_namespace::configure(
+            command,
+            launch_mode,
+            executable_fd,
+            source_fd,
+            arg0,
+            arguments,
+            class,
+            launch_deadline,
+        );
+    }
+    command.args(arguments);
     #[cfg(not(target_os = "linux"))]
     let _ = launch_deadline;
     #[cfg(target_os = "linux")]
@@ -2902,31 +3023,80 @@ fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, Dec
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
+    snapshot_executable_in(source, None)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn snapshot_executable_in(
+    source: &std::fs::File,
+    directory: Option<&Path>,
+) -> Result<ExecutableSnapshot, DecodeFactError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mut snapshot = tempfile::Builder::new()
-        .prefix("plurx-ffprobe-")
-        .tempfile()
-        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    copy_executable(source, snapshot.as_file_mut())?;
-    snapshot
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("plurx-ffprobe-");
+    let mut temporary = match directory {
+        Some(directory) => builder.tempfile_in(directory),
+        None => builder.tempfile(),
+    }
+    .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    copy_executable(source, temporary.as_file_mut())?;
+    temporary
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o700))
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    // Install the cleanup owner before setting immutability on the exact
+    // copied object. Reopening readonly and initializing the parser can both
+    // fail; neither may leave an immutable file outside its cleanup owner.
+    let (file, path) = temporary.into_parts();
+    let mut snapshot = ExecutableSnapshot {
+        file,
+        _path: path,
+        #[cfg(target_os = "macos")]
+        parser: None,
+        #[cfg(target_os = "macos")]
+        parser_image_digest: None,
+    };
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;
 
-        if unsafe { libc::fchflags(snapshot.as_file().as_raw_fd(), libc::UF_IMMUTABLE) } == -1 {
+        if unsafe { libc::fchflags(snapshot.file.as_raw_fd(), libc::UF_IMMUTABLE) } == -1 {
             return Err(DecodeFactError::ProbeIdentity(
                 std::io::Error::last_os_error().to_string(),
             ));
         }
     }
-    let path = snapshot.into_temp_path();
-    let file = std::fs::File::open(&path)
+    snapshot.file = std::fs::File::open(snapshot.path())
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    Ok(ExecutableSnapshot { file, _path: path })
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::FileExt;
+
+        let size = snapshot
+            .file
+            .metadata()
+            .map_err(|e| DecodeFactError::ProbeIdentity(e.to_string()))?
+            .len();
+        let mut magic = [0; 8];
+        if snapshot.file.read_exact_at(&mut magic, 0).is_ok() && magic == *b"\0asm\x01\0\0\0" {
+            if size > 32 * 1024 * 1024 {
+                return Err(DecodeFactError::ProbeIdentity(
+                    "source parser exceeds image bound".into(),
+                ));
+            }
+            let mut bytes = vec![0; size as usize];
+            snapshot
+                .file
+                .read_exact_at(&mut bytes, 0)
+                .map_err(|e| DecodeFactError::ProbeIdentity(e.to_string()))?;
+            snapshot.parser_image_digest = Some(hex::encode(Sha256::digest(&bytes)));
+            snapshot.parser = Some(Arc::new(
+                macos_wasm::Parser::new(&bytes).map_err(DecodeFactError::ProbeIdentity)?,
+            ));
+        }
+    }
+    Ok(snapshot)
 }
 
 #[cfg(windows)]
@@ -3224,12 +3394,30 @@ async fn probe_version_with_deadline_on(
         use std::os::unix::process::CommandExt;
 
         let _version_permit = version_permit;
+        #[cfg(target_os = "macos")]
+        if launch_mode.is_production() {
+            let output = run_macos_parser(
+                &executable,
+                None,
+                vec!["-version".into()],
+                MAX_VERSION_BYTES,
+                launch_deadline,
+                None,
+            )
+            .await?;
+            if output.status != 0 || output.stdout.is_empty() {
+                return Err(DecodeFactError::ProbeIdentity(
+                    "bounded parser version check failed".into(),
+                ));
+            }
+            return Ok(output.stdout);
+        }
         let executable_fd = executable.as_file().as_raw_fd();
         let arguments = vec![OsString::from("-version")];
-        let mut command = tokio::process::Command::new(snapshot_execution_path(&executable));
+        let mut command =
+            tokio::process::Command::new(probe_launch_path(&executable, launch_mode)?);
         command.as_std_mut().arg0(&configured_path);
         command
-            .args(&arguments)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -3392,6 +3580,77 @@ async fn probe_version(
     Ok(stdout.0)
 }
 
+/// One freshly collected document and the typed facts derived from the same
+/// executable and source. The document is transient; only facts enter cache.
+pub(crate) struct FreshSourceProbe {
+    pub(crate) document: String,
+    facts: Result<DecodeFacts, DecodeFactError>,
+    key: CacheKey,
+}
+
+#[derive(Clone, Debug)]
+struct FreshFactSeed {
+    facts: Result<DecodeFacts, DecodeFactError>,
+    key: CacheKey,
+}
+
+struct CollectedProbe {
+    facts: Result<DecodeFacts, DecodeFactError>,
+    document: Option<String>,
+    key: Option<CacheKey>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeProjection {
+    Decoder,
+    SourceDocument,
+}
+
+impl ProbeProjection {
+    fn arguments(self) -> Vec<&'static str> {
+        let mut args = vec!["-v", "error", "-print_format", "json"];
+        match self {
+            Self::Decoder => args.extend(["-show_entries",
+                "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,sample_aspect_ratio,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_tags=rotate:stream_side_data=side_data_type,rotation,displaymatrix,max_content,max_average,max_luminance",
+                "-show_streams"]),
+            Self::SourceDocument => args.extend(["-show_format", "-show_streams", "-show_chapters"]),
+        }
+        args
+    }
+
+    fn output_limit(self) -> usize {
+        match self {
+            Self::Decoder => MAX_PROBE_STDOUT_BYTES,
+            // Same bound as the held-source comparison this replaces.
+            Self::SourceDocument => 16 * 1024 * 1024,
+        }
+    }
+
+    fn finish(
+        self,
+        facts: Result<DecodeFacts, DecodeFactError>,
+        stdout: &[u8],
+        reporter: &str,
+    ) -> Result<CollectedProbe, DecodeFactError> {
+        let document = if self == Self::SourceDocument {
+            let mut document: serde_json::Value = serde_json::from_slice(stdout)
+                .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?;
+            plurx_core::scan::probe::stamp_reporter(&mut document, reporter);
+            Some(
+                serde_json::to_string(&document)
+                    .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        Ok(CollectedProbe {
+            facts,
+            document,
+            key: None,
+        })
+    }
+}
+
 /// Bounded FIFO cache. The preparation path supplies the exact FFprobe build
 /// digest, so replacing the binary cannot reuse facts from an older parser.
 pub(crate) struct DecodeFactCache {
@@ -3444,7 +3703,56 @@ impl DecodeFactCache {
             Ok((_, result)) => *result,
             Err(_) => DecodeFactLookupResult::Refused,
         });
-        result.map(|(facts, _)| facts)
+        result.and_then(|(collected, _)| collected.facts)
+    }
+
+    /// Fresh verification cannot be satisfied by a cache hit: comparison of
+    /// the scan and the held object is a current observation, even when the
+    /// decode facts for that object are already cached.
+    pub(crate) async fn probe_source_document(
+        &self,
+        probe: &DecodeProbeIdentity,
+        mut source: DecodeFactSource,
+        catalog: Option<&DecodeCatalogMetadata>,
+        selected_stream: ProbeStreamSelection,
+        budget: Duration,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<FreshSourceProbe, DecodeFactError> {
+        source.projection = ProbeProjection::SourceDocument;
+        let result = self
+            .get_or_probe_inner(probe, source, catalog, selected_stream, budget, cancelled)
+            .await;
+        self.metrics.record_lookup(match &result {
+            Ok((_, outcome)) => *outcome,
+            Err(_) => DecodeFactLookupResult::Refused,
+        });
+        let (collected, _) = result?;
+        Ok(FreshSourceProbe {
+            facts: collected.facts,
+            document: collected.document.ok_or(DecodeFactError::CacheInvariant)?,
+            key: collected.key.ok_or(DecodeFactError::CacheInvariant)?,
+        })
+    }
+
+    /// Complete optional decoder refinement using a source document already
+    /// validated by this owner. Its complete cache identity must still match;
+    /// a changed object or executable cannot turn into a catalog fallback.
+    pub(crate) async fn refine_source_document(
+        &self,
+        probe: &DecodeProbeIdentity,
+        mut source: DecodeFactSource,
+        catalog: Option<&DecodeCatalogMetadata>,
+        prepared: FreshSourceProbe,
+        budget: Duration,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<DecodeFacts, DecodeFactError> {
+        let selected_stream = prepared.key.selected_stream;
+        source.seed = Some(FreshFactSeed {
+            facts: prepared.facts,
+            key: prepared.key,
+        });
+        self.get_or_probe(probe, source, catalog, selected_stream, budget, cancelled)
+            .await
     }
 
     async fn get_or_probe_inner(
@@ -3455,7 +3763,7 @@ impl DecodeFactCache {
         selected_stream: ProbeStreamSelection,
         budget: Duration,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<(DecodeFacts, DecodeFactLookupResult), DecodeFactError> {
+    ) -> Result<(CollectedProbe, DecodeFactLookupResult), DecodeFactError> {
         let started = std::time::Instant::now();
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
@@ -3521,14 +3829,40 @@ impl DecodeFactCache {
             catalog_digest: catalog.map(|metadata| metadata.digest().to_owned()),
             selected_stream,
         };
-        if let Some(facts) = self.entries.lock().await.get(&key).cloned() {
+        if let Some(seed) = &source.seed {
+            if seed.key.source != key.source {
+                return Err(DecodeFactError::SourceChanged);
+            }
+            if seed.key.ffprobe_build_digest != key.ffprobe_build_digest {
+                return Err(DecodeFactError::ProbeChanged);
+            }
+            if seed.key != key {
+                return Err(DecodeFactError::CacheInvariant);
+            }
+            if let Err(error) = &seed.facts {
+                return Err(error.clone());
+            }
+        }
+        let cached = if source.projection == ProbeProjection::Decoder {
+            self.entries.lock().await.get(&key).cloned()
+        } else {
+            None
+        };
+        if let Some(facts) = cached {
             self.metrics
                 .record_hit_phase(DecodeFactPhase::GateWait, gate_elapsed);
             self.metrics
                 .record_hit_phase(DecodeFactPhase::IdentityValidation, identity_elapsed);
             self.metrics
                 .record_hit_phase(DecodeFactPhase::SourceObservation, observation_elapsed);
-            return Ok((facts, DecodeFactLookupResult::Hit));
+            return Ok((
+                CollectedProbe {
+                    facts: Ok(facts),
+                    document: None,
+                    key: Some(key.clone()),
+                },
+                DecodeFactLookupResult::Hit,
+            ));
         }
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
@@ -3570,6 +3904,8 @@ impl DecodeFactCache {
                     observation: bound_source,
                     offset_permit: source_offset_permit,
                     work: source.work,
+                    projection: source.projection,
+                    seed: source.seed.clone(),
                 },
                 owned_catalog.as_ref(),
                 selected_stream,
@@ -3585,8 +3921,8 @@ impl DecodeFactCache {
             (result, gate, source)
         });
         let collection_result = await_owned_collection(collection, remaining, cancelled).await;
-        let (facts, gate, source) = collection_result?;
-        let facts = facts?;
+        let (collected, gate, source) = collection_result?;
+        let mut collected = collected?;
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
             .saturating_sub(started.elapsed());
@@ -3632,9 +3968,26 @@ impl DecodeFactCache {
             phase_started.elapsed(),
         );
         source_outcome?;
+        collected.key = Some(key.clone());
         let mut entries = self.entries.lock().await;
-        if let Some(existing) = entries.get(&key) {
-            return Ok((existing.clone(), DecodeFactLookupResult::Hit));
+        let Ok(facts) = &collected.facts else {
+            // Source verification succeeded; preserve the decoder's typed
+            // parse refusal for its existing, separately bounded fallback.
+            return Ok((collected, DecodeFactLookupResult::MissCollected));
+        };
+        let pending_refinement = source.projection == ProbeProjection::SourceDocument
+            && matches!(facts.scan_type(), ScanType::Interlaced(_));
+        if pending_refinement {
+            if let Some(existing) = entries.get(&key) {
+                collected.facts = Ok(facts
+                    .clone()
+                    .with_interlace_verdict(existing.interlace_verdict()));
+            }
+            return Ok((collected, DecodeFactLookupResult::MissCollected));
+        }
+        if let Some(existing) = entries.get_mut(&key) {
+            *existing = facts.clone();
+            return Ok((collected, DecodeFactLookupResult::MissCollected));
         }
         let mut order = self.order.lock().await;
         while entries.len() >= self.capacity {
@@ -3646,7 +3999,7 @@ impl DecodeFactCache {
         entries.insert(key.clone(), facts.clone());
         order.push_back(key);
         drop(gate);
-        Ok((facts, DecodeFactLookupResult::MissCollected))
+        Ok((collected, DecodeFactLookupResult::MissCollected))
     }
 }
 
@@ -3697,7 +4050,7 @@ pub(crate) enum DecodeFactError {
     InvalidJson(String),
     InvalidFacts(String),
     CacheInvariant,
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     UnsupportedPlatform,
 }
 
@@ -3719,7 +4072,7 @@ impl DecodeFactError {
                 DecodePlanFallbackReason::IdentityIo
             }
             Self::CacheInvariant => DecodePlanFallbackReason::Invariant,
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             Self::UnsupportedPlatform => DecodePlanFallbackReason::Invariant,
         }
     }
@@ -3752,7 +4105,7 @@ impl std::fmt::Display for DecodeFactError {
             Self::CacheInvariant => {
                 formatter.write_str("decoder fact cache ordering is inconsistent")
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             Self::UnsupportedPlatform => formatter
                 .write_str("descriptor-bound decoder probing is unsupported on this platform"),
         }
@@ -3774,6 +4127,8 @@ struct DecodeFactCollectionSource {
     observation: DecodeSourceObservation,
     offset_permit: tokio::sync::OwnedSemaphorePermit,
     work: crate::process_control::ChildWork,
+    projection: ProbeProjection,
+    seed: Option<FreshFactSeed>,
 }
 
 #[cfg(unix)]
@@ -3971,6 +4326,58 @@ fn parse_idet_verdict(stderr: &[u8]) -> Option<InterlaceVerdict> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn duplicate_macos_source(fd: std::os::fd::RawFd) -> Result<Arc<std::fs::File>, DecodeFactError> {
+    use std::os::fd::FromRawFd;
+    let copied = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if copied < 0 {
+        return Err(DecodeFactError::Read(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(Arc::new(unsafe { std::fs::File::from_raw_fd(copied) }))
+}
+
+#[cfg(target_os = "macos")]
+async fn run_macos_parser(
+    snapshot: &Arc<ExecutableSnapshot>,
+    source: Option<Arc<std::fs::File>>,
+    args: Vec<String>,
+    stdout_limit: usize,
+    deadline: std::time::Instant,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<macos_wasm::Output, DecodeFactError> {
+    let parser = snapshot.parser.as_ref().cloned().ok_or_else(|| {
+        DecodeFactError::ProbeIdentity("packaged source parser was not compiled".into())
+    })?;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let mut worker = tokio::task::spawn_blocking(move || {
+        parser.run(
+            source,
+            args,
+            (stdout_limit, MAX_PROBE_STDERR_BYTES),
+            deadline,
+            worker_stop,
+        )
+    });
+    let result = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => Err(DecodeFactError::Cancelled),
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Err(DecodeFactError::Deadline),
+        result = &mut worker => return result.map_err(|e| DecodeFactError::Read(e.to_string()))?
+            .map_err(|reason| if reason == "parser deadline" { DecodeFactError::Deadline }
+                else if reason == "parser cancelled" { DecodeFactError::Cancelled }
+                else if reason == "parser output exceeds bound" { DecodeFactError::OversizedOutput }
+                else { DecodeFactError::Read(reason) }),
+    };
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    // A filesystem syscall can settle after the caller's deadline. The owned
+    // collection task still holds source/admission guards until this join.
+    let _ = worker.await;
+    result
+}
+
 #[cfg(unix)]
 async fn collect_idet_verdict(
     probe: &DecodeProbeIdentity,
@@ -3998,14 +4405,35 @@ async fn collect_idet_verdict(
         OsString::from("-of"),
         OsString::from("compact=p=0:nk=1"),
     ];
+    #[cfg(target_os = "macos")]
+    if probe.launch_mode.is_production() {
+        let source = duplicate_macos_source(source_fd)?;
+        let output = run_macos_parser(
+            &probe.executable_snapshot,
+            Some(source),
+            arguments
+                .iter()
+                .map(|v| v.to_string_lossy().into_owned())
+                .collect(),
+            MAX_PROBE_STDOUT_BYTES,
+            launch_deadline,
+            cancelled,
+        )
+        .await?;
+        if output.status != 0 {
+            return Ok(InterlaceVerdict::IdetUnavailable);
+        }
+        return Ok(parse_idet_verdict(&output.stderr).unwrap_or(InterlaceVerdict::IdetUnavailable));
+    }
     let executable_fd = probe.executable_snapshot.as_file().as_raw_fd();
-    let mut command =
-        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    let mut command = tokio::process::Command::new(probe_launch_path(
+        &probe.executable_snapshot,
+        probe.launch_mode,
+    )?);
     command.as_std_mut().arg0(probe.executable());
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
     command
-        .args(&arguments)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4111,6 +4539,36 @@ async fn collect_idet_verdict(
 }
 
 #[cfg(unix)]
+async fn refine_interlace(
+    probe: &DecodeProbeIdentity,
+    source_fd: std::os::fd::RawFd,
+    mut facts: DecodeFacts,
+    deadline: std::time::Instant,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+) -> Result<DecodeFacts, DecodeFactError> {
+    if matches!(facts.scan_type(), ScanType::Interlaced(_)) {
+        let verdict = match collect_idet_verdict(
+            probe,
+            source_fd,
+            facts.input_video_stream(),
+            deadline,
+            cancelled,
+            work,
+        )
+        .await
+        {
+            Ok(verdict) => verdict,
+            Err(DecodeFactError::Cancelled) => return Err(DecodeFactError::Cancelled),
+            Err(_) => InterlaceVerdict::IdetUnavailable,
+        };
+        record_interlace_verdict(verdict);
+        facts = facts.with_interlace_verdict(verdict);
+    }
+    Ok(facts)
+}
+
+#[cfg(unix)]
 async fn collect(
     probe: &DecodeProbeIdentity,
     source: DecodeFactCollectionSource,
@@ -4118,7 +4576,7 @@ async fn collect(
     selected_stream: ProbeStreamSelection,
     budget: Duration,
     cancelled: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<DecodeFacts, DecodeFactError> {
+) -> Result<CollectedProbe, DecodeFactError> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
@@ -4127,6 +4585,8 @@ async fn collect(
         observation,
         offset_permit,
         work,
+        projection,
+        seed,
     } = source;
     let started = std::time::Instant::now();
     let launch_deadline = started + budget.min(probe.launch_mode.probe_deadline());
@@ -4160,24 +4620,78 @@ async fn collect(
         fd: source_fd,
         offset: source_offset,
     };
+    if let Some(seed) = seed {
+        let facts = refine_interlace(
+            probe,
+            source_fd,
+            seed.facts?,
+            launch_deadline,
+            cancelled,
+            work,
+        )
+        .await?;
+        drop(restore_offset);
+        drop(offset_permit);
+        return projection.finish(Ok(facts), &[], &probe.reporter);
+    }
+    #[cfg(target_os = "macos")]
+    if probe.launch_mode.is_production() {
+        let mut args = projection
+            .arguments()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        args.push("/dev/fd/3".into());
+        let output = run_macos_parser(
+            &probe.executable_snapshot,
+            Some(duplicate_macos_source(source_fd)?),
+            args,
+            projection.output_limit(),
+            launch_deadline,
+            cancelled,
+        )
+        .await?;
+        if output.status != 0 {
+            return Err(DecodeFactError::Failed(
+                Some(output.status),
+                String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(512)
+                    .collect(),
+            ));
+        }
+        let facts = parse_collected_facts(
+            &output.stdout,
+            observation.identity,
+            catalog,
+            selected_stream,
+        );
+        let facts = if projection == ProbeProjection::Decoder {
+            Ok(
+                refine_interlace(probe, source_fd, facts?, launch_deadline, cancelled, work)
+                    .await?,
+            )
+        } else {
+            facts
+        };
+        drop(restore_offset);
+        drop(offset_permit);
+        return projection.finish(facts, &output.stdout, &probe.reporter);
+    }
     let executable_fd = probe.executable_snapshot.as_file().as_raw_fd();
-    let arguments = [
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,sample_aspect_ratio,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_tags=rotate:stream_side_data=side_data_type,rotation,displaymatrix,max_content,max_average,max_luminance",
-        "-show_streams",
-        "/dev/fd/3",
-    ]
-    .map(OsString::from);
-    let mut command =
-        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    let mut arguments = projection
+        .arguments()
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    arguments.push(OsString::from("/dev/fd/3"));
+    let mut command = tokio::process::Command::new(probe_launch_path(
+        &probe.executable_snapshot,
+        probe.launch_mode,
+    )?);
     command.as_std_mut().arg0(probe.executable());
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
-    command.args(&arguments);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -4240,7 +4754,7 @@ async fn collect(
         outcome = tokio::time::timeout(remaining, async {
             #[cfg(target_os = "linux")]
             let (stdout, stderr, exited) = tokio::join!(
-                read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
+                read_bounded(stdout, projection.output_limit()),
                 read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
                 async {
                     let exited = exit_anchor.wait_until_exit().await;
@@ -4260,7 +4774,7 @@ async fn collect(
             };
             #[cfg(not(target_os = "linux"))]
             let (stdout, stderr, status) = tokio::join!(
-                read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
+                read_bounded(stdout, projection.output_limit()),
                 read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
                 child.wait(),
             );
@@ -4306,32 +4820,22 @@ async fn collect(
             .collect();
         return Err(DecodeFactError::Failed(status.code(), reason));
     }
-    let mut facts =
-        parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream)?;
-    if matches!(facts.scan_type(), ScanType::Interlaced(_)) {
-        let verdict = match collect_idet_verdict(
-            probe,
-            source_fd,
-            facts.input_video_stream(),
-            launch_deadline,
-            cancelled,
-            work,
-        )
-        .await
-        {
-            Ok(verdict) => verdict,
-            Err(DecodeFactError::Cancelled) => return Err(DecodeFactError::Cancelled),
-            Err(_) => InterlaceVerdict::IdetUnavailable,
-        };
-        record_interlace_verdict(verdict);
-        facts = facts.with_interlace_verdict(verdict);
+    let facts = parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream);
+    if projection == ProbeProjection::SourceDocument {
+        drop(restore_offset);
+        drop(offset_permit);
+        return projection.finish(facts, &stdout.0, &probe.reporter);
+    }
+    let mut facts = facts?;
+    if projection == ProbeProjection::Decoder {
+        facts = refine_interlace(probe, source_fd, facts, launch_deadline, cancelled, work).await?;
     }
     // Every descriptor-reading child has now been reaped. Restore the shared
     // open-file offset and release the producer lane before the authoritative
     // final metadata observation.
     drop(restore_offset);
     drop(offset_permit);
-    Ok(facts)
+    projection.finish(Ok(facts), &stdout.0, &probe.reporter)
 }
 
 fn parse_collected_facts(
@@ -4443,12 +4947,14 @@ async fn collect(
     selected_stream: ProbeStreamSelection,
     budget: Duration,
     cancelled: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<DecodeFacts, DecodeFactError> {
+) -> Result<CollectedProbe, DecodeFactError> {
     let DecodeFactCollectionSource {
         handle,
         observation,
         offset_permit,
         work,
+        projection,
+        seed,
     } = source;
     let launch_deadline =
         std::time::Instant::now() + budget.min(probe.launch_mode.probe_deadline());
@@ -4457,15 +4963,17 @@ async fn collect(
     if source_observation_windows(&handle)?.identity != observation.identity {
         return Err(DecodeFactError::ProbeChanged);
     }
-    let arguments = [
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,sample_aspect_ratio,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_tags=rotate:stream_side_data=side_data_type,rotation,displaymatrix,max_content,max_average,max_luminance",
-        "-show_streams",
-    ];
+    if let Some(seed) = seed {
+        let facts = seed.facts?;
+        let facts = if matches!(facts.scan_type(), ScanType::Interlaced(_)) {
+            facts.with_interlace_verdict(InterlaceVerdict::IdetUnavailable)
+        } else {
+            facts
+        };
+        drop(offset_permit);
+        return projection.finish(Ok(facts), &[], &probe.reporter);
+    }
+    let arguments = projection.arguments();
     let mut command =
         tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
     command
@@ -4492,7 +5000,7 @@ async fn collect(
         }
         result = tokio::time::timeout(remaining, async {
             tokio::join!(
-                read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
+                read_bounded(stdout, projection.output_limit()),
                 read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
                 child.wait(),
             )
@@ -4526,13 +5034,18 @@ async fn collect(
     if source_observation_windows(&handle)?.identity != observation.identity {
         return Err(DecodeFactError::ProbeChanged);
     }
-    let mut facts =
-        parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream)?;
-    if matches!(facts.scan_type(), ScanType::Interlaced(_)) {
+    let facts = parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream);
+    if projection == ProbeProjection::SourceDocument {
+        return projection.finish(facts, &stdout.0, &probe.reporter);
+    }
+    let mut facts = facts?;
+    if projection == ProbeProjection::Decoder
+        && matches!(facts.scan_type(), ScanType::Interlaced(_))
+    {
         record_interlace_verdict(InterlaceVerdict::IdetUnavailable);
         facts = facts.with_interlace_verdict(InterlaceVerdict::IdetUnavailable);
     }
-    Ok(facts)
+    projection.finish(Ok(facts), &stdout.0, &probe.reporter)
 }
 
 #[cfg(windows)]
@@ -4547,6 +5060,51 @@ async fn terminate_windows_probe(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn invalid_parser_initialization_removes_the_immutable_snapshot() {
+        let root = crate::test_tempdir().expect("private source root");
+        let snapshots = root.path().join("snapshots");
+        std::fs::create_dir(&snapshots).expect("private snapshot directory");
+        let artifact = root.path().join("invalid.wasm");
+        // Valid magic followed by an invalid section; initialization must fail
+        // with a parser error or unsupported signing, and both paths clean up.
+        std::fs::write(&artifact, b"\0asm\x01\0\0\0\xff").expect("malformed parser");
+        let source = std::fs::File::open(artifact).expect("held source");
+        assert!(snapshot_executable_in(&source, Some(&snapshots)).is_err());
+        assert_eq!(
+            std::fs::read_dir(&snapshots)
+                .expect("snapshot entries")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn successful_snapshot_drop_removes_the_immutable_file() {
+        let root = crate::test_tempdir().expect("private source root");
+        let snapshots = root.path().join("snapshots");
+        std::fs::create_dir(&snapshots).expect("private snapshot directory");
+        let artifact = root.path().join("native-fixture");
+        std::fs::write(&artifact, b"native fixture bytes").expect("source bytes");
+        let source = std::fs::File::open(artifact).expect("held source");
+        let snapshot = snapshot_executable_in(&source, Some(&snapshots)).expect("snapshot");
+        let immutable_path = snapshot.path().to_path_buf();
+        assert!(
+            std::fs::remove_file(&immutable_path).is_err(),
+            "snapshot retains immutability until its owner drops"
+        );
+        drop(snapshot);
+        assert!(!immutable_path.exists());
+        assert_eq!(
+            std::fs::read_dir(&snapshots)
+                .expect("snapshot entries")
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn idet_verdict_uses_the_final_multi_frame_summary_and_a_strict_ninety_percent_bound() {
@@ -4804,6 +5362,11 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn build_static_probe(path: &std::path::Path, mode: u8) {
+        build_static_probe_with_private_path(path, mode, Path::new("/unavailable-parent-marker"));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_static_probe_with_private_path(path: &Path, mode: u8, private_path: &Path) {
         use std::os::unix::fs::PermissionsExt;
 
         let source = path.with_extension("c");
@@ -4829,6 +5392,10 @@ mod tests {
 #define NR_EXIT 60
 #define NR_MEMFD_CREATE 319
 #define NR_EXECVEAT 322
+#define NR_OPENAT 257
+#define NR_PTRACE 101
+#define NR_PROCESS_VM_READV 310
+#define NR_GETDENTS64 217
 #if defined(__aarch64__)
 #undef NR_READ
 #undef NR_WRITE
@@ -4845,6 +5412,14 @@ mod tests {
 #undef NR_EXIT
 #undef NR_MEMFD_CREATE
 #undef NR_EXECVEAT
+#undef NR_OPENAT
+#undef NR_PTRACE
+#undef NR_PROCESS_VM_READV
+#undef NR_GETDENTS64
+#define NR_OPENAT 56
+#define NR_PTRACE 117
+#define NR_PROCESS_VM_READV 270
+#define NR_GETDENTS64 61
 #define NR_READ 63
 #define NR_WRITE 64
 #define NR_CLOSE 57
@@ -5031,6 +5606,75 @@ void probe_main(unsigned long *stack) {
         unsigned long delay[2] = { 5, 0 };
         syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
     }
+#elif PROBE_MODE == 7
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PRIVATE_PATH, 0, 0, 0, 0) >= 0) finish(96);
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_ROOT_PATH, 0, 0, 0, 0) >= 0) finish(97);
+    if (syscall6(NR_OPENAT, -100, (long)("/proc/self/root" PROBE_PRIVATE_PATH), 0, 0, 0, 0) >= 0) finish(100);
+    if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_PROC_PATH, 0, 0, 0, 0) >= 0) finish(101);
+    if (syscall6(NR_OPENAT, -100, (long)"/proc/1", 0, 0, 0, 0) >= 0) finish(102);
+    // Enumerate all inherited capabilities, not just low-numbered bootstrap
+    // and supervisor FDs. The directory opened for this check is the sole
+    // allowed descriptor above the held source/parser pair.
+    long directory = syscall6(NR_OPENAT, -100, (long)"/proc/self/fd", 0, 0, 0, 0);
+    if (directory < 0) finish(103);
+    char entries[4096];
+    for (;;) {
+        long count = syscall6(NR_GETDENTS64, directory, (long)entries, sizeof(entries), 0, 0, 0);
+        if (count < 0) finish(104);
+        if (count == 0) break;
+        for (long offset = 0; offset < count;) {
+            if (count - offset < 20) finish(105);
+            unsigned short size = *(unsigned short *)(entries + offset + 16);
+            if (size < 20 || size > count - offset) finish(106);
+            const char *name = entries + offset + 19;
+            long fd = 0;
+            long index = 0;
+            while (19 + index < size && name[index] >= '0' && name[index] <= '9') {
+                if (fd > 214748364) finish(107);
+                fd = fd * 10 + name[index++] - '0';
+            }
+            if (index > 0 && (19 + index >= size || name[index] != 0 || (fd > 4 && fd != directory))) finish(108);
+            offset += size;
+        }
+    }
+    syscall6(NR_CLOSE, directory, 0, 0, 0, 0, 0);
+    if (!(argc > 1 && same(argv[1], "-version"))) {
+        long source_fd = syscall6(NR_OPENAT, -100, (long)"/proc/self/fd/3", 0, 0, 0, 0);
+        if (source_fd < 0) finish(109);
+        char source[64];
+        long count = syscall6(NR_READ, source_fd, (long)source, sizeof(source) - 1, 0, 0, 0);
+        if (count != 23) finish(110);
+        source[count] = 0;
+        if (!same(source, "production-bound source")) finish(111);
+        syscall6(NR_CLOSE, source_fd, 0, 0, 0, 0, 0);
+    }
+    if (syscall6(NR_PTRACE, 0, 0, 0, 0, 0, 0) != -1) finish(98);
+    if (syscall6(NR_PROCESS_VM_READV, PROBE_PARENT_PID, 0, 0, 0, 0, 0) != -1) finish(99);
+#elif PROBE_MODE == 8 || PROBE_MODE == 9
+    if (argc > 1 && same(argv[1], "-version")) {
+        write_text(1, facts);
+        finish(0);
+    }
+    long child;
+#if defined(__x86_64__)
+    child = syscall6(NR_FORK, 0, 0, 0, 0, 0, 0);
+#else
+    child = syscall6(NR_FORK, SIGCHLD, 0, 0, 0, 0, 0);
+#endif
+    if (child < 0) finish(89);
+    if (child == 0) {
+#if PROBE_MODE == 9
+        syscall6(NR_LSEEK, 3, 0, 0, 0, 0, 0);
+        write_text(3, "namespace-child-started");
+#endif
+        unsigned long delay[2] = { 60, 0 };
+        syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
+        finish(0);
+    }
+#if PROBE_MODE == 9
+    unsigned long delay[2] = { 60, 0 };
+    syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
+#endif
 #endif
     write_text(1, facts);
     finish(0);
@@ -5047,6 +5691,23 @@ void probe_main(unsigned long *stack) {
             .arg("-Wl,--build-id=none")
             .arg("-Wl,-e,_start")
             .arg(format!("-DPROBE_MODE={mode}"))
+            .arg(format!(
+                "-DPROBE_PRIVATE_PATH={:?}",
+                private_path.to_str().expect("private marker path")
+            ))
+            .arg(format!(
+                "-DPROBE_PARENT_ROOT_PATH={:?}",
+                format!(
+                    "/proc/{}/root{}",
+                    std::process::id(),
+                    private_path.display()
+                )
+            ))
+            .arg(format!("-DPROBE_PARENT_PID={}", std::process::id()))
+            .arg(format!(
+                "-DPROBE_PARENT_PROC_PATH={:?}",
+                format!("/proc/{}", std::process::id())
+            ))
             .arg(&source)
             .arg("-o")
             .arg(path)
@@ -5069,7 +5730,12 @@ void probe_main(unsigned long *stack) {
             require_direct_probe_executable(&wrapper),
             Err(DecodeFactError::ProbeIdentity(_))
         ));
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            require_direct_probe_executable(&wrapper),
+            Err(DecodeFactError::ProbeIdentity(_))
+        ));
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(
             require_direct_probe_executable(&wrapper),
             Err(DecodeFactError::UnsupportedPlatform)
@@ -5083,14 +5749,19 @@ void probe_main(unsigned long *stack) {
             Err(DecodeFactError::ProbeIdentity(reason))
                 if reason.contains("statically linked")
         ));
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            require_direct_probe_executable(&current),
+            Err(DecodeFactError::ProbeIdentity(_))
+        ));
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(
             require_direct_probe_executable(&current),
             Err(DecodeFactError::UnsupportedPlatform)
         );
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     #[tokio::test]
     async fn production_discovery_refuses_unsupported_unix_within_its_deadline() {
         let root = crate::test_tempdir().expect("tempdir");
@@ -5106,6 +5777,19 @@ void probe_main(unsigned long *stack) {
         .await
         .expect("unsupported Unix discovery remains bounded");
         assert!(matches!(result, Err(DecodeFactError::UnsupportedPlatform)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn production_discovery_requires_the_packaged_capability_parser() {
+        let root = crate::test_tempdir().expect("package");
+        let probe = root.path().join("ffprobe");
+        executable(&probe, "#!/bin/sh\ntouch \"$0.executed\"\n");
+        let result = DecodeProbeIdentity::discover(probe.to_str().expect("path")).await;
+        assert!(
+            matches!(result, Err(DecodeFactError::ProbeIdentity(reason)) if reason.contains("packaged capability-bound source parser"))
+        );
+        assert!(!root.path().join("ffprobe.executed").exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -5152,16 +5836,26 @@ void probe_main(unsigned long *stack) {
         std::fs::write(&artifact, elf).expect("write initially accepted ELF");
         let opened = std::fs::File::open(&artifact).expect("open initially accepted ELF");
         require_direct_probe_executable(&opened).expect("initial bytes qualify structurally");
-        std::fs::copy(
-            std::env::current_exe().expect("current dynamic executable"),
-            &artifact,
-        )
-        .expect("replace configured bytes in place");
+        std::fs::copy(small_dynamic_executable(), &artifact)
+            .expect("replace configured bytes in place");
         let snapshot = snapshot_executable(&opened).expect("snapshot replacement bytes");
         assert!(matches!(
             require_direct_probe_executable(snapshot.as_file()),
             Err(DecodeFactError::ProbeIdentity(reason)) if reason.contains("statically linked")
         ));
+    }
+
+    /// A real dynamically linked executable well under
+    /// `MAX_PROBE_EXECUTABLE_BYTES`. The debug test binary itself is not: it
+    /// grew past 512 MiB, so snapshotting `current_exe()` tested its size, not
+    /// the sealing or static-link rules these tests are about.
+    #[cfg(target_os = "linux")]
+    fn small_dynamic_executable() -> std::path::PathBuf {
+        ["/usr/bin/true", "/bin/true"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| std::env::current_exe().expect("current executable"))
     }
 
     #[cfg(target_os = "linux")]
@@ -5170,8 +5864,8 @@ void probe_main(unsigned long *stack) {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::FileExt;
 
-        let current = std::fs::File::open(std::env::current_exe().expect("current executable"))
-            .expect("open current executable");
+        let current =
+            std::fs::File::open(small_dynamic_executable()).expect("open a small executable");
         let snapshot = snapshot_executable(&current).expect("sealed executable snapshot");
         let seals = unsafe { libc::fcntl(snapshot.as_file().as_raw_fd(), libc::F_GET_SEALS) };
         assert_eq!(seals & libc::F_SEAL_WRITE, libc::F_SEAL_WRITE);
@@ -5206,6 +5900,138 @@ void probe_main(unsigned long *stack) {
             .expect("sealed production collection");
         assert_eq!(facts.input_video_stream(), 4);
         assert_eq!(facts.codec(), Some("h264"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_executes_bound_source_and_denies_secondary_images() {
+        assert!(
+            std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some(),
+            "provide the exact compiled daemon bootstrap"
+        );
+        let root = crate::test_tempdir().expect("tempdir");
+        for mode in 0..=3 {
+            let probe = root.path().join(format!("namespace-probe-{mode}"));
+            build_static_probe(&probe, mode);
+            let identity = DecodeProbeIdentity::discover_with_mode(
+                probe.to_str().expect("probe path"),
+                ProbeLaunchMode::ProductionNamespace,
+            )
+            .await
+            .expect("namespace-bound sealed discovery and one-shot exec");
+            if mode == 0 {
+                let media = root.path().join("namespace-media.bin");
+                std::fs::write(&media, b"production-bound source").expect("media");
+                let source = Arc::new(std::fs::File::open(media).expect("source"));
+                let facts = DecodeFactCache::new()
+                    .get_or_probe(
+                        &identity,
+                        DecodeFactSource::isolated(source),
+                        None,
+                        ProbeStreamSelection::Absolute(4),
+                        Duration::from_secs(5),
+                        None,
+                    )
+                    .await
+                    .expect("namespace-bound exact FD source collection");
+                assert_eq!(facts.input_video_stream(), 4);
+                assert_eq!(facts.codec(), Some("h264"));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_hides_parent_files_and_reaps_descendants() {
+        assert!(std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some());
+        let root = crate::test_tempdir().expect("tempdir");
+        let marker = root.path().join("parent-private-marker");
+        std::fs::write(&marker, b"must not enter probe namespace").expect("parent marker");
+        for mode in [7, 8] {
+            let probe = root.path().join(format!("isolated-probe-{mode}"));
+            build_static_probe_with_private_path(&probe, mode, &marker);
+            let identity = DecodeProbeIdentity::discover_with_mode(
+                probe.to_str().expect("probe path"),
+                ProbeLaunchMode::ProductionNamespace,
+            )
+            .await
+            .expect("isolated production bootstrap");
+            let media = root.path().join(format!("media-{mode}"));
+            std::fs::write(&media, b"production-bound source").expect("media");
+            let source = Arc::new(std::fs::File::open(media).expect("source"));
+            let facts = tokio::time::timeout(Duration::from_secs(7), DecodeFactCache::new().get_or_probe(&identity, DecodeFactSource::isolated(source), None, ProbeStreamSelection::Absolute(4), Duration::from_secs(5), None)).await.expect("namespace child retaining pipes for60s must be killed within unchanged probe deadline").expect("isolated parser facts");
+            assert_eq!(facts.codec(), Some("h264"));
+        }
+        assert_eq!(
+            std::fs::read(marker).expect("parent marker remains"),
+            b"must not enter probe namespace"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
+    async fn namespace_probe_cancellation_kills_started_descendants() {
+        assert!(std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some());
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("cancellable-namespace-probe");
+        build_static_probe(&probe, 9);
+        let identity = DecodeProbeIdentity::discover_with_mode(
+            probe.to_str().expect("probe path"),
+            ProbeLaunchMode::ProductionNamespace,
+        )
+        .await
+        .expect("isolated production bootstrap");
+        let media = root.path().join("owned-cancellation-marker-source");
+        std::fs::write(&media, b"production-bound source").expect("media");
+        // This owned test source is deliberately writable solely to signal that
+        // the hostile descendant has started, before cancellation is requested.
+        let source = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&media)
+                .expect("owned marker source"),
+        );
+        let cleanup_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let probe_gate = Arc::clone(&cleanup_gate);
+        let token = tokio_util::sync::CancellationToken::new();
+        let probe_token = token.clone();
+        let task = tokio::spawn(async move {
+            DecodeFactCache::new()
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::new(source, probe_gate, TEST_FACT_WORK),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    Duration::from_secs(10),
+                    Some(&probe_token),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(&media)
+                .expect("owned source marker")
+                .starts_with(b"namespace-child-started")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("actual descendant must start before cancellation");
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancellation must not wait for the descendant60s sleep")
+            .expect("probe task joins");
+        assert!(matches!(result, Err(DecodeFactError::Cancelled)));
+        let _reaped_source =
+            tokio::time::timeout(Duration::from_secs(2), cleanup_gate.acquire_owned())
+                .await
+                .expect("descendant cleanup must reap before returning source ownership")
+                .expect("source ownership remains available");
     }
 
     #[cfg(target_os = "linux")]
@@ -5956,6 +6782,271 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
     }
 
     #[cfg(unix)]
+    fn full_document_probe_fixture(root: &Path, field_order: &str) -> PathBuf {
+        let probe = root.join("ffprobe-document");
+        let document = serde_json::json!({
+            "streams":[{"index":4,"codec_type":"video","codec_name":"h264",
+                "profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,
+                "avg_frame_rate":"30000/1001","r_frame_rate":"30000/1001",
+                "field_order":field_order,"disposition":{"attached_pic":0}}],
+            "format":{"format_name":"matroska","duration":"12.0"},
+            "chapters":[{"id":0,"start_time":"0.0","end_time":"12.0"}]
+        });
+        executable(
+            &probe,
+            &format!(
+                r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version document-fixture'; exit 0; fi
+if test "$1" = "-hide_banner"; then
+  echo idet >> "$PLURX_TEST_PROBE_PATH.idet"
+  printf '%s\n' '[Parsed_idet_2] Multi frame detection: TFF: 0 BFF: 0 Progressive: 91 Undetermined: 9' >&2
+  exit 0
+fi
+test "$8" = "/dev/fd/3" || exit 91
+cat "$8" >/dev/null || exit 92
+echo probe >> "$PLURX_TEST_PROBE_PATH.calls"
+printf '%s\n' '{document}'
+"###
+            ),
+        );
+        probe
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fresh_source_document_and_decoder_facts_share_one_stream_probe() {
+        use std::io::{Seek, SeekFrom};
+        for field_order in ["progressive", "tt"] {
+            let root = crate::test_tempdir().expect("document fixture");
+            let probe = full_document_probe_fixture(root.path(), field_order);
+            let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("path"))
+                .await
+                .expect("sealed fixture identity");
+            let media = root.path().join("media.bin");
+            std::fs::write(&media, b"descriptor-bound document").expect("source");
+            let handle = Arc::new(std::fs::File::open(&media).expect("source handle"));
+            let mut offset = handle.try_clone().expect("offset witness");
+            offset.seek(SeekFrom::Start(3)).expect("initial offset");
+            let calls = probe.with_extension("calls");
+            let idet = probe.with_extension("idet");
+            // The previous two independent owners each needed a stream probe.
+            DecodeFactCache::new()
+                .probe_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("old verification owner");
+            DecodeFactCache::new()
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("old independent planning owner");
+            assert_eq!(
+                std::fs::read_to_string(&calls)
+                    .expect("old calls")
+                    .lines()
+                    .count(),
+                2
+            );
+            std::fs::write(&calls, "").expect("reset measured launches");
+            if idet.exists() {
+                std::fs::remove_file(&idet).expect("reset idet witness");
+            }
+            let cache = DecodeFactCache::new();
+            let prepared = cache
+                .probe_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("full source verification");
+            let document: serde_json::Value =
+                serde_json::from_str(&prepared.document).expect("full document");
+            assert_eq!(document["format"]["format_name"], "matroska");
+            assert_eq!(document["chapters"].as_array().expect("chapters").len(), 1);
+            assert_eq!(
+                plurx_core::scan::probe::reporter_of(&document),
+                Some("ffprobe version document-fixture")
+            );
+            assert!(
+                !idet.exists(),
+                "source verification must not consume the optional refinement budget"
+            );
+            assert_eq!(
+                offset.stream_position().expect("offset after full probe"),
+                3
+            );
+            let facts = cache
+                .refine_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    prepared,
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("same-document decoder planning");
+            assert_eq!(facts.input_video_stream(), 4);
+            assert_eq!(facts.scan_type(), ScanType::Progressive);
+            assert_eq!(
+                std::fs::read_to_string(&calls)
+                    .expect("new calls")
+                    .lines()
+                    .count(),
+                1,
+                "source verification and decoder facts must use one stream FFprobe, not two"
+            );
+            assert_eq!(idet.exists(), field_order == "tt");
+            assert_eq!(
+                offset.stream_position().expect("offset after refinement"),
+                3
+            );
+            cache
+                .probe_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("fresh verification on warm cache");
+            assert_eq!(
+                std::fs::read_to_string(&calls)
+                    .expect("fresh calls")
+                    .lines()
+                    .count(),
+                2,
+                "cached facts must never stand in for fresh source verification"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_verification_keeps_decoder_refinement_failures_separate() {
+        for missing_stream in [false, true] {
+            let root = crate::test_tempdir().expect("document failure fixture");
+            let probe = full_document_probe_fixture(root.path(), "tt");
+            let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("path"))
+                .await
+                .expect("identity");
+            let media = root.path().join("media.bin");
+            std::fs::write(&media, b"unchanged source").expect("source");
+            let handle = Arc::new(std::fs::File::open(media).expect("source"));
+            let cache = DecodeFactCache::new();
+            let prepared = cache
+                .probe_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    ProbeStreamSelection::Absolute(if missing_stream { 9 } else { 4 }),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("source verification still succeeds");
+            assert!(prepared.document.contains("chapters"));
+            let result = cache
+                .refine_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(handle),
+                    None,
+                    prepared,
+                    if missing_stream {
+                        PROBE_DEADLINE
+                    } else {
+                        Duration::ZERO
+                    },
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(DecodeFactError::InvalidFacts(_))) && missing_stream
+                    || matches!(result, Err(DecodeFactError::Deadline)) && !missing_stream
+            );
+            assert!(
+                cache.entries.lock().await.is_empty(),
+                "unfinished refinement must not poison the facts cache"
+            );
+            assert_eq!(
+                std::fs::read_to_string(probe.with_extension("calls"))
+                    .expect("calls")
+                    .lines()
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepared_source_document_refuses_changed_source_and_probe_before_refinement() {
+        for replace_probe in [false, true] {
+            let root = crate::test_tempdir().expect("document identity fixture");
+            let probe = full_document_probe_fixture(root.path(), "tt");
+            let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("path"))
+                .await
+                .expect("identity");
+            let media = root.path().join("media.bin");
+            std::fs::write(&media, b"old source").expect("source");
+            let handle = Arc::new(std::fs::File::open(&media).expect("source"));
+            let cache = DecodeFactCache::new();
+            let prepared = cache
+                .probe_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("prepared source");
+            if replace_probe {
+                std::fs::write(&probe, b"changed executable").expect("replace probe");
+            } else {
+                std::fs::write(&media, b"changed source length").expect("replace source");
+            }
+            let result = cache
+                .refine_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(handle),
+                    None,
+                    prepared,
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(DecodeFactError::ProbeChanged)) && replace_probe
+                    || matches!(result, Err(DecodeFactError::SourceChanged)) && !replace_probe
+            );
+            assert!(
+                !probe.with_extension("idet").exists(),
+                "refused identity must not launch refinement"
+            );
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_idet_reaps_the_second_child_before_returning_the_offset_lane() {
         use std::io::{Seek, SeekFrom};
@@ -6185,6 +7276,8 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
                     .await
                     .expect("source offset permit"),
                 work: TEST_FACT_WORK,
+                projection: ProbeProjection::Decoder,
+                seed: None,
             },
             None,
             ProbeStreamSelection::FirstPlayable,
@@ -6192,7 +7285,9 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
             None,
         )
         .await
-        .expect("held executable runs even while its path names another program");
+        .expect("held executable runs even while its path names another program")
+        .facts
+        .expect("valid typed facts");
         assert_eq!(facts.codec(), Some("h264"));
         std::fs::remove_file(&probe).expect("remove transient executable");
         std::fs::rename(&original, &probe).expect("restore original path");
@@ -6239,6 +7334,8 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
                     .await
                     .expect("source offset permit"),
                 work: TEST_FACT_WORK,
+                projection: ProbeProjection::Decoder,
+                seed: None,
             },
             None,
             ProbeStreamSelection::FirstPlayable,
@@ -6246,7 +7343,9 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             None,
         )
         .await
-        .expect("held snapshot descriptor remains the execution object");
+        .expect("held snapshot descriptor remains the execution object")
+        .facts
+        .expect("valid typed facts");
         assert_eq!(facts.codec(), Some("h264"));
         assert!(
             !probe.with_extension("snapshot-b").exists(),

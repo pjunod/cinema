@@ -46,6 +46,32 @@ impl FileGrantStore for SqliteStore {
         .await
     }
 
+    async fn file_grant_by_id(&self, id: &str) -> Result<Option<FileGrant>, StoreError> {
+        let id = id.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT g.id, g.file_id, g.user_id, g.expires_at, g.revoked_at,
+                            EXISTS (SELECT 1 FROM tokens t WHERE t.token_hash = g.source_token_hash
+                                      AND t.user_id = g.user_id)
+                     FROM file_grants g WHERE g.id = ?1 AND g.purpose = 'open_in'",
+                    params![id],
+                    |row| {
+                        Ok(FileGrant {
+                            id: row.get(0)?,
+                            file_id: row.get(1)?,
+                            user_id: row.get(2)?,
+                            expires_at: row.get(3)?,
+                            revoked_at: row.get(4)?,
+                            source_active: row.get::<_, i64>(5)? != 0,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+        .await
+    }
+
     async fn revoke_file_grant(
         &self,
         id: &str,

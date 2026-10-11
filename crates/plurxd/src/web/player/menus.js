@@ -45,9 +45,11 @@ function setupTrackMenus(){
   const cc=document.getElementById("pbsubs"); if(cc) cc.style.display=has?"":"none";
   pbSyncSubIcon();
 }
-// Light the CC button while a subtitle track is showing.
+// Project subtitle selection immediately, including while the picture is paused.
 function pbSyncSubIcon(){ const cc=document.getElementById("pbsubs");
-  if(cc) cc.classList.toggle("on", !!(PLAYER&&PLAYER.curSub>=0)); }
+  if(cc) cc.classList.toggle("on", !!(PLAYER&&PLAYER.curSub>=0));
+  if(typeof watchRenderLedger==="function") watchRenderLedger();
+}
 // `low` = opened from the bottom transport, so the menu anchors above that
 // button instead of jumping to the top-right corner of the screen.
 function closeMenu(restoreFocus=true){
@@ -98,7 +100,7 @@ function toggleMenu(kind,low){
   if(opener&&opener.setAttribute) opener.setAttribute("aria-expanded","true");
   m.dataset.kind=kind; m.classList.toggle("low",!!low);
   if(kind==="audio"){
-    m.innerHTML=PLAYER.audio.map((a,i)=>`<button class="${PLAYER.curAudio===i?'sel':''}" onclick="switchAudio(${i})">${esc(audioLabelMenu(a,i))}</button>`).join("");
+    m.innerHTML=PLAYER.audio.map((a,i)=>`<button class="${PLAYER.curAudio===i?'sel':''}" data-remote-track="${i}" onclick="switchAudio(${i})">${esc(audioLabelMenu(a,i))}</button>`).join("");
   } else if(kind==="settings"){
     m.innerHTML=settingsMenuHtml();
   } else if(kind==="quality"){
@@ -129,11 +131,14 @@ function toggleMenu(kind,low){
       <button onclick="forgetDecodeLimitHere()">Forget this measurement</button>`:"";
     m.innerHTML=`<div class="amsec">Quality</div>`+qualityOptions().map(([v,l])=>{
       const note=v==="auto"?" — automatic":v==="original"?" — max, no transcode":"";
-      return `<button class="${playQuality()===v?'sel':''}" onclick="setQuality('${v}')">${l}${note}</button>`;
-    }).join("")+limNote;
+      return `<button class="${playQuality()===v?'sel':''}" data-remote-track="${v}" onclick="setQuality('${v}')">${l}${note}</button>`;
+    }).join("")+limNote+(retainedQualityChange(PLAYER)?
+      `<div class="menunote">Your preference is saved; the current stream is still playing.</div>
+      <button onclick="retryQualityChange()">Retry quality change</button>
+      <button onclick="applyQualityWithRestart()">Apply with restart</button>`:"");
   } else {
-    m.innerHTML=`<button class="${PLAYER.curSub<0?'sel':''}" onclick="setSub(-1)">Off</button>`+
-      PLAYER.subs.map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("");
+    m.innerHTML=`<button class="${PLAYER.curSub<0?'sel':''}" data-remote-track="-1" onclick="setSub(-1)">Off</button>`+
+      PLAYER.subs.map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" data-remote-track="${s.index}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("");
   }
   m.querySelectorAll("button").forEach(button=>{
     if(!button.hasAttribute("role")) button.setAttribute("role","menuitem");
@@ -258,6 +263,7 @@ window.addEventListener("resize",()=>{
 // Auto follows the automatic ladder; Original forces direct/remux (no video
 // transcode); a height forces a transcode. Changing it restarts at position.
 function setQuality(q){
+  const standing=PLAYER?playbackControlSelection(PLAYER):null;
   let from="auto"; try{ from=localStorage.getItem("plurx_quality")||"auto"; }catch(e){}
   try{ localStorage.setItem("plurx_quality", q); }catch(e){}
   closeMenu();
@@ -289,7 +295,7 @@ function setQuality(q){
     // server builds a successor. `PENDING_ATTEMPT_REASON` is set by the reopen
     // itself now: a switch that commits opens no session, and leaving the
     // reason armed would label the next unrelated open a quality change.
-    const running=requestQualityChange(PLAYER,"manual");
+    const running=requestQualityChange(PLAYER,"manual",null,null,standing);
     if(running&&running.catch) running.catch(()=>{});
   }
 }

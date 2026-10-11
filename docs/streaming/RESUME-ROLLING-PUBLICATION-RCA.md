@@ -4,7 +4,7 @@
 attachment, the progress ratchet fixed in PR #438, the remaining startup
 failure not yet fixed ·
 **Written:** 2026-09-22 ·
-**Evidence base:** m6 `v0.3.0-3135-g9deb58a2e`, live reproduction from the
+**Evidence base:** lab6 `v0.3.0-3135-g9deb58a2e`, live reproduction from the
 shipped web client
 
 Companion to
@@ -25,7 +25,7 @@ it, and the play request carries it. ffmpeg is even given the right seek.
 
 ## 2. What the node did
 
-Reproduced from the shipped web client against m6 on file 6455 at 30:32, with
+Reproduced from the shipped web client against lab6 on file 6455 at 30:32, with
 the client's progress beats blocked so nothing was destroyed:
 
 ```

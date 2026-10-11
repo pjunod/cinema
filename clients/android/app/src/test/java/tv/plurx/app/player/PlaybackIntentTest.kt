@@ -9,9 +9,116 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tv.plurx.app.data.ClientInfo
+import tv.plurx.app.data.CreateSessionReq
+import tv.plurx.app.data.DeviceCaps
+import tv.plurx.app.data.DisplayCaps
 import tv.plurx.app.data.PlaybackQuality
+import tv.plurx.app.data.PresentationTarget
+import tv.plurx.app.data.VideoEntry
 
 class PlaybackIntentTest {
+    private val caps = DeviceCaps(
+        v = 2, client = ClientInfo("android", "test", "owned test device"),
+        video = listOf(VideoEntry(codec = "h264", present = listOf("sdr"))),
+        audio = listOf("aac"), containers = listOf("mp4"), transports = listOf("hls"),
+        display = DisplayCaps(hdr = false, dolby_vision = false),
+    )
+    private fun selection(quality: QualitySelection) = ClientSelection(
+        quality = quality, audioTrack = 0, subtitle = SubtitleSelection(SubtitleMode.OFF),
+        audioOffsetMs = 0, codec = CodecPolicy.AUTO, dynamicRange = DynamicRangePolicy.AUTO,
+    )
+
+    @Test fun manualSessionCarriesIntentWithDisplayAwareAutoDisabled() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Q720)
+        intent.setPlaybackRequested(false)
+        intent.noteViewerDestination()
+        val body = CreateSessionReq(playback_id = intent.playbackId, height = 720, caps = caps)
+        val request = intent.bindSessionIntent(body, caps, "route-v1", "route-v1", false,
+            selection(QualitySelection.Manual(720)), PresentationTarget(1920, 1080, 1))
+        assertEquals(720, request.height)
+        assertEquals(caps, request.caps)
+        assertNull(request.caps?.display?.presentation_target)
+        assertEquals(intent.playbackId, request.intent?.lifetime_id)
+        assertEquals(2L, request.intent?.destination_revision)
+        assertEquals(QualitySelection.Manual(720), request.intent?.selection?.quality)
+        assertEquals(intent.mediaIntent(selection(QualitySelection.Manual(720))), request.intent)
+    }
+
+    @Test fun unnegotiatedSessionKeepsTheLegacyBodyWithoutMintingIntent() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Q720)
+        val body = CreateSessionReq(playback_id = intent.playbackId, height = 720, caps = caps)
+        for ((server, plan) in listOf(null to "route-v1", "route-v1" to null, "old" to "route-v1")) {
+            assertSame(body, intent.bindSessionIntent(body, caps, server, plan, false,
+                selection(QualitySelection.Manual(720)), null))
+        }
+        assertNull(body.intent)
+        assertEquals(1L, intent.mediaIntent(selection(QualitySelection.Original)).recipe_revision)
+    }
+
+    @Test fun onlyEnabledAutoRebindsTheCandidateHeightAndMeasuredDisplay() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val id = "a".repeat(32)
+        intent.requestAutomaticCandidate(id, 720)
+        val body = CreateSessionReq(playback_id = intent.playbackId, height = 1080, caps = caps)
+        val target = PresentationTarget(1280, 720, 2)
+        val plain = intent.bindSessionIntent(body, caps, "route-v1", "route-v1", false,
+            selection(QualitySelection.Auto), target)
+        assertEquals(1080, plain.height)
+        assertEquals(QualitySelection.Auto, plain.intent?.selection?.quality)
+        assertNull(plain.caps?.display?.presentation_target)
+        val automatic = intent.bindSessionIntent(body, caps, "route-v1", "route-v1", true,
+            selection(QualitySelection.AutoCandidate(720, id)), target)
+        assertEquals(720, automatic.height)
+        assertEquals(target, automatic.caps?.display?.presentation_target)
+        assertEquals(QualitySelection.AutoCandidate(720, id), automatic.intent?.selection?.quality)
+        assertEquals(plain.intent?.lifetime_id, automatic.intent?.lifetime_id)
+        assertEquals((plain.intent?.recipe_revision ?: 0) + 1, automatic.intent?.recipe_revision)
+    }
+
+    @Test fun aPresentedContinuousQualityKeepsLaterSeeksOnTheRetainedPlan() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val replacement = PlaybackPlanReplacement(PlaybackQuality.Auto)
+        val routed = mutableListOf<Pair<Long, PlaybackQuality>>()
+        replacement.retain { target, quality -> routed += target to quality }
+        val quality = PlaybackQuality.Q720
+        intent.beginQualityChange(quality, 0)
+        replacement.presented(quality)
+        intent.beginSeek(50_000, 10_000)
+        assertFalse(replacement.route(intent))
+        assertTrue(routed.isEmpty())
+        assertTrue(replacement.route(intent, force = true))
+        assertEquals(listOf(50_000L to quality), routed)
+    }
+
+    @Test
+    fun failedQualityRetainsWireAndMediaWithoutLosingSavedPreferenceOrPause() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val first = intent.beginQualityChange(PlaybackQuality.Q1080)
+        intent.setPlaybackRequested(false)
+        val wire = QualitySelection.AutoCandidate(720, "a".repeat(32))
+        assertTrue(intent.retainFailedQuality(first, wire))
+        assertEquals(PlaybackQuality.Q1080, intent.desiredQuality)
+        assertEquals(PlaybackQuality.Auto, intent.qualityForMedia())
+        assertEquals(wire, intent.retainedControlQuality)
+        assertFalse(intent.playbackRequested)
+        var replans = 0
+        val replacement = PlaybackPlanReplacement(PlaybackQuality.Auto)
+        replacement.retain { _, _ -> replans++ }
+        intent.beginSeek(90_000, 10_000)
+        assertFalse(replacement.route(intent))
+        assertEquals("a later seek must not implicitly apply the failed saved choice", 0, replans)
+        val retry = intent.beginQualityChange(PlaybackQuality.Q1080)
+        assertNull(intent.retainedControlQuality)
+        assertFalse(intent.retainFailedQuality(first, QualitySelection.Original))
+        assertSame(retry, intent.pendingQualityChange)
+        assertTrue(intent.retainFailedQuality(retry, wire))
+        assertEquals(PlaybackQuality.Auto, intent.qualityForMedia())
+        intent.adoptQuality(PlaybackQuality.Q1080)
+        assertNull(intent.retainedControlQuality)
+        assertEquals(PlaybackQuality.Q1080, intent.qualityForMedia())
+    }
+
     @Test
     fun rapidSeeksRetainOnlyTheNewestDestination() {
         val intent = PlaybackIntent("11111111-1111-4111-8111-111111111111", PlaybackQuality.Auto)
@@ -98,6 +205,47 @@ class PlaybackIntentTest {
         assertTrue(intent.markExecuted(successor.sequence))
         assertEquals(successor.sequence, intent.executedSequence())
         assertTrue(intent.presentedVideoFrame(30_000, successor.sequence))
+    }
+
+    @Test
+    fun hlsCopyPrerollSettlesBeforeTheDestinationDeadline() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(1_291_132, 1_200_000)
+        val deadline = PlaybackTargetDeadline()
+        val first = Triple(pending.sequence, 1_290_664L, 1)
+        assertTrue(intent.markExecuted(pending.sequence))
+        assertNull(deadline.sample(intent.pendingSeek, true, true, 0))
+        assertFalse(intent.presentedVideoFrame(first.second, pending.sequence))
+        // The live-copy session's first keyframe precedes the seek by 468 ms.
+        // Later decoded output and a clock past the target prove arrival.
+        assertTrue(copyPrerollHasRenderedProgress(
+            PlaybackMediaTransport.HlsCopy, pending, first, true, true, true, 30,
+        ))
+        assertFalse(intent.presentedVideoProgress(1_291_000, pending.sequence))
+        assertTrue(intent.presentedVideoProgress(1_291_800, pending.sequence))
+        assertNull(intent.pendingSeek)
+        assertNull(deadline.sample(intent.pendingSeek, true, true, 8_000))
+    }
+
+    @Test
+    fun copyPrerollCannotSettleFromStaleOrUnrenderedOutput() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(1_291_132, 1_200_000)
+        val first = Triple(pending.sequence, 1_290_664L, 1)
+        fun allowed(transport: PlaybackMediaTransport? = PlaybackMediaTransport.HlsCopy,
+                    frame: Triple<Long, Long, Int> = first, foreground: Boolean = true,
+                    playing: Boolean = true, selectionReady: Boolean = true, count: Int = 2) =
+            copyPrerollHasRenderedProgress(transport, pending, frame, foreground, playing, selectionReady, count)
+        assertTrue(allowed(PlaybackMediaTransport.ProgressiveRemux))
+        assertFalse(allowed(PlaybackMediaTransport.Direct))
+        assertFalse(allowed(PlaybackMediaTransport.HlsTranscode))
+        assertFalse(allowed(null))
+        assertFalse(allowed(frame = first.copy(first = pending.sequence - 1)))
+        assertFalse(allowed(frame = first.copy(second = pending.targetMs - 2_001)))
+        assertFalse(allowed(foreground = false))
+        assertFalse(allowed(playing = false))
+        assertFalse(allowed(selectionReady = false))
+        assertFalse(allowed(count = 1))
     }
 
     @Test

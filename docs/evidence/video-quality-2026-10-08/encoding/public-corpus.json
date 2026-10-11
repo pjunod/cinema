@@ -1,0 +1,24 @@
+[
+  {
+    "identity": "tears-of-steel",
+    "download_url": "https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov",
+    "license_url": "https://mango.blender.org/about/",
+    "license": "CC BY 3.0",
+    "attribution": "Blender Foundation | mango.blender.org",
+    "sha256": "efa9062d9cdb7a338e40ad530dfdf234806743f29ae6a1a136b97ece4e588e8f",
+    "bytes": 372178639,
+    "source_color_tags": "missing range/matrix/transfer/primaries; original rejected by C2 contract, used only for SDR VOD comparison",
+    "local_media_retained_in_git": false
+  },
+  {
+    "identity": "big-buck-bunny",
+    "download_url": "https://download.blender.org/demo/movies/BBB/bbb_sunflower_1080p_30fps_normal.mp4.zip",
+    "license_url": "https://peach.blender.org/about/",
+    "license": "CC BY 3.0",
+    "attribution": "Copyright 2008 Blender Foundation | www.bigbuckbunny.org",
+    "sha256": "ae51005850b0ff757fe60c3dd7a12d754d3cd2397d87d939b55235e457f97658",
+    "bytes": 276134947,
+    "source_color_tags": "missing range/matrix/transfer/primaries; original rejected by C2 contract, used only for SDR VOD comparison",
+    "local_media_retained_in_git": false
+  }
+]

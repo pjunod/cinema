@@ -83,11 +83,14 @@ services:
     #   # evidence for this workload.
     #   PLURX_CLUSTER_READ_POOL_SIZE: "4"
 
-    # --- Hardware transcode passthrough (uncomment for your GPU) ---
+    # --- Optional manual GPU selection (make docker-up auto-detects by default) ---
     #
+    # Set PLURX_DOCKER_GPU=manual in .env for fully manual device setup.
     # Intel QuickSync / AMD VA-API:
     # devices:
     #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "992" # replace with: stat -c %g /dev/dri/renderD128
     #
     # NVIDIA (needs nvidia-container-toolkit on the host):
     # deploy:

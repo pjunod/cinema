@@ -15,10 +15,10 @@ use super::{
     item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
     IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
     IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ProgressRails,
-    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, WatchStore, WatchSummary,
-    IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX,
-    IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
-    TOP_LEVEL_ITEM_PREDICATE,
+    ReconcileOutcome, RootFingerprintStatus, RootRemovalOutcome, SeriesHintOutcome, WatchStore,
+    WatchSummary, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
+    IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
+    IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::DolbyVisionFacts;
 use crate::domain::{
@@ -866,6 +866,162 @@ fn reconcile_refusal(
 
 async fn scalar(client: &TimedClient, sql: &'static str) -> Result<i64, StoreError> {
     scalar_with(client, sql.to_owned(), params!()).await
+}
+
+/// Whether library `library_id`'s configured paths are exactly the JSON set
+/// `configured_paths` — the consistent read behind `ConfigurationChanged`.
+pub(super) async fn library_paths_are(
+    client: &TimedClient,
+    library_id: i64,
+    configured_paths: &str,
+) -> Result<bool, StoreError> {
+    let sql = format!(
+        "SELECT {} AS value",
+        super::library_paths_are_sql("$1", "$2")
+    );
+    validate_sql(&sql)?;
+    Ok(scalar_with(client, sql, params!(library_id, configured_paths)).await? != 0)
+}
+
+/// The replicated removal of a library's files `file_ids` (a JSON array),
+/// taken only while its configured paths are still `configured_paths`: the
+/// first statement takes the library's reconcile guard row under that
+/// condition and every later one runs only under the guard. `lease` (the
+/// five job-lease values) adds the publication fence to every statement.
+/// Results: [0] guard taken, [1] files deleted, [2..=5] items pruned (the
+/// folder staging INSERT counts folders), then folder delete, staging clear
+/// and guard release.
+pub(super) fn root_removal_statements(
+    library_id: i64,
+    configured_paths: &str,
+    file_ids: &str,
+    lease: Option<&hiqlite::Params>,
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    const GUARD: &str = "EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)";
+    let paths_are = super::library_paths_are_sql("$1", "$2");
+    let templates: Vec<(String, hiqlite::Params)> = vec![
+        (
+            format!(
+                "INSERT INTO scan_reconcile_guards (library_id) SELECT $1 \
+                 WHERE {paths_are} {{LEASE}} ON CONFLICT(library_id) DO NOTHING"
+            ),
+            params!(library_id, configured_paths),
+        ),
+        (
+            format!(
+                "DELETE FROM files WHERE item_id IN (SELECT id FROM items WHERE library_id = $1) \
+                 AND id IN (SELECT value FROM json_each($2)) \
+                 AND NOT EXISTS (SELECT 1 FROM dv_conversions d \
+                                 WHERE d.file_id = files.id \
+                                   AND d.state IN ('running', 'verified')) \
+                 AND {GUARD} {{LEASE}}"
+            ),
+            params!(library_id, file_ids),
+        ),
+        (
+            format!(
+                "DELETE FROM items WHERE library_id = $1 AND {GUARD} \
+                 AND kind IN ('movie','episode','video','photo','book','audiobook') \
+                 AND id NOT IN (SELECT item_id FROM files) {{LEASE}}"
+            ),
+            params!(library_id),
+        ),
+        (
+            format!(
+                "DELETE FROM items WHERE library_id = $1 AND {GUARD} AND kind = 'season' \
+                 AND id NOT IN (SELECT parent_id FROM items \
+                                WHERE kind = 'episode' AND parent_id IS NOT NULL) {{LEASE}}"
+            ),
+            params!(library_id),
+        ),
+        (
+            format!(
+                "DELETE FROM items WHERE library_id = $1 AND {GUARD} AND kind = 'show' \
+                 AND id NOT IN (SELECT parent_id FROM items \
+                                WHERE kind = 'season' AND parent_id IS NOT NULL) {{LEASE}}"
+            ),
+            params!(library_id),
+        ),
+        (
+            format!(
+                "WITH RECURSIVE descendants(root_id, id, kind) AS ( \
+                     SELECT root.id, child.id, child.kind FROM items root \
+                     LEFT JOIN items child ON child.parent_id = root.id \
+                     WHERE root.library_id = $1 AND root.kind = 'folder' \
+                     UNION SELECT descendants.root_id, child.id, child.kind \
+                     FROM descendants JOIN items child ON child.parent_id = descendants.id \
+                 ) INSERT INTO scan_reconcile_items (library_id, item_id) \
+                   SELECT $1, items.id FROM items \
+                   WHERE items.library_id = $1 AND items.kind = 'folder' AND {GUARD} \
+                     AND NOT EXISTS (SELECT 1 FROM descendants \
+                                     WHERE root_id = items.id AND kind != 'folder') {{LEASE}} \
+                   ON CONFLICT(library_id, item_id) DO NOTHING"
+            ),
+            params!(library_id),
+        ),
+        (
+            "DELETE FROM items WHERE library_id = $1 AND id IN \
+                (SELECT item_id FROM scan_reconcile_items WHERE library_id = $1) {LEASE}"
+                .to_owned(),
+            params!(library_id),
+        ),
+        (
+            "DELETE FROM scan_reconcile_items WHERE library_id = $1 {LEASE}".to_owned(),
+            params!(library_id),
+        ),
+        (
+            "DELETE FROM scan_reconcile_guards WHERE library_id = $1 {LEASE}".to_owned(),
+            params!(library_id),
+        ),
+    ];
+    templates
+        .into_iter()
+        .map(|(sql, mut bound)| {
+            let fence = match lease {
+                None => String::new(),
+                Some(lease) => {
+                    let first = bound.len() + 1;
+                    bound.extend(lease.iter().cloned());
+                    format!(
+                        "AND EXISTS (SELECT 1 FROM job_leases WHERE resource = ${} \
+                         AND owner_node_id = ${} AND fence = ${} AND revision = ${} \
+                         AND expires_at_ms = ${})",
+                        first,
+                        first + 1,
+                        first + 2,
+                        first + 3,
+                        first + 4
+                    )
+                }
+            };
+            let sql = sql.replace("{LEASE}", &fence);
+            validate_sql(&sql)?;
+            Ok((sql, bound))
+        })
+        .collect()
+}
+
+/// Read [`root_removal_statements`]' results. A guard that was not taken
+/// means the paths changed — or, if they did not, another operation holds
+/// the library's guard, which is an error like reconcile's.
+pub(super) async fn root_removal_outcome(
+    client: &TimedClient,
+    library_id: i64,
+    configured_paths: &str,
+    results: &[usize],
+) -> Result<RootRemovalOutcome, StoreError> {
+    if results.first().copied() != Some(1) {
+        if !library_paths_are(client, library_id, configured_paths).await? {
+            return Ok(RootRemovalOutcome::ConfigurationChanged);
+        }
+        return Err(StoreError::Database(
+            "scan reconciliation guard was already held by another operation".to_owned(),
+        ));
+    }
+    Ok(RootRemovalOutcome::Applied {
+        deleted_files: results[1] as u64,
+        pruned_items: results[2..=5].iter().map(|rows| *rows as u64).sum(),
+    })
 }
 
 async fn scalar_with(
@@ -1922,10 +2078,16 @@ impl MediaStore for HiqliteAuthStore {
             sort_title_for(&item.title)
         };
         let now = self.now()?;
-        let sql = "INSERT INTO items \
+        // authority: current allocator installation selects the identity-fenced write path.
+        let allocated = self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.count==1);
+        let sql = if allocated {
+            "INSERT INTO items(id,library_id,kind,parent_id,title,sort_title,year,season_number,episode_number,added_at,updated_at) SELECT high_water+1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$9 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807 RETURNING id"
+        } else {
+            "INSERT INTO items \
                    (library_id, kind, parent_id, title, sort_title, year, \
                     season_number, episode_number, added_at, updated_at) \
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) RETURNING id";
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) RETURNING id"
+        };
         validate_sql(sql)?;
         let row = self
             .client()
@@ -2879,7 +3041,7 @@ impl MediaStore for HiqliteAuthStore {
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
                     probe.video_codec_tag.as_deref(),
-                    probe.field_order.as_deref(),
+                    probe.stored_field_order(),
                     probe.max_cll,
                     probe.max_fall,
                     probe.mastering_max_luminance,
@@ -3383,6 +3545,84 @@ impl MediaStore for HiqliteAuthStore {
         Ok(changed == 1)
     }
 
+    async fn files_without_luminance_facts(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        #[derive(Debug)]
+        struct UnobservedRow {
+            id: i64,
+            path: String,
+            size: i64,
+            mtime: i64,
+            probe_json: String,
+        }
+        impl From<&mut Row<'_>> for UnobservedRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    id: row.get("id"),
+                    path: row.get("path"),
+                    size: row.get("size"),
+                    mtime: row.get("mtime"),
+                    probe_json: row.get("probe_json"),
+                }
+            }
+        }
+        // The frame walk's cursor passes ids for good, so a page read from a
+        // lagging replica could skip a committed `none` row forever.
+        Ok(self
+            .client()
+            // authority: the cursor never revisits an id it has passed.
+            .query_consistent_map::<UnobservedRow, _>(
+                "SELECT id, path, size, mtime, probe_json FROM files \
+                  WHERE hdr IS NOT NULL AND luminance_source = 'none' \
+                    AND probe_json IS NOT NULL AND id > $1 ORDER BY id LIMIT $2",
+                params!(after_id, limit.max(0)),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| MissingVideoCodecTag {
+                id: row.id,
+                path: row.path,
+                size: row.size,
+                mtime: row.mtime,
+                probe_json: row.probe_json,
+            })
+            .collect())
+    }
+
+    async fn set_file_frame_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files SET max_cll = $1, max_fall = $2, \
+                  mastering_max_luminance = $3, luminance_source = 'frame' \
+                  WHERE id = $4 AND path = $5 AND size = $6 AND mtime = $7 \
+                    AND probe_json = $8 AND luminance_source = 'none'",
+                params!(
+                    max_cll,
+                    max_fall,
+                    mastering_max_luminance,
+                    candidate.id,
+                    candidate.path.as_str(),
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json.as_str()
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
     async fn set_file_dolby_vision(
         &self,
         file_id: i64,
@@ -3482,6 +3722,26 @@ impl MediaStore for HiqliteAuthStore {
         Ok(changed == 1)
     }
 
+    async fn merge_file_probe_content_encoding(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        report_json: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files \
+                    SET probe_json = json_set(probe_json, '$.plurx_content_encoding', json($1)) \
+                  WHERE id = $2 AND size = $3 AND mtime = $4 AND probe_json IS NOT NULL",
+                params!(report_json, file_id, size, mtime),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
     async fn files_missing_probe(
         &self,
         library_id: Option<i64>,
@@ -3520,19 +3780,34 @@ impl MediaStore for HiqliteAuthStore {
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
     ) -> Result<RootFingerprintStatus, StoreError> {
+        let configured_paths = super::library_paths_json(configured_paths)?;
+        let sql = format!(
+            "INSERT INTO library_roots (library_id, fingerprint) \
+             SELECT $1, $2 WHERE $3 AND {} \
+             ON CONFLICT(library_id) DO NOTHING",
+            super::library_paths_are_sql("$1", "$4")
+        );
         let inserted = self
+            .client()
             .execute(
-                "INSERT INTO library_roots (library_id, fingerprint) \
-                 SELECT $1, $2 WHERE $3 \
-                 ON CONFLICT(library_id) DO NOTHING",
-                params!(library_id, fingerprint, allow_establish),
+                sql,
+                params!(
+                    library_id,
+                    fingerprint,
+                    allow_establish,
+                    configured_paths.as_str()
+                ),
             )
             .await?;
         if inserted == 1 {
             return Ok(RootFingerprintStatus::Established);
+        }
+        if !library_paths_are(self.client(), library_id, &configured_paths).await? {
+            return Ok(RootFingerprintStatus::ConfigurationChanged);
         }
         let expected = self
             .client()
@@ -3733,6 +4008,27 @@ impl MediaStore for HiqliteAuthStore {
         })
     }
 
+    async fn remove_files_outside_library_roots(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+    ) -> Result<RootRemovalOutcome, StoreError> {
+        super::root_removal_payload(file_ids)?;
+        let configured_paths = super::library_paths_json(configured_paths)?;
+        let ids = serde_json::to_string(file_ids).map_err(database_error)?;
+        let statements = root_removal_statements(library_id, &configured_paths, &ids, None)?;
+        let results = self
+            .client()
+            .txn(statements)
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        root_removal_outcome(self.client(), library_id, &configured_paths, &results).await
+    }
+
     async fn reset_library_root_fingerprint(&self, library_id: i64) -> Result<bool, StoreError> {
         Ok(self
             .execute(
@@ -3788,35 +4084,7 @@ impl MediaStore for HiqliteAuthStore {
     }
 
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError> {
-        let statements = [
-            "DELETE FROM scan_reconcile_items WHERE library_id = $1",
-            "DELETE FROM items WHERE library_id = $1 \
-             AND kind IN ('movie','episode','video','photo','book','audiobook') \
-             AND id NOT IN (SELECT item_id FROM files)",
-            "DELETE FROM items WHERE library_id = $1 AND kind = 'season' \
-             AND id NOT IN (SELECT parent_id FROM items \
-                            WHERE kind = 'episode' AND parent_id IS NOT NULL)",
-            "DELETE FROM items WHERE library_id = $1 AND kind = 'show' \
-             AND id NOT IN (SELECT parent_id FROM items \
-                            WHERE kind = 'season' AND parent_id IS NOT NULL)",
-            "WITH RECURSIVE descendants(root_id, id, kind) AS ( \
-                 SELECT root.id, child.id, child.kind FROM items root \
-                 LEFT JOIN items child ON child.parent_id = root.id \
-                 WHERE root.library_id = $1 AND root.kind = 'folder' \
-                 UNION \
-                 SELECT descendants.root_id, child.id, child.kind \
-                 FROM descendants JOIN items child ON child.parent_id = descendants.id \
-             ) \
-             INSERT INTO scan_reconcile_items (library_id, item_id) \
-               SELECT $1, items.id FROM items \
-               WHERE items.library_id = $1 AND items.kind = 'folder' \
-                 AND NOT EXISTS (SELECT 1 FROM descendants \
-                                 WHERE root_id = items.id AND kind != 'folder') \
-               ON CONFLICT(library_id, item_id) DO NOTHING",
-            "DELETE FROM items WHERE library_id = $1 AND id IN \
-                (SELECT item_id FROM scan_reconcile_items WHERE library_id = $1)",
-            "DELETE FROM scan_reconcile_items WHERE library_id = $1",
-        ];
+        let statements = PRUNE_EMPTY_ITEMS_SQL;
         for sql in statements {
             validate_sql(sql)?;
         }
@@ -3835,7 +4103,108 @@ impl MediaStore for HiqliteAuthStore {
     }
 }
 
+/// The replicated prune of a library's items left without files, bottom-up.
+/// Bound `$1` = library id. Rows removed are the counts of statements 1..=4
+/// (the folder staging INSERT counts the folders; CTE DELETE counts vary
+/// across SQLite wrappers).
+const PRUNE_EMPTY_ITEMS_SQL: [&str; 7] = [
+    "DELETE FROM scan_reconcile_items WHERE library_id = $1",
+    "DELETE FROM items WHERE library_id = $1 \
+     AND kind IN ('movie','episode','video','photo','book','audiobook') \
+     AND id NOT IN (SELECT item_id FROM files)",
+    "DELETE FROM items WHERE library_id = $1 AND kind = 'season' \
+     AND id NOT IN (SELECT parent_id FROM items \
+                    WHERE kind = 'episode' AND parent_id IS NOT NULL)",
+    "DELETE FROM items WHERE library_id = $1 AND kind = 'show' \
+     AND id NOT IN (SELECT parent_id FROM items \
+                    WHERE kind = 'season' AND parent_id IS NOT NULL)",
+    "WITH RECURSIVE descendants(root_id, id, kind) AS ( \
+         SELECT root.id, child.id, child.kind FROM items root \
+         LEFT JOIN items child ON child.parent_id = root.id \
+         WHERE root.library_id = $1 AND root.kind = 'folder' \
+         UNION \
+         SELECT descendants.root_id, child.id, child.kind \
+         FROM descendants JOIN items child ON child.parent_id = descendants.id \
+     ) \
+     INSERT INTO scan_reconcile_items (library_id, item_id) \
+       SELECT $1, items.id FROM items \
+       WHERE items.library_id = $1 AND items.kind = 'folder' \
+         AND NOT EXISTS (SELECT 1 FROM descendants \
+                         WHERE root_id = items.id AND kind != 'folder') \
+       ON CONFLICT(library_id, item_id) DO NOTHING",
+    "DELETE FROM items WHERE library_id = $1 AND id IN \
+        (SELECT item_id FROM scan_reconcile_items WHERE library_id = $1)",
+    "DELETE FROM scan_reconcile_items WHERE library_id = $1",
+];
+
 const PLAYABLE_KINDS: &str = "'movie','episode','video','audiobook'";
+
+/// The replicated watch-rollup statements, with the plan pins (`NOT INDEXED`
+/// seed and leaf join, `INDEXED BY idx_items_parent` recursion, `CROSS JOIN`
+/// tree-first order) that `sqlite/watch.rs`'s `watch_rollups_sql` explains:
+/// the vendored state machine runs `PRAGMA optimize`, so every voter has
+/// `sqlite_stat1`, and with it the unpinned statement skip-scanned every item
+/// through `idx_items_library_kind` (K-05: 2.6 → 7.9 ms on the fixture).
+/// `watch_rollup_plans_do_not_depend_on_statistics` pins these too.
+pub(super) fn watch_rollups_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(root, id) AS ( \
+             SELECT id, id FROM items NOT INDEXED \
+             WHERE id IN (SELECT value FROM json_each($1)) \
+             UNION SELECT t.root, i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT t.root AS root, COUNT(*) AS leaves, \
+                COALESCE(SUM(w.watched), 0) AS watched \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
+         WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
+    )
+}
+
+/// [`watch_rollups_sql`] for one container.
+pub(super) fn watch_rollup_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(id) AS ( \
+             SELECT id FROM items NOT INDEXED WHERE id = $1 \
+             UNION SELECT i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT $1 AS root, COUNT(*) AS leaves, \
+                COALESCE(SUM(w.watched), 0) AS watched \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
+         WHERE i.kind IN ({PLAYABLE_KINDS})"
+    )
+}
+
+/// Both halves of `watch_summary` in one statement; its rollup half is
+/// [`watch_rollups_sql`]'s, pins included, and its watch-map half is
+/// `read_watch_map`'s id-driven `CROSS JOIN` (one `(user_id, item_id)` key
+/// lookup per requested id). Before K-05 pinned it, that half was still the
+/// `watch_state`-first join K-05 M4 replaced in `watch_map`: without
+/// statistics it walked every watch row the user has through
+/// `idx_watch_updated`, so it also changed plan with `sqlite_stat1`.
+pub(super) fn watch_summary_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(root, id) AS ( \
+             SELECT id, id FROM items NOT INDEXED \
+             WHERE id IN (SELECT value FROM json_each($1)) \
+             UNION SELECT t.root, i.id FROM items i INDEXED BY idx_items_parent \
+             JOIN tree t ON i.parent_id = t.id \
+         ) \
+         SELECT 0 AS part, w.item_id AS item_id, w.position_ms AS position_ms, \
+                w.duration_ms AS duration_ms, w.watched AS watched, \
+                w.updated_at AS updated_at, NULL AS leaves \
+         FROM json_each($2) j \
+         CROSS JOIN watch_state w ON w.user_id = $3 AND w.item_id = j.value \
+         UNION ALL \
+         SELECT 1, t.root, NULL, NULL, COALESCE(SUM(w.watched), 0), NULL, COUNT(*) \
+         FROM tree t CROSS JOIN items i NOT INDEXED ON i.id = t.id \
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $3 \
+         WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
+    )
+}
 
 #[async_trait]
 impl WatchStore for HiqliteAuthStore {
@@ -3979,6 +4348,61 @@ impl WatchStore for HiqliteAuthStore {
         Ok(rows.into_iter().next().map(Into::into))
     }
 
+    async fn jellyfin_progress_is_current(
+        &self,
+        write: &super::JellyfinProgressWrite,
+    ) -> Result<bool, StoreError> {
+        let p = &write.provenance;
+        super::jellyfin_play::validate_key(&p.play_id, &p.scope)?;
+        let rows = self
+            .client()
+            // authority: queued compatibility admission observes the exact live play and manual-edit revision.
+            .query_consistent_map::<super::jellyfin_watch::CurrentRow, _>(
+                super::jellyfin_watch::CURRENT,
+                params!(
+                    p.play_id.clone(),
+                    p.scope.user_id,
+                    p.scope.token_digest.clone(),
+                    p.scope.device_digest.clone(),
+                    p.scope.client_family.as_str(),
+                    p.manual_revision,
+                    write.item_id,
+                    self.now()?
+                ),
+            )
+            .await?;
+        Ok(rows.into_iter().next().is_some_and(|row| row.current))
+    }
+    async fn put_jellyfin_progress(
+        &self,
+        write: super::JellyfinProgressWrite,
+        expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        let now = self.now()?;
+        let (expected, context) = super::jellyfin_watch::progress_context(&write, now, expected)?;
+        let p = &write.provenance;
+        let rows = self
+            .watch_write_returning::<WatchRow>(
+                p.scope.user_id,
+                super::jellyfin_watch::PROGRESS,
+                params!(
+                    write.item_id,
+                    write.duration_ms,
+                    write.position_ms,
+                    p.scope.user_id,
+                    now,
+                    p.play_id.clone(),
+                    p.scope.token_digest.clone(),
+                    p.scope.device_digest.clone(),
+                    p.scope.client_family.as_str(),
+                    p.manual_revision,
+                    expected,
+                    context
+                ),
+            )
+            .await?;
+        Ok(rows.into_iter().next().map(Into::into))
+    }
     async fn set_watched(
         &self,
         user_id: i64,
@@ -3986,69 +4410,45 @@ impl WatchStore for HiqliteAuthStore {
         watched: bool,
     ) -> Result<(), StoreError> {
         let now = self.now()?;
-        if watched {
-            self.watch_write(
-                user_id,
-                "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 VALUES ($1, $2, 0, 1, $3) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET watched = 1, updated_at = $3",
-                params!(user_id, item_id, now),
-            )
-            .await?;
-        } else {
-            self.watch_write(
-                user_id,
-                "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 VALUES ($1, $2, 0, 0, $3) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET \
-                     watched = 0, position_ms = 0, updated_at = $3",
-                params!(user_id, item_id, now),
-            )
-            .await?;
-        }
+        let sql = super::jellyfin_watch::manual_sql(false, watched);
+        validate_sql(&sql)?;
+        self.watch_write_returning::<super::jellyfin_watch::EditRow>(
+            user_id,
+            sql,
+            params!(item_id, user_id, now, Option::<String>::None),
+        )
+        .await?;
         Ok(())
     }
-
     async fn set_watched_tree(
         &self,
         user_id: i64,
         item_id: i64,
         watched: bool,
     ) -> Result<Vec<i64>, StoreError> {
+        self.set_watched_tree_with_origin(user_id, item_id, watched, None)
+            .await
+    }
+    async fn set_watched_tree_with_origin(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        origin: Option<&super::JellyfinPlayScope>,
+    ) -> Result<Vec<i64>, StoreError> {
         let now = self.now()?;
-        let sql = if watched {
-            format!(
-                "WITH RECURSIVE tree(id) AS ( \
-                     SELECT id FROM items WHERE id = $1 \
-                     UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                 ) \
-                 INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 SELECT $2, i.id, 0, 1, $3 FROM tree t JOIN items i ON i.id = t.id \
-                 WHERE i.kind IN ({PLAYABLE_KINDS}) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET watched = 1, updated_at = $3 \
-                 WHERE watch_state.watched = 0 RETURNING item_id AS id"
-            )
-        } else {
-            format!(
-                "WITH RECURSIVE tree(id) AS ( \
-                     SELECT id FROM items WHERE id = $1 \
-                     UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                 ) \
-                 INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 SELECT $2, i.id, 0, 0, $3 FROM tree t JOIN items i ON i.id = t.id \
-                 WHERE i.kind IN ({PLAYABLE_KINDS}) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET \
-                     watched = 0, position_ms = 0, updated_at = $3 \
-                 WHERE watch_state.watched = 1 OR watch_state.position_ms <> 0 \
-                 RETURNING item_id AS id"
-            )
-        };
+        let origin = super::jellyfin_watch::origin_json(user_id, origin, now)?;
+        let sql = super::jellyfin_watch::manual_sql(true, watched);
         validate_sql(&sql)?;
         let mut changed = self
-            .watch_write_returning::<IdRow>(user_id, sql, params!(item_id, user_id, now))
+            .watch_write_returning::<super::jellyfin_watch::EditRow>(
+                user_id,
+                sql,
+                params!(item_id, user_id, now, origin),
+            )
             .await?
             .into_iter()
-            .map(|row| row.id)
+            .filter_map(|row| row.changed.then_some(row.id))
             .collect::<Vec<_>>();
         changed.sort_unstable();
         Ok(changed)
@@ -4288,23 +4688,7 @@ impl HiqliteAuthStore {
         let rows = self
             .watch_query::<WatchSummaryRow>(
                 read,
-                format!(
-                    "WITH RECURSIVE tree(root, id) AS ( \
-                         SELECT id, id FROM items \
-                         WHERE id IN (SELECT value FROM json_each($1)) \
-                         UNION SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT 0 AS part, w.item_id AS item_id, w.position_ms AS position_ms, \
-                            w.duration_ms AS duration_ms, w.watched AS watched, \
-                            w.updated_at AS updated_at, NULL AS leaves \
-                     FROM watch_state w JOIN json_each($2) j ON j.value = w.item_id \
-                     WHERE w.user_id = $3 \
-                     UNION ALL \
-                     SELECT 1, t.root, NULL, NULL, COALESCE(SUM(w.watched), 0), NULL, COUNT(*) \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $3 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
-                ),
+                watch_summary_sql(),
                 params!(ids_json(container_ids)?, ids_json(item_ids)?, user_id),
             )
             .await?;
@@ -4354,21 +4738,7 @@ impl HiqliteAuthStore {
         item_id: i64,
     ) -> Result<WatchRollup, StoreError> {
         let rows = self
-            .watch_query::<RollupRow>(
-                read,
-                format!(
-                    "WITH RECURSIVE tree(id) AS ( \
-                         SELECT id FROM items WHERE id = $1 \
-                         UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT $1 AS root, COUNT(*) AS leaves, \
-                            COALESCE(SUM(w.watched), 0) AS watched \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS})"
-                ),
-                params!(item_id, user_id),
-            )
+            .watch_query::<RollupRow>(read, watch_rollup_sql(), params!(item_id, user_id))
             .await?;
         let row = rows
             .into_iter()
@@ -4390,18 +4760,7 @@ impl HiqliteAuthStore {
             return Ok(HashMap::new());
         }
         let ids_json = ids_json(ids)?;
-        let sql = format!(
-            "WITH RECURSIVE tree(root, id) AS ( \
-                         SELECT id, id FROM items \
-                         WHERE id IN (SELECT value FROM json_each($1)) \
-                         UNION SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                     ) \
-                     SELECT t.root AS root, COUNT(*) AS leaves, \
-                            COALESCE(SUM(w.watched), 0) AS watched \
-                     FROM tree t JOIN items i ON i.id = t.id \
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $2 \
-                     WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
-        );
+        let sql = watch_rollups_sql();
         trace_statement("watch_rollups", &sql);
         let rows = self
             .watch_query::<RollupRow>(read, sql, params!(ids_json, user_id))

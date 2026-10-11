@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "milestone": "J0",
+  "status": "in_progress",
+  "protocol_baseline": {
+    "server_version": "10.11.11",
+    "server_commit": "1fbd8739292cce610231be93daf43368733edf63",
+    "container_index_digest": "sha256:aefb67e6a7ff1debdd154a78a7bbb780fd0c873d8639210a7f6a2016ad2b35db",
+    "container_arch": "arm64",
+    "container_image_id": "sha256:1546f3945380ad2662049751dab2ff761d5042144da181b3488f1984df4804a3",
+    "openapi_sha256": "6dac6d7b15905319068512342a80898aa2fa19d4d8109711c0ae933affe5a2d0",
+    "openapi_path_count": 315,
+    "openapi_servers": [
+      {
+        "url": "http://127.0.0.1:18096/jellyfin"
+      }
+    ],
+    "openapi_schema_without_servers_sha256": "aa7d04241834beac7869cc413cdd2797ea4fc112ddc7dc5ed72f49d5a05688ce"
+  },
+  "clients": {
+    "infuse": {
+      "version": "8.5.6",
+      "build": "8.5.5763",
+      "os": "tvOS 27.0",
+      "os_build": "24J361",
+      "device_model": "Apple TV 4K (3rd generation)",
+      "model": "AppleTV14,1",
+      "inventory_status": "paired_physical_device",
+      "flow_status": "reference_direct_and_explicit_encoded_hls_rendered"
+    },
+    "androidtv": {
+      "source_commit": "984181a3d6ab14e9a6d2dcc850c582e1c138bd95",
+      "release_apk_sha256": "8510a517c99927076082917f41bf306dd7a2546c59d492dd11bde18d6e2e4628",
+      "sdk_version": "1.7.1",
+      "media3_version": "1.8.0",
+      "inventory_status": "connected_physical_adb",
+      "flow_status": "reference_direct_encoded_hls_and_controlled_native_fmp4_rendered",
+      "player_backend": "AndroidX Media3 ExoPlayer 1.8.0 (physical runtime log)",
+      "version": "0.19.10",
+      "version_code": 191099,
+      "device_model": "Google TV Streamer",
+      "manufacturer": "Google",
+      "os_version": "14",
+      "api_level": 34,
+      "os_build": "UTTK.260317.003"
+    }
+  },
+  "fixtures": [
+    {
+      "name": "J0 Direct (2026)-poster.jpg",
+      "relative_path": "Movies/J0 Direct (2026)-poster.jpg",
+      "sha256": "20283a6048e5f1815d38b4f96d5bfe9ade74459c5e4127592df4424f21d184bc",
+      "bytes": 43525
+    },
+    {
+      "name": "J0 Direct (2026).mp4",
+      "relative_path": "Movies/J0 Direct (2026).mp4",
+      "sha256": "a79162652c3924033bd2b4dc55f1656c914f8b540697b43e025847e0611ef7d0",
+      "bytes": 400229792
+    },
+    {
+      "name": "J0 Tracks (2026).en.srt",
+      "relative_path": "Movies/J0 Tracks (2026).en.srt",
+      "sha256": "6d6d454f59602e2d56c1e4a5b12e85d76a5b01d5ccb40bc6fd4d6356111e3375",
+      "bytes": 210
+    },
+    {
+      "name": "J0 Tracks (2026).mkv",
+      "relative_path": "Movies/J0 Tracks (2026).mkv",
+      "sha256": "3d59fb434c159eba526a773ad40b79e97dfc7bf797c212fa16666777e0dbc2e0",
+      "bytes": 410811287
+    },
+    {
+      "name": "J0 Show S01E01.mp4",
+      "relative_path": "TV/J0 Show (2026)/Season 01/J0 Show S01E01.mp4",
+      "sha256": "a79162652c3924033bd2b4dc55f1656c914f8b540697b43e025847e0611ef7d0",
+      "bytes": 400229792
+    },
+    {
+      "name": "J0 Show S01E02.mp4",
+      "relative_path": "TV/J0 Show (2026)/Season 01/J0 Show S01E02.mp4",
+      "sha256": "a79162652c3924033bd2b4dc55f1656c914f8b540697b43e025847e0611ef7d0",
+      "bytes": 400229792
+    }
+  ],
+  "evidence_boundary": "Physical Android TV and Infuse reference playback and labeled controlled native delivery spike are measured; production compatibility adapter remains unimplemented.",
+  "fixtures_revised_at_utc": "2026-10-02T20:47:44.046931+00:00"
+}

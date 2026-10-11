@@ -51,7 +51,7 @@
 //! the lock.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// Process-local identity of one scratch allocation.
@@ -258,6 +258,164 @@ pub(crate) struct ScratchLedger {
     /// Test seam: how many times a measurement was refused because the
     /// inventory generation moved under it.
     stale_measurements: AtomicU64,
+    /// Disk headroom left for scratch after rolling retention's hard links.
+    /// Here because the two writers of `slack` between samples — the
+    /// eviction of a linked segment, and the cap — are already ledger events.
+    headroom: Arc<RetainedHeadroom>,
+}
+
+/// Free-space headroom for rolling complete-output retention.
+///
+/// A retained hard link keeps a segment's bytes on disk after rolling
+/// eviction returns its ledger credit, so those bytes are on nobody's books.
+/// The invariant retention must keep is that the disk can still hold
+/// everything scratch is authorised to write. The ledger's total is not bytes
+/// on disk — `charge = max(grant, materialized) + pinned`, so a grant that is
+/// mostly unwritten counts in full — so the authorised-but-unwritten bytes are
+/// `scratch_cap - (total - grant_unused)`, and
+///
+/// ```text
+/// slack = free_bytes - authorised_unwritten
+/// retention allowed  <=>  slack >= RESERVE
+/// ```
+///
+/// Sampled on the VOD maintenance tick, never on the capture path. Between
+/// samples: a scratch write lowers free space and authorised-unwritten bytes
+/// alike (slack unchanged); a hard link allocates nothing (unchanged);
+/// evicting a segment that still has a retained link returns credit while the
+/// bytes stay (slack falls by its size, applied synchronously by
+/// [`Self::consume`]); and a raised cap invalidates the sample.
+pub(crate) struct RetainedHeadroom {
+    slack: AtomicI64,
+    /// Milliseconds since [`RetainedHeadroom::epoch`] at the last sample; 0
+    /// means unsampled or invalidated.
+    sampled_at_ms: AtomicU64,
+    cap_at_sample: AtomicI64,
+    epoch: std::time::Instant,
+}
+
+/// The margin for writers the ledger does not know: the caches, the database.
+/// A guess, stated as one; the Developer card shows the live slack beside it.
+pub(crate) const RETAINED_HEADROOM_RESERVE_BYTES: i64 = 1 << 30;
+
+impl RetainedHeadroom {
+    fn new() -> Self {
+        Self {
+            slack: AtomicI64::new(0),
+            sampled_at_ms: AtomicU64::new(0),
+            cap_at_sample: AtomicI64::new(0),
+            // Backdated so a sample can be aged in a test of a fresh gauge;
+            // only differences of this clock are ever read.
+            epoch: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3_600))
+                .unwrap_or_else(std::time::Instant::now),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1)
+    }
+
+    /// The slack these facts imply. Pure, so the rule is testable alone.
+    pub(crate) fn slack_of(free_bytes: i64, snapshot: &ScratchSnapshot, scratch_cap: i64) -> i64 {
+        let written_or_pinned = snapshot.total.saturating_sub(snapshot.grant_unused);
+        let authorised_unwritten = if scratch_cap > 0 {
+            scratch_cap.saturating_sub(written_or_pinned).max(0)
+        } else {
+            // No ceiling configured: nothing bounds what scratch may write,
+            // so only what is already granted and unwritten is known owed.
+            snapshot.grant_unused
+        };
+        free_bytes.saturating_sub(authorised_unwritten)
+    }
+
+    /// Publish one sample: free bytes on the retained filesystem, and the
+    /// ledger snapshot and cap taken in the same pass.
+    pub(crate) fn record(&self, free_bytes: i64, snapshot: &ScratchSnapshot, scratch_cap: i64) {
+        self.slack.store(
+            Self::slack_of(free_bytes, snapshot, scratch_cap),
+            Ordering::Release,
+        );
+        self.cap_at_sample.store(scratch_cap, Ordering::Release);
+        self.sampled_at_ms.store(self.now_ms(), Ordering::Release);
+    }
+
+    /// [`Self::record`] against the live cap, closing the race with a raise.
+    ///
+    /// A raise publishes the new cap and then calls [`Self::note_cap`]. If
+    /// that note ran before this sample stored its own (older) cap, the
+    /// invalidation was overwritten by the store. So the cap is read again
+    /// after the store and noted here: a cap that rose while the sample was
+    /// taken invalidates it. The fences here and in the raise make each
+    /// side's store-then-load sequentially consistent, so at least one of the
+    /// two `note_cap` calls sees the other side's store.
+    pub(crate) fn record_against(
+        &self,
+        free_bytes: i64,
+        snapshot: &ScratchSnapshot,
+        scratch_cap: &AtomicI64,
+    ) {
+        let cap = scratch_cap.load(Ordering::SeqCst);
+        self.record(free_bytes, snapshot, cap);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        self.note_cap(scratch_cap.load(Ordering::SeqCst));
+    }
+
+    /// Bytes that stay on disk although the ledger just stopped charging
+    /// them (an evicted segment with a retained link).
+    pub(crate) fn consume(&self, bytes: i64) {
+        self.slack.fetch_sub(bytes.max(0), Ordering::AcqRel);
+    }
+
+    /// A new scratch cap: a raise invalidates the sample, because more may
+    /// now be authorised than the sample's slack assumed.
+    pub(crate) fn note_cap(&self, scratch_cap: i64) {
+        let sampled = self.cap_at_sample.load(Ordering::Acquire);
+        let raised = if sampled <= 0 {
+            scratch_cap > 0
+        } else {
+            scratch_cap <= 0 || scratch_cap > sampled
+        };
+        if raised {
+            self.sampled_at_ms.store(0, Ordering::Release);
+        }
+    }
+
+    /// The current slack, when a sample exists.
+    pub(crate) fn slack(&self) -> Option<i64> {
+        (self.sampled_at_ms.load(Ordering::Acquire) != 0)
+            .then(|| self.slack.load(Ordering::Acquire))
+    }
+
+    /// Whether retention may take another link now. Reads atomics only; the
+    /// capture path never calls `statvfs`. A missing, invalidated or stale
+    /// sample refuses, which also covers a mount that hangs the sampler.
+    pub(crate) fn admits(&self, max_age: std::time::Duration) -> Result<(), &'static str> {
+        let sampled = self.sampled_at_ms.load(Ordering::Acquire);
+        if sampled == 0 {
+            return Err("headroom_unsampled");
+        }
+        let age = self.now_ms().saturating_sub(sampled);
+        if u128::from(age) > max_age.as_millis() {
+            return Err("headroom_stale");
+        }
+        if self.slack.load(Ordering::Acquire) < RETAINED_HEADROOM_RESERVE_BYTES {
+            return Err("headroom_low");
+        }
+        Ok(())
+    }
+
+    /// Test seam: make the last sample `age` old.
+    #[cfg(test)]
+    pub(crate) fn age_sample_for_test(&self, age: std::time::Duration) {
+        let aged = self
+            .now_ms()
+            .saturating_sub(u64::try_from(age.as_millis()).unwrap_or(u64::MAX))
+            .max(1);
+        self.sampled_at_ms.store(aged, Ordering::Release);
+    }
 }
 
 impl ScratchLedger {
@@ -269,7 +427,14 @@ impl ScratchLedger {
                 entries: HashMap::new(),
             }),
             stale_measurements: AtomicU64::new(0),
+            headroom: Arc::new(RetainedHeadroom::new()),
         })
+    }
+
+    /// The retained-output headroom gauge this ledger's scratch shares a disk
+    /// with.
+    pub(crate) fn headroom(&self) -> &Arc<RetainedHeadroom> {
+        &self.headroom
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, LedgerState> {
@@ -1565,5 +1730,90 @@ mod walk_tests {
         assert!(ledger.authorize_write(key, 100, 1_000, 0).is_none());
         drop(held);
         drop(permit);
+    }
+}
+
+#[cfg(test)]
+mod retained_headroom_tests {
+    use super::*;
+
+    const GIB: i64 = 1 << 30;
+
+    fn snapshot(total: i64, grant_unused: i64) -> ScratchSnapshot {
+        ScratchSnapshot {
+            total,
+            grant_unused,
+            ..ScratchSnapshot::default()
+        }
+    }
+
+    /// The ledger's total counts unused grants in full. `cap - total` would
+    /// read 2 GiB of room here; the writers are still authorised to land
+    /// 11 GiB, which the disk does not have.
+    #[test]
+    fn retention_refuses_when_unused_grants_exceed_free_space_on_a_fresh_sample() {
+        let headroom = RetainedHeadroom::new();
+        let cap = 12 * GIB;
+        let ledger = snapshot(10 * GIB, 9 * GIB);
+        headroom.record(5 * GIB / 2, &ledger, cap);
+        assert_eq!(
+            RetainedHeadroom::slack_of(5 * GIB / 2, &ledger, cap),
+            5 * GIB / 2 - 11 * GIB
+        );
+        assert_eq!(
+            headroom.admits(std::time::Duration::from_secs(60)),
+            Err("headroom_low")
+        );
+        // The same disk with the grants written instead admits.
+        headroom.record(5 * GIB / 2, &snapshot(10 * GIB, 0), 10 * GIB);
+        assert_eq!(headroom.admits(std::time::Duration::from_secs(60)), Ok(()));
+    }
+
+    #[test]
+    fn evicting_a_linked_segment_consumes_headroom_before_the_next_sample() {
+        let headroom = RetainedHeadroom::new();
+        headroom.record(3 * GIB, &snapshot(0, 0), GIB);
+        assert_eq!(headroom.slack(), Some(2 * GIB));
+        assert_eq!(headroom.admits(std::time::Duration::from_secs(60)), Ok(()));
+        // Ledger credit came back for 1.5 GiB that a retained link still
+        // holds on disk: the gauge falls at once, not at the next sample.
+        headroom.consume(3 * GIB / 2);
+        assert_eq!(headroom.slack(), Some(GIB / 2));
+        assert_eq!(
+            headroom.admits(std::time::Duration::from_secs(60)),
+            Err("headroom_low")
+        );
+    }
+
+    #[test]
+    fn capture_refuses_on_a_stale_free_space_sample() {
+        let headroom = RetainedHeadroom::new();
+        assert_eq!(
+            headroom.admits(std::time::Duration::from_secs(60)),
+            Err("headroom_unsampled")
+        );
+        headroom.record(100 * GIB, &snapshot(0, 0), GIB);
+        assert_eq!(headroom.admits(std::time::Duration::from_secs(60)), Ok(()));
+        headroom.age_sample_for_test(std::time::Duration::from_secs(61));
+        assert_eq!(
+            headroom.admits(std::time::Duration::from_secs(60)),
+            Err("headroom_stale"),
+            "a sample older than two ticks refuses, which also covers a hung mount"
+        );
+    }
+
+    #[test]
+    fn a_raised_scratch_cap_invalidates_the_sample() {
+        let headroom = RetainedHeadroom::new();
+        headroom.record(100 * GIB, &snapshot(0, 0), 8 * GIB);
+        headroom.note_cap(8 * GIB);
+        assert_eq!(headroom.admits(std::time::Duration::from_secs(60)), Ok(()));
+        headroom.note_cap(4 * GIB);
+        assert_eq!(headroom.admits(std::time::Duration::from_secs(60)), Ok(()));
+        headroom.note_cap(16 * GIB);
+        assert_eq!(
+            headroom.admits(std::time::Duration::from_secs(60)),
+            Err("headroom_unsampled")
+        );
     }
 }

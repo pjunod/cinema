@@ -1,0 +1,42 @@
+{
+  "scope": "retained sharp-panel pre-encoder stage isolation",
+  "commands": [
+    {
+      "argv": [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "http://127.0.0.1:32400/metrics"
+      ],
+      "exit": 0,
+      "seconds": 0.007156522013247013,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "inspect",
+        "plurxd",
+        "--format",
+        "{{.Image}}"
+      ],
+      "exit": 0,
+      "seconds": 0.014242124045267701,
+      "stderr": ""
+    }
+  ],
+  "root": "/var/tmp/plurx-hdr-stage-20261008-0j2h3urd",
+  "image": "sha256:e7f036e7d1c40d407f20f178c68e857b79f1828b62c921236272a24c2c303cec",
+  "source.mkv": {
+    "sha256": "b30a6a37e512a26f47e734ac27764a34cf5848e4ca92e83cbf8bea4d7a991946",
+    "bytes": 3138663
+  },
+  "outcome": "failed",
+  "failure": "FileNotFoundError(2, 'No such file or directory')",
+  "receipt_provenance": {
+    "kind": "sanitized derivative of locally retained execution receipt",
+    "raw_receipt_sha256": "5c6191a3c758385f4417e8649f44f061a44eab65b4e15984ef3db4eab1789706",
+    "sanitization": "private source names/paths replaced, media title tags omitted, infrastructure host normalized; numerical measurements unchanged"
+  }
+}

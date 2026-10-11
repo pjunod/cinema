@@ -123,7 +123,11 @@ impl LibraryStore for SqliteStore {
 
     async fn delete_library(&self, id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| {
-            Ok(conn.execute("DELETE FROM libraries WHERE id = ?1", params![id])? > 0)
+            let txn=conn.unchecked_transaction()?;
+            txn.execute("UPDATE sharing_exports SET scope_generation=scope_generation+1,catalogue_generation=catalogue_generation+1,mutation_generation=mutation_generation+1 WHERE id IN (SELECT grant_id FROM sharing_export_libraries WHERE library_id=$1)",params![id])?;
+            txn.execute("DELETE FROM sharing_export_libraries WHERE library_id=$1",params![id])?;
+            let deleted=txn.execute("DELETE FROM libraries WHERE id=?1",params![id])?>0;
+            txn.commit()?; Ok(deleted)
         })
         .await
     }

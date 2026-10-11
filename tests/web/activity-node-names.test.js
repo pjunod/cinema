@@ -76,6 +76,10 @@ const BORROWED = [
   "fmtDur",
   "durableQueueHtml",
   "clusterWorkersHtml",
+  "activityIsClustered",
+  "durableJobReason",
+  "activityBlockedScans",
+  "activityBlockedScansHtml",
   "restoreDurableFocus",
   "paintActivityBody",
 ];
@@ -110,7 +114,7 @@ const painter = new Function(
   "return (function(){" +
     PRELUDE +
     BORROWED.map(shippedSource).join("\n") +
-    "\nreturn {paintActivityBody, main, nodeLabel, durable:DURABLE_ACTIVITY, view:ACTIVITY_VIEW, inspect:activityInspectorHtml, snapshot:(d)=>{ACTIVITY_SNAPSHOT=d;}, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
+    "\nreturn {paintActivityBody, main, me:ME, nodeLabel, durable:DURABLE_ACTIVITY, view:ACTIVITY_VIEW, inspect:activityInspectorHtml, snapshot:(d)=>{ACTIVITY_SNAPSHOT=d;}, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
 )(require("../../crates/plurxd/src/web/live-tv.js"));
 
 const NODE_A = "5deeeebc-8f39-4cb5-8e4a-aa5f912f327f";
@@ -519,15 +523,15 @@ test("durable owners, attempts and repair destinations use roster names", () => 
     lease_expires_ms:now+30000,observed_at_ms:now};
   Object.assign(painter.durable,{observed:now,rows:[job],repairs:[{kind:"subtitle",target_node_id:"owner-id",phase:"copying",age_ms:1000}],
     detail:{job,waiters:[],attempts:[{node_id:"owner-id",started_at_ms:now-120000,outcome:null}]}});
-  const html=paint(snapshot({node_hostnames:{"owner-id":"m6"}}));
-  assert.match(html, /title="owner-id">m6<\/span>/);
-  assert.match(html, /<td>m6<\/td><td>copying/);
+  const html=paint(snapshot({node_hostnames:{"owner-id":"lab6"}}));
+  assert.match(html, /title="owner-id">lab6<\/span>/);
+  assert.match(html, /<td>lab6<\/td><td>copying/);
   painter.view.inspector={kind:"job",id:"job"};painter.view.detailTab="history";
-  assert.match(painter.inspect(), /m6<\/b> · running[\s\S]*2 min elapsed/);painter.view.inspector=null;
+  assert.match(painter.inspect(), /lab6<\/b> · running[\s\S]*2 min elapsed/);painter.view.inspector=null;
   assert.match(html, /Since requested/);
   assert.match(html, /23h 47m/);
   assert.doesNotMatch(html, /1427 min/);
-  const missing=paint(snapshot());
+  const missing=paint(snapshot({clustered:true}));
   assert.match(missing, /title="owner-id">owner-id<\/span>/);
   Object.assign(painter.durable,{rows:[],repairs:[],detail:null});
 });
@@ -539,12 +543,12 @@ test("expired durable leases do not masquerade as live executions", () => {
     lease_expires_ms:now-3600000,observed_at_ms:now};
   Object.assign(painter.durable,{observed:now,rows:[job],detail:{job,waiters:[],
     attempts:[{node_id:"owner-id",started_at_ms:job.lease_expires_ms-120000,outcome:null}]}});
-  const html=paint(snapshot({node_hostnames:{"owner-id":"<m6>"}}));
+  const html=paint(snapshot({node_hostnames:{"owner-id":"<lab6>"}}));
   assert.match(html, /Lease expired · awaiting recovery/);
   assert.match(html, /previous owner/);
   painter.view.inspector={kind:"job",id:"expired"};painter.view.detailTab="history";
-  assert.match(painter.inspect(), /&lt;m6&gt;<\/b> · lease expired[\s\S]*2 min elapsed/);painter.view.inspector=null;
-  assert.doesNotMatch(html, /<m6>/);
+  assert.match(painter.inspect(), /&lt;lab6&gt;<\/b> · lease expired[\s\S]*2 min elapsed/);painter.view.inspector=null;
+  assert.doesNotMatch(html, /<lab6>/);
   Object.assign(painter.durable,{rows:[],detail:null});
 });
 
@@ -555,9 +559,9 @@ function refreshingQueue(q,api){
     const document={getElementById:()=>null};
     function closeActivityInspector(){DURABLE_ACTIVITY.selectedId=null;}
     const ACTIVITY_VIEW={inspector:{kind:"job",id:"job"},detailTab:"history"};
-    const ACTIVITY_SNAPSHOT={node_hostnames:{node:"m6"}};
+    const ACTIVITY_SNAPSHOT={node_hostnames:{node:"lab6"}};
     function paintDurableActivity(){}
-    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","activityIsClustered","durableJobReason","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
     return {page:pageDurableJobs,previous:previousDurableJobs,resize:resizeDurableJobs,filter:filterDurableJobs,refresh:refreshDurableActivity,reset:()=>{resetActivityWork();PAGE_RENDER_GENERATION++;},html:()=>activityInspectorHtml()};
   `)(q,api);
 }
@@ -574,7 +578,7 @@ test("bounded queue refresh updates the open attempt when execution completes", 
   });
   await runner.refresh(true);
   assert.deepEqual(calls,["/cluster/jobs?state=running&limit=20","/cluster/jobs/job"]);
-  assert.match(runner.html(), /m6<\/b> · succeeded[\s\S]*2 min elapsed/);
+  assert.match(runner.html(), /lab6<\/b> · succeeded[\s\S]*2 min elapsed/);
   assert.doesNotMatch(runner.html(), /this attempt|awaiting recovery/);
 });
 test("a late detail refresh cannot reopen closed or replace newly selected details", async () => {
@@ -675,6 +679,55 @@ test("node assignments are independent of queue filters and expired ownership st
 });
 
 
+// The 2026-10-10 report: a fresh install showed "2 jobs queued" and nothing
+// else, because both library roots were mistyped. The reason existed — on the
+// scan status, behind a closed disclosure, and on the Jobs tab — but not where
+// the queue count sent the reader.
+function queuedScan(library, error) {
+  return {library, library_id: 1, status: {running: true, phase: "queued", error}};
+}
+test("a queued scan that cannot start names its reason above the queue count", () => {
+  const html = paint(snapshot({scans: [queuedScan("movies",
+    "This node could not read library root /Users/me/mnt/20t/movies: No such file or directory (os error 2). Waiting for a compatible worker.")]}));
+  const attention = html.indexOf("data-activity-blocked-scans");
+  assert.ok(attention !== -1, "the blocked scan has an attention section");
+  assert.ok(attention < html.indexOf('id="cluster-workers"'), "it sits above the queue count");
+  assert.match(html, /A library scan can’t start<\/h2><p><b>movies<\/b><br>This node could not read library root \/Users\/me\/mnt\/20t\/movies: No such file or directory/);
+  assert.match(html, /href="#\/settings\/libraries">Review library locations/);
+});
+test("in a cluster the blocked scan is this node's observation, not a promise", () => {
+  const html = paint(snapshot({clustered: true, scans: [queuedScan("movies", "root missing")]}));
+  assert.match(html, /<h2>This node can’t read a queued library<\/h2><p class="muted">Another node that can read these folders can still run the scan\.<\/p>/);
+  assert.doesNotMatch(html, /can’t start/);
+});
+test("a member who cannot edit libraries is told who can", () => {
+  painter.me.is_admin = false;
+  try {
+    const html = paint(snapshot({scans: [queuedScan("movies", "root missing")]}));
+    assert.match(html, /Ask an administrator to check the library locations\./);
+    assert.doesNotMatch(html, /Review library locations/);
+  } finally {
+    painter.me.is_admin = true;
+  }
+});
+test("waiting, running and finished scans raise no attention", () => {
+  for (const status of [
+    {running: true, phase: "queued", error: null},
+    {running: true, phase: "scanning", error: "stale"},
+    {running: false, phase: null, error: "finished with an error"},
+  ]) {
+    const html = paint(snapshot({scans: [{library: "movies", library_id: 1, status}]}));
+    assert.doesNotMatch(html, /data-activity-blocked-scans/);
+  }
+});
+test("several blocked scans are counted and their text is escaped", () => {
+  const html = paint(snapshot({scans: [queuedScan("<b>films</b>", "root <x> unreadable"), queuedScan("tv", "root missing")]}));
+  assert.match(html, /2 library scans can’t start/);
+  assert.match(html, /&lt;b&gt;films&lt;\/b&gt;/);
+  assert.match(html, /root &lt;x&gt; unreadable/);
+  assert.doesNotMatch(html, /<b><b>films|<x>/);
+});
+
 test("watching stays above both tabs and the selected workspace survives polling", () => {
   for(const tab of ["status","jobs"]){
     painter.view.tab=tab;
@@ -755,4 +808,46 @@ test("yield history explains recorded reasons and missing legacy reasons", () =>
   assert.doesNotMatch(html,/<hostile/);
   painter.view.inspector=null;
   Object.assign(painter.durable,{rows:[],detail:null});
+});
+
+test("standalone Activity presents server work without cluster controls", () => {
+  const now=Date.now();
+  Object.assign(painter.durable,{observed:now,rows:[],counts:[],activeJobs:[]});
+  const workers={[NODE_A]:{observed_at_ms:now,accepting_work:true,heavy_limit:1,heavy_in_use:0,heavy_available:1,software_used:0,software_limit:8,hardware_used:0,hardware_limit:2,child_count:0}};
+  for(const topology of [{},{clustered:false}]){
+    const html=paint(snapshot({...topology,deliveries:[],workers}));
+    assert.match(html, /Server work/);
+    assert.match(html, />This server<\/button>/);
+    assert.match(html, /Server totals, independent of filters/);
+    assert.doesNotMatch(html, /Cluster workers|nodes reporting capacity|Cluster-wide|in cluster|All nodes|Durable cluster jobs/);
+    assert.doesNotMatch(html, /data-durable-focus="node"/);
+  }
+  const clustered=paint(snapshot({clustered:true,deliveries:[],workers,activity_nodes:[{node_id:NODE_A,status:"answered"}]}));
+  assert.match(clustered, /Cluster workers/);
+  assert.match(clustered, /1 \/ 1<\/b><span>nodes reporting capacity/);
+  assert.match(clustered, /All nodes/);
+});
+
+test("queued library jobs show their local mount problem by library identity", () => {
+  const now=Date.now();
+  const job={id:"blocked",kind:"library_scan",library_id:1,library:"Movies",state:"queued",supported:true,priority:2,age_ms:60000};
+  Object.assign(painter.durable,{observed:now,rows:[job],counts:[]});
+  const scans=[{library_id:1,library:"Movies",status:{running:true,phase:"queued",error:"Cannot read /media/<movies>; check the mount."}},{library_id:2,library:"Movies",status:{running:true,phase:"queued",error:"A different library problem"}}];
+  for(const kind of ["library_scan","metadata_refresh"]){
+    job.kind=kind;
+    const html=paint(snapshot({clustered:false,deliveries:[],scans}));
+    assert.match(html, /durable-reason[^>]*>Cannot read \/media\/&lt;movies&gt;; check the mount\./);
+    // No row may borrow library 2's reason. The page as a whole now names it,
+    // in the blocked-scans section above, because library 2 is blocked too;
+    // the Jobs workspace must not.
+    const jobs = html.slice(html.indexOf('id="durable-activity"'));
+    assert.ok(jobs.length < html.length, "the Jobs workspace was painted");
+    assert.doesNotMatch(jobs, /A different library problem/);
+    assert.doesNotMatch(html, /\/media\/<movies>/);
+  }
+  job.state="running";
+  assert.doesNotMatch(paint(snapshot({scans})), /durable-reason[^>]*>Cannot read/);
+  job.state="queued";job.error_code="recorded_failure";
+  assert.match(paint(snapshot({scans})), /durable-reason[^>]*>recorded_failure/);
+  Object.assign(painter.durable,{rows:[],counts:[]});
 });

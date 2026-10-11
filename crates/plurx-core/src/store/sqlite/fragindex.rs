@@ -9,6 +9,17 @@ use crate::store::{FragmentIndexStore, RenditionPlanStore};
 
 #[async_trait]
 impl FragmentIndexStore for SqliteStore {
+    async fn fragment_index_status(
+        &self,
+        wanted: &[(i64, SourceIdentity)],
+    ) -> Result<Vec<crate::store::FragmentIndexStatus>, StoreError> {
+        crate::store::fragindex::check_status_batch(wanted)?;
+        crate::store::record_http_index_status_call();
+        let wanted = wanted.to_vec();
+        self.with_read(move |conn| crate::store::fragindex::status(conn, &wanted))
+            .await
+    }
+
     async fn put_fragment_index(
         &self,
         file_id: i64,

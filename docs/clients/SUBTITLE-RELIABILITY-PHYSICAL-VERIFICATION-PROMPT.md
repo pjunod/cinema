@@ -1,167 +1,94 @@
 # Subtitle reliability — physical verification
 
-**Status:** open · **Reconciled:** 2026-09-20
+**Status:** current case contract; individual results belong in the completion
+ledger · **Reconciled:** 2026-10-09.
 
-**For:** a session with the physical devices. **Against:** Apple build 171,
-Android versionCode 108, web from the same deploy, server at or after the
-subtitle reliability merge. **Written:** 2026-09-19.
+Companion to the [subtitle completion ledger](SUBTITLE-RELIABILITY-COMPLETION.md),
+which records source versions, engine observations and the finite remaining
+work. Use current clients and an identified server tree. The original Apple
+171/Android108 target and unconditional PGS-refusal expectations are historical.
+The user excludes physical Apple TV and iPhone18 from this effort. Available
+Apple handhelds, Android devices and browsers may be used; simulator or engine
+fixtures must be labelled as such.
 
-Three viewer-visible failures were fixed with no hardware evidence at all.
-Every claim below is a source-level claim until a device says otherwise, and
-two of them — the routing one and the CEA-608 one — are hypotheses that this
-run either confirms or refutes. A "did not reproduce" is a real result here;
-say so rather than retrying until it passes.
+Record each case separately: platform/build, source/file/track, outcome,
+visible cue behavior, video continuity and why any case was not run. A
+synthetic engine check proves that engine mechanism; it does not establish
+library UI selection, provider operation or a different hardware display.
 
-Paste this whole document into the session that has the devices. Report back
-per case: **pass**, **fail** (with what was on screen), or **not run** (with
-why). Do not summarise several cases into one verdict.
+## 1. Automatic selection preserves the delivered video range
 
-## What you need
+Use an HDR/Dolby Vision title with PGS and SRT. Start without touching the
+subtitle menu and record the selected track against the viewer's saved
+language/mode preference. A native client advertising `pgs-v1` may select PGS
+as an overlay. A client without that capability may select deliverable text
+or Off, according to policy. Neither path may silently spend the requested
+video range on an implicit SDR burn or show a refusal for an unrequested pick.
 
-- One **HDR or Dolby Vision remux** whose English subtitle track is **PGS**
-  and which also carries an **English SRT**. A Blu-ray remux usually is one.
-  Note its title and file id.
-- One title with an **SRT** track, any dynamic range.
-- One **dual-audio anime** file: Japanese + English audio, one **ASS** track.
-- One title with a subtitle track whose extraction **fails** — a track the
-  server cannot read. If you have none, skip case 6 and say so; do not
-  manufacture one by deleting a file mid-playback.
-- The Apple TV, an iPad or iPhone, the Android device, and a browser.
+## 2. Manual PGS selection follows client capability
 
-## The cases
+On overlay-capable Apple and Android, select PGS: cues must show with correct
+placement/timing, and video session/range must stay unchanged. Switch PGS A
+to B and then Off; stale manifests/images must not restore a previous choice.
+On a client without overlay support, record its explicit burn/refusal policy.
+An HDR refusal on that client must preserve the requested range. The old
+rule that every native PGS pick must be refused is superseded.
 
-### 1. No notice, and no subtitles, on an HDR remux — all three clients
+Include a warm track and a cold/late manifest, an active cue seek, a clear
+followed by a gap and authored colors/alpha. Preserve known corpus and
+output-mode limitations as individual results.
 
-The reported symptom: *"That subtitle requires an SDR burn-in. HDR playback
-was kept unchanged."* appearing with no user action, about half the time.
+## 3. Text selected during play recovers after preparation
 
-Open the HDR/PGS+SRT title. Do not touch the subtitle menu.
+Start an SRT title with Off, then select its track. Preparation may finish
+before the first control observation; the first ready response must therefore
+restore cached empty rendition data without requiring an observed warming
+edge. Cues must continue through later ready windows and complete-track
+publication. Seek forward and back and confirm source timing; Off remains Off.
+Record cue availability separately from preparation duration.
 
-**Pass:** playback starts, **no notice appears at any point**, and the
-subtitle menu shows the **English SRT** as the selected track — not the PGS
-one, and not "Off". On the web client the notice used to appear about 400 ms
-after the picture, so watch the first two seconds.
+## 4. A quality/item handoff preserves text intent
 
-**Fail:** the notice appears, or the PGS track is selected, or a subtitle
-menu that should have selected the SRT shows Off.
+With cues visibly showing on Apple, perform a quality handoff and confirm
+that the same selected text continues. Repeat with Off and verify it stays
+Off. A response/callback from the superseded item cannot apply to its
+replacement. Record whether the switch actually occurred.
 
-Run this on **web, Apple TV and Android** separately. The web client is the
-one that showed the notice; the native ones showed silence.
+## 5. Dual-audio styled subtitles preserve their routing policy
 
-### 2. The manual pick still tells the truth
+Use a Japanese/English anime file with ASS. Record the selected audio and
+subtitle route. Direct container playback may render an embedded styled track
+without a re-encode. Session-mode ASS needs a burn and is not automatically
+chosen when the policy would spend the video range. A manual supported choice
+must produce visible authored cues; a refused choice must explain the limit.
+This case is not an unconditional promise that every ASS default is on.
 
-Same title. Open the subtitle menu and **choose the PGS track by hand**.
+## 6. Failed captions notify without stalling video
 
-**Pass:** the notice appears, *once*, and HDR playback continues unchanged.
-This refusal is correct — the viewer asked, and the answer is honest.
+Use a synthetic failure fixture or an existing unreadable subtitle; never
+remove or corrupt real library media to create a case. Control reports
+`delivery.subtitle_readiness=unavailable`. The client shows one nonfatal
+notice per current selection/seek intent, with the video and selected track
+remaining attached. Repeated unavailable exchanges do not repeat the notice;
+a delayed response cannot notify after Off, a new intent or teardown.
 
-**Fail:** the picture drops to SDR, or the track appears to enable and shows
-nothing.
+The terminal subtitle-503 experiment is retired. Actual macOS AVPlayer stayed
+at time zero for 18 seconds on permanent 503+`Retry-After:2`, while an empty 200
+control advanced to 17.75 seconds. Physical Pixel Fold Media3 advanced to 14.22
+seconds in a 15-second 503 run. Failure belongs to the control contract; it
+must not become a caption transport refusal that blocks the picture. Do not
+re-enable a historical Developer switch or treat readiness advice as a gate.
 
-### 3. An SRT turned on mid-play shows cues within one segment
+## 7. Direct-play styled selection does not reopen video
 
-Any SRT title. Start playback with subtitles **Off**. Let it run past the
-opening, then turn the SRT on.
+On Android, select embedded ASS or `mov_text` in direct container playback.
+Cues must show without creating another server session or changing quality.
+Record server session/media-item identity as well as visible continuity.
 
-**Pass:** cues appear within a few seconds — one segment, not one minute —
-and keep appearing. Seek forward 10 minutes; they keep appearing.
+## 8. Each rendition displays its selected language
 
-**Fail:** the track shows as selected and no cues ever appear. That is the
-defect; note **which client** and whether a later seek fixed it.
-
-Run on **all three**. Apple's retry was gated on a field only `open()` wrote,
-so mid-play selection is exactly the case that was broken there.
-
-### 4. A quality change keeps the subtitle showing — Apple
-
-Apple TV or iPad, SRT title, subtitles **on and visibly showing**. Force a
-server-driven quality change: constrain the network, or pick a different
-quality from the menu, and wait for the switch to actually happen.
-
-**Pass:** cues keep appearing across the switch. A gap of a second or two is
-the switch; a permanent stop is the defect.
-
-**Fail:** cues stop at the switch and never return, while the menu still
-shows the track selected.
-
-Also run it with subtitles **Off**: **pass** is that they stay off. A master
-carrying a DEFAULT rendition used to be able to turn them on by itself.
-
-### 5. The anime file gets its subtitles — all three
-
-The dual-audio ASS file. Do not touch the menus.
-
-**Pass:** Japanese audio, and the ASS subtitles are **showing**.
-
-**Fail:** Japanese audio and no subtitles. This case exists because the first
-draft of the server fix would have produced exactly that, silently, on every
-such file; it is worth confirming on hardware rather than trusting a unit
-test.
-
-If the file is HDR, subtitles being **off** is the correct answer instead —
-an implicit burn may not spend the grade. Say which case applies.
-
-### 6. A failed extraction — the three engine observations
-
-This one is not a pass/fail on the fix; it is the **measurement three
-advisory rows in Settings → Developer are waiting for**, and until it is
-taken `playback.subtitle_not_ready_503` stays off.
-
-With the switch **off** (the default), play the title whose subtitle
-extraction fails and select that track. Expected: the track selects, no cues
-ever appear, video plays normally. Note it.
-
-Then turn **Settings → Developer → Refuse a subtitle segment that failed**
-**on**, and do it again on each platform. What is being measured is one
-thing: **does the video keep playing?**
-
-- **AVPlayer (Apple TV, iPad):** AVPlayer gives a subtitle segment about two
-  seconds and blocks the muxed video while it waits, so this is the refusal
-  with a picture riding on it. Report: video continues / video stalls / app
-  shows an error.
-- **Media3 (Android):** report whether the refusal surfaces as a subtitle
-  problem or stops playback outright.
-- **hls.js (browser):** report whether playback continues or the player
-  reports a fatal network error.
-
-Turn the switch back **off** afterwards whatever the result. Report the three
-observations verbatim; they go on the Developer card, and a tick nobody
-earned is worse than the grey "not observable" that is there now.
-
-### 7. Direct play keeps an embedded ASS track out of a re-encode — Android
-
-Android, a **direct-play** title (no transcode, no remux) carrying an
-embedded ASS or `mov_text` track. Select it.
-
-**Pass:** cues appear and **no new server session is created** — the stream
-does not restart, the picture does not blink, and quality does not change.
-
-**Fail:** the picture restarts, which means it took a burn. The routing order
-was asking "can this be a rendition" before "is there a container to read it
-from", so this is the case that changed.
-
-### 8. The CEA-608 phantom — confirm or refute
-
-Every master now carries `CLOSED-CAPTIONS=NONE` unconditionally. The
-hypothesis it closes is that without it, AVFoundation and ExoPlayer invent a
-caption option in the text group, shifting every rendition ordinal beneath it
-— so a client asking for the first subtitle rendition gets the second.
-
-On a title with **two or more** subtitle renditions, on **Apple TV and
-Android**: select each track in turn and confirm the cues that appear are the
-**language you selected**.
-
-**Pass:** each selection shows its own language. **Fail:** selecting one
-language shows another, or the last track in the list shows nothing.
-
-If you never saw this before the change, say so — "could not reproduce the
-original symptom" is the honest result and it retires the hypothesis.
-
-## What to report
-
-For each case: the platform, the title, pass/fail/not-run, and what was on
-screen. For case 6, the three engine observations in full. For anything that
-failed, the client build number and whether it reproduced twice.
-
-No deploys are part of this. The server changes are merged; the owner
-deploys.
+Use a title with two or more subtitle renditions. Select each in turn and
+confirm the displayed language. The master declares `CLOSED-CAPTIONS=NONE`;
+selecting an ordinal must not resolve to a phantom CEA-608 option. If the old
+symptom cannot be reproduced, say so. Keep available handheld results
+separate from excluded TV hardware.

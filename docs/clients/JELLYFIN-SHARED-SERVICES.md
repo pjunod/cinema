@@ -1,0 +1,168 @@
+# Jellyfin service seams — share native policy before mounting routes
+
+**Status:** open · J1 shared-service task implemented; native focused regressions pass ·
+**Written:** 2026-10-02.
+
+Companion to [the build contract](JELLYFIN-COMPATIBILITY-BUILD.md). This task
+extracts callable operations from native HTTP handlers. It adds no Jellyfin
+routes. It now includes transactional compatibility token replacement; play
+binding and watch revision fences remain open. Physical Apple TV work remains deferred to final qualification under
+Paul's instruction; implementation continues without waiting for that device.
+
+## 1. Authentication — parsing and authority remain separate
+
+`auth::verify_login_password` shares native password-size/device-label validation, trusted
+proxy address selection, per-node login throttling, bounded password work,
+uniform unknown-user verification and a generation-bracketed password read.
+`auth::login_user` keeps native password-match CAS minting and cache-proof
+bookkeeping. The native handler converts the returned native user
+to its existing response DTO. A compatibility handler must supply the actual
+connection peer and apply its own bounded request body before calling the login service.
+
+`extract::authenticate_user_token` shares native expiry/revocation decisions,
+typed idle-expiry refusals and proof-generation bookkeeping. Native `AuthUser`
+still parses its existing carriers and delegates authority to this function.
+The compatibility parser will supply its validated user token independently;
+client/device labels and successful wire parsing grant no authority.
+
+`auth::revoke_token_under_exclusion` commits deletion under the exact cluster
+cache-revocation claim and finishes the proof invalidation. Its caller must
+first authenticate the presented token and acquire that digest's exclusion.
+Native logout keeps revoking all user file grants inside that exclusion before
+calling the primitive. Compatibility logout can end its own bound plays and
+call the token-only primitive without revoking other devices' file grants.
+No public compatibility logout route exists in this task.
+
+## 2. Watch operations — retain every native side effect
+
+`watch::apply_progress` keeps item validation, negative-position clamping,
+durable previous-state reads, offline timestamp ordering and live coalescing.
+It retains direct-play presence, start-attempt activity, watched-time telemetry,
+Trakt progress and watched notification on the completion crossing. Protocol
+adapters must not replace it with a bare coalescer call.
+
+`watch::apply_watched` retains cascading manual watched/unwatched marks,
+notifications for episodes that actually become watched, and Trakt sync for
+both directions. Native handlers return their existing JSON forms. Compatibility
+binding revisions, terminal durability and queued pre-edit beats are additional
+ingress/storage work; these shared functions do not claim those fences exist.
+
+## 3. Focused proof — preserve scope and existing HTTP behavior
+
+The new token-scope regression calls shared login and authority directly, then
+revokes one token under the production exclusion primitive. The other device
+stays authenticated and its reader grant remains active and unrevoked; the
+revoked token's own grant loses source authority. Calling the native logout
+route afterward still revokes user file grants under its existing scope.
+
+Existing focused regressions cover setup/login and body/device bounds, typed
+idle expiry, concurrent logout, cache-proof generation order, dated/coalesced
+progress, direct-play activity, watched-time telemetry and cascading marks.
+The new scope regression and ten affected native regressions pass on pinned
+Rust 1.97.1. The service task compiles for all daemon targets and its four
+document-index checks pass. Workspace denied-lint checks remain required
+before review. Keep play-binding lifecycle and cross-node manual-watch
+fencing open until their own receipts exist.
+
+## 4. Compatibility login — replacement without intermediate native tokens
+
+`auth::login_jellyfin_user` verifies the password through the same admission,
+proxy and throttle policy, then acquires the existing user cache-proof
+exclusion. Device IDs are bounded to 256 bytes and retained only as SHA-256
+digests. The closed client family and authenticated native user select the
+replacement scope; a human device label never selects authority.
+
+The Store's `replace_jellyfin_login` mints the new token under the verified
+password CAS, retires the previous compatibility token in that exact scope,
+and publishes the new mapping in one transaction. Native tokens, another
+family, another device and another user's tokens survive. A collision or
+failed transaction rolls everything back. On replicated storage every mutation
+also checks the exact committed cache-revocation claim, so cancellation and
+claim cleanup cannot admit a delayed replacement. The service completes the
+exclusion before recording a fresh authentication proof; it never reuses its
+pre-exclusion ticket.
+
+SQLite migration 99 and replicated migration 75 add the digest-only scope
+mapping with cascading token/user deletion. The SQLite import plan preserves
+this mapping after its token rows, allowing replacement from another node.
+The backend regressions prove simultaneous replacements converge to one
+winner, stale passwords change no authority, collisions preserve the old
+login, unrelated reader grants remain active and absent/cleaned exact cluster
+claims refuse the mutation. Those two backend regressions pass on SQLite and
+three voters. The daemon service and alternate-node import regressions pass on the combined
+task tree. The 15 SQL placeholder checks, transaction/import censuses, fresh
+versus frozen-v42 migration parity, five affected daemon regressions, seven
+document/source guards and mandatory workspace lint checks also pass.
+
+No public compatibility route is mounted yet. Replaced-play retirement still
+requires the binding lifecycle work; token replacement alone is not evidence
+that those native playback resources have been released.
+
+## 6. J3 watch revision and terminal work — under verification
+
+`watch::apply_jellyfin_progress` shares the native effect service after guarded
+compatibility acceptance. Direct presence uses the validated native play key;
+manual origin comes from current token membership rather than claimed device
+metadata. Native progress still retains its existing online/offline authority.
+
+The shared SQLite/replicated manual statement bumps a monotonic per-user/item
+revision even for explicit no-ops. Deterministic triggers advance only one
+eligible active own binding. Ambiguous or already fenced plays stay fenced.
+The replicated migration commits the columns/triggers and schema marker in one
+transaction. Imports retain counters while clearing saved edit context.
+
+The shared coalescer preserves original compatibility provenance through
+mixed native/compatibility pending beats and repeats its guard at commit.
+`put_final` commits one supplied final and its exact terminal state under the
+entry lock; another viewer's pending value remains queued. Stop without a
+position writes no zero. Injected final-write failure returns a failure and
+releases exact resources; the binding remains retriable. Protocol constraints,
+media credential policy, physical clients and current-candidate qualification
+remain open until their separate evidence exists.
+
+Compatibility logout begins the native digest-cache exclusion, terminalizes
+only plays with that exact user/token/device/family scope, releases their
+native direct references and deletes the presented native token. It does not
+invoke native logout's user-wide file-grant revocation. Returned terminal
+references also let a failed release retry cleanly before token deletion.
+
+
+## 7. Native VOD watch admission
+
+A compatibility binding to a native media incarnation uses the existing
+native playback pointer, ready publication state, live media lease, exact
+request fingerprint and original media clock for both read admission and the
+atomic progress write. It does not require a direct-file grant or renew a
+producer lease. Token, item/source membership, probe and manual-revision
+predicates still apply.
+
+Ordinary progress refuses an expired, replaced or deleted native route. A
+final Stop retry may use its exact native `deleted` reference after cleanup
+only while no replacement pointer exists; the accepted final and compatibility
+tombstone remain one transaction. The Store contract exercises expired and
+renewed ownership, original-clock progress, deleted-resource final retry and
+an unmapped native replacement on SQLite and three voters. HLS negotiation,
+serving and resource cleanup are separate work; this change advertises no new
+client transport.
+
+
+## 8. Native activation admission
+
+The `jellyfin:<PlaySessionId>` request namespace reserves one native start
+for one compatibility negotiation. Before replacing a playback pointer, the
+SQLite transaction and replicated native-row insertion require that exact
+user/player binding, pending lifetime or active exact incarnation, native
+request fingerprint and media clock. Its login token and mapped item/source
+must still exist. A cancelled, expired or missing negotiation cannot replace
+the viewer's current native stream. An exact active replay remains idempotent.
+
+The replicated insertion repeats these predicates after its consistent read;
+predecessor fencing and pointer writes retain their existing exact-row guards.
+Ordinary native request ids preserve their existing admission. This boundary
+prepares authenticated HLS activation; it does not advertise HLS or add a
+producer, timer or media credential.
+
+An idempotent replay adds one authoritative, indexed negotiation lookup to
+observe cancellation and login revocation. Fresh replicated activation relies
+on the transaction predicate and adds no negotiation read round trip. The
+consistent-read census records this conditional site with its authority reason.

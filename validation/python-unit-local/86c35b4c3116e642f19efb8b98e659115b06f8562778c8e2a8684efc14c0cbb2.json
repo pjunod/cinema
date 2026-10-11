@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/python-unit-pr-receipts",
+  "suite": "operations",
+  "test_file": "tests/operations/test_contracts.py",
+  "test_file_sha256": "24fbdd35c66e98d14abc3dd5e8102c7ab75f6be63f845e90c3d950908619202a",
+  "command": "python3 -m unittest tests.operations.test_contracts.OperationsContractCase.test_preflight_budgets_allow_full_history_and_contracts -v",
+  "output": "test_preflight_budgets_allow_full_history_and_contracts ... ok; Ran 1 test in 0.001s; OK; exit 0",
+  "test_ids": [
+    "test_contracts.OperationsContractCase.test_preflight_budgets_allow_full_history_and_contracts"
+  ],
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  },
+  "source_attribution": "Original local worktree first pass after narrow effort-only command update; main/full/fast commands and history/catalog budgets retained. No previously passed case repeated."
+}

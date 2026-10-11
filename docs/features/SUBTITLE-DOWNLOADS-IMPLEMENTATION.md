@@ -1,6 +1,8 @@
 # Subtitle downloads — find captions for media without them
 
-**Status:** implemented locally; review and promotion open · **Written:** 2026-09-24
+**Status:** built on main in #498 (`0e2c3fd47`); live provider/device acceptance remains · **Written:** 2026-09-24
+
+Current acceptance is tracked in the [subtitle completion ledger](../clients/SUBTITLE-RELIABILITY-COMPLETION.md).
 
 Add manual subtitle search and download, with optional automatic acquisition
 for missing preferred languages. OpenSubtitles.com is the first provider.
@@ -85,7 +87,7 @@ regressions, pinned compilation, formatting and Clippy before pushing.
 ## 5. Local verification
 
 All Rust commands used the repository-pinned Rust 1.97.1. The build cache was
-reused with `--target-dir /Users/pjunod/code/plurx/target`; tests used `--offline`.
+reused with `--target-dir ~/code/plurx/target`; tests used `--offline`.
 
 | Command | Result |
 |---|---|

@@ -1,0 +1,308 @@
+{
+  "result": "completed",
+  "requests": 3600,
+  "object": {
+    "bytes": 473153,
+    "sha256": "3cf249d0729fe8aaa5fe6c25b93571957f0c0c480aecb3af2c49e8bcef2ef3d3"
+  },
+  "groups": [
+    {
+      "concurrency": 1,
+      "variant": "current",
+      "pairs": 3,
+      "requests": 600,
+      "batch_ms": [
+        1455.7948340000003,
+        1376.8043330000073,
+        2653.4481249999953
+      ],
+      "median_batch_ms": 1455.7948340000003,
+      "request_latency_ms": {
+        "median": 2.459187500004191,
+        "p95_nearest_rank": 69.584165999986,
+        "min": 0.9699580000014976,
+        "max": 426.78195800000685
+      },
+      "daemon_cpu_elapsed_ms": [
+        180.0,
+        180.0,
+        220.0
+      ],
+      "sampled_max_tree_rss_bytes": [
+        103776256,
+        106954752,
+        109641728
+      ],
+      "rss_before_bytes": [
+        103006208,
+        106856448,
+        109527040
+      ],
+      "measured_tree_process_counts": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    {
+      "concurrency": 1,
+      "variant": "control",
+      "pairs": 3,
+      "requests": 600,
+      "batch_ms": [
+        2144.7529170000053,
+        2444.867458999972,
+        2963.195584000001
+      ],
+      "median_batch_ms": 2444.867458999972,
+      "request_latency_ms": {
+        "median": 3.3091669999994338,
+        "p95_nearest_rank": 80.0319170000148,
+        "min": 1.694374999991851,
+        "max": 187.00641699999687
+      },
+      "daemon_cpu_elapsed_ms": [
+        430.0,
+        430.0,
+        450.0
+      ],
+      "sampled_max_tree_rss_bytes": [
+        107282432,
+        111706112,
+        106053632
+      ],
+      "rss_before_bytes": [
+        106184704,
+        111706112,
+        104644608
+      ],
+      "measured_tree_process_counts": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    {
+      "concurrency": 8,
+      "variant": "current",
+      "pairs": 3,
+      "requests": 600,
+      "batch_ms": [
+        360.26679100000183,
+        349.64133300000685,
+        410.1447919999773
+      ],
+      "median_batch_ms": 360.26679100000183,
+      "request_latency_ms": {
+        "median": 4.959625000003143,
+        "p95_nearest_rank": 63.130457999999635,
+        "min": 2.0984579999931157,
+        "max": 86.77595899999142
+      },
+      "daemon_cpu_elapsed_ms": [
+        240.0,
+        240.0,
+        230.0
+      ],
+      "sampled_max_tree_rss_bytes": [
+        96387072,
+        103120896,
+        99729408
+      ],
+      "rss_before_bytes": [
+        90161152,
+        102907904,
+        98025472
+      ],
+      "measured_tree_process_counts": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    {
+      "concurrency": 8,
+      "variant": "control",
+      "pairs": 3,
+      "requests": 600,
+      "batch_ms": [
+        343.82720800000243,
+        355.94733299998916,
+        387.9801659999939
+      ],
+      "median_batch_ms": 355.94733299998916,
+      "request_latency_ms": {
+        "median": 5.961561999996775,
+        "p95_nearest_rank": 68.99575000000186,
+        "min": 2.5956670000159647,
+        "max": 77.41000000000349
+      },
+      "daemon_cpu_elapsed_ms": [
+        510.0,
+        440.0,
+        460.0
+      ],
+      "sampled_max_tree_rss_bytes": [
+        100810752,
+        109789184,
+        101138432
+      ],
+      "rss_before_bytes": [
+        92880896,
+        109789184,
+        98189312
+      ],
+      "measured_tree_process_counts": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    {
+      "concurrency": 32,
+      "variant": "current",
+      "pairs": 3,
+      "requests": 600,
+      "batch_ms": [
+        277.3908750000119,
+        282.15487500000745,
+        399.04229199999827
+      ],
+      "median_batch_ms": 282.15487500000745,
+      "request_latency_ms": {
+        "median": 19.10681250000198,
+        "p95_nearest_rank": 132.15391700001783,
+        "min": 7.193624999985332,
+        "max": 219.65408300000126
+      },
+      "daemon_cpu_elapsed_ms": [
+        350.0,
+        330.0,
+        270.0
+      ],
+      "sampled_max_tree_rss_bytes": [
+        108118016,
+        109723648,
+        105807872
+      ],
+      "rss_before_bytes": [
+        96731136,
+        102776832,
+        98254848
+      ],
+      "measured_tree_process_counts": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    {
+      "concurrency": 32,
+      "variant": "control",
+      "pairs": 3,
+      "requests": 600,
+      "batch_ms": [
+        342.9494999999879,
+        277.3142499999958,
+        639.8497079999943
+      ],
+      "median_batch_ms": 342.9494999999879,
+      "request_latency_ms": {
+        "median": 21.804437499988126,
+        "p95_nearest_rank": 209.32679200000712,
+        "min": 9.195082999998704,
+        "max": 230.98433300000033
+      },
+      "daemon_cpu_elapsed_ms": [
+        530.0,
+        570.0,
+        480.0
+      ],
+      "sampled_max_tree_rss_bytes": [
+        111706112,
+        107642880,
+        101892096
+      ],
+      "rss_before_bytes": [
+        100958208,
+        105103360,
+        94420992
+      ],
+      "measured_tree_process_counts": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    }
+  ],
+  "limits": [
+    "Shared host has unrelated workloads; paired observations are not idle capacity or statistically significant fleet estimates.",
+    "Isolated generated AVC/AAC, software x264, loopback and OS-cache-uncontrolled source.",
+    "Startup endpoint is first decoded video frame in common FFmpeg controller, not native UI/display.",
+    "Resource samples measure daemon process-tree endpoints/interval sample maximum, not allocator high water or retired-child CPU."
+  ],
+  "owner": "crates/plurxd/src/http/hls/segment.rs: source-copy VOD file response calls pump_local_media; response.rs control preserves owner/admission/publication/storage fences",
+  "probe_collection_during_serving": false,
+  "interpretation": [
+    "All 3,600 responses matched exact length and SHA256; no source-probe metric changed in any measured interval.",
+    "Each batch is 200 requests; three paired repetitions at each concurrency. Individual requests are not independent fleet samples.",
+    "Serial latency improved in each pair. Concurrent latency varied; there is no universal speedup claim.",
+    "Sampled daemon tree memory is bounded around 100 MiB and has no extra child during steady serving; sample maxima are not allocator high-water marks.",
+    "No acknowledgement or storage-roundtrip count is exposed by the runtime; causal per-frame barrier difference is source-defined, not an invented observed counter.",
+    "CPU/process sampling and hashing overhead belongs to the common measurement harness and the host has unrelated workloads."
+  ]
+}

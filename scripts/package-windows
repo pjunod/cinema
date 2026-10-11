@@ -2,6 +2,9 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# The tree the binary was built from, when that is not this checkout (the
+# GitHub release packages a tag's build with the current scripts).
+source_root="${PLURX_PKG_SOURCE_ROOT:-$root}"
 target="${CARGO_TARGET_DIR:-$root/target}/x86_64-pc-windows-msvc/release"
 stage="$root/target/windows-package/plurx-windows-x86_64"
 archive="$root/target/windows-package/plurxd-windows-x86_64.zip"
@@ -10,15 +13,23 @@ test -f "$target/plurxd.exe" || {
   echo "missing release binary: $target/plurxd.exe" >&2
   exit 1
 }
+pdb_name=$(PYTHONPATH="$root" python3 -m validation.release_pdb \
+  "$target/plurxd.exe" "$target/plurxd.pdb")
+# Windows refuses to start an executable whose manifest a linker mangled.
+PYTHONPATH="$root" python3 -m validation.release_manifest >&2 \
+  "$target/plurxd.exe" "$source_root/crates/plurxd/plurxd.manifest"
 
 rm -rf "$stage"
 mkdir -p "$stage"
 cp "$target/plurxd.exe" "$stage/plurxd.exe"
-cp "$root/plurx.example.toml" "$stage/plurx.example.toml"
+cp "$target/plurxd.pdb" "$stage/$pdb_name"
+cp "$source_root/plurx.example.toml" "$stage/plurx.example.toml"
 cp "$root/deploy/windows/README.md" "$stage/README.md"
 
 mkdir -p "$(dirname "$archive")"
 rm -f "$archive"
-(cd "$(dirname "$stage")" && zip -q -r "$archive" "$(basename "$stage")")
+# Python is already required by the PE/PDB verifier. Keep archive creation
+# available on the same hosts without a second, undeclared `zip` executable.
+(cd "$(dirname "$stage")" && python3 -m zipfile -c "$archive" "$(basename "$stage")")
 sha256sum "$archive" > "$archive.sha256"
 printf '%s\n' "$archive"

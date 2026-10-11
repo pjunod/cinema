@@ -1249,7 +1249,7 @@ Two decisions worth recording against the plan's text:
 minimum recent speed". An absolute number would have to be guessed for
 hardware nobody has measured, and would be wrong on both the fast and slow
 ends. Running the CPU chain first as a reference and requiring a candidate to
-beat it by 20% costs one extra run, cancels process startup on both sides, and
+beat it by 20% costs one extra run, includes process startup on both sides, and
 states the real requirement: a graph that merely matches the chain it replaces
 has bought nothing and taken on a driver dependency.
 

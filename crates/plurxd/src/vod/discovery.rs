@@ -62,6 +62,10 @@ impl EncodedGenerationScanner {
                 }
             };
             examined += 1;
+            if entry.file_name() == ".retained" {
+                // Private artifacts never own a recipe plan/process marker.
+                continue;
+            }
             if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }

@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Run first-ready/off/seek caption recovery on an explicitly selected Apple device.
+
+Requires Xcode, xcodegen, ffmpeg and an existing usable development team/profile.
+Creates only the isolated tv.plurx.subtitleprobe application. It embeds synthetic
+HLS, uses the shipped readiness decision, and uninstalls its probe after the run.
+No viewer application, library, account credential or production server is used.
+Pass --device and --team explicitly; there is no device discovery/auto-selection.
+The destination must be authorized and unlocked. Receipts remain in --receipt-dir.
+"""
+import argparse
+import hashlib
+import json
+import pathlib
+import re
+import shutil
+import subprocess
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+BUNDLE = "tv.plurx.subtitleprobe"
+
+SPEC = r'''name: SubtitleProbe
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: {team}
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Apple Development"
+targets:
+  SubtitleProbe:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - Sources
+      - path: Media
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.subtitleprobe
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Subtitle Probe
+        UILaunchScreen: {}
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+  SubtitleProbeTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [Tests]
+    dependencies:
+      - target: SubtitleProbe
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.subtitleprobe.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  SubtitleProbe:
+    build:
+      targets:
+        SubtitleProbe: all
+    test:
+      targets: [SubtitleProbeTests]
+'''
+
+APP = r'''import SwiftUI
+@main struct SubtitleProbeApp: App { var body: some Scene { WindowGroup { Text("Isolated subtitle engine check") } } }
+'''
+
+MASTER = r'''#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",AUTOSELECT=YES,DEFAULT=YES,URI="subs.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=500000,CODECS="avc1.64000c,mp4a.40.2",CLOSED-CAPTIONS=NONE,SUBTITLES="subs"
+video.m3u8
+'''
+
+TEST = r'''import XCTest
+import AVFoundation
+import Network
+@testable import SubtitleProbe
+
+final class FixtureServer {
+    let listener: NWListener
+    let queue = DispatchQueue(label: "subtitle.fixture")
+    let lock = NSLock()
+    var published = false
+    var requests: [(Int, Bool)] = []
+    init() throws {
+        listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { return }
+            connection.start(queue: self.queue)
+            self.read(connection, prefix: Data())
+        }
+        listener.start(queue: queue)
+    }
+    func publish() { lock.lock(); published = true; lock.unlock() }
+    func snapshot() -> [(Int, Bool)] { lock.lock(); defer { lock.unlock() }; return requests }
+    func read(_ connection: NWConnection, prefix: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
+            guard let self else { return }
+            var received = prefix; received.append(data ?? Data())
+            guard let header = String(data: received, encoding: .utf8), header.contains("\r\n\r\n") else {
+                if !complete && error == nil { self.read(connection, prefix: received) } else { connection.cancel() }
+                return
+            }
+            let path = String(header.split(separator: " ").dropFirst().first ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let body: Data
+            var mime = "application/vnd.apple.mpegurl"
+            if path.hasPrefix("sub"), path.hasSuffix(".vtt"), let n = Int(path.dropFirst(3).dropLast(4)) {
+                self.lock.lock(); let empty = !self.published; self.requests.append((n, empty)); self.lock.unlock()
+                let cues = (0..<6).map { i in "00:00:0\(i).100 --> 00:00:0\(i).900\ncue-\(n * 6 + i)\n\n" }.joined()
+                body = Data((empty ? "WEBVTT\n\n" : "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:\(n * 540000),LOCAL:00:00:00.000\n\n" + cues).utf8)
+                mime = "text/vtt"
+            } else {
+                let url = Bundle.main.resourceURL!.appendingPathComponent("Media").appendingPathComponent(path)
+                body = (try? Data(contentsOf: url)) ?? Data()
+                if !path.hasSuffix("m3u8") { mime = "video/mp4" }
+            }
+            var response = Data("HTTP/1.1 200 OK\r\nContent-Type: \(mime)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n".utf8)
+            response.append(body)
+            connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+        }
+    }
+}
+final class Captions: NSObject, AVPlayerItemLegibleOutputPushDelegate {
+    var cues: [String] = []
+    func legibleOutput(_ output: AVPlayerItemLegibleOutput, didOutputAttributedStrings strings: [NSAttributedString], nativeSampleBuffers: [Any], forItemTime itemTime: CMTime) {
+        for text in strings { cues.append(text.string); print("APPLE_CUE \(itemTime.seconds) \(text.string)") }
+    }
+}
+@MainActor final class RenderingTests: XCTestCase {
+    func testPhysicalFirstReadySelectionOffAndSeek() async throws {
+        let server = try FixtureServer()
+        defer { server.listener.cancel() }
+        for _ in 0..<100 { if let port = server.listener.port, port.rawValue > 0 { break }; try await Task.sleep(nanoseconds: 20_000_000) }
+        let port = try XCTUnwrap(server.listener.port)
+        let item = AVPlayerItem(url: URL(string: "http://127.0.0.1:\(port.rawValue)/master.m3u8")!)
+        let player = AVPlayer(playerItem: item)
+        defer { player.pause(); player.replaceCurrentItem(with: nil) }
+        let captions = Captions(); let output = AVPlayerItemLegibleOutput(); output.setDelegate(captions, queue: .main); item.add(output)
+        let loadedGroup = try await item.asset.loadMediaSelectionGroup(for: .legible)
+        let group = try XCTUnwrap(loadedGroup)
+        let track = try XCTUnwrap(group.options.first)
+        player.appliesMediaSelectionCriteriaAutomatically = false
+        item.select(track, in: group); player.play()
+        try await Task.sleep(nanoseconds: 6_000_000_000)
+        XCTAssertTrue(server.snapshot().contains { $0.1 }, "Engine must buffer empty captions first")
+        XCTAssertTrue(captions.cues.isEmpty)
+        server.publish()
+        let state = SubtitleReadinessRetryState()
+        XCTAssertTrue(state.record("ready")); XCTAssertFalse(state.record("ready"))
+        item.select(nil, in: group); item.select(track, in: group)
+        try await Task.sleep(nanoseconds: 6_000_000_000)
+        XCTAssertTrue(server.snapshot().contains { !$0.1 }, "Engine must refetch real captions")
+        XCTAssertGreaterThan(captions.cues.count, 0)
+        let beforeOff = captions.cues.count
+        item.select(nil, in: group)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        XCTAssertEqual(captions.cues.count, beforeOff, "Off must remain off")
+        await player.seek(to: CMTime(seconds: 18, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        item.select(track, in: group)
+        try await Task.sleep(nanoseconds: 4_000_000_000)
+        XCTAssertTrue(captions.cues.contains("cue-20"), "Cues must survive seek and re-selection")
+        XCTAssertTrue(player.currentItem === item)
+        XCTAssertNil(item.error)
+        XCTAssertGreaterThan(player.currentTime().seconds, 20)
+        print("APPLE_RESULT sameItem=true cues=\(captions.cues) requests=\(server.snapshot()) time=\(player.currentTime().seconds)")
+    }
+}
+'''
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device", required=True, help="explicit authorized iOS device UDID")
+    parser.add_argument("--team", required=True, help="existing ten-character Apple development team")
+    parser.add_argument("--source-root", type=pathlib.Path, default=ROOT)
+    parser.add_argument("--receipt-dir", type=pathlib.Path, required=True)
+    args = parser.parse_args()
+    if not re.fullmatch(r"[A-Fa-f0-9-]{24,40}", args.device):
+        parser.error("--device must be an explicit device UDID, not an automatically resolved name")
+    if not re.fullmatch(r"[A-Z0-9]{10}", args.team):
+        parser.error("--team must identify an existing Apple development team")
+    for command in ("xcrun", "xcodebuild", "xcodegen", "ffmpeg"):
+        if not shutil.which(command):
+            parser.error(f"{command} is required")
+    receipt = args.receipt_dir.resolve()
+    receipt.mkdir(parents=True, exist_ok=True)
+    log_path = receipt / "device-test.log"
+    result_path = receipt / "device-test.xcresult"
+    if result_path.exists():
+        parser.error("receipt directory already contains an XCTest result; choose a fresh directory")
+    source = (args.source_root / "clients/apple/Sources/PlaybackControlReporter.swift").read_text()
+    decision = source[source.index("enum SubtitleReadinessDecision {"):source.index("\nstruct ControlResponse:")]
+    code = 1
+    cleanup_code = None
+    with tempfile.TemporaryDirectory(prefix="plurx-subtitle-device-") as raw:
+        root = pathlib.Path(raw)
+        for directory in ("Sources", "Tests", "Media"):
+            (root / directory).mkdir()
+        (root / "project.yml").write_text(SPEC.replace("{team}", args.team))
+        (root / "Sources/App.swift").write_text(APP)
+        (root / "Sources/Readiness.swift").write_text("import Foundation\n" + decision + "\n")
+        (root / "Tests/RenderingTests.swift").write_text(TEST)
+        media = root / "Media"
+        (media / "master.m3u8").write_text(MASTER)
+        (media / "subs.m3u8").write_text("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n" + "".join(f"#EXTINF:6,\nsub{i}.vtt\n" for i in range(5)) + "#EXT-X-ENDLIST\n")
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "150", "-keyint_min", "150", "-sc_threshold", "0", "-c:a", "aac", "-b:a", "64k", "-shortest", "-f", "hls", "-hls_time", "6", "-hls_playlist_type", "vod", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4", "-hls_segment_filename", str(media / "seg%d.m4s"), str(media / "video.m3u8")], check=True)
+        with log_path.open("w") as log:
+            subprocess.run(["xcodegen", "generate", "--spec", str(root / "project.yml"), "--project", str(root)], stdout=log, stderr=subprocess.STDOUT, check=True)
+            try:
+                result = subprocess.run(["xcodebuild", "-project", str(root / "SubtitleProbe.xcodeproj"), "-scheme", "SubtitleProbe", "-destination", f"id={args.device}", "-destination-timeout", "20", "-derivedDataPath", str(root / "Derived"), "-resultBundlePath", str(result_path), "test"], stdout=log, stderr=subprocess.STDOUT, timeout=180)
+                code = result.returncode
+            except subprocess.TimeoutExpired:
+                log.write("\nTimed out waiting for the explicitly selected device/test.\n")
+                code = 124
+            finally:
+                cleanup = subprocess.run(["xcrun", "devicectl", "device", "uninstall", "app", "--device", args.device, BUNDLE, "--timeout", "20"], stdout=log, stderr=subprocess.STDOUT, timeout=30)
+                cleanup_code = cleanup.returncode
+    data = {"source_sha256": hashlib.sha256(source.encode()).hexdigest(), "test_sha256": hashlib.sha256(TEST.encode()).hexdigest(), "isolated_bundle": BUNDLE, "xctest_exit": code, "cleanup_exit": cleanup_code, "log": str(log_path), "result": str(result_path)}
+    (receipt / "receipt.json").write_text(json.dumps(data, indent=2) + "\n")
+    print(json.dumps(data, indent=2))
+    if cleanup_code:
+        print("Probe cleanup failed; remove only tv.plurx.subtitleprobe from the selected device.")
+    return code or cleanup_code or 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())

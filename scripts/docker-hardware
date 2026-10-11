@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""Generate a per-invocation Compose GPU overlay without editing host config."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import hashlib
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+class HardwareError(ValueError):
+    pass
+
+
+def run(*args: str) -> str:
+    result = subprocess.run(args, capture_output=True, text=True, timeout=20)
+    if result.returncode:
+        raise HardwareError(f"{' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def compose_files(environment: dict[str, str], directory: Path) -> list[str]:
+    """Retain Compose's selected files, including its automatic host override."""
+    configured = environment.get("COMPOSE_FILE", "")
+    if configured:
+        separator = environment.get("COMPOSE_PATH_SEPARATOR") or os.pathsep
+        files = [Path(name) for name in configured.split(separator)]
+    else:
+        # Match Compose's filename preference, including alternate overrides.
+        names = (
+            "compose.yaml",
+            "compose.yml",
+            "docker-compose.yml",
+            "docker-compose.yaml",
+        )
+        base = next(
+            (directory / name for name in names if (directory / name).is_file()), None
+        )
+        if base is None:
+            raise HardwareError("no Compose file in the deployment directory")
+        files = [base]
+        overrides = (
+            "compose.override.yml",
+            "compose.override.yaml",
+            "docker-compose.override.yml",
+            "docker-compose.override.yaml",
+        )
+        override = next(
+            (directory / name for name in overrides if (directory / name).is_file()),
+            None,
+        )
+        if override is not None:
+            files.append(override)
+    return [os.path.abspath(directory / path) for path in files]
+
+
+def local_linux_engine() -> bool:
+    if platform.system() != "Linux":
+        return False
+    # DOCKER_CONTEXT takes precedence over DOCKER_HOST in the Docker CLI.
+    endpoint = (
+        "" if os.environ.get("DOCKER_CONTEXT") else os.environ.get("DOCKER_HOST", "")
+    )
+    endpoint = endpoint or run(
+        "docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"
+    )
+    if not endpoint.startswith("unix://"):
+        return False
+    return (
+        "docker desktop"
+        not in run("docker", "info", "--format", "{{.OperatingSystem}}").lower()
+    )
+
+
+def nvidia_available() -> bool:
+    if not shutil.which("nvidia-smi"):
+        return False
+    try:
+        present = bool(run("nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"))
+    except (HardwareError, subprocess.TimeoutExpired):
+        print(
+            "docker hardware: NVIDIA driver probe failed; leaving NVIDIA selection to the override",
+            file=sys.stderr,
+        )
+        return False
+    return present
+
+
+def device_source(device: dict | str) -> str:
+    return (
+        device.get("source", "")
+        if isinstance(device, dict)
+        else str(device).split(":")[0]
+    )
+
+
+def gpu_selection(service: dict, dri: Path) -> tuple[bool, bool]:
+    """Explicit GPU choices suppress discovery, but unrelated devices do not."""
+    requests = (
+        service.get("deploy", {})
+        .get("resources", {})
+        .get("reservations", {})
+        .get("devices")
+        or []
+    )
+    nvidia = (
+        bool(service.get("gpus"))
+        or service.get("runtime") == "nvidia"
+        or any(request.get("driver") == "nvidia" for request in requests)
+    )
+    selected = nvidia or any(
+        "gpu" in request.get("capabilities", []) for request in requests
+    )
+    for device in service.get("devices") or []:
+        source = device_source(device)
+        target = device.get("target", "") if isinstance(device, dict) else source
+        if source.startswith(("nvidia.com/gpu=", "/dev/nvidia")):
+            nvidia = True
+            selected = True
+        if any(
+            Path(name) == dri or dri in Path(name).parents for name in (source, target)
+        ):
+            selected = True
+    return selected, nvidia
+
+
+def gpu_overlay(service: dict, *, dri: Path, nvidia: bool) -> dict:
+    additions: dict = {}
+    devices = service.get("devices") or []
+    explicit_gpu, nvidia_requested = gpu_selection(service, dri)
+    selected = []
+    for device in devices:
+        path = Path(device_source(device))
+        if path == dri or dri in path.parents:
+            selected.append(path)
+    if (
+        not explicit_gpu
+        and dri.is_dir()
+        and any(node.is_char_device() for node in dri.iterdir())
+    ):
+        selected = [dri]
+        additions["devices"] = [f"{dri}:{dri}"]
+    groups = set()
+    for path in selected:
+        for node in path.iterdir() if path.is_dir() else [path]:
+            if node.is_char_device():
+                groups.add(str(node.stat().st_gid))
+    groups.difference_update(str(group) for group in service.get("group_add", []))
+    if groups:
+        additions["group_add"] = sorted(groups, key=int)
+
+    if nvidia and not explicit_gpu:
+        additions["deploy"] = {
+            "resources": {
+                "reservations": {
+                    "devices": [
+                        {"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}
+                    ]
+                }
+            }
+        }
+        nvidia_requested = True
+    if nvidia_requested:
+        capabilities = (service.get("environment") or {}).get(
+            "NVIDIA_DRIVER_CAPABILITIES"
+        ) or ""
+        values = {value.strip() for value in capabilities.split(",") if value.strip()}
+        if "all" not in values:
+            values.update(("compute", "video", "utility", "graphics"))
+            additions["environment"] = {
+                "NVIDIA_DRIVER_CAPABILITIES": ",".join(sorted(values))
+            }
+    return {"services": {"plurxd": additions}}
+
+
+def raspberry_pi_host(compatible: Path = Path('/sys/firmware/devicetree/base/compatible')) -> bool:
+    if platform.system() != 'Linux' or platform.machine() not in ('aarch64', 'arm64'):
+        return False
+    try:
+        return any(token.startswith(b'raspberrypi,') for token in compatible.read_bytes().split(b'\0'))
+    except OSError:
+        return False
+
+
+def pi_security_options(service: dict) -> list[str]:
+    if service.get('privileged') or service.get('cap_add'):
+        raise HardwareError('Pi runtime requires protected Compose privilege settings')
+    retained = []
+    for option in service.get('security_opt') or []:
+        if not str(option).startswith(('seccomp=', 'seccomp:')):
+            retained.append(option)
+            continue
+        filename = str(option)[8:]
+        path = Path(filename)
+        expected = Path(__file__).resolve().parents[1] / 'deploy/pi-runtime-assets/pi-worker-seccomp.json'
+        try:
+            protected = all(not p.is_symlink() and p.stat().st_uid == 0 and not p.stat().st_mode & 0o022 for p in (path, *path.parents))
+            exact = hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(expected.read_bytes()).digest()
+        except OSError:
+            protected = exact = False
+        if not protected or not exact:
+            raise HardwareError('Pi runtime cannot replace an operator seccomp profile; reconcile it before startup')
+        retained.append(option)
+    return retained
+
+
+def pi_runtime_overlay(service: dict, runtime: dict, manual_gpu: bool = False) -> dict:
+    additions = dict(runtime['service'])
+    image = additions['image']
+    explicit_gpu, _ = gpu_selection(service, Path('/dev/dri'))
+    devices = additions.get('devices', [])
+    if (manual_gpu or explicit_gpu) and any(device_source(device).startswith('/dev/dri/') for device in devices):
+        retained_devices = [device for device in devices if not device_source(device).startswith('/dev/dri/')]
+        additions['devices'] = retained_devices
+        additions['group_add'] = sorted({str(Path(device_source(device)).stat().st_gid) for device in retained_devices}, key=int)
+    # Compose's unique-resource merge retains unrelated host devices, mounts,
+    # networks and data; the readonly platform proof is one additional mount.
+    additions['volumes'] = [{'type': 'bind', 'source': '/sys/firmware/devicetree/base/compatible',
+                            'target': '/run/plurx-platform/compatible', 'read_only': True,
+                            'bind': {'create_host_path': False}}]
+    options = pi_security_options(service)
+    existing = [str(option) for option in options if str(option).startswith(('seccomp=', 'seccomp:'))]
+    additions['security_opt'] = options if existing else [*options, 'seccomp=' + runtime['profile']]
+    additions['cap_drop'] = ['ALL']
+    return {'services': {'plurxd': additions, 'plurx-discovery': {'image': image}}}
+
+
+def prepare_pi_runtime(profile: str | None = None) -> dict:
+    path = Path(__file__).resolve().parents[1] / 'deploy/pi-setup'
+    loader = importlib.machinery.SourceFileLoader('pi_compose_setup', str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.prepare_compose_runtime(Path(profile) if profile else None)
+
+
+def resolved_compose_inputs() -> tuple[dict[str, str], dict]:
+    """Use Compose itself for interpolation, including pre-2.27 clients."""
+    try:
+        text = run("docker", "compose", "config", "--environment")
+    except HardwareError as error:
+        if "unknown flag: --environment" not in str(error).lower():
+            raise
+        # Older Compose cannot print its interpolation environment. A throwaway
+        # service makes the relevant values observable through supported JSON
+        # config output instead. It is never part of the deployment overlay.
+        name = "plurx-hardware-environment-probe"
+        probe = {
+            "services": {
+                name: {
+                    "image": "scratch",
+                    "labels": {
+                        "COMPOSE_FILE": "${COMPOSE_FILE:-}",
+                        "COMPOSE_PATH_SEPARATOR": "${COMPOSE_PATH_SEPARATOR:-}",
+                        "PLURX_DOCKER_GPU": "${PLURX_DOCKER_GPU:-auto}",
+                    },
+                }
+            }
+        }
+        directory = Path.cwd()
+        # The first probe stays in the deployment directory, retaining its .env.
+        # The second uses the selected base first, retaining any project .env too.
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", prefix=".plurx-hardware-probe-", dir=directory
+        ) as temporary:
+            json.dump(probe, temporary)
+            temporary.flush()
+            initial = json.loads(
+                run("docker", "compose", "-f", temporary.name, "config", "--format", "json")
+            )
+            environment = initial.get("services", {}).get(name, {}).get("labels", {})
+            if not isinstance(environment, dict):
+                raise HardwareError("Compose did not resolve hardware environment labels")
+            files = compose_files(environment, directory)
+            arguments = ["docker", "compose"]
+            for filename in files:
+                arguments.extend(("-f", filename))
+            arguments.extend(("-f", temporary.name, "config", "--format", "json"))
+            document = json.loads(run(*arguments))
+            resolved = document.get("services", {}).pop(name, {}).get("labels", {})
+            if not isinstance(resolved, dict) or "PLURX_DOCKER_GPU" not in resolved:
+                raise HardwareError("Compose did not resolve hardware mode")
+            return resolved, document
+    environment = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    return environment, json.loads(run("docker", "compose", "config", "--format", "json"))
+
+
+def prepare(output: Path, prepare_pi: bool = False) -> str:
+    # Ask Compose for precedence, rather than implementing an .env parser.
+    environment, document = resolved_compose_inputs()
+    mode = environment.get("PLURX_DOCKER_GPU", "auto")
+    if mode not in ("auto", "manual"):
+        raise HardwareError("PLURX_DOCKER_GPU must be auto or manual")
+    files = compose_files(environment, Path.cwd())
+    service = document.get("services", {}).get("plurxd")
+    if not isinstance(service, dict):
+        raise HardwareError("resolved Compose configuration has no plurxd service")
+    overlay = {"services": {"plurxd": {}}}
+    local = local_linux_engine() if prepare_pi or mode == "auto" else False
+    if prepare_pi and local and raspberry_pi_host():
+        options = pi_security_options(service)  # Reject conflicts before runtime/profile mutations.
+        profiles = [str(option)[8:] for option in options if str(option).startswith(('seccomp=', 'seccomp:'))]
+        overlay = pi_runtime_overlay(service, prepare_pi_runtime(profiles[0] if profiles else None), manual_gpu=mode == 'manual')
+    elif mode == "auto" and local:
+        dri = Path("/dev/dri")
+        explicit_gpu, _ = gpu_selection(service, dri)
+        # Existing selections (including hook-free CDI) need no legacy probe.
+        nvidia = not explicit_gpu and nvidia_available()
+        if nvidia and not shutil.which("nvidia-container-runtime-hook"):
+            print(
+                "docker hardware: NVIDIA GPU detected but its Docker runtime hook "
+                "is missing; leaving NVIDIA passthrough unset. Configure NVIDIA "
+                "Container Toolkit or select a CDI device in your override. "
+                "Other encoder paths remain available.",
+                file=sys.stderr,
+            )
+            nvidia = False
+        overlay = gpu_overlay(service, dri=dri, nvidia=nvidia)
+        print(
+            "docker hardware: "
+            + json.dumps(overlay["services"]["plurxd"], sort_keys=True),
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "docker hardware: using existing configuration (manual mode or non-local/native-Linux engine)",
+            file=sys.stderr,
+        )
+    output.write_text(json.dumps(overlay) + "\n", encoding="utf-8")
+    files.append(os.path.abspath(output))
+    if any(os.pathsep in name for name in files):
+        raise HardwareError("Compose paths must not contain the path-list separator")
+    return os.pathsep.join(files)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--prepare-pi", action="store_true", help="prepare the verified local Pi runtime before Compose startup")
+    args = parser.parse_args()
+    try:
+        print(prepare(args.output, args.prepare_pi))
+    except (HardwareError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print(
+            f"docker hardware preparation failed; this helper did not start Compose: {error}",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

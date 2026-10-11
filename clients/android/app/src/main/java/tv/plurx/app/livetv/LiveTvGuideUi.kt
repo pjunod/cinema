@@ -2,6 +2,14 @@
 
 package tv.plurx.app.livetv
 
+import tv.plurx.app.remote.*
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,7 +28,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -39,6 +46,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -84,6 +92,13 @@ data class LiveTvGridDimensions(
     val slotWidth: Dp,
     val rowHeight: Dp,
     val channelColumnWidth: Dp,
+    /**
+     * The station tile at the head of each row: logo, or callsign until one
+     * decodes. Inside the fixed channel column, so no slot geometry moves.
+     */
+    val stationChipWidth: Dp = 44.dp,
+    val stationChipHeight: Dp = 30.dp,
+    val stationChipGap: Dp = 5.dp,
 )
 
 /** Half-hour geometry, shared by the grid composable and its tests. */
@@ -114,6 +129,10 @@ object LiveTvGridMetrics {
             .coerceAtLeast(60.dp),
         rowHeight = televisionRowHeight,
         channelColumnWidth = televisionChannelColumnWidth,
+        // The 37 dp row leaves 21 dp inside the header button's padding.
+        stationChipWidth = 36.dp,
+        stationChipHeight = 20.dp,
+        stationChipGap = 4.dp,
     )
 }
 
@@ -203,6 +222,12 @@ fun LiveTvFormatBadges(channel: LiveTvChannel) {
 @Composable
 fun LiveTvChannelRow(
     channel: LiveTvChannel,
+    /**
+     * The guide's station artwork ([LiveTvPlayer.stationLogo]). Required,
+     * not defaulted: a row built without it is how the native guides went
+     * without logos while the web had them.
+     */
+    logo: String?,
     airing: LiveTvAiring,
     selected: Boolean,
     onWatch: () -> Unit,
@@ -225,17 +250,13 @@ fun LiveTvChannelRow(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
     ) {
-        Text(
-            channel.guide_name.take(5),
+        LiveTvStationChip(
+            name = channel.guide_name.take(5),
+            logo = logo,
+            width = 52.dp,
+            height = 32.dp,
             style = type.badge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier
-                .size(width = 52.dp, height = 32.dp)
-                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp))
-                .wrapContentHeight(),
+            shape = RoundedCornerShape(6.dp),
         )
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -299,7 +320,7 @@ private fun LiveTvPagingChip(
     onClick: () -> Unit,
     type: LiveTvTypeScale,
 ) {
-    TvTextButton(onClick = onClick, enabled = enabled, compact = true) {
+    TvTextButton(modifier = Modifier.remoteAction("live-guide-page:" + label, label, enabled) { onClick(); RemoteOutcome.Applied }, onClick = onClick, enabled = enabled, compact = true) {
         Text(label, style = type.badge)
     }
 }
@@ -332,10 +353,34 @@ fun LiveTvGuideGrid(
     onFocus: (LiveTvChannel, LiveTvProgramme?) -> Unit = { _, _ -> },
     onToolbarBoundary: () -> Unit = {},
     modifier: Modifier = Modifier,
+    extraRemoteKeys: List<String> = emptyList(),
 ) {
     val scroll = rememberScrollState()
     val rows = rememberLazyListState()
     val requesters = remember { mutableStateMapOf<LiveTvGuideFocusTarget, FocusRequester>() }
+    val remoteScope = rememberCoroutineScope()
+    val remoteTune = LocalRemoteLiveTune.current
+    val remoteNavigation = LocalRemoteNavigation.current
+    val density = androidx.compose.ui.platform.LocalDensity.current.density
+    val semanticKeys = (buildList {
+        addAll(extraRemoteKeys)
+        paging?.let { if (it.canEarlier) add("live-guide-page:‹"); add("live-guide-page:Now"); if (it.canLater) add("live-guide-page:›") }
+        layout.rows.forEach { row ->
+            if (row.channel.watchable) add("live-guide-channel:" + row.channel.id)
+            row.cells.forEach { add("live-guide-cell:" + row.channel.id + ":" + it.programme.start) }
+            if (row.cells.isEmpty() && row.channel.watchable) add("live-guide-empty:" + row.channel.id)
+        }
+    }).distinct().take(16384)
+    var lastWindow by remember { mutableStateOf<List<Long>?>(null) }
+    SideEffect { if (lastWindow != slots) { lastWindow = slots.toList(); remoteNavigation?.changedContext() } }
+    RemoteOrder(semanticKeys) { key ->
+        val rowIndex = layout.rows.indexOfFirst { row -> key == "live-guide-channel:" + row.channel.id || key == "live-guide-empty:" + row.channel.id || row.cells.any { key == "live-guide-cell:" + row.channel.id + ":" + it.programme.start } }
+        if (rowIndex >= 0) remoteScope.launch {
+            rows.scrollToItem(rowIndex)
+            val cell = layout.rows[rowIndex].cells.firstOrNull { key == "live-guide-cell:" + layout.rows[rowIndex].channel.id + ":" + it.programme.start }
+            if (cell != null) scroll.scrollTo((cell.left * density).toInt().coerceIn(0, scroll.maxValue))
+        } else if (key.startsWith("live-guide-page:") || key in extraRemoteKeys) remoteScope.launch { rows.scrollToItem(0) }
+    }
     var focused by remember { mutableStateOf(navigationTarget) }
     var pending by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
     var preserveAnchorFor by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
@@ -458,22 +503,43 @@ fun LiveTvGuideGrid(
                     TvTextButton(
                         onClick = { if (row.channel.watchable) onAiring(row.channel) },
                         modifier = Modifier
+                            .remoteAction("live-guide-channel:" + row.channel.id, row.channel.title, enabled = "live-guide-channel:" + row.channel.id in semanticKeys, deferred = { action -> if (action.type == "select") remoteTune?.invoke(row.channel) else null }) { if (row.channel.watchable) { onAiring(row.channel); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
                             .width(dimensions.channelColumnWidth)
                             .liveTvGuideFocusTarget(channelTarget, requesters) {
                                 receiveFocus(channelTarget, row.channel)
                             }
                             .liveTvGuideNavigation(dpadNavigation, ::move),
                     ) {
-                        Column {
-                            Text(row.channel.guide_number, style = type.secondary)
-                            Text(
-                                row.channel.guide_name,
-                                style = type.badge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            LiveTvFormatBadges(row.channel)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(dimensions.stationChipGap),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        ) {
+                            // Only a station with artwork gives up header width to
+                            // a tile — the name column already says the callsign,
+                            // and the layout knows before any load.
+                            row.logo?.let { logo ->
+                                LiveTvStationChip(
+                                    name = row.channel.guide_name,
+                                    logo = logo,
+                                    width = dimensions.stationChipWidth,
+                                    height = dimensions.stationChipHeight,
+                                    style = type.badge,
+                                    shape = RoundedCornerShape(5.dp),
+                                    padding = 2.dp,
+                                )
+                            }
+                            // Clipped at the column edge, as on the web.
+                            Column(Modifier.weight(1f).clipToBounds()) {
+                                Text(row.channel.guide_number, style = type.secondary)
+                                Text(
+                                    row.channel.guide_name,
+                                    style = type.badge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                LiveTvFormatBadges(row.channel)
+                            }
                         }
                     }
                     Box(Modifier.horizontalScroll(scroll)) {
@@ -499,6 +565,7 @@ fun LiveTvGuideGrid(
                                 mark = marks.mark(row.channel.id, cell.programme.start, now),
                                 onFuture = onFuture,
                                 modifier = Modifier
+                                    .remoteAction("live-guide-cell:" + row.channel.id + ":" + cell.programme.start, cell.programme.title, enabled = "live-guide-cell:" + row.channel.id + ":" + cell.programme.start in semanticKeys) { onFuture(row.channel, cell.programme); RemoteOutcome.Applied }
                                     .liveTvGuideFocusTarget(target, requesters) {
                                         receiveFocus(target, row.channel)
                                     }
@@ -510,6 +577,7 @@ fun LiveTvGuideGrid(
                             TvTextButton(
                                 onClick = { if (row.channel.watchable) onAiring(row.channel) },
                                 modifier = Modifier
+                                    .remoteAction("live-guide-empty:" + row.channel.id, row.channel.title, enabled = "live-guide-empty:" + row.channel.id in semanticKeys, deferred = { action -> if (action.type == "select") remoteTune?.invoke(row.channel) else null }) { if (row.channel.watchable) { onAiring(row.channel); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
                                     .width(dimensions.slotWidth * slots.size)
                                     .height(dimensions.rowHeight)
                                     .liveTvGuideFocusTarget(emptyTarget, requesters) {
@@ -699,3 +767,5 @@ private fun Modifier.liveTvGuideFocusTarget(
     }
     return focusRequester(requester).onFocusChanged { if (it.isFocused) onFocused() }
 }
+
+internal val LocalRemoteLiveTune = androidx.compose.runtime.staticCompositionLocalOf<((LiveTvChannel) -> RemoteDeferredEffect)?>( { null })

@@ -20,7 +20,7 @@ tree. Fleet recovery and deployment remain separate actions.
 | W3 · durable bounded retry | reviewed | fixed backoff, seven-day deadline, attempt preservation, deadline-clamped initial and renewed leases, and deadline-aware completion compile in both Store paths | exercise both backends in the final fast lane |
 | W4 · identity-correct repair | reviewed | exact pipeline/video identity, current-recipe attribution for legacy and standalone rows, revisioned preview/apply candidates, atomic receipts, and stale revalidation compile | backend regressions in the final fast lane |
 | W5 · operator surfaces | implemented | history diagnostics, truthful failure text, repair controls, and advisory Developer enablement compile | browser contract regression in the final fast lane |
-| W6 · review and promotion | merge authorized | Forgejo PR [#352](http://192.168.4.7:3000/noirr/plurx/pulls/352) is open; adversarial review findings are addressed; focused local acceptance is green on `0db6c804`; current main is integrated and the merged Rust surface compiles | merge immediately per the owner's explicit direction |
+| W6 · review and promotion | merge authorized | Forgejo PR [#352](http://forge.lan:3000/noirr/plurx/pulls/352) is open; adversarial review findings are addressed; focused local acceptance is green on `0db6c804`; current main is integrated and the merged Rust surface compiles | merge immediately per the owner's explicit direction |
 
 ## Standing decisions
 

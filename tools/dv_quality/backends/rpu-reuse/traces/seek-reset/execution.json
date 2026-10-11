@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "stage": "decode",
+  "mode": "seek-reset",
+  "argv": [
+    "decode_reuse",
+    "normal.mkv",
+    "seek-reset",
+    "seek-reset"
+  ],
+  "process_returncode": 0,
+  "shell_status": 0,
+  "consumed_before": {
+    "decode_reuse": "b3aa859d3dda3f018ae8b28c8ec6a0cb387d7d31eca0e2ec4dc0108018031eb7",
+    "normal.mkv": "e3bbe2f2e388632e54756d5d2549607de41e4ab62a13c56bac7411bbd699faf8"
+  },
+  "consumed_after": {
+    "decode_reuse": "b3aa859d3dda3f018ae8b28c8ec6a0cb387d7d31eca0e2ec4dc0108018031eb7",
+    "normal.mkv": "e3bbe2f2e388632e54756d5d2549607de41e4ab62a13c56bac7411bbd699faf8"
+  },
+  "outputs": {
+    "seek-reset/events.jsonl": "f44b582a58f54c29d7e52134f636799284964ac0efdfb6de4bdc96c91afb0f2c",
+    "seek-reset/decoder.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "seek-reset/decode-status.txt": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "seek-reset/epoch-1-bl-frame-000.yuv420p10le": "d4ac91b058fedcf06feb54fb19ef1f048286b0aef2fe3566fa26d02364e9939e",
+    "seek-reset/epoch-1-bl-frame-001.yuv420p10le": "d8db2c495c21be386887658e03fa6b449a30cf3f79baff546c822377d4c188d4",
+    "seek-reset/epoch-1-bl-frame-002.yuv420p10le": "3dc0eae3f41f181a176885a5259da60d0015bcdb0977e84eae1601b38973ef86",
+    "seek-reset/epoch-1-bl-frame-000.rpu.nal": "8df25b259638b173e09f8416a5887621618907e1b4a2b8562741efebfbaedd45",
+    "seek-reset/epoch-1-bl-frame-001.rpu.nal": "d874a9d8c7b6d9b52146762f303402b7d8b7a3b956be9e65ed2429444e080b5e",
+    "seek-reset/epoch-1-bl-frame-002.rpu.nal": "d8c4a7f467ad04376f3874978e0ec2db40d90b3e7b93970c05bee224a7784f19"
+  }
+}

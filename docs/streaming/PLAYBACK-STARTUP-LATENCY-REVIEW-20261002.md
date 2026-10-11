@@ -55,7 +55,7 @@ standalone plan.
 ### B1. This is the reference film G incident again, and its fix is approved but unbuilt
 
 [`NATIVE-HLS-STARTUP-RCA.md`](docs/streaming/NATIVE-HLS-STARTUP-RCA.md)
-(2026-09-17, nynuc) has the same signature: a master 503 after 5,001 ms
+(2026-09-17, media1) has the same signature: a master 503 after 5,001 ms
 waiting for init, a second master also timing out at 5 s, then Safari error
 → codec rescue. Its build contract,
 [`NATIVE-HLS-STARTUP-IMPLEMENTATION.md`](docs/streaming/NATIVE-HLS-STARTUP-IMPLEMENTATION.md),
@@ -276,7 +276,7 @@ after-restart case is real, because Paul tests right after deploys.
 ## 6. Final implementation review — findings addressed
 
 **Reviewed:** 2026-10-02 · **Candidate:** `6835957c` · **Base:** `955e1551`
-· **PR:** [draft #711](http://192.168.4.7:3000/noirr/plurx/pulls/711).
+· **PR:** [draft #711](http://forge.lan:3000/noirr/plurx/pulls/711).
 This is the single final independent implementation review required by
 [the build contract](PLAYBACK-STARTUP-LATENCY-BUILD.md), distinct from the
 proposal review above. It read the implementation and evidence without

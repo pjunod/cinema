@@ -97,7 +97,7 @@ function renderPlayerInfo(){
 function playerMeta(it, ancestors){
   if(!it) return null;
   const show=(ancestors||[]).find(a=>a.kind==='show');
-  return { title:it.title||"", overview:it.overview||"", year:it.year||null,
+  return { item_id:it.id, title:it.title||"", overview:it.overview||"", year:it.year||null,
     air_date:it.air_date||null, runtime_ms:it.runtime_ms||0, kind:it.kind||"",
     show:(it.kind==='episode'&&show)?show.title:(it.show_title||null),
     season:(it.season_number!=null)?it.season_number:null,

@@ -1,0 +1,12 @@
+ffmpeg version 8.1.3 Copyright (c) 2000-2026 the FFmpeg developers
+built with gcc 12 (Debian 12.2.0-14+deb12u1)
+configuration: --disable-shared --enable-static --disable-autodetect --disable-everything --disable-programs --enable-ffmpeg --disable-doc --disable-debug --disable-network --enable-avdevice --enable-indev=lavfi --enable-protocol='file,pipe' --enable-demuxer=matroska --enable-decoder='h264,ffv1,rawvideo,wrapped_avframe' --enable-parser=h264 --enable-encoder=wrapped_avframe --enable-muxer=null --enable-filter='libvmaf,scale,format,setpts,split,testsrc2,buffer,buffersink,null' --enable-libvmaf --pkg-config-flags=--static --extra-ldexeflags=-static --extra-libs=-lstdc++
+libavutil      60. 26.103 / 60. 26.103
+libavcodec     62. 28.103 / 62. 28.103
+libavformat    62. 12.103 / 62. 12.103
+libavdevice    62.  3.103 / 62.  3.103
+libavfilter    11. 14.103 / 11. 14.103
+libswscale      9.  5.103 /  9.  5.103
+libswresample   6.  3.103 /  6.  3.103
+
+Exiting with exit code 0

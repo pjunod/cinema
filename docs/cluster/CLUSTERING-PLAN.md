@@ -605,11 +605,29 @@ the monotonic clock keeps the ratio honest without turning the CI gate into a
 ten-minute campaign; every store read, compare-and-set, and replicated write
 remains real.
 
-With hiqlite's production 10,000-log snapshot policy, two successive
-snapshot/purge cycles normalize retained WAL rollover before each directory
-comparison. The 2026-08-14 record is 3,832,601 bytes before, 8,273,961 bytes
+The gate retains hiqlite's production 10,000-log snapshot policy, two normal
+snapshot/purge cycles and a fixed 512-entry applied tail before each directory
+comparison. Equal index tails alone do not establish equal allocation phase:
+a retained suffix can straddle two 16 MiB Raft files. On Unix, normal purge
+and rollover reclaim the obsolete prefix of a sealed front file by publishing
+a synced, same-format replacement under the writer's exclusive layout guard.
+Purge never shrinks the active append target; when later writes seal that
+file, rollover must reclaim its obsolete prefix without waiting for another
+snapshot or changing the settling workload. Both writer rollover paths hold
+the guard before replacement and refresh readers even on publication errors.
+Every
+required record survives; readers refresh the replacement's incarnation, and
+an append target keeps or regains its configured 16 MiB capacity. All retained
+file lengths still count; no segment is subtracted, and the byte budget,
+snapshot cadence, sync policy and recovery retention remain unchanged.
+Windows retains its existing normal purge without sealed-prefix reclamation;
+equivalent Windows publication/runtime proof remains a separate follow-up.
+
+The historical 2026-08-14 record is 3,832,601 bytes before, 8,273,961 bytes
 after, and 4,441,360 bytes of compacted growth — 444.136 bytes/incoming beat
-against the measured 512-byte budget. The same run bypasses the coalescer: its
+against the measured 512-byte budget. Its baseline is smaller than one current
+16 MiB segment, so it is not evidence for the current WAL layout. The same
+historical run bypasses the coalescer: its
 10,000 commits produce 8,454,240 compacted bytes (845.424 bytes/beat), so the
 live control must violate both the 5,120-commit and 5,120,000-byte limits.
 Paused-time tests still prove the ten-second window and terminal watched

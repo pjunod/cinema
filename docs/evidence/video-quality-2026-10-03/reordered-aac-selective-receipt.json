@@ -1,0 +1,30 @@
+{
+  "outcome": "passed",
+  "source_parent": "dd45daec5ef89043b76fcf4661ba10c6ad473959",
+  "cause": "The muxer cut AAC at reordered video DTS; a continuous next entry began at sample 92160 but a restarted entry began at 96256. Both shared the correct 1024-sample phase; segment packet ownership differed.",
+  "fix": "Encoded Segmenter assigns leading AAC packets by rational presentation-plan boundaries; copies only moved audio payload, preserves timestamps/sample bytes and leaves copy segmentation unchanged.",
+  "source_sha256": {
+    "crates/plurx-core/src/fmp4.rs": "026119cbccc110e7551d10e7a801e6bb266c9c1e1df723d61d3ff5c4a1051ee4",
+    "crates/plurxd/src/vodgen.rs": "bbb4765bb94e6dd4ca0aeed34f63da8c671296a3bc1cba73977bfcf2907ca8aa"
+  },
+  "checks": [
+    {
+      "command": "cargo test --locked --offline -p plurx-core --features hiqlite-store --lib fmp4::tests::encoded_audio_partition_uses_presentation_time_and_preserves_packets -- --exact",
+      "passed": 1,
+      "failed": 0,
+      "scope": "Exact packet/sample conservation and rational cut; compact audio payload only."
+    },
+    {
+      "command": "cargo test --locked --offline --workspace --exclude plurx-cluster-check vodserve::tests::encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid -- --exact --nocapture",
+      "passed": 1,
+      "failed": 0,
+      "seconds": 5.56,
+      "scope": "Independent forward/backward video/AAC splices, init equality, exact intervals and decoded sample count, waveform bound and presentation grid."
+    }
+  ],
+  "ffmpeg": "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "log_sha256": {
+    "audio-partition-selective.log": "8b3228fb953a84e6b2f7cd072c7fe9ebfe99687ad52e5d571610c5d0116cd306",
+    "reordered-aac-selective.log": "10e8b073fac76b77dd910c35afa174bde0b33f80f72bcca0f6bf21d0cd034dc8"
+  }
+}

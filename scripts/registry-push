@@ -21,6 +21,10 @@ git diff --quiet && git diff --cached --quiet || {
   exit 1
 }
 
+# The commit's committer time: the binary's built_at stamp and BuildKit's
+# image timestamps, so a rebuild of this commit is the same image.
+SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$FULL_SHA")"
+
 SHORT_SHA="${FULL_SHA:0:12}"
 IMMUTABLE_REF="$IMAGE:sha-$SHORT_SHA"
 FLEET_REF="$IMAGE:main"
@@ -61,6 +65,7 @@ elif is_missing_ref "$IMMUTABLE_REF" inspect.err; then
   docker build \
     --build-arg PLURX_BUILD_REF="$REF" \
     --build-arg PLURX_BUILD_SHA="$FULL_SHA" \
+    --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     --label "org.opencontainers.image.source=$SOURCE_URL" \
     --label "org.opencontainers.image.revision=$FULL_SHA" \
     --label "tv.plurx.build-ref=$REF" \

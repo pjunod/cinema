@@ -113,6 +113,16 @@ pub async fn content(
         .file_grant_by_hash(&auth::hash_token(&token))
         .await?
         .ok_or(ApiError::NotFound("grant"))?;
+    // A Jellyfin direct-play link shares this table but is not an open-in
+    // grant: refuse it before revealing whether it is still live.
+    if state
+        .store
+        .jellyfin_play_for_direct_grant(&grant.id)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::NotFound("grant"));
+    }
     if grant.revoked_at.is_some() || !grant.source_active || grant.expires_at <= now_unix() {
         return Err(ApiError::typed(
             StatusCode::GONE,

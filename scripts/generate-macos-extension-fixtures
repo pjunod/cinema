@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""Generate lawful analytic HLG/P5 extension experiments in a new task directory.
+
+P5 additionally requires the explicit private binary compiled from
+macos-video-fixture-rpu.rs against vendored dolby_vision 3.4.0. This script
+never discovers or installs FFmpeg. Patterns prove controlled signal and
+metadata experiments, not mastered-content visual quality.
+"""
+from array import array
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+import subprocess
+
+WIDTH, HEIGHT, FPS, FRAMES = 320, 180, 12, 24
+# Quantized public Profile5 defaults in vendored dolby_vision 3.4.0.
+NONLINEAR = ((8192, 799, 1681), (8192, -933, 1091), (8192, 267, -5545))
+LMS_ADJUST = ((17081, -349, -349), (-349, 17081, -349), (-349, -349, 17081))
+LMS_TO_RGB = ((3.06441879, -2.16597676, 0.10155818),
+              (-0.65612108, 1.78554118, -0.12943749),
+              (0.01736321, -0.04725154, 1.03004253))
+LICENSE = """SPDX-License-Identifier: CC0-1.0
+Synthetic HLG and Profile5 analytical media and generated RPU metadata.
+The contributors waive copyright and related rights to these generated media
+and pattern descriptions under CC0 1.0 Universal.
+https://creativecommons.org/publicdomain/zero/1.0/
+No external footage, pictures or movie metadata is incorporated. Tool code
+retains its respective repository license. Patent obligations are separate.
+"""
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def inverse(m):
+    work = [list(row) + [float(i == j) for j in range(3)] for i, row in enumerate(m)]
+    for i in range(3):
+        pivot = max(range(i, 3), key=lambda k: abs(work[k][i]))
+        work[i], work[pivot] = work[pivot], work[i]
+        scale = work[i][i]
+        if abs(scale) < 1e-12:
+            raise ValueError("singular color matrix")
+        work[i] = [x / scale for x in work[i]]
+        for j in range(3):
+            if j != i:
+                scale = work[j][i]
+                work[j] = [a - scale * b for a, b in zip(work[j], work[i])]
+    return tuple(tuple(row[3:]) for row in work)
+
+
+def multiply(m, x):
+    return tuple(sum(a * b for a, b in zip(row, x)) for row in m)
+
+
+def pq(nits):
+    power = (max(0, nits) / 10000) ** (2610 / 16384)
+    return ((3424 / 4096 + (2413 / 128) * power) /
+            (1 + (2392 / 128) * power)) ** (2523 / 32)
+
+
+def hlg_oetf(scene):
+    a = 0.17883277
+    b = 1 - 4 * a
+    c = 0.5 - a * math.log(4 * a)
+    return math.sqrt(3 * scene) if scene <= 1 / 12 else a * math.log(12 * scene - b) + c
+
+
+def hlg_signal(rgb_nits):
+    # BT.2100 reference 1000 cd/m2 display, system gamma 1.2.
+    # Invert the luma-dependent OOTF before applying each scene OETF.
+    yd = sum(c * n for c, n in zip((0.2627, 0.6780, 0.0593), rgb_nits)) / 1000
+    ys = yd ** (1 / 1.2)
+    return tuple(hlg_oetf(n / 1000 / ys ** 0.2) if ys else 0 for n in rgb_nits)
+
+
+def p5_signal(rgb_nits):
+    # Independent scalar reference: RGB -> LMS -> adjusted LMS -> PQ -> IPT.
+    # It does not use FFmpeg's approximate CPU implementation as an oracle.
+    lms = multiply(inverse(LMS_TO_RGB), rgb_nits)
+    adjusted = multiply(inverse(tuple(tuple(x / 16384 for x in row) for row in LMS_ADJUST)), lms)
+    signals = tuple(pq(x) for x in adjusted)
+    ipt = multiply(inverse(tuple(tuple(x / 8192 for x in row) for row in NONLINEAR)), signals)
+    return ipt[0], ipt[1] + 0.5, ipt[2] + 0.5
+
+
+def codes(rgb, family):
+    signal = hlg_signal(rgb) if family == "hlg" else p5_signal(rgb)
+    if family == "hlg":
+        y = sum(a * b for a, b in zip((0.2627, 0.6780, 0.0593), signal))
+        cb = (signal[2] - y) / (2 * (1 - 0.0593))
+        cr = (signal[0] - y) / (2 * (1 - 0.2627))
+        return tuple(round(x) for x in (64 + 876 * y, 512 + 896 * cb, 512 + 896 * cr))
+    return tuple(round(min(1, max(0, x)) * 1023) for x in signal)
+
+
+def patches(frame):
+    gray = (0, 1, 10, 100, 203, 400, 700, 1000)
+    colors = ((100, 30, 20), (30, 100, 20), (20, 30, 100), (100, 100, 20),
+              (20, 100, 100), (100, 20, 100), (0, 0, 0), (100, 100, 100))
+    return tuple((n, n, n) for n in gray) + colors
+
+
+def frame_bytes(family, frame):
+    values = tuple(codes(rgb, family) for rgb in patches(frame))
+    planes = []
+    for plane in range(3):
+        width, height = (WIDTH, HEIGHT) if plane == 0 else (WIDTH // 2, HEIGHT // 2)
+        samples = array("H")
+        for y in range(height):
+            for x in range(width):
+                index = min(7, x * 8 // width) + (8 if y >= height // 2 else 0)
+                if 4 + frame * 6 <= x * (1 if plane == 0 else 2) < 12 + frame * 6 and y * (1 if plane == 0 else 2) < 12:
+                    index = 15
+                samples.append(values[index][plane])
+        planes.append(samples.tobytes())
+    return b"".join(planes)
+
+
+def run(argv):
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+    if result.returncode:
+        raise ValueError(f"{Path(argv[0]).name} failed: " + result.stderr[-3000:].decode(errors="replace"))
+    return result.stdout
+
+
+def split_annexb(data):
+    # Canonicalize start codes without interpreting payload bytes as delimiters.
+    import re
+    markers = list(re.finditer(b"\x00\x00(?:\x00)?\x01", data))
+    return [data[m.end():markers[i + 1].start() if i + 1 < len(markers) else len(data)]
+            for i, m in enumerate(markers)]
+
+
+def validate_frame_bound_metadata(observed, packets):
+    expected = {int(packet["pts"]): index for index, packet in enumerate(packets)}
+    frames = observed.get("frames", [])
+    if len(frames) != FRAMES or len(expected) != FRAMES:
+        raise ValueError("frame-bound fixture lost a presentation frame")
+    for frame in frames:
+        ordinal = expected.get(int(frame["pts"]))
+        metadata = next((side for side in frame.get("side_data_list", [])
+                         if side.get("side_data_type") == "Dolby Vision Metadata"), {})
+        if ordinal is None or metadata.get("dm_metadata_id") != ordinal % 16 or metadata.get("source_max_pq") != 3079 + ordinal:
+            raise ValueError("effective Dolby metadata is not bound to its coded AU/presentation frame")
+
+
+def inject_rpu(data, rpus):
+    output = bytearray()
+    access_units = []
+    current = []
+    for nal in split_annexb(data):
+        if len(nal) < 2:
+            raise ValueError("truncated NAL")
+        kind = (nal[0] >> 1) & 63
+        if kind == 35 and current:
+            access_units.append(current)
+            current = []
+        current.append(nal)
+    if current:
+        access_units.append(current)
+    if len(access_units) != len(rpus):
+        raise ValueError("RPU/access-unit count mismatch")
+    for unit, rpu in zip(access_units, rpus):
+        for nal in unit:
+            output.extend(b"\x00\x00\x00\x01" + nal)
+        # FFmpeg's HEVC decoder consumes the final non-EOB/EOS NAL as RPU.
+        output.extend(b"\x00\x00\x00\x01" + rpu)
+    return bytes(output)
+
+
+def boxes(data):
+    import struct
+    offset = 0
+    while offset < len(data):
+        if len(data) - offset < 8:
+            raise ValueError("truncated MP4 box")
+        size, kind = struct.unpack_from(">I4s", data, offset)
+        if size < 8 or size > len(data) - offset:
+            raise ValueError("unsupported or truncated MP4 box")
+        yield kind, data[offset + 8:offset + size]
+        offset += size
+
+
+def box(kind, payload):
+    import struct
+    return struct.pack(">I4s", len(payload) + 8, kind) + payload
+
+
+def inject_mp4_rpu(data, rpus):
+    """Keep original encode-order samples, DTS/CTS tables and B-frame timing.
+
+    The video-only fixture encoder produces one contiguous chunk. Refuse any
+    other layout rather than reconstructing timestamps from elementary HEVC.
+    """
+    import struct
+    tables = {}
+    containers = {b"moov", b"trak", b"mdia", b"minf", b"stbl"}
+    def collect(data):
+        for kind, payload in boxes(data):
+            if kind in containers:
+                collect(payload)
+            elif kind in {b"stsz", b"stco", b"stsc"}:
+                if kind in tables:
+                    raise ValueError("multiple video tracks are unsupported")
+                tables[kind] = payload
+    collect(data)
+    sizes = tables[b"stsz"]
+    uniform, count = struct.unpack_from(">II", sizes, 4)
+    if uniform or count != len(rpus):
+        raise ValueError("unexpected sample size table")
+    sizes = list(struct.unpack_from(f">{count}I", sizes, 12))
+    chunks = tables[b"stco"]
+    if struct.unpack_from(">I", chunks, 4)[0] != 1:
+        raise ValueError("fixture must have a single contiguous video chunk")
+    first = struct.unpack_from(">I", chunks, 8)[0]
+    stsc = tables[b"stsc"]
+    if struct.unpack_from(">IIII", stsc, 4) != (1, 1, count, 1):
+        raise ValueError("unexpected sample-to-chunk mapping")
+    new_sizes = [size + (4 + len(rpu) if rpu is not None else 0) for size, rpu in zip(sizes, rpus)]
+    def rewrite(data):
+        output = bytearray()
+        for kind, payload in boxes(data):
+            if kind in containers:
+                payload = rewrite(payload)
+            elif kind == b"stsz":
+                payload = payload[:12] + struct.pack(f">{count}I", *new_sizes)
+            elif kind == b"stsd":
+                # Visual sample entry header is 78 bytes after its box header.
+                if struct.unpack_from(">I", payload, 4)[0] != 1:
+                    raise ValueError("unexpected sample descriptions")
+                entry_kind, entry = next(boxes(payload[8:]))
+                if entry_kind != b"hvc1":
+                    raise ValueError("fixture must use hvc1")
+                config = bytes((1, 0, 10, 13)) + bytes(20)  # P5 level1, BL+RPU, no EL.
+                payload = payload[:8] + box(b"dvh1", entry + box(b"dvcC", config))
+            output.extend(box(kind, payload))
+        return bytes(output)
+    output = bytearray()
+    original_offset = 0
+    saw_mdat = False
+    for kind, payload in boxes(data):
+        if kind == b"mdat":
+            if saw_mdat or first != original_offset + 8 or sum(sizes) != len(payload):
+                raise ValueError("unexpected media chunk layout")
+            saw_mdat = True
+            offset = 0
+            rebuilt = bytearray()
+            for size, rpu in zip(sizes, rpus):
+                rebuilt.extend(payload[offset:offset + size])
+                if rpu is not None:
+                    rebuilt.extend(struct.pack(">I", len(rpu)) + rpu)
+                offset += size
+            output.extend(box(kind, rebuilt))
+        elif kind == b"moov":
+            if not saw_mdat:
+                raise ValueError("moov must follow mdat in the fixture input")
+            output.extend(box(kind, rewrite(payload)))
+        else:
+            output.extend(box(kind, payload))
+        original_offset += 8 + len(payload)
+    return bytes(output)
+
+
+def validate_observed(observed, family):
+    from fractions import Fraction
+    frames, streams = observed.get("frames", []), observed.get("streams", [])
+    if len(streams) != 1 or len(frames) != FRAMES:
+        raise ValueError("fixture frame/stream count mismatch")
+    stream = streams[0]
+    expected = {"width": WIDTH, "height": HEIGHT, "pix_fmt": "yuv420p10le",
+                "color_transfer": "arib-std-b67" if family == "hlg" else "smpte2084",
+                "color_primaries": "bt2020", "color_space": "bt2020nc" if family == "hlg" else "ipt-c2",
+                "color_range": "tv" if family == "hlg" else "pc", "sample_aspect_ratio": "1:1"}
+    if any(stream.get(k) != v for k, v in expected.items()):
+        raise ValueError("fixture signal declarations mismatch")
+    time_base = Fraction(stream["time_base"])
+    for i, frame in enumerate(frames):
+        if Fraction(frame.get("pts", -1)) * time_base != Fraction(i, FPS):
+            raise ValueError("fixture presentation timestamps mismatch")
+        if frame.get("sample_aspect_ratio") != "1:1":
+            raise ValueError("decoded fixture does not retain explicit square pixels")
+        if family == "p5":
+            metadata = [s for s in frame.get("side_data_list", [])
+                        if s.get("side_data_type") == "Dolby Vision Metadata"]
+            color_fields = {"signal_eotf": 65535, "signal_bit_depth": 12,
+                            "signal_color_space": 2, "signal_chroma_format": 0,
+                            "signal_full_range_flag": 1}
+            if (len(metadata) != 1 or metadata[0].get("disable_residual_flag") != 1 or
+                metadata[0].get("vdr_rpu_profile") != 0 or
+                any(metadata[0].get(k) != v for k, v in color_fields.items())):
+                raise ValueError("fixture lacks supported effective Dolby metadata")
+    if family == "p5":
+        config = [s for s in stream.get("side_data_list", []) if s.get("side_data_type") == "DOVI configuration record"]
+        if len(config) != 1 or config[0].get("dv_profile") != 5 or config[0].get("el_present_flag") != 0:
+            raise ValueError("fixture does not declare base-layer-only P5")
+
+
+def generate(ffmpeg, ffprobe, output, family, rpu_generator=None, lossless=False):
+    output.mkdir()
+    raw = output / "pattern.yuv"
+    raw.write_bytes(b"".join(frame_bytes(family, frame) for frame in range(FRAMES)))
+    stream = output / "base.mp4"
+    transfer = "arib-std-b67" if family == "hlg" else "smpte2084"
+    color_range = "tv" if family == "hlg" else "pc"
+    matrix = "bt2020nc" if family == "hlg" else "ipt-c2"
+    coding = "lossless=1" if lossless else "crf=8:vbv-maxrate=10000:vbv-bufsize=10000:level-idc=3.1:no-sao=1:no-deblock=1"
+    argv = [str(ffmpeg), "-nostdin", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
+            "-s", f"{WIDTH}x{HEIGHT}", "-r", str(FPS), "-color_range", color_range,
+            "-color_trc", transfer, "-color_primaries", "bt2020", "-colorspace", matrix, "-i", str(raw), "-vf", "setsar=1", "-frames:v", str(FRAMES),
+            "-c:v", "libx265", "-x265-params", f"{coding}:repeat-headers=1:aud=1:keyint=12:bframes=2:pools=1:frame-threads=1:colorprim=9:transfer={18 if family == 'hlg' else 16}:colormatrix={9 if family == 'hlg' else 15}:range={'limited' if family == 'hlg' else 'full'}",
+            "-color_trc", transfer, "-color_primaries", "bt2020", "-colorspace", matrix,
+            "-color_range", color_range, "-tag:v", "hvc1", "-f", "mp4", str(stream)]
+    run(argv)
+    files = {"base.mp4": sha(stream), "pattern.yuv": sha(raw)}
+    if family == "p5":
+        if not rpu_generator:
+            raise ValueError("P5 needs an explicit compiled RPU generator")
+        rpu_dir = output / "generated-rpu"
+        run([str(rpu_generator), str(rpu_dir), str(FRAMES)])
+        rpus = [(rpu_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        media = output / "p5.mp4"
+        media.write_bytes(inject_mp4_rpu(stream.read_bytes(), rpus))
+        files["p5.mp4"] = sha(media)
+        files.update({str(p.relative_to(output)): sha(p) for p in sorted(rpu_dir.iterdir())})
+        reuse_dir = output / "generated-reuse-rpu"
+        run([str(rpu_generator), str(reuse_dir), str(FRAMES), "reuse"])
+        reused = [(reuse_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        reuse_media = output / "p5-explicit-reuse.mp4"
+        reuse_media.write_bytes(inject_mp4_rpu(stream.read_bytes(), reused))
+        reuse_observed = json.loads(run([str(ffprobe), "-v", "error", "-show_frames", "-show_streams", "-of", "json", str(reuse_media)]))
+        validate_observed(reuse_observed, "p5")
+        files[reuse_media.name] = sha(reuse_media)
+        files.update({str(p.relative_to(output)): sha(p) for p in sorted(reuse_dir.iterdir())})
+        packets = json.loads(run([str(ffprobe), "-v", "error", "-show_packets", "-of", "json", str(stream)]))["packets"]
+        bound_dir = output / "generated-frame-bound-rpu"
+        run([str(rpu_generator), str(bound_dir), str(FRAMES), "frame-bound"])
+        bound = [(bound_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        bound_media = output / "p5-frame-bound.mp4"
+        bound_media.write_bytes(inject_mp4_rpu(stream.read_bytes(), bound))
+        bound_observed = json.loads(run([str(ffprobe), "-v", "error", "-show_frames", "-of", "json", str(bound_media)]))
+        validate_frame_bound_metadata(bound_observed, packets)
+        (output / "frame-bound-observed.json").write_text(json.dumps(bound_observed, indent=2) + "\n")
+        files["frame-bound-observed.json"] = sha(output / "frame-bound-observed.json")
+        files[bound_media.name] = sha(bound_media)
+        files.update({str(p.relative_to(output)): sha(p) for p in sorted(bound_dir.iterdir())})
+        (output / "frame-bound-association.json").write_text(json.dumps([
+            {"coded_au": i, "presentation_pts": packet["pts"], "dm_metadata_id": i % 16,
+             "source_max_pq": 3079 + i} for i, packet in enumerate(packets)], indent=2) + "\n")
+        files["frame-bound-association.json"] = sha(output / "frame-bound-association.json")
+        missing_color_dir = output / "generated-missing-color-rpu"
+        run([str(rpu_generator), str(missing_color_dir), str(FRAMES), "missing-color"])
+        missing_color = [(missing_color_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        missing_reuse_dir = output / "generated-reuse-missing-color-rpu"
+        run([str(rpu_generator), str(missing_reuse_dir), str(FRAMES), "reuse-missing-color"])
+        missing_reuse_color = [(missing_reuse_dir / f"frame-{i:04}.bin").read_bytes() for i in range(FRAMES)]
+        variants = []
+        for label, index in [("missing-first", 0), ("missing-midstream", 12), ("missing-seek-start", 10),
+                             ("malformed-first", 0), ("malformed-midstream", 12),
+                             ("omitted-color-first", 0), ("omitted-color-mapping-reuse-midstream", 12)]:
+            modified = list(rpus)
+            if label.startswith("missing"):
+                modified[index] = None
+            elif label.startswith("omitted-color"):
+                modified[index] = missing_color[index] if index == 0 else missing_reuse_color[index]
+            else:
+                modified[index] = rpus[index][:3]
+            path = output / f"p5-{label}.mp4"
+            path.write_bytes(inject_mp4_rpu(stream.read_bytes(), modified))
+            files[path.name] = sha(path)
+            variants.append({"path": path.name, "affected_decode_sample": index,
+                             "affected_presentation_pts": packets[index]["pts"],
+                             "time_base": "1/12288", "expected": "strict-render-failure" if label.startswith("omitted-color") else "strict-decode-failure"})
+        (output / "negative-variants.json").write_text(json.dumps(variants, indent=2) + "\n")
+        files["negative-variants.json"] = sha(output / "negative-variants.json")
+    else:
+        media = stream
+    observed = json.loads(run([str(ffprobe), "-v", "error", "-show_frames", "-show_streams", "-of", "json", str(media)]))
+    validate_observed(observed, family)
+    decoded = run([str(ffmpeg), "-nostdin", "-v", "error", "-i", str(media), "-map", "0:v:0",
+                   "-c:v", "rawvideo", "-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough", "-f", "rawvideo", "-"])
+    source_pixels, decoded_pixels = array("H"), array("H")
+    source_pixels.frombytes(raw.read_bytes())
+    decoded_pixels.frombytes(decoded)
+    if len(source_pixels) != len(decoded_pixels):
+        raise ValueError("fixture decoded pixel count mismatch")
+    errors = [abs(a - b) for a, b in zip(source_pixels, decoded_pixels)]
+    maximum = max(errors)
+    if maximum > (0 if lossless else 4):
+        raise ValueError("fixture changed source pixels or presentation order beyond its coding tolerance")
+    (output / "observed.json").write_text(json.dumps(observed, indent=2) + "\n")
+    # Values are signal expectations, not an output perceptual-quality score.
+    reference = {"patches_rgb_nits": patches(0), "patches_source_codes": [codes(rgb, family) for rgb in patches(0)],
+                 "hlg_reference_white_signal": hlg_oetf((203 / 1000) ** (1 / 1.2)),
+                 "hlg_peak_nits": 1000, "hlg_system_gamma": 1.2,
+                 "p5_nonlinear": NONLINEAR, "p5_lms_adjust": LMS_ADJUST, "p5_lms_to_rgb": LMS_TO_RGB}
+    (output / "reference.json").write_text(json.dumps(reference, indent=2) + "\n")
+    (output / "LICENSE.txt").write_text(LICENSE)
+    receipt = {"schema_version": 1, "family": family, "frames": FRAMES, "fps": FPS,
+               "dimensions": [WIDTH, HEIGHT], "media": media.name, "sha256": files,
+               "tools": {"ffmpeg": sha(ffmpeg), "ffprobe": sha(ffprobe)},
+               "encoded_argv": argv, "recipe": "analytic-extension-v3", "qualification": "generated-synthetic-only",
+               "coding": "lossless" if lossless else "main10_crf8_level31",
+               "decoded_source_error": {"maximum_code_values": maximum, "mean_code_values": sum(errors) / len(errors)},
+               "limits": ["not mastered-content visual qualification", "fresh/frame-bound P5 positives are synthetic; explicit mapping reuse is a nonconforming pinned-parser robustness diagnostic"]}
+    if rpu_generator:
+        receipt["tools"]["rpu_generator"] = sha(rpu_generator)
+    (output / "manifest.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    return receipt
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--family", choices=["hlg", "p5"], required=True)
+    parser.add_argument("--ffmpeg", type=Path, required=True)
+    parser.add_argument("--ffprobe", type=Path, required=True)
+    parser.add_argument("--rpu-generator", type=Path)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--lossless", action="store_true", help="signal reference only; may require unsupported hardware coding tools")
+    args = parser.parse_args()
+    if not args.output.is_absolute() or args.output.exists():
+        parser.error("output must be an absolute new directory")
+    for path in [args.ffmpeg, args.ffprobe] + ([args.rpu_generator] if args.rpu_generator else []):
+        if not path.is_absolute() or not path.is_file():
+            parser.error("tool must be an explicit absolute file")
+    print(json.dumps(generate(args.ffmpeg, args.ffprobe, args.output, args.family, args.rpu_generator, args.lossless), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

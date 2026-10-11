@@ -1,0 +1,12 @@
+{
+  "case": "live-action-bf0",
+  "apk_sha256": "6ce7730195dd47447bc691008a8a012f3de7e3dec05195395bb4efad364216b2",
+  "started_unix": 1791514513.704638,
+  "scope": "Selective quiet-window retry; unchanged 250ms acceptance criterion; prior three successful cases retained.",
+  "result": "fail",
+  "failure": "audio/clock/visible-moving-surface contract failed",
+  "finished_unix": 1791514534.216414,
+  "owned_emulator_reaped": true,
+  "measurement_valid": false,
+  "disposition": "Stale attempt3 receipt accepted by launcher after install -r retained app data. Every observation is identical to attempt3. No new playback verdict. Retry requires force-stop, owned-package data clear, and verified receipt absence before launch."
+}

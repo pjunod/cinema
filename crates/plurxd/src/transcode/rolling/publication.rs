@@ -196,6 +196,10 @@ pub(super) struct RollingPublicationClock {
     pub(super) allowed_end_ms: Option<i64>,
     pub(super) carried_surplus_ms: i64,
     pub(super) demand_observation_age_ms: Option<i64>,
+    /// When the current run of "the next segment is only early" cycles began.
+    /// Cleared by the next publication; bounds how long publication may wait
+    /// for a viewer who is not consuming.
+    pub(super) deferred_since: Option<Instant>,
 }
 
 impl RollingPublicationClock {
@@ -288,6 +292,7 @@ impl RollingPublicationClock {
             self.allowed_end_ms = None;
             self.carried_surplus_ms = 0;
             self.demand_observation_age_ms = None;
+            self.deferred_since = None;
         }
         self.staged_attempt = Some(producer_attempt);
     }

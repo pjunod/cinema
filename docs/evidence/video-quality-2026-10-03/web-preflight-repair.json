@@ -1,0 +1,17 @@
+{
+  "result": "passed",
+  "candidate": "bd24f27679faf68bf8815915b488a3e7ac2e7461",
+  "policy": {
+    "command": "node tests/playback/web-policy.test.js",
+    "passed_assertions": 203,
+    "log": "web-policy-current-main.log"
+  },
+  "control": {
+    "command": "node --test-name-pattern='^prepared HLS buffer readiness' tests/playback/web-control.test.js",
+    "passed_manual_groups": 5,
+    "passed_node_cases": 1,
+    "log": "web-control-current-main.log",
+    "native_cases": "native-hls-retained.json"
+  },
+  "cause": "Extracted-function harnesses omitted the new successor preparation dependencies. Wire real cancellation/resolver definitions and observe timer seams; no runtime guards added."
+}

@@ -1,0 +1,9 @@
+{
+  "source_revision": "09ab303741e1b79aeb3dc8807a7398d3ce45bba8",
+  "outcome": "failed",
+  "phase": "FFmpeg static VMAF configure",
+  "error": "libvmaf >= 2.0.0 not found using pkg-config",
+  "elapsed_layer_seconds": 284.4,
+  "log_sha256": "823d4d5d153f5617a294e993064897353ed3cdfa3a794b6e4f76db3171e74a51",
+  "builder_cleanup": "helper EXIT cleanup invoked"
+}

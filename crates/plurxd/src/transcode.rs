@@ -85,6 +85,12 @@ const CLUSTER_REPLACEMENT_HOLD_CEILING: Duration = Duration::from_secs(120);
 const MAX_CLUSTER_REPLACEMENT_REENTRIES: usize = 4;
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
+/// A strict subset of the start-infrastructure class: this source's Dolby
+/// Vision pixel proof did not finish (a probe timed out, could not start, or
+/// exited non-zero). Nothing was learned about the source, so this is a
+/// "try again", never the `unsupported_build` verdict a refuted proof gives.
+const SOURCE_PROOF_PENDING_PREFIX: &str =
+    "media session infrastructure is unavailable: this source's Dolby Vision pixel proof did not finish: ";
 /// How long descriptor-bound fact collection may borrow from a producer's
 /// deadline.
 ///
@@ -114,10 +120,12 @@ const MIXED_RECOVERY_CAPACITY_WAIT: Duration = Duration::from_secs(5);
 // split: begin planning
 #[path = "transcode/planning.rs"]
 mod planning;
-pub(crate) use planning::*;
+#[cfg(test)]
+pub(crate) use planning::unverified_hevc_copy_enabled;
+use planning::*;
 // split: end planning
 
-const ADMISSION_POLL: Duration = Duration::from_millis(250);
+pub(crate) const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
@@ -147,6 +155,10 @@ pub(crate) use session_log::*;
 mod errors;
 pub(crate) use errors::*;
 // split: end errors
+
+#[path = "transcode/dovi_proofs.rs"]
+mod dovi_proofs;
+use dovi_proofs::DoviProofs;
 
 /// Stable classification for a start this ffmpeg build cannot perform at all.
 ///
@@ -322,7 +334,8 @@ const RETENTION_HANDOFF_BATCH: usize = 32;
 /// running, why it chose that work, or that a switch existed to stop it. The
 /// count is exported as `plurx_live_hls_recovery_sessions_total{reason}` and
 /// read back by the Developer readiness route, which names the switch.
-static LIVE_RECOVERY_SESSIONS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static LIVE_RECOVERY_SESSIONS: [AtomicU64; LiveRecoveryReason::COUNT] =
+    [const { AtomicU64::new(0) }; LiveRecoveryReason::COUNT];
 
 // split: begin live-recovery
 #[path = "transcode/live_recovery.rs"]
@@ -331,7 +344,8 @@ pub(crate) use live_recovery::*;
 // split: end live-recovery
 
 /// The reason labels, in `live_recovery_snapshot()` order.
-pub(crate) const LIVE_RECOVERY_LABELS: [&str; 5] = LiveRecoveryReason::LABELS;
+pub(crate) const LIVE_RECOVERY_LABELS: [&str; LiveRecoveryReason::COUNT] =
+    LiveRecoveryReason::LABELS;
 
 static RETENTION_SWEEP_ID: AtomicU64 = AtomicU64::new(0);
 /// Default pace for an HLS session's input, as a multiple of realtime, and how
@@ -485,6 +499,12 @@ mod hls_codecs;
 use hls_codecs::*;
 // split: end hls-codecs
 
+#[allow(dead_code)] // Finite owned actor API; ordinary Shared ingress remains closed.
+#[path = "transcode/source_actor.rs"]
+pub(crate) mod source_actor;
+pub(crate) mod source_preparation;
+mod source_subtitles;
+
 // split: begin cluster-adoption
 #[path = "transcode/cluster_adoption.rs"]
 mod cluster_adoption;
@@ -528,6 +548,9 @@ pub use rate_control::*;
 // split: end rate-control
 
 pub struct TranscodeManager {
+    #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
+    source_workers: source_actor::SourceWorkerRegistry,
+    pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,
     store: Arc<dyn Store>,
     work_dir: PathBuf,
     /// The VOD presentation's serving runtime (plan §2). Sessions created
@@ -563,6 +586,15 @@ pub struct TranscodeManager {
     /// artifact qualification this changes no cache identity, so the Settings
     /// checkbox can apply immediately to attempts created after the write.
     automatic_decoder_recovery: AtomicBool,
+    /// Saved operator choice; captured with one node-local compatibility
+    /// report for each new immutable plan, never used as a probe gate.
+    macos_video_processing_enabled: Arc<AtomicBool>,
+    /// Independent operator choice for newly negotiated HEVC output.
+    macos_hevc_output_enabled: AtomicBool,
+    /// Serialize durable preference writes and replicated reload publication;
+    /// a stale read cannot overwrite a just-saved hot value.
+    macos_video_preference_update: Mutex<()>,
+    macos_video_probe: Arc<crate::macos_video::MacosVideoProbe>,
     /// The manager's test points (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8), in
     /// every build. Production never fills the slot, so every point reads
     /// [`NoopTranscodeManagerHooks`] (Decision D-M8-I).
@@ -592,6 +624,8 @@ pub struct TranscodeManager {
     /// [`Pipeline::for_session`] — because a proven graph is a claim about the
     /// box, not about the session.
     pipeline: Pipeline,
+    /// Saved node choice, activated with its tone-map graph at startup.
+    encoder_override: Option<String>,
     /// The hardware budget, and what this box has learned about its own speed.
     admissions: Admissions,
     /// Where finished transcodes live, and what identifies them here. `None`
@@ -663,9 +697,9 @@ pub struct TranscodeManager {
     /// starts before they reach the manager; this second edge closes the
     /// transition race between that check and publishing a spawned child.
     serving_ready: AtomicBool,
-    /// Monotonic counterpart to `serving_ready`. Recovery may reopen the
-    /// process, but it cannot erase a loss observed by a session admitted
-    /// under an older generation.
+    /// Monotonic counterpart to `serving_ready`: the generation the fence
+    /// loop last resolved. Recovery may reopen the process, but registrations
+    /// admitted under an older generation still refuse themselves.
     serving_loss_generation: AtomicU64,
     /// Lock-free projection for Prometheus. The session map remains the
     /// authority; every production insert/removal publishes its resulting
@@ -726,7 +760,10 @@ pub struct TranscodeManager {
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
     hdr10_passthrough_qsv: bool,
-    dovi_proofs: std::sync::Mutex<HashMap<String, bool>>,
+    hdr10_passthrough_vaapi: bool,
+    /// Per-source Profile 5 pixel proofs: remembered verdicts and the proofs
+    /// in flight ([`DoviProofs`]).
+    dovi_proofs: DoviProofs,
     /// The ahead-window limits, snapshotted ([`AHEAD_LIMITS_TTL`]).
     ///
     /// Flow control consults the limits on every segment publish and
@@ -740,6 +777,40 @@ pub struct TranscodeManager {
     /// actually elapse. Zero (always, in production) means the real budget —
     /// see [`TranscodeManager::playlist_wait`].
     playlist_wait_override_ms: std::sync::atomic::AtomicU64,
+    /// Complete-output queue publications handed off by VOD starts. Create
+    /// never waits on the catalog rebuild, source fences or replicated
+    /// enqueue; [`TranscodeManager::output_enqueue_loop`] owns them.
+    output_enqueue: OutputEnqueueQueue,
+}
+
+/// Starts that may hand off before the owned worker drains. Beyond this a
+/// start does not queue its preparation; the title's next start offers it.
+const OUTPUT_ENQUEUE_CAPACITY: usize = 64;
+
+/// One complete-output queue publication handed off by a VOD start.
+pub(crate) struct OutputEnqueue {
+    request: SessionRequest,
+    file: plurx_core::domain::MediaFile,
+    settings: crate::vodserve::VodSettings,
+    encoding: Option<Arc<crate::vodencode::Encoding>>,
+    session_id: String,
+    queued_at: Instant,
+}
+
+/// Bounded hand-off from session create to the single owned enqueue worker.
+pub(crate) struct OutputEnqueueQueue {
+    sender: tokio::sync::mpsc::Sender<OutputEnqueue>,
+    receiver: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<OutputEnqueue>>>,
+}
+
+impl OutputEnqueueQueue {
+    fn new() -> Self {
+        let (sender, receiver) = tokio::sync::mpsc::channel(OUTPUT_ENQUEUE_CAPACITY);
+        Self {
+            sender,
+            receiver: std::sync::Mutex::new(Some(receiver)),
+        }
+    }
 }
 
 // split: begin manager-hooks
@@ -762,7 +833,7 @@ const QUALIFICATION_ENCODERS: [Encoder; 5] = [
     Encoder::VideoToolbox,
 ];
 const QUALIFICATION_GRADES: [OutputGrade; 2] = [OutputGrade::Sdr, OutputGrade::Hdr10];
-const QUALIFICATION_PIPELINES: [Pipeline; 8] = [
+const QUALIFICATION_PIPELINES: [Pipeline; 18] = [
     Pipeline::VppQsv,
     Pipeline::TonemapVaapi,
     Pipeline::Libplacebo,
@@ -771,6 +842,16 @@ const QUALIFICATION_PIPELINES: [Pipeline; 8] = [
     Pipeline::DoviPassthrough,
     Pipeline::Hdr10Passthrough,
     Pipeline::Cpu,
+    Pipeline::LibplaceboVaapi,
+    Pipeline::TonemapCuda,
+    Pipeline::VtScaleSdr,
+    Pipeline::VtToneMapMetal,
+    Pipeline::VtScaleHdr10,
+    Pipeline::DoviStrictTonemapx,
+    Pipeline::VtDoviTonemapx,
+    Pipeline::VtDoviMetal,
+    Pipeline::DoviMetal,
+    Pipeline::LibplaceboSoftware,
 ];
 
 // split: begin terminal-admission
@@ -779,12 +860,23 @@ mod terminal_admission;
 use terminal_admission::*;
 // split: end terminal-admission
 
+/// Rolling retention as this node sees it, for the Developer card.
+pub(crate) struct RollingRetentionFacts {
+    pub(crate) same_filesystem: Option<bool>,
+    pub(crate) slack: Option<i64>,
+    pub(crate) admits: Result<(), &'static str>,
+    pub(crate) rows: Vec<crate::vodserve::retained::RetainedOutputRow>,
+    pub(crate) cleanup_pending: usize,
+}
+
 // split: begin manager
 #[path = "transcode/manager/cache.rs"]
 mod manager_cache;
 #[path = "transcode/manager/candidates.rs"]
 mod manager_candidates;
 pub(crate) use manager_candidates::QUALITY_PLANNING_KEYS;
+#[path = "transcode/content_encoding.rs"]
+mod content_encoding;
 #[path = "transcode/manager/construct.rs"]
 mod manager_construct;
 #[path = "transcode/manager/control.rs"]
@@ -801,6 +893,8 @@ mod manager_plan;
 mod manager_produce;
 #[path = "transcode/manager/publication.rs"]
 mod manager_publication;
+#[path = "transcode/manager/rolling_retained.rs"]
+mod manager_rolling_retained;
 #[path = "transcode/manager/start.rs"]
 mod manager_start;
 // split: end manager

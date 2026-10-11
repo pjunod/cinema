@@ -27,5 +27,14 @@ declare var CinemaNative: any;
 
 /** Assigned by pages/reader.js for the native shells to call. */
 interface Window {
+  /** Safari and older WebKit expose these optional browser constructors. */
+  ManagedMediaSource?: typeof MediaSource;
+  WebKitMediaSource?: typeof MediaSource;
   startNativeReader?: any;
+}
+
+/** Script captions share the attached video element's media timeline. */
+interface HTMLVideoElement {
+  _vsubs?: TextTrack;
+  _subtitleCueOwner?: {player: Player; index: number; off: number; intent: number};
 }

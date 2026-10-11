@@ -12,6 +12,18 @@
 // exactly ONE reopen as the answer to every way it can go wrong.
 const PREPARED_OFFER_BOUND_MS=12000;
 const PREPARED_OFFER_CADENCE_MS=500;
+// A continuous change settles on presentation of its target rendition. §4.2
+// bounds the wait without promising a false 30-second presentation: until the
+// target holds a reservation, a 30-second active-time control budget applies;
+// after that, the deadline is the target boundary's presentation plus 2 s of
+// active play. Film time is that active clock -- it stops while paused or
+// waiting and moves at the playback rate -- so a healthy 60-second prebuffer
+// is never declared unobserved. Missing the deadline settles
+// `observation_unknown` (never retained_current, never a reopen), so a target
+// that is never observed cannot latch Auto or leave the change unsettled.
+const CONTINUOUS_CONTROL_BUDGET_MS=30000;
+const CONTINUOUS_OBSERVATION_GRACE_SECONDS=2;
+const CONTINUOUS_OBSERVATION_POLL_MS=500;
 // `askPlaybackControl` cannot serve this and cannot be made to. Its waiter
 // settles on the FIRST exchange at or after its floor, and a `Prepare` arrives
 // on a later exchange than the one that carried the ask -- the server has to
@@ -164,26 +176,66 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
     },PREPARED_OFFER_CADENCE_MS);
   }
 }
-// One owner per directed change, from the tap to a commit or ONE reopen.
-//
-// Every way this can fail converges on the same single answer -- reopen the
-// stream where the viewer actually is -- and `change.settled` is what keeps it
-// single. Without it a decline racing the bound, or a failed commit racing a
-// supersede, reopens twice.
+// One owner per directed change. Optional manual and Auto targets retain the
+// incumbent on failure; a recovery target keeps its existing single reopen.
+// `change.settled` prevents a decline, timeout and supersession from settling
+// the same request twice.
 //
 // `fallback` is optional and is how Auto keeps its own reopen: the automatic
 // controller goes through `requestPlaybackMediaChange` so the create carries
 // the rung, where the menu goes through `play()`.
-async function requestQualityChange(p,reason,fallback,autoMove){
+async function requestQualityChange(p,reason,fallback,autoMove,standingSelection){
   if(!p) return "superseded";
+  const retained=p.qualityRetainedSelection;
+  const previous=standingSelection||(retained&&retained.selection)||(p.controlLastRequest&&p.controlLastRequest.selection);
+  if(retained?.change?.noticeIntent) playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  supersedeDirectedChange(p);
+  p.qualityRetainedSelection=null;
   const change={intentGeneration:p.controlIntentGeneration||0,
+    incumbentSessionId:p.sessionId,standingSelection:previous||null,
+    retainIncumbent:reason==="manual"&&!!p.started&&playbackOwnsAttachedMedia(p),
     tappedAt:performance.now(),settled:false,reason:reason||"manual",
     fallback:fallback||null,autoMove:autoMove||null,commitTimer:null,
     outcome:null,outcomeAt:null};
   p.directedChange=change;
+  const selection=playbackControlSelection(p);
+  if(p.continuousQuality&&continuousQualitySelectionCompatible(p,selection)){
+    const candidate=continuousQualityCandidate(p,selection);
+    change.continuousOwner=p.continuousQuality;
+    change.continuousAttachment=p.mediaAttachment;
+    const outcome=await p.continuousQuality.choose(candidate.id,()=>p.directedChange===change
+      &&(p.controlIntentGeneration||0)===change.intentGeneration);
+    if(p.directedChange!==change)return "superseded";
+    if(outcome==="continuous"){
+      change.outcome=outcome;change.outcomeAt=performance.now();
+      change.continuousCandidateId=candidate.id;
+      const ledger=p.continuousQuality.protocol.ledger;
+      const newest=ledger?.transactions.find(tx=>tx.intent_revision===ledger.latest_intent_revision)?.transaction_id;
+      // Name the choice by its lineage root, so a later re-Prepare of the same
+      // target still settles it (settleContinuousDirectedChange).
+      change.continuousTransactionId=newest&&typeof p.continuousQuality.transactionRoot==="function"
+        ?p.continuousQuality.transactionRoot(newest):newest;
+      if(!settleContinuousDirectedChange(p))armContinuousObservation(p,change);
+      notifyPlaybackControl();return outcome;
+    }
+    // A newer intent fenced this ask while it was still this change's own:
+    // settle it, as the prepared path does, so nothing waits on it forever.
+    if(outcome==="superseded"){settleDirectedChange(p,change,"superseded");return outcome;}
+    fallBackDirectedChange(p,change,outcome);return outcome;
+  }
+  // Keep transport reports live while learning the owner's strict-reader
+  // floor. Publish the new recipe only after this negotiation turn settles.
+  if(previous) p.qualityNegotiatingSelection={change,selection:previous};
+  try{ await discoverQualityControl(p); }
+  finally{ if(p.qualityNegotiatingSelection&&p.qualityNegotiatingSelection.change===change) p.qualityNegotiatingSelection=null; }
+  if(p.directedChange!==change||(p.controlIntentGeneration||0)!==change.intentGeneration) return "superseded";
+  change.qualityIntent=qualityControlSupported(p)?qualityMediaIntent(p):null;
   let outcome="timed_out";
   try{ outcome=await awaitPreparedOffer(p,change.tappedAt); }catch(e){ outcome="timed_out"; }
-  if(p.directedChange===change){ change.outcome=outcome; change.outcomeAt=performance.now(); }
+  // A change already settled while the waiter confirmed -- a commit that beat
+  // the confirmation, or an offer that did not bind and took its reopen --
+  // keeps the outcome it settled with.
+  if(p.directedChange===change&&!change.settled){ change.outcome=outcome; change.outcomeAt=performance.now(); }
   // A prepared successor is now this change's business: its commit settles it,
   // and its failure reopens through the same owner.
   if(outcome==="prepared") return outcome;
@@ -205,12 +257,43 @@ function fallBackDirectedChange(p,change,why){
   if(change.commitTimer!=null){ clearTimeout(change.commitTimer); change.commitTimer=null; }
   change.outcome=why;
   change.outcomeAt=performance.now();
+  if(change.retainIncumbent&&p.sessionId!==change.incumbentSessionId){
+    // Exposure already changed the authoritative session. Its presentation
+    // and recovery owner settle that state; this older optional ask cannot
+    // declare retention or reopen over it after an acknowledgement is lost.
+    change.cancellationOutcome="observation_unknown";
+    return true;
+  }
+  // Manual preferences survive a declined optional target. The wire follows
+  // the attached incumbent until Retry or an explicit restart owns a new ask.
+  if(change.retainIncumbent&&p.sessionId===change.incumbentSessionId
+    &&playbackOwnsAttachedMedia(p)&&change.standingSelection){
+    const staged=preparedState(p);
+    if(staged) abandonPreparedReplacement(p,"aborted","manual_quality_target_failed");
+    p.qualityRetainedSelection={selection:change.standingSelection,
+      intentGeneration:change.intentGeneration,sessionId:p.sessionId,change};
+    settleQualityCancellation(p,change).then(outcome=>{change.cancellationOutcome=outcome;});
+    change.noticeIntent="quality:"+change.intentGeneration+":"+change.tappedAt;
+    raisePlaybackSurface("change_failed",{context:"change",intent:change.noticeIntent,
+      title:"Quality change did not complete. Keeping the current stream.",
+      detail:"Your preference is saved. Retry, or choose Apply with restart in Quality.",actions:["retry"]});
+    notifyPlaybackControl();
+    clientLog(Object.assign({level:"info",event:"quality_switch",detail:why,reason:"manual",
+      message:"Optional manual quality target failed; keeping the current stream"},playbackContext()));
+    return true;
+  }
   // A voluntary trial may fail without interrupting a healthy incumbent.
   // Abort its one successor, restore the standing selection and back off.
   if(change.autoMove&&change.autoMove.retainIncumbent){
     const move=change.autoMove, now=performance.now();
     const staged=preparedState(p);
     if(staged) abandonPreparedReplacement(p,"aborted","auto_trial_failed");
+    const cancellation=settleQualityCancellation(p,change);
+    if(cancellation&&cancellation.then) cancellation.then(outcome=>{
+      change.cancellationOutcome=outcome;
+      clientLog(Object.assign({level:"info",event:"quality_cancellation",detail:outcome,
+        message:"Optional quality target cancellation: "+outcome},playbackContext()));
+    });
     p.autoRequestedHeight=null;
     if(p.abr){
       p.abr.requestedCandidateId=move.previousCandidateId||null;
@@ -253,6 +336,88 @@ function fallBackDirectedChange(p,change,why){
 }
 // A directed change that ended without a reopen: the successor took the
 // picture, or something newer replaced the whole ask.
+function retainedQualityChange(p){
+  const retained=p&&p.qualityRetainedSelection;
+  return retained&&retained.sessionId===p.sessionId
+    &&retained.intentGeneration===(p.controlIntentGeneration||0)?retained:null;
+}
+function retryQualityChange(){
+  const p=PLAYER, retained=retainedQualityChange(p);
+  if(!retained) return false;
+  closeMenu();
+  // Retry is a new media intent even when the saved preference is identical.
+  const holder=p.abr||p;
+  if(holder.mediaIntent) holder.mediaIntent.recipeKey=null;
+  playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  return requestQualityChange(p,"manual",null,null,retained.selection);
+}
+function applyQualityWithRestart(){
+  const p=PLAYER, retained=retainedQualityChange(p);
+  if(!retained||!p.fileId) return false;
+  closeMenu();
+  playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  p.qualityRetainedSelection=null;
+  const pos=positionForPlaybackIntent(document.getElementById("video"),p);
+  PENDING_ATTEMPT_REASON="quality";
+  beginPlaybackControlSeek(p,pos);
+  return play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+}
+// The earliest film second the chosen target (or its re-Prepare lineage)
+// holds media for: the boundary whose presentation settles the choice.
+function continuousTargetBoundary(p,change){
+  const owner=p&&p.continuousQuality,ledger=owner&&owner.protocol&&owner.protocol.ledger;
+  if(!ledger||!change) return null;
+  const root=id=>typeof owner.transactionRoot==="function"?owner.transactionRoot(id):id;
+  let boundary=null;
+  for(const tx of ledger.transactions||[]){
+    if(root(tx.transaction_id)!==change.continuousTransactionId) continue;
+    for(const interval of [...(tx.reserved||[]),...(tx.appended||[])]){
+      const at=Number(interval.from_tick)/Number(interval.timescale);
+      if(Number.isFinite(at)&&(boundary===null||at<boundary)) boundary=at;
+    }
+  }
+  return boundary;
+}
+function continuousObservationDue(p,change,activeMs){
+  const boundary=continuousTargetBoundary(p,change);
+  if(boundary===null) return activeMs>=CONTINUOUS_CONTROL_BUDGET_MS;
+  const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
+  if(!v) return false;
+  const film=((p&&p.offset)||0)+(Number(v.currentTime)||0);
+  return film>=boundary+CONTINUOUS_OBSERVATION_GRACE_SECONDS*Math.max(Number(v.playbackRate)||1,0);
+}
+function armContinuousObservation(p,change){
+  let activeMs=0,last=performance.now();
+  const poll=()=>{
+    change.commitTimer=null;
+    if(p.directedChange!==change||change.settled||settleContinuousDirectedChange(p)) return;
+    const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video")),now=performance.now();
+    if(v&&!v.paused&&!v.seeking) activeMs+=now-last;
+    last=now;
+    if(continuousObservationDue(p,change,activeMs)){
+      settleDirectedChange(p,change,"observation_unknown","continuous");
+      return;
+    }
+    change.commitTimer=setTimeout(poll,CONTINUOUS_OBSERVATION_POLL_MS);
+  };
+  change.commitTimer=setTimeout(poll,CONTINUOUS_OBSERVATION_POLL_MS);
+}
+function settleContinuousDirectedChange(p){
+  const change=p?.directedChange,ledger=p?.continuousQuality?.protocol?.ledger;
+  if(!change||change.settled||change.outcome!=="continuous"||!ledger
+     ||p.continuousQualityPresented?.candidate_id!==change.continuousCandidateId) return false;
+  // The newest transaction settles this choice when it is the choice's own or
+  // the adapter's re-Prepare of that same target (its lineage root).
+  const owner=p.continuousQuality,root=id=>typeof owner.transactionRoot==="function"?owner.transactionRoot(id):id;
+  const transaction=ledger.transactions.find(tx=>tx.intent_revision===ledger.latest_intent_revision
+    &&root(tx.transaction_id)===change.continuousTransactionId);
+  if(!transaction||transaction.intent_revision!==ledger.latest_intent_revision
+     ||transaction.intent_superseded||transaction.cancel_requested
+     ||transaction.first_presented_tick==null||transaction.first_presented_at_ms==null) return false;
+  const committed=settleDirectedChange(p,change,"committed","continuous");
+  if(committed) p.autoRequestedHeight=null;
+  return committed;
+}
 function settleDirectedChange(p,change,why,detail){
   const owned=change||(p&&p.directedChange);
   if(!p||!owned||owned.settled||p.directedChange!==owned) return false;
@@ -266,7 +431,8 @@ function settleDirectedChange(p,change,why,detail){
   // exchange succeeds: changing to plain Auto here makes the server reject
   // the commit as a different ask and retire the stream we just exposed.
   if(why!=="committed"||!owned.autoMove) p.autoRequestedHeight=null;
-  if(why!=="committed"&&owned.autoMove&&owned.autoMove.candidateId&&p.abr)
+  // An unobserved continuous target is still the rung future loads request.
+  if(why!=="committed"&&why!=="observation_unknown"&&owned.autoMove&&owned.autoMove.candidateId&&p.abr)
     p.abr.requestedCandidateId=owned.autoMove.previousCandidateId||null;
   if(owned.autoMove&&p.abr){
     if(why==="committed"){
@@ -294,7 +460,10 @@ function settleDirectedChange(p,change,why,detail){
 // A viewer command, a teardown, a stream replacement. The ask is retired and
 // nothing owes it a reopen.
 function supersedeDirectedChange(p){
-  return settleDirectedChange(p,p&&p.directedChange,"superseded");
+  const change=p&&p.directedChange;
+  const settled=settleDirectedChange(p,change,"superseded");
+  if(settled&&change.qualityIntent) settleQualityCancellation(p,change).then(outcome=>{change.cancellationOutcome=outcome;});
+  return settled;
 }
 // The server cancels a preparation the moment the incumbent reports `waiting`
 // or `stalled`, so an automatic move made from a stalled picture would spend
@@ -354,9 +523,27 @@ function subtitleReadinessMeansReady(delivery){
 // cannot turn into a subtitle request storm.
 function subtitleReadinessRetryTransition(state,delivery){
   const ready=subtitleReadinessMeansReady(delivery);
-  const retry=state.subtitleReadinessReady===false&&ready;
+  const intent=state.controlIntentGeneration||0;
+  const revision=delivery&&delivery.subtitle_revision||null;
+  // The empty segment can precede the first control exchange; a missed
+  // warming observation must not suppress recovery for the whole intent.
+  const retry=ready&&(state.subtitleReadinessReady!==true||state.subtitleReadinessIntent!==intent||state.subtitleReadinessRevision!==revision);
   state.subtitleReadinessReady=ready;
+  state.subtitleReadinessIntent=intent;
+  state.subtitleReadinessRevision=revision;
   return retry;
+}
+// A failed caption is a caption notice. Exact unavailable observations spend
+// one notice per selection/seek intent without changing video or track state.
+function subtitleReadinessUnavailableNotice(player,delivery){
+  if(!player||!delivery||delivery.subtitle_readiness!=="unavailable"
+    ||player.burnedSub!=null||player.curSub==null||player.curSub<0
+    ||nativeHlsSubtitleOrdinal(player,player.curSub)<0) return false;
+  const intent=player.controlIntentGeneration||0;
+  if(player._subtitleUnavailableIntent===intent&&player._subtitleUnavailableIndex===player.curSub) return false;
+  player._subtitleUnavailableIntent=intent;
+  player._subtitleUnavailableIndex=player.curSub;
+  return true;
 }
 function nativeHlsSubtitleOrdinal(player,index){
   const native=(player&&player.subs||[]).filter(s=>s.native===true);
@@ -369,7 +556,7 @@ function nativeHlsSubtitleOrdinal(player,index){
 //
 // The obvious move — re-select the rendition so hls.js fetches the segment
 // again — does not work, and that is measured rather than assumed. Against
-// the bundled hls.js 1.6.16, `subtitleTrack = -1` then back, the same wrapped
+// hls.js 1.6.16 (the build bundled when this was measured), `subtitleTrack = -1` then back, the same wrapped
 // in `subtitleDisplay` off/on, a bounce through a sibling rendition, a purge
 // of the fragment tracker, and a reselect with a nudge seek all leave the
 // cue count at zero and produce exactly ONE request for the segment. hls.js
@@ -378,61 +565,117 @@ function nativeHlsSubtitleOrdinal(player,index){
 // `WEBVTT` body the server published while the sidecar was warming is what
 // that rendition shows for the rest of the session.
 //
-// What does work — 0 cues to 1 in the same harness, with the session id, the
-// video element and the segment count all unchanged — is to stop asking hls.js
-// and read the whole-track sidecar instead. By the time readiness says
-// `ready` that sidecar is exactly what exists, and `/files/{id}/subs/{i}.vtt`
-// is a route this player already uses for offset sessions. The rendition is
-// switched off so its empty track cannot sit on top of the cues.
-function retryReadyNativeSubtitle(player){
+// hls.js keeps already-processed empty fragments. Deliver the representation
+// the server has actually published through the existing file route instead.
+// Window cues share the whole track's absolute source timeline and accumulate
+// on this one script track; complete publication replaces that partial view.
+function retryReadyNativeSubtitle(player,delivery){
   if(!player||player.burnedSub!=null||player.curSub==null||player.curSub<0) return false;
   const ordinal=nativeHlsSubtitleOrdinal(player,player.curSub);
   if(ordinal<0) return false;
   if(player.hls){
-    try{ player.hls.subtitleTrack=-1; }catch(err){}
-    // Re-entering `setSub` would be the wrong move: it would take the
-    // rendition path again and land on the same cached empty fragment. Force
-    // the sidecar branch by clearing the marker `setSub` reads, then let it
-    // rebuild the script cue list at the session's own offset.
-    player._subOff=null;
-    applyReadySubtitleSidecar(player,player.curSub);
+    applyReadySubtitleSidecar(player,player.curSub,delivery&&delivery.subtitle_revision);
     return true;
   }
   if(!player.sessionId) return false;
-  const video=document.getElementById("video");
+  const video=/** @type {HTMLVideoElement} */ (document.getElementById("video"));
   const track=video&&video.textTracks&&video.textTracks[ordinal];
   if(!track) return false;
   track.mode="disabled";
   track.mode="showing";
   return true;
 }
-// Fetch the whole-track sidecar and hand its cues to the one script text
-// track this player reuses. Shifted by the session's media origin for the
-// same reason `setSub` shifts it: a transcode's timeline starts at its own
-// offset, and sidecar cue times are absolute source time.
+// Kept as the legacy whole-track entry point for older peers without revisions.
 async function applyReadySubtitleSidecar(player,index){
-  const video=document.getElementById("video");
+  return applyReadySubtitleRevision(player,index,arguments[2]||null);
+}
+async function applyReadySubtitleRevision(player,index,revision){
+  const video=/** @type {HTMLVideoElement} */ (document.getElementById("video"));
   if(!video) return;
   const off=player.offset||0;
-  let text;
+  const intent=player.controlIntentGeneration||0;
+  const session=player.sessionId;
+  const context=player.fileContext;
+  const fileId=player.fileId;
+  const bootstrap=player.controlReporter&&player.controlReporter.bootstrap;
+  const generation=bootstrap&&bootstrap.generation;
+  const epoch=bootstrap&&bootstrap.control_epoch;
+  const pending=player._subtitleSidecarRequest;
+  if(pending&&pending.index===index&&pending.off===off&&pending.intent===intent
+    &&pending.revision===revision&&pending.video===video&&pending.session===session
+    &&pending.generation===generation&&pending.epoch===epoch) return;
+  const request={index,off,intent,revision,video,session,generation,epoch};
+  player._subtitleSidecarRequest=request;
+  const serial=player._subtitleSidecarSerial=(player._subtitleSidecarSerial||0)+1;
+  let text,complete;
   try{
-    const r=await fetch(subUrl(index));
+    // The attached playlist owns the media namespace (including receiver
+    // sessions). A file URL can point at an ingress with no worker cache.
+    const playlist=player.probeUrl;
+    const base=typeof playlist==="string"?playlist.split("?")[0].replace(/[^/]*$/,""):null;
+    if(revision&&(!base||!session||!/^[A-Za-z0-9.-]{1,192}$/.test(revision)||revision.includes(".."))) return;
+    const url=revision?tok(base+"subs/"+index+"/cached-"+revision):subUrl(index);
+    const r=await fetch(url);
+    // A revision can disappear after observation. Empty or absent snapshots
+    // spend this observation and preserve usable cues; cadence cannot retry it.
+    if(r.status===204) return;
     if(!r.ok) throw new Error("HTTP "+r.status);
+    complete=revision?r.headers.get("x-plurx-subtitle-complete")==="true":true;
     text=await r.text();
-  }catch(err){ return; }              // still warming, or gone: leave it alone
-  if(PLAYER!==player||player.curSub!==index||(player.offset||0)!==off) return;
-  if(!video._vsubs) video._vsubs=video.addTextTrack("subtitles","Subtitles");
-  const track=video._vsubs;
-  if(track.mode==="disabled") track.mode="hidden";
-  try{ while(track.cues&&track.cues.length) track.removeCue(track.cues[0]); }catch(err){}
+  }catch(err){
+    return;
+  }finally{
+    if(player._subtitleSidecarRequest===request) player._subtitleSidecarRequest=null;
+  }
+  if(PLAYER!==player||document.getElementById("video")!==video||player.curSub!==index
+    ||(player.offset||0)!==off||(player.controlIntentGeneration||0)!==intent
+    ||player.sessionId!==session||player.fileContext!==context||player.fileId!==fileId
+    ||player._subtitleSidecarSerial!==serial
+    ||(player.controlReporter&&player.controlReporter.bootstrap&&player.controlReporter.bootstrap.generation)!==generation
+    ||(player.controlReporter&&player.controlReporter.bootstrap&&player.controlReporter.bootstrap.control_epoch)!==epoch) return;
   const Cue=window.VTTCue||window.TextTrackCue;
-  let added=0;
+  const cues=[];
   for(const c of vttParse(text)){
     const en=c.end-off;
     if(en<=0) continue;
-    try{ track.addCue(new Cue(Math.max(0,c.start-off),en,c.text)); added++; }catch(err){}
+    try{ cues.push(new Cue(Math.max(0,c.start-off),en,c.text)); }catch(err){}
   }
-  if(!added) return;                  // nothing to show; do not claim otherwise
+  if(!cues.length) return;
+  if(!video._vsubs) video._vsubs=video.addTextTrack("subtitles","");
+  const track=video._vsubs;
+  if(track.mode==="disabled") track.mode="hidden";
+  const same=video._subtitleCueOwner&&video._subtitleCueOwner.player===player
+    &&video._subtitleCueOwner.index===index&&video._subtitleCueOwner.off===off
+    &&video._subtitleCueOwner.intent===intent;
+  const existing=new Set();
+  const key=c=>JSON.stringify([c.startTime,c.endTime,c.text]);
+  const previous=Array.from(track.cues||[]),retained=[],fresh=[];
+  // A window never removes an active or future cue from another window.
+  // Expired cues retire as delivery advances, bounding the ordinary view.
+  for(const c of previous){
+    if(!complete&&same&&c.endTime>=Number(video.currentTime||0)-60){
+      retained.push(c);existing.add(key(c));
+    }
+  }
+  for(const cue of cues){
+    if(existing.has(key(cue))) continue;
+    fresh.push(cue);existing.add(key(cue));
+  }
+  // Also bound pathological overlapping long cues. Refuse a snapshot before
+  // mutating the track, so an over-budget publication preserves valid cues.
+  if(retained.length+fresh.length>65536
+    ||retained.concat(fresh).reduce((bytes,c)=>bytes+c.text.length*2,0)>16*1024*1024) return;
+  const keep=new Set(retained);
+  for(const c of previous){if(!keep.has(c)){try{track.removeCue(c);}catch(err){}}}
+  let added=0;
+  for(const cue of fresh){try{track.addCue(cue);added++;}catch(err){}}
+  if(!added&&!retained.length) return;
+  video._subtitleCueOwner={player,index,off,intent};
+  if(player.hls){
+    // Keep rendition I/O alive: it owns warming the next window. An empty
+    // script-track label excludes it from hls.js native-selection polling.
+    try{ if(complete) player.hls.subtitleTrack=-1; else player.hls.subtitleDisplay=false; }catch(err){}
+  }
   track.mode="showing";
   player._subOff=off;
 }
@@ -447,23 +690,35 @@ function startPlaybackControl(v,p,bootstrap){
   if(!bootstrap || !window.PlurxPlaybackControl) return null;
   try{
     const attachment=p.mediaAttachment;
+    const generationOwner=/** @type {typeof startPlaybackControl & {captureGeneration?:number}} */ (startPlaybackControl);
     const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
-      attachmentGeneration:startPlaybackControl.captureGeneration=(startPlaybackControl.captureGeneration||0)+1});
+      attachmentGeneration:generationOwner.captureGeneration=(generationOwner.captureGeneration||0)+1});
     // A prepared commit swaps the DOM video while retaining this reporter to
     // deliver the acknowledgement on the predecessor's control session.
     // Sample the visible successor after that swap, never the retired node.
     const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
       ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p),
         p.controlIntentGeneration||0,owner):null;
+    // A Shared session also names B's successor transaction; dual-player
+    // preparation stays the Developer switch every session honours.
+    const shared=!!(p.fileContext&&p.fileContext.source_ref&&p.fileContext.source_ref.kind!=="local");
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
-      clientInstanceId:CONTROL_CLIENT_ID,
+      clientInstanceId:CONTROL_CLIENT_ID,sharedSuccessor:shared,
       capture,
-      send:sendPlaybackControl,
+      send:(url,body,signal)=>sendPlaybackControl(url,body,signal,
+        p.controlReporter===reporter&&p.mediaAttachment===attachment?candidateLinkReceipt(p,p.fileId):null),
       onExchange:({request,response,error,capture:captured})=>{
         if(continueStoppingPlaybackControl(p,reporter,v,request,response,captured)) return;
         if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
+        if(captured.intentGeneration===(p.controlIntentGeneration||0)){
+          const processing=effectiveHdrProcessing(response?.effective_processing,
+            reporter.bootstrap.generation,p.deliveredRange);
+          const processingChanged=JSON.stringify(p.effectiveProcessing)!==JSON.stringify(processing);
+          p.effectiveProcessing=processing;
+          if(processingChanged&&p===PLAYER&&typeof renderPlayerInfo==="function") renderPlayerInfo();
+        }
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);
         // An acknowledgement the server accepted is spent; one whose exchange
@@ -484,9 +739,9 @@ function startPlaybackControl(v,p,bootstrap){
           &&captured.intentGeneration===(p.controlIntentGeneration||0)){
           handlePreparedReplacementAction(p,response.action);
         }
-        if(captured.intentGeneration===(p.controlIntentGeneration||0)&&response&&response.delivery
-          &&subtitleReadinessRetryTransition(p,response.delivery)){
-          retryReadyNativeSubtitle(p);
+        if(captured.intentGeneration===(p.controlIntentGeneration||0)&&response&&response.delivery){
+          if(subtitleReadinessRetryTransition(p,response.delivery)) retryReadyNativeSubtitle(p,response.delivery);
+          if(subtitleReadinessUnavailableNotice(p,response.delivery)) toast("Couldn't load that subtitle track");
         }
         // A terminal verdict can arrive on any exchange, and the reporter
         // stops on it — correctly, since it owns no recovery. But a stall an
@@ -516,6 +771,12 @@ function startPlaybackControl(v,p,bootstrap){
             message:"playback-control exchange recovered; legacy recovery remained authoritative"});
         }
         if(error){
+          const pending=p.preparedControlPending;
+          if(shared&&pending?.sharedContext&&request.acknowledgement?.state==="committed"
+            &&request.acknowledgement.action_id===pending.actionId){
+            recoverSharedCommittedReplacement(p,pending);
+            return;
+          }
           const now=Date.now(), message=String(error.message||error);
           p.controlLastError={at:now,message};
           if(Number(error.status)===410){
@@ -559,7 +820,7 @@ function startPlaybackControl(v,p,bootstrap){
 // recovers the session it already made instead of spawning a second encoder —
 // which is what makes retrying a "still building" 503 safe at all. Absent, a
 // fresh identity is minted, exactly as every caller had before.
-async function openSession(fileId, opts, signal=null, requestId=null){
+async function openSession(fileId, opts, signal=null, requestId=null, restartSessionId=null){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
     {playback_id:PLAYBACK_ID,request_id:requestId||newRequestId()},contract.session);
@@ -591,6 +852,25 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     // `review_client_plan`, which only runs when the document is usable.
     const force=(typeof qualityForce==="function")?qualityForce():"auto";
     if(force && force!=="auto") body.overrides=Object.assign({force},body.overrides||{});
+  }
+  const fileContext=playbackFileContext(fileId);
+  if(fileContext.source_ref.kind!=="local"){
+    // Shared initial Start never inherits a Local control/recovery envelope.
+    // Actual supplied unsupported fields are refused by the typed adapter.
+    if(opts&&opts.presentation==="direct"){
+      // Original bytes: no segment budget, HLS transport, rung or native
+      // subtitle group exists for them, and the Source refuses a subtitle ask.
+      body.presentation="direct";
+      for(const field of ["block_budget_secs","transport","height","copy","native_subtitles","subtitle"]) delete body[field];
+      return SHARED_DECISION.start(fileContext,body,signal);
+    }
+    const player=typeof PLAYER!=="undefined"?PLAYER:null;
+    const natives=(player&&player.subs||[]).filter(sub=>sub.native===true);
+    if(natives.length){body.native_subtitles=true;if(natives.some(sub=>sub.index===player.curSub))body.subtitle=player.curSub;}
+    const hevcCopy=!!body.copy&&["hevc","h265","hevc10"].includes(String(player&&player.source&&player.source.video_codec||"").toLowerCase());
+    const transport=typeof plannedHlsTransport==="function"?plannedHlsTransport(hevcCopy):null;if(transport)body.transport=transport;
+    if(body.height==null&&!Object.hasOwn(opts||{},"height"))delete body.height;
+    return SHARED_DECISION.start(fileContext,body,signal);
   }
   // HLS sessions carry native WebVTT renditions whenever this server says a
   // track can become one. Publishing the group up front lets a later subtitle
@@ -655,7 +935,15 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     PLAYER.libraryChannel=Object.assign({},following,result.library_channel);
     return result.playback;
   }
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
+  // A forced recovery creates a new attachment even while the failed one
+  // still owns its session id. Only that exact continuous predecessor may
+  // enroll a fresh family; healthy replacement paths keep their incumbent.
+  const continuous=body.transport==='hlsjs'&&(!player?.sessionId
+      ||player.sessionId===restartSessionId&&player.continuousQualityBootstrap)
+    ?await openContinuousQualitySession(playbackFileContext(fileId).source_ref.file_id,body,player,signal,restartSessionId):null;
+  if(continuous) return continuous;
+  const linkReceipt=typeof candidateLinkReceipt==='function'?candidateLinkReceipt(player,fileId):null;
+  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the
@@ -725,6 +1013,7 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
   const requestId=newRequestId();
   const began=Date.now();
   const sequence={raised:false,refusal:null};
+  const pendingSessions=new Set();
   const superseded=()=>Object.assign(new Error("Playback preparation superseded."),
     {name:"AbortError"});
   // Two things about the raise below, both of them decisions rather than
@@ -765,10 +1054,12 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
       if(signal&&signal.aborted) throw superseded();
       let info;
       try{
-        info=await openSession(fileId,opts,signal,requestId);
+        info=await openSession(fileId,opts,signal,requestId,settings.continuousRestartSessionId||null);
       }catch(error){
-        if(signal&&signal.aborted) throw superseded();
         const failure=error&&error.streamFailure;
+        if(failure?.code==='media_session_handoff_pending'&&failure.pending_session_id)
+          pendingSessions.add(failure.pending_session_id);
+        if(signal&&signal.aborted) throw superseded();
         if(answeredLocally&&failure&&answeredLocally(failure)) throw error;
         const source=failure?PlaybackPolicy.classifyStreamFailure({
           status:failure.status,code:failure.code,context:where}):null;
@@ -798,12 +1089,17 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
       // that the preparation deadline is the one that ends this: it aborts the
       // signal, and the create already in flight still lands.
       if(signal&&signal.aborted){
+        pendingSessions.delete(info&&info.session_id);
         releaseSession(info&&info.session_id);
         throw superseded();
       }
+      // The successful response transfers this same family's ownership to
+      // its attachment. Earlier refused families still belong to this owner.
+      pendingSessions.delete(info&&info.session_id);
       return info;
     }
   }finally{
+    for(const session of pendingSessions) releaseSession(session);
     // A hook left behind would answer the NEXT operation's deadline with this
     // sequence's exhaustion.
     preparation.expiry=null;
@@ -821,16 +1117,26 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
 // is now the whole immutable title, so the media element seeks there directly.
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
+  clearEffectiveProcessing(t);
+  if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){
+    const context=playbackFileContext(t.fileContext),bound=info&&info._sharedContext;
+    if(!bound||playbackFileKey(bound)!==playbackFileKey(context)||bound.session_id!==info.session_id)playbackFileReject();
+  }
   stopPlaybackControl(t);
   t.controlRenderOverride=null;
   t.controlObservationOverride=null;
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
+  if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){
+    t.fileContext=info._sharedContext;
+    t.meta={...(t.meta||{}),fileContext:t.fileContext};
+  }
   t.streamId=null;
   t.vod=!!info.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;
   t.qualityCandidates=Array.isArray(info.quality_candidates)?info.quality_candidates:null;
+  t.measuredCandidateOutputs=Array.isArray(info.measured_candidate_outputs)?info.measured_candidate_outputs:null;
   t.qualityCandidateId=info.quality_candidate_id||null;
   t.qualityProtocol=info.display_aware_auto_protocol==='route-v1'?'route-v1':null;
   if(t.abr){
@@ -855,12 +1161,15 @@ function attachSession(v, t, info, wantSec){
   // panel repaints. renderPlayerInfo() is otherwise painted once, at session
   // open — before the route is chosen and before the forced-burn override.
   // MEDIA-BADGES-PLAN.md requires the chip and the panel row to agree.
-  if(t===PLAYER) renderPlayerInfo();
+  t.continuousQualityBootstrap=info.continuous_quality||null;
   t.probeUrl=info.playlist_url;
   const into = t.vod ? Math.max(0, wantSec||0) : 0;
   t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
   startPlaybackControl(v,t,info.control||null);
+  t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing,
+    t.controlReporter?.bootstrap?.generation,info.delivered_dynamic_range);
+  if(t===PLAYER) renderPlayerInfo();
   markPlaybackControlSeekExecuted(t,wantSec||0);
   return into + (t.offset||0);
 }
@@ -869,10 +1178,73 @@ function attachSession(v, t, info, wantSec){
 // hardware slot held for nobody — every time a player closes or replaces its
 // stream. `keepalive` is what makes it survive the page going away, and is
 // also why the route authenticates by session id rather than by header.
-function releaseSession(sessionId){
+function releaseSession(sessionId,token=TOKEN){
   if(!sessionId) return;
   try{
     fetch(API+`/hls/${sessionId}`,{method:"DELETE",keepalive:true,
-      headers:TOKEN?{"authorization":"Bearer "+TOKEN}:{}}).catch(()=>{});
+      headers:token?{"authorization":"Bearer "+token}:{}}).catch(()=>{});
   }catch(e){}
+}
+// A Shared direct session ends with the attachment that reads it: the same
+// DELETE retires it. B also retires it after 300 s with no open body and no
+// byte request, which is why a resume after a long pause can find it gone.
+function releaseSharedDirect(p){
+  const direct=p&&p.sharedDirect;
+  if(!direct) return;
+  p.sharedDirect=null;
+  releaseSession(direct.session_id);
+}
+// Take on a Shared direct session and attach its byte URL. Direct play has no
+// playlist, status or control exchange, Local or Shared, so nothing here names
+// an HLS session or starts a reporter: the B session lives in `sharedDirect`,
+// owned by the attachment minted below, and the URL carries its binding.
+function attachSharedDirect(v,t,info,wantSec){
+  const context=playbackFileContext(t.fileContext),bound=info&&info._sharedContext;
+  if(context.source_ref.kind==="local"||!bound||info.presentation!=="direct"
+    ||playbackFileKey(bound)!==playbackFileKey(context)||bound.session_id!==info.session_id
+    ||info.url!==playbackFileUrl(bound,"direct")) playbackFileReject();
+  const at=Math.max(0,wantSec||0);
+  stopPlaybackControl(t);
+  t.controlRenderOverride=null;
+  t.controlObservationOverride=null;
+  t.fileContext=bound;
+  t.meta={...(t.meta||{}),fileContext:bound};
+  t.sessionId=null; t.streamId=null; t.vod=false; t.offset=0;
+  t.method='direct_play'; t.copyHls=false; t.started=false;
+  t.directUrl=info.url; t.probeUrl=info.url;
+  if(t===PLAYER) renderPlayerInfo();
+  resetMediaSource(v);
+  const attachment=beginPlaybackMediaAttachment(t);
+  const direct={session_id:info.session_id,attachment,timeline:false};
+  t.sharedDirect=direct;
+  setPlaybackMediaSource(v,info.url);
+  markPlaybackControlSeekExecuted(t,at);
+  v.onloadedmetadata=()=>{
+    if(!attachment.current()) return;
+    v.onloadedmetadata=null;
+    direct.timeline=true;
+    applyPlaybackAttachmentPosition(v,t,attachment,at); };
+  applyPlaybackTransportIntent(v,t);
+  return at;
+}
+// The element could not read its Shared direct session: B retired it after a
+// long pause, or the transfer failed. Answered once, through the ordinary
+// media-change owner, by a fresh direct Start at the current position. The
+// allowance belongs to an attachment that reached a timeline, so a successor
+// that fails before its metadata cannot restart again: its error takes the
+// ordinary failure path. Only a network error (2) — what a refused byte range
+// is — qualifies; a decode or format error is not an expiry and keeps the
+// compatibility rescue.
+function restartSharedDirectAfterError(v,p,code){
+  const direct=p&&p.sharedDirect;
+  if(!direct||!direct.timeline||!direct.attachment.current()||code!==2) return false;
+  direct.timeline=false;
+  const pos=positionForPlaybackIntent(v,p);
+  beginPlaybackControlSeek(p,pos,false);
+  clientLog(Object.assign({level:"info",event:"shared_direct_restart",detail:"media_error_"+code,
+    message:"the shared direct session could not be read — starting a fresh one at the saved position"},
+    playbackContext()));
+  requestPlaybackMediaChange(p,{method:'direct_play',copyHls:false,sharedDirect:true,reason:"direct-expired"})
+    .catch(()=>{});
+  return true;
 }

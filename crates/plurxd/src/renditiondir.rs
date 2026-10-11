@@ -31,7 +31,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use plurx_core::fmp4::{promote_from, segment_name, Fmp4Error, Init, PromotionInputs};
+use plurx_core::fmp4::{
+    collapse_equivalent_hevc_sample_entries, promote_from, segment_name, Fmp4Error, Init,
+    PromotionInputs,
+};
 use sha2::{Digest, Sha256};
 
 use crate::titlestore::{Manifest, ReaderWindow, SegState};
@@ -45,7 +48,10 @@ pub const INIT_NAME: &str = "init.mp4";
 /// Two, not one, because they detect different things and only one of them can
 /// be compared across generations at all.
 ///
-/// - `muxer_init` is ffmpeg's raw `ftyp`+`moov`. It is byte-identical across
+/// - `muxer_init` is ffmpeg's `ftyp`+`moov`, after the one normalization that
+///   is not promotion: repeated decoder-equivalent HEVC descriptions collapse
+///   to one ([`collapse_equivalent_hevc_sample_entries`]) — ffmpeg 8 fills
+///   them from whichever keyframe led the generation. It is byte-identical across
 ///   generations including `-ss`-started ones — M0-P0 clause (d), 9/9 — so a
 ///   mismatch here is real pipeline drift: a different ffmpeg, a different
 ///   argv, a re-fragmenting upgrade. That is the `producer_failed` case.
@@ -114,6 +120,7 @@ impl std::fmt::Display for InitRefused {
 impl InitIdentity {
     /// Establish a rendition's identity from its first generation.
     pub fn establish(muxer: &Init, promotion: PromotionInputs) -> Result<InitIdentity, Fmp4Error> {
+        let muxer = normalized_muxer(muxer)?;
         let mut served = muxer.clone();
         promote_from(&mut served, &promotion)?;
         Ok(InitIdentity {
@@ -129,6 +136,10 @@ impl InitIdentity {
     /// This is plan §2.2's check. It runs at generation start, against the
     /// muxer init the pipe just emitted, before a single segment is written.
     pub fn served_init_for(&self, muxer: &Init) -> Result<Init, InitRefused> {
+        let muxer = &normalized_muxer(muxer).map_err(|_| InitRefused::MuxerDrift {
+            stored: self.muxer_init.clone(),
+            found: "unreadable".to_owned(),
+        })?;
         let found = digest(&muxer.bytes);
         if found != self.muxer_init {
             return Err(InitRefused::MuxerDrift {
@@ -165,6 +176,15 @@ fn parse_segment_name(name: &str) -> Option<u64> {
         return None;
     }
     digits.parse().ok()
+}
+
+/// The muxer init as the identity digests it (see [`InitIdentity`]). A single
+/// description, or descriptions that differ, pass through unchanged, so every
+/// identity recorded before this normalization still matches.
+fn normalized_muxer(muxer: &Init) -> Result<Init, Fmp4Error> {
+    let mut normalized = muxer.clone();
+    collapse_equivalent_hevc_sample_entries(&mut normalized)?;
+    Ok(normalized)
 }
 
 fn digest(bytes: &[u8]) -> String {

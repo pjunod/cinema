@@ -1201,16 +1201,25 @@ A nightly `DueJob` over `playback_events`:
 
 ### 10.2 Subtitles on demand — the whisper queue
 
-Optional `jobs.subtitle_gen_mins` sweep over files lacking subtitles
-in wanted languages: `command`-adapter transcription
-(whisper.cpp — Vulkan iGPU builds measured 3–4× realtime-factor gains
-on exactly this class of chip
-([Phoronix](https://www.phoronix.com/news/Whisper-cpp-1.8.3-12x-Perf))
-— or faster-whisper), writing `.srt` sidecars the scanner already
-knows how to pick up. Fully offline, attribution card + stop button
-(principle 3), off by default. The ecosystem precedent (Bazarr/subgen)
-says this is the single most-asked-for "AI" feature in self-hosted
-media.
+**Implemented in the current subtitle batch; qualification is tracked in the
+[completion ledger](../clients/SUBTITLE-RELIABILITY-COMPLETION.md).** Optional
+manual requests and a bounded missing-language sweep use the durable
+`subtitle_transcribe` queue. Activity owns progress and Stop; the job respects
+worker admission, claim/lease ownership, source replacement and shutdown.
+
+The initial adapter is local whisper.cpp with an operator-installed model,
+two CPU threads and GPU execution disabled. It produces WebVTT and publishes
+captions, source/model provenance and queue completion atomically through the
+existing acquired-caption store. It does not write into the media library or
+wait for a scanner to discover a sidecar. This replaces the earlier proposed
+SRT/scanner handoff and hypothetical `jobs.subtitle_gen_mins` setting.
+
+Settings → Developer exposes enable, local command/model, spoken language
+and interval. Missing dependencies are advisory when saving; an attempted job
+reports a concrete refusal when they are unavailable. Enabled with interval
+zero means manual requests only. Generation defaults off, downloads no model
+or audio, and labels its captions as machine-generated. GPU acceleration is
+a future measured optimization, not a gate on CPU transcription.
 
 ### 10.3 Intro/credits markers that are measured, not guessed
 
@@ -1229,7 +1238,7 @@ heuristic. Chromaprint presence is a behavioral boot probe
 **Effort:** each of the three is small-medium and independent.
 **Risk:** low — all off by default, none on the play path.
 **Toggles:** `jobs.qoe_digest_mins`, `ops.llm_backend` (`none`
-default), `jobs.subtitle_gen_mins`, marker detection rides
+default), `subtitles.transcription.config`, marker detection rides
 `jobs.media_analysis_mins`.
 
 **Acceptance:** digest renders useful stage-1 output with zero
@@ -1268,7 +1277,7 @@ effective default; hot-path reads snapshotted like `AheadLimits`
 | `cache.av1_lane` | off | N5 | producer encodes H.264/HEVC only |
 | `jobs.qoe_digest_mins` | 0 | N7 | no digest |
 | `ops.llm_backend` | `none` | N7 | stage-1 analytics only |
-| `jobs.subtitle_gen_mins` | 0 | N7 | no transcription |
+| `subtitles.transcription.config` | disabled; interval 0 | N7 | no new transcription; enabled with interval 0 allows manual requests |
 
 ### 11.2 New job variants
 

@@ -1,0 +1,31 @@
+{
+  "kind": "supplemental-two-receipt-read-only-privacy-disposition",
+  "full_receipts_read": true,
+  "source_read_handle": "46942c",
+  "copied_hash_verification_handle": "recorded separately in terminal output",
+  "credentials_or_session_capabilities_present": false,
+  "argv_scope": "offline Python parser only; input path and receipt SHA256; no HTTP routes or secrets",
+  "actual_argv_nul_sha256": "e3ef75705467829072bbf111faf8887432e96361b5e510f1e37195f083a87ac1",
+  "removed_data_paths": [],
+  "byte_exact_to_original_private_receipts": true,
+  "actual_caps": {
+    "cpu_nanocpus": 2000000000,
+    "memory_bytes": 1073741824,
+    "total_swap_bytes": 1073741824,
+    "pids": 64,
+    "network": "none",
+    "readonly_rootfs": true,
+    "readonly_input_mount": true,
+    "user": "501:20"
+  },
+  "actual_process": {
+    "pid": 7,
+    "parent_pid": 1,
+    "held_source_fd": 3,
+    "exe": "/usr/bin/python3.11",
+    "held_parser_sha256": "56825d98839fa31757112bbc7ebeba731e8266cf3bc8ea93ec15cb45af689c80"
+  },
+  "not_a_later_wrapper_or_expiry_admission": true,
+  "original_capsule_and_archive_unchanged": true,
+  "no_runtime_control_corpus_replay": true
+}

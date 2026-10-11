@@ -144,7 +144,7 @@ merge, is **green now**: `main` fixed it in `5ae76988`.
 
 ### 2026-09-21 scheduler and sink isolation follow-up
 
-Draft PR [#407](http://192.168.4.7:3000/noirr/plurx/pulls/407) implements the
+Draft PR [#407](http://forge.lan:3000/noirr/plurx/pulls/407) implements the
 architecture review's L1/L10 correction without changing a setting or wire
 shape. The owner-side scheduler, reconciliation pass and reminder sweep now
 share one immutable, unclipped guide generation; the public and relay guide

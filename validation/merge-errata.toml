@@ -153,3 +153,182 @@ reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(
 [[errata]]
 commit = "96612e22454946a2afca24c02cc870a4067a6452"
 reason = "PR #701 landed corrective commit 96612e22 through merge 189286828ca0be981a8820d3191856f4e216364a with subject 'fix(streaming): retain the parent HLS target for candidate warnings (#701) [skip ci]'. The suffix after (#701) prevents the immutable history audit from recognizing that merge as a landing. Both the corrective commit and the merge carry Regression-Test: crates/plurxd/src/main.rs::split_children_log_under_their_parent_target, which resolves in the landing tree. PR #707 fast lane #3772 reported the corrective commit as outside a landing before any Rust unit tests ran. This permanent erratum records the malformed historical subject without changing the audit boundary, parser, runtime behavior, or current PR regression requirements."
+
+[[errata]]
+commit = "0e4318355ef3ec369b85a19daae3ae0d68eb6de1"
+reason = "Jellyfin J1 PR #763 landed into effort/jellyfin-compat through immutable merge d3719303ea271bdf3ee53f7cb44376bdc4466598. Its subject omitted (#763), so the history audit cannot recognize that landing even though its message carries all 36 checked Regression-Test references. The corrective commit named here requires tests/validation/test_runner.py::test_every_store_slice_selects_the_replicated_lane, and that exact line is present in the landing's own message and resolves in its tree. J3 effort gate run 4016 exposed the malformed landing subject. This erratum records the receipt defect without rewriting history, moving the audit boundary or waiving later regression fields."
+
+[[errata]]
+commit = "1cc9468936e3737a3e6993269cc18e06ace8e534"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 1cc94689 (fix(vod): assign encoded AAC to planned presentation intervals) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "757bd633e4c491bf099598c0bb6c4ec11cc067ae"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 757bd633 (fix(settings): type content and reordered frame checkboxes precisely) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "addfac9f138da42d1912c88d508451533410224f"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit addfac9f (fix(video): align encoded HEVC sample entries with HLS declarations) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "9eacf58a1c1174b1b923571595021e99db3bc079"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 9eacf58a (fix(encoding): qualify native samples against actual source color facts) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "555c7defb61113b2a2a7127df55c85a6df5566ca"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 555c7def (fix(build): link the static scorer C++ runtime and lavfi frame decoder) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "11757065434aca122742ee243c47435331d0edc7"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 11757065 (fix(video): advertise the measured VAAPI HEVC constraint flags) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "09ab303741e1b79aeb3dc8807a7398d3ce45bba8"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 09ab3037 (fix(video): bind VAAPI HDR admission to its level-four cadence) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "827023fd2206fe780a3a8d29a316d783cf8e3c03"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 827023fd (fix(transcode): exclude stored analysis from source probe identity) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "e56c802741ebc8479100616affa4a7044fccb721"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit e56c8027 (fix(transcode): serve completed measured content cache recipes) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "d717b82b614a90dbba225f1ccb28d952aa3801be"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit d717b82b (perf(video): finalize integrated codec arguments and operator contracts) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "133be17064422166479b11be3e7b91d689695726"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 133be170 (perf(playback): share sealed source probe with VOD decoder planning) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "8fd3bba7d9cac9dc8d5375ae0e65cb5eea52df16"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 8fd3bba7 (perf(video): measure bounded content-aware recipes in durable producers) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "5a8356329d927a83c1a21bf8fcf3f9324b045254"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 5a835632 (perf(video): add a distinct VAAPI Main10 HDR recipe and graph proof) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "6a959929533c5d73eaf846943877890251173966"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 6a959929 (perf(vod): validate presentation grids and add signed x264 reordering) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "f632af81d3389aa7d157451b6517afe8bb1d946d"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit f632af81 (perf(web): prepare successor episode metadata before playback ends) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "157f31ab93b4e7904816f318fe1e2fe209fca188"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 157f31ab (perf(hls): batch producer coordination without coarsening delivery proof) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "6ef61fb1fc61aa170e134a9945f0184907731523"
+reason = "PR #766 reached main through merge 34252101807d with subject 'perf(video): improve measured encoding and playback delivery', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries thirty-seven Regression-Test lines. Corrective commit 6ef61fb1 (perf(video): add bounded encoder and tone-map calibration tools) is part of that landed ancestry. PR #791's fast lane reported it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #791 from its checked regression fields."
+
+[[errata]]
+commit = "b6605cd478618307a00f3fc4c3a838fec435a99f"
+reason = """PR #767 landed on 2026-10-03 at 05:57:29 UTC with four malformed immutable Regression-Test fields: tests/operations/test_contracts.py::OperationsContractCase.test_ci_jobs_use_the_intended_runner_trust_boundary; tests/validation/test_attempt_census_cache.py::AttemptCensusCacheCase.test_analysis_reuses_equal_text_invalidates_edits_and_bounds_retention; tests/validation/test_python_interrupted_journal_recovery.py::InterruptedJournalRecoveryCase.test_exact_deadline_recovery_retains_events_and_refuses_ambiguous_evidence; tests/validation/test_python_receipt_cli_identity.py::ReceiptCLIIdentityCase.test_module_cli_owner_fallback_and_exact_zero_unit_refusal. The resolver requires bare method names. The canonical references, all resolved against d09bbbc22's immutable tree, are tests/operations/test_contracts.py::test_ci_jobs_use_the_intended_runner_trust_boundary; tests/validation/test_attempt_census_cache.py::test_analysis_reuses_equal_text_invalidates_edits_and_bounds_retention; tests/validation/test_python_interrupted_journal_recovery.py::test_exact_deadline_recovery_retains_events_and_refuses_ambiguous_evidence; tests/validation/test_python_receipt_cli_identity.py::test_module_cli_owner_fallback_and_exact_zero_unit_refusal. Actual Effort development gate 3988 passed all eight jobs on reviewed head 87aa606a898fa2c95243c09f226d05e179d6fde3. Its genuine final artifact 1652 retains 940 Python passes, complete=true and no fixture errors; retained receipt JSON SHA-256 8774329a2090833bfa6a8810a5246ced76a3c039be8b3d1285e46d317c5c5eb4 and original ZIP SHA-256 5918c0b9dd78a181becefbe7e0dd2245bac5fc6f7062cace2b60b1b8e93ca17b. PR #742 gate 3994 exposed the malformed landing fields at history-check before unit execution; its genuine start/final journals are not missing. This single permanent landing erratum preserves the original evidence and immutable history, without changing the boundary, resolver, test selection, gate or runtime, and without exempting this follow-up from its own checked regression reference."""
+
+[[errata]]
+commit = "742c7d79b7c48041126a2ab0a0996250a7105aba"
+reason = "PR #698 reached the architecture effort through immutable merge 27397d3dbdad641a9e63b861c1519ca3751b9a64 with subject 'fix(auto-quality): persist exact candidate recovery lifetime memory', which omitted (#698) and therefore is not recognized as a landing by the history audit. That merge preserves two Regression-Test lines resolving against its own tree; corrective commit 06ee3f83 is in its ancestry. The recognized #700 landing exposes this ancestor as outside a recognized landing. This coordinator-approved permanent erratum records only the malformed subject; it does not move the boundary, rewrite history, change the parser or runtime, promote the effort into main, or exempt PR #702 from checked regression fields."
+
+[[errata]]
+commit = "b06131f69a19941f4a3bd04d4cbe22c7bd5d7c40"
+reason = "PR #698 reached the architecture effort through immutable merge 27397d3dbdad641a9e63b861c1519ca3751b9a64 with subject 'fix(auto-quality): persist exact candidate recovery lifetime memory', which omitted (#698) and therefore is not recognized as a landing by the history audit. That merge preserves two Regression-Test lines resolving against its own tree; corrective import-preservation repair e7381faf is its second parent. The recognized #700 landing exposes this ancestor as outside a recognized landing. This coordinator-approved permanent erratum records only the malformed subject; it does not move the boundary, rewrite history, change the parser or runtime, promote the effort into main, or exempt PR #702 from checked regression fields."
+
+[[errata]]
+commit = "d871707179e67c8b7f1749c24b6f856881795ce2"
+reason = "PR #699 reached the architecture effort through immutable merge 6f0bac0bafed2e063e95883a3654d1b035849b69 with subject 'fix(streaming): prepare exact encoded complete output for later attachments', which omitted (#699) and therefore is not recognized as a landing by the history audit. That merge preserves five Regression-Test lines resolving against its own tree; corrective commit 8c601d5b is in its ancestry. The recognized #700 landing exposes this ancestor as outside a recognized landing. This coordinator-approved permanent erratum records only the malformed subject; it does not move the boundary, rewrite history, change the parser or runtime, promote the effort into main, or exempt PR #702 from checked regression fields."
+
+
+[[errata]]
+commit = "6cb19bb489edf0a8cb005503cd914b586fbc628c"
+reason = "PR #822 landed with a class-qualified Python Regression-Test field, tests/operations/test_player_input_fence.py::PlayerInputFenceTest.test_the_fence_passes_the_repository_as_it_stands. The resolver requires the bare method name: tests/operations/test_player_input_fence.py::test_the_fence_passes_the_repository_as_it_stands. That test passed on the corrected bb90441e1 source before landing; the merge tree was verified identical, and the row-boundary browser regression also passed. Native PR #823 exposed the malformed immutable trailer in history-check. This erratum records only that reference typo; it preserves the boundary, audit policy, runtime and original history. PR #823 validates its own bare-method trailers before merging."
+
+# The API supplied the PR title verbatim rather than Forgejo's canonical merge
+# subject. This pins its real immutable two-parent landing, without excusing any
+# trailer: history still resolves every Regression-Test against this exact tree.
+[[landings]]
+commit = "5630baf52634fc7610254238f0ca35d77425577d"
+tree = "83af8af5c2d07f2a3eb59b9fe8da245338166877"
+parents = ["cca4a09b997171ba91136b396f7d484097305fd0", "397dfa991fcd185d9c8199f78c0ff57ca51b718e"]
+title = "fix(sharing): promote shared libraries with Source-owned playback and custody"
+pull = "828"
+reason = "Verified PR828 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All100 original trailers remain mandatory own-tree evidence; this row recognizes identity only and waives no checks."
+
+[[landings]]
+commit = "a93ece7e37014ebfc46510f0dc3ec0c00280dd76"
+tree = "87dee4c2d0a7635a639f9e412200000cbb20d1e2"
+parents = ["f6de43cd9df10e20816f49ab83c5542e73f194ab", "3fa57aa1ba80fb2d69644e395b562842d01e66bd"]
+title = "fix(remote): integrate reviewed receiver guard foundation"
+pull = "864"
+reason = "Verified local integration of reviewed Cinema PR #864 into the foundation candidate; the immutable merge subject omitted its PR number. Exact tree and ordered parents retain authored lineage. Recognition alone does not exempt original Regression-Test fields; the separate static-manifest omission is recorded explicitly."
+
+[[landings]]
+commit = "b856d114909c24aaef04bab6b08223ae5f3ea0b4"
+tree = "5a518e9d875e20ec05f5fdec2ef8574ff803ae19"
+parents = ["a93ece7e37014ebfc46510f0dc3ec0c00280dd76", "f9026e8e70e2572b3d46fe126e313ac7e40562e8"]
+title = "fix(clients): integrate reviewed web remote foundation"
+pull = "865"
+reason = "Verified local integration of reviewed Cinema PR #865 into the foundation candidate; the immutable merge subject omitted its PR number. Exact tree and ordered parents retain authored lineage. Recognition alone does not exempt original Regression-Test fields; the separate static-manifest omission is recorded explicitly."
+
+[[landings]]
+commit = "3163341ed044328af4b1c02b42b5ab5b8cc452a3"
+tree = "cd1249685e8a6ad3de1af5e1e60027247745a36f"
+parents = ["b856d114909c24aaef04bab6b08223ae5f3ea0b4", "93f821c0f320ab091b2adb8870fd0e5b17eaa81e"]
+title = "fix(apple): integrate reviewed native navigation foundation"
+pull = "863"
+reason = "Verified local integration of reviewed Cinema PR #863 into the foundation candidate; the immutable merge subject omitted its PR number. Exact tree and ordered parents retain authored lineage. Recognition alone does not exempt original Regression-Test fields; the separate static-manifest omission is recorded explicitly."
+
+[[landings]]
+commit = "2b21cc0354561c737b53c73f00804337024e3c61"
+tree = "a3340169ece0aa093fd92323c26cf23a1ec21cc7"
+parents = ["3163341ed044328af4b1c02b42b5ab5b8cc452a3", "502c98761f97955620e4bbbf7d710c2edd2693bf"]
+title = "chore(clients): integrate Cinema static manifest correction"
+pull = "865"
+reason = "Verified local integration of reviewed Cinema PR #865 into the foundation candidate; the immutable merge subject omitted its PR number. Exact tree and ordered parents retain authored lineage. Recognition alone does not exempt original Regression-Test fields; the separate static-manifest omission is recorded explicitly."
+
+[[errata]]
+commit = "f357ce983cb7c4702025cec8df0f6af28562c432"
+reason = "PR #873 receipt recovery landed with two class-qualified Python references that do not resolve. The canonical references are tests/validation/test_python_zero_failure_recovery.py::test_exact_zero_unit_history_and_prepare_refusal_import_no_passes and tests/validation/test_python_zero_failure_recovery.py::test_corrupt_or_contradictory_evidence_refuses; both were verified against this immutable merge tree. Effort gate4397 exposed the trailer error before unit execution. This exact landing erratum preserves failed-run evidence and authored history; it imports no passes and changes no policy, boundary or runtime."
+
+[[errata]]
+commit = "2b21cc0354561c737b53c73f00804337024e3c61"
+reason = "The local follow-up integration of reviewed PR #865 used a chore subject without a PR number and omitted Regression-Test fields, despite bringing corrective source502c98761f97955620e4bbbf7d710c2edd2693bf. That source registers the remote adapters in the generated jsconfig and corrects static annotations; node tests/web/jsconfig-generated.test.js checks the generated manifest against actual served rows, and node scripts/web-jsconfig --check rejects stale output. The complete effort-web-static-check passed after this correction with unchanged TypeScript diagnostic baseline. The exact immutable merge is recognized above. This landing-specific erratum records the missing fields without rewriting history, changing the boundary, claiming a new unit pass or exempting later landings."
+
+[[landings]]
+commit = "4a737e92c07c3692f607a4c6d8b08a71fc0e22ca"
+tree = "d243ca02ef6b6ed322d7d0ae35827f345b2a03b0"
+parents = ["f4eb3cb9db0757d3f6feda10dc9cb1586afaf6d0", "b6ebc3f6e7ccacf7d04efd24f0f312f81d797315"]
+title = "fix(vaapi-qualification): restore original sharp-panel diagnostic input"
+pull = "909"
+reason = "Verified PR909 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All 4 original Regression-Test trailers remain mandatory own-tree evidence; this row recognizes the exact immutable merge identity and waives no checks."
+
+[[landings]]
+commit = "98af2eca9049c61524a013b5bd578ff79a64ed6d"
+tree = "fb7783bff20a9d695fb97e46d4334db0708c1f16"
+parents = ["4a737e92c07c3692f607a4c6d8b08a71fc0e22ca", "4e98734d17790c822aaa7afe5289d4d3e32c71ba"]
+title = "fix(sharing): compile source custody without replicated store"
+pull = "910"
+reason = "Verified PR910 main promotion API landing; custom MergeTitleField preserved the raw corrective title. All 1 original Regression-Test trailers remain mandatory own-tree evidence; this row recognizes the exact immutable merge identity and waives no checks."
+[[errata]]
+commit = "4e98734d17790c822aaa7afe5289d4d3e32c71ba"
+reason = "Fast lane for PR #915 found this existing corrective commit in main ancestry outside an audited PR landing. Its own immutable message carries Regression-Test: crates/plurx-core/src/store/sharing_source_session_tests.rs::sharing_source_ingress_admission_accepts_current_accounting_but_refuses_changed_authority. Record the missing landing attribution without changing the audit boundary or claiming a new test run; #915 carries its own checked regression trailers into its landing."
+
+[[errata]]
+commit = "b6ebc3f6e7ccacf7d04efd24f0f312f81d797315"
+reason = "Fast lane for PR #915 found this existing corrective commit in main ancestry outside an audited PR landing. Its immutable message carries four Regression-Test anchors in tests/operations/test_vaapi_failure_capture.py, including test_fixed_signal_selection_preserves_ramp_and_original_sharp_reference and test_failed_luma_keeps_full_identity_coordinates_and_reference_regions. Record the missing landing attribution without changing the audit boundary or claiming a new test run; #915 carries its own checked regression trailers into its landing."
+
+[[landings]]
+commit = "1088d7529401297bddced74bfa11c166457468d8"
+tree = "7e6a70793b9e86f4f734d612f4401d68ea97fd4d"
+parents = ["079960daebd5a1e23dff2b0e8f8506c1238bc1b0", "1c76a9f605cf4b3b83ec5da2c28743dc1a02bdfc"]
+title = "fix(batch): promote Cinema remotes and macOS video completion"
+pull = "917"
+reason = "Batch03 PR917 was merged by explicit user direction after 10114 applicable unit passes. The API landing subject omitted the PR number, so the audit did not recognize it. All 663 Regression-Test fields match the saved PR description and immutable landing message. This row binds the actual ordered parents and tree; it does not claim the failed promotion gate passed, rewrite history, alter the audit boundary or excuse future missing regression fields."
+
+[[errata]]
+commit = "1088d7529401297bddced74bfa11c166457468d8"
+reason = "Batch03 PR917 landing1088d752 preserves all663 original regression fields. Three immutable Python references incorrectly include unittest class qualifiers: tests/operations/test_macos_p5_terminal_nals.py::P5TerminalNalCase::test_terminal_positives_preserve_every_original_sample_and_timing_table, tests/validation/test_python_zero_failure_recovery.py::ZeroFailureRecoveryCase::test_exact_zero_unit_history_and_prepare_refusal_import_no_passes, tests/validation/test_python_zero_failure_recovery.py::ZeroFailureRecoveryCase::test_corrupt_or_contradictory_evidence_refuses. Their canonical references are tests/operations/test_macos_p5_terminal_nals.py::test_terminal_positives_preserve_every_original_sample_and_timing_table, tests/validation/test_python_zero_failure_recovery.py::test_exact_zero_unit_history_and_prepare_refusal_import_no_passes, tests/validation/test_python_zero_failure_recovery.py::test_corrupt_or_contradictory_evidence_refuses. The exact classes and methods exist in the immutable landing tree; the completed audit resolved the other660 references. This permanent row records those three malformed historical trailers, retains the verified merge identity and leaves the boundary and all future regression checks unchanged. It does not claim the failed promotion gate passed."

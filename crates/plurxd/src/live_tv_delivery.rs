@@ -79,6 +79,25 @@ pub(crate) struct LivePlaybackRequest {
 }
 
 impl LivePlaybackRequest {
+    /// The closed-caption formats the client's player decodes, from the
+    /// `caption_decoders` claim in its capability document (`cea608`,
+    /// `cea708`). `None` is a client that makes no claim — every client built
+    /// before the claim existed — and is advertised every caption service the
+    /// stream carries, as before. Read from the retained document rather than
+    /// `DeviceCaps`, because it is a Live TV claim and an owner that predates
+    /// it simply ignores the key.
+    pub(crate) fn caption_decoders(&self) -> Option<Vec<String>> {
+        let claimed = self.caps.get("caption_decoders")?.as_array()?;
+        Some(
+            claimed
+                .iter()
+                .take(MAX_ENTRIES)
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
+
     pub(crate) fn validate(&self) -> Result<DeviceCaps, String> {
         if self.v != 1 {
             return Err("live playback request version must be 1".into());
@@ -198,6 +217,11 @@ pub(crate) struct LiveSourceFacts {
     pub(crate) color_transfer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) color_space: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) color_range: Option<String>,
+    /// Absent in older retained probes; native processing requires known upright video.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotation: Option<i16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) hdr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

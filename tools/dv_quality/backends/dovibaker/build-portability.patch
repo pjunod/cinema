@@ -1,0 +1,9 @@
+--- a/dovi_tool/Cargo.toml
++++ b/dovi_tool/Cargo.toml
+@@ -41,3 +41,6 @@
+ default = ["system-font"]
+ system-font = ["plotters/ttf"]
+ internal-font = ["plotters/ab_glyph"]
++
++[workspace]
++members = ["dolby_vision"]

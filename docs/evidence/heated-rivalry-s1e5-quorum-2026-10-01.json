@@ -6,7 +6,7 @@
   "root_cause": "Replicated fragment-index cleanup performs repeated poorly indexed analysis-history probes, blocking state-machine apply beyond the serving-proof budget.",
   "live_mutations": false,
   "loss_events": {
-    "nuc4": [
+    "lab4": [
       {
         "timestamp_utc": "2026-10-01T23:41:20.628159834Z",
         "last_applied_index": 26344334,
@@ -122,7 +122,7 @@
         "next_entry_index": 26359417
       }
     ],
-    "m6": [
+    "lab6": [
       {
         "timestamp_utc": "2026-10-01T23:41:20.571222708Z",
         "last_applied_index": 26344334,
@@ -238,7 +238,7 @@
         "next_entry_index": 26359417
       }
     ],
-    "nynuc": [
+    "media1": [
       {
         "timestamp_utc": "2026-10-01T23:41:20.371228364Z",
         "last_applied_index": 26344334,
@@ -362,7 +362,7 @@
     "method": "Read HQL_WAL records and inspect SQL bytes for last_applied_index + 1; no bind values retained."
   },
   "benchmark": {
-    "host": "nuc4",
+    "host": "lab4",
     "engine": "SQLite 3.53.2 compiled from pinned libsqlite3-sys 0.38.1 amalgamation; Python driver preloaded only for the reproduction",
     "method": "Consistent read-only snapshot of six tables, explicit indexes and matching sqlite_stat1/stat4 rows into private :memory: database; DELETE wrapped in BEGIN/ROLLBACK; 30-day cutoff, LIMIT 128; three trials per variant.",
     "limitations": [
@@ -3118,7 +3118,7 @@
         "USE_URI"
       ],
       "library_sha256": "0e43f04d442a9a2afd5ed79215b217bc2185f5c20471c30057196d500e3fbd21",
-      "provenance": "Read back during review from retained nuc4 reproduction library /tmp/plurx-quorum-rca-20261001/libsqlite3.so. These are not daemon compile options; the hash identifies the library at review time.",
+      "provenance": "Read back during review from retained lab4 reproduction library /tmp/plurx-quorum-rca-20261001/libsqlite3.so. These are not daemon compile options; the hash identifies the library at review time.",
       "recorded_at_utc": "2026-10-02",
       "stat4_enabled": true
     },
@@ -4229,7 +4229,7 @@
     ]
   },
   "review_corrections": {
-    "m6_last_index_stamp": {
+    "lab6_last_index_stamp": {
       "raw_unix_seconds": 1790899243,
       "utc": "2026-10-02T00:00:43Z",
       "america_new_york": "2026-10-01T20:00:43-04:00",

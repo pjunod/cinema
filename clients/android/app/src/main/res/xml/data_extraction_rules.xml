@@ -9,9 +9,13 @@
     <cloud-backup>
         <exclude domain="file" path="offline/" />
         <exclude domain="file" path="datastore/" />
+        <exclude domain="sharedpref" path="cinema-remote-secrets.xml" />
+        <exclude domain="sharedpref" path="cinema-invitation-state.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="offline/" />
         <exclude domain="file" path="datastore/" />
+        <exclude domain="sharedpref" path="cinema-remote-secrets.xml" />
+        <exclude domain="sharedpref" path="cinema-invitation-state.xml" />
     </device-transfer>
 </data-extraction-rules>

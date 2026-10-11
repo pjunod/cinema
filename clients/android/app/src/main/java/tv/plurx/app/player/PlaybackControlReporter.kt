@@ -747,6 +747,7 @@ data class ControlAction(
 @Serializable
 data class ControlDelivery(
     @SerialName("subtitle_readiness") val subtitleReadiness: String? = null,
+    @SerialName("subtitle_revision") val subtitleRevision: String? = null,
     /**
      * Where this server has got to on the viewer's last selection change:
      * `staging`, `offered` or `none`.
@@ -773,37 +774,29 @@ internal object SubtitleReadinessDecision {
     fun meansUnavailable(value: String?): Boolean = value == "unavailable"
 }
 
-/**
- * One notice per run of `unavailable`, not one per exchange.
- *
- * The reporter exchanges every couple of seconds, so a bare equality test
- * would put a banner on screen on a cadence. The viewer needs to be told
- * once, and told again only if the track recovers and fails afresh.
- */
+/** A terminal failure gets one notice per selection/seek intent, independently of ready retries. */
 internal class SubtitleUnavailableNoticeState {
-    private var told = false
+    private var toldIntent: Long? = null
 
     @Synchronized
-    fun record(value: String?): Boolean {
-        val unavailable = SubtitleReadinessDecision.meansUnavailable(value)
-        if (!unavailable) {
-            told = false
-            return false
-        }
-        if (told) return false
-        told = true
+    fun record(value: String?, commitUnavailable: Boolean = true, intent: Long = 0): Boolean {
+        if (!SubtitleReadinessDecision.meansUnavailable(value) || toldIntent == intent) return false
+        if (commitUnavailable) toldIntent = intent
         return true
     }
 }
 
 internal class SubtitleReadinessRetryState {
     private var lastReady: Boolean? = null
+    private var lastIntent: Long? = null
+    private var lastRevision: String? = null
 
     @Synchronized
-    fun record(value: String?, commitReady: Boolean = true): Boolean {
+    fun record(value: String?, commitReady: Boolean = true, intent: Long = 0, revision: String? = null): Boolean {
         val ready = SubtitleReadinessDecision.meansReady(value)
-        val retry = lastReady == false && ready
-        if (!ready || commitReady) lastReady = ready
+        // Extraction can finish before the first control response.
+        val retry = ready && (lastReady != true || lastIntent != intent || lastRevision != revision)
+        if (!ready || commitReady) { lastReady = ready; lastIntent = intent; lastRevision = revision }
         return retry
     }
 }
@@ -816,6 +809,7 @@ data class ControlResponse(
     @SerialName("accepted_sequence") val acceptedSequence: Long,
     val action: ControlAction,
     val delivery: ControlDelivery? = null,
+    @SerialName("effective_processing") val effectiveProcessing: kotlinx.serialization.json.JsonElement? = null,
     /**
      * What the session that is playing *now* delivers. The server has always
      * sent it; `ignoreUnknownKeys` meant this client dropped it. Comparing it
@@ -1389,7 +1383,10 @@ class PlaybackControlReporter private constructor(
         }
         val retryableControl = (status == 425 && code == "owner_transition") ||
             (status == 429 && code == "control_rate_limited") ||
-            (status == 503 && code == "control_unavailable")
+            // The serving fence is temporary and carries Retry-After. Keep
+            // reporting when authority returns instead of freezing the last
+            // playhead/runway for the rest of an otherwise live session.
+            (status == 503 && code in setOf("control_unavailable", "serving_fenced"))
         val retryableTransport = status == 408 || status == null
         if (!retryableControl && !retryableTransport) {
             // Nothing left to try on this session's control channel: a 404

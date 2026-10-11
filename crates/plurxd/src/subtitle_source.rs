@@ -2147,7 +2147,7 @@ mod tests {
             source_size: 10,
             source_mtime: 20,
             source_attestation: "a".repeat(64),
-            node_id: "nuc4".into(),
+            node_id: "lab4".into(),
             ordinal,
             kind: "text".into(),
             format: "webvtt".into(),
@@ -2331,6 +2331,8 @@ mod tests {
             .await
             .expect("second");
         let bad = crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
+            clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: b"invalid!".to_vec(),
         };
@@ -2340,6 +2342,8 @@ mod tests {
         );
         forget_stale_publication(&catalog, &stale).await;
         let good = crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
+            clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: b"verified".to_vec(),
         };
@@ -2359,6 +2363,8 @@ mod tests {
     fn a_404_holder_is_skipped_and_forgotten() {
         let holder = publication(0, "extracted", "kept", 1);
         let missing = crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
+            clock_timing: None,
             status: reqwest::StatusCode::NOT_FOUND,
             body: Vec::new(),
         };
@@ -2367,6 +2373,8 @@ mod tests {
             PeerArtifactVerdict::Forget
         );
         let unavailable = crate::http::peer_transport::PeerResponse {
+            dv_processing_header: None,
+            clock_timing: None,
             status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
             body: Vec::new(),
         };
@@ -2392,7 +2400,7 @@ mod tests {
             .upsert_subtitle_source_publication(&row)
             .await
             .expect("row");
-        let outcome = sweep(&catalog, "nuc4", &root, None, 256, u64::MAX)
+        let outcome = sweep(&catalog, "lab4", &root, None, 256, u64::MAX)
             .await
             .expect("sweep");
         assert_eq!(outcome.removed, 1);

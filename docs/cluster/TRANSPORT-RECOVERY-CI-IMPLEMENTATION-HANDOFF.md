@@ -878,8 +878,8 @@ remaining infrastructure limits or resource-detection blind spots. If full
 qualification has not completed, list the exact missing evidence and leave
 M6 open.
 
-[run-1034]: http://192.168.4.7:3000/noirr/plurx/actions/runs/1034/jobs/9/attempt/1
-[run-1100]: http://192.168.4.7:3000/noirr/plurx/actions/runs/1100/jobs/9
-[resource-decision]: http://192.168.4.7:3000/noirr/plurx/src/commit/9fcd151c98485707d2dc28195adf9c0c1e4a6d4c/docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md
-[resource-baseline]: http://192.168.4.7:3000/noirr/plurx/src/commit/9fcd151c98485707d2dc28195adf9c0c1e4a6d4c/docs/cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md
+[run-1034]: http://forge.lan:3000/noirr/plurx/actions/runs/1034/jobs/9/attempt/1
+[run-1100]: http://forge.lan:3000/noirr/plurx/actions/runs/1100/jobs/9
+[resource-decision]: http://forge.lan:3000/noirr/plurx/src/commit/9fcd151c98485707d2dc28195adf9c0c1e4a6d4c/docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md
+[resource-baseline]: http://forge.lan:3000/noirr/plurx/src/commit/9fcd151c98485707d2dc28195adf9c0c1e4a6d4c/docs/cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md
 [forgejo-concurrency]: https://forgejo.org/docs/latest/user/actions/reference/#concurrency

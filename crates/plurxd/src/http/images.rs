@@ -72,6 +72,297 @@ const DERIVED_DIR: &str = "derived";
 /// original filename is content-addressed or carries `?v={updated_at}`, and a
 /// derivative key is the verified source digest.
 const ARTWORK_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
+
+/// Exact opened-byte snapshot for sharing. Internal paths/identities have no
+/// diagnostic or wire implementation; B receives only digest/length/MIME.
+pub(super) struct SharedArtAsset {
+    pub(super) bytes: axum::body::Bytes,
+    pub(super) digest: [u8; 32],
+    pub(super) mime: &'static str,
+    path: std::path::PathBuf,
+    identity: ArtworkFileIdentity,
+    _local_bytes: OwnedSemaphorePermit,
+    _request_owner: Arc<super::shared_artwork::ArtBodyLease>,
+}
+impl SharedArtAsset {
+    pub(super) async fn still_current(&self) -> bool {
+        open_local_artwork(self.path.clone())
+            .await
+            .is_some_and(|opened| opened.identity == self.identity)
+    }
+}
+fn shared_art_mime(filename: &str, bytes: &[u8]) -> Option<&'static str> {
+    let extension = FsPath::new(filename)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Some("image/png"),
+        "jpg" | "jpeg" if bytes.starts_with(&[0xff, 0xd8]) => Some("image/jpeg"),
+        "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Some("image/gif"),
+        "webp" if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => {
+            Some("image/webp")
+        }
+        _ => None,
+    }
+}
+async fn shared_opened_art(
+    state: &AppState,
+    path: std::path::PathBuf,
+    name: &str,
+    lease: Arc<super::shared_artwork::ArtBodyLease>,
+) -> Result<Option<SharedArtAsset>, ApiError> {
+    let Some(opened) = open_local_artwork(path.clone()).await else {
+        return Ok(None);
+    };
+    let identity = opened.identity;
+    let Some(local) = state.artwork_fetch.local_permit(identity.bytes + 1).await else {
+        return Err(artwork_capacity_error());
+    };
+    let Some((bytes, digest, local, lease)) = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        // Cancellation cannot release either budget while this descriptor read
+        // still owns allocation/work. The existing worker settles its CPU own.
+        let request_owner = lease;
+        let mut file = opened.file;
+        let mut bytes = Vec::with_capacity(identity.bytes as usize + 1);
+        (&mut file)
+            .take(identity.bytes + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 != identity.bytes
+            || artwork_file_identity(&file.metadata().ok()?) != identity
+        {
+            return None;
+        }
+        let digest = Sha256::digest(&bytes).into();
+        Some((axum::body::Bytes::from(bytes), digest, local, request_owner))
+    })
+    .await
+    .ok()
+    .flatten() else {
+        return Ok(None);
+    };
+    let Some(mime) = shared_art_mime(name, &bytes) else {
+        return Ok(None);
+    };
+    if !artwork_digest_matches_name(name, digest) {
+        return Ok(None);
+    }
+    Ok(Some(SharedArtAsset {
+        bytes,
+        digest,
+        mime,
+        path,
+        identity,
+        _local_bytes: local,
+        _request_owner: lease,
+    }))
+}
+struct SharedArtDownloadOwner {
+    _lease: Arc<super::shared_artwork::ArtBodyLease>,
+    _local: Option<tokio::sync::OwnedSemaphorePermit>,
+    _peer: Option<tokio::sync::OwnedSemaphorePermit>,
+    _workspace: tokio::sync::OwnedSemaphorePermit,
+}
+struct SharedArtDownload {
+    bytes: bytes::Bytes,
+    _owner: Arc<SharedArtDownloadOwner>,
+}
+impl AsRef<[u8]> for SharedArtDownload {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+/// One collector at a time, preallocated to its charged object/sentinel cap.
+/// Only trusted current-cluster artwork URLs and node proofs reach this helper.
+async fn shared_peer_snapshot(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    auth: &ArtworkPeerAuth,
+    name: &str,
+    owner: Arc<SharedArtDownloadOwner>,
+) -> Option<SharedArtDownload> {
+    let response = client
+        .get(url)
+        .header(NODE_ID_HEADER, &auth.node_id)
+        .header(TIMESTAMP_HEADER, auth.timestamp_ms)
+        .header(SIGNATURE_HEADER, &auth.signature)
+        .send()
+        .await
+        .ok()?;
+    if response.status() != reqwest::StatusCode::OK
+        || response
+            .content_length()
+            .is_some_and(|len| len == 0 || len > MAX_ARTWORK_BYTES)
+        || !response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| matches!(v, "image/png" | "image/jpeg" | "image/gif" | "image/webp"))
+    {
+        return None;
+    }
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::with_capacity(MAX_ARTWORK_BYTES as usize + 1);
+    let mut digest = Sha256::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.ok()?;
+        if chunk.len() > MAX_ARTWORK_BYTES as usize - bytes.len() {
+            return None;
+        }
+        digest.update(&chunk);
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty()
+        || shared_art_mime(name, &bytes).is_none()
+        || !artwork_digest_matches_name(name, digest.finalize().into())
+    {
+        return None;
+    }
+    Some(SharedArtDownload {
+        bytes: bytes.into(),
+        _owner: owner,
+    })
+}
+async fn shared_materialize_original(
+    state: &AppState,
+    selection: &plurx_core::store::sharing_catalogue_artwork::SourceArtSnapshot,
+    credential_hash: &str,
+    name: &str,
+    lease: Arc<super::shared_artwork::ArtBodyLease>,
+) -> Result<bool, ApiError> {
+    let Some(peer_permit) = state.artwork_fetch.peer_permit() else {
+        return Err(artwork_capacity_error());
+    };
+    let Some(local_permit) = state
+        .artwork_fetch
+        .local_permit(MAX_ARTWORK_BYTES + 1)
+        .await
+    else {
+        return Err(artwork_capacity_error());
+    };
+    // Charge a second object workspace for transport buffers independently of
+    // the collector. HTTP/1 keeps the pinned Hyper adaptive receive buffer
+    // bounded; no multiplexed H2 receive windows are admitted by this client.
+    let workspace = super::shared_artwork::ArtBodyLease::source_collection_workspace()?;
+    let client = reqwest::Client::builder()
+        .http1_only()
+        .connect_timeout(Duration::from_millis(750))
+        .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|_| artwork_capacity_error())?;
+    let peers = state
+        .membership
+        .reachable_peer_http_urls()
+        .await
+        .unwrap_or_default();
+    let Ok(auth) = state.membership.artwork_peer_auth(name) else {
+        return Ok(false);
+    };
+    let owner = Arc::new(SharedArtDownloadOwner {
+        _lease: lease,
+        _local: Some(local_permit),
+        _peer: Some(peer_permit),
+        _workspace: workspace,
+    });
+    tokio::time::timeout(Duration::from_secs(2),async {
+        // Three roster destinations total, sequential. The ordinary three-peer
+        // racer is deliberately unchanged and never consumes this reservation.
+        for peer in peers.into_iter().take(3) {
+            let Some(url)=peer_artwork_url(&peer,name) else {continue;};
+            let Some(download)=shared_peer_snapshot(&client,url,&auth,name,owner.clone()).await else {continue;};
+            let current=state.store.source_art_snapshot(credential_hash,selection.reference().grant_id,selection.reference()).await.map_err(super::error::ApiError::from)?;
+            if !matches!(current,plurx_core::store::sharing_catalogue_artwork::SourceArtRead::Authorized(ref value) if selection.same_selection(value))
+                || !super::shared_library::source_art_scope_current(state,selection.reference()).await {return Ok(false);}
+            // Move the collector allocation and Source reservation directly into
+            // the held-directory blocking writer. No second bitmap allocation.
+            if plurx_core::fs_secure::atomic_write_child_owned(&state.artwork_dir,name,download).await.is_ok() {return Ok(true);}
+            return Ok(false);
+        }
+        Ok(false)
+    }).await.unwrap_or(Ok(false))
+}
+pub(super) async fn shared_artwork_asset(
+    state: &AppState,
+    selection: &plurx_core::store::sharing_catalogue_artwork::SourceArtSnapshot,
+    credential_hash: &str,
+    lease: Arc<super::shared_artwork::ArtBodyLease>,
+) -> Result<Option<SharedArtAsset>, ApiError> {
+    let name = safe_artwork_name(selection.filename())?;
+    let variant = selection.reference().variant;
+    let path = state.artwork_dir.join(name);
+    let mut original = shared_opened_art(state, path.clone(), name, lease.clone()).await?;
+    if original.is_none() {
+        if !shared_materialize_original(state, selection, credential_hash, name, lease.clone())
+            .await?
+        {
+            return Ok(None);
+        }
+        original = shared_opened_art(state, path, name, lease.clone()).await?;
+    }
+    let Some(original) = original else {
+        return Ok(None);
+    };
+    use plurx_core::sharing_artwork::ArtVariant;
+    let size = match variant {
+        ArtVariant::Original => return Ok(Some(original)),
+        ArtVariant::W300 => ArtworkSize::W300,
+        ArtVariant::W500 => ArtworkSize::W500,
+        ArtVariant::W780 => ArtworkSize::W780,
+    };
+    let Some(spec) = worker::spec(original.digest, size, name).await else {
+        return Ok(None);
+    };
+    let Some(location) = worker::shared_local_variant(state, &spec).await else {
+        // No render demand follows an authority refusal. The worker's own
+        // canonical job/CPU/storage settlement remains independent of this
+        // request's later cancellation.
+        let current = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.store.source_art_snapshot(
+                credential_hash,
+                selection.reference().grant_id,
+                selection.reference(),
+            ),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok);
+        if !matches!(current,Some(plurx_core::store::sharing_catalogue_artwork::SourceArtRead::Authorized(ref snapshot)) if selection.same_selection(snapshot))
+            || !original.still_current().await
+            || !super::shared_library::source_art_scope_current(state, selection.reference()).await
+        {
+            return Ok(None);
+        }
+        worker::request(state, spec).await;
+        return Ok(None); // The canonical job owns settlement; no original fallback.
+    };
+    let Some(variant_name) = worker::location_filename(&location) else {
+        return Ok(None);
+    };
+    let Some(asset) = shared_opened_art(
+        state,
+        state.artwork_dir.join(DERIVED_DIR).join(&variant_name),
+        &variant_name,
+        lease,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if asset.bytes.len() as i64 != location.bytes
+        || hex::encode(asset.digest) != location.blob_sha256
+        || !image_dimensions(&variant_name, &asset.bytes)
+            .is_some_and(|(width, height)| width > 0 && height > 0 && Some(width) <= size.width())
+    {
+        return Ok(None);
+    }
+    drop(original);
+    Ok(Some(asset))
+}
 /// A fallback answers a `?size=` URL with the original bytes, which is not the
 /// resource that URL names. `immutable` would freeze that substitution in every
 /// client cache for a week, and a cold grid load falls back on nearly every
@@ -97,6 +388,8 @@ pub(crate) struct ArtworkCoordinator {
     derive_permits: Arc<Semaphore>,
     variants: Mutex<HashMap<String, worker::CachedLocation>>,
     demands: Mutex<HashMap<String, Instant>>,
+    jellyfin_budget: Mutex<JellyfinArtworkBudget>,
+    jellyfin_demands: Mutex<HashMap<String, JellyfinArtworkDemand>>,
     wake: tokio::sync::Notify,
     #[cfg(test)]
     hashes: AtomicU64,
@@ -118,6 +411,8 @@ impl ArtworkCoordinator {
             derive_permits: Arc::new(Semaphore::new(DERIVATIVE_CONCURRENCY)),
             variants: Mutex::new(HashMap::new()),
             demands: Mutex::new(HashMap::new()),
+            jellyfin_budget: Mutex::new(JellyfinArtworkBudget::default()),
+            jellyfin_demands: Mutex::new(HashMap::new()),
             wake: tokio::sync::Notify::new(),
             #[cfg(test)]
             hashes: AtomicU64::new(0),
@@ -2714,6 +3009,80 @@ mod tests {
     use plurx_core::store::SqliteStore;
 
     use super::*;
+    #[tokio::test]
+    async fn sharing_art_opened_digest_refuses_symlinks_and_rehashes_inode_changes() {
+        let _serial = super::super::shared_artwork::ART_FIXTURES.lock().await;
+        let (_, state) = super::super::tests::test_app_with_state();
+        let directory = crate::test_tempdir().expect("owned images");
+        let path = directory.path().join("private.png");
+        let bytes = b"\x89PNG\r\n\x1a\nfirst";
+        std::fs::write(&path, bytes).expect("first");
+        let first = shared_opened_art(
+            &state,
+            path.clone(),
+            "private.png",
+            super::super::shared_artwork::ArtBodyLease::source(false).expect("lease"),
+        )
+        .await
+        .expect("read")
+        .expect("asset");
+        assert_eq!(first.digest, <[u8; 32]>::from(Sha256::digest(bytes)));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nother").expect("same inode same size rewrite");
+        assert!(!first.still_current().await);
+        drop(first);
+        let second = shared_opened_art(
+            &state,
+            path.clone(),
+            "private.png",
+            super::super::shared_artwork::ArtBodyLease::source(false).expect("lease"),
+        )
+        .await
+        .expect("read")
+        .expect("asset");
+        assert_ne!(second.digest, <[u8; 32]>::from(Sha256::digest(bytes)));
+        drop(second);
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&replacement, bytes).expect("replace");
+        std::fs::rename(replacement, &path).expect("rename");
+        assert_eq!(
+            shared_opened_art(
+                &state,
+                path.clone(),
+                "private.png",
+                super::super::shared_artwork::ArtBodyLease::source(false).expect("lease")
+            )
+            .await
+            .expect("read")
+            .expect("asset")
+            .digest,
+            <[u8; 32]>::from(Sha256::digest(bytes))
+        );
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).expect("remove");
+            std::os::unix::fs::symlink(directory.path().join("outside"), &path).expect("symlink");
+            assert!(shared_opened_art(
+                &state,
+                path.clone(),
+                "private.png",
+                super::super::shared_artwork::ArtBodyLease::source(false).expect("lease")
+            )
+            .await
+            .expect("closed")
+            .is_none());
+        }
+        let huge = std::fs::File::create(directory.path().join("huge.png")).expect("huge");
+        huge.set_len(MAX_ARTWORK_BYTES + 1).expect("size");
+        assert!(shared_opened_art(
+            &state,
+            directory.path().join("huge.png"),
+            "huge.png",
+            super::super::shared_artwork::ArtBodyLease::source(false).expect("lease")
+        )
+        .await
+        .expect("closed")
+        .is_none());
+    }
 
     #[test]
     fn artwork_inventory_deduplicates_bare_names_and_rejects_paths() {
@@ -3546,6 +3915,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sharing_art_single_peer_collector_keeps_owned_capacity_and_refuses_invalid_bytes() {
+        let _fixture = super::super::shared_artwork::ART_FIXTURES.lock().await;
+        async fn peer(Path(name): Path<String>, headers: HeaderMap) -> Response {
+            if headers
+                .get(SIGNATURE_HEADER)
+                .and_then(|value| value.to_str().ok())
+                != Some("proof")
+            {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            if name == "redirect.jpg" {
+                return (StatusCode::FOUND, [(header::LOCATION, "/original.jpg")]).into_response();
+            }
+            let bytes = if name == "invalid.jpg" {
+                Bytes::from_static(b"not an image")
+            } else {
+                Bytes::from_static(b"\xff\xd8\xff bounded peer")
+            };
+            ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/art/{name}", get(peer)))
+                .await
+                .expect("server");
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("client");
+        let lease = super::super::shared_artwork::ArtBodyLease::source(false).expect("lease");
+        let owner = Arc::new(SharedArtDownloadOwner {
+            _lease: lease,
+            _local: None,
+            _peer: None,
+            _workspace: super::super::shared_artwork::ArtBodyLease::source_collection_workspace()
+                .expect("workspace"),
+        });
+        let auth = ArtworkPeerAuth {
+            node_id: "peer".to_owned(),
+            timestamp_ms: 123,
+            signature: "proof".to_owned(),
+        };
+        for name in ["invalid.jpg", "redirect.jpg"] {
+            assert!(shared_peer_snapshot(
+                &client,
+                reqwest::Url::parse(&format!("http://{address}/art/{name}")).expect("url"),
+                &auth,
+                name,
+                owner.clone()
+            )
+            .await
+            .is_none());
+        }
+        let download = shared_peer_snapshot(
+            &client,
+            reqwest::Url::parse(&format!("http://{address}/art/original.jpg")).expect("url"),
+            &auth,
+            "original.jpg",
+            owner.clone(),
+        )
+        .await
+        .expect("validated collector");
+        assert_eq!(download.as_ref(), b"\xff\xd8\xff bounded peer");
+        drop(owner);
+        assert_eq!(super::super::shared_artwork::source_capacity().0, 3);
+        let directory = crate::test_tempdir().expect("directory");
+        plurx_core::fs_secure::atomic_write_child_owned(directory.path(), "original.jpg", download)
+            .await
+            .expect("owned publication");
+        assert_eq!(
+            tokio::fs::read(directory.path().join("original.jpg"))
+                .await
+                .expect("bytes"),
+            b"\xff\xd8\xff bounded peer"
+        );
+        assert_eq!(super::super::shared_artwork::source_capacity().0, 4);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn a_peer_miss_sends_node_proof_and_materializes_complete_bytes() {
         let coordinator = ArtworkCoordinator::new();
         async fn peer(
@@ -4295,5 +4750,615 @@ mod reconciliation_scope_tests {
     #[test]
     fn a_fenced_voter_waits_for_the_membership_change_to_settle() {
         assert_eq!(artwork_tick(view(false, true, true)), ArtworkTick::Wait);
+    }
+}
+
+/// Admission state is bounded and never evicts active addresses to admit new ones.
+#[derive(Debug, Default)]
+struct JellyfinArtworkBudget {
+    addresses: HashMap<std::net::IpAddr, JellyfinArtworkWindow>,
+}
+#[derive(Debug)]
+struct JellyfinArtworkWindow {
+    started: Instant,
+    last: Instant,
+    count: u8,
+}
+/// One budget per IPv4 address and per IPv6 /64: a single host owns a whole
+/// /64, so keying full IPv6 addresses would let one host fill the table.
+fn artwork_budget_key(address: std::net::IpAddr) -> std::net::IpAddr {
+    match address {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+                u128::from(v6) & !((1u128 << 64) - 1),
+            )),
+        },
+        v4 => v4,
+    }
+}
+impl JellyfinArtworkBudget {
+    fn admit(&mut self, address: std::net::IpAddr, now: Instant) -> bool {
+        let address = artwork_budget_key(address);
+        self.addresses
+            .retain(|_, window| now.duration_since(window.last) < Duration::from_secs(60));
+        if !self.addresses.contains_key(&address) && self.addresses.len() >= 4096 {
+            return false;
+        }
+        let window = self
+            .addresses
+            .entry(address)
+            .or_insert(JellyfinArtworkWindow {
+                started: now,
+                last: now,
+                count: 0,
+            });
+        if now.duration_since(window.started) >= Duration::from_secs(60) {
+            window.started = now;
+            window.count = 0;
+        }
+        window.last = now;
+        if window.count >= 20 {
+            return false;
+        }
+        window.count += 1;
+        true
+    }
+}
+#[derive(Debug, Clone)]
+struct JellyfinArtworkDemand {
+    mapped: plurx_core::store::JellyfinCatalogArtwork,
+    backdrop: bool,
+    size: ArtworkSize,
+    deadline: Instant,
+    retry_at: Instant,
+}
+pub(super) async fn serve_jellyfin_artwork(
+    state: &AppState,
+    mapped: plurx_core::store::JellyfinCatalogArtwork,
+    backdrop: bool,
+    width: u32,
+    headers: &HeaderMap,
+    address: std::net::IpAddr,
+) -> Result<Response, ApiError> {
+    let size = match width {
+        0..=300 => ArtworkSize::W300,
+        301..=500 => ArtworkSize::W500,
+        _ => ArtworkSize::W780,
+    };
+    let safe_name = safe_artwork_name(&mapped.filename)?;
+    // Open/fstat plus an existing verified digest; no original read, peer
+    // fetch, decoder or resize is allowed in this compatibility request.
+    if let Some(opened) = open_local_artwork(state.artwork_dir.join(safe_name)).await {
+        if let Some(digest) = state
+            .artwork_fetch
+            .verified_digest(safe_name, opened.identity)
+            .await
+        {
+            if let Some(spec) = worker::spec(digest, size, safe_name).await {
+                if let Some(mut response) =
+                    worker::serve_local_variant(state, &spec, headers).await?
+                {
+                    // The URL identifies the current mapped item's artwork,
+                    // which can change. Always revalidate instead of freezing it.
+                    response.headers_mut().insert(
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("private, max-age=0, must-revalidate"),
+                    );
+                    return Ok(response);
+                }
+            }
+        }
+    }
+    // Warm hits do no work; only a miss, which enqueues materialization,
+    // spends this address's budget.
+    admit_jellyfin_artwork(state, address).await?;
+    let key = format!(
+        "{}:{}:{}:{}:{}",
+        mapped.wire_id,
+        backdrop,
+        size.label(),
+        mapped.filename,
+        mapped.generation
+    );
+    let now = Instant::now();
+    let mut pending = state.artwork_fetch.jellyfin_demands.lock().await;
+    pending.retain(|_, d| d.deadline > now);
+    if !pending.contains_key(&key) {
+        if pending.len() >= 256 {
+            return Err(artwork_capacity_error());
+        }
+        pending.insert(
+            key,
+            JellyfinArtworkDemand {
+                mapped,
+                backdrop,
+                size,
+                deadline: now + Duration::from_secs(60),
+                retry_at: now,
+            },
+        );
+        state.artwork_fetch.wake.notify_one();
+    }
+    drop(pending);
+    // A miss is retryable and never an inline original/thumbnail fallback.
+    let mut response = ApiError::NotFound("image derivative").into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+    Ok(response)
+}
+async fn admit_jellyfin_artwork(
+    state: &AppState,
+    address: std::net::IpAddr,
+) -> Result<(), ApiError> {
+    if !state
+        .artwork_fetch
+        .jellyfin_budget
+        .lock()
+        .await
+        .admit(address, Instant::now())
+    {
+        return Err(ApiError::typed(
+            StatusCode::TOO_MANY_REQUESTS,
+            "artwork_admission_limit",
+            "artwork admission limit reached",
+        ));
+    }
+    Ok(())
+}
+/// Runs only in the existing artwork owner; a miss never creates another task.
+async fn jellyfin_artwork_pass(state: &AppState) -> bool {
+    use plurx_core::store::background_jobs::JobKind;
+    if !state
+        .jobs
+        .execution_authority()
+        .may_execute_job(JobKind::ArtworkDerivative)
+        .await
+    {
+        return false;
+    }
+    let now = Instant::now();
+    let intents = {
+        let mut pending = state.artwork_fetch.jellyfin_demands.lock().await;
+        pending.retain(|_, d| d.deadline > now);
+        pending
+            .iter_mut()
+            .filter(|(_, d)| d.retry_at <= now)
+            .take(4)
+            .map(|(key, d)| {
+                d.retry_at = now + Duration::from_secs(5);
+                (key.clone(), d.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    let progressed = !intents.is_empty();
+    for (key, intent) in intents {
+        match state
+            .store
+            .jellyfin_catalog_artwork(intent.mapped.wire_id.clone(), intent.backdrop)
+            .await
+        {
+            Ok(Some(current)) if current == intent.mapped => {}
+            Ok(_) => {
+                state
+                    .artwork_fetch
+                    .jellyfin_demands
+                    .lock()
+                    .await
+                    .remove(&key);
+                continue;
+            }
+            Err(_) => continue,
+        }
+        let name = &intent.mapped.filename;
+        let Ok(safe_name) = safe_artwork_name(name) else {
+            state
+                .artwork_fetch
+                .jellyfin_demands
+                .lock()
+                .await
+                .remove(&key);
+            continue;
+        };
+        let source = match read_verified_local_artwork(
+            &state.artwork_fetch,
+            state.artwork_dir.join(safe_name),
+            safe_name,
+        )
+        .await
+        {
+            LocalArtworkRead::Verified(bytes) => Some(bytes),
+            LocalArtworkRead::Missing => {
+                let membership = state.membership.clone();
+                fetch_and_materialize(
+                    &state.artwork_fetch,
+                    &state.artwork_dir,
+                    safe_name,
+                    move |client| async move {
+                        let peers = membership.reachable_peer_http_urls().await.ok()?;
+                        fetch_peer_artwork(&client, &membership, &peers, safe_name).await
+                    },
+                )
+                .await
+                .ok()
+                .flatten()
+            }
+            LocalArtworkRead::Corrupt(identity) => {
+                quarantine_corrupt_artwork(
+                    &state.artwork_fetch,
+                    &state.artwork_dir,
+                    safe_name,
+                    identity,
+                )
+                .await;
+                None
+            }
+            LocalArtworkRead::Capacity => None,
+        };
+        let Some(source) = source else {
+            continue;
+        };
+        // Source verification/fetch awaited. Fence the exact incarnation,
+        // artwork name and switch generation again before durable admission.
+        if !matches!(state.store.jellyfin_catalog_artwork(intent.mapped.wire_id.clone(),intent.backdrop).await,Ok(Some(current)) if current==intent.mapped)
+        {
+            state
+                .artwork_fetch
+                .jellyfin_demands
+                .lock()
+                .await
+                .remove(&key);
+            continue;
+        }
+        if let Some(spec) = worker::spec(source.digest, intent.size, safe_name).await {
+            worker::request(state, spec).await;
+        }
+        state
+            .artwork_fetch
+            .jellyfin_demands
+            .lock()
+            .await
+            .remove(&key);
+    }
+    progressed
+}
+
+#[cfg(test)]
+mod jellyfin_artwork_tests {
+    use super::*;
+    fn artwork_test_address(n: u32) -> std::net::IpAddr {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + n))
+    }
+    #[test]
+    fn jellyfin_artwork_budget_keys_ipv6_per_64_and_ipv4_per_address() {
+        let mut budget = JellyfinArtworkBudget::default();
+        let now = Instant::now();
+        let host: std::net::IpAddr = "2001:db8:1:2::1".parse().expect("v6");
+        let same_64: std::net::IpAddr = "2001:db8:1:2:ffff::9".parse().expect("v6");
+        let other_64: std::net::IpAddr = "2001:db8:1:3::1".parse().expect("v6");
+        for _ in 0..20 {
+            assert!(budget.admit(host, now));
+        }
+        assert!(
+            !budget.admit(same_64, now),
+            "one /64 shares one miss budget"
+        );
+        assert!(budget.admit(other_64, now));
+        for v4 in ["192.0.2.1", "192.0.2.2"] {
+            assert!(budget.admit(v4.parse().expect("v4"), now));
+        }
+        let mapped: std::net::IpAddr = "::ffff:192.0.2.1".parse().expect("mapped");
+        assert_eq!(
+            artwork_budget_key(mapped),
+            "192.0.2.1".parse::<std::net::IpAddr>().expect("v4")
+        );
+    }
+    #[tokio::test]
+    async fn jellyfin_artwork_cold_demands_deduplicate_without_hashing_or_decoding_originals() {
+        let state = super::tests::derivative_state();
+        let name = "1-poster-c123456789abcdef0.png";
+        tokio::fs::create_dir_all(&state.artwork_dir)
+            .await
+            .expect("fixture directory");
+        tokio::fs::write(
+            state.artwork_dir.join(name),
+            b"synthetic bytes that must not be decoded inline",
+        )
+        .await
+        .expect("fixture source");
+        let mapped = plurx_core::store::JellyfinCatalogArtwork {
+            wire_id: uuid::Uuid::new_v4().simple().to_string(),
+            filename: name.into(),
+            generation: uuid::Uuid::new_v4().simple().to_string(),
+        };
+        for _ in 0..4 {
+            let response = serve_jellyfin_artwork(
+                &state,
+                mapped.clone(),
+                false,
+                500,
+                &HeaderMap::new(),
+                artwork_test_address(0),
+            )
+            .await
+            .expect("cold request");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        assert_eq!(state.artwork_fetch.hashes.load(Ordering::SeqCst), 0);
+        assert_eq!(state.artwork_fetch.derivations.load(Ordering::SeqCst), 0);
+        assert_eq!(state.artwork_fetch.jellyfin_demands.lock().await.len(), 1);
+        // Admission is refused at the fixed queue bound; existing work remains.
+        for n in 1..256u32 {
+            let mut another = mapped.clone();
+            another.wire_id = uuid::Uuid::new_v4().simple().to_string();
+            serve_jellyfin_artwork(
+                &state,
+                another,
+                false,
+                500,
+                &HeaderMap::new(),
+                artwork_test_address(n),
+            )
+            .await
+            .expect("bounded demand");
+        }
+        let mut overflow = mapped;
+        overflow.wire_id = uuid::Uuid::new_v4().simple().to_string();
+        assert!(serve_jellyfin_artwork(
+            &state,
+            overflow,
+            false,
+            500,
+            &HeaderMap::new(),
+            artwork_test_address(0)
+        )
+        .await
+        .is_err());
+        assert_eq!(state.artwork_fetch.jellyfin_demands.lock().await.len(), 256);
+        assert_eq!(state.artwork_fetch.hashes.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn jellyfin_artwork_owner_discards_queued_demand_after_switch_generation_changes() {
+        use plurx_core::domain::{ItemKind, LibraryKind, MetadataPatch, NewItem, NewLibrary};
+        use plurx_core::store::JellyfinEntityKind;
+        let state = super::tests::derivative_state();
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Mapped artwork".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/synthetic".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Mapped".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        state
+            .store
+            .apply_metadata(
+                item,
+                &MetadataPatch {
+                    poster_path: Some("1-poster-c123456789abcdef0.png".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("poster mapping");
+        let wire = state
+            .store
+            .jellyfin_entity_ids(JellyfinEntityKind::Item, &[item])
+            .await
+            .expect("wire")[0]
+            .wire_id
+            .clone();
+        state
+            .store
+            .set_jellyfin_compatibility(true)
+            .await
+            .expect("enable");
+        let old = state
+            .store
+            .jellyfin_catalog_artwork(wire.clone(), false)
+            .await
+            .expect("mapping")
+            .expect("enabled mapping");
+        serve_jellyfin_artwork(
+            &state,
+            old.clone(),
+            false,
+            500,
+            &HeaderMap::new(),
+            artwork_test_address(0),
+        )
+        .await
+        .expect("queued miss");
+        assert_eq!(state.artwork_fetch.jellyfin_demands.lock().await.len(), 1);
+        state
+            .store
+            .set_jellyfin_compatibility(false)
+            .await
+            .expect("disable");
+        state
+            .store
+            .set_jellyfin_compatibility(true)
+            .await
+            .expect("reenable");
+        let current = state
+            .store
+            .jellyfin_catalog_artwork(wire, false)
+            .await
+            .expect("mapping")
+            .expect("new mapping");
+        assert_ne!(old.generation, current.generation);
+        assert!(jellyfin_artwork_pass(&state).await);
+        assert!(state.artwork_fetch.jellyfin_demands.lock().await.is_empty());
+        assert_eq!(state.artwork_fetch.hashes.load(Ordering::SeqCst), 0);
+        assert_eq!(state.artwork_fetch.derivations.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn jellyfin_artwork_native_owner_publishes_warm_private_revalidated_derivatives() {
+        use plurx_core::domain::{ItemKind, LibraryKind, MetadataPatch, NewItem, NewLibrary};
+        use plurx_core::store::JellyfinEntityKind;
+        let state = super::tests::derivative_state();
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Mapped artwork".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/synthetic".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Mapped".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        state
+            .store
+            .apply_metadata(
+                item,
+                &MetadataPatch {
+                    poster_path: Some("1-poster.png".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("poster mapping");
+        let wire = state
+            .store
+            .jellyfin_entity_ids(JellyfinEntityKind::Item, &[item])
+            .await
+            .expect("wire")[0]
+            .wire_id
+            .clone();
+        state
+            .store
+            .set_jellyfin_compatibility(true)
+            .await
+            .expect("enable");
+        let old = state
+            .store
+            .jellyfin_catalog_artwork(wire.clone(), false)
+            .await
+            .expect("mapping")
+            .expect("enabled mapping");
+        super::tests::write_test_image(
+            &state.artwork_dir.join(&old.filename),
+            "testsrc2=size=960x540",
+            &["-frames:v", "1"],
+        );
+        serve_jellyfin_artwork(
+            &state,
+            old.clone(),
+            false,
+            500,
+            &HeaderMap::new(),
+            artwork_test_address(0),
+        )
+        .await
+        .expect("cold miss");
+        assert_eq!(state.artwork_fetch.hashes.load(Ordering::SeqCst), 0);
+        assert_eq!(state.artwork_fetch.derivations.load(Ordering::SeqCst), 0);
+        assert!(jellyfin_artwork_pass(&state).await);
+        assert!(state.artwork_fetch.jellyfin_demands.lock().await.is_empty());
+        assert!(worker::run_one(&state)
+            .await
+            .expect("native derivative owner"));
+        let derivations = state.artwork_fetch.derivations.load(Ordering::SeqCst);
+        let warm = serve_jellyfin_artwork(
+            &state,
+            old.clone(),
+            false,
+            500,
+            &HeaderMap::new(),
+            artwork_test_address(0),
+        )
+        .await
+        .expect("warm derivative");
+        assert_eq!(warm.status(), StatusCode::OK);
+        assert_eq!(
+            warm.headers()[header::CACHE_CONTROL],
+            "private, max-age=0, must-revalidate"
+        );
+        let etag = warm.headers()[header::ETAG].clone();
+        assert!(!axum::body::to_bytes(warm.into_body(), 8 * 1024 * 1024)
+            .await
+            .expect("warm bytes")
+            .is_empty());
+        // Native serving verifies the published derivative on its first read.
+        // Subsequent validator hits must not hash either source or derivative.
+        let hashes = state.artwork_fetch.hashes.load(Ordering::SeqCst);
+        let mut conditional = HeaderMap::new();
+        conditional.insert(header::IF_NONE_MATCH, etag);
+        let unchanged = serve_jellyfin_artwork(
+            &state,
+            old,
+            false,
+            500,
+            &conditional,
+            artwork_test_address(0),
+        )
+        .await
+        .expect("conditional derivative");
+        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            unchanged.headers()[header::CACHE_CONTROL],
+            "private, max-age=0, must-revalidate"
+        );
+        assert_eq!(state.artwork_fetch.hashes.load(Ordering::SeqCst), hashes);
+        assert_eq!(
+            state.artwork_fetch.derivations.load(Ordering::SeqCst),
+            derivations
+        );
+        assert!(state.artwork_fetch.jellyfin_demands.lock().await.is_empty());
+    }
+    #[test]
+    fn jellyfin_artwork_budget_bounds_addresses_without_evicting_active_windows() {
+        let mut budget = JellyfinArtworkBudget::default();
+        let now = Instant::now();
+        let address = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+        for _ in 0..20 {
+            assert!(budget.admit(address, now));
+        }
+        assert!(!budget.admit(address, now));
+        for n in 1..4096 {
+            assert!(budget.admit(std::net::IpAddr::V4(std::net::Ipv4Addr::from(n)), now));
+        }
+        assert_eq!(budget.addresses.len(), 4096);
+        assert!(!budget.admit(std::net::IpAddr::V4(std::net::Ipv4Addr::from(5000)), now));
+        assert!(!budget.admit(address, now + Duration::from_secs(59)));
+        assert!(budget.admit(address, now + Duration::from_secs(60)));
+        assert!(budget.admit(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::from(5000)),
+            now + Duration::from_secs(60)
+        ));
+        assert_eq!(budget.addresses.len(), 2);
     }
 }

@@ -1,0 +1,149 @@
+{
+  "real-capture.json": {
+    "baseline": {
+      "bytes": 3847419,
+      "seconds": 3.6932963819708675,
+      "max_one_second_packet_bits": 16349776,
+      "psnr_mean": 54.62083333333334,
+      "psnr_min": 50.2,
+      "ssim_mean": 0.9969867708333333,
+      "ssim_min": 0.993278
+    },
+    "qmax24": {
+      "bytes": 3847419,
+      "seconds": 3.708116743946448,
+      "max_one_second_packet_bits": 16349776,
+      "psnr_mean": 54.62083333333334,
+      "psnr_min": 50.2,
+      "ssim_mean": 0.9969867708333333,
+      "ssim_min": 0.993278
+    },
+    "qmax18": {
+      "bytes": 3916011,
+      "seconds": 3.670541360974312,
+      "max_one_second_packet_bits": 16360192,
+      "psnr_mean": 54.74604166666666,
+      "psnr_min": 52.92,
+      "ssim_mean": 0.9970964583333334,
+      "ssim_min": 0.995356
+    }
+  },
+  "real-1800.json": {
+    "baseline": {
+      "bytes": 1758560,
+      "seconds": 3.5807768979575485,
+      "max_one_second_packet_bits": 7285968,
+      "psnr_mean": 48.58208333333334,
+      "psnr_min": 47.75,
+      "ssim_mean": 0.987048625,
+      "ssim_min": 0.984222
+    },
+    "qmax18": {
+      "bytes": 2012694,
+      "seconds": 3.5801043671090156,
+      "max_one_second_packet_bits": 8191512,
+      "psnr_mean": 48.74541666666667,
+      "psnr_min": 47.75,
+      "ssim_mean": 0.987340375,
+      "ssim_min": 0.984205
+    }
+  },
+  "real-3600.json": {
+    "baseline": {
+      "bytes": 1880311,
+      "seconds": 3.963251441018656,
+      "max_one_second_packet_bits": 7804464,
+      "psnr_mean": 50.954791666666665,
+      "psnr_min": 49.64,
+      "ssim_mean": 0.9922352916666667,
+      "ssim_min": 0.990236
+    },
+    "qmax18": {
+      "bytes": 2180470,
+      "seconds": 3.9331509578041732,
+      "max_one_second_packet_bits": 8818000,
+      "psnr_mean": 51.11208333333334,
+      "psnr_min": 49.83,
+      "ssim_mean": 0.9924273958333334,
+      "ssim_min": 0.990152
+    }
+  },
+  "pressure-result.json": {
+    "baseline": {
+      "bytes": 1828972,
+      "seconds": 3.4862171090207994,
+      "max_one_second_packet_bits": 7408936,
+      "psnr_mean": 52.240208333333335,
+      "psnr_min": 50.3,
+      "ssim_mean": 0.9945376041666667,
+      "ssim_min": 0.992906
+    },
+    "qmax18": {
+      "bytes": 1908801,
+      "seconds": 3.430891543859616,
+      "max_one_second_packet_bits": 7903192,
+      "psnr_mean": 52.34770833333334,
+      "psnr_min": 52.2,
+      "ssim_mean": 0.994621875,
+      "ssim_min": 0.994533
+    }
+  },
+  "pressure2m-result.json": {
+    "baseline": {
+      "bytes": 456218,
+      "packet_bits": 3639520,
+      "seconds": 3.9876326809171587,
+      "peak_one_second_packet_bits": 1831040,
+      "psnr_mean": 47.79541666666666,
+      "psnr_min": 47.53,
+      "ssim_mean": 0.9885187916666666,
+      "ssim_min": 0.987774
+    },
+    "qmax18": {
+      "bytes": 1416138,
+      "packet_bits": 11318880,
+      "seconds": 3.933771257987246,
+      "peak_one_second_packet_bits": 5751496,
+      "psnr_mean": 51.66583333333333,
+      "psnr_min": 51.62,
+      "ssim_mean": 0.9940839791666667,
+      "ssim_min": 0.99402
+    }
+  },
+  "pressure2m-effort1-result.json": {
+    "effort1": {
+      "bytes": 516220,
+      "packet_bits": 4119536,
+      "seconds": 3.447493348037824,
+      "peak_one_second_packet_bits": 2246528,
+      "psnr_mean": 48.10333333333333,
+      "psnr_min": 45.98,
+      "ssim_mean": 0.9894728958333333,
+      "ssim_min": 0.985479
+    }
+  },
+  "real-1800-effort1.json": {
+    "effort1": {
+      "bytes": 1825724,
+      "packet_bits": 14584552,
+      "seconds": 3.6100821108557284,
+      "peak_one_second_packet_bits": 7468272,
+      "psnr_mean": 48.57583333333333,
+      "psnr_min": 47.64,
+      "ssim_mean": 0.9872836875000001,
+      "ssim_min": 0.984227
+    }
+  },
+  "real-3600-effort1.json": {
+    "effort1": {
+      "bytes": 1800995,
+      "packet_bits": 14387848,
+      "seconds": 3.8991237690206617,
+      "peak_one_second_packet_bits": 7385288,
+      "psnr_mean": 50.82208333333333,
+      "psnr_min": 49.46,
+      "ssim_mean": 0.99228825,
+      "ssim_min": 0.989828
+    }
+  }
+}

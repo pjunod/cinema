@@ -7,7 +7,7 @@ the original proposal; product changes remain unimplemented in this task.
 
 Companion to [the HLS startup status](WEB-HLS-STARTUP-RECOVERY-STATUS.md)
 and [the freeze recovery repair](WEB-PLAYBACK-FREEZE-RECOVERY-IMPLEMENTATION.md).
-This investigation covers reference film G's failed Safari startup on nynuc. It extends
+This investigation covers reference film G's failed Safari startup on media1. It extends
 startup recovery to the native HLS transport, which the deployed hls.js
 startup controller does not cover. Build instructions now live in the
 [implementation handoff](NATIVE-HLS-STARTUP-IMPLEMENTATION.md).
@@ -34,7 +34,7 @@ on web, Apple and Android, including errors from `open_source_fence`.
 
 **The initiating delay has a narrower evidentiary limit.** The media-origin
 probe exceeded five seconds, and initialization remained unavailable through
-two five-second publication deadlines. The file is on QNAP NFS. Later exact
+two five-second publication deadlines. The file is on NAS NFS. Later exact
 probes took 58 ms for source verification and 117 ms for the resume seek.
 Transient source/storage latency is the leading explanation. No retained
 syscall trace or NAS event establishes disk spin-up, a slow NFS read, or
@@ -44,7 +44,7 @@ another specific storage mechanism. Do not present one as proved.
 
 The running build was `v0.3.0-2633-gc9e4edf4`, commit
 `c9e4edf451e12247a7aa4188903e5ba36888e7e9`. Source was read using
-`git archive` from nynuc's deployment checkout. The local documentation
+`git archive` from media1's deployment checkout. The local documentation
 checkout is older and has unrelated edits; its player is not the incident
 implementation. Symbol names below refer to the deployed source and must be
 rechecked against the intended implementation base. Fable reviewed main
@@ -96,7 +96,7 @@ cancellation leak.
 Read-only checks found no kernel messages in the incident window. The
 available sysstat sample ending at 00:50:03 predates the failure; its idle
 CPU and zero NFS retransmissions cannot rule out a later short stall.
-Cumulative NFS counters cannot attribute latency to this attempt. QNAP SSH
+Cumulative NFS counters cannot attribute latency to this attempt. NAS SSH
 authentication was denied, so NAS-side events were unavailable.
 
 Bounded probes used the deployed `/usr/lib/jellyfin-ffmpeg/ffprobe`, including

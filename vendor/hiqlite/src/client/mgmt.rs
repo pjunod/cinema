@@ -57,6 +57,22 @@ pub struct LocalDbRaftSnapshot {
     pub last_applied_index: Option<u64>,
 }
 
+/// Address-free membership identity from one local Raft watch borrow.
+/// Effective membership can precede application: `committed` is false until
+/// the corresponding log entry is covered by this node's applied watermark.
+/// A changed log identity matters even when member IDs are unchanged (ABA).
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalDbMembershipSnapshot {
+    pub running: bool,
+    pub node_id: NodeId,
+    /// Membership entry (leader term, leader node ID, log index).
+    pub membership_log: Option<(u64, NodeId, u64)>,
+    pub members: std::collections::BTreeSet<NodeId>,
+    pub voters: std::collections::BTreeSet<NodeId>,
+    pub committed: bool,
+}
+
 /// A leader-issued database commit watermark backed by a quorum heartbeat.
 ///
 /// The term and leader identity describe the leadership proof, not the term
@@ -92,6 +108,33 @@ pub struct LocalDbRaftMetrics {
 
 #[cfg(feature = "sqlite")]
 impl LocalDbRaftMetrics {
+    pub(crate) fn from_receiver(receiver: watch::Receiver<RaftMetrics<NodeId, Node>>) -> Self {
+        Self { receiver }
+    }
+    /// Observe the exact local membership without SQL, management IO or awaits.
+    /// Initial/closed/unapplied observations cannot establish a committed
+    /// empty-remote roster merely because an old peer directory is empty.
+    #[must_use]
+    pub fn membership_snapshot(&self) -> LocalDbMembershipSnapshot {
+        let metrics = self.receiver.borrow();
+        let membership = &metrics.membership_config;
+        let log = membership.log_id().as_ref();
+        let running = metrics.running_state.is_ok() && self.receiver.has_changed().is_ok();
+        let committed = running
+            && log
+                .zip(metrics.last_applied.as_ref())
+                .is_some_and(|(entry, applied)| entry.index < applied.index || entry == applied);
+        LocalDbMembershipSnapshot {
+            running,
+            node_id: metrics.id,
+            membership_log: log
+                .map(|entry| (entry.leader_id.term, entry.leader_id.node_id, entry.index)),
+            members: membership.nodes().map(|(id, _)| *id).collect(),
+            voters: membership.voter_ids().collect(),
+            committed,
+        }
+    }
+
     /// Copy the latest in-process Raft observation without Store or network IO.
     #[must_use]
     pub fn snapshot(&self) -> LocalDbRaftSnapshot {
@@ -230,6 +273,152 @@ impl Client {
         Ok(LocalDbRaftMetrics {
             receiver: state.raft_db.raft.metrics(),
         })
+    }
+
+    /// The same caller-owned admission installed before listeners. Remote or
+    /// unguarded local clients cannot manufacture a replacement context.
+    pub fn local_membership_admission(
+        &self,
+    ) -> Result<Arc<dyn crate::membership_admission::MembershipAdmission>, Error> {
+        self.inner
+            .state
+            .as_ref()
+            .and_then(|state| state.membership_admission.clone())
+            .ok_or_else(|| Error::Error("local startup membership admission is unavailable".into()))
+    }
+
+    /// Submit one promotion request after authenticated clock observation.
+    /// There is deliberately no redirect/retry loop: a transport failure may
+    /// mean the proposal was submitted, so callers must reconcile the applied
+    /// watch rather than acquire a replacement proof and submit again.
+    #[cfg(feature = "sqlite")]
+    pub async fn promote_after_clock_observation(
+        &self,
+        deadline: time::Instant,
+    ) -> Result<(), Error> {
+        let state = self
+            .inner
+            .state
+            .as_ref()
+            .ok_or_else(|| Error::Error("startup promotion requires a local node".into()))?;
+        let policy = state
+            .membership_admission
+            .as_ref()
+            .ok_or_else(|| Error::Error("startup promotion requires installed admission".into()))?;
+        // Capture before the first await, including any original refusal.
+        let original = policy.prepare(
+            crate::membership_admission::MembershipAcquisition::Promote { node_id: state.id },
+        );
+        let metrics = state.raft_db.raft.metrics().borrow().clone();
+        if metrics
+            .membership_config
+            .voter_ids()
+            .any(|id| id == state.id)
+        {
+            // Effective membership can precede application. This is already
+            // submitted reconciliation, not authority for another proposal.
+            return Ok(());
+        }
+        if !crate::helpers::membership_is_applied(&metrics) {
+            return Err(Error::Error(
+                "startup promotion requires applied membership".into(),
+            ));
+        }
+        let local = metrics
+            .membership_config
+            .membership()
+            .get_node(&state.id)
+            .ok_or_else(|| {
+                Error::Error("startup promotion target is absent from membership".into())
+            })?;
+        let leader_id = metrics
+            .current_leader
+            .ok_or_else(|| Error::Error("startup promotion has no current leader".into()))?;
+        let leader = metrics
+            .membership_config
+            .membership()
+            .get_node(&leader_id)
+            .ok_or_else(|| {
+                Error::Error("startup promotion leader is absent from membership".into())
+            })?;
+        let payload = crate::helpers::serialize(&crate::network::management::LearnerReq {
+            node_id: state.id,
+            addr_api: local.addr_api.clone(),
+            addr_raft: local.addr_raft.clone(),
+        })?;
+        let scheme = if self.inner.tls_config.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        let url = format!(
+            "{scheme}://{}/cluster/become_member/sqlite",
+            leader.addr_api
+        );
+        let client = self.inner.client.as_ref().ok_or_else(|| {
+            Error::Error("startup promotion has no configured management client".into())
+        })?;
+        let request = client
+            .post(url)
+            .header(HEADER_NAME_SECRET, &state.secret_api)
+            .body(payload);
+        if time::Instant::now() >= deadline {
+            return Err(Error::Error(
+                "startup promotion budget expired before submission".into(),
+            ));
+        }
+        original.redeem()?;
+        let response = time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| {
+                Error::Error("startup promotion outcome is unknown after deadline".into())
+            })??;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let error = time::timeout_at(deadline, response.json::<Error>())
+            .await
+            .map_err(|_| {
+                Error::Error("startup promotion response is unknown after deadline".into())
+            })??;
+        Err(error)
+    }
+
+    /// Activate deferred vendor jobs only after this actual local member has
+    /// applied its vote. Repeated completion never starts a second job owner.
+    #[cfg(feature = "sqlite")]
+    pub fn finish_clock_observation(&self) -> Result<(), Error> {
+        let state = self
+            .inner
+            .state
+            .as_ref()
+            .ok_or_else(|| Error::Error("startup completion requires a local node".into()))?;
+        let metrics = state.raft_db.raft.metrics().borrow().clone();
+        if !crate::helpers::membership_is_applied(&metrics)
+            || !metrics
+                .membership_config
+                .voter_ids()
+                .any(|id| id == state.id)
+        {
+            return Err(Error::Error(
+                "startup completion requires an applied local vote".into(),
+            ));
+        }
+        #[cfg(feature = "backup")]
+        if let Some(config) = state
+            .startup_backup
+            .lock()
+            .map_err(|_| Error::Error("startup backup ownership lock is poisoned".into()))?
+            .take()
+        {
+            crate::backup::start_cron(
+                self.clone(),
+                config,
+                #[cfg(feature = "s3")]
+                state.s3_config.clone(),
+            );
+        }
+        Ok(())
     }
 
     /// Obtain the process-local database snapshot instrumentation handle.
@@ -475,14 +664,127 @@ impl Client {
         }
     }
 
-    /// Perform a graceful shutdown for a local Raft node, or close the owned
-    /// streams and rate ticker for a remote client without stopping servers.
-    ///
-    /// The shutdown adds a 10 delay on purpose for smoothing out Kubernetes rolling releases and
-    /// make the whole process more graceful, because a whole new leader election might be necessary.
-    ///
-    /// In future versions, there will be the possibility to trigger a graceful leader election
-    /// upfront, but this has not been stabilized in this version.
+    /// Whether the staged factory transferred actual listener ownership.
+    pub fn has_retained_startup_resources(&self) -> bool {
+        self.inner
+            .startup_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Drain a handed-off staged node without leave/remove proposals or an
+    /// outer cancellation deadline. The caller must retain this future and
+    /// its directory lease through terminal completion.
+    pub async fn shutdown_retained_startup(&self) -> Result<(), Error> {
+        let _drain = self.inner.startup_drain.lock().await;
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Error("retained startup cleanup requires a local client".into())
+        })?;
+        state.is_shutting_down.store(true, Ordering::Relaxed);
+        if let Some(listeners) = self
+            .inner
+            .startup_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            listeners.stop_admitting();
+        }
+        // Shut admission for both groups before awaiting either group's work.
+        #[cfg(feature = "cache")]
+        {
+            state
+                .raft_cache
+                .is_raft_stopped
+                .store(true, Ordering::Relaxed);
+            state.raft_cache.snapshot_executor.request_shutdown();
+        }
+        #[cfg(feature = "sqlite")]
+        {
+            state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
+            state.raft_db.snapshot_executor.request_shutdown();
+        }
+        #[cfg(feature = "cache")]
+        {
+            state
+                .raft_cache
+                .is_raft_stopped
+                .store(true, Ordering::Relaxed);
+            state.raft_cache.snapshot_executor.request_shutdown();
+            while !state
+                .raft_cache
+                .snapshot_executor
+                .wait_for_shutdown(Duration::from_secs(5))
+                .await
+            {
+                tracing::warn!("retained startup cleanup still owns accepted cache snapshot work");
+            }
+            state.raft_cache.raft.shutdown().await?;
+            if let Some(wal) = &state.raft_cache.shutdown_handle {
+                wal.shutdown().await?;
+            }
+            let _ = self
+                .inner
+                .tx_client_cache
+                .send_async(ClientStreamReq::Shutdown)
+                .await;
+        }
+        #[cfg(feature = "sqlite")]
+        {
+            state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
+            state.raft_db.snapshot_executor.request_shutdown();
+            while !state
+                .raft_db
+                .snapshot_executor
+                .wait_for_shutdown(Duration::from_secs(5))
+                .await
+            {
+                tracing::warn!("retained startup cleanup still owns accepted SQLite snapshot work");
+            }
+            state.raft_db.raft.shutdown().await?;
+            state.raft_db.shutdown_handle.shutdown().await?;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            state
+                .raft_db
+                .sql_writer
+                .send_async(WriterRequest::Shutdown(tx))
+                .await
+                .map_err(|error| Error::Error(error.to_string().into()))?;
+            rx.await
+                .map_err(|error| Error::Error(error.to_string().into()))?;
+            let _ = self
+                .inner
+                .tx_client_db
+                .send_async(ClientStreamReq::Shutdown)
+                .await;
+        }
+        self.inner.stream_shutdown.send_replace(true);
+        let handles = self
+            .inner
+            .background_handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle
+                .await
+                .map_err(|error| Error::Error(error.to_string().into()))?;
+        }
+        let listeners = self
+            .inner
+            .startup_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(mut listeners) = listeners {
+            listeners.finish().await?;
+        }
+        Ok(())
+    }
+
+    /// Ordinary client shutdown retains its existing rolling-release policy.
     pub async fn shutdown(&self) -> Result<(), Error> {
         let primary = if let Some(state) = &self.inner.state {
             match tokio::time::timeout(
@@ -829,8 +1131,8 @@ async fn request_snapshot_transport_status_sqlite(
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::{
-        RAFT_SHUTDOWN_TIMEOUT, SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES,
         request_snapshot_transport_status_sqlite, snapshot_transport_peer_from_current_membership,
+        RAFT_SHUTDOWN_TIMEOUT, SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES,
     };
     use crate::Node;
     use openraft::{Membership, RaftMetrics, StoredMembership};
@@ -936,12 +1238,15 @@ mod tests {
             addr_api: address,
             ..peer
         };
-        assert!(
-            request_snapshot_transport_status_sqlite(&client, "exact-test-secret", false, &peer,)
-                .await
-                .expect("404 is compatible")
-                .is_none()
-        );
+        assert!(request_snapshot_transport_status_sqlite(
+            &client,
+            "exact-test-secret",
+            false,
+            &peer,
+        )
+        .await
+        .expect("404 is compatible")
+        .is_none());
         server.await.expect("join 404 server");
     }
 
@@ -1025,6 +1330,62 @@ mod tests {
             RAFT_SHUTDOWN_TIMEOUT >= deliberate_waits + Duration::from_secs(10),
             "shutdown must retain time for Raft and durable-writer drains after cluster waits"
         );
+    }
+
+    #[test]
+    fn local_membership_watch_preserves_commit_boundary_joint_members_and_aba() {
+        let mut metrics = RaftMetrics::<u64, Node>::new_initial(1);
+        let (sender, receiver) = tokio::sync::watch::channel(metrics.clone());
+        let watch = super::LocalDbRaftMetrics { receiver };
+        assert!(!watch.membership_snapshot().committed);
+        let nodes = BTreeMap::from_iter((1..=4).map(|id| {
+            (
+                id,
+                Node {
+                    id,
+                    addr_raft: format!("private-raft-{id}"),
+                    addr_api: format!("private-api-{id}"),
+                },
+            )
+        }));
+        let log = openraft::LogId::new(openraft::CommittedLeaderId::new(2, 1), 7);
+        metrics.membership_config = Arc::new(StoredMembership::new(
+            Some(log),
+            Membership::new(vec![BTreeSet::from([1, 2]), BTreeSet::from([2, 3])], nodes),
+        ));
+        sender.send_replace(metrics.clone());
+        let pending = watch.membership_snapshot();
+        assert_eq!(pending.members, BTreeSet::from([1, 2, 3, 4]));
+        assert_eq!(pending.voters, BTreeSet::from([1, 2, 3]));
+        assert_eq!(pending.membership_log, Some((2, 1, 7)));
+        assert!(!pending.committed);
+        metrics.last_applied = Some(log);
+        sender.send_replace(metrics.clone());
+        let committed = watch.membership_snapshot();
+        assert!(committed.committed);
+        let newer = openraft::LogId::new(openraft::CommittedLeaderId::new(3, 2), 9);
+        metrics.membership_config = Arc::new(StoredMembership::new(
+            Some(newer),
+            metrics.membership_config.membership().clone(),
+        ));
+        sender.send_replace(metrics.clone());
+        let aba = watch.membership_snapshot();
+        assert_eq!(aba.members, committed.members);
+        assert_ne!(aba.membership_log, committed.membership_log);
+        assert!(!aba.committed);
+        metrics.last_applied = Some(newer);
+        sender.send_replace(metrics.clone());
+        assert!(watch.membership_snapshot().committed);
+        // The same index from a different leader is not this applied entry.
+        metrics.last_applied = Some(openraft::LogId::new(
+            openraft::CommittedLeaderId::new(3, 1),
+            9,
+        ));
+        sender.send_replace(metrics);
+        assert!(!watch.membership_snapshot().committed);
+        drop(sender);
+        let closed = watch.membership_snapshot();
+        assert!(!closed.running && !closed.committed);
     }
 
     #[test]
@@ -1132,11 +1493,9 @@ mod tests {
         .into_db_quorum_watermark()
         .expect_err("a malformed advertised protocol is not an old leader");
 
-        assert!(
-            error
-                .to_string()
-                .contains("invalid local_read_protocol_version")
-        );
+        assert!(error
+            .to_string()
+            .contains("invalid local_read_protocol_version"));
     }
 
     #[tokio::test]
@@ -1187,33 +1546,25 @@ mod tests {
             .await
             .expect("remote shutdown deadline")
             .expect("remote shutdown");
-        assert!(
-            operation
-                .await
-                .expect("stream operation did not panic")
-                .is_err()
-        );
-        assert!(
-            db_rate
-                .await
-                .expect("DB rate waiter did not panic")
-                .is_err()
-        );
+        assert!(operation
+            .await
+            .expect("stream operation did not panic")
+            .is_err());
+        assert!(db_rate
+            .await
+            .expect("DB rate waiter did not panic")
+            .is_err());
         #[cfg(feature = "cache")]
-        assert!(
-            cache_rate
-                .await
-                .expect("cache rate waiter did not panic")
-                .is_err()
-        );
+        assert!(cache_rate
+            .await
+            .expect("cache rate waiter did not panic")
+            .is_err());
         assert!(*client.inner.stream_shutdown.borrow());
-        assert!(
-            client
-                .inner
-                .background_handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty()
-        );
+        assert!(client
+            .inner
+            .background_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
     }
 }

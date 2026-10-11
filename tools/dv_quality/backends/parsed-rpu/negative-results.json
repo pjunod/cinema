@@ -1,0 +1,33 @@
+{
+  "scope": "controlled-refusal",
+  "results": [
+    {
+      "control": "missing",
+      "exit_status": 1,
+      "expected_reason": "Probe failed: RPU input exists",
+      "renderer_started": false,
+      "frame_writes": false
+    },
+    {
+      "control": "truncated",
+      "exit_status": 1,
+      "expected_reason": "RPU parser rejected input: Failed parsing RPU: Invalid RPU length: 16",
+      "renderer_started": false,
+      "frame_writes": false
+    },
+    {
+      "control": "bounded",
+      "exit_status": 1,
+      "expected_reason": "Probe failed: unsupported bounded vdr_in_max residual clipping",
+      "renderer_started": false,
+      "frame_writes": false
+    },
+    {
+      "control": "missing-el",
+      "exit_status": 1,
+      "expected_reason": "Probe failed: missing EL rejected for requested residual reconstruction",
+      "renderer_started": false,
+      "frame_writes": false
+    }
+  ]
+}

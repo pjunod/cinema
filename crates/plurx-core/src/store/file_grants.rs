@@ -44,6 +44,12 @@ pub struct NewFileGrant {
 pub trait FileGrantStore: Send + Sync {
     async fn create_file_grant(&self, grant: NewFileGrant) -> Result<(), StoreError>;
     async fn file_grant_by_hash(&self, token_hash: &str) -> Result<Option<FileGrant>, StoreError>;
+    /// Internal exact-reference read; the public bearer endpoint remains hash-only.
+    async fn file_grant_by_id(&self, _id: &str) -> Result<Option<FileGrant>, StoreError> {
+        Err(StoreError::Credential(
+            "grant reference lookup unsupported by this Store".into(),
+        ))
+    }
     async fn revoke_file_grant(&self, id: &str, user_id: i64, now: i64)
         -> Result<bool, StoreError>;
     async fn revoke_file_grants_for_user(&self, user_id: i64, now: i64) -> Result<(), StoreError>;

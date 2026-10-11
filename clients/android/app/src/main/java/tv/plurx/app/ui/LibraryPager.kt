@@ -74,6 +74,8 @@ internal class LibraryPager(
         drive = if (enabled && !invalidated) scope.launch { ensure(Int.MAX_VALUE) } else null
     }
 
+    fun setWatchFilter(filter: WatchFilter) = setDriveToCompletion(filter != WatchFilter.Everything)
+
     private suspend fun loadLegacyWholeCollection() {
         val all = mutableListOf<Item>()
         for (id in ids) {

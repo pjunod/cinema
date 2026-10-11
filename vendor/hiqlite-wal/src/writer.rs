@@ -90,6 +90,7 @@ pub fn spawn(
     wal_size: u32,
     wal_deep_integrity_check: bool,
     meta: Arc<RwLock<Metadata>>,
+    staged: bool,
 ) -> Result<
     (
         flume::Sender<Action>,
@@ -103,6 +104,8 @@ pub fn spawn(
     // that case, or should be maybe `auto-heal` as much as possible?
     let mut buf = Vec::with_capacity(32);
     set.check_integrity(&mut buf, wal_deep_integrity_check)?;
+    #[cfg(unix)]
+    set.cleanup_reclaim_stage(wal_size)?;
     if set.files.is_empty() {
         buf.clear();
         set.add_file(wal_size, &mut buf)?;
@@ -171,12 +174,41 @@ pub fn spawn(
         result
     });
 
+    let mut partial = PartialStartupWriter::new(staged, &tx);
     if let LogSync::IntervalMillis(millis) = &sync {
         let interval = time::interval(Duration::from_millis(*millis));
         spawn_syncer(tx.clone(), interval);
     }
 
+    partial.handoff();
     Ok((tx, wal_locked, status))
+}
+
+/// Used only inside the owned blocking constructor. Failure cannot abandon
+/// the writer while its interval syncer retains a sender.
+pub(crate) struct PartialStartupWriter(Option<flume::Sender<Action>>);
+
+impl PartialStartupWriter {
+    pub(crate) fn new(staged: bool, writer: &flume::Sender<Action>) -> Self {
+        Self(staged.then(|| writer.clone()))
+    }
+
+    pub(crate) fn handoff(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for PartialStartupWriter {
+    fn drop(&mut self) {
+        if let Some(writer) = self.0.take() {
+            let (tx, ack) = oneshot::channel();
+            if writer.send(Action::Shutdown(tx)).is_err() || ack.blocking_recv().is_err() {
+                tracing::error!(
+                    "staged partial WAL writer shutdown failed; no clean termination claim"
+                );
+            }
+        }
+    }
 }
 
 fn spawn_syncer(tx_writer: flume::Sender<Action>, mut interval: Interval) {
@@ -227,6 +259,9 @@ fn run(
                 let mut res = Ok(());
                 {
                     let mut active = wal.active();
+                    // A failed removal may still have changed the physical append head.
+                    // Reopen it rather than using a missing/stale writable mapping.
+                    active.mmap_mut()?;
                     while let Ok(Some((id, bytes))) = rx.recv() {
                         if bytes.len() > data_len_limit {
                             panic!(
@@ -238,11 +273,13 @@ fn run(
 
                         if !active.has_space(bytes.len() as u32) {
                             buf.clear();
-                            wal.roll_over(wal_size, &mut buf)?;
-                            {
+                            let rolled = {
                                 let mut lock = wal_locked.write().unwrap();
+                                let result = wal.roll_over(wal_size, &mut buf);
                                 lock.refresh_from_no_mmap(&wal);
-                            }
+                                result
+                            };
+                            rolled?;
                             active = wal.active();
                         }
 
@@ -291,11 +328,13 @@ fn run(
                 // TODO fixed 4kB -> make configurable?
                 if wal.active().space_left() < 4 * 1024 {
                     buf.clear();
-                    wal.roll_over(wal_size, &mut buf)?;
-                    {
+                    let rolled = {
                         let mut lock = wal_locked.write().unwrap();
+                        let result = wal.roll_over(wal_size, &mut buf);
                         lock.refresh_from_no_mmap(&wal);
-                    }
+                        result
+                    };
+                    rolled?;
                 }
             }
             Action::Remove {
@@ -333,18 +372,21 @@ fn run(
                     // the shared guard from refresh through mmap/read, so an
                     // old incarnation can never open a replacement pathname.
                     let mut layout = wal_locked.write().unwrap();
-                    match wal.shift_delete_logs(from, until, wal_size, &mut buf, &mut buf_logs) {
-                        Ok(_) => {
-                            // the last_log may be none if logs are truncated
-                            if last_log.is_some() {
-                                meta.write()?.last_purged_log_id = last_log;
-                                Metadata::write(meta.clone(), &wal.base_path)?;
-                            }
-                            layout.refresh_from_no_mmap(&wal);
-                            Ok(())
+                    let shifted =
+                        wal.shift_delete_logs(from, until, wal_size, &mut buf, &mut buf_logs);
+                    // Deletion or atomic replacement may have succeeded before a later
+                    // durability error. Publish the actual layout on every result, and
+                    // before metadata publication can fail.
+                    wal.active = wal.files.len().checked_sub(1);
+                    layout.refresh_from_no_mmap(&wal);
+                    shifted.and_then(|()| {
+                        // the last_log may be none if logs are truncated
+                        if last_log.is_some() {
+                            meta.write()?.last_purged_log_id = last_log;
+                            Metadata::write(meta.clone(), &wal.base_path)?;
                         }
-                        Err(err) => Err(err),
-                    }
+                        Ok(())
+                    })
                 };
                 match &result {
                     Ok(()) => status.record_compaction(Some(wal.active().id_until)),
@@ -352,6 +394,11 @@ fn run(
                 }
                 if ack.send(result).is_err() {
                     debug!("WAL remove response receiver closed before completion");
+                }
+                if !wal.writable_head_ready(wal_size) {
+                    return Err(Error::Integrity(
+                        "WAL removal left no complete writable append target".into(),
+                    ));
                 }
             }
             Action::Vote { value, ack } => {
@@ -445,6 +492,7 @@ mod tests {
             WAL_SIZE,
             false,
             meta.clone(),
+            false,
         )?;
         Ok((writer, meta, wal))
     }
@@ -453,6 +501,188 @@ mod tests {
         let (ack, rx) = oneshot::channel();
         writer.send(Action::Shutdown(ack)).unwrap();
         rx.blocking_recv().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn both_append_rollover_triggers_reclaim_a_previously_purged_active_front() -> Result<(), Error>
+    {
+        for (name, payload_len, first_last, next_id) in [
+            ("space-forced", WAL_SIZE as usize / 4, 3, 4),
+            ("preemptive", WAL_SIZE as usize / 3 - 1000, 2, 3),
+        ] {
+            let path = test_path(name);
+            let (writer, _meta, layout) = start_writer(&path)?;
+            let append = |from, until| -> Result<(), Error> {
+                let (entries, receive) = flume::bounded(2);
+                let (ack, acknowledged) = oneshot::channel();
+                writer
+                    .send(Action::Append {
+                        rx: receive,
+                        callback: Box::new(|| {}),
+                        ack,
+                    })
+                    .unwrap();
+                for id in from..=until {
+                    entries
+                        .send(Some((id, vec![id as u8; payload_len])))
+                        .unwrap();
+                }
+                entries.send(None).unwrap();
+                acknowledged.blocking_recv().unwrap()
+            };
+            append(1, first_last)?;
+            let mut reader = layout.read().unwrap().clone_no_map();
+            assert_eq!(reader.files.len(), 1);
+            reader.active().mmap()?;
+            let mut memo = None;
+            reader
+                .active()
+                .read_logs(1, 1, &mut memo, &mut Vec::new())?;
+            let (ack, acknowledged) = oneshot::channel();
+            writer
+                .send(Action::Remove {
+                    from: 0,
+                    until: 2,
+                    last_log: Some(serialize(&LogId {
+                        leader_id: LeaderId {
+                            term: 1,
+                            node_id: 1_u64,
+                        },
+                        index: 2,
+                    })?),
+                    ack,
+                })
+                .unwrap();
+            acknowledged.blocking_recv().unwrap()?;
+            {
+                let current = layout.read().unwrap();
+                assert_eq!(current.files.len(), 1);
+                assert_eq!(
+                    fs::metadata(&current.files[0].path)?.len(),
+                    u64::from(WAL_SIZE)
+                );
+            }
+            append(next_id, next_id)?;
+            // Append acknowledgement precedes the preemptive rollover. This
+            // non-purge action is a queue barrier, not another reclamation trigger.
+            let (ack, acknowledged) = oneshot::channel();
+            writer
+                .send(Action::Vote {
+                    value: vec![1],
+                    ack,
+                })
+                .unwrap();
+            acknowledged.blocking_recv().unwrap()?;
+            {
+                let current = layout.read().unwrap();
+                assert_eq!(current.files.len(), 2);
+                assert!(fs::metadata(&current.files[0].path)?.len() < u64::from(WAL_SIZE));
+                assert_eq!(
+                    fs::metadata(&current.files[1].path)?.len(),
+                    u64::from(WAL_SIZE)
+                );
+                assert_eq!(current.files[0].data_start, Some(32));
+                reader.refresh_from_no_mmap(&current);
+            }
+            // Observe invalidation through the public read operation instead
+            // of reaching into WalFile's private mapping field.
+            assert!(matches!(
+                reader.files[0].read_logs(2, 2, &mut None, &mut Vec::new()),
+                Err(Error::Generic(message)) if message.as_ref() == "No mmap exists"
+            ));
+            reader.files[0].mmap()?;
+            let last_front = if name == "space-forced" {
+                first_last
+            } else {
+                next_id
+            };
+            let mut records = Vec::new();
+            reader.files[0].read_logs(2, last_front, &mut memo, &mut records)?;
+            let expected: Vec<_> = (2..=last_front)
+                .map(|id| (id, vec![id as u8; payload_len]))
+                .collect();
+            assert_eq!(records, expected);
+            stop_writer(writer);
+            drop(reader);
+            drop(layout);
+            let mut reopened = WalFileSet::read(path.clone(), WAL_SIZE)?;
+            reopened.files[0].mmap()?;
+            records.clear();
+            reopened.files[0].read_logs(2, last_front, &mut None, &mut records)?;
+            assert_eq!(records, expected);
+            drop(reopened);
+            fs::remove_dir_all(path)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_metadata_error_still_refreshes_reclaimed_reader_layout() -> Result<(), Error> {
+        let path = test_path("reclaim-metadata-error");
+        let (writer, _meta, layout) = start_writer(&path)?;
+        let (entries, receive) = flume::bounded(2);
+        let (ack, acknowledged) = oneshot::channel();
+        writer
+            .send(Action::Append {
+                rx: receive,
+                callback: Box::new(|| {}),
+                ack,
+            })
+            .unwrap();
+        for id in 1..=4 {
+            entries
+                .send(Some((id, vec![id as u8; WAL_SIZE as usize / 3])))
+                .unwrap();
+        }
+        entries.send(None).unwrap();
+        acknowledged.blocking_recv().unwrap()?;
+        let mut reader = layout.read().unwrap().clone_no_map();
+        reader.files[0].mmap()?;
+        let mut memo = None;
+        reader.files[0].read_logs(1, 1, &mut memo, &mut Vec::new())?;
+        // A deterministic owned fixture blocks only metadata staging, after the
+        // real remove/reclaim has published its new canonical file.
+        fs::create_dir(format!("{path}/meta.hql.tmp"))?;
+        let (ack, acknowledged) = oneshot::channel();
+        writer
+            .send(Action::Remove {
+                from: 0,
+                until: 2,
+                last_log: Some(serialize(&LogId {
+                    leader_id: LeaderId {
+                        term: 1,
+                        node_id: 1_u64,
+                    },
+                    index: 2,
+                })?),
+                ack,
+            })
+            .unwrap();
+        assert!(acknowledged.blocking_recv().unwrap().is_err());
+        {
+            let current = layout.read().unwrap();
+            assert_eq!(current.files[0].id_from, 2);
+            assert!(fs::metadata(&current.files[0].path)?.len() < u64::from(WAL_SIZE));
+            reader.refresh_from_no_mmap(&current);
+        }
+        reader.files[0].mmap()?;
+        let mut retained = Vec::new();
+        reader.files[0].read_logs(2, 2, &mut memo, &mut retained)?;
+        assert_eq!(retained, vec![(2, vec![2; WAL_SIZE as usize / 3])]);
+        fs::remove_dir(format!("{path}/meta.hql.tmp"))?;
+        stop_writer(writer);
+        drop(reader);
+        drop(layout);
+        let mut reopened = WalFileSet::read(path.clone(), WAL_SIZE)?;
+        reopened.files[0].mmap()?;
+        retained.clear();
+        reopened.files[0].read_logs(2, 2, &mut None, &mut retained)?;
+        assert_eq!(retained, vec![(2, vec![2; WAL_SIZE as usize / 3])]);
+        drop(reopened);
+        fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[test]
@@ -635,6 +865,7 @@ mod tests {
             WAL_SIZE,
             false,
             meta,
+            false,
         )?;
         // The interval's first tick is immediate. Let that empty sync pass so
         // the assertion below measures this append rather than scheduler order.
@@ -707,6 +938,7 @@ mod tests {
             WAL_SIZE,
             true,
             meta,
+            false,
         )?;
 
         let startup = status.snapshot();

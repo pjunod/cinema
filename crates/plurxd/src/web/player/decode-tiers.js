@@ -68,6 +68,39 @@ function hevcTiersSync(can, mse){
   });
 }
 
+// HLS/fMP4 is authorized by the selected hls.js MediaSource path, not a
+// progressive file decoder. Native HLS has no codec-specific API here and
+// therefore remains unclaimed until an actual playlist probe is available.
+async function hlsHevcSampleEntries(claimedTiers, claimedPqTiers, injected){
+  const probe=injected||{};
+  let video=probe.videoElement, mc=probe.mediaCapabilities, mse=probe.mediaSource;
+  if(video===undefined){ try{ video=document.createElement("video"); }catch(e){ video=null; } }
+  if(mc===undefined){ try{ mc=navigator.mediaCapabilities; }catch(e){ mc=null; } }
+  if(mse===undefined){ try{ mse=window.MediaSource||window.ManagedMediaSource; }catch(e){ mse=null; } }
+  const native=probe.nativeHls===undefined?(!video||useNativeHls(video)):probe.nativeHls;
+  const hls=probe.hlsJsSupported===undefined?hlsJsSupported():probe.hlsJsSupported;
+  if(native||!hls||!mc||typeof mc.decodingInfo!=="function"||!mse||typeof mse.isTypeSupported!=="function") return [];
+  const summary=hevcTierSummary(claimedTiers,claimedPqTiers);
+  if(!summary.maxheight) return [];
+  const required=HEVC_TIERS.filter(t=>t.height<=summary.maxheight&&(t.depth===8?summary.depth8:summary.depth10));
+  // Include the lowest Main10 rung even when the shared ceiling is below it.
+  if(summary.depth10&&!required.some(t=>t.depth===10)) required.push(HEVC_TIERS.find(t=>t.depth===10));
+  for(const tier of required){
+    const contentType=`video/mp4; codecs="${tier.codec}"`;
+    try{
+      if(!mse.isTypeSupported(`video/mp4; codecs="${tier.codec},mp4a.40.2"`)) return [];
+      const videoConfig={contentType,width:tier.width,height:tier.height,bitrate:tier.bitrate,framerate:24};
+      const answer=await mc.decodingInfo({type:"media-source",video:videoConfig});
+      if(!answer||answer.supported!==true) return [];
+      if(summary.pq10&&tier.depth===10){
+        const pq=await mc.decodingInfo({type:"media-source",video:{...videoConfig,transferFunction:"pq"}});
+        if(!pq||pq.supported!==true) return [];
+      }
+    }catch(e){ return []; }
+  }
+  return ["hvc1"];
+}
+
 // Progressive packaging is a separate claim from decoder availability. A
 // MediaSource success cannot authorize a plain <video src>, and a successful
 // hvc1 probe says nothing about hev1 (or either Dolby Vision label).
@@ -176,6 +209,45 @@ async function hevcTiersMediaCapabilities(){
   }
   return answered?{passed, pqPassed}:null;
 }
+// Channels this browser's audio output reaches. The destination of an
+// AudioContext is the only public answer; the context is closed again at once
+// so a page that never plays sound keeps no audio device open. Unknown is
+// stereo, never a guessed surround claim.
+function browserOutputChannels(){
+  try{
+    // Safari before 14.1 named it webkitAudioContext; TypeScript knows only the standard name.
+    const Ctx=window.AudioContext||/** @type {any} */ (window).webkitAudioContext;
+    if(!Ctx) return 2;
+    const context=new Ctx();
+    const channels=Number(context.destination&&context.destination.maxChannelCount);
+    try{ const closing=context.close(); if(closing&&closing.catch) closing.catch(()=>{}); }catch(e){}
+    return Number.isFinite(channels)&&channels>0?channels:2;
+  }catch(e){ return 2; }
+}
+// Read when a caps document is first built for a request (after the viewer
+// has interacted, so no autoplay warning at page load) and again after an
+// output device change, never on every document.
+let BROWSER_OUTPUT_CHANNELS=null;
+function browserOutputChannelsCached(){
+  if(BROWSER_OUTPUT_CHANNELS===null) BROWSER_OUTPUT_CHANNELS=browserOutputChannels();
+  return BROWSER_OUTPUT_CHANNELS;
+}
+try{
+  if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener){
+    navigator.mediaDevices.addEventListener("devicechange",()=>{ BROWSER_OUTPUT_CHANNELS=null; });
+  }
+}catch(e){}
+// The route claim the server negotiates audio from (AUDIO-RESOLVED-
+// INDEPENDENTLY.md §3.1). A browser decodes every codec it lists itself and
+// never passes a bitstream through, so each decoded codec reaches exactly the
+// output's channel count, and the browser resamples anything it decodes. Only
+// codecs the server's negotiation understands are claimed.
+function browserAudioSinks(acodec, outputChannels){
+  const raw=Math.floor(Number(outputChannels));
+  const channels=Number.isFinite(raw)?Math.min(8,Math.max(2,raw)):2;
+  return String(acodec||"").split(",").filter(codec=>["aac","mp3","flac","ac3","eac3"].includes(codec))
+    .map(codec=>({codec, max_channels:channels, passthrough:false, sample_rates_hz:[44100,48000]}));
+}
 function buildPlayCaps(hevc){
   let v=null; try{ v=document.createElement("video"); }catch(e){}
   const can=t=>{ try{ return !!v && v.canPlayType(t)!==""; }catch(e){ return false; } };
@@ -242,6 +314,7 @@ let PLAY_CAPS=buildPlayCaps(hevcTierSummary(PLAY_HEVC_TIERS, null));
 // Safe even before the async probe settles: [] is an explicit restrictive
 // claim, never the legacy/unrestricted omission.
 PLAY_CAPS.progressiveHevcSampleEntries=[];
+PLAY_CAPS.hlsHevcSampleEntries=[];
 // The capability query string every /decision and /stream.mp4 carries.
 //
 //   vcodec     CSV of decodable video codecs. `hevc` = an HEVC decoder exists;
@@ -340,11 +413,15 @@ function capsDocument(c, limits){
     // `overlay` protocol, and tells it the truth when a viewer picks a bitmap
     // track: that delivery needs a burn-in. Add the key here the day a
     // renderer lands, not before.
+    hls_hevc_sample_entries:Array.isArray(c.hlsHevcSampleEntries)
+      ?c.hlsHevcSampleEntries.filter(x=>x==="hvc1"||x==="hev1").filter((x,i,a)=>a.indexOf(x)===i).slice(0,2):[],
     progressive_hevc_sample_entries:Array.isArray(c.progressiveHevcSampleEntries)
       ?c.progressiveHevcSampleEntries.slice(0,4):[],
     // Only when this browser has one; absent is not a claim.
     ...(c.dv?{dv_transport:"progressive"}:{}),
     display:{hdr:!!c.hdrDisplay, dolby_vision:dvProfiles.length>0},
+    // Absent is the legacy audio contract, so an empty claim is not sent.
+    ...(Array.isArray(c.audioSinks)&&c.audioSinks.length?{audio_sinks:c.audioSinks.slice(0,16)}:{}),
     ...(c.maxheight?{max_height:c.maxheight}:{}),
     // The identity is the MAP KEY in localStorage, so the entries have to be
     // rebuilt with it inlined — the obvious `Object.values()` would send a
@@ -402,7 +479,9 @@ function measuredPresentationTarget(){
   return {...PRESENTATION_TARGET_RECT};
 }
 function currentCapsDocument(){
-  const caps=capsDocument(PLAY_CAPS, decodeLimits());
+  const sinks=browserAudioSinks(PLAY_CAPS.acodec, browserOutputChannelsCached());
+  const caps=capsDocument(sinks.length?Object.assign({}, PLAY_CAPS, {audioSinks:sinks}):PLAY_CAPS,
+    decodeLimits());
   const target=measuredPresentationTarget();
   if(SERVER&&SERVER.playback_display_aware_auto&&target){
     Object.assign(caps.display,{presentation_target:target});
@@ -528,6 +607,7 @@ const PLAY_CAPS_READY=(async()=>{
     PLAY_CAPS.progressiveHevcSampleEntries=
       await progressiveHevcSampleEntries(
         PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS,dvProfiles);
+    PLAY_CAPS.hlsHevcSampleEntries=await hlsHevcSampleEntries(PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS);
     CAPS_Q=capsQuery(PLAY_CAPS);
   }catch(e){}
   return PLAY_CAPS;
@@ -650,9 +730,11 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
+  const fileContext=playbackFileContextForPlay(fileId,meta);
+  meta={...(meta||{}),fileContext};
   const beginning=beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent);
   const inputs=capturePlayInputs(fileId,meta,retryIntent);
-  const attempt=Object.freeze({...beginning,...inputs,fileId,title,resumeMs,knownDurMs,meta});
+  const attempt=Object.freeze({...beginning,...inputs,fileContext,fileId,title,resumeMs,knownDurMs,meta});
   const {modal,playerWasOpen}=attempt;
   document.getElementById("playTitle").textContent=title;
   modal.classList.add("open");
@@ -679,6 +761,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
 }
 function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent){
   WATCH_CLOSE_PROMISE=null;
+  cancelNextEpisodePreparation(PLAYER);
   // Live TV holds a physical tuner and, since the dock, keeps holding it on
   // every other route. Starting a film used to be the moment it was released
   // (the route change stopped it); now the dock survives, so two pictures
@@ -690,24 +773,28 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
   const libraryChannel=PENDING_LIBRARY_CHANNEL_PLAYBACK;
   PENDING_LIBRARY_CHANNEL_PLAYBACK=null;
   const openIsCurrent=()=>PLAY_OPEN_GATE.current(openAttempt);
-  const predecessor=PLAYER?.mediaPredecessor||PLAYER;
+  const predecessor=document.getElementById("modal")?.classList.contains("open")
+    ? PLAYER?.mediaPredecessor||PLAYER : null;
   play.failedPreparation=null;
   const preparation=beginPlaybackPreparation(openIsCurrent);
   const failPreparation=(error,attempt)=>{
     if(!openIsCurrent()) return;
     preparation.finish();
     const wanted=PLAYER;
-    const latest=wanted?.fileId===fileId;
+    const latest=samePlaybackFile(wanted,fileId,meta);
     const retry={fileId,title,knownDurMs,meta,predecessor,
       resumeMs:latest&&wanted.controlSeek?Math.round(wanted.controlSeek.targetMs):resumeMs,
       wantsPlayback:fullIntent.wantsPlayback,
-      selection:latest?playbackSelection(wanted,fileId):attempt.selection,
+      selection:latest?playbackSelection(wanted,meta.fileContext||fileId):attempt.selection,
       audioOffsetMs:latest?(wanted.aoffset||0):attempt.sessionAudioOffset};
     play.failedPreparation=retry;
     if(play.pendingIntent===fullIntent)play.pendingIntent=null;
-    if(predecessor){
+    // Only a predecessor with a picture can survive a refused replacement.
+    // Restoring the initial empty PLAYER loses the failed attempt's generation
+    // and file identity, leaving its preparing surface and breaking Close.
+    if(predecessor?.started){
       PLAYER=predecessor;
-      if(latest&&predecessor.fileId===fileId){
+      if(latest&&samePlaybackFile(predecessor,fileId,meta)){
         const audio=selectedAudioIndex(wanted);
         Object.assign(predecessor,{wantsPlayback:wanted.wantsPlayback,
           controlSeek:wanted.controlSeek,controlSeekSequence:wanted.controlSeekSequence,
@@ -723,7 +810,7 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
     // paused before asking for a different quality still has that stream under
     // them, and covering it because the element happens to be paused is the
     // same mistake in a quieter spelling.
-    const surfaceContext=(PLAYER&&PLAYER.started)?"change":"start";
+    const surfaceContext=predecessor?.started?"change":"start";
     // The create-retry owner (M5) stops the player and raises `exhausted`
     // itself, on the clock, at the moment the deadline passes. Raising again
     // here would put a second fault of a lower class over its prompt.
@@ -751,7 +838,7 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
     PLAYER.retiringOpenAttempt=openAttempt;
   }
   if(predecessor)predecessor.retiringOpenAttempt=openAttempt;
-  const inputPlayer=PLAYER&&PLAYER.fileId===fileId
+  const inputPlayer=samePlaybackFile(PLAYER,fileId,meta)
     &&document.getElementById("modal")?.classList.contains("open")?PLAYER:null;
   if(inputPlayer){
     rememberPlaybackTransportIntent(document.getElementById("video"),inputPlayer);
@@ -775,13 +862,13 @@ function capturePlayInputs(fileId,meta,retryIntent){
   // keeps its correction. A different title, or a player that was closed,
   // starts clean at zero.
   const sessionAudioOffset=retryIntent?.audioOffsetMs??
-    (PLAYER&&PLAYER.fileId===fileId ? (PLAYER.aoffset||0) : 0);
-  const replacementBandwidthSeed=PLAYER&&PLAYER.fileId===fileId
+    (samePlaybackFile(PLAYER,fileId,meta) ? (PLAYER.aoffset||0) : 0);
+  const replacementBandwidthSeed=samePlaybackFile(PLAYER,fileId,meta)
     ? PlaybackPolicy.bandwidthSeedBps({
         outgoingEstimateBps:PLAYER.hls&&PLAYER.hls.bandwidthEstimate,
         priorKbps:PLAYER.priorKbps})
     : null;
-  const continuingPlayback=!!(PLAYER&&PLAYER.fileId===fileId);
+  const continuingPlayback=!!(samePlaybackFile(PLAYER,fileId,meta));
   const carriedSeek=retryIntent?.controlSeek||(continuingPlayback&&PLAYER.controlSeek);
   const replacementControlSeek=carriedSeek
     ? Object.assign({},carriedSeek,{executed:false,frameFloor:0,audioPositionMs:null})
@@ -794,7 +881,7 @@ function capturePlayInputs(fileId,meta,retryIntent){
     ? (PLAYER.controlIntentGeneration||0) : 0;
   // The track choice this playback runs with: the detail screen's pickers on a
   // cold start, what is already playing on an internal reopen.
-  const selection=retryIntent?.selection??playbackSelection(PLAYER, fileId);
+  const selection=retryIntent?.selection??playbackSelection(PLAYER, meta&&meta.fileContext||fileId);
   const modal=document.getElementById("modal"), video=document.getElementById("video");
   const playerWasOpen=modal.classList.contains("open");
   const playerOpener=playerWasOpen?(PLAYER&&PLAYER._opener):document.activeElement;
@@ -821,7 +908,7 @@ async function decideForPlay(attempt){
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
   let decision;
-  try{ decision=await preparation.run(signal=>askDecision(fileId, qualityForce(), requestSelection,signal));}
+  try{ decision=await preparation.run(signal=>askDecision(attempt.fileContext||fileId, qualityForce(), requestSelection,signal));}
   catch(e){failPreparation(e,attempt);return null;}
   if(!openIsCurrent()) return null;
   let retestDecodeLimit=false;
@@ -856,7 +943,7 @@ async function decideForPlay(attempt){
         // would hand the learned-limit transcode the policy default audio and
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
-        const d2=await preparation.run(signal=>askDecision(fileId,"transcode",requestSelection,signal));
+        const d2=await preparation.run(signal=>askDecision(attempt.fileContext||fileId,"transcode",requestSelection,signal));
         if(!openIsCurrent()) return null;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
@@ -905,6 +992,7 @@ function preparePlayOutgoing(attempt,decision){
       stopPlayerTimers();
       teardownHls();
       if(outgoing.sessionId)releaseSession(outgoing.sessionId);
+      if(outgoing.sharedDirect)releaseSharedDirect(outgoing);
       PLAYER=incoming;
     }
     if(incoming)incoming.mediaPredecessor=null;
@@ -928,7 +1016,7 @@ function buildPlayer(attempt,decided,prepared){
     replacementControlIntentGeneration,replacementControlSequenceFloor,clickedAt,
     openAttempt,fullIntent,selection}=attempt;
   const {src,book,preBurn,ladder,priorKbps,autoStartHeight,outgoing}=prepared;
-  return {fileId, timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
+  return {fileId, fileContext:attempt.fileContext||localPlaybackFileContext(fileId), timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
     decodeRetest:retestDecodeLimit,
     durMs:(src.duration_ms||knownDurMs||0), method:decision.method, encoder:null,
     capsSnapshot:decision._capsSnapshot||currentCapsDocument(),
@@ -949,7 +1037,7 @@ function buildPlayer(attempt,decided,prepared){
     _markerOffers:new Set(),
     _seekPreview:null, _seekPending:null, _lastFocusedControl:playerLastFocused,
     _opener:playerOpener, _openerClick:playerOpenerClick,
-    idleTimer:null, autoskip:libraryChannel?false:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null,
+    idleTimer:null, autoskip:libraryChannel?false:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null, sharedDirect:null,
     triedFallback:false,
     mediaRecoveries:0,
     mediaRecoveredAtMs:null,
@@ -978,6 +1066,7 @@ function buildPlayer(attempt,decided,prepared){
     attemptId:null, attemptReason:null, bufferLimits:null,
     ladder, priorKbps, autoHeight:autoStartHeight,
     qualityCandidates:Array.isArray(decision.quality_candidates)?decision.quality_candidates:null,
+    measuredCandidateOutputs:Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null,
     qualityCandidateId:decision.quality_candidate_id||null,
     bandwidthSeedBps:replacementBandwidthSeed,
     abr:{requestedCandidateId:decision.quality_candidate_id||null,
@@ -989,11 +1078,12 @@ function buildPlayer(attempt,decided,prepared){
       recentEstimateSource:null,recentEstimateUrl:null,
       completedTransfers:[],lastCliffAtMs:null,
       switches:[],switching:false,stableSinceMs:clickedAt,supplyRescued:false,
+      decodeStepConsumed:false,
       // Rungs this playback has already failed to open. Per playback, not
       // persisted: a transient server failure must not cap quality forever.
       failedHeights:new Set()},
     waitAt:null, waitStartedRunway:null, waitTimer:null, waitReported:false,
-    stallsByKind:null, stallRecoveries:outgoing&&outgoing.fileId===fileId?(outgoing.stallRecoveries||0):0, recoveringStall:null,
+    stallsByKind:null, stallRecoveries:samePlaybackFile(outgoing,fileId,meta)?(outgoing.stallRecoveries||0):0, recoveringStall:null,
     // The presenter's state, shared by every player object this page has: the
     // overlay is one element with one history and identity is the generation
     // each fault carries (PLAYBACK-SURFACE-CONTRACT.md §3.1).
@@ -1064,6 +1154,33 @@ function choosePlayRoute(attempt,decided,prepared,initialAudio){
   // purpose and history isolation are enforced. Copy-HLS retains source video
   // when the decision does not require an encode.
   if(libraryChannel) initialRoute=decision.method==='transcode'?'transcode_hls':'copy_hls';
+  // Shared direct play: the actual decision says these original bytes play in
+  // this browser's own container/codec caps, with the default audio and no
+  // offset. The Source re-derives that decision at Start and refuses anything
+  // else; there is no burn, grade or segment capability for raw bytes to need.
+  if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"
+    &&preBurn==null&&decision.method==='direct_play'&&initialRoute==='direct'){
+    initialRoute='shared_direct';
+  }else if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"){
+    // A burn always encodes (the Source owns its sidecar and fonts), and an
+    // HDR10/HLG grade is the Source's own answer to this browser's caps.
+    // Dolby Vision is not built for shared playback: not preserved, not
+    // converted, and a Dolby Vision source is never re-encoded or burned.
+    const grade=decision.delivered_dynamic_range;
+    const encoded=decision.method==='transcode'||preBurn!=null;
+    const supported=encoded
+      ?!noSegments()&&(nativeHls||!!(window.Hls&&Hls.isSupported())):hlsAvailable;
+    if(grade==='dolby_vision'||decision.preserve_dolby_vision===true||decision.convert_dolby_vision===true
+      ||decision.source?.hdr==='dolby_vision'&&encoded){
+      failPreparation(Object.assign(new Error("Dolby Vision is not available for shared playback yet."),{code:"sharing_start_dolby_vision_unsupported"}),attempt);return null;
+    }
+    if(!supported||grade&&!['sdr','hdr10','hlg'].includes(grade)){
+      failPreparation(Object.assign(new Error("This shared delivery is not available yet."),{code:"sharing_start_unsupported"}),attempt);return null;
+    }
+    // A copy decision with a burn becomes a transcode just below, exactly as
+    // it does for a local file.
+    initialRoute=decision.method==='transcode'?'transcode_hls':'copy_hls';
+  }
   // A burn is a transcode whatever the plan said. The server's plan is a remux
   // (or a direct play) when the PGS application overlay is enabled — a delivery
   // this player does not implement, so `prePlayBurnNeeded()` said yes where the
@@ -1100,7 +1217,7 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
     const options=transcodeOpts(startSec,initialAudio);
     const retryContext=playbackCreateRetryContext();
     let info; try{info=await preparation.run(
-      signal=>openSessionRetryingNotYet(fileId,options,signal,{context:retryContext,preparation}),
+      signal=>openSessionRetryingNotYet(attempt.fileContext||fileId,options,signal,{context:retryContext,preparation}),
       late=>releaseSession(late&&late.session_id));}catch(e){
       if(openIsAttached())failPreparation(e,attempt);
       return false;
@@ -1116,6 +1233,26 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
       detail:(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
         (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments")});
     armStall(from);
+    return true;
+  })();
+  if(initialRoute==='shared_direct') return (async()=>{
+    // The B session is the byte URL's binding, not a producer: no playlist,
+    // status poll or control exchange follows it, exactly as Local direct.
+    raisePlaybackSurface("client_preparing",{context:"start",
+      title:"Loading…",detail:"direct play — no conversion needed"});
+    let info; try{info=await preparation.run(
+      signal=>openSession(attempt.fileContext,{presentation:"direct",start:startSec,audio:initialAudio},signal),
+      late=>releaseSession(late&&late.session_id));}catch(e){
+      if(openIsAttached())failPreparation(e,attempt);
+      return false;
+    }
+    if(!PLAY_OPEN_GATE.acceptResource(openAttempt,info&&info.session_id,releaseSession)) return false;
+    if(!openIsAttached()){
+      releaseSession(info&&info.session_id);
+      return false;
+    }
+    retireOutgoing();
+    armStall(attachSharedDirect(video,openedPlayer,info,startSec));
     return true;
   })();
   if(initialRoute==='copy_hls') return (async()=>{
@@ -1160,15 +1297,12 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
     if(isRemux){
       if(decision.method==='direct_play') PLAYER.method='remux';
       PLAYER.offset=startSec;
-      const base=decision.method==='direct_play'
-        ? `/api/v1/files/${fileId}/stream.mp4`
-        : decision.play_url;
-      url=remuxUrl(base, initialAudio, startSec);
-      PLAYER.probeUrl=decision.play_url; armStall(startSec);
+      url=remuxUrl(playbackFileContextForPlayer(PLAYER), initialAudio, startSec);
+      PLAYER.probeUrl=playbackFileDecisionMediaUrl(playbackFileContextForPlayer(PLAYER),decision.play_url); armStall(startSec);
     } else {
-      url=tok(decision.play_url);
+      url=tok(playbackFileDecisionMediaUrl(playbackFileContextForPlayer(PLAYER),decision.play_url));
       PLAYER.directUrl=url;
-      PLAYER.probeUrl=decision.play_url;
+      PLAYER.probeUrl=playbackFileDecisionMediaUrl(playbackFileContextForPlayer(PLAYER),decision.play_url);
       armStall(startSec);
     }
     retireOutgoing();
@@ -1289,7 +1423,8 @@ async function executePlaybackMediaChange(p,change){
       // point: which context a create is in is decided in ONE place, not by
       // which branch of this function happened to call which function.
       const info=await preparation.run(
-        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation}),
+        signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(p),opts,signal,{preparation,
+          continuousRestartSessionId:change.forceReopen&&p.continuousQualityBootstrap?p.sessionId:null}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);
@@ -1299,14 +1434,26 @@ async function executePlaybackMediaChange(p,change){
       if(change.height>0) p.autoHeight=change.height;
       if(change.note) p.rescuedNote=change.note;
       armStall(attachSession(v,p,info,pos),PlaybackPolicy.HLS_STARTUP.seek_deadline_ms);
-    }else if(change.copyHls){
+    }else if(change.sharedDirect&&method==='direct_play'){
+      // A fresh Shared direct Start of the same file at the saved position.
+      // Attaching it retires the B session the element could no longer read.
+      const info=await preparation.run(
+        signal=>openSession(playbackFileContextForPlayer(p),{presentation:"direct",start:pos,audio},signal),
+        late=>releaseSession(late&&late.session_id));
+      if(!live()){ releaseSession(info&&info.session_id); return false; }
+      retirePlaybackPredecessor(p);
+      teardownHls();
+      armStall(attachSharedDirect(v,p,info,pos),20000);
+    }else if(change.copyHls||playbackFileContextForPlayer(p).source_ref.kind!=="local"){
+      // A Shared file has no progressive remux: every other route change of a
+      // Shared direct play (an audio switch, a quality move) is Copy HLS.
       if(!await startCopyHls(v,pos,live,null,preparation,()=>retirePlaybackPredecessor(p))) return false;
     }else{
       retirePlaybackPredecessor(p);
       teardownHls(); resetMediaSource(v); clearSubs(v);
       p.started=false; p.method='remux'; p.copyHls=false; p.offset=pos;
-      p.probeUrl=`/api/v1/files/${p.fileId}/stream.mp4`;
-      setPlaybackMediaSource(v,remuxUrl(`/api/v1/files/${p.fileId}/stream.mp4`,audio,pos));
+      p.probeUrl=playbackFileUrl(playbackFileContextForPlayer(p),"stream.mp4");
+      setPlaybackMediaSource(v,remuxUrl(playbackFileContextForPlayer(p),audio,pos));
       markPlaybackControlSeekExecuted(p,pos);
       armStall(pos,20000); applyPlaybackTransportIntent(v,p);
     }
@@ -1407,7 +1554,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       new Error("A copy-HLS open needs a preparation owner to bound and cancel it."),
       {name:"TypeError"});
     info=await preparation.run(
-      signal=>openSessionRetryingNotYet(fileId,options,signal,retry),
+      signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),options,signal,retry),
       late=>releaseSession(late&&late.session_id));
   }catch(error){
     if(live && !live()) return false;
@@ -1422,9 +1569,9 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
     // unplayable title. Safari/native HLS is excluded by the policy above.
     const from=startSec||0;
     if(beforeAttach)beforeAttach();
-    const base=`/api/v1/files/${PLAYER.fileId}/stream.mp4`;
+    const context=playbackFileContextForPlayer(PLAYER);
     PLAYER.method='remux'; PLAYER.copyHls=false; PLAYER.offset=from;
-    PLAYER.probeUrl=base;
+    PLAYER.probeUrl=playbackFileUrl(context,"stream.mp4");
     clearStreamFailure();
     clientLog(Object.assign({level:"warn",event:"stream_route_fallback",
       detail:"vod_index_pending",
@@ -1434,7 +1581,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       detail:"the HLS index is still building — remuxing without segmentation"});
     resetMediaSource(v);
     if(live && !live()) return false;
-    setPlaybackMediaSource(v,remuxUrl(base,aidx,from));
+    setPlaybackMediaSource(v,remuxUrl(context,aidx,from));
     markPlaybackControlSeekExecuted(PLAYER,from);
     armStall(from,20000); applyPlaybackTransportIntent(v,PLAYER);
     return true;
@@ -1534,7 +1681,9 @@ function mseCodecKey(srcCodec, bitDepth){
 // nothing here is ever told to the server. A no sends the remux down the
 // progressive path, which is where the `<video>` error handler's rescue lives.
 function mseCanTake(srcCodec, audioCodec, bitDepth){
-  const mediaSource=window.ManagedMediaSource||window.MediaSource;
+  // Match every Hls instance's explicit preferManagedMediaSource:false.
+  // The static Hls.getMediaSource() helper still defaults to MMS-first.
+  const mediaSource=window.MediaSource||window.ManagedMediaSource||window.WebKitMediaSource;
   if(!(mediaSource && mediaSource.isTypeSupported)) return false;
   const v=MSE_VIDEO[mseCodecKey(srcCodec, bitDepth)];
   if(!v) return false;                       // unknown codec: do not gamble
@@ -1661,8 +1810,9 @@ async function refreshSegTimes(){
 }
 // A frame callback registered before a new media execution belongs to the
 // predecessor, even if the browser delivers it after the source was replaced.
-function queuePlaybackFrame(v,p,callback){
+function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   const epoch=p.controlPresentationEpoch||0;
+  const attachment=p.mediaAttachment, intent=p.controlSeek?.sequence;
   // One subscription belongs to this player and element. Retire it when an
   // element is adopted or reused, including callbacks already queued by the
   // browser before cancellation.
@@ -1680,7 +1830,7 @@ function queuePlaybackFrame(v,p,callback){
     v.removeEventListener("loadeddata",ready);
     v.removeEventListener("canplay",ready);
     v.removeEventListener("seeked",ready);
-    if(p.controlFrameCancel===clear) p.controlFrameCancel=null;
+    if(p.controlFrameCancel===clear){p.controlFrameCancel=null;p.controlFrameRearm=null;}
     if(v._plurxFrameCancel===clear) v._plurxFrameCancel=null;
   };
   const suspend=()=>{if(PLAYER!==p) clear();else cancel();};
@@ -1694,15 +1844,17 @@ function queuePlaybackFrame(v,p,callback){
     // frame, including when playback stays paused.
     // Readiness only permits registration; actual callbacks remain the proof
     // of presentation used by the existing progress detector.
-    if(id!=null||v.readyState<2||v.seeking) return;
+    if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;
     const registration=++generation;
     id=v.requestVideoFrameCallback((now,meta)=>{
       if(registration!==generation) return;
       id=null;clear();
-      if(PLAYER===p) callback(now,meta,epoch);
+      if(PLAYER===p&&p.mediaAttachment===attachment) callback(now,meta,epoch,{attachment,intent,epoch});
     });
   };
   p.controlFrameCancel=clear;v._plurxFrameCancel=clear;
+  // Execution renews this same observer before assigning the target clock.
+  p.controlFrameRearm=()=>queuePlaybackFrame(v,p,callback,true);
   v.addEventListener("emptied",suspend);
   v.addEventListener("loadeddata",ready);
   // loadeddata is once per resource; canplay also covers buffer replenishment.
@@ -1710,13 +1862,14 @@ function queuePlaybackFrame(v,p,callback){
   v.addEventListener("seeked",ready);
   ready();
 }
+const HITCH_LIFECYCLE_BOUNDARIES=new WeakMap();
 function armHitchDetector(v){
   const p=PLAYER; if(!p) return;
   p.controlHasFrameCallbacks=!!v.requestVideoFrameCallback;
   if(!p.controlHasFrameCallbacks) return;
   p.hitches={back:0, held:0, late:0, gap:0, drop:0, slow:0, worst:0, last:null, at:[], fps:null,
              n:0, near:{}, flushEdge:null, skewMax:0, skewAt:null, decodeMs:null, frames:0,
-             rate:null, renderedFps:null, faults:[]};
+             rate:null, renderedFps:null, faults:[], metadataAnomalies:0, metadataFaults:[]};
   // When the detector armed, so "zero faults" can be told apart from "zero
   // callbacks". Safari has shipped rVFC for years and still declines to fire
   // it on some pipelines — a session that stutters visibly while this
@@ -1747,6 +1900,25 @@ function armHitchDetector(v){
   // callback timestamps averages out; cleared on pause/seek because a ring
   // spanning a seek measures the seek.
   const rateWin=[];
+  // Pausing normally stops rVFC altogether. Reset temporal comparisons on
+  // the actual media events rather than waiting for a paused frame callback,
+  // or resume compares against the pre-pause frame and includes the pause in
+  // realized rate. Fault counters and nominal/decode history remain intact.
+  HITCH_LIFECYCLE_BOUNDARIES.get(v)?.();
+  const resetLifecycleWindow=()=>{
+    if(PLAYER!==p||document.getElementById("video")!==v){removeLifecycleBoundary();return;}
+    prev=null;rateWin.length=0;
+    p.hitches.rate=null;p.hitches.renderedFps=null;
+  };
+  const removeLifecycleBoundary=()=>{
+    v.removeEventListener("pause",resetLifecycleWindow);
+    v.removeEventListener("play",resetLifecycleWindow);
+    if(HITCH_LIFECYCLE_BOUNDARIES.get(v)===removeLifecycleBoundary)
+      HITCH_LIFECYCLE_BOUNDARIES.delete(v);
+  };
+  HITCH_LIFECYCLE_BOUNDARIES.set(v,removeLifecycleBoundary);
+  v.addEventListener("pause",resetLifecycleWindow);
+  v.addEventListener("play",resetLifecycleWindow);
   const noteRate=(now, mediaTime, pf, h)=>{
     // A ring that spans a timeline discontinuity measures the discontinuity.
     // Pause and seek are cleared by the caller, but a SESSION REPLACEMENT is
@@ -1780,19 +1952,32 @@ function armHitchDetector(v){
         : null;
     }
   };
-  const step=(now, meta, epoch)=>{
+  const step=(now, meta, epoch, observation)=>{
     // Bail the moment this playback is replaced, or the callback outlives its
     // PLAYER and starts recording another stream's frames as this one's. A
     // prepared switch keeps the same PLAYER while changing the video element;
     // only the element that now owns the picture may report a hitch.
-    if(PLAYER!==p||document.getElementById("video")!==v) return;
+    if(PLAYER!==p||document.getElementById("video")!==v){removeLifecycleBoundary();return;}
     if(!playbackOwnsAttachedMedia(p)){
       prev=null;rateWin.length=0;
       queuePlaybackFrame(v,p,step);return;
     }
+    if(!v.paused&&!v.seeking&&PlaybackPolicy.frameMetadataAheadOfClock(meta,{
+      nowMs:now,currentTime:v.currentTime,playbackRate:v.playbackRate||1,nominalSeconds:nominal()||0
+    })){
+      const h=p.hitches;
+      h.metadataAnomalies++;
+      h.metadataFaults.push({kind:'future_media_timestamp',at_ms:now,media_time:meta.mediaTime,
+        current_time:v.currentTime,expected_display_time_ms:meta.expectedDisplayTime??null,
+        presented_frames:meta.presentedFrames??null,session_id:p.sessionId||null});
+      if(h.metadataFaults.length>16) h.metadataFaults.shift();
+      // Preserve the last trustworthy frame: the next callback still spans
+      // this interval and can reveal a real hold, backward step or late frame.
+      queuePlaybackFrame(v,p,step);return;
+    }
     p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(epoch===(p.controlPresentationEpoch||0))
-      settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames);
+      settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames,observation);
     p.hitches.frames++;
     if(v.paused || v.seeking){
       // Clear the MEASUREMENT with the window: a rate left standing after a

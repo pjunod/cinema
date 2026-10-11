@@ -10,13 +10,13 @@
   // that the owner could not serve the channel — which is also what the shared
   // fixture rules for `node_maintenance`.
   const ERROR_COPY = {
-    live_tv_disabled: ["Live TV is off", "An administrator can enable it in Settings → Developer."],
+    live_tv_disabled: ["Live TV is off", "An administrator can enable it in Settings → Live TV."],
     live_tv_protocol_unready: ["Live TV route is updating", "This tuner owner cannot serve the requested route yet. Another compatible owner may still work."],
     owner_unavailable: ["Tuner owner unavailable", "The selected tuner owner cannot serve Live TV right now."],
     no_answer: ["The server did not answer", "Press the channel again."],
     invalid_request: ["Live TV could not read that request", "Reload the page and choose the channel again."],
     admin_required: ["Live TV needs an administrator", "This account cannot change Live TV on this server."],
-    invalid_settings: ["Live TV settings are incomplete", "An administrator can finish the tuner setup in Settings → Developer."],
+    invalid_settings: ["Live TV settings are incomplete", "An administrator can finish the tuner setup in Settings → Live TV."],
     tuner_capacity: ["All Live TV slots are busy", "Close another Live TV session or try this channel again shortly."],
     encoder_capacity: ["The tuner owner's encoder is busy", "Every video encoder on the tuner owner is in use, so this channel cannot be converted right now. Try again in a moment."],
     tuner_unavailable: ["The tuner could not start this channel", "A tuner, signal, or channel authorization may be unavailable."],
@@ -491,6 +491,42 @@
     return guide.channels.find(channel => channel && channel.id === channelId) || null;
   }
 
+  // (guide, channel id) → the station's logo URL, or null for the callsign
+  // fallback. The station is matched by its stable lineup id — never by a
+  // programme image or a guessed network name — and HDHomeRun's own station
+  // artwork is the only source. The address is a third-party URL inside a
+  // client that holds a bearer token, so the rule is textual and written the
+  // same way on every client instead of leaning on whatever each platform's
+  // URL parser tolerates:
+  //   * a string of 1–512 characters, all printable ASCII (0x21–0x7E);
+  //   * beginning `https://`, the scheme compared case-insensitively;
+  //   * an authority (up to the first `/`, `?` or `#`) that is a host of
+  //     letters, digits, `.` and `-` — or a bracketed IPv6 literal — with an
+  //     optional port of one to five digits no greater than 65535. So no user
+  //     info, no empty host, nothing a parser could read two ways.
+  // The accepted string is returned with its scheme spelled `https://` and
+  // otherwise exactly as given — not every image loader matches an
+  // upper-case scheme — so all three clients fetch byte-identical addresses;
+  // one that still fails to load leaves the callsign.
+  // tests/playback/live-tv-guide-cases.json `station_logo` pins it.
+  const STATION_LOGO_MAX = 512;
+  const STATION_LOGO_AUTHORITY = /^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::([0-9]{1,5}))?$/;
+  function stationLogoUrl(guide, channelId) {
+    const value = guideChannel(guide, channelId)?.image_url;
+    if (typeof value !== "string" || value.length === 0 || value.length > STATION_LOGO_MAX) return null;
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      if (code < 0x21 || code > 0x7e) return null;
+    }
+    if (value.slice(0, 8).toLowerCase() !== "https://") return null;
+    const rest = value.slice(8);
+    const cut = rest.search(/[/?#]/);
+    const authority = STATION_LOGO_AUTHORITY.exec(cut === -1 ? rest : rest.slice(0, cut));
+    if (!authority) return null;
+    if (authority[1] !== undefined && Number(authority[1]) > 65535) return null;
+    return "https://" + rest;
+  }
+
   // (guide, channel id, now) → { now, next, progress }.
   // The start instant belongs to the programme that starts; the end instant
   // does not. Without that rule a viewer at exactly 8:30 sees two programmes
@@ -798,6 +834,7 @@
     liveTvReasonText,
     errorView,
     programmeAt,
+    stationLogoUrl,
     gridLayout,
     gridSlots,
     guideEnds,

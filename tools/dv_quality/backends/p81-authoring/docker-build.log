@@ -1,0 +1,32 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 477B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 69B done
+#3 DONE 0.0s
+
+#4 [1/4] FROM docker.io/library/rust@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#4 DONE 0.0s
+
+#5 [2/4] RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 ffmpeg && rm -rf /var/lib/apt/lists/*
+#5 CACHED
+
+#6 [3/4] RUN dpkg-query -W > /opt/authoring-package-versions.txt
+#6 CACHED
+
+#7 [4/4] WORKDIR /work
+#7 CACHED
+
+#8 exporting to image
+#8 exporting layers done
+#8 writing image sha256:c1b89ba6d0323390b50bbe2ec100389a70de7c91ad34f34c70e5bd24f9cd135b done
+#8 naming to docker.io/codex/plurx-dv-m0-authoring:replay done
+#8 DONE 0.0s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/vl0u8sjrzdwibfkg9parxesj3

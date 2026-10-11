@@ -19,7 +19,7 @@ the navigation contract.
 | Change | Bind Back and Exit callbacks to their originating navigation entry at 16 destinations; preserve Home and intermediate pages after repeated taps. |
 | Lint repair | Opt in to Media3's existing `UnstableApi` usage in `PlaybackService.kt`. |
 | Gate repairs | Advance Android source build from 125 to 126 and add the navigation regression anchor. Main now carries the independently merged errata for earlier PRs #519 and #522. |
-| PR | [#523](http://192.168.4.7:3000/noirr/plurx/pulls/523) is the authoritative live record for CI and merge state. |
+| PR | [#523](http://forge.lan:3000/noirr/plurx/pulls/523) is the authoritative live record for CI and merge state. |
 
 ## Milestones
 
@@ -47,7 +47,7 @@ on base `60f3803d1d5dc431a919235fab328ae6ea86d394`. On the disposable
 
 ```bash
 cd clients/android
-ANDROID_SERIAL=emulator-5580 ANDROID_HOME=/Users/pjunod/Library/Android/sdk \
+ANDROID_SERIAL=emulator-5580 ANDROID_HOME=~/Library/Android/sdk \
   ./gradlew --offline --no-daemon \
   :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug \
   :app:connectedDebugAndroidTest \

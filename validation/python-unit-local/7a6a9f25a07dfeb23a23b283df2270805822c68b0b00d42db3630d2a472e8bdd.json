@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/python-unit-pr-receipts",
+  "suite": "validation",
+  "test_file": "tests/validation/test_python_unit_receipts.py",
+  "test_file_sha256": "74cecc963bc3f9fc00bf6caee5208eadd846561746626e5a98969f470a7d833a",
+  "command": "python3 -m unittest tests.validation.test_python_unit_receipts.PythonReceiptCase.test_effort_node_units_have_only_the_existing_web_lane",
+  "output": "Ran 1 test in 0.001s; OK; exit 0",
+  "test_ids": [
+    "test_python_unit_receipts.PythonReceiptCase.test_effort_node_units_have_only_the_existing_web_lane"
+  ],
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  },
+  "source_attribution": "Original local worktree focused first pass after sole review; existing passed IDs not rerun. Fake internal fixture outcomes are regression inputs."
+}

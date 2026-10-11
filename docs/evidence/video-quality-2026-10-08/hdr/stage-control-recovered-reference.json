@@ -1,0 +1,291 @@
+{
+  "scope": "retained sharp-panel pre-encoder stage isolation",
+  "commands": [
+    {
+      "argv": [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "http://127.0.0.1:32400/metrics"
+      ],
+      "exit": 0,
+      "seconds": 0.006702530896291137,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "inspect",
+        "plurxd",
+        "--format",
+        "{{.Image}}"
+      ],
+      "exit": 0,
+      "seconds": 0.010470139095559716,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "run",
+        "-d",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "2",
+        "--memory",
+        "2g",
+        "--pids-limit",
+        "128",
+        "--user",
+        "1000:1000",
+        "--group-add",
+        "992",
+        "--device",
+        "/dev/dri/renderD128",
+        "--mount",
+        "type=bind,src=/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl,dst=/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl",
+        "--entrypoint",
+        "/bin/sleep",
+        "sha256:e7f036e7d1c40d407f20f178c68e857b79f1828b62c921236272a24c2c303cec",
+        "90"
+      ],
+      "exit": 0,
+      "seconds": 0.18339454312808812,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "exec",
+        "b6bc82b222e85a3c54d7727a5b93908d0173418a0e51d8e24702fd4ececf2703",
+        "sha256sum",
+        "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+      ],
+      "exit": 0,
+      "seconds": 0.03216049098409712,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "http://127.0.0.1:32400/metrics"
+      ],
+      "exit": 0,
+      "seconds": 0.006234531989321113,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "exec",
+        "b6bc82b222e85a3c54d7727a5b93908d0173418a0e51d8e24702fd4ececf2703",
+        "timeout",
+        "--kill-after=2",
+        "15",
+        "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
+        "-i",
+        "/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl/source.mkv",
+        "-frames:v",
+        "1",
+        "-pix_fmt",
+        "yuv420p10le",
+        "-f",
+        "rawvideo",
+        "/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl/source-decode.yuv"
+      ],
+      "exit": 0,
+      "seconds": 0.0976833978202194,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "http://127.0.0.1:32400/metrics"
+      ],
+      "exit": 0,
+      "seconds": 0.006805479060858488,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "http://127.0.0.1:32400/metrics"
+      ],
+      "exit": 0,
+      "seconds": 0.00656917504966259,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "exec",
+        "b6bc82b222e85a3c54d7727a5b93908d0173418a0e51d8e24702fd4ececf2703",
+        "timeout",
+        "--kill-after=2",
+        "15",
+        "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
+        "-i",
+        "/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl/source.mkv",
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=1920:1080,format=yuv420p10le,format=p010le,format=yuv420p10le",
+        "-pix_fmt",
+        "yuv420p10le",
+        "-f",
+        "rawvideo",
+        "/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl/software-filter.yuv"
+      ],
+      "exit": 0,
+      "seconds": 0.09916747990064323,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "http://127.0.0.1:32400/metrics"
+      ],
+      "exit": 0,
+      "seconds": 0.00639229197986424,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "http://127.0.0.1:32400/metrics"
+      ],
+      "exit": 0,
+      "seconds": 0.0067728799767792225,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "exec",
+        "b6bc82b222e85a3c54d7727a5b93908d0173418a0e51d8e24702fd4ececf2703",
+        "timeout",
+        "--kill-after=2",
+        "15",
+        "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
+        "-vaapi_device",
+        "/dev/dri/renderD128",
+        "-i",
+        "/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl/source.mkv",
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=1920:1080,format=yuv420p10le,format=p010le,hwupload,hwdownload,format=p010le,format=yuv420p10le",
+        "-pix_fmt",
+        "yuv420p10le",
+        "-f",
+        "rawvideo",
+        "/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl/hardware-roundtrip.yuv"
+      ],
+      "exit": 0,
+      "seconds": 0.12303300085477531,
+      "stderr": "Failed to create //.cache for shader cache (Permission denied)---disabling.\n"
+    },
+    {
+      "argv": [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "http://127.0.0.1:32400/metrics"
+      ],
+      "exit": 0,
+      "seconds": 0.0060736569575965405,
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "rm",
+        "-f",
+        "b6bc82b222e85a3c54d7727a5b93908d0173418a0e51d8e24702fd4ececf2703"
+      ],
+      "exit": 0,
+      "seconds": 0.08960145898163319,
+      "stderr": ""
+    }
+  ],
+  "root": "/var/tmp/plurx-hdr-stage-20261008-0t4k4qcl",
+  "image": "sha256:e7f036e7d1c40d407f20f178c68e857b79f1828b62c921236272a24c2c303cec",
+  "source.mkv": {
+    "sha256": "b30a6a37e512a26f47e734ac27764a34cf5848e4ca92e83cbf8bea4d7a991946",
+    "bytes": 3138663
+  },
+  "source.yuv": {
+    "sha256": "777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9",
+    "bytes": 6220800
+  },
+  "container": "b6bc82b222e85a3c54d7727a5b93908d0173418a0e51d8e24702fd4ececf2703",
+  "ffmpeg_sha256": "90004301255382e1beb441a294fa8b75ac7fbb54678837f224d3458032e38787",
+  "source-decode": {
+    "sha256": "777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9",
+    "maximum": 0,
+    "mae": 0.0,
+    "byte_identical": true
+  },
+  "software-filter": {
+    "sha256": "777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9",
+    "maximum": 0,
+    "mae": 0.0,
+    "byte_identical": true
+  },
+  "hardware-roundtrip": {
+    "sha256": "777e283050d76a5d51c723ee0a23d04f2abee492aa02046803441715fb6b17f9",
+    "maximum": 0,
+    "mae": 0.0,
+    "byte_identical": true
+  },
+  "outcome": "complete",
+  "cleanup_container": true,
+  "receipt_provenance": {
+    "kind": "sanitized derivative of locally retained execution receipt",
+    "raw_receipt_sha256": "0b5b45d19360ac489b17eb9694c6c05fe3c05356d6a9e9290e8066b144cb30c0",
+    "sanitization": "private source names/paths replaced, media title tags omitted, infrastructure host normalized; numerical measurements unchanged"
+  }
+}

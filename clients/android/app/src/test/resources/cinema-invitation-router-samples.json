@@ -1,0 +1,143 @@
+{
+  "broker_generation": "27b5b014-b4aa-4e05-bcf2-870e6e5429bf",
+  "broker_origin": "https://broker.example",
+  "grant_id": "deecefb8-ccad-4a49-8452-6b73c425d4a7",
+  "installation_id": "b5bfd146-143d-4cce-89bc-5a4492163126",
+  "live": false,
+  "normalization": "Captured synthetic Home/broker Router replies; all emitted proofs replaced with canonical non-authorizing A43 values; broker origin replaced with broker.example.",
+  "receiver_id": "d29f4b64-d22e-4ebf-9480-511832cdf190",
+  "samples": [
+    {
+      "operation": "phones",
+      "response": {
+        "phone": {
+          "created_at": 1791451398,
+          "installation_id": "b5bfd146-143d-4cce-89bc-5a4492163126",
+          "name": "Phone",
+          "permission_granted": false,
+          "phone_generation": 1,
+          "platform": "android",
+          "resident_active": false
+        },
+        "phone_secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "version": "cinema.invitation.v1"
+      }
+    },
+    {
+      "operation": "availability",
+      "response": {
+        "phone": {
+          "created_at": 1791451398,
+          "installation_id": "b5bfd146-143d-4cce-89bc-5a4492163126",
+          "name": "Phone",
+          "permission_granted": true,
+          "phone_generation": 2,
+          "platform": "android",
+          "resident_active": false
+        },
+        "version": "cinema.invitation.v1"
+      }
+    },
+    {
+      "operation": "consent_on",
+      "response": {
+        "consent": {
+          "consent_generation": 1,
+          "enabled": true,
+          "grant_id": "deecefb8-ccad-4a49-8452-6b73c425d4a7",
+          "readiness": {
+            "eligible": false,
+            "provider_delivery_verified": false,
+            "status": "transport_unavailable"
+          },
+          "receiver_id": "d29f4b64-d22e-4ebf-9480-511832cdf190",
+          "transport": "fcm",
+          "transport_generation": 0
+        },
+        "version": "cinema.invitation.v1"
+      }
+    },
+    {
+      "operation": "transport_start",
+      "response": {
+        "consent": {
+          "consent_generation": 2,
+          "enabled": true,
+          "grant_id": "deecefb8-ccad-4a49-8452-6b73c425d4a7",
+          "readiness": {
+            "eligible": false,
+            "provider_delivery_verified": false,
+            "status": "transport_pending"
+          },
+          "receiver_id": "d29f4b64-d22e-4ebf-9480-511832cdf190",
+          "transport": "fcm",
+          "transport_generation": 1
+        },
+        "ticket": {
+          "broker_generation": "27b5b014-b4aa-4e05-bcf2-870e6e5429bf",
+          "broker_origin": "https://broker.example",
+          "expires_at": 1791451518,
+          "ticket_id": "3f9be703-d07b-4b09-a1ec-a9bc94036537",
+          "ticket_secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "version": "cinema.invitation.v1"
+      }
+    },
+    {
+      "operation": "transport_confirm",
+      "response": {
+        "consent": {
+          "consent_generation": 2,
+          "enabled": true,
+          "grant_id": "deecefb8-ccad-4a49-8452-6b73c425d4a7",
+          "readiness": {
+            "eligible": true,
+            "provider_delivery_verified": false,
+            "status": "ready"
+          },
+          "receiver_id": "d29f4b64-d22e-4ebf-9480-511832cdf190",
+          "transport": "fcm",
+          "transport_generation": 1
+        },
+        "version": "cinema.invitation.v1"
+      }
+    },
+    {
+      "operation": "consents_list",
+      "response": {
+        "consents": [
+          {
+            "consent_generation": 2,
+            "enabled": true,
+            "grant_id": "deecefb8-ccad-4a49-8452-6b73c425d4a7",
+            "readiness": {
+              "eligible": true,
+              "provider_delivery_verified": false,
+              "status": "ready"
+            },
+            "receiver_id": "d29f4b64-d22e-4ebf-9480-511832cdf190",
+            "transport": "fcm",
+            "transport_generation": 1
+          }
+        ],
+        "next_cursor": null,
+        "version": "cinema.invitation.v1"
+      }
+    },
+    {
+      "operation": "lookup",
+      "response": {
+        "expires_at": 1791451519,
+        "foreground_id": "abbd5ecf-4bde-4266-b81a-90c4ff553397",
+        "receiver_id": "d29f4b64-d22e-4ebf-9480-511832cdf190",
+        "target": {
+          "owner_node_id": "test-node",
+          "receiver_epoch": "0ea43076-397b-4553-8fb5-06cdfd67d4ae",
+          "session_id": "6e02c7fe-815e-41f3-bb3a-51068729969e"
+        },
+        "version": "cinema.invitation.v1"
+      }
+    }
+  ],
+  "synthetic_only": true
+}

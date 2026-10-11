@@ -13,6 +13,7 @@ from unittest import mock
 
 from validation.release_artifact import BINARIES, create, verify
 from validation.release_aliases import alias_action
+from tests.operations.test_release_debug import packed_pair
 from validation.release_dockerfile import (
     render,
     render_binary_export,
@@ -114,7 +115,13 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertIn("plurx-cluster-check", image)
         self.assertIn("build-identity", image)
         self.assertIn("GLIBC_$max_glibc; Bookworm provides 2.36", workflow)
-        self.assertIn("target: runtime-assets", image)
+        # amd64 tags carrying the audited Dolby package publish the runtime
+        # that installs it; every other tag publishes the plain runtime.
+        self.assertIn(
+            "target: ${{ steps.media-contract.outputs.dolby_required == 'true' "
+            "&& 'runtime-assets-dolby-amd64' || 'runtime-assets' }}",
+            image,
+        )
         self.assertIn("REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST", image)
         self.assertIn("--runtime-image", image)
         self.assertLess(
@@ -207,13 +214,21 @@ class ReleasePublicationContractCase(unittest.TestCase):
             "/usr/local/bin/plurx-cluster-check",
             generated,
         )
-        self.assertNotIn("FROM rust:", generated)
+        # The runtime copies its private DV processing bundle from the stages
+        # that build it, so those stay; the daemon's Rust build stage and the
+        # bundle's own check stage do not.
+        self.assertIn("AS dv-processing-dependencies", generated)
+        self.assertIn("AS dv-processing-helpers", generated)
+        self.assertNotIn("AS dv-processing-helper-check", generated)
+        self.assertNotRegex(generated, r"(?m)^FROM \S+ AS build$")
+        self.assertNotIn("FROM node:", generated)
+        self.assertNotIn("FROM runtime-assets AS ci", generated)
         self.assertNotIn("cargo build", generated)
         self.assertNotIn("COPY --from=build", generated)
 
     def test_digest_bound_release_omits_mutable_runtime_install(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        runtime = "192.168.4.7:3000/noirr/plurx-media-runtime@sha256:" + "a" * 64
+        runtime = "forge.lan:3000/noirr/plurx-media-runtime@sha256:" + "a" * 64
         generated = render(source, runtime)
 
         self.assertIn(f"FROM {runtime} AS runtime-assets", generated)
@@ -225,7 +240,7 @@ class ReleasePublicationContractCase(unittest.TestCase):
             generated,
         )
         with self.assertRaisesRegex(ValueError, "immutable sha256 digest"):
-            render(source, "192.168.4.7:3000/noirr/plurx-media-runtime:latest")
+            render(source, "forge.lan:3000/noirr/plurx-media-runtime:latest")
 
     def test_release_binds_daemon_identity_to_published_runtime(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -250,6 +265,116 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         )
         self.assertNotIn("plurx-cluster-check", generated)
 
+    def test_runtime_is_found_by_name_beside_other_bookworm_stages(self):
+        # The DV processing bundle added a Bookworm check stage and helper
+        # stages the runtime copies from. Counting Bookworm bases then found
+        # two runtimes and refused every packaging step, and a renderer that
+        # dropped the helper stages would emit a COPY --from naming nothing.
+        source = """# syntax=docker/dockerfile:1
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release
+# Helper toolchain.
+FROM rust:1-bookworm AS helper-dependencies
+RUN make dependencies
+FROM helper-dependencies AS helpers
+COPY tools/helpers /inputs
+RUN make bundle
+# Loader check, never shipped.
+FROM debian:bookworm-slim AS helper-check
+COPY --from=helpers /opt/bundle /opt/bundle
+FROM debian:bookworm-slim AS runtime-assets
+COPY --from=helpers /opt/bundle /usr/lib/bundle
+FROM node:22-bookworm-slim AS ci-node
+FROM runtime-assets AS ci
+COPY --from=ci-node /usr/local/bin/node /usr/local/bin/node
+FROM runtime-assets AS runtime
+COPY --from=build /plurxd /usr/local/bin/plurxd
+"""
+
+        self.assertEqual(required_binaries(source), ("plurxd",))
+        generated = render(source)
+        self.assertIn("# Helper toolchain.\nFROM rust:1-bookworm AS helper-dependencies", generated)
+        self.assertIn("FROM helper-dependencies AS helpers", generated)
+        self.assertIn("COPY --from=helpers /opt/bundle /usr/lib/bundle", generated)
+        self.assertIn("COPY --chmod=0755 release-bin/plurxd /usr/local/bin/plurxd", generated)
+        for dropped in ("AS helper-check", "Loader check", "AS ci", "cargo build", "COPY . ."):
+            self.assertNotIn(dropped, generated)
+        self.assertNotRegex(generated, r"(?m)^FROM \\S+ AS build$")
+
+        exporter = render_binary_export(source)
+        self.assertTrue(exporter.startswith("# syntax=docker/dockerfile:1\nFROM rust:1-bookworm AS build"))
+        self.assertNotIn("helper", exporter.lower())
+        self.assertNotIn("bookworm-slim", exporter)
+
+        published = render(source, "forge.lan:3000/noirr/plurx-media-runtime@sha256:" + "b" * 64)
+        self.assertNotIn("helper", published.lower())
+
+        refusals = {
+            "neither a stage the packaging output keeps": source.replace(
+                "COPY --from=helpers /opt/bundle /usr/lib", "COPY --from=missing /opt/bundle /usr/lib"),
+            "neither a stage the packaging output keeps nor": source.replace(
+                "COPY --from=build /plurxd", "COPY --from=ci-node /usr/local/bin/node /opt/node\nCOPY --from=build /plurxd"),
+            "must not depend on the Rust build stage": source.replace(
+                "RUN make bundle", "COPY --from=build /plurxd /opt/bundle"),
+            "must not depend on the Rust build stage ": source.replace(
+                "COPY --from=helpers /opt/bundle /usr/lib/bundle",
+                "RUN --mount=type=bind,from=build,source=/plurxd,target=/x true"),
+            "helpers copies the daemon's sources": source.replace(
+                "COPY tools/helpers /inputs", "COPY ./crates /inputs"),
+            "one runtime-assets stage": source.replace("AS helper-check", "AS runtime-assets"),
+        }
+        for message, refused in refusals.items():
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message.strip()):
+                render(refused)
+
+    def test_runtime_named_with_the_final_stage_prefix_is_not_a_second_runtime(self):
+        source = (
+            "FROM rust:1-bookworm AS build\n"
+            "RUN cargo build --release\n\n"
+            "FROM debian:bookworm-slim AS runtime-assets\n"
+            "RUN true\n\n"
+            "FROM runtime-assets AS runtime\n"
+            "COPY --from=build /plurxd /usr/local/bin/plurxd\n\n"
+            "FROM runtime-assets AS runtime-assets-dolby-amd64\n"
+            "RUN true\n"
+        )
+        from validation.release_dockerfile import _runtime, _split_final_runtime
+
+        assets, final = _split_final_runtime(source)
+        self.assertTrue(final.startswith("\nCOPY --from=build /plurxd"))
+        self.assertNotIn("runtime-assets-dolby-amd64", _runtime(source))
+        with self.assertRaises(ValueError):
+            _split_final_runtime(source + "\nFROM runtime-assets AS runtime\n")
+
+    def test_stage_boundaries_are_whole_from_declarations_in_any_case(self):
+        from validation.release_dockerfile import _runtime
+
+        source = (
+            "FROM debian:bookworm-slim AS runtime-assets\n"
+            "RUN true\n\n"
+            "from runtime-assets as Runtime\n"
+            "COPY --from=build /plurxd /usr/local/bin/plurxd\n\n"
+            "  from runtime-assets AS runtime-assets-dolby-amd64-extra\n"
+            "RUN echo later\n"
+        )
+        runtime = _runtime(source)
+        self.assertIn("COPY --from=build /plurxd", runtime)
+        self.assertNotIn("echo later", runtime)
+        self.assertNotIn("dolby-amd64-extra", runtime)
+
+    def test_named_dolby_package_context_is_accepted_only_in_its_render_mode(self):
+        from validation.release_dockerfile import render
+
+        source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        rendered = render(source, linux_dolby_package=True)
+        self.assertIn("--mount=from=linux-dolby-package,", rendered)
+        self.assertIn("FROM runtime-assets-dolby-amd64 AS runtime", rendered)
+        self.assertNotIn("cargo build", rendered)
+        plain = render(source)
+        self.assertNotIn("linux-dolby-package", plain)
+
     def test_generator_derives_current_two_binary_runtime(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
@@ -261,6 +386,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         for name in BINARIES:
             self.assertIn(f"COPY --from=build /{name} /{name}", exporter)
         self.assertNotIn("FROM debian:bookworm-slim", exporter)
+        self.assertNotIn("dv-processing", exporter)
 
     def test_trusted_helper_can_inspect_real_isolated_tag_checkouts(self):
         tagged_contracts = {
@@ -468,11 +594,13 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         export.mkdir()
         environment = own_repository_environment()
         shutil.copy2(ROOT / "Dockerfile", source / "Dockerfile")
+        shutil.copy2(ROOT / "Cargo.toml", source / "Cargo.toml")
+        shutil.copy2(ROOT / "rust-toolchain.toml", source / "rust-toolchain.toml")
         subprocess.run(
             ["git", "init", "-q"], cwd=source, check=True, env=environment
         )
         subprocess.run(
-            ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile"],
+            ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile", "Cargo.toml", "rust-toolchain.toml"],
             cwd=source,
             check=True,
             env=environment,
@@ -501,7 +629,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             env=environment,
         ).stdout.strip()
         for name in BINARIES:
-            write_elf(export / name, "x86_64-unknown-linux-gnu", name.encode())
+            packed_pair(export, name)
         (export / "rustc-version").write_text(
             "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
         )
@@ -548,8 +676,12 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     "build-manifest.json",
                     "plurxd",
                     "plurxd.sha256",
+                    "plurxd.dwp",
+                    "plurxd.dwp.sha256",
                     "plurx-cluster-check",
                     "plurx-cluster-check.sha256",
+                    "plurx-cluster-check.dwp",
+                    "plurx-cluster-check.dwp.sha256",
                 },
             )
             self.assertIn(
@@ -573,6 +705,51 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             )
             self.assertNotEqual(wrong_tree.returncode, 0)
             self.assertIn("does not match", wrong_tree.stderr)
+            (source / "Cargo.toml").write_text("# tracked source changed\n", encoding="utf-8")
+            dirty_tree = subprocess.run(
+                [str(ROOT / "scripts/release-package-candidate"), str(source),
+                 str(ROOT), str(export), str(fixture / "dirty"),
+                 "x86_64-unknown-linux-gnu", commit, commit],
+                capture_output=True, text=True, env=own_repository_environment(),
+            )
+            self.assertNotEqual(dirty_tree.returncode, 0)
+            self.assertIn("tracked changes", dirty_tree.stderr)
+
+
+
+
+    def test_audited_amd64_release_render_excludes_export_tools_and_keeps_arm_incumbent(self):
+        source = (ROOT / "Dockerfile").read_text()
+        arm = render(source)
+        assert "FROM runtime-assets AS runtime" in arm
+        assert "linux-dolby-package-export" not in arm
+        assert "linux-dolby-install" not in arm
+        amd64 = render(source, linux_dolby_package=True)
+        assert "FROM runtime-assets-dolby-amd64 AS runtime" in amd64
+        assert "--mount=from=linux-dolby-package" in amd64
+        assert "linux-dolby-package-build" not in amd64
+        assert "linux-dolby-package-export" not in amd64
+        assert "cargo build" not in amd64
+        assert "USER plurx" in amd64
+        published = render(source, runtime_image="example.invalid/media@sha256:" + "a" * 64)
+        assert "linux-dolby-install" not in published
+        assert "FROM example.invalid/media@sha256:" in published
+        with unittest.TestCase().assertRaises(ValueError):
+            render(source, runtime_image="example.invalid/media@sha256:" + "a" * 64, linux_dolby_package=True)
+
+
+    def test_publish_and_ci_produce_and_consume_same_audited_media_export(self):
+        publication = WORKFLOW.read_text()
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        for workflow in [publication, ci]:
+            assert "target: linux-dolby-package-export" in workflow
+            assert "outputs: type=local,dest=linux-dolby-export" in workflow
+            assert "linux-dolby-package=./linux-dolby-export/package" in workflow
+        assert "runtime-assets-dolby-amd64" in publication
+        candidate = (ROOT / "scripts/release-package-candidate").read_text()
+        assert '"$target" == x86_64-unknown-linux-gnu' in candidate
+        assert 'media_args+=(--linux-dolby-package)' in candidate
+        assert '"${media_args[@]}"' in candidate
 
 
 if __name__ == "__main__":

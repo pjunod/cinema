@@ -8,7 +8,7 @@ that document; what shipped from them is #447 and its follow-ups. ·
 **Reviewing:** `docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md` as committed in
 `8b92b958` · **Evidence base:** `origin/main` = `5c605768` (the merge of PR #445,
 2026-09-23 00:48 UTC), a fresh Forgejo clone, PR #444/#445 via the API, and
-`/api/v1/server` on m6, nynuc, nuc4 · **Reviewer:** Fable 5.1, adversarial ·
+`/api/v1/server` on lab6, media1, lab4 · **Reviewer:** Fable 5.1, adversarial ·
 **Written:** 2026-09-22
 
 **Verdict: APPROVE WITH CHANGES.** §2 and §4 are right, every anchor I could
@@ -97,7 +97,7 @@ to ≥ 177 / 118.
 Not re-verified: the §2.1 log lines (container recreated, as the doc says), the
 windowed-extraction 7 % / 57 % / 101 % curve attributed to a test comment, the
 four transcode reasons in §2.7, and whether `5c605768` is on any node —
-`/api/v1/server` answers only `0.3.0` on m6, nynuc and nuc4; `git describe` on the
+`/api/v1/server` answers only `0.3.0` on lab6, media1 and lab4; `git describe` on the
 node is the only way to know.
 
 ---

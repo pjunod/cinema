@@ -1,0 +1,12 @@
+{
+  "run_id": 3993,
+  "ui_index": 3972,
+  "job_id": 41503,
+  "name": "fast Windows compile",
+  "outcome": "success",
+  "checked_source": "bd24f27679faf68bf8815915b488a3e7ac2e7461",
+  "job_commands": "unchanged copy of main-fast-lane.yml windows_compile",
+  "log_sha256": "c01bb14983da2df8d461615e377260d7f6b222a5957ccfdd4a396c720c7b3ee1",
+  "compressed_log": "windows-41503.log.gz",
+  "reruns": 0
+}

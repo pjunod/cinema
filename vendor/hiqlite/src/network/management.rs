@@ -26,6 +26,238 @@ pub struct LearnerReq {
     pub addr_raft: String,
 }
 
+#[cfg(feature = "sqlite")]
+macro_rules! membership_params {
+    ($($value:expr),* $(,)?) => { vec![$(crate::Param::from($value)),*] };
+}
+
+/// A committed SQL intent freezes the admission evidence until a separate
+/// committed membership entry reaches the requested outcome. Errors deliberately
+/// retain the intent; elapsed time is never evidence that an ambiguous Raft
+/// mutation did not commit.
+#[cfg(feature = "sqlite")]
+struct SharingMembershipIntent {
+    raft_id: i64,
+    attempt_id: String,
+}
+
+#[cfg(feature = "sqlite")]
+async fn sharing_membership_write(
+    state: &AppStateExt,
+    sql: String,
+    params: crate::Params,
+) -> Result<usize, Error> {
+    use crate::store::state_machine::sqlite::state_machine::{Query, QueryWrite};
+    let response = state
+        .raft_db
+        .raft
+        .client_write(QueryWrite::Transaction(vec![Query {
+            sql: sql.into(),
+            params,
+        }]))
+        .await?;
+    let crate::Response::Transaction(results) = response.data else {
+        return Err(Error::Config(
+            "unexpected membership intent response".into(),
+        ));
+    };
+    let results = results?;
+    let [result] = results.as_slice() else {
+        return Err(Error::Config("unexpected membership intent result".into()));
+    };
+    result
+        .as_ref()
+        .copied()
+        .map_err(|error| Error::Config(format!("membership intent refused: {error}").into()))
+}
+
+#[cfg(feature = "sqlite")]
+async fn sharing_membership_claim(
+    state: &AppStateExt,
+    raft_type: &RaftType,
+    node: &Node,
+    operation: &str,
+) -> Result<Option<SharingMembershipIntent>, Error> {
+    if *raft_type != RaftType::Sqlite {
+        return Ok(None);
+    }
+    let mut rows=crate::query::query_consistent_local(&state.raft_db.raft,state.raft_db.log_statements,state.raft_db.read_pool.clone(),
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name='item_identity_watermark') OR EXISTS (SELECT 1 FROM sqlite_master schema JOIN pragma_table_info(schema.name) info WHERE schema.type='table' AND schema.name IN ('media_session_requests','media_playback_pointers','media_sessions','media_session_preparations','media_playback_desired','media_session_producer_recovery','library_channel_session_recipes','media_session_requests_principal_new','media_playback_pointers_principal_new','media_sessions_principal_new','media_session_preparations_principal_new','media_playback_desired_principal_new','media_session_producer_recovery_principal_new','library_channel_session_recipes_principal_new') AND info.name IN ('owner_key','principal_kind','share_grant_id','share_viewer_key')) OR EXISTS (SELECT 1 FROM sqlite_master WHERE name='cluster_sharing_membership_intents') AS installed",membership_params!()).await?;
+    let installed = rows
+        .first_mut()
+        .ok_or_else(|| Error::Config("missing sharing schema observation".into()))?
+        .try_get::<i64>("installed")?;
+    if installed == 0 {
+        return Ok(None);
+    }
+    let raft_id = i64::try_from(node.id)
+        .map_err(|_| Error::Config("membership target exceeds SQL identity range".into()))?;
+    if raft_id <= 0
+        || [&node.addr_api, &node.addr_raft].iter().any(|address| {
+            address.is_empty() || address.len() > 512 || address.chars().any(char::is_control)
+        })
+    {
+        return Err(Error::Config("invalid sharing membership target".into()));
+    }
+    // A partial installation must not turn an INSERT into an unguarded proof.
+    let mut guards = vec![
+        "cluster_sharing_principal_membership_claim_guard".to_owned(),
+        "cluster_sharing_catalogue_membership_claim_guard".to_owned(),
+        "cluster_sharing_membership_intent_update_guard".to_owned(),
+    ];
+    for table in [
+        "cluster_nodes",
+        "cluster_node_capabilities",
+        "cluster_sharing_join_declarations",
+        "cluster_join_tokens",
+    ] {
+        for event in ["insert", "update", "delete"] {
+            guards.push(format!("cluster_sharing_freeze_{table}_{event}"));
+        }
+    }
+    let guard_names =
+        serde_json::to_string(&guards).map_err(|error| Error::Config(error.to_string().into()))?;
+    let mut shape=crate::query::query_consistent_local(&state.raft_db.raft,state.raft_db.log_statements,state.raft_db.read_pool.clone(),
+        "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (SELECT value FROM json_each($1)))=15 AND (SELECT COUNT(*) FROM pragma_table_list WHERE name IN ('cluster_sharing_membership_intents','cluster_sharing_join_declarations') AND type='table' AND strict=1)=2 AND (SELECT COUNT(*) FROM pragma_table_info('cluster_sharing_membership_intents'))=7 AND (SELECT COUNT(*) FROM pragma_table_info('cluster_sharing_membership_intents') WHERE (name='raft_id' AND type='INTEGER' AND pk=1) OR (name IN ('node_id','attempt_id','operation','api_address','raft_address') AND type='TEXT' AND pk=0 AND \"notnull\"=1) OR (name='claimed_at' AND type='INTEGER' AND pk=0 AND \"notnull\"=1))=7 AND (SELECT COUNT(*) FROM pragma_table_info('cluster_sharing_join_declarations'))=7 AND (SELECT COUNT(*) FROM pragma_table_info('cluster_sharing_join_declarations') WHERE (name='token_hash' AND type='TEXT' AND pk=1 AND \"notnull\"=1) OR (name='capability' AND type='TEXT' AND pk=2 AND \"notnull\"=1) OR (name IN ('node_id','api_address','raft_address') AND type='TEXT' AND pk=0 AND \"notnull\"=1) OR (name IN ('raft_id','last_seen_at') AND type='INTEGER' AND pk=0 AND \"notnull\"=1))=7 AS valid",membership_params!(guard_names.clone())).await?;
+    if shape
+        .first_mut()
+        .ok_or_else(|| Error::Config("missing sharing admission shape".into()))?
+        .try_get::<i64>("valid")?
+        != 1
+    {
+        return Err(Error::Config(
+            "partial sharing membership admission schema".into(),
+        ));
+    }
+    let mut existing=crate::query::query_consistent_local(&state.raft_db.raft,state.raft_db.log_statements,state.raft_db.read_pool.clone(),
+        "SELECT attempt_id,operation,api_address,raft_address FROM cluster_sharing_membership_intents WHERE raft_id=$1",membership_params!(raft_id)).await?;
+    if let Some(intent) = existing.first_mut() {
+        if intent.try_get::<String>("operation")? != operation
+            || intent.try_get::<String>("api_address")? != node.addr_api
+            || intent.try_get::<String>("raft_address")? != node.addr_raft
+        {
+            return Err(Error::Config(
+                "another sharing membership outcome remains unresolved".into(),
+            ));
+        }
+        return Ok(Some(SharingMembershipIntent {
+            raft_id,
+            attempt_id: intent.try_get("attempt_id")?,
+        }));
+    }
+    let metrics = state.raft_db.raft.metrics().borrow().clone();
+    let applied_membership =
+        metrics
+            .membership_config
+            .log_id()
+            .as_ref()
+            .is_some_and(|membership| {
+                metrics
+                    .last_applied
+                    .as_ref()
+                    .is_some_and(|applied| applied.index >= membership.index)
+            })
+            && metrics
+                .membership_config
+                .membership()
+                .get_joint_config()
+                .len()
+                == 1;
+    let exact_member = applied_membership
+        && metrics
+            .membership_config
+            .membership()
+            .get_node(&node.id)
+            .is_some_and(|member| {
+                member.addr_api == node.addr_api && member.addr_raft == node.addr_raft
+            });
+    if exact_member
+        && (operation == "learner"
+            || metrics
+                .membership_config
+                .voter_ids()
+                .any(|id| id == node.id))
+    {
+        return Ok(None);
+    }
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+    let changed=sharing_membership_write(state,
+        "INSERT INTO cluster_sharing_membership_intents(raft_id,node_id,attempt_id,operation,api_address,raft_address,claimed_at) SELECT $1,node.node_id,$2,$3,$4,$5,$6 FROM cluster_nodes node WHERE node.raft_id=$1 AND node.removed_at IS NULL AND node.api_address=$4 AND node.raft_address=$5 AND (SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (SELECT value FROM json_each($7)))=15".to_owned(),
+        membership_params!(raft_id,attempt_id.clone(),operation,node.addr_api.clone(),node.addr_raft.clone(),now,guard_names)).await?;
+    if changed != 1 {
+        return Err(Error::Config(
+            "installed sharing schema has no complete current admission proof".into(),
+        ));
+    }
+    Ok(Some(SharingMembershipIntent {
+        raft_id,
+        attempt_id,
+    }))
+}
+
+#[cfg(feature = "sqlite")]
+async fn sharing_membership_finish(
+    state: &AppStateExt,
+    node: &Node,
+    voter: bool,
+    intent: Option<SharingMembershipIntent>,
+) -> Result<(), Error> {
+    let Some(intent) = intent else {
+        return Ok(());
+    };
+    state.raft_db.raft.ensure_linearizable().await?;
+    let metrics = state.raft_db.raft.metrics().borrow().clone();
+    let applied_membership =
+        metrics
+            .membership_config
+            .log_id()
+            .as_ref()
+            .is_some_and(|membership| {
+                metrics
+                    .last_applied
+                    .as_ref()
+                    .is_some_and(|applied| applied.index >= membership.index)
+            })
+            && metrics
+                .membership_config
+                .membership()
+                .get_joint_config()
+                .len()
+                == 1;
+    let committed = applied_membership
+        && metrics
+            .membership_config
+            .membership()
+            .get_node(&node.id)
+            .is_some_and(|member| {
+                member.addr_api == node.addr_api && member.addr_raft == node.addr_raft
+            })
+        && (!voter
+            || metrics
+                .membership_config
+                .voter_ids()
+                .any(|id| id == node.id));
+    if !committed {
+        return Err(Error::Config(
+            "sharing membership outcome remains unresolved".into(),
+        ));
+    }
+    let changed = sharing_membership_write(
+        state,
+        "DELETE FROM cluster_sharing_membership_intents WHERE raft_id=$1 AND attempt_id=$2"
+            .to_owned(),
+        membership_params!(intent.raft_id, intent.attempt_id),
+    )
+    .await?;
+    if changed != 1 {
+        return Err(Error::Config(
+            "sharing membership intent changed before completion".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClusterLeaveReq {
     pub node_id: u64,
@@ -54,8 +286,28 @@ where
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum MembershipChangeReq {
+    FencedRemoveVoter(FencedVoterReduction),
     RemoveVoter { remove_voter: NodeId },
     SetVoters(BTreeSet<NodeId>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FencedVoterReduction {
+    fenced_remove_voter: crate::ReductionFenceReference,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FencedLearnerReduction {
+    fenced_leave: crate::ReductionFenceReference,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MembershipLeaveReq {
+    Fenced(FencedLearnerReduction),
+    Legacy(ClusterLeaveReq),
 }
 
 #[tracing::instrument(skip_all)]
@@ -67,6 +319,15 @@ pub(crate) async fn add_learner(
 ) -> Result<Response, Error> {
     validate_secret(&state, &headers)?;
 
+    let LearnerReq {
+        node_id,
+        addr_api,
+        addr_raft,
+    } = get_payload(&headers, body)?;
+    let admission = state.membership_admission.as_ref().map(|policy| {
+        policy.prepare(crate::membership_admission::MembershipAcquisition::AddLearner { node_id })
+    });
+
     if helpers::is_raft_stopped(&state, &raft_type)
         || !helpers::is_raft_initialized(&state, &raft_type).await?
     {
@@ -74,11 +335,6 @@ pub(crate) async fn add_learner(
     }
     are_we_leader(&state, &raft_type).await?;
 
-    let LearnerReq {
-        node_id,
-        addr_api,
-        addr_raft,
-    } = get_payload(&headers, body)?;
     let node = Node {
         id: node_id,
         addr_raft,
@@ -86,8 +342,12 @@ pub(crate) async fn add_learner(
     };
     info!("{:?} requests to be added as {:?} Learner", node, raft_type);
     let lock = state.raft_lock.lock().await;
+    are_we_leader(&state, &raft_type).await?;
+    #[cfg(feature = "sqlite")]
+    let sharing_intent = sharing_membership_claim(&state, &raft_type, &node, "learner").await?;
     let nid = node.id;
-    let res = helpers::add_new_learner(&state, &raft_type, node).await;
+    let res =
+        helpers::add_new_learner(&state, &raft_type, node.clone(), admission.as_deref()).await;
     match res {
         Ok(_) => {
             let mut metrics = helpers::get_raft_metrics(&state, &raft_type).await;
@@ -95,7 +355,8 @@ pub(crate) async fn add_learner(
                 .membership_config
                 .membership()
                 .get_node(&nid)
-                .is_some();
+                .is_some()
+                && helpers::membership_is_applied(&metrics);
             while !is_member {
                 info!("Waiting for node {nid} to become a committed learner");
                 time::sleep(Duration::from_millis(500)).await;
@@ -104,9 +365,12 @@ pub(crate) async fn add_learner(
                     .membership_config
                     .membership()
                     .get_node(&nid)
-                    .is_some();
+                    .is_some()
+                    && helpers::membership_is_applied(&metrics);
             }
 
+            #[cfg(feature = "sqlite")]
+            sharing_membership_finish(&state, &node, false, sharing_intent).await?;
             // give it a second to sync before dropping the lock
             time::sleep(Duration::from_millis(1000)).await;
             drop(lock);
@@ -129,6 +393,14 @@ pub(crate) async fn become_member(
     body: body::Bytes,
 ) -> Result<Response, Error> {
     validate_secret(&state, &headers)?;
+    let payload = get_payload::<LearnerReq>(&headers, body)?;
+    let admission = state.membership_admission.as_ref().map(|policy| {
+        policy.prepare(
+            crate::membership_admission::MembershipAcquisition::Promote {
+                node_id: payload.node_id,
+            },
+        )
+    });
 
     if helpers::is_raft_stopped(&state, &raft_type)
         || !helpers::is_raft_initialized(&state, &raft_type).await?
@@ -138,17 +410,42 @@ pub(crate) async fn become_member(
     are_we_leader(&state, &raft_type).await?;
 
     let lock = state.raft_lock.lock().await;
-    let payload = get_payload::<LearnerReq>(&headers, body)?;
+    are_we_leader(&state, &raft_type).await?;
+    #[cfg(feature = "sqlite")]
+    let node = Node {
+        id: payload.node_id,
+        addr_api: payload.addr_api.clone(),
+        addr_raft: payload.addr_raft.clone(),
+    };
     info!("{:?} Node membership request: {:?}", raft_type, payload);
 
     let mut metrics = helpers::get_raft_metrics(&state, &raft_type).await;
     debug!("{:?} Members before add: {:?}", raft_type, metrics);
 
+    #[cfg(feature = "sqlite")]
+    let sharing_intent = sharing_membership_claim(&state, &raft_type, &node, "voter").await?;
     let is_voter = metrics
         .membership_config
         .voter_ids()
         .any(|id| id == payload.node_id);
     if is_voter {
+        // An effective vote may be an already submitted, ambiguous proposal.
+        // Reconcile its application; do not acquire or submit another vote.
+        while !helpers::membership_is_applied(&metrics) {
+            time::sleep(Duration::from_millis(500)).await;
+            metrics = helpers::get_raft_metrics(&state, &raft_type).await;
+            if !metrics
+                .membership_config
+                .voter_ids()
+                .any(|id| id == payload.node_id)
+            {
+                return Err(Error::LeaderChange(
+                    "pending voter membership changed during reconciliation".into(),
+                ));
+            }
+        }
+        #[cfg(feature = "sqlite")]
+        sharing_membership_finish(&state, &node, true, sharing_intent).await?;
         info!(
             "Node {} is a voter already - nothing left to do",
             payload.node_id
@@ -162,7 +459,9 @@ pub(crate) async fn become_member(
         .collect::<BTreeSet<u64>>();
     nodes_set.insert(payload.node_id);
 
-    match helpers::change_membership(&state, &raft_type, nodes_set, true).await {
+    match helpers::change_membership(&state, &raft_type, nodes_set, true, admission.as_deref())
+        .await
+    {
         Ok(_) => {
             metrics = helpers::get_raft_metrics(&state, &raft_type).await;
             let mut is_voter = metrics
@@ -182,6 +481,8 @@ pub(crate) async fn become_member(
                     .any(|id| id == payload.node_id);
             }
 
+            #[cfg(feature = "sqlite")]
+            sharing_membership_finish(&state, &node, true, sharing_intent).await?;
             // give it a second to sync before dropping the lock
             time::sleep(Duration::from_millis(1000)).await;
             drop(lock);
@@ -259,16 +560,69 @@ pub(crate) async fn post_membership(
 ) -> Result<Response, Error> {
     validate_secret(&state, &headers)?;
 
+    let payload = get_payload::<MembershipChangeReq>(&headers, body)?;
+    if let MembershipChangeReq::FencedRemoveVoter(request) = &payload
+        && !request.fenced_remove_voter.has_valid_shape()
+    {
+        return Err(Error::Error("invalid exact reduction reference".into()));
+    }
+    // Capture this receiver's original installed clock before FIRST await.
+    let mut admission = match &payload {
+        MembershipChangeReq::FencedRemoveVoter(request) => {
+            state.membership_admission.as_ref().map(|policy| {
+                policy.prepare(
+                    crate::membership_admission::MembershipAcquisition::Reduction {
+                        reference: request.fenced_remove_voter.clone(),
+                        retain_as_learner: false,
+                    },
+                )
+            })
+        }
+        _ => None,
+    };
+
     if helpers::is_raft_stopped(&state, &raft_type)
         || !helpers::is_raft_initialized(&state, &raft_type).await?
     {
         return Err(Error::Config("Raft node has not been initialized".into()));
     }
 
-    let payload = get_payload::<MembershipChangeReq>(&headers, body)?;
     let _lock = state.raft_lock.lock().await;
     are_we_leader(&state, &raft_type).await?;
     match payload {
+        MembershipChangeReq::FencedRemoveVoter(request) => {
+            let target = request.fenced_remove_voter.target_raft_id;
+            let metrics = helpers::get_raft_metrics(&state, &raft_type).await;
+            // Already-applied outcome is reconciliation, not a new grant.
+            if metrics
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == target)
+            {
+                let prepared = admission.as_mut().ok_or_else(|| {
+                    Error::Error("fenced reduction requires installed node admission".into())
+                })?;
+                prepared.prepare_proof().await?;
+                if metrics.membership_config.voter_ids().any(|id| id == target) {
+                    helpers::remove_voter_with_admission(
+                        &state,
+                        &raft_type,
+                        target,
+                        false,
+                        admission.as_deref(),
+                    )
+                    .await?;
+                } else {
+                    helpers::remove_learner_with_admission(
+                        &state,
+                        &raft_type,
+                        target,
+                        admission.as_deref(),
+                    )
+                    .await?;
+                }
+            }
+        }
         // Apply the delta against the membership OpenRaft sees while holding
         // the same lock as learner promotion. Two sequential operations can no
         // longer overwrite one another with client-snapshotted absolute sets.
@@ -323,6 +677,34 @@ pub async fn leave_cluster(
 ) -> Result<Response, Error> {
     validate_secret(&state, &headers)?;
 
+    let request = get_payload::<MembershipLeaveReq>(&headers, body)?;
+    let (payload, reference) = match request {
+        MembershipLeaveReq::Fenced(request) => {
+            if !request.fenced_leave.has_valid_shape() {
+                return Err(Error::Error("invalid exact reduction reference".into()));
+            }
+            (
+                ClusterLeaveReq {
+                    node_id: request.fenced_leave.target_raft_id,
+                    stay_as_learner: false,
+                },
+                Some(request.fenced_leave),
+            )
+        }
+        MembershipLeaveReq::Legacy(payload) => (payload, None),
+    };
+    // Pure capture is before initialized/leader/lock/Store futures.
+    let mut admission = reference.and_then(|reference| {
+        state.membership_admission.as_ref().map(|policy| {
+            policy.prepare(
+                crate::membership_admission::MembershipAcquisition::Reduction {
+                    reference,
+                    retain_as_learner: false,
+                },
+            )
+        })
+    });
+
     if helpers::is_raft_stopped(&state, &raft_type)
         || !helpers::is_raft_initialized(&state, &raft_type).await?
     {
@@ -330,16 +712,33 @@ pub async fn leave_cluster(
     }
     are_we_leader(&state, &raft_type).await?;
 
-    let payload = get_payload::<ClusterLeaveReq>(&headers, body)?;
-    leave_cluster_exec(&state.0, &raft_type, payload).await?;
+    leave_cluster_exec_with_admission(
+        &state.0,
+        &raft_type,
+        payload,
+        admission.as_mut().map(|prepared| {
+            &mut **prepared as &mut dyn crate::membership_admission::PreparedMembershipAdmission
+        }),
+    )
+    .await?;
 
     Ok(Response::new(Body::empty()))
 }
 
+#[cfg(feature = "cache")]
 pub async fn leave_cluster_exec(
     state: &Arc<AppState>,
     raft_type: &RaftType,
     payload: ClusterLeaveReq,
+) -> Result<(), Error> {
+    leave_cluster_exec_with_admission(state, raft_type, payload, None).await
+}
+
+async fn leave_cluster_exec_with_admission(
+    state: &Arc<AppState>,
+    raft_type: &RaftType,
+    payload: ClusterLeaveReq,
+    mut admission: Option<&mut (dyn crate::membership_admission::PreparedMembershipAdmission + '_)>,
 ) -> Result<(), Error> {
     info!("{:?} Node {:?}", raft_type, payload);
 
@@ -352,6 +751,12 @@ pub async fn leave_cluster_exec(
         .any(|(id, _)| *id == payload.node_id);
 
     if is_member {
+        if let Some(prepared) = admission.as_mut() {
+            prepared.prepare_proof().await?;
+        }
+        let prepared = admission.as_ref().map(|prepared| {
+            &**prepared as &dyn crate::membership_admission::PreparedMembershipAdmission
+        });
         warn!(
             "Node {} ({:?}) is a cluster member - removing it",
             payload.node_id, raft_type
@@ -363,9 +768,14 @@ pub async fn leave_cluster_exec(
 
         if is_voter {
             warn!("Node {} ({:?}) is a Voter", payload.node_id, raft_type);
-            if let Err(err) =
-                helpers::remove_voter(state, raft_type, payload.node_id, payload.stay_as_learner)
-                    .await
+            if let Err(err) = helpers::remove_voter_with_admission(
+                state,
+                raft_type,
+                payload.node_id,
+                payload.stay_as_learner,
+                prepared,
+            )
+            .await
             {
                 error!(
                     "Error removing Node {} ({:?}) from Voters: {:?}",
@@ -393,7 +803,10 @@ pub async fn leave_cluster_exec(
                 "Node {} ({:?}) is a Learner and should not stay one",
                 payload.node_id, raft_type
             );
-            if let Err(err) = helpers::remove_learner(state, raft_type, payload.node_id).await {
+            if let Err(err) =
+                helpers::remove_learner_with_admission(state, raft_type, payload.node_id, prepared)
+                    .await
+            {
                 error!(
                     "Error removing Node {} ({:?}) from Learners: {:?}",
                     payload.node_id, raft_type, err

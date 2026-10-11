@@ -16,11 +16,18 @@
 > dependency audit remains. These rules supersede the older automatic
 > qualification and post-merge instructions below pending their rewrite.
 
-> **Test-lane amendment, 2026-09-20:** The ready main-bound fast Rust job
-> runs workspace Clippy and `make unit` after its compile checks, on the
-> pinned FFmpeg 6 runner surface. Paul selected the blocking PR lane so unit
-> regressions reach the author before merge without spending runner capacity
-> on recurring runtime schedules; no periodic test schedule was added.
+> **Test-lane amendment, 2026-10-07, superseding 2026-09-20:** The ready
+> main-bound fast Rust job compiles every target and runs workspace and
+> vendored Hiqlite Clippy on the pinned FFmpeg 6 runner surface. The full
+> Rust unit and SQLite suites run in manually dispatched
+> [ci.yml](../.github/workflows/ci.yml), outside the blocking PR lane.
+> Run the smallest focused regression locally before pushing and record its
+> command in the PR, with each `Regression-Test:` anchor on its own line.
+> Preflight validates those anchors in the merge candidate; it does not
+> execute commands from the PR body. Policy, affected compile checks, and
+> named regression evidence remain prerequisites for merge. This keeps a
+> focused change from waiting for the entire Rust suite; no periodic schedule
+> was added.
 
 > **Coverage amendment, 2026-09-30:** [coverage.yml](../.github/workflows/coverage.yml)
 > refreshes the dated unit coverage badge on pushes to `main`, independently
@@ -105,9 +112,13 @@ The [`effort-ci.yml`](../.github/workflows/effort-ci.yml) gate runs only:
 | Apple | iOS and tvOS compilation | XCTest and physical-device acceptance |
 | Android | Debug application compilation | JVM tests, lint, emulator tests, and physical-device acceptance |
 
-The aggregate result is named `Effort development gate`. Every new task push
-cancels its superseded run because only the latest task tree can merge. Missing
-scope information fails open into all compile surfaces.
+The aggregate result is named `Effort development gate`. Receipt-bearing
+attempts serialize without automatic cancellation so successful Python units
+cannot lose their evidence. [Once-per-PR Python receipts](ci/PYTHON-UNIT-PR-RECEIPTS.md)
+retain the original test/run/source attribution; retries execute only failed
+or newly discovered IDs. They do not replace current-source compilation,
+history, catalog or static checks. Missing scope information enables all
+compile surfaces; ambiguous PR receipt identity refuses unit execution.
 
 **Compilation being blocking is a reason to compile locally, not a reason to
 let the gate do it.** A session whose checkout has no toolchain can still have
@@ -261,15 +272,23 @@ When the project is complete:
 2. **Merge current `main` into the effort.** Do not rebase the shared effort
    branch: rewriting every task commit creates avoidable review and recovery
    work.
-3. **Open `effort/<project>` into `main`.** The main workflow recognizes that
-   head/base pair and replaces normal path selection with the complete fan-out.
+3. **Open `effort/<project>` into `main`, then dispatch qualification manually.**
+   Full CI is manual or release-tag-only; opening the PR does not allocate its
+   runtime sweep. Dispatch [ci.yml](../.github/workflows/ci.yml) on the frozen
+   promotion head branch with `promotion_pr`, `promotion_head_sha` and
+   `promotion_base_sha` naming that open same-repository PR and both exact tips.
+   Authenticated API metadata must agree with the dispatched checkout, and
+   current `main` must already be an ancestor of the head. The bound run enables
+   every surface, including Windows. It never publishes a package or fleet image;
+   leaving the three inputs empty preserves the ordinary manual workflow.
    If resolving the final merge requires a separate branch, name it
    `integration/<project>-into-main`; the workflow treats that narrowly named
    branch as the same qualification candidate.
    Forgejo does not auto-cancel these promotion runs when a newer event arrives;
-   it retains the older result for diagnosis. Compile-only effort PRs, ordinary
-   main-bound PRs, and superseded `main` pushes still cancel obsolete work, and
-   immutable tags do not. This is an explicit event-context expression because
+   it retains the older result for diagnosis. Receipt-bearing effort and
+   ordinary main-bound PRs also serialize to preserve Python success evidence.
+   Superseded `main` pushes still cancel obsolete work, and immutable tags do
+   not. The full workflow uses an explicit event-context expression because
    workflow concurrency is evaluated before the scope job exists. The behavior
    follows Forgejo's
    [workflow concurrency contract](https://forgejo.org/docs/latest/user/actions/reference/#concurrency).
@@ -282,7 +301,9 @@ When the project is complete:
    available for one day.
 6. **Merge only while the candidate is current.** Immediately before writing
    the receipt, the gate fetches the live head and base refs and requires both
-   tips to equal the pull-request event. A moved effort head or `main` base
+   tips to equal the pull-request event or authenticated manual binding. The
+   manual receipt also revalidates the PR's open state and same-repository route.
+   A moved effort head or `main` base
    leaves the completed run available for diagnosis but prevents a success
    receipt. Merge current `main` into the effort and qualify the new tree.
 

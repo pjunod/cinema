@@ -36,7 +36,8 @@ axum = { workspace = true }
 # directly so it can delegate `size_hint`; the crate is already in the tree
 # under hyper and axum, so this names it rather than adding a build.
 http-body = { workspace = true }
-hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
+http-body-util = { workspace = true }
 hyper-util = { version = "0.1", features = [
     "server-auto",
     "server-graceful",
@@ -50,6 +51,8 @@ plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
 hiqlite = { workspace = true }
 hiqlite-wal = { workspace = true }
 plurx-compat-plex = { path = "../plurx-compat-plex" }
+plurx-compat-jellyfin = { path = "../plurx-compat-jellyfin" }
+serde_urlencoded = { workspace = true }
 plurx-pgs = { path = "../plurx-pgs" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -69,6 +72,8 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 qrcode = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+base64 = "0.22"
 hex = { workspace = true }
 flate2 = { workspace = true }
 crc32fast = { workspace = true }
@@ -86,7 +91,18 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The source-only parser has no native executable/dependency/descendant closure.
+# No WASI filesystem or process implementation is linked into its runtime.
+wasmtime = { version = "=49.0.2", default-features = false, features = ["std", "runtime", "cranelift"] }
+
 [dev-dependencies]
+# Invitation seam tests compose the released broker Router and trusted local TLS.
+plurx-notification-broker = { path = "../plurx-notification-broker" }
+async-trait = { workspace = true }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rusqlite = { workspace = true }
 # `fixtures` builds plurx-core's shared media-fixture helper for the copyseg
 # tests. A dev-dependency, so a release build never compiles it.
@@ -96,8 +112,8 @@ plurx-core = { path = "../plurx-core", features = [
   # an unprivileged uid; a permission-based injection is a no-op for uid 0.
   "scratch-fault-injection",
 ] }
-http-body-util = { workspace = true }
 serde_urlencoded = { workspace = true }
+http-body-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
 # `test-util` gives tests a pausable clock (`start_paused`), so the lifetime
@@ -122,3 +138,6 @@ required-features = ["cluster-integration-tests"]
 [[test]]
 name = "live_tv_two_node"
 required-features = ["cluster-integration-tests"]
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+wat = "=1.261.0"

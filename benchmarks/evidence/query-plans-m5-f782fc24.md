@@ -5,7 +5,7 @@ on both schemas, with and without the statistics Hiqlite voters collect; the
 candidates measured and rejected; the migration's build time · **Tool:**
 `query_plans` from `012d8a3a3`/`27f729521` (unchanged), run from this branch
 at `f782fc24f` for "after" · **Base:** `main@71d1c1ecd` · **Captured:**
-2026-09-26 UTC on nuc3 (16 cores, bundled SQLite 3.53.2; the host was shared with
+2026-09-26 UTC on lab3 (16 cores, bundled SQLite 3.53.2; the host was shared with
 other agents' builds, load average 3.6-17) · **Plan:**
 [SQLITE-READ-PATH-AND-QUERY-PLANS.md](../../docs/cluster/SQLITE-READ-PATH-AND-QUERY-PLANS.md)
 §3.4, §5.6 · **M0 evidence:** [query-plans-012d8a3a.md](query-plans-012d8a3a.md)
@@ -28,7 +28,7 @@ ignored `k05_capture_hiqlite_statements` contract test, `build-hiqlite`,
   `writer.rs:496-706`). So a voter that has restarted or snapshotted
   since its tables filled **has** `sqlite_stat1` for `items`, unlike the M0
   assumption ("no statistics on either database"). A read-only copy of the
-  nuc3 voter's current snapshot (schema 47, 6,871 items) confirms it: its
+  lab3 voter's current snapshot (schema 47, 6,871 items) confirms it: its
   `sqlite_stat1` has rows for every `items` and `watch_state` index. The
   "Hiqlite + stats" rows below are the Hiqlite fixture after running that same
   `PRAGMA optimize=0x10002` (23 `sqlite_stat1` rows; `analysis_limit` 400, as
@@ -120,7 +120,7 @@ non-Title pages keep their `USE TEMP B-TREE FOR ORDER BY`).
 `home_preview_pages`: its inner `SCAN items USING INDEX idx_items_library_kind`
 becomes `SCAN items USING INDEX idx_items_top_level_title`.
 
-**On a copy of the nuc3 voter's snapshot** (its own statistics, then
+**On a copy of the lab3 voter's snapshot** (its own statistics, then
 `PRAGMA optimize=0x10002` after adding the three indexes, as the voter would
 at its next snapshot), the same `measure` run shows exactly these plan changes
 and no others. Its timings are not reported: the calls' bindings name fixture
@@ -138,7 +138,7 @@ rows.
 | warm | 58.5-63.7 ms (median 59.1) | 5.8-7.3 | 3.6-4.4 | 48.7-51.7 |
 
 The fixture has no IMDb ids, so `idx_items_imdb` is one page here; on the
-nuc3 snapshot 455 of 6,871 items carry one. Sizes on the Hiqlite fixture
+lab3 snapshot 455 of 6,871 items carry one. Sizes on the Hiqlite fixture
 (`dbstat`): `idx_items_tmdb` 57 pages (228 KiB), `idx_items_imdb` 1 page,
 `idx_items_top_level_title` 114 pages (456 KiB) — 688 KiB together, against
 11.0 MiB for `items` and 1.2 MiB for `idx_items_library_kind`. The fleet

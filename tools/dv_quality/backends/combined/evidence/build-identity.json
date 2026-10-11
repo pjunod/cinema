@@ -1,0 +1,18 @@
+{
+  "scope": "recorded actual ELF identity of this isolated build, not current binaries in slim evidence bundle",
+  "tools": {
+    "/work/decode_layers": "3cfbf869259a6cfc901898cddce78acd71610d6fade901247288d43f8e93d501",
+    "/work/fel_export": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+    "/work/mux_rgb": "6bb418e2e438f4847690c5e5ec61b3b333e7aecae8e177b867744415278c0490",
+    "/usr/bin/ffmpeg": "249e6abb898538aeae5165a6cee0748b73f4791afb02e088d19bc5321dfe2a4e",
+    "/usr/bin/ffprobe": "5f47ad172b221b4e5bfaacfd9dd0aab092d02d83dd990a331ad8d62ac47817f1"
+  },
+  "source_sha256": {
+    "decode_layers.c": "e9b16adcaeb440b97491e484922371b495d9e93c9e476a721fe959ae20d93a66",
+    "fel_export.c": "163af5d1ab9104dc37759f7eb6c6d8263313d19ec7bc4221b0c5f23859c8139a",
+    "mux_rgb.c": "234c9d5a2c2a43fa876a4195234e5f0d039ed725132fbf7e1ff5b9ad49796958",
+    "run_combined.py": "7f47df5afe0ba840a5df09deeb30509c42a67ef1c23ac62a162507463cba4eeb",
+    "runner/src/main.rs": "8630e5c6f51a9195be64f2ff71b57e557974c7983ac70f8e96306c49ee872923",
+    "runner/Cargo.lock": "9c2c9f1a403c52664c2e7d79e4f6fb745b20599e8412cf610ee104b6c00838a9"
+  }
+}

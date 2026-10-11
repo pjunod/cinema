@@ -1,0 +1,5 @@
+{
+  "original_cpu_processor": "d7f4dce9f72a6d0ff1258790eebd47bce29f66785ceec8350e2504deff9eb65c",
+  "base_gpu_helper": "85c892780eb44d159b9eaef57815ca52da05dec0849eb89a08b1a980c2508bf8",
+  "patched_gpu_helper": "89a64f2efdf992c41194c374d1c77fb82186ef8d672d74cf48591fb2d301c292"
+}

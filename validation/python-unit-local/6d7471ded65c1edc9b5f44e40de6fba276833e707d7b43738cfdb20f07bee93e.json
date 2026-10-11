@@ -1,0 +1,10 @@
+{
+ "version":1,"repository":1,"branch":"codex/s11-durable-claim-harness","suite":"validation",
+ "test_file":"tests/validation/test_rolling_producer_ownership_inventory.py",
+ "test_file_sha256":"2dbdfcfa7daaa66639d897afcd18c8daeac749b863cee4848f3ea4c38f9ebbef",
+ "source_commit":null,
+ "command":"python3 -m unittest -v tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts",
+ "test_ids":["test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts"],
+ "output":"Original failed-only local tool44610 terminal exit0: one named validation method ... ok; Ran1 test in4.589s; OK. Raw /private/tmp/s11-failed-only-validation.log SHA2563f1955a037e6c4ea2a4840a6cde2f98bc0a89839bdfa353d013c8e83f0b6360b. Executed owned working source after root-reviewed census103->104 repair for one new test-only durable route publication assertion; no runtime/source helper change. All923 other first gate3767 successes retained in artifact1545; none replayed. This working-source pass is not retrospectively attributed to the later commit.",
+ "result":{"failed":0,"errors":0,"skipped":0,"expected_failures":0,"unexpected_successes":0,"count":1}
+}

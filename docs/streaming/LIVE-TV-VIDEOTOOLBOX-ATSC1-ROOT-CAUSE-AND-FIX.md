@@ -1,7 +1,7 @@
 # ATSC 1.0 on VideoToolbox — caption failure, reviewed repair and evidence
 
 **Status:** implemented and locally validated in an independent agent clone;
-[PR #346](http://192.168.4.7:3000/noirr/plurx/pulls/346) records the fast-lane and merge outcome · **Updated:** 2026-09-16 · **Base:**
+[PR #346](http://forge.lan:3000/noirr/plurx/pulls/346) records the fast-lane and merge outcome · **Updated:** 2026-09-16 · **Base:**
 `c9e4edf45` · **Branch:** `codex/live-tv-videotoolbox-repair`.
 
 Companion to [PLAYBACK-TESTING.md](../PLAYBACK-TESTING.md) and the

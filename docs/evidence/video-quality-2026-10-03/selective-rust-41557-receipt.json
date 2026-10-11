@@ -1,0 +1,53 @@
+{
+  "source_commit": "1cc9468936e3737a3e6993269cc18e06ace8e534",
+  "wrapper_commit": "65904bfade2f6715945f52e5e070f990d7436be8",
+  "run_id": 4000,
+  "ui_index": 3979,
+  "job_id": 41557,
+  "job_result": "success",
+  "environment": {
+    "container": "ubuntu:24.04",
+    "ffmpeg_major": 6,
+    "rust": "1.97.1",
+    "ffmpeg_version": "6.1.1-3ubuntu5",
+    "rust_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "checks": [
+    {
+      "name": "state::tests::artwork_retry_pass_is_single_flight",
+      "result": "ok"
+    },
+    {
+      "name": "state::tests::due_jobs_continue_while_artwork_retry_is_in_flight",
+      "result": "ok"
+    },
+    {
+      "name": "state::tests::schedule_loop_dispatches_a_due_library_scan",
+      "result": "ok"
+    },
+    {
+      "name": "state::tests::three_cluster_ticks_run_one_provider_pass",
+      "result": "ok"
+    },
+    {
+      "name": "vodserve::tests::encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid",
+      "result": "ok"
+    },
+    {
+      "name": "vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid",
+      "result": "ok"
+    },
+    {
+      "name": "vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing",
+      "result": "ok"
+    }
+  ],
+  "totals": {
+    "passed": 7,
+    "failed": 0
+  },
+  "check_scope": "Four failed scheduler tests, original B-frame failure on FFmpeg6, two previously unrun restart tests; no successful suites repeated.",
+  "log": "selective-rust-41557.log.gz",
+  "log_sha256": "7cc17caa736c5eb681a894ee05253f3e279da574603357a2646b5957fe225874",
+  "runtime_binding": "Every checkout pinned to source_commit; B-frame fix checked separately on localFFmpeg9 and this originalFFmpeg6 runner."
+}

@@ -1,0 +1,11 @@
+{
+  "result": "passed",
+  "command": "cargo test --locked --offline --workspace --exclude plurx-cluster-check ffmpeg::tests::a_content_encoding_report_is_not_a_source_change_for_the_same_reporter -- --exact",
+  "passed": 1,
+  "failed": 0,
+  "source_parent": "e2eac0888aedb93fdecf81d9abf1044bdcb0d79a",
+  "test_file_sha256": "e2a77ddf24a56b282273cc4a58c09841ff6312137c6d909ea9a9ce502ad58f8b",
+  "change": "Test negative control uses width present in both documents; existing optional omission normalization deliberately ignores a one-sided refs field. Positive application metadata assertions and runtime code unchanged.",
+  "log": "probe-report-selective.log",
+  "log_sha256": "5b297e0d8154cde3b7a0bb4c9ab71a2126e08e3515f94bdcdc5d8c567c2be5a0"
+}

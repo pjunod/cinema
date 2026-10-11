@@ -1,11 +1,29 @@
 # Clock-skew guard — measure the offset, bound it, and refuse the dangerous side
 
-**Status:** design-only boundary; sole review addressed; runtime work not started · **Executes:** S9 / F-sc-10 from
+**Status:** open — original design accepted; measurement and enforcement
+on `main` since 2026-10-04 (#793), enforcement behind a Developer switch this
+design does not allow (see the §3.8 note); runtime evidence open ·
+**Executes:** S9 / F-sc-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Revised:** 2026-09-21 against `main` @
 `9deb58a2`
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
+**September 30 handoff:** original M0–M4 design acceptance is verified; the
+K-06 architecture issue remains open. Section 5's required separately owned
+[measurement](CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) and
+[enforcement](CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md) implementation plans
+retain the release/evidence boundaries. Measurement is assigned to
+`gpt-6.1-sol`, session `agent:/root/k06_runtime_sol61`; enforcement remains
+unclaimed pending measurement fleet evidence. Paul clarified on 2026-09-30
+that switches apply only where manual on/off is meaningful, rather than to
+every unfinished feature. K-06 therefore retains the accepted no-switch
+design, read-only Developer facts and separate releases. (Since 2026-10-04
+`main` has the switch anyway — Settings → Developer *Cluster clock guard*,
+`cluster.clock_guard_enforced`, default off, with advisory readiness rows;
+see the §3.8 note.) Runtime work is now
+authorized; production rollout and clock-step drills remain separate actions.
 
 Read §2 first: every wall-clock comparison that decides ownership is listed
 there with its current line. Then §3, which is a design, not a diff — it
@@ -65,6 +83,41 @@ it — each is explicitly refused in §4 and each has a reason.
    recovery path instead of treating removal as new authority acquisition.
 
 ## 1. Objective
+
+**2026-10-01 sequencing decision — preparatory policy is not enforcement.**
+Under Paul's delegated routine-decision authority and the newer workflow that
+promotes the effort to main only at its end, the coordinator permits E0 pure
+policy source preparation now. This dated ruling supersedes the earlier
+before-claim prohibition only for preparation: active production refusal
+consumers still require successful identified measurement evidence before
+effort integration. A separately identified, measurement-only current-effort
+artifact observed in an owned isolated four-node LAN lab can supply that
+safety evidence; it is not a main release or production-fleet qualification.
+Keep §5.5's one-hour idle and 60-second actual network-load observation,
+complete roster/uncertainty/continuity/authority-cost facts, 250 ms local and
+2,000 ms relative bounds, and original failed/missing receipts unchanged.
+The later 24-hour enforcing observation and explicitly approved disposable
+clock-step drill remain final acceptance. There was no enablement switch or
+gate at this ruling (one exists now; §3.8 note), and this ruling authorizes
+no deployment, lab launch or clock step.
+
+**2026-10-01 private preparation extension:** coordinator `agent:/root`
+prepares E1 consumer source on `codex/k06-consumer-preparation-20261001`,
+as recorded in the [enforcement plan](CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md).
+This extends preparatory source beyond E0 only; successful identified
+measurement evidence remains mandatory before enforcement effort integration.
+There is no new switch, reduced acceptance or deployment authorization.
+
+**2026-10-02 private applied-membership binding:** the same preparatory
+branch now binds clock coverage to the address-free local Raft watch's applied
+membership log identity, complete member set and joint voter set. UUID mapping
+and fanout compare this identity before/after awaits; acquisition and final
+revalidation consult the in-process watch synchronously, so raw-membership
+ABA cannot borrow the prior probe's proof. Unknown/unapplied/stopped watches
+never establish empty-remote coverage. The new vendor-watch and core binding
+regressions passed once; this is private source preparation, not E1 integration
+or replicated-fleet acceptance. Startup/leader and fenced-target work and the
+identified measurement prerequisites remain unchanged.
 
 Board id **K-06**. A node that steps its clock must not be able to steal
 every session in the fleet, and an operator must be able to see the offset
@@ -330,8 +383,14 @@ the recorded point and uncertainty still use the measured round trip. It
 prevents a valid zero-millisecond sample from making every later positive
 sample fail `candidate > 4 * minimum`; a `0 ms` then `1 ms` LAN observation is
 accepted. A candidate whose floored `round_trip` exceeds four times the
-floored window minimum is unusable for that round rather than silently
-leaving an old sample authoritative.
+floored window minimum never enters the window and never leaves an old
+sample authoritative: if its interval intersects the selected sample's, the
+round publishes the candidate's own (wider) interval, because the four
+timestamps bound the true offset whatever the queueing delay; if it does not
+intersect, the step reset below applies. (Amended 2026-10-10: publishing
+`Unknown` here made every round with a CPU-loaded peer Unknown, so enforced
+expiry scans on every voter refused although each exchange bounded the
+offset.)
 
 Before every comparison, discard entries whose monotonic `observed_at` age is
 greater than `CLOCK_OBSERVATION_MAX_AGE = 25 s`, even if every candidate since
@@ -339,8 +398,9 @@ the selected sample was rejected. Expiry is time-based, not accepted-sample-
 count-based: a zero-delay minimum cannot remain in an eight-entry window
 forever by rejecting the observations that would evict it. If pruning empties
 the window, the current otherwise-usable candidate starts a new one. A
-rejected current round still publishes `Unknown`; expiry prevents poisoning
-later rounds rather than converting a rejected sample into success.
+rejected current round (no usable exchange) still publishes `Unknown`;
+expiry prevents poisoning later rounds rather than converting a rejected
+sample into success.
 
 A minimum-delay window must not hide a clock step for 80 seconds. Before a
 usable candidate enters the window, compare its conservative interval with
@@ -457,6 +517,43 @@ pub(crate) enum ClusterClockState {
 }
 ```
 
+**Learners (amended 2026-10-04, Paul's "fix them" on the K-06 findings).**
+"Peer" in `Incomplete` means a *voting* peer. A committed non-voting learner
+is still probed, still has its per-peer `observation_state`, and is counted
+separately (`ClockSnapshot::unobserved_learners`,
+`plurx_cluster_clock_unobserved_learners`), but an unobserved learner does
+not make the state `Incomplete`: it holds no vote, so a stopped learner must
+not refuse takeover, the expiry scan and every membership change on every
+node. The role is proved only from the exact applied peer directory bound to
+the membership watch; a roster without one treats every peer as a voter. A
+*measured* learner's `|offset| + uncertainty` is likewise not part of the
+cluster-wide worst bound, which is over voters only: above 2 s it refuses
+the routes that learner owns (below) and its own promotion, nothing else.
+(Amended 2026-10-10, reversing the 2026-10-04 wording that counted it: a
+~9.7 s learner step made every voter's enforced expiry scan refuse for
+~16 minutes, so no node could fail a session over.) Promoting a learner
+makes its clock a voter's clock, so promotion additionally requires that
+learner's own fresh bounded observation (§3.5). A node that is itself a
+learner applies the same rule: every voter is its peer and must be bounded.
+The leader answers a committed learner's clock probe whatever its own
+acquisition state — a probe response is timing evidence, not an authority
+grant — so a skewed learner measures its own offset instead of seeing the
+leader as `Unknown`.
+
+The excuse is about votes, so it covers membership changes and the surviving
+set of a fenced removal, never a lease. A learner owns delegated media
+sessions, and their lease expiry was written by its clock, so takeover and the
+expiry scan also require the route's **owner** to be bounded
+(`ClusterClockGuard::owner_policy`, through `acquire_owned_for_owner` for a
+takeover and `admit_owner_for` per route of an admitted expiry page). An
+unobserved or out-of-bound learner's routes are skipped — not expired, not
+taken over — until it is measured within the bound or leaves the committed
+roster (a removed node's renewals are refused by its removal fence). The
+takeover ticket re-checks the owner at every revalidation; the scan's keyset
+cursor still advances past a skipped route. An unproved roster refuses the
+owner check outright, because absence from it then proves nothing.
+Advisory mode contests such routes as before and counts the refusal.
+
 The policy types and one `Arc<ClusterClockGuard>` live in `plurx-core` so
 `MembershipManager`, media-session recovery and HTTP readiness consult the
 same local snapshot. The daemon owns transport and filtering and publishes one
@@ -561,6 +658,16 @@ Reasons, each row:
   protocol rollback. The exception never skips a fence, manufactures quorum,
   permits self-promotion, or turns a missing clock probe alone into proof that
   the target is unreachable.
+- **An unobserved or out-of-bound learner refuses nothing but its own
+  promotion and its own leases.** The amended §3.3 rule applies to every row:
+  coverage, takeover, the expiry scan, membership acquisition and the
+  surviving set of a fenced removal excuse an unobserved learner and never an
+  unobserved voter, and the cluster-wide bound counts voters only. Takeover
+  and the expiry scan still never contest a route that learner OWNS: its
+  lease expiry is its own clock's, so the owner must be bounded too. Learner promotion (the
+  application `promote_learner` and the leader-side Raft `Promote`
+  admission) also requires the promoted learner's own bounded observation, so
+  startup promotion still waits for the leader to have measured the learner.
 - **A post-step removal waits for stable reachability evidence.** After a local
   discontinuity, target exclusion cannot use a `last_seen_at` comparison from
   the new wall-clock generation until `NODE_REACHABLE_WINDOW_MS = 30_000` has
@@ -568,6 +675,12 @@ Reasons, each row:
   This prevents the very forward step being guarded from making a healthy
   target look stale. An actually lost target becomes removable after the
   bounded 30-second stabilization interval; recovery is delayed, not stranded.
+  That wall-age use is a guard decision like every other, never a raw read of
+  the capture: with enforcement off it admits (one advisory refusal is
+  counted at `admit_fenced_removal`); with enforcement on the removal keeps
+  polling for target-applied evidence within its original 15-second budget and,
+  if that budget ends with only unusable wall evidence, returns the typed
+  `LocalDiscontinuity` refusal (counted) rather than a bare deadline.
 - **`/readyz` stays ready on `Incomplete`.** A rolling deploy makes every
   peer temporarily `Unknown`; taking the whole fleet out of rotation because
   a probe route is new would be the upgrade turning itself off. Only a
@@ -693,6 +806,23 @@ Developer settings. `/readyz` remains the machine-facing signal described in
 rollback or corrective release, not a setting flip that can leave voters on
 different safety policies.
 
+**2026-10-04 note — what `main` carries, contrary to this section.** The
+design above is unchanged; this note records the code on `main` since
+`4cfd1bdd1` (#793). `main` has a Developer switch, *Enforce the cluster clock
+guard* on the *Cluster clock guard* card, stored as the replicated setting `cluster.clock_guard_enforced`
+(`crates/plurx-core/src/store/mod.rs`, read with `stored_switch(.., false)`,
+so missing is off). Each node applies it to its own guard from a 10-second
+poll of that row (`CLOCK_ENFORCEMENT_REFRESH` and `apply_stored_enforcement`
+in `crates/plurxd/src/clock_offset.rs`); a node whose read fails keeps its
+current mode, so voters can run different policies for up to one poll or
+longer — the state this section rules out. While it is off, every guarded
+decision is admitted and what would have been refused is counted in
+`plurx_cluster_clock_advisory_refusals_total`; while it is on, the guard
+refuses takeover, the expired-session scan and membership changes when the
+roster is not fully observed or an offset exceeds the bound. Whether the switch stays, or
+enforcement is removed until the measurement evidence exists, awaits Paul's
+ruling (see the 2026-10-04 relevance pass §2.2).
+
 No recipe identity, cache digest or manifest changes: nothing here enters a
 transcode recipe or a cache key.
 
@@ -715,8 +845,9 @@ Each is an assessment disposition; each says how this plan honours it.
   in microseconds so half-millisecond results are exact; decisions
   compare `|offset| + uncertainty`, and a sample whose round trip exceeds the
   transport deadline becomes `Unknown`. The delay ratio has a 1 ms
-  quantization floor, and selected entries expire by monotonic age even when
-  later candidates are rejected.
+  quantization floor; a slow intersecting sample is published with its own
+  interval but kept out of the window; and selected entries expire by
+  monotonic age even when later candidates are kept out.
 - **Relative agreement is not local-clock continuity.** A fixed
   wall/monotonic anchor detects local and common-mode steps synchronously at
   dangerous decisions. Generation revalidation closes awaits between the
@@ -785,6 +916,7 @@ interval).
 | above bound | `1000,3510,3512,1022` | `+2500 ms` | `11 ms` | upper `2511 ms`, refuse |
 | crosses bound | `1000,3100,3102,2202` | `+1500 ms` | `601 ms` | upper `2101 ms`, refuse |
 | quantized LAN | `1000,1000,1000,1000`, then `2000,2000,2000,2001` | `0 ms`, then `-0.5 ms` | `1 ms`, then `1.5 ms` | both bounded; `0 ms` minimum accepts `1 ms` RTT |
+| slow, intersecting | `1000,1000,1000,1000`, then `2000,2005,2005,2010` | `0 ms`, then `0 ms` | `1 ms`, then `6 ms` | both bounded; the 10 ms sample publishes its own interval and stays out of the window |
 | responder step | any `t3 < t2` | n/a | n/a | `Unknown` |
 | excessive RTT | network RTT `2001 ms` | n/a | n/a | `Unknown` |
 
@@ -795,7 +927,8 @@ cargo test -p plurxd clock_offset::tests::four_timestamp_contract
 cargo test -p plurxd clock_offset::tests::step_resets_minimum_delay_window
 cargo test -p plurxd clock_offset::tests::zero_then_one_ms_recovers
 cargo test -p plurxd clock_offset::tests::expired_minimum_cannot_poison_window
-cargo test -p plurxd clock_offset::tests::local_discontinuity_invalidates_generation
+cargo test -p plurx-core --features hiqlite-store \
+  cluster::clock::tests::local_discontinuity_invalidates_generation
 ```
 
 The second test seeds a low-delay sample, advances the peer by 15 seconds,
@@ -979,5 +1112,7 @@ claim protocol). **Model** is the runtime's exact model identifier;
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0-M4 design | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) · `1ddfe0c26` | Reconciled the existing signed request timestamp, distinct 30 s/5 s auth windows, authenticated response body, conservative upper-bound decision, discontinuity reset, no-gate rollout split and executable follow-on evidence. No runtime behaviour or fleet result is claimed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | sole-review disposition | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) · `1318972bb` | Added synchronous wall/monotonic continuity plus decision/state generations; split acquisition from fenced target removal; floored and time-expired the delay filter; and added executable common-mode, decision-race, removal and 0→1 ms fixtures. Runtime and fleet evidence remain unclaimed. |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s14_resume_sol61 | E0 preparatory pure policy | `codex/k06-pure-clock-policy` | Coordinator's dated sequencing ruling above permits source preparation, not active consumers. Core-only typed acquisition/revalidation and completed-positive-round readiness facts; measurement remains automatic and measurement-only. Identified observation, active consumers and final qualification remain open. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0-M4 design | [#430](http://forge.lan:3000/noirr/plurx/pulls/430) · `1ddfe0c26` | Reconciled the existing signed request timestamp, distinct 30 s/5 s auth windows, authenticated response body, conservative upper-bound decision, discontinuity reset, no-gate rollout split and executable follow-on evidence. No runtime behaviour or fleet result is claimed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | sole-review disposition | [#430](http://forge.lan:3000/noirr/plurx/pulls/430) · `1318972bb` | Added synchronous wall/monotonic continuity plus decision/state generations; split acquisition from fenced target removal; floored and time-expired the delay filter; and added executable common-mode, decision-race, removal and 0→1 ms fixtures. Runtime and fleet evidence remain unclaimed. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/dashboard_remaining_count_sol61 | original-design receipt and required runtime handoffs | `codex/k06-runtime-handoffs`, docs-only continuation | [#430](http://forge.lan:3000/noirr/plurx/pulls/430) final head `1fffa4dbafccc1f7ee06b0a807d482df13afb588` and landing `02c7760e2486e09e84d390e0b40b35f64449d53d` share tree `28f1ee1eda8e8f23f0d8ff4af2698f0865011aa9`; both design and Python model are unchanged at effort `f319fa779`. Sole review [3360](http://forge.lan:3000/noirr/plurx/pulls/430#issuecomment-3360), disposition [3368](http://forge.lan:3000/noirr/plurx/pulls/430#issuecomment-3368) and final CI-only timeout correction [3405](http://forge.lan:3000/noirr/plurx/pulls/430#issuecomment-3405) are retained. Final-head [gate UI 2533](http://forge.lan:3000/noirr/plurx/actions/runs/2533) / API 2551 passed scope, preflight, Rust, Windows and Main promotion; irrelevant web/mobile jobs skipped. Current baseline's design/index/status checks passed 12 tests. Section 5's two separately owned runtime handoffs are now documented; owners remain unclaimed, enabling-policy conflict awaits a human ruling, and no runtime, fleet, drill or final effort qualification is claimed. |

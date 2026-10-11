@@ -17,7 +17,7 @@ use super::LibraryStore;
 use crate::domain::{Library, LibraryKind, NewLibrary};
 use crate::error::StoreError;
 
-const CATALOG_SCHEMA: &str = r#"
+pub(super) const CATALOG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS libraries (
     id                    INTEGER PRIMARY KEY,
     name                  TEXT NOT NULL UNIQUE,
@@ -547,10 +547,16 @@ impl LibraryStore for HiqliteAuthStore {
     }
 
     async fn delete_library(&self, id: i64) -> Result<bool, StoreError> {
-        Ok(self
-            .execute("DELETE FROM libraries WHERE id = $1", params!(id))
-            .await?
-            > 0)
+        let results=self.client().txn(vec![
+            ("UPDATE sharing_exports SET scope_generation=scope_generation+1,catalogue_generation=catalogue_generation+1,mutation_generation=mutation_generation+1 WHERE id IN (SELECT grant_id FROM sharing_export_libraries WHERE library_id=$1)".to_owned(),params!(id)),
+            ("DELETE FROM sharing_export_libraries WHERE library_id=$1".to_owned(),params!(id)),
+            ("DELETE FROM libraries WHERE id=$1".to_owned(),params!(id)),
+        ]).await?;
+        let counts = results
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(super::hiqlite::database_error)?;
+        Ok(counts[2] > 0)
     }
 
     async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {

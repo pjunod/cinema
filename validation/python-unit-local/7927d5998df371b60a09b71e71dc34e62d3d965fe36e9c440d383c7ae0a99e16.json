@@ -1,0 +1,10 @@
+{
+ "version":1,"repository":1,"branch":"codex/a05-unknown-original-trial","suite":"operations",
+ "test_file":"tests/operations/test_attempt_scope_census.py",
+ "test_file_sha256":"f407534f8744d46c5a7d091dac4ba754708c007056a19edb6c41814f621b8cf1",
+ "source_commit":null,
+ "command":"python3 -m unittest -v tests.operations.test_attempt_scope_census.AttemptScopeCensusCase.test_a05_boundary_named_fences_preserve_original_scope_and_no_allowlist_growth",
+ "test_ids":["test_attempt_scope_census.AttemptScopeCensusCase.test_a05_boundary_named_fences_preserve_original_scope_and_no_allowlist_growth"],
+ "output":"Original local tool chunk7779c2 exit0: exact NEW method ... ok; Ran 1 test in 0.730s; OK. Raw /private/tmp/a05-remaining-GCQQYa/pr692-new-typed-census-test.log SHA256302566a50ba8f89fe40c1044b2b614a0e5cfb9406a5541ca0c86d85b6174e12a. Executed owned working final typed repair source before normal commit. Tests real source audit, nine new original-scope rows and one-case mutation per new fence, and absence of handwritten allowlist growth. Old twelve failed-only methods were not replayed; this new bounded proof covers final typed fence integration.",
+ "result":{"failed":0,"errors":0,"skipped":0,"expected_failures":0,"unexpected_successes":0,"count":1}
+}

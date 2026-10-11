@@ -15,8 +15,60 @@ internet, read [Non-goals](#non-goals--what-plurx-does-not-defend-against)
 first: several protections you'd expect at that boundary are the proxy's job,
 not plurx's, by design.
 
-Audited 2026-09-09. Where a claim below is exhaustive, the test that keeps it
-honest is named inline.
+Audited 2026-09-09; the shared-library boundary below was updated 2026-10-06
+for the effort implementation. Where a claim below is exhaustive, the test
+that keeps it honest is named inline.
+
+## Shared libraries — private peer authority and local viewer authority
+
+The [shared-library effort](features/SHARED-LIBRARIES-STATUS.md) adds a separate
+pinned-TLS peer listener. It does not expose the ordinary administration or
+viewer API through Tailscale Serve. The supported deployment contract is raw
+TCP Serve to the sharing-only loopback listener; real Tailscale, Docker egress
+and two-home qualification remain open. The ordinary LAN service described
+above keeps its existing boundary.
+
+An exporting Source grants selected libraries to a recipient server. The
+recipient separately assigns its own viewers. Matching account names do not
+link accounts, and the Source does not impersonate a local user to produce
+media. The Source trusts the authorized recipient administrator with the
+granted bytes; this is access control, not copy prevention.
+
+The recipient retains the peer credential and relays playback. Clients see
+recipient URLs and opaque compound references, not a Source bearer, Source
+filesystem path or numeric Local file identity. Outbound credentials and
+cleanup capsules are purpose-bound ciphertext in the Store. Dialing requires
+the approved endpoint's SPKI pin and certificate validity before sending a
+credential; redirects, proxy inheritance and public-DNS fallback are refused.
+Endpoint additions and pin changes require the authenticated manifest or an
+explicit administrator confirmation. An address hint is not new identity
+authority.
+
+Playback has both durable authorization and physical resource ownership.
+Source preparation retains its processes, descriptors and artifacts through
+actual join. Recipient retirement retains its Source obligation until confirmed
+End. A durable assignment, expired lease, missing local actor or failed HTTP
+request alone cannot prove that media production stopped. Restore and clone
+handling disable sharing and require re-pairing; replaying old database state
+must not silently restore a revoked relationship.
+
+Within each cluster, non-owner forwarding uses a current member's signed
+request bound to the target, method, path and body. It carries the exact
+sharing principal and invocation identity, never the raw peer bearer or a
+filesystem path. The owner independently checks current playback authority;
+cleanup uses the retained original obligation. File-location observations are
+bounded, signed metadata and cannot authorize producer creation. Actual ingress
+closure receipts are also signed for the requesting member and exact request.
+Neither a forwarded header nor a database-only owner change grants physical
+ownership. See the [ingress custody design](features/SHARED-LIBRARIES-INGRESS-CUSTODY.md)
+for registration, lost-reply and retirement boundaries.
+
+The contract requires new Source and recipient delivery to stop within 30
+seconds of revocation, excluding bytes already buffered by a player. That is
+an acceptance requirement, not a completed live-topology measurement. Consult
+the [current status](features/SHARED-LIBRARIES-STATUS.md) before interpreting
+component receipts as end-to-end qualification. The Developer switch remains
+an explicit saved choice with advisory readiness while that work is open.
 
 ## Authentication — one token bar, no anonymous back doors
 
@@ -208,7 +260,7 @@ storage, and redirects disabled. Capability downloads refuse redirects and
 same-origin escapes, and the offline bridge receives no bearer or credential
 getter.
 
-## Cluster voter disks — the Trakt credential is encrypted at rest
+## Cluster voter disks — outbound credentials are encrypted at rest
 
 Passwords, login tokens, API keys, and offline lease capabilities are stored
 as hashes, because plurx only ever needs to *verify* them. Trakt is the
@@ -226,6 +278,16 @@ alone is not the guarantee, because a pre-encryption row must still be readable
 to be upgraded; there, the **durable write itself refuses** an unsealed value.
 Raft carries ciphertext, key id, expiry, username, and sync metadata. A copied
 voter disk is not enough to use a household's Trakt account.
+
+The [shared-library foundation](features/SHARED-LIBRARIES-IMPLEMENTATION.md)
+uses the same wrapping key for outbound peer credentials, pending claims,
+rotations and upstream capabilities. Sharing AEAD binds secret purpose,
+local server UUID and import UUID; ciphertext substitution across any of
+those contexts fails. The startup census includes both Trakt and sharing,
+including disabled imports. Missing or mismatched keys preserve whole-server
+startup refusal. The effort now implements the isolated peer listener and
+shared playback described above; production promotion and topology/device
+qualification remain open.
 
 | Property | How |
 |---|---|
@@ -343,6 +405,57 @@ Kept honest by
 `plurxd http::tests::a_key_cannot_read_the_settings_that_hold_every_secret`,
 which asserts a scan key gets 401/403 from `/settings`, `/users` and `/me` —
 and by `only_an_admin_manages_keys`, which asserts a key cannot mint another.
+
+## Jellyfin compatibility — mapped artwork and one-title media links
+
+Two parts of the `/jellyfin` surface answer without a login, both approved by
+the operator on 2026-10-03 and both off whenever the Developer switch is off:
+
+- **Mapped artwork.** Posters and backdrops of mapped movie/TV items are served
+  to anyone who has the artwork URL. The item's random wire ID limits
+  enumeration but is not access control. There is no listing route, no user
+  avatar, no arbitrary path or size: widths quantize to the existing
+  derivative set, a miss enqueues bounded deduplicated work for the existing
+  artwork owner, and each client (an IPv4 address or an IPv6 /64) admits at
+  most 20 misses a minute from a fixed 4,096-entry table that refuses rather
+  than evicts. Warm images do no work and are not counted.
+- **One-title media links.** A direct-play negotiation, made with a login,
+  returns one 256-bit secret as the source `ETag`. It is the token of a native
+  one-file grant (only its SHA-256 is stored) for that title and that play.
+  It expires within 24 hours of the negotiation, and new requests stop
+  working on `Stop`, on replacement by a newer play, when the switch is saved
+  off, or when its login is revoked or idle-expires (each request
+  re-authenticates that login's digest, which also counts as activity). A
+  response already streaming finishes. The native open-in grant route
+  refuses it. It opens only that item's direct bytes. Treat a URL carrying it as
+  a credential for one title for at most a day; it grants nothing else.
+
+Streams for HLS and every subtitle still require the compatibility login on
+each request. Since 2026-10-04 the URLs the facade returns (`TranscodingUrl`,
+`DirectStreamUrl`, subtitle `DeliveryUrl`, and every child URI in a facade
+manifest) carry that login as `ApiKey`, exactly as Jellyfin's own URLs do:
+Jellyfin for Android TV sends no header on media, HLS or subtitle requests
+(J0 trace), so without it those requests could not authenticate at all. The
+value is only ever the compatibility login the same request presented, never
+a native token, and it is returned only to that authenticated caller. Request
+logs omit the query. Treat such a URL as that login: it reaches `/jellyfin`
+until sign-out, revocation or idle expiry, and nothing else. A per-play
+capability in place of the login would be tighter; it needs new storage and
+remains open as hardening.
+
+A compatibility login is not a native bearer. The token Infuse or Jellyfin
+Android TV receives authenticates only `/jellyfin`; the native API, the Plex
+facade and the cached admin proof all refuse it, so a token copied off a shared
+TV cannot reach settings or mint keys. It still appears in the account's device
+list, where it can be revoked. Signing out of the facade revokes the token
+before any media cleanup, so a busy release cannot leave it valid.
+
+The facade also answers on Jellyfin's standard port (`server.jellyfin_port`,
+default 8096) on the main listener's address, so a client given only a host
+connects. Every request there is mapped under `/jellyfin` before routing:
+nothing native, no web app and no Plex route is reachable on it, and while the
+switch is off it answers a JSON 404 to everything. Set `jellyfin_port = 0` to
+close that listener.
 
 ## Live TV capabilities — one tuner, one URL, no account bearer
 

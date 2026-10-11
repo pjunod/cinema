@@ -44,6 +44,131 @@ const esc = (value) => String(value)
 let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
+
+test("node transcoder selector hides unsupported backends and explains the unavailable saved choice", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
+  const html = render({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
+  assert.doesNotMatch(html, /value="qsv"/);
+  assert.match(html, /saved backend is unavailable/);
+  assert.match(html, /value="auto" selected/);
+  assert.match(html, /waiting for this node to restart/);
+  assert.match(html, /data-node-id="rog&quot;node"/);
+  assert.match(html, /Active: <b>NVIDIA NVENC/);
+  assert.doesNotMatch(html, /disabled/);
+});
+
+test("transcoder menu shows every measured speed against CPU and names Auto winner", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
+  const html = render({node_id:"node",hwaccel_pref:"auto",encoder_selected:"Apple VideoToolbox",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{measured_at:1,results:[
+    {backend:"software",fps:120,relative_to_cpu:1},
+    {backend:"videotoolbox",fps:480,relative_to_cpu:4}
+  ]}}});
+  assert.match(html, /Auto — Apple VideoToolbox · 480 fps · 4.00× CPU/);
+  assert.match(html, /CPU — 120 fps · 1.00× CPU/);
+  assert.match(html, /Apple VideoToolbox — 480 fps · 4.00× CPU/);
+  assert.doesNotMatch(html, /value="nvenc"/);
+  assert.match(html, />Optimize<\/button>/);
+});
+
+test("transcoder polling discards a response from before leaving and reentering System", async () => {
+  let generation=1, calls=0, resolve;
+  const original={node_id:"node",transcoder_optimization:{running:true}};
+  const data={sys:original};
+  const poll=new Function("settingsCurrent","api","SETTINGS_DATA","document","transcoderCard",`${shippedSource("pollTranscoderOptimization")}\nreturn pollTranscoderOptimization;`)(
+    expected=>generation===expected,
+    ()=>{calls++;return new Promise(done=>{resolve=done;});},data,
+    {getElementById:()=>{throw Error("stale response touched the page");}},()=>"");
+  const pending=poll("node",1);
+  generation=3; // leave System, then return to a new System render
+  resolve({node_id:"node",transcoder_optimization:{running:false}});
+  await pending;
+  assert.equal(data.sys,original);
+  await poll("node",1);
+  assert.equal(calls,1,"obsolete timer generations must not fetch");
+  assert.doesNotMatch(shippedSource("pollTranscoderOptimization"),/setTimeout|setInterval/);
+});
+
+test("Mac processing card preserves enabled choice with unavailable compatibility and names graduation evidence", () => {
+  const render=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosVideoProcessingCard")}\nreturn macosVideoProcessingCard;`)(
+      value=>value, title=>title, (id,label,note,on)=>`TOG:${id}:${on}`,
+      ()=>"unavailable", (waiting,destination)=>`${waiting} ${destination}`, name=>`SAVE:${name}`);
+  const html=render({macos_video_processing_enabled:true},{unavailable:"not observed"});
+  assert.match(html,/TOG:pmacosvideo:true/);
+  assert.match(html,/SAVE:saveMacosVideoProcessing/);
+  assert.match(html,/visual checks on a named display/);
+  assert.match(html,/encoded VOD pass seek\/resume/);
+  assert.match(html,/Playback → Advanced server delivery/);
+  assert.doesNotMatch(html,/ disabled(?:[=>\s]|$)/);
+});
+
+test("Mac processing save writes only the operator choice despite unavailable readiness", async () => {
+  const card={outerHTML:""}, button={disabled:false,closest:()=>card}, calls=[];
+  const save=new Function("document","api","cacheSettings","macosVideoProcessingCard","DEVELOPER_READINESS","toast",
+    `${shippedSource("saveMacosVideoProcessing")}\nreturn saveMacosVideoProcessing;`)(
+      {getElementById:id=>id==="pmacosvideo"?{checked:true}:{textContent:""}},
+      async(path,options)=>{calls.push({path,options});return {macos_video_processing_enabled:true};},
+      value=>value, settings=>`SAVED:${settings.macos_video_processing_enabled}`,
+      {unavailable:"runtime unknown"},()=>{});
+  await save(button);
+  assert.deepEqual(calls,[{path:"/settings",options:{method:"PUT",body:{macos_video_processing_enabled:true}}}]);
+  assert.equal(card.outerHTML,"SAVED:true");
+});
+
+test("Mac HEVC output remains enabled with unavailable compatibility and has independent graduation", () => {
+  const render=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosHevcOutputCard")}\nreturn macosHevcOutputCard;`)(
+      value=>value, title=>title, (id,label,note,on)=>`TOG:${id}:${on}`,
+      ()=>"unavailable", (waiting,destination)=>`${waiting} ${destination}`, name=>`SAVE:${name}`);
+  const html=render({macos_hevc_output_enabled:true,macos_video_processing_enabled:false},{unavailable:"not observed"});
+  assert.match(html,/TOG:pmacoshevc:true/);
+  assert.match(html,/SAVE:saveMacosHevcOutput/);
+  assert.match(html,/named HDR display/);
+  assert.match(html,/permanent HEVC output switch moves to Playback/);
+  assert.doesNotMatch(html,/ disabled(?:[=>\s]|$)/);
+});
+
+test("Mac HEVC output save accepts the operator choice without changing processing", async () => {
+  const card={outerHTML:""}, button={disabled:false,closest:()=>card}, calls=[];
+  const save=new Function("document","api","cacheSettings","macosHevcOutputCard","DEVELOPER_READINESS","toast",
+    `${shippedSource("saveMacosHevcOutput")}\nreturn saveMacosHevcOutput;`)(
+      {getElementById:id=>id==="pmacoshevc"?{checked:true}:{textContent:""}},
+      async(path,options)=>{calls.push({path,options});return {macos_hevc_output_enabled:true,macos_video_processing_enabled:false};},
+      value=>value, settings=>`SAVED:${settings.macos_hevc_output_enabled}:${settings.macos_video_processing_enabled}`,
+      {unavailable:"runtime unknown"},()=>{});
+  await save(button);
+  assert.deepEqual(calls,[{path:"/settings",options:{method:"PUT",body:{macos_hevc_output_enabled:true}}}]);
+  assert.equal(card.outerHTML,"SAVED:true:false");
+});
+
+test("Mac compatibility reprobe never sends or changes the saved switch", async () => {
+  const calls=[], button={disabled:false};
+  const reprobe=new Function("document","api","applyDeveloperReadiness","toast",
+    `${shippedSource("reprobeMacosVideoProcessing")}\nreturn reprobeMacosVideoProcessing;`)(
+      {getElementById:()=>({textContent:""})},async(path,options)=>{calls.push([path,options]);return {};},()=>{},()=>{});
+  await reprobe(button);
+  assert.deepEqual(calls,[["/developer/macos-video-processing/reprobe",{method:"POST",body:{}}],["/developer/readiness",undefined]]);
+  assert.equal(button.disabled,false);
+});
+
+test("node transcoder save binds the request to the displayed node and preserves the active backend", async () => {
+  const status = {textContent:""}, button = {disabled:false};
+  const sys = {node_id:"rog",hwaccel_pref:"nvenc"};
+  const calls=[];
+  const save = new Function("document","api","SETTINGS_DATA","toast", `${shippedSource("saveNodeHwaccel")}\nreturn saveNodeHwaccel;`)(
+    {getElementById:id=>id==="node-hwaccel"?{value:"qsv",dataset:{nodeId:"rog"}}:status},
+    // The value api() receives, not a parse of it: api() serializes `body`
+    // itself. This fake once JSON.parse'd it, which made the test demand the
+    // double-encoded string that broke Save and Optimize (2026-10-11).
+    async (url,options)=>{calls.push([url,options.body]);return {restart_required:true};},
+    {sys},()=>{});
+  await save(button);
+  assert.deepEqual(calls, [["/system/transcoder",{node_id:"rog",preference:"qsv"}]]);
+  assert.equal(sys.hwaccel_pref,"nvenc");
+  assert.equal(sys.hwaccel_requested,"qsv");
+  assert.match(status.textContent,/Restart this node/);
+  assert.equal(button.disabled,false);
+});
 async function main() {
   for (const { name, run } of QUEUE) {
     started += 1;
@@ -76,17 +201,18 @@ test("every section is a route, grouped in the rail's order", () => {
   assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
   assert.deepEqual(r.SET_TABS.map(([id]) => id), [
     "libraries", "metadata", "livetv", "playback", "analysis",
-    "maintenance", "users", "system", "cluster", "integrations", "developer",
+    "maintenance", "users", "system", "cluster", "integrations", "sharing", "developer",
   ]);
   const dispatch = {
     metadata: "metadataPanel(d.settings,d.developerReadiness)",
     playback: "playbackPanel(d.settings,d.developerReadiness)",
     livetv: "liveTvPanel(d.settings,d.developerReadiness)",
-    analysis: "analysisSettingsPanel(d.settings,d.analysis)",
+    analysis: "analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions,d.developerReadiness)",
     users: "usersPanel(d.users,d.settings)",
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
+    sharing: "sharingManagementPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
     developer: "developerPanel(d.settings,d.developerReadiness)",
   };
@@ -156,8 +282,9 @@ test("render() keeps the cached aggregate across a section switch and rewrites b
 
 test("the rail marks the active section, shows counts it already has, and never fetches", () => {
   const rail = new Function(
-    "SETTINGS_DATA", "esc", "PlurxClusterPanel",
+    "SETTINGS_DATA", "esc", "PlurxClusterPanel", "SERVER",
     `${shippedConst("SET_GROUPS")}${shippedConst("SET_TABS")}
+     ${shippedSource("settingsClusterEnabled")}
      ${shippedSource("settingsTabAside")}
      ${shippedSource("settingsTabsHtml")}
      return settingsTabsHtml;`,
@@ -173,7 +300,7 @@ test("the rail marks the active section, shows counts it already has, and never 
   assert.doesNotMatch(quiet, /setdot/, "home and books libraries never want a key");
   assert.doesNotMatch(shippedSource("settingsTabAside"), /api\(/, "the rail spends no request of its own");
   const sqlite = rail({ cluster: { unavailable: true, code: "membership_unavailable" } }, esc, {})("cluster");
-  assert.match(sqlite, /Cluster<span class="setn">sqlite<\/span>/);
+  assert.match(sqlite, /Cluster<span class="setn">off<\/span>/);
 });
 
 test("a card's Save wakes on a change and sleeps again once saved", () => {
@@ -211,7 +338,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
   const run = (fn, ids) => new Function(
-    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard", "pgsOverlayCard", "DEVELOPER_READINESS",
+    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard", "pgsOverlayCard", "DEVELOPER_READINESS", "sdrMasterCodecsCard", "networkPriorsCard",
     // The newline matters: a shipped function may be followed by a line
     // comment, and `shippedSource` returns everything up to the next
     // declaration. Without it the injected `return` lands inside that comment
@@ -220,7 +347,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   )(
     async (path, opts) => { writes[fn] = { path, body: opts.body }; return {}; },
     { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
-    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "", () => "", null,
+    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "", () => "", null, () => "",
   );
   const defaults = ["pal", "psl", "psm", "perr"];
   // Protocol and quality switching have separate cards. Streaming must not
@@ -238,6 +365,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
   const automaticRecovery = ["adr", "adrerr", "drcard"];
   const pgsOverlay = ["pgsoverlay", "pgsoverlayerr", "pgsoverlaycard"];
+  // D6: the priors switch had no control at all; it gets its own card and
+  // writes only its own field.
+  const networkPriors = ["network-priors", "network-priors-error", "network-priors-card"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
@@ -249,6 +379,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
     run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
     run("savePgsOverlay", pgsOverlay)({ disabled: false }),
+    // S-10's SDR master CODECS switch: its own card, its own field.
+    run("saveSdrMasterCodecs", ["sdr-master-codecs", "sdr-codecs-error", "sdr-codecs-card"])({ disabled: false }),
+    run("saveNetworkPriors", networkPriors)({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
@@ -275,7 +408,11 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.deepEqual(Object.keys(writes.saveAutomaticDecoderRecovery.body).sort(), ["automatic_decoder_recovery"]);
     assert.equal(writes.saveAutomaticDecoderRecovery.path, "/settings");
     assert.deepEqual(writes.savePgsOverlay.body, { pgs_overlay: true });
+    assert.deepEqual(writes.saveSdrMasterCodecs.body, { playback_sdr_master_codecs: true });
+    assert.equal(writes.saveSdrMasterCodecs.path, "/settings");
     assert.equal(writes.savePgsOverlay.path, "/settings");
+    assert.deepEqual(writes.saveNetworkPriors.body, { playback_network_priors: true });
+    assert.equal(writes.saveNetworkPriors.path, "/settings");
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
     assert.equal(writes.savePlaybackCompatibility.path, "/settings");
@@ -460,33 +597,28 @@ test("Durable retry preserves its UUID after a transport failure and sends an ob
   assert.equal(queue.retries.size,0);
 });
 
-test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
-  assert.doesNotMatch(
-    shippedSource("playbackPanel"),
-    /preparedQualityCard/,
-    "the server-wide experimental enable must not remain in everyday Playback settings",
-  );
-  // Joined with newlines, never bare interpolation: `shippedSource` here
-  // stops at the next `\nfunction `, so a fragment can end inside a trailing
-  // `//` comment and swallow whatever follows it.
+function developerPanels(){
   const composedBody = [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
-      shippedSource("liveTvEnableCard"),
+      shippedSource("liveTvEnableCard"), shippedSource("jellyfinCompatibilityCard"),
       "const document={getElementById:()=>null};",
       shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"), shippedSource("hevcCopyCard"),
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
-      shippedSource("subtitleNotReadyCard"),
+      shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
+      shippedSource("dolbyVisionHdrProcessingCard"), shippedSource("dolbyVisionFelReencodeCard"),
+      shippedSource("sdrMasterCodecsCard"),
+      // The main-merge defects build (2026-10-04): complete-output
+      // preparation and rolling retention arrived with their Developer cards.
+      shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
+      shippedSource("subtitleTranscriptionCard"),
+      shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
-      // The fifth time: #517 put the automatic playback-ranges card at the
-      // head of the stored-subtitle section without composing it here.
-      shippedSource("subtitlePlaybackRangesCard"),
       shippedSource("subtitleStoredSourcesCard"),
       shippedSource("subtitleClusterSourcesCard"),
       shippedSource("subtitleBackfillCard"),
       shippedSource("chapterThumbnailsCard"),
-      shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
       shippedConst("DEV_READINESS_LABEL"), shippedConst("LIVE_TV_GUIDE_DRAFT"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
@@ -497,23 +629,30 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
-      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"),
+      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"), shippedSource("cinemaSharingCard"), shippedSource("cinemaRemoteCard"), shippedSource("cinemaRemoteInvitationsCard"),
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
+      // 2026-10-10: the graduated cards are drawn by their own sections.
+      shippedSource("preparedHandoffBrowserCard"), shippedSource("clusterSettingsSection"),
+      shippedSource("analysisSettingsPanel"),
+      // D6 (2026-10-04): the network priors switch sits beside display Auto.
+      shippedSource("networkPriorsCard"),
+      shippedSource("macosVideoProcessingCard"), shippedSource("macosHevcOutputCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
+      shippedSource("rateControlCard"),
       shippedSource("playbackPanel"), shippedSource("metadataPanel"),
       shippedSource("searchSettingsCard"), shippedSource("windowsServerCard"),
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
-      "const SERVER=null, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
-      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'';",
-      // `directedChangeDeveloperRows` reads the live player and returns ""
+      "const SERVER={cluster_enabled:true}, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
+      shippedSource("settingsClusterEnabled"),
+      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'',analysisSummaryCard=()=>'';",
+      // `directedChangeRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
-      shippedSource("directedChangeDeveloperRows"),
+      shippedSource("directedChangeRows"),
       "const SETTINGS_DATA=null,ME={is_admin:true},PLAYER=null;",
-      shippedSource("seekScratchReservationsCard"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
-      "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel};",
+      "return {server:SERVER,developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel,analysisSettingsPanel,clusterSettingsSection};",
     ].join("\n");
   const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "window", "Hls",
@@ -530,10 +669,18 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       `TOG:${id}|${label}|${note}|checked=${!!checked}|${attrs || ""}`,
     (fn) => `FOOT:${fn}`,
     esc,
-    { Hls: { DefaultConfig: { loader: function StockLoader() {} } } },
+    { location:{href:"https://plurx.example/"}, Hls: { DefaultConfig: { loader: function StockLoader() {} } } },
     { DefaultConfig: { loader: function StockLoader() {} } },
     () => ({ progressive_hevc_sample_entries: ["hvc1"], transports: ["progressive", "hls"] }),
   );
+  return panels;
+}
+
+test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
+  // Joined with newlines, never bare interpolation: `shippedSource` here
+  // stops at the next `\nfunction `, so a fragment can end inside a trailing
+  // `//` comment and swallow whatever follows it.
+  const panels = developerPanels();
   const readiness = { items: [{
     id: "prepared_quality_handoff",
     requirements: [
@@ -547,7 +694,6 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     prepared_quality_handoff: true,
     automatic_decoder_recovery: true,
     vod_live_recovery: true,
-    subtitle_not_ready_503: false,
     pgs_overlay: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
@@ -563,20 +709,118 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill"])
+  for (const id of ["hevc-unverified", "pabr"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
-  // Parallel playback ranges are automatic: the card explains them and reads
-  // peer reachability as advisory, and offers no switch of its own.
-  const ranges = /Parallel playback subtitle ranges[\s\S]*?(?=<div class="setsection"|TOG:subsrc)/.exec(html);
-  assert.ok(ranges, "Developer shows the automatic playback-ranges card");
-  assert.doesNotMatch(ranges[0], /TOG:/, "playback ranges have no enable switch");
+  // Graduated 2026-10-10 (Paul: "clean up developer settings"). Each switch
+  // left with its Save, its saved value and its advisory rows; Developer no
+  // longer draws any of them, and none of the automatic no-switch cards.
+  for (const id of ["lt-enable", "dev-live-tv-enable", "ltdeint", "pqh", "pdp", "pgsoverlay", "subsrc", "subcluster", "subbackfill",
+    "cluster-placement-enabled", "cluster-takeover-enabled", "bounded-catalogue-reads", "cluster-clock-enforced"])
+    assert.ok(!html.includes(`TOG:${id}|`), `Developer no longer owns ${id}`);
+  assert.doesNotMatch(html, /Seek scratch accounting|Parallel playback subtitle ranges|Portable cluster backup|backup-destination|Live TV deinterlace cadence|CARDHEAD:Enable Live TV|Quality switching|Second player in this browser/);
+  assert.doesNotMatch(shippedSource("developerPanel"),
+    /liveTvEnableCard|liveTvDeinterlaceCard|clusterPlacementCard|boundedCatalogueCard|clusterClockCard|clusterBackupCard|preparedQualityCard|pgsOverlayCard|subtitle(StoredSources|ClusterSources|Backfill|PlaybackRanges)Card|seekScratchReservationsCard/,
+    "no graduated card is drawn twice");
+  for (const gone of ["seekScratchReservationsCard", "subtitlePlaybackRangesCard"])
+    assert.equal(shippedDeclares(gone), false, `${gone} had no switch and was removed outright`);
+  // The clock guard is an operator switch, off by default, whose readiness
+  // rows are advisory: no hard gate in code. It lives in Cluster now.
+  const clusterHtml = panels.clusterSettingsSection({ settings, developerReadiness: readiness });
+  const clocks = /Cluster clock guard[\s\S]*?(?=CARD\[|$)/.exec(clusterHtml);
+  assert.ok(clocks, "Cluster shows the clock guard switch");
+  assert.match(clocks[0], /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=false/, "enforcement is off by default");
+  assert.match(clocks[0], /FOOT:saveClusterClockGuard/);
+  assert.match(clocks[0], /advisory and never prevent saving/);
+  assert.doesNotMatch(clusterHtml, /Leaves Developer when/, "a graduated card no longer waits on anything");
+  assert.match(
+    panels.clusterSettingsSection({ settings: { ...settings, cluster_clock_guard_enforced: true }, developerReadiness: readiness }),
+    /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=true/,
+  );
+  for (const [id, save] of [["cluster-placement-enabled", "saveClusterPlacement"], ["cluster-takeover-enabled", "saveClusterPlacement"],
+    ["bounded-catalogue-reads", "saveBoundedCatalogueReads"], ["subcluster", "saveSubtitleClusterSources"]]) {
+    assert.match(clusterHtml, new RegExp(`TOG:${id}\\|`), `Cluster owns ${id}`);
+    assert.match(clusterHtml, new RegExp(`FOOT:${save}`));
+  }
+  assert.match(clusterHtml, /id="backup-destination"/);
+  assert.match(clusterHtml, /FOOT:saveClusterBackup/);
+  assert.match(panels.clusterSettingsSection({}), /id="cluster-settings"[\s\S]*Loading cluster settings/,
+    "the board never waits for /settings: the cards fill their mount when it lands");
+  // Complete-output preparation and rolling retention: both off by default,
+  // both advisory, both graduate (main-merge defects build, 2026-10-04).
+  const preparation = /Complete-output preparation[\s\S]*?(?=Rolling output retention)/.exec(html);
+  assert.ok(preparation, "Developer shows the complete-output preparation card");
+  assert.match(preparation[0], /<option value="off" selected>/, "preparation is off by default");
+  assert.match(preparation[0], /FOOT:saveOutputPreparation/);
+  assert.match(preparation[0], /advisory and never prevent saving/);
+  assert.match(preparation[0], /Leaves Developer when/);
+  assert.match(
+    panels.developerPanel({ ...settings, vod_output_preparation: "copy_and_encoded" }, readiness),
+    /<option value="copy_and_encoded" selected>/,
+  );
+  const retention = /Rolling output retention[\s\S]*?(?=<div class="setsection")/.exec(html);
+  assert.ok(retention, "Developer shows the rolling retention card");
+  assert.match(retention[0], /TOG:vod-rolling-retention\|[^|]*\|[^|]*\|checked=false/, "retention is off by default");
+  assert.match(retention[0], /FOOT:saveRollingRetention/);
+  assert.match(retention[0], /Leaves Developer when/);
+  assert.match(
+    panels.developerPanel({ ...settings, vod_rolling_retention: true }, readiness),
+    /TOG:vod-rolling-retention\|[^|]*\|[^|]*\|checked=true/,
+  );
+  // D6: Fit Auto to display moves up only with network priors on. The card
+  // names that prerequisite and the two limits beside it, and the priors
+  // switch is a Developer card of its own. Red rows never move either switch.
+  const displayAuto = /CARDHEAD:Fit Auto to display\|[\s\S]*?(?=CARDHEAD:Network priors)/.exec(html);
+  assert.ok(displayAuto, "Developer shows Fit Auto to display followed by Network priors");
+  for (const id of ["auto_abr", "network_priors", "local_session_owner", "ipv4_client"])
+    assert.match(displayAuto[0], new RegExp(`data-devstat="display_aware_auto:${id}"`), `display Auto reports ${id}`);
+  assert.match(displayAuto[0], /TOG:pdisplayauto\|/);
+  assert.match(displayAuto[0], /FOOT:saveDisplayAwareAuto/);
+  const priors = /CARDHEAD:Network priors\|[\s\S]*?(?=<div class="setsection")/.exec(html);
+  assert.ok(priors, "Developer shows the network priors card");
+  assert.match(priors[0], /TOG:network-priors\|[^|]*\|[^|]*\|checked=false/, "priors are off by default");
+  assert.match(priors[0], /per user, client and IPv4 \/24 network/);
+  assert.match(priors[0], /starting \(cold-start\) rung/);
+  assert.match(priors[0], /FOOT:saveNetworkPriors/);
+  assert.match(priors[0], /Leaves Developer when/);
+  const priorsOff = { items: [
+    { id: "display_aware_auto", requirements: [
+      { id: "network_priors", status: "unmet", evidence: "Off: Auto never upgrades and a link stall retries the same quality; producer and decoder recovery still work" },
+    ] },
+    { id: "network_priors", requirements: [] },
+  ] };
+  const savedOn = renderComposedPanel("developerPanel", () => panels.developerPanel(
+    { ...settings, playback_display_aware_auto: true, playback_network_priors: false }, priorsOff));
+  assert.match(savedOn, /TOG:pdisplayauto\|[^|]*\|[^|]*\|checked=true/, "unmet priors never turn display Auto off");
+  assert.match(savedOn, /Auto never upgrades and a link stall retries the same quality/);
+  assert.match(
+    panels.developerPanel({ ...settings, playback_network_priors: true }, priorsOff),
+    /TOG:network-priors\|[^|]*\|[^|]*\|checked=true/,
+  );
   const unverified = panels.developerPanel({...settings, hevc_unverified_copy:true,
     hevc_header_trace_available:false, vod_index_cluster_cache:false, vod_index_mins:0}, readiness);
   assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);
   assert.match(unverified, /FOOT:saveHevcCopy/);
   assert.match(unverified, /not configured/);
-  assert.match(html, /FOOT:saveLiveTvEnable/);
-  assert.match(html, /Readiness observations never disable the control/);
+  // S-10: SDR master CODECS is an operator switch, off by default, whose one
+  // readiness row (the Apple device re-qualification) is advisory.
+  const sdrCodecs = /CODECS on SDR master playlists[\s\S]*?(?=<div class="setsection"|$)/.exec(html);
+  assert.ok(sdrCodecs, "Developer shows the SDR master CODECS switch");
+  assert.match(sdrCodecs[0], /TOG:sdr-master-codecs\|[^|]*\|[^|]*\|checked=false/, "off by default");
+  assert.match(sdrCodecs[0], /FOOT:saveSdrMasterCodecs/);
+  assert.match(sdrCodecs[0], /data-devstat="sdr_master_codecs:sdr_codecs_device_requalification"/);
+  assert.match(sdrCodecs[0], /never refused/);
+  assert.doesNotMatch(sdrCodecs[0], / disabled/, "no readiness result may disable the switch");
+  assert.match(
+    panels.developerPanel({ ...settings, playback_sdr_master_codecs: true }, readiness),
+    /TOG:sdr-master-codecs\|[^|]*\|[^|]*\|checked=true/,
+  );
+  const liveTv = panels.liveTvPanel(settings, readiness);
+  assert.match(liveTv, /TOG:lt-enable\|/);
+  assert.match(liveTv, /FOOT:saveLiveTvEnable/);
+  assert.match(liveTv, /Readiness observations never disable the control/);
+  assert.match(liveTv, /TOG:lt-enable\|[\s\S]*HDHomeRun Live TV[\s\S]*id="ltdeint"[\s\S]*Programme guide/, "the switch first, then tuner, cadence and guide");
+  assert.match(liveTv, /FOOT:saveLiveTvDeinterlace/);
+  assert.doesNotMatch(liveTv, /Leaves Developer when|settings\/developer/);
   // Graduated 2026-09-28 at Paul's word: chapter thumbnails and both decoder
   // controls are permanent Playback settings now, each with its own Save.
   // Absent from the settings document is on: chapter thumbnails default on.
@@ -596,15 +840,20 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   for (const id of ["chthumb", "dhqa", "adr"])
     assert.ok(!html.includes(`TOG:${id}|`), `Developer no longer owns ${id}`);
   assert.doesNotMatch(html, /Decoder experiments|Chapter thumbnails|Verified decode artifacts|Automatic decode recovery/);
-  assert.match(html, /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=false/);
-  assert.match(html, /FOOT:savePgsOverlay/);
-  assert.match(panels.developerPanel({ ...settings, pgs_overlay: true }, readiness),
+  assert.match(graduatedPlayback, /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=false/);
+  assert.match(graduatedPlayback, /FOOT:savePgsOverlay/);
+  assert.match(panels.playbackPanel({ ...settings, pgs_overlay: true }, readiness),
     /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(graduatedPlayback, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(graduatedPlayback, /FOOT:savePreparedQuality/);
+  assert.doesNotMatch(graduatedPlayback, /Leaves Developer when|pill warn">experimental/);
   // Absent from the settings document is on: the store's switch defaults on.
-  assert.match(html, /TOG:subsrc\|[^|]*\|[^|]*\|checked=true/);
-  assert.match(html, /FOOT:saveSubtitleStoredSources/);
+  // It sits in Maintenance beside the store it controls.
+  const maintenance = panels.maintenancePanel(settings, null, readiness);
+  assert.match(maintenance, /TOG:subsrc\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(maintenance, /FOOT:saveSubtitleStoredSources/);
   assert.match(
-    panels.developerPanel({ ...settings, subtitle_stored_sources: false }, readiness),
+    panels.maintenancePanel({ ...settings, subtitle_stored_sources: false }, null, readiness),
     /TOG:subsrc\|[^|]*\|[^|]*\|checked=false/,
   );
   // Neither the unseen schema report nor an unmet queue reading may remove
@@ -613,10 +862,12 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     {id:"subtitle_cluster_sources",requirements:[{id:"analysis_queue",status:"unmet",evidence:"Queue is off."}]},
     {id:"subtitle_backfill",requirements:[{id:"backfill_lease",status:"unobservable",evidence:"No holder between passes."}]},
   ]};
-  const optedIn = renderComposedPanel("developerPanel", () => panels.developerPanel(
-    {...settings,subtitle_cluster_sources:true,subtitle_backfill:true}, unmet));
+  const optedInSettings = {...settings,subtitle_cluster_sources:true,subtitle_backfill:true};
+  const optedIn = panels.clusterSettingsSection({ settings: optedInSettings, developerReadiness: unmet })
+    + panels.analysisSettingsPanel(optedInSettings, null, unmet);
   assert.match(optedIn, /TOG:subcluster\|[^|]*\|[^|]*\|checked=true/);
   assert.match(optedIn, /TOG:subbackfill\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(optedIn, /FOOT:saveSubtitleBackfill/);
   assert.match(optedIn, /Queue is off\./);
   assert.match(optedIn, /No holder between passes\./);
   for (const id of ["backfill_lease","backfill_enqueued","backfill_remaining","backfill_bytes"])
@@ -625,8 +876,6 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
   assert.match(html, /FOOT:saveAutoQuality/);
-  assert.match(html, /FOOT:savePreparedQuality/);
-  assert.match(html, /Seek scratch accounting/);
   // Graduated 2026-09-28: durable cluster work is deployed and its plan has no
   // fleet receipt to wait for. Its two switches were copies of the permanent
   // ones in Analysis and Maintenance, and the storage-domain editor moved to
@@ -648,11 +897,11 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(panels.metadataPanel(settings, readiness), /onclick="showSearchSettings\(\)"/);
   assert.match(panels.maintenancePanel({...settings,dolby_vision_convert:true}, null, readiness), /TOG:dvwin\|[^|]*\|[^|]*\|checked=true/);
   assert.match(panels.maintenancePanel(settings, null, readiness), /FOOT:saveWindowsCompatibility/);
-  assert.match(html, /This saved switch is authoritative; readiness is advisory and never overrides your choice/);
+  assert.match(playback, /This saved switch is authoritative; readiness is advisory and never overrides your choice/);
   // The switch has to be wired to something. A control that renders and does
   // nothing is worse than no control: it reports a capability to the operator
   // that the server never hears about.
-  assert.match(html, /TOG:pdp\|[^|]*\|[^|]*\|checked=true\|onchange="setPreparedHandoff\(this\.checked\)"/,
+  assert.match(playback, /TOG:pdp\|[^|]*\|[^|]*\|checked=true\|onchange="setPreparedHandoff\(this\.checked\)"/,
     "the prepared-handoff switch reflects the stored state and sets it");
   assert.match(playback, /Automatic decode recovery/);
   assert.match(playback, /TOG:adr\|[^|]*\|[^|]*\|checked=true/);
@@ -671,6 +920,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // without saying so fails here, whatever else it renders.
   const developerCards = html.split("CARD[").slice(1);
   assert.ok(developerCards.length >= 15, `Developer renders its cards (${developerCards.length})`);
+  assert.ok(developerCards.length <= 20, `Developer holds only what still waits (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,
@@ -684,12 +934,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     assert.ok(card, `Developer renders ${title}`);
     return /Leaves Developer when:<\/b> ([^<]*)<b>Then:/.exec(card)[1];
   };
-  assert.doesNotMatch(waitsOf("Local catalogue reads"), /echo with its normal default lands/);
-  assert.match(waitsOf("Local catalogue reads"), /already shipped \(5ba02212f\)/);
-  assert.match(waitsOf("Portable cluster backup"), /arm64 container-smoke leg \(amd64 passed in run 3205\)/);
   assert.doesNotMatch(waitsOf("Unverified HEVC copy"), /containment is deployed and/);
   assert.match(waitsOf("Unverified HEVC copy"), /containment itself is deployed \(87ca67c0e\)/);
-  assert.match(waitsOf("Enable Live TV"), /scratch-fault \(L9\)/);
+  assert.match(waitsOf("CODECS on SDR master playlists"), /Apple TV and iPhone device check confirms every SDR variant is still offered/);
   // Adaptive Auto's graduation is Paul's choice between two destinations.
   const autoCard = developerCards.find((card) => card.startsWith("CARDHEAD:Adaptive Auto quality|"));
   assert.ok(autoCard, "Developer renders the adaptive Auto card");
@@ -743,7 +990,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(live, /FOOT:saveLibraryChannelsSettings/);
   assert.match(live, /HDHomeRun Live TV/);
   assert.match(live, /tuner itself belongs to the cluster/);
-  assert.match(live, /Developer → Enable Live TV/);
+  assert.doesNotMatch(live, /Developer → Enable Live TV/);
   assert.doesNotMatch(live, /ltowner|ltfenced|setLiveTvEnabled/);
   assert.match(live, /Programme guide/);
   assert.match(live, /Saved-configuration evidence/);
@@ -789,8 +1036,10 @@ test("server guidance sends disabled Live TV features to their current settings"
   }
   for (const file of ["http/live_tv.rs", "live_tv.rs"]) {
     const source = fs.readFileSync(path.join(sourceRoot, file), "utf8");
-    assert.match(source, /Live TV is disabled[^"\n]*Settings → Developer/,
-      `${file} sends enablement to its advisory Developer control`);
+    assert.match(source, /Live TV is disabled[^"\n]*Settings → Live TV/,
+      `${file} sends enablement to the Live TV section, where the switch lives`);
+    assert.doesNotMatch(source, /Live TV is disabled[^"\n]*Settings → Developer/,
+      `${file} must not send an operator to the retired destination`);
   }
 });
 
@@ -804,14 +1053,83 @@ test("late readiness success and failure update evidence without repainting move
   `)(value=>updates.push(value),esc);
   // No document or renderSettings stub: touching the surrounding panel would
   // throw instead of silently losing an edit when the diagnostics arrive.
-  for(const tab of ["metadata","playback","livetv","maintenance","developer","cluster"]){
+  for(const tab of ["metadata","playback","livetv","analysis","maintenance","developer","cluster"]){
     const evidence={items:[]};
     patch.ok(tab,"developerReadiness",evidence);
     assert.equal(updates.at(-1),evidence);
     patch.fail(tab,"developerReadiness",new Error("offline"));
     assert.deepEqual(updates.at(-1),{unavailable:"offline"});
   }
-  assert.equal(updates.length,12);
+  assert.equal(updates.length,14);
+});
+
+test("Cluster's settings cards fill their own mount when /settings lands, and say so when it cannot", () => {
+  const mount={outerHTML:"",innerHTML:""}, revealed=[];
+  const patch=new Function("applyDeveloperReadiness","esc","document","clusterSettingsSection","clusterSettingsUnavailable","revealSettingsAnchor","SETTINGS_DATA",`
+    ${shippedConst("SETTINGS_MANIFEST")}
+    ${shippedSource("patchSettingsSecondary")}
+    ${shippedSource("patchSettingsSecondaryError")}
+    return {ok:patchSettingsSecondary,fail:patchSettingsSecondaryError};
+  `)(()=>{},esc,{getElementById:id=>id==="cluster-settings"?mount:null},d=>`cards:${d.settings.x}`,
+    message=>`unavailable:${message}`,tab=>revealed.push(tab),{settings:{x:1}});
+  // No renderSettings: the roster above is interactive while this lands, and
+  // repainting it would close an open drill-down or an election dialog.
+  patch.ok("cluster","settings",{x:1});
+  assert.equal(mount.outerHTML,"cards:1");
+  assert.deepEqual(revealed,["cluster"],"a link that named a card in here lands on it once it exists");
+  patch.fail("cluster","settings",new Error("offline <now>"));
+  assert.equal(mount.outerHTML,"unavailable:offline &lt;now&gt;");
+  const unavailable=new Function(`${shippedSource("clusterSettingsUnavailable")} return clusterSettingsUnavailable;`)()("offline");
+  assert.match(unavailable,/data-state="error"/);
+  assert.match(unavailable,/onclick="retryClusterSettings\(this\)"/,"the section retries its own read, not the board's");
+  // Another tab's settings read never reaches the cluster mount.
+  mount.outerHTML="untouched"; patch.ok("playback","settings",{x:2});
+  assert.equal(mount.outerHTML,"untouched");
+});
+
+test("a section repaint carries kept settings cards across as live nodes", () => {
+  // The cluster board repaints the whole section on status changes and
+  // roster refreshes; the analysis summary does after its Save. A settings
+  // card on the same page must come through with its unsaved edit, its
+  // enabled Save, open disclosures and focus — so the node itself is kept.
+  const make=(id,state)=>{
+    const node={id,dataset:state?{state}:{},isConnected:true,contains:other=>other===node||other===node.child,replaced:null};
+    node.child={isConnected:true,focused:0,focus(){this.focused+=1;}};
+    node.replaceWith=other=>{node.replaced=other;};
+    return node;
+  };
+  let dom={}, active=null;
+  const document={getElementById:id=>dom[id]||null,get activeElement(){return active;}};
+  const keep=new Function("document",`${shippedConst("SETTINGS_KEPT_MOUNTS")}
+    ${shippedSource("captureSettingsMounts")}
+    ${shippedSource("restoreSettingsMounts")}
+    return {capture:captureSettingsMounts,restore:restoreSettingsMounts};`)(document);
+  const editing=make("cluster-settings","ready"); dom={"cluster-settings":editing}; active=editing.child;
+  const captured=keep.capture("cluster");
+  assert.deepEqual(captured.nodes,[editing]);
+  const repainted=make("cluster-settings","ready"); dom={"cluster-settings":repainted};
+  keep.restore(captured);
+  assert.equal(repainted.replaced,editing,"the repaint's copy is replaced by the node being edited");
+  assert.equal(editing.child.focused,1,"focus goes back where it was");
+  // Waiting for /settings is never kept over the cards themselves…
+  dom={"cluster-settings":make("cluster-settings","loading")};
+  assert.deepEqual(keep.capture("cluster").nodes,[]);
+  // …and an error stays until the data arrives, then gives way to it.
+  const failed=make("cluster-settings","error"); dom={"cluster-settings":failed};
+  const errorKeep=keep.capture("cluster");
+  const stillLoading=make("cluster-settings","loading"); dom={"cluster-settings":stillLoading};
+  keep.restore(errorKeep); assert.equal(stillLoading.replaced,failed);
+  const arrived=make("cluster-settings","ready"); dom={"cluster-settings":arrived};
+  keep.restore(errorKeep); assert.equal(arrived.replaced,null);
+  // Analysis keeps the backfill card across its own panel's Save.
+  const backfill=make("subbackfillcard"); dom={subbackfillcard:backfill}; active=null;
+  assert.deepEqual(keep.capture("analysis").nodes,[backfill]);
+  assert.deepEqual(keep.capture("playback").nodes,[],"other sections redraw everything, as before");
+  const render=shippedSource("renderSettings");
+  assert.ok(render.indexOf("captureSettingsMounts(tab)")<render.indexOf('innerHTML=`<div class="setlayout">'),"captured before the repaint");
+  assert.ok(render.indexOf("restoreSettingsMounts(keep)")>render.indexOf('innerHTML=`<div class="setlayout">'),"restored after it");
+  assert.match(shippedSource("viewSettings"),/SETTINGS_PENDING_KEEP=!reset&&SETTINGS_SHOWN_TAB===tab\?captureSettingsMounts\(tab\):null/,
+    "a same-section reload (Refresh nodes) carries them across the loading shell too");
 });
 
 test("the guide's readiness rows are advisory and never disable the save", () => {
@@ -931,8 +1249,11 @@ test("Live TV mutations repaint only the card that owns the saved fields", () =>
     /replaceLiveTvCard\("live-tv-guide-settings",liveTvGuideCard\(saved\),"ltgsrc"\)/);
   assert.match(shippedSource("saveLiveTvSettings"),
     /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltip"\)/);
-  assert.doesNotMatch(shippedSource("saveLiveTvEnable"), /renderSettings\(|replaceLiveTvCard\(/,
-    "saving Developer enablement cannot erase a tuner or guide draft");
+  assert.doesNotMatch(shippedSource("saveLiveTvEnable"), /renderSettings\(/,
+    "saving the on/off switch cannot erase a tuner or guide draft");
+  assert.match(shippedSource("saveLiveTvEnable"),
+    /replaceLiveTvCard\("live-tv-enable",liveTvEnableCard\(saved\),"lt-enable"\)/,
+    "it repaints only its own card");
 });
 
 test("every asynchronous Live TV settings response is fenced to the Live TV route", () => {
@@ -1201,7 +1522,7 @@ test("Maintenance shows the stored subtitle tracks: size, what is riding now, an
   assert.match(html, /5 tracks attempted — 3 kept, 1 with no cues, 1 malformed, 0 to retry/);
   assert.match(html, /1 file indexed without it after a riding pass failed/);
   assert.match(html, /2 riding passes finished after it was turned off and kept nothing/);
-  assert.match(html, /href="#\/settings\/developer\/enable-subtitle-sources"/, "the link lands on the switch");
+  assert.match(html, /href="#\/settings\/maintenance\/subsrccard"/, "the link lands on the switch");
   assert.match(html, /a pass already running finishes its index but publishes none of the tracks it kept/, "what off does, exactly");
   assert.doesNotMatch(html, /setwarn/);
 
@@ -1232,23 +1553,24 @@ test("a section route may name the element it lands on", () => {
      ${shippedSource("revealSettingsAnchor")}
      return {settingsRouteTab,settingsRouteAnchor,revealSettingsAnchor};`,
   );
-  const location = { hash: "#/settings/developer/enable-subtitle-sources" };
+  const location = { hash: "#/settings/maintenance/subsrccard" };
   const replaced = [];
   const history = { replaceState: (_s, _t, url) => { replaced.push(url); location.hash = url; } };
   let scrolled = 0;
-  const document = { getElementById: (id) => (id === "enable-subtitle-sources" ? { scrollIntoView: () => { scrolled += 1; } } : null) };
+  const document = { getElementById: (id) => (id === "subsrccard" ? { scrollIntoView: () => { scrolled += 1; } } : null) };
   const api = r(location, history, document);
-  assert.equal(api.settingsRouteTab(location.hash), "developer", "the section still routes");
-  assert.equal(api.settingsRouteAnchor(location.hash), "enable-subtitle-sources");
-  assert.equal(api.settingsRouteAnchor("#/settings/developer"), null);
-  assert.equal(api.settingsRouteTab("#/settings/nothere/enable-subtitle-sources"), null);
-  api.revealSettingsAnchor("developer");
+  assert.equal(api.settingsRouteTab(location.hash), "maintenance", "the section still routes");
+  assert.equal(api.settingsRouteAnchor(location.hash), "subsrccard");
+  assert.equal(api.settingsRouteAnchor("#/settings/maintenance"), null);
+  assert.equal(api.settingsRouteTab("#/settings/nothere/subsrccard"), null);
+  api.revealSettingsAnchor("maintenance");
   assert.equal(scrolled, 1, "scrolled to the named card");
-  assert.deepEqual(replaced, ["#/settings/developer"], "the address drops the anchor");
-  api.revealSettingsAnchor("developer");
+  assert.deepEqual(replaced, ["#/settings/maintenance"], "the address drops the anchor");
+  api.revealSettingsAnchor("maintenance");
   assert.equal(scrolled, 1, "once: a repaint does not scroll the reader back");
-  assert.match(shippedSource("renderSettings"), /settingsPanel\(tab,d\)\}<\/div><\/div>`;\s*revealSettingsAnchor\(tab\);/);
-  assert.match(shippedSource("subtitleStoredSourcesCard") + shippedSource("developerPanel"), /id="enable-subtitle-sources"/, "the anchor exists on Developer");
+  assert.match(shippedSource("renderSettings"), /settingsPanel\(tab,d\)\}<\/div><\/div>`;\s*restoreSettingsMounts\(keep\);\s*revealSettingsAnchor\(tab\);/);
+  assert.match(shippedSource("subtitleStoredSourcesCard"), /\{id:"subsrccard"\}/, "the anchor is the switch's own card");
+  assert.match(shippedSource("maintenancePanel"), /subtitleStoredSourcesCard\(settings,readiness\)/, "and Maintenance draws it");
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
@@ -1404,8 +1726,363 @@ test("HEVC override saves either choice without consulting advisory readiness", 
   }
 });
 
+test("Cinema sharing saves both choices with unknown network qualification", async () => {
+  const readiness={items:[{id:"cinema_sharing",requirements:[{id:"network",status:"unknown",evidence:"No qualified network receipt."}]}]};
+  const writes=[];
+  const nodes={"cinema-sharing-enabled":{checked:false},"cinema-sharing-error":{textContent:""},"cinema-sharing-settings":{outerHTML:""}};
+  let reject=false;
+  const save=new Function("document","api","cacheSettings","cinemaSharingCard","DEVELOPER_READINESS",
+    `${shippedSource("saveCinemaSharing")}\nreturn saveCinemaSharing;`)(
+      {getElementById:id=>{assert.ok(id in nodes);return nodes[id];}},
+      async(path,request)=>{writes.push([path,request.body]);if(reject)throw new Error("Write unavailable");return request.body;},
+      value=>value,(settings,evidence)=>{assert.equal(evidence,readiness);return `saved:${settings.sharing_enabled}`;},readiness);
+  for(const enabled of [true,false]){
+    nodes["cinema-sharing-enabled"].checked=enabled;
+    const button={disabled:false};await save(button);
+    assert.deepEqual(writes.at(-1),["/settings",{sharing_enabled:enabled}]);
+    assert.equal(nodes["cinema-sharing-settings"].outerHTML,`saved:${enabled}`);
+    assert.equal(button.disabled,false);
+  }
+  reject=true;await save({disabled:false});
+  assert.equal(nodes["cinema-sharing-error"].textContent,"Write unavailable");
+  assert.equal(nodes["cinema-sharing-settings"].outerHTML,"saved:false");
+});
+
+test("SDR master CODECS saves either choice without consulting advisory readiness", async () => {
+  for (const enabled of [true, false]) {
+    const calls=[], err={textContent:""}, card={outerHTML:""}, btn={disabled:false};
+    const save = new Function("api","document","cacheSettings","sdrMasterCodecsCard","toast","DEVELOPER_READINESS",
+      `${shippedSource("saveSdrMasterCodecs")}\nreturn saveSdrMasterCodecs;`)(
+      async (path, opts) => {calls.push([path,opts.body]);return {playback_sdr_master_codecs:enabled};},
+      {getElementById:(id)=>id==="sdr-codecs-error"?err:id==="sdr-codecs-card"?card:{checked:enabled}},
+      (s)=>s, (s,r)=>`saved:${s.playback_sdr_master_codecs}:${r.items[0].requirements[0].status}`, ()=>{},
+      {items:[{id:"sdr_master_codecs",requirements:[{id:"sdr_codecs_device_requalification",status:"unmet"}]}]});
+    await save(btn);
+    assert.deepEqual(calls, [["/settings",{playback_sdr_master_codecs:enabled}]]);
+    assert.equal(card.outerHTML, `saved:${enabled}:unmet`, "the card redraws with the readiness it already had");
+    assert.equal(err.textContent, "");
+  }
+});
+
+test("Jellyfin compatibility saves both explicit choices without a readiness veto", async () => {
+  for(const enabled of [true,false]) {
+    const calls=[],err={textContent:""},btn={disabled:false};
+    const save=new Function("api","document","cacheSettings","toast","setCardSaved",
+      `${shippedSource("saveJellyfinCompatibility")}\nreturn saveJellyfinCompatibility;`)(
+        async(path,opts)=>{calls.push([path,opts.body]);return {jellyfin_compatibility_enabled:enabled};},
+        {getElementById:id=>id==="jellyfin-compatibility-error"?err:{checked:enabled}},()=>{},()=>{},()=>{});
+    await save(btn);
+    assert.deepEqual(calls,[["/settings",{jellyfin_compatibility_enabled:enabled}]]);
+    assert.equal(err.textContent,"");
+  }
+});
+
+test("Rate control round-trips an unset request as unset and keeps explicit choices", async () => {
+  const card = new Function("setCard","cardHead","setCardFoot","esc",
+    `${shippedSource("rateControlCard")}\nreturn rateControlCard;`)(
+    (body, opts) => `CARD#${(opts||{}).id}[${body}]`, (title) => `HEAD:${title}`, (fn) => `FOOT:${fn}`, esc);
+  const request = new Function(`${shippedSource("rateControlRequest")}\nreturn rateControlRequest;`)();
+  const selected = (html) => {
+    const chosen = [...html.matchAll(/<option value="([^"]*)" (selected)?>/g)].filter((m) => m[2]);
+    assert.equal(chosen.length, 1, html);
+    return chosen[0][1];
+  };
+  const quality = (html) => /id="prq"[^>]*value="([^"]*)"/.exec(html)[1];
+  const unset = {transcode_rate_mode:null, transcode_quality:null, transcode_rate_mode_default:"bitrate",
+    transcode_rate_mode_default_encoder:"qsv", transcode_quality_default:22};
+  const html = card(unset);
+  assert.match(html, /Default \(per encoder\) — on this node, qsv uses bitrate/);
+  assert.match(html, /id="prq"[^>]* disabled>/, "the quality value is inert outside Quality mode");
+  assert.match(html, /placeholder="family default \(22\)"/);
+  assert.match(html, /FOOT:saveRateControl/);
+  // A Save that never touched the control sends the clear, never a bitrate pin.
+  assert.deepEqual(request(selected(html), quality(html)), {transcode_rate_mode:null, transcode_quality:null});
+  for (const [mode, q] of [["bitrate", null], ["quality", 21]]) {
+    const explicit = card({...unset, transcode_rate_mode:mode, transcode_quality:q});
+    assert.deepEqual(request(selected(explicit), quality(explicit)), {transcode_rate_mode:mode, transcode_quality:q});
+  }
+  assert.doesNotMatch(card({...unset, transcode_rate_mode:"quality", transcode_quality:21}), /id="prq"[^>]* disabled>/);
+
+  const calls = [];
+  const fields = {prc:{value:""}, prq:{value:""}, rcerr:{textContent:""}, rccard:{outerHTML:""}};
+  const save = new Function("api","document","cacheSettings","toast","setCardSaved","rateControlCard","rateControlRequest",
+    `${shippedSource("saveRateControl")}\nreturn saveRateControl;`)(
+    async (path, opts) => { calls.push([path, opts.method, opts.body]); return unset; },
+    {getElementById:(id) => fields[id]}, () => {}, () => {}, () => {}, (s) => `rerendered:${s.transcode_rate_mode}`, request);
+  await save({disabled:false});
+  assert.deepEqual(calls, [["/settings", "PUT", {transcode_rate_mode:null, transcode_quality:null}]]);
+  assert.equal(fields.rccard.outerHTML, "rerendered:null");
+  assert.equal(fields.rcerr.textContent, "");
+});
+
+test("Default plus a typed value sends {null, null}", async () => {
+  const request = new Function(`${shippedSource("rateControlRequest")}\nreturn rateControlRequest;`)();
+  // `effective_for` reads the quality only when the mode resolves to Quality,
+  // so outside Quality a value changes no output — but it would move the
+  // speculative key's quality component and cancel queued rows cluster-wide.
+  assert.deepEqual(request("", "22"), {transcode_rate_mode:null, transcode_quality:null});
+  assert.deepEqual(request("bitrate", "22"), {transcode_rate_mode:"bitrate", transcode_quality:null});
+  assert.deepEqual(request("quality", "22"), {transcode_rate_mode:"quality", transcode_quality:22});
+
+  const calls = [];
+  const fields = {prc:{value:""}, prq:{value:"22", disabled:false}, rcerr:{textContent:""}, rccard:{outerHTML:""}};
+  const save = new Function("api","document","cacheSettings","toast","setCardSaved","rateControlCard","rateControlRequest",
+    `${shippedSource("saveRateControl")}\nreturn saveRateControl;`)(
+    async (path, opts) => { calls.push(opts.body); return {}; },
+    {getElementById:(id) => fields[id]}, () => {}, () => {}, () => {}, () => "", request);
+  await save({disabled:false});
+  assert.deepEqual(calls, [{transcode_rate_mode:null, transcode_quality:null}]);
+
+  const changed = new Function("document", `${shippedSource("rateControlModeChanged")}\nreturn rateControlModeChanged;`)(
+    {getElementById:(id) => fields[id]});
+  changed({value:"bitrate"});
+  assert.deepEqual([fields.prq.disabled, fields.prq.value], [true, ""]);
+  changed({value:"quality"});
+  assert.equal(fields.prq.disabled, false);
+});
+
+test("the version stamp dates a release by its source date, not a compile time", () => {
+  // built_at is SOURCE_DATE_EPOCH, else the commit time, else the compile
+  // clock (crates/plurxd/build_support/source_date.rs). For an exact-tag
+  // release it is the tagged commit's date, so the label must not say "built".
+  const make = (server) => new Function("SERVER",
+    `${shippedSource("sourceDateLabel")}\n${shippedSource("buildLabel")}\nreturn buildLabel;`)(server);
+  const at = "2026-10-02T14:44:46Z";
+  assert.equal(make({version:"0.3.0", build:"v0.3.0", built_at:at})(), "0.3.0 · dated 02 Oct 14:44Z");
+  assert.equal(make({version:"0.3.0", build:"unknown", built_at:at})(), "0.3.0 · dated 02 Oct 14:44Z");
+  assert.equal(make({version:"0.3.0", build:"v0.3.0-5-gabc", built_at:at})(), "0.3.0 · v0.3.0-5-gabc");
+  const tag = new Function("esc",
+    `${shippedSource("sourceDateLabel")}\n${shippedSource("buildTag")}\nreturn buildTag;`)(esc);
+  const unstamped = tag({version:"0.3.0", build:"unknown", built_at:at});
+  assert.match(unstamped, /\(unstamped · dated 02 Oct 14:44Z\)/);
+  assert.doesNotMatch(unstamped, /build time|· built/);
+});
+
+test("tone-map probe failures stay collapsed beneath the selected pipeline", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\nreturn toneMapHtml;`)(esc);
+  const rejected = {pipeline:"vaapi",label:"GPU tone-map (VA-API)",passed:false,rejected:"Driver refused <HDR> & output"};
+  for (const selected of ["libplacebo_vaapi", "cpu"]) {
+    const label = selected === "cpu" ? "CPU tone-map" : "GPU tone-map (Vulkan / VA-API)";
+    const html = render({ran:true,selected,selected_label:label,verdicts:[rejected,
+      {pipeline:selected,label,passed:true}]});
+    const disclosure = html.match(/<details\b([^>]*)>([\s\S]*?)<\/details>/);
+    assert.ok(disclosure, "rejected probes remain available for diagnosis");
+    assert.doesNotMatch(disclosure[1], /\bopen(?:\s|=|$)/, "probe details start collapsed");
+    assert.match(disclosure[2], /<summary[^>]*>Probe details<\/summary>/);
+    assert.ok(disclosure[2].includes("Driver refused &lt;HDR&gt; &amp; output"));
+    const visible = html.replace(disclosure[0], "");
+    assert.ok(visible.includes(label), "the selected pipeline stays visible");
+    assert.doesNotMatch(visible, /Driver refused|GPU tone-map \(VA-API\)/);
+    assert.equal(visible.includes("fell back"), selected === "cpu", "CPU fallback stays explicit");
+  }
+  assert.doesNotMatch(render({ran:true,selected:"libplacebo_vaapi",selected_label:"GPU tone-map (Vulkan / VA-API)",verdicts:[]}), /<details/,
+    "no empty disclosure when no probe was rejected");
+  assert.match(render({ran:false,selected:"cpu",verdicts:[{rejected:"software encoder"}]}), /software encoder/,
+    "an unprobed node keeps its short explanation");
+});
+
+test("a standalone server keeps every local switch; cluster switches live only in Cluster", () => {
+  const panels=developerPanels();
+  const settings=Object.freeze({cluster_media_pool_enabled:true,cluster_session_takeover_enabled:true,
+    cluster_clock_guard_enforced:true,bounded_replica_reads:true,backup_destination:"/backups",
+    subtitle_cluster_sources:true,subtitle_stored_sources:true,subtitle_backfill:true,sharing_enabled:true});
+  panels.server.cluster_enabled=false;
+  const html=panels.developerPanel(settings,{items:[]});
+  assert.doesNotMatch(html,/Cluster work|Portable cluster backup|Cluster clock guard|Cluster media placement|Local catalogue reads|Share stored subtitle tracks|href="#\/settings\/cluster"/);
+  assert.match(html,/TOG:cinema-sharing-enabled\|/,"sharing still applies to this server");
+  assert.match(panels.maintenancePanel(settings,null,{items:[]}),/TOG:subsrc\|[^|]*\|[^|]*\|checked=true/,"stored tracks are a local choice");
+  assert.match(panels.analysisSettingsPanel(settings,null,{items:[]}),/TOG:subbackfill\|[^|]*\|[^|]*\|checked=true/,"so is backfill");
+  assert.match(panels.liveTvPanel(settings,{items:[]}),/TOG:lt-enable\|/,"and the Live TV switch");
+  assert.doesNotMatch(panels.liveTvPanel(settings,{items:[]}),/keep a ready voter majority/);
+  panels.server.cluster_enabled=true;
+  panels.server.cluster_advertisement=false; // Persisted member without an explicit advertised host.
+  const clustered=panels.clusterSettingsSection({settings,developerReadiness:{items:[]}});
+  assert.match(clustered,/Cluster media placement[\s\S]*Portable cluster backup/);
+  assert.match(clustered,/TOG:subcluster\|[^|]*\|[^|]*\|checked=true/,
+    "moving a control never changes its saved value");
+});
+
+test("transcription readiness never overrides enable or disables Save", async () => {
+  const form=new Function("esc",`${shippedSource("subtitleTranscriptionForm")} return subtitleTranscriptionForm;`)(String);
+  const missing={enabled:true,command:"whisper-cli",model_path:"",language:"en",interval_mins:0,
+    readiness:{ready:false,command_available:false,model_available:false,reason:"Install a local model."}};
+  const html=form(missing);
+  assert.match(html,/id="st-enabled" type="checkbox" checked/);
+  assert.doesNotMatch(html,/disabled/);
+  assert.match(html,/Worker readiness:<\/b> Not ready/);
+  const nodes={"subtitle-transcription-form":{isConnected:true,innerHTML:""},"st-status":{isConnected:true,textContent:""},
+    "st-enabled":{checked:true},"st-command":{value:"whisper-cli"},"st-model":{value:""},"st-language":{value:"en"},"st-interval":{value:"0"}};
+  let request;
+  const save=new Function("document","api","subtitleTranscriptionForm",`${shippedSource("saveSubtitleTranscription")} return saveSubtitleTranscription;`)(
+    {getElementById:id=>nodes[id]},async(path,options)=>{request={path,...options};return missing;},form);
+  await save({isConnected:true,disabled:false});
+  assert.equal(request.path,"/subtitle-transcription");
+  assert.equal(request.body.enabled,true);
+  assert.equal(request.body.interval_mins,0);
+  assert.equal(request.body.model_path,"");
+  assert.match(nodes["st-status"].textContent,/Saved/);
+});
+
+test("transcription queue refusal is not displayed as successful work", async () => {
+  const panel={isConnected:true,textContent:"",innerHTML:""},button={isConnected:true,disabled:false};
+  let outcome="queue_full";
+  const generate=new Function("document","api",`${shippedSource("generateSubtitles")}\nreturn generateSubtitles;`)(
+    {getElementById:()=>panel},async()=>({outcome,job_id:"job-a"}));
+  await generate("42",button);
+  assert.match(panel.textContent,/queue is full/);
+  assert.equal(panel.innerHTML,"");
+  assert.equal(button.disabled,false);
+  outcome="existing";
+  await generate("42",button);
+  assert.match(panel.innerHTML,/already queued or running/);
+  assert.match(panel.innerHTML,/#\/activity/);
+  assert.equal(button.disabled,false);
+});
+
 main().then(() => {
   if (started !== finished) failures += started - finished;
   process.stdout.write(`${started - failures}/${started} passed\n`);
   process.exit(failures ? 1 : 0);
+});
+
+test("Cinema sharing reports current activation during rolling upgrade without a restart gate", () => {
+  const requirements=[];
+  const card=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("cinemaSharingCard")} return cinemaSharingCard;`)(
+      value=>value,()=>"",()=>"",
+      (readiness,item,id,title,detail)=>{
+        requirements.push({id,title,detail});
+        return readiness.items[0].requirements.find(row=>row.id===id)?.evidence || detail;
+      },()=>"",()=>"");
+  for(const ready of [false,true]) {
+    const evidence=ready?"Current layout verified.":"Source activation is pending.";
+    const html=card({sharing_enabled:true},{items:[{id:"cinema_sharing",requirements:[{id:"source_activation",status:ready?"met":"unmet",evidence}]}]});
+    assert.ok(html.includes(evidence));
+    assert.ok(!html.includes("coordinated drained restart"));
+  }
+  const activation=requirements.find(row=>row.id==="source_activation");
+  assert.equal(activation.title,"Current Source activation");
+  assert.match(activation.detail,/cluster compatibility and authority checks/);
+  assert.match(activation.detail,/coordinated restart is not required/);
+  assert.match(activation.detail,/never changes your saved choice/);
+});
+
+test("Cinema sharing lists endpoint setup and unverified host network without gating the switch", () => {
+  const requirements=[];let enabled;
+  const card=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("cinemaSharingCard")} return cinemaSharingCard;`)(
+      value=>value,()=>"",(id,title,detail,choice)=>{enabled=choice;return detail;},
+      (readiness,item,id,title,detail)=>{requirements.push({id,detail});return detail;},()=>"",()=>"");
+  const html=card({sharing_enabled:true},{items:[]});
+  assert.equal(enabled,true);
+  assert.match(requirements.find(row=>row.id==="endpoints").detail,/Settings → Sharing/);
+  assert.match(html,/Saved endpoints do not prove connectivity/);
+  assert.match(requirements.find(row=>row.id==="network").detail,/Tailscale installed and signed in/);
+  assert.match(html,/A container cannot infer host installation or remote reachability/);
+  assert.match(html,/Readiness observations never prevent saving/);
+});
+
+
+
+
+test("DV preferences stay independent and editable with unmet or unavailable readiness", () => {
+  const panels=developerPanels();
+  for(const readiness of [{items:[]},{unavailable:"Reading failed"},{items:[
+    {id:"dolby_vision_hdr_processing",requirements:[{id:"dv_hdr_backend_reference",status:"unmet",evidence:"No qualified backend."}]},
+    {id:"dolby_vision_fel_reencode",requirements:[{id:"dv_fel_backend_reference",status:"unmet",evidence:"No qualified authoring."}]}
+  ]}]) {
+    for(const hdr of [false,true]) for(const fel of [false,true]) {
+      const html=panels.developerPanel({dolby_vision_convert:false,dolby_vision_hdr_processing:hdr,dolby_vision_fel_reencode:fel},readiness);
+      assert.match(html,new RegExp(`TOG:dv-hdr-processing\\|[^|]*\\|[^|]*\\|checked=${hdr}`));
+      assert.match(html,new RegExp(`TOG:dv-fel-reencode\\|[^|]*\\|[^|]*\\|checked=${fel}`));
+      assert.match(html,/FOOT:saveDolbyVisionHdrProcessing/);
+      assert.match(html,/FOOT:saveDolbyVisionFelReencode/);
+      assert.match(html,/Unsupported sources or processing failures use compatible playback/);
+      assert.match(html,/Unsupported sources or processing failures keep the existing permitted conversion fallback/);
+      assert.doesNotMatch(html,/not implemented in production yet|when qualified/);
+      assert.match(html,/This preference never enables conversion by itself/);
+      assert.match(html,/HDR backend\/reference proof/);
+      assert.match(html,/FEL\/P8.1 backend\/reference proof/);
+      assert.match(html,/moves independently to Settings → Playback/);
+    }
+  }
+  for(const name of ["dolbyVisionHdrProcessingCard","dolbyVisionFelReencodeCard"])
+    assert.doesNotMatch(shippedSource(name),/disabled|HDR10-E/);
+});
+
+test("DV preference saves roundtrip either choice and preserve advisory failures", async () => {
+  for(const [name,cardName,field,id] of [
+    ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
+    ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
+  ]) {
+    for(const readiness of [{unavailable:"Reading failed"},{items:[{id:field,requirements:[{status:"unmet"}]}]}]) {
+      const writes=[],nodes={[id]:{checked:false},[`${id}-error`]:{textContent:""},[`${id}-card`]:{outerHTML:""}};
+      let reject=false;
+      const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
+        `${shippedSource(name)} return ${name};`)(
+        {getElementById:key=>{assert.ok(key in nodes);return nodes[key];}},
+        async(path,request)=>{assert.equal(request.method,"PUT");writes.push([path,request.body]);if(reject)throw new Error("Write failed");return {...request.body,dolby_vision_convert:false};},
+        value=>value,(settings,evidence)=>{assert.equal(evidence,readiness);return `saved:${settings[field]}`;},readiness,()=>{});
+      for(const enabled of [true,false]) {
+        nodes[id].checked=enabled;const button={disabled:false};await save(button);
+        assert.deepEqual(writes.at(-1),["/settings",{[field]:enabled}]);
+        assert.equal(nodes[`${id}-card`].outerHTML,`saved:${enabled}`);
+        assert.equal(button.disabled,false);
+      }
+      reject=true;const button={disabled:false};await save(button);
+      assert.equal(nodes[`${id}-error`].textContent,"Write failed");
+      assert.equal(nodes[`${id}-card`].outerHTML,"saved:false");
+      assert.equal(button.disabled,false);
+    }
+  }
+});
+
+
+test("DV preference responses preserve newer edits and replacement cards", async () => {
+  for(const [name,cardName,field,id] of [
+    ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
+    ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
+  ]) {
+    for(const change of ["edit","replace","leave"]) {
+      const card={dataset:{revision:"1"},outerHTML:"unsaved"};
+      const replacement={dataset:{revision:"0"},outerHTML:"new page"};
+      const nodes={[id]:{checked:true},[`${id}-error`]:{textContent:""},[`${id}-card`]:card};
+      let resolve,requested,cached;
+      const pending=new Promise(done=>{resolve=done;});
+      const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
+        `${shippedSource(name)} return ${name};`)(
+        {getElementById:key=>nodes[key]},
+        (_path,request)=>{requested=request.body;return pending;},
+        value=>{cached=value;return value;},()=>"saved:true",{},()=>{});
+      const button={disabled:false};const work=save(button);
+      assert.deepEqual(requested,{[field]:true});
+      if(change==="edit"){nodes[id].checked=false;card.dataset.revision="2";}
+      if(change==="replace")nodes[`${id}-card`]=replacement;
+      if(change==="leave")nodes[`${id}-card`]=null;
+      resolve({[field]:true});await work;
+      assert.equal(cached[field],true,"the confirmed write refreshes shared settings");
+      assert.equal(card.outerHTML,"unsaved","an earlier reply cannot erase a newer draft");
+      assert.equal(replacement.outerHTML,"new page","a reply cannot repaint a replacement card");
+      if(change==="edit")assert.equal(nodes[id].checked,false);
+      assert.equal(button.disabled,false);
+    }
+  }
+});
+
+test("Mac processing exposes every independent implemented graph while preserving the enabled choice", () => {
+  const requirements=[];let enabled;let graduation;
+  const card=new Function("setCard","cardHead","togRow","devReq","devGraduation","setCardFoot",
+    `${shippedSource("macosVideoProcessingCard")} return macosVideoProcessingCard;`)(
+      value=>value,()=>"",(id,title,detail,choice)=>{enabled=choice;return detail;},
+      (readiness,item,id,title,detail)=>{requirements.push({id,title,detail});return detail;},
+      waiting=>{graduation=waiting;return waiting;},()=>"");
+  const html=card({macos_video_processing_enabled:true},{items:[]});
+  assert.equal(enabled,true,"missing compatibility never overrides saved enable");
+  for(const id of ["effective_encoder","sdr_scale","hdr10_metal","hlg_metal","subtitle_burns","deinterlace","dolby_vision","live_upload"])
+    assert.ok(requirements.some(row=>row.id===id),id);
+  assert.match(graduation,/moving-field deinterlacing, strict Dolby Vision and Live TV/);
+  assert.match(html,/Live TV keeps H264 output/);
+  assert.equal(requirements.find(row=>row.id==="subtitle_burns").title,"SDR, HDR10 and HLG subtitle burns");
+  assert.match(requirements.find(row=>row.id==="deinterlace").detail,/HDR interlaced sources keep the existing processing path/);
+  assert.doesNotMatch(html,/Dolby Vision, HLG, burns and interlaced sources retain their existing routes/);
 });

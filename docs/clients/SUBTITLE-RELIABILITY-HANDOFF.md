@@ -1,6 +1,8 @@
 # Subtitle reliability — build handoff
 
-**Status:** ready to build · **Executes:** the repairs in
+> Current work and corrected delivery status: [subtitle completion ledger](SUBTITLE-RELIABILITY-COMPLETION.md). This page retains its historical scope and evidence.
+
+**Status:** historical implementation built; residual repair and acceptance in the completion ledger · **Executes:** the repairs in
 [SUBTITLE-RELIABILITY-ASSESSMENT.md](SUBTITLE-RELIABILITY-ASSESSMENT.md) §3
 · **Baseline:** `origin/main` @ `c9e4edf4` (v0.3.0-2633) · **Written:**
 2026-09-16
@@ -31,7 +33,7 @@ mechanism at the baseline:
 | Selected, nothing shows, no error | §2.2 — server answers "warming" with a valid empty segment; each client's readiness retry is broken | §5, §6 |
 | Showing, then stops, still selected | §2.3 — Apple successor commit does not reconcile the selection; empty segments past a window boundary / past midpoint are cached | §5, §7 |
 
-Done means: on nynuc, an HDR remux with a default-flagged English PGS track
+Done means: on media1, an HDR remux with a default-flagged English PGS track
 opens on all three clients with **no notice and no subtitles**, an SRT track
 turned on mid-play shows cues within one segment on all three, a
 server-driven quality handoff on Apple keeps the selected SRT showing, and

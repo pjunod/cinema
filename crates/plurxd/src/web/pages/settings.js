@@ -73,6 +73,7 @@ const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
   dvConversions:()=>api("/dv-conversions"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
+  sharingStatus:()=>sharingManagementRead("/sharing/status"),sharingImports:()=>sharingManagementRead("/sharing/imports"),sharingExports:()=>sharingManagementRead("/sharing/exports"),
   developerReadiness:()=>api("/developer/readiness"),
   analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
@@ -105,16 +106,32 @@ const SETTINGS_MANIFEST={
   metadata:{required:["settings"],secondary:["libs","developerReadiness"]},
   playback:{required:["settings"],secondary:["developerReadiness"]},
   livetv:{required:["settings"],secondary:["developerReadiness"]},
-  analysis:{required:["settings","analysis"],secondary:[]},
+  analysis:{required:["settings","analysis"],secondary:["developerReadiness"]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
   users:{required:["settings","users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
-  cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness"]},
+  cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
+  sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},
   developer:{required:["settings"],secondary:["developerReadiness"]},
 };
+// The configured mode, not the current peer count or a failed status read,
+// determines whether cluster controls apply. /server is loaded before routing.
+function settingsClusterEnabled(d=SETTINGS_DATA){
+  return SERVER?.cluster_enabled??
+    !(d?.cluster?.unavailable&&d.cluster.code==="membership_unavailable");
+}
+function settingsManifest(tab){
+  return tab==="cluster"&&!settingsClusterEnabled()
+    ?{required:[],secondary:[]}:SETTINGS_MANIFEST[tab];
+}
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
+  // Every settings read and save lands here, so this is the one place an
+  // enable switch the admin just flipped reaches the nav: re-read /features
+  // (the nav's only source of truth) in the background. Fire-and-forget, and
+  // a refusal or a missing loader must never fail the save that got here.
+  if(typeof refreshFeatures==="function") void refreshFeatures();
   return value;
 }
 function cacheTrakt(value){
@@ -160,6 +177,7 @@ function settingsTabsHtml(tab){
 // a dot for "something here needs you". Only from data already loaded — the
 // rail never spends a request of its own.
 function settingsTabAside(id,d){
+  if(id==="cluster"&&!settingsClusterEnabled(d)) return `<span class="setn">off</span>`;
   if(id==="libraries"&&Array.isArray(d.libs)) return `<span class="setn">${d.libs.length}</span>`;
   if(id==="users"&&Array.isArray(d.users)) return `<span class="setn">${d.users.length}</span>`;
   if(id==="metadata"&&d.settings&&!d.settings.tmdb_configured&&Array.isArray(d.libs)
@@ -183,6 +201,15 @@ function patchSettingsSecondary(tab,key,value){
   if(tab==="system"&&key==="playbackEvents"){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
+  }
+  if(tab==="cluster"&&key==="settings"){
+    // The settings cards under the board need the saved settings; the health
+    // board does not, so it never waits for them. Fill only their mount.
+    const mount=document.getElementById("cluster-settings");
+    if(mount) mount.outerHTML=clusterSettingsSection(SETTINGS_DATA);
+    // A link from Analysis names a card in here; the board painted before
+    // the card existed, so land on it now.
+    revealSettingsAnchor(tab);
   }
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     // Patch only the evidence rows. Re-rendering the entire panel here could
@@ -215,13 +242,17 @@ function patchSettingsSecondaryError(tab,key,error){
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
   }
+  if(tab==="cluster"&&key==="settings"){
+    const mount=document.getElementById("cluster-settings");
+    if(mount) mount.outerHTML=clusterSettingsUnavailable(message);
+  }
   if(tab==="cluster"&&key==="clusterOps"){
     const mount=document.getElementById("cluster-operations");
     if(mount) mount.innerHTML=clusterOperationsUnavailable(message);
   }
 }
 async function loadSettingsTab(generation,tab){
-  const route=location.hash, manifest=SETTINGS_MANIFEST[tab];
+  const route=location.hash, manifest=settingsManifest(tab);
   try{
     await Promise.all(manifest.required.map(key=>loadSettingsKey(key,generation)));
   }catch(error){
@@ -236,7 +267,7 @@ async function loadSettingsTab(generation,tab){
   if(!settingsCurrent(generation,tab)) return false;
   renderSettings();
   setPageFailure(route,generation,null); setPagePhase(route,generation,"content");
-  const secondary=manifest.secondary.map(key=>{
+  const secondary=settingsManifest(tab).secondary.map(key=>{
     // Cluster status owns an atomic store-and-paint boundary because the
     // already-rendered roster can open a decision dialog before this secondary
     // response arrives. Other secondary data can keep the ordinary eager cache.
@@ -252,28 +283,33 @@ async function loadSettingsTab(generation,tab){
     });
   });
   if(tab==="system") secondary.push(refreshLogs());
-  if(tab==="cluster") secondary.push(refreshClusterLogs());
+  if(tab==="cluster"&&settingsClusterEnabled()) secondary.push(refreshClusterLogs());
   await Promise.allSettled(secondary);
   if(settingsCurrent(generation,tab)) setPagePhase(route,generation,"settled");
   return settingsCurrent(generation,tab);
 }
 async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
-  if(!ME.is_admin){ location.hash="#/"; return; }
+  if(!ME.is_admin){ if(settingsRouteTab(location.hash)==="developer")viewLocalRemoteSettings(generation);else location.hash="#/"; return; }
   const route=location.hash;
   if(reset){
+    if(typeof sharingRetire==="function")sharingRetire();
     SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_DATA={};
     SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
     DV_SETTINGS_POLL_AT=0;
     CLUSTER_LOADED=false; forgetJoinToken();
   }
   const tab=settingsTab();
+  // A same-section reload (Refresh nodes) redraws through the loading shell;
+  // carry the kept mounts across it the way renderSettings does a repaint.
+  SETTINGS_PENDING_KEEP=!reset&&SETTINGS_SHOWN_TAB===tab?captureSettingsMounts(tab):null;
   // Leaving a section drops any minted join token: it is bearer material, and
   // the operator who switched away is done with it whether or not they said so.
   if(SETTINGS_SHOWN_TAB!==tab) forgetJoinToken();
+  if(SETTINGS_SHOWN_TAB!==tab&&typeof sharingRetire==="function")sharingRetire();
   SETTINGS_SHOWN_TAB=tab; LIB_DRAWER=null; USER_DRAWER=null; DEVICE_DRAWER=null;
   try{ localStorage.setItem("plurx_settings_tab",tab); }catch(e){}
   layoutChrome("settings",settingsShell(tab));
   setPagePhase(route,generation,"shell");
   const loaded=await loadSettingsTab(generation,tab);
-  if(loaded) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
+  if(loaded&&(tab!=="cluster"||settingsClusterEnabled())) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
 }

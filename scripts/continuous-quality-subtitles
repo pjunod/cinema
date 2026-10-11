@@ -1,0 +1,175 @@
+#!/usr/bin/env node
+"use strict";
+
+// State/clock diagnostics only. This is not full per-switch pixel/audio acceptance.
+const fs = require("node:fs");
+const path = require("node:path");
+const lab = require("./playback-lab");
+const {identityErrors} = require("./continuous-quality-lifecycle");
+const {producerCensus, producerPurposeCensus} = require("./continuous-quality-qualification");
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function snapshot(driver) {
+  const state = await driver.eval(lab.playerSnapshotExpression());
+  state.presentation = await driver.eval("({visibility:document.visibilityState})");
+  state.subtitle_tracks = await driver.eval(`(()=>{const v=document.getElementById('video');
+    return [...(v?.textTracks||[])].slice(0,8).map(t=>({mode:t.mode,
+      active_cues:[...(t.activeCues||[])].slice(0,4).map(c=>({start:c.startTime,end:c.endTime,text:c.text}))}));})()`);
+  return state;
+}
+
+async function selectSubtitle(driver, index) {
+  // Open the shipped subtitle menu and activate its actual selector button.
+  await driver.exec("playerActivity(); toggleMenu('subs',true); return true;");
+  const selector = `#pmenu button[onclick="setSub(${index})"]`;
+  if (driver instanceof lab.FirefoxDriver) {
+    const element = await driver.wd("POST", `/session/${driver.sessionId}/element`, {using:"css selector",value:selector});
+    const id = element["element-6066-11e4-a52e-4f735466cecf"] || element.ELEMENT;
+    if(!id)throw new Error("subtitle selector missing");
+    await driver.wd("POST", `/session/${driver.sessionId}/element/${id}/click`, {});
+  } else if (driver instanceof lab.CdpDriver) {
+    const r = await driver.eval(`(()=>{const b=document.querySelector(${JSON.stringify(selector)}),r=b?.getBoundingClientRect();return r?{x:r.x,y:r.y,width:r.width,height:r.height}:null})()`);
+    if(!r||r.width<=0||r.height<=0)throw new Error("subtitle selector not visible");
+    const point={x:r.x+r.width/2,y:r.y+r.height/2,button:"left",clickCount:1};
+    await driver.send("Input.dispatchMouseEvent",{...point,type:"mousePressed"});
+    await driver.send("Input.dispatchMouseEvent",{...point,type:"mouseReleased"});
+  } else throw new Error("unsupported trusted-input driver");
+}
+
+async function waitSubtitle(driver, index) {
+  const deadline=Date.now()+15000;
+  while(Date.now()<deadline){
+    const state=await snapshot(driver);
+    if(state.video.error)throw new Error("media error during subtitle change");
+    if(state.current_subtitle===index && (index<0
+      ? !state.subtitle_tracks.some(t=>t.mode==='showing')
+      : state.subtitle_tracks.some(t=>t.mode==='showing'&&t.active_cues.length)))return state;
+    await sleep(100);
+  }
+  throw new Error("actual subtitle selection/cue deadline");
+}
+
+async function window(driver, before, index, limits) {
+  const started = performance.now();
+  await sleep(8000);
+  const after = await snapshot(driver), elapsed = (performance.now() - started) / 1000;
+  const rate = (after.video.absolute_time - before.video.absolute_time) / elapsed;
+  const transition = lab.transitionMetrics(before, after), errors = identityErrors(before, after);
+  if (!Number.isFinite(rate) || Math.abs(rate - 1) > 0.1) errors.push(`film clock ${rate} differs from 1x by more than 10%`);
+  for (const state of [before, after]) {
+    if(state.current_subtitle!==index)errors.push("subtitle selection not retained");
+    if(index<0&&state.subtitle_tracks.some(t=>t.mode==='showing'))errors.push("subtitle Off retained a showing track");
+    if(index>=0&&!state.subtitle_tracks.some(t=>t.mode==='showing'&&t.active_cues.some(c=>/^CQ caption \d{4}$/.test(c.text)&&c.start<=state.video.current_time&&c.end>state.video.current_time)))errors.push("no deterministic active cue aligned with film clock");
+    if (state.presentation.visibility !== "visible") errors.push("document not actually visible");
+    if (state.video.paused || state.video.playback_rate !== 1 || state.video.error) errors.push("moving 1x playback not retained");
+  }
+  if (!transition.complete) errors.push("incomplete media event trace");
+  if (!after.frame_probe?.supported || !(after.frame_probe.frames > before.frame_probe.frames)) errors.push("no advancing frame callbacks");
+  for (const [field, limit] of [["maximum_video_gap_ms", limits.maximum_video_gap_ms],
+    ["wait_events", limits.maximum_wait_events], ["reopen_events", limits.maximum_reopen_events],
+    ["stalls", limits.maximum_stalls], ["hitches", limits.maximum_hitches]]) {
+    if (!Number.isFinite(transition[field]) || transition[field] > limit) errors.push(`${field} ${transition[field]} exceeds ${limit}`);
+  }
+  return {requested_subtitle: index, before, after, elapsed_seconds: elapsed, observed_rate: rate, transition, errors};
+}
+
+async function presentationCase(driver, server, manifest, fixture, testCase, browserInfo) {
+  const began = Date.now();
+  const result = await lab.runOneCase(driver, server, manifest, fixture, {...testCase, operation: "steady"}, browserInfo, 2);
+  result.matrix_case = "subtitle-cycle";
+  result.metrics_scope = "initial two-second steady baseline; presentation windows separate";
+  result.evidence_scope = "trusted shipped text-subtitle selectors and active cue/clock/identity diagnostics; no quality request, pixel visibility, physical/audio or app background acceptance";
+  result.presentation_diagnostic = {phases: [], windows: []};
+  try {
+    if (result.status !== "passed") return result;
+    const original = await snapshot(driver);
+    if(original.subtitle_count<1)throw new Error("fixture has no actual subtitle stream");
+    const index=await driver.eval("PLAYER.subs.find(s=>!subNeedsBurn(s))?.index??null");
+    if(!Number.isSafeInteger(index))throw new Error("no text subtitle offered by shipped metadata");
+    for(const requested of [-1,index,-1]){
+      await selectSubtitle(driver,requested);
+      const before=await waitSubtitle(driver,requested);
+      result.presentation_diagnostic.phases.push({phase:requested<0?'off':'on',state:before});
+      result.errors.push(...identityErrors(original,before));
+      const observed=await window(driver,before,requested,testCase.transition);
+      result.presentation_diagnostic.windows.push(observed);
+      result.errors.push(...observed.errors);
+      if(result.errors.length)break;
+    }
+    result.end = await snapshot(driver);
+    result.errors.push(...identityErrors(original, result.end));
+    const whole = lab.transitionMetrics(original, result.end);
+    result.presentation_diagnostic.whole_lifecycle_transition = whole;
+    if (!whole.complete) result.errors.push("incomplete whole presentation trace");
+    for (const field of ["reopen_events", "stalls", "hitches"])
+      if (whole[field] > 0) result.errors.push(`whole presentation ${field}: ${whole[field]}`);
+  } catch (error) {result.errors.push(error.message);}
+  finally {
+    try {
+      const before = await producerPurposeCensus(server), requested = Date.now(), samples = [];
+      await driver.exec("closePlayer(); return true;");
+      for (const elapsed of [0, 1000, 3000, 5000]) {
+        await sleep(Math.max(0, requested + elapsed - Date.now()));
+        samples.push(await producerPurposeCensus(server));
+      }
+      result.producer_end = {requested_at_unix_ms: requested, before, samples,
+        scope: "exact owned Linux daemon direct FFmpeg children; reader leases/physical queues unmeasured"};
+      if (samples.at(-1).children.length) result.errors.push("owned producers remain five seconds after End");
+      const closed = await snapshot(driver);
+      result.presentation_diagnostic.after_end = closed.presentation;
+    } catch (error) {result.errors.push(`End census/presentation: ${error.message}`);}
+    result.duration_ms = Date.now() - began;
+    result.status = result.errors.length ? "failed" : "passed";
+  }
+  return result;
+}
+
+async function main(args) {
+  if (args.includes("--help")) {
+    process.stdout.write("Usage: scripts/continuous-quality-subtitles --server PATH --source-ref BUILD --browser firefox|chrome --json NEW_PATH [--fixtures DIR] [--firefox PATH] [--geckodriver PATH] [--chrome PATH] [--junit NEW_PATH]\nHeaded Linux owned display required. One subtitle off/on/off state diagnostic using a separately remuxed caption fixture; no quality switches or physical/audio capture.\n");
+    return 0;
+  }
+  const options = {headed: true, enable_auto_abr: true, suite: "continuous"};
+  const allowed = new Set(["server", "source-ref", "browser", "json", "fixtures", "firefox", "geckodriver", "chrome", "junit"]);
+  for (let i = 0; i < args.length; i += 2) {
+    const key = args[i].replace(/^--/, "").replaceAll("-", "_");
+    if (!args[i].startsWith("--") || !allowed.has(args[i].slice(2)) || !args[i+1] || args[i+1].startsWith("--") || options[key] !== undefined) throw new Error(`invalid option ${args[i]}`);
+    options[key] = args[i+1];
+  }
+  if (process.platform !== "linux" || !process.env.DISPLAY) throw new Error("headed Linux owned DISPLAY required");
+  if (!options.server || !options.source_ref || !options.json) throw new Error("explicit server/source-ref/new JSON path required");
+  if (!["firefox", "chrome"].includes(options.browser)) throw new Error("choose firefox or chrome");
+  for (const key of ["json", "junit"]) if (options[key] && fs.existsSync(options[key])) throw new Error(`refusing to overwrite ${key}`);
+  const manifest = lab.loadManifest(), testCase = manifest.suites.continuous.cases[0];
+  Object.assign(testCase, {fixture: "continuous-mpeg4-aac-captions-1080", quality: "1080", operation: "steady", repetitions: 1, switches: []});
+  manifest.thresholds.maximum_hitches = 0;
+  const outcome = await lab.executeRun(manifest, options, {
+    startServer: async (opts, directory) => {
+      const server = await lab.startServer({...opts, enable_auto_abr: true}, directory);
+      try {
+        const system = await lab.api(server.baseUrl, "/system", {token: server.token});
+        if (system.build !== options.source_ref) throw new Error(`server build ${system.build} differs from ${options.source_ref}`);
+        await lab.api(server.baseUrl, "/settings", {token: server.token, method: "PUT", body: {playback_display_aware_auto: true}});
+        server.qualification_binary = path.resolve(options.server);
+        const quietStart = Date.now(); let quietSince = null;
+        while (Date.now() - quietStart < 120000) {
+          if ((await producerCensus(server)).children.length) quietSince = null;
+          else if (quietSince == null) quietSince = Date.now();
+          if (quietSince != null && Date.now() - quietSince >= 8000) break;
+          await sleep(1000);
+        }
+        if (quietSince == null || Date.now() - quietSince < 8000)
+          throw new Error("owned startup FFmpeg probes did not settle");
+        server.preparation.cache_condition.startup_producer_quiet_ms = Date.now() - quietStart;
+        await lab.api(server.baseUrl, "/activity/detail", {token: server.token});
+        server.preparation.cache_condition.engine_attestation_before_playback = "warmed_by_ordinary_activity_detail_read";
+        return server;
+      } catch (error) {await server.close(false); throw error;}
+    }, runOneCase: presentationCase,
+  });
+  if (outcome.error) throw outcome.error;
+  return outcome.code;
+}
+module.exports = {main, snapshot, selectSubtitle, presentationCase};
+if (require.main === module) main(process.argv.slice(2)).then(code => {process.exitCode = code;})
+  .catch(error => {process.stderr.write(`continuous presentation: ${error.message}\n`); process.exitCode = 1;});

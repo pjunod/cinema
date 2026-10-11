@@ -1,5 +1,11 @@
 package tv.plurx.app.ui
 
+import tv.plurx.app.remote.*
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.foundation.lazy.rememberLazyListState
+
 import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -197,7 +203,46 @@ private fun DetailContent(
     val canResume = resumeMs > 3_000 && !nearlyDone
     var selectedVersion by remember(item.id) { mutableStateOf<Long?>(null) }
     val best = detail.files.find { it.id == selectedVersion } ?: playbackFile(item, detail.files, if (canResume) resumeMs else 0L)
-    LazyColumn(Modifier.fillMaxSize().navigationBarsPadding()) {
+    val remoteNavigation = LocalRemoteNavigation.current
+    val remoteScope = LocalRemoteScope.current
+    val remotePlayToken = remember(remoteScope) { java.util.UUID.randomUUID().toString() }
+    SideEffect {
+        remoteNavigation?.registerPlayItem(remoteScope, remotePlayToken) { requested ->
+            when {
+                requested != item.id -> RemoteOutcome.Unsupported
+                seriesPlayback != null -> { val target = seriesPlayback.playback; onPlay(target.itemId, target.fileId, target.startMs, PreplayTracks.NONE); RemoteOutcome.Applied }
+                item.isPlayable && best != null -> { onPlay(item.id, best.id, if (canResume) audiobookLocalPosition(resumeMs, best.part_offset_ms) else 0, trackChoices[best.id] ?: PreplayTracks.NONE); RemoteOutcome.Applied }
+                else -> RemoteOutcome.Unavailable
+            }
+        }
+    }
+    DisposableEffect(remoteNavigation, remoteScope, remotePlayToken) { onDispose { remoteNavigation?.unregisterPlayItem(remoteScope, remotePlayToken) } }
+    val remoteList = rememberLazyListState()
+    val remoteKeys = buildList {
+        add("detail:back")
+        if (seriesPlayback != null || best != null && item.isPlayable) add("detail:play")
+        if (canResume && best != null && item.isPlayable) add("detail:start-over")
+        if (item.isPlayableVideo && detail.files.size > 1 && best != null) add("choice:Version")
+        if (item.isPlayableVideo && best != null) { add("choice:Audio"); add("choice:Subtitles") }
+        addAll(detail.editions.map { "detail-edition:${it.id}" })
+        addAll(detail.children.map { if (it.kind == "episode") "detail-episode:${it.id}" else "detail-child:${it.id}" })
+    }
+    RemoteOrder(remoteKeys) { key ->
+        val episode = detail.children.indexOfFirst { "detail-episode:${it.id}" == key }
+        val child = detail.children.indexOfFirst { "detail-child:${it.id}" == key }
+        val edition = detail.editions.any { "detail-edition:${it.id}" == key }
+        val mediaOffset = if (detail.files.isNotEmpty()) 1 else 0
+        val editionOffset = if (detail.editions.isNotEmpty()) 2 else 0
+        val index = when {
+            episode >= 0 -> 1 + mediaOffset + editionOffset + 1 + episode
+            child >= 0 -> 1 + mediaOffset + editionOffset + 1
+            edition -> 1 + mediaOffset + 1
+            key.startsWith("choice:") -> 1
+            else -> 0
+        }
+        scope.launch { remoteList.scrollToItem(index) }
+    }
+    LazyColumn(Modifier.fillMaxSize().navigationBarsPadding(), state = remoteList) {
         item {
             Box(Modifier.fillMaxWidth().height(70.dp)) { DetailBackButton(onBack) }
             Column(Modifier.fillMaxWidth().padding(horizontal = side), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -287,8 +332,10 @@ private fun DetailContent(
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     items(detail.editions, key = { it.id }) { edition ->
+                        CompositionLocalProvider(LocalRemoteItemPrefix provides "detail-edition") {
                         PosterCard(edition, width = if (formFactor == FormFactor.Television) 166.dp else 132.dp) {
                             onOpenItem(edition.id)
+                        }
                         }
                     }
                 }
@@ -329,8 +376,10 @@ private fun DetailContent(
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
                         items(detail.children, key = { it.id }) { child ->
+                            CompositionLocalProvider(LocalRemoteItemPrefix provides "detail-child") {
                             PosterCard(child, width = if (formFactor == FormFactor.Television) 166.dp else 132.dp) {
                                 onOpenItem(child.id)
+                            }
                             }
                         }
                     }
@@ -526,6 +575,7 @@ private fun Actions(
                         onPlay(target.itemId, target.fileId, target.startMs, PreplayTracks.NONE)
                     },
                     requestInitialFocus = requestInitialFocus,
+                    remoteKey = "detail:play",
                 ) {
                     Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
                     Text("  ${seriesPlayLabel(seriesPlayback)}", fontWeight = FontWeight.SemiBold)
@@ -538,6 +588,7 @@ private fun Actions(
                         onPlay(item.id, playable.id, if (canResume) localResume else 0L, chosenTracks)
                     },
                     requestInitialFocus = requestInitialFocus,
+                    remoteKey = "detail:play",
                 ) {
                     Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
                     Text(if (canResume) "  Resume  ${formatTime(resumeMs)}" else "  Play", fontWeight = FontWeight.SemiBold)
@@ -545,7 +596,7 @@ private fun Actions(
             }
             if (canResume) {
                 item {
-                    TvOutlinedButton(onClick = {
+                    TvOutlinedButton(modifier = Modifier.remoteAction("detail:start-over", "Start over") { val file = startOverFile?.id ?: playable.id; onPlay(item.id, file, 0L, trackChoices[file] ?: PreplayTracks.NONE); RemoteOutcome.Applied }, onClick = {
                         val file = startOverFile?.id ?: playable.id
                         onPlay(item.id, file, 0L, trackChoices[file] ?: PreplayTracks.NONE)
                     }) {
@@ -675,13 +726,14 @@ internal fun DetailPrimaryActionButton(
     onClick: () -> Unit,
     requestInitialFocus: Boolean,
     modifier: Modifier = Modifier,
+    remoteKey: String? = null,
     content: @Composable RowScope.() -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
     RequestInitialFocus(focusRequester, enabled = requestInitialFocus)
     TvButton(
         onClick = onClick,
-        modifier = modifier.focusRequester(focusRequester),
+        modifier = modifier.focusRequester(focusRequester).then(if (remoteKey != null) Modifier.remoteAction(remoteKey, "Play") { onClick(); RemoteOutcome.Applied } else Modifier),
         content = content,
     )
 }
@@ -935,6 +987,7 @@ private fun EpisodeRow(item: Item, side: androidx.compose.ui.unit.Dp, starting: 
             .fillMaxWidth()
             .padding(horizontal = side - focusEndPadding)
             .tvFocusRing(MaterialTheme.shapes.medium, focusedScale = 1.02f)
+            .remoteAction("detail-episode:${item.id}", item.title, enabled = !starting) { onClick(); RemoteOutcome.Applied }
             .clickable(enabled = !starting, onClick = onClick)
             .padding(horizontal = focusEndPadding, vertical = 9.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -1047,5 +1100,5 @@ internal fun DetailBackButton(
     onBack: () -> Unit,
     safeInsets: WindowInsets = safeDisplayInsets(),
 ) {
-    SafeBackButton(onBack = onBack, safeInsets = safeInsets)
+    SafeBackButton(onBack = onBack, modifier = Modifier.remoteAction("detail:back", "Back") { onBack(); RemoteOutcome.Applied }, safeInsets = safeInsets)
 }

@@ -20,11 +20,63 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `143` — decoder envelopes compact conservatively
+> Status: **v0.3.0**, build `163` — Continuous Auto costs rungs by their link
+> rate and never holds a rung the link cannot carry (#994); its
+> capability-probe build passed the Android TV series.
+> Build `162` — Home hides the Live TV, Recordings,
+> Library channels and Shared libraries entries (and their remote-navigation
+> stops) while the server has that section switched off (`GET /api/v1/features`);
+> not yet installed on hardware.
+> Build `161` — Developer graduation pass (Enable Live TV
+> is the first card of Settings → Live TV; Prepared replacement is in Playback;
+> the release startup profile status is in About); not yet installed on hardware.
+> Build `160` — Continuous-quality acceptance repairs
+> (Auto decides again after a viewer quality choice; shared-audio EOF evidence).
+> Build `159` — Shared-library playback and controls;
+> not yet installed on hardware.
+> Build `152` — Prepared-video geometry and playback-panel contrast repairs
+> from PR #915; hardware visual acceptance remains pending.
+> Build `150` — Shared-library playback and controls.
+> Build `149` — Live TV station logos: the list rows,
+> grid headers, programme details, picture badge and fullscreen overlay draw
+> the guide's station artwork from the shared `station_logo` rule, fetched
+> without the account token. Not yet installed on hardware.
+> Build `148` — a display-mode wait that times out
+> withdraws its `preferredDisplayModeId` request while it still owns the
+> window, so a late HDMI switch cannot land mid-playback (needs
+> `display_mode_match` on; not yet observed on a television), and the
+> uncalled Auto-quality policy port and its JVM runner are deleted; released
+> continuous audio outputs are retired again (since build 145 they were kept
+> and could exhaust the 16-output bound).
+> Build `147` — a seek pressed while a prepared quality
+> handoff has switched but not yet rendered is held and runs once on its first
+> frame (or on the picture an Auto rollback restores) instead of being dropped
+> until the 8-second target deadline reopens; a rollback reopen lands at the
+> seek's destination, not the playhead. Not yet on a device.
+> Build `146` — grouped library rows, a visible letter/year
+> index, expanded groups with Retry, and landscape home-media cards. Focused
+> phone and TV emulator checks passed; physical-device acceptance is unmeasured.
+> Build `145` — continuous quality: manual and Auto
+> quality changes adapt inside the one player, with owned outputs and release
+> fences around a prepared replacement, on top of current main's recovery
+> parity and audio-focus handover. Production and test sources compile;
+> physical-device transitions remain unmeasured.
+> Build `144` — decoder envelopes compact conservatively
 > while preserving crossing limits, profiles and display grades. The bounded
 > contract is negotiated with the server; no evidence is truncated. Physical
 > TCL/Streamer acceptance remains outstanding.
-> Build 142 — a paused transcoding session the server
+> Build `143` — no Android source change; the number was claimed with the
+> server's bounded catalog discovery and canonical recipe dispatch
+> (`56e52c50e`).
+> Build `142` — the 10/30-second seek controls use directional arrow icons
+> (`4f25ab713`); no physical production install is claimed.
+> Build `141` was claimed twice: on main for the 10/30-second seek controls
+> (`bdff3314b`), and on the architecture effort (`1ffaae2a4`), where buffer
+> roles retain their existing ceilings
+> and clamp to the actual process heap; local diagnostics name the actual Coil
+> cache bound. Larger incumbent allocation and three-device memory/HDMI
+> qualification remain open. No physical production install is claimed.
+> A paused transcoding session the server
 > retires after its three-minute pause grace no longer surfaces "Playback
 > stopped"; Play reopens at the saved position (not yet on a device). Build
 > 138's per-box Live TV player view (fullscreen fills tablets) was accepted
@@ -217,7 +269,7 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > source timeline, and draws them above the unchanged Dolby Vision, HDR, or SDR
 > video. Picture in Picture is unavailable while the overlay is active until
 > physical-device behavior is accepted.
-> HDHomeRun Live TV has dedicated live controls and Settings → Developer
+> HDHomeRun Live TV has dedicated live controls and Settings → Live TV
 > runtime enablement, readiness and exact previous-owner recovery. Its durable
 > token-free marker prevents duplicate starts after interrupted cleanup or app
 > death. DRM, DVR, captions and guide scheduling are not supported.
@@ -229,9 +281,10 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 
 - **HDHomeRun Live TV** — channel selection, pause/resume, mute, fullscreen and
   stop on a dedicated H.264/AAC live player. No library watch-progress writes.
-  Settings → Developer documents the required private IPv4 tuner, committed
-  owner node, compatible fleet, FFmpeg, scratch space and session budget before
-  runtime enablement. [The Live TV plan](../../docs/features/HDHOMERUN-LIVE-TV-PLAN.md)
+  *Enable Live TV* is the first card in Settings → Live TV (it left Developer
+  on 2026-10-10); the screen documents the required private IPv4 tuner,
+  committed owner node, compatible fleet, FFmpeg, scratch space and session
+  budget as advisory readiness beside the switch. [The Live TV plan](../../docs/features/HDHOMERUN-LIVE-TV-PLAN.md)
   records limits and acceptance; source tests are not physical playback proof.
 - **Connect & sign in** to any plurx server by address (`http://10.42.1.10:32400`); the
   session is remembered so the app reconnects silently on next launch.
@@ -287,6 +340,9 @@ recomputed on every decision, because unplugging HDMI changes the answer.
     watch state and the server-side **Trakt** scrobble.
 - **Viewer preferences** remember theme, appearance, poster size, home
   grouping, quality, audio/subtitle language, auto-skip, and autoplay-next.
+  Settings → Playback also holds the device-local *Prepared replacement*
+  switch for quality switching, and Settings → About shows the release startup
+  profile status; both moved out of Developer on 2026-10-10.
 - **App-managed offline video viewing on phones and tablets.** A detail-page action
   creates a durable server preparation request, then Media3's foreground
   `DownloadService` transfers the prepared HLS package into one process-owned,
@@ -528,6 +584,77 @@ Pro XL (`1344×2992`), Pixel 10 Pro Fold open (`2076×2152`), and Android TV
 1080p (`1920×1080`). The exact AVD names used locally are
 `plurx_pixel_10_pro_xl_api36`, `plurx_pixel_10_pro_fold_api36`, and
 `plurx_android_tv_1080p_api36`.
+
+## Background screen invitations — explicit choices and recovery
+
+The unfinished invitation controls live in Settings → Developer, alongside
+Cinema remotes. Register this phone, allow notifications explicitly, and save
+ON/OFF separately for each paired screen. Each screen uses one selected
+transport: Push (FCM) or Resident. Readiness is advisory; unavailable providers
+and permissions preserve the saved choice. The controls graduate to Remotes &
+devices after physical provider and background-execution qualification.
+
+**Optional FCM configuration.** The APK includes the real Firebase Messaging
+SDK. The default build has no configured Firebase app and does not claim push
+readiness. Supply your Firebase Android application's public configuration as
+Gradle properties; no Google-services JSON, broker private key, provider service
+account, or Cinema proof belongs in source or these properties:
+
+```bash
+./gradlew assembleDebug \
+  -PcinemaFirebaseProjectId=your-project \
+  -PcinemaFirebaseApplicationId=1:123456789:android:your-app-id \
+  -PcinemaFirebaseApiKey=your-public-api-key \
+  -PcinemaFirebaseSenderId=123456789
+```
+
+Use the Firebase project that matches the configured broker FCM project. Auto
+initialization is disabled; an explicit push enrollment requests the real SDK
+token. Start obtains a short-lived home ticket, sends only that ticket and the
+OS token directly to its issued HTTPS broker origin, checks the exact broker
+generation, then confirms with the home. The home never receives the OS token.
+An unknown enrollment is renewed explicitly after readiness refresh; it is
+never replayed automatically. Token rotation retains work per screen, so one
+confirmed screen cannot hide another screen's uncertain renewal.
+[Firebase setup](https://firebase.google.com/docs/android/setup) explains the
+application configuration, and
+[message handling](https://firebase.google.com/docs/cloud-messaging/android/receive-messages)
+explains why the broker uses data-only messages. Physical FCM delivery is
+unverified.
+
+**Resident alternative.** Select Resident for each intended screen, then enable
+its separate local resident choice and press Start. The visible connected-device
+service requests Wi-Fi and uses its network only for the invitation client's
+sockets and DNS. Media, downloads, reminders, and process-wide networking keep
+their existing owners. Stop in the app or persistent notification takes effect
+locally while offline and queues home availability reconciliation. Wi-Fi loss,
+logout, setup failure, or service termination releases the network callback;
+Start must be pressed again. Saved choice alone never triggers a boot, alarm,
+WorkManager, sticky-service, or fallback restart. The
+[Android connected-device service requirements](https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device)
+still require physical permission and background-execution acceptance.
+
+**Tap and recovery.** Notifications contain one opaque invitation ID. Local
+admission checks the actual saved login, exact installation, permission, channel,
+proved consent, current saved choice, and bounded durable dedupe before display.
+Tap retains the ID across login and requires the matching selected profile,
+explicit foreground remote switch, and fresh authenticated lookup. It opens the
+ordinary remote; take control and playback remain separate actions. An OFF
+choice also fences previously displayed notifications before lookup selection.
+Remotes & devices keeps the bounded signed-in home installation list and explicit
+selected-installation removal available without a local phone proof or pairing
+grant. Local reset or forgetting a saved profile does not claim remote
+revocation: remove any orphan home installation while signed in there.
+
+Encrypted invitation records retain at most eight saved profiles, 160 screen
+choices/consents per profile, and 256 unexpired notification IDs. Invalid clocks,
+clock rollback, corrupted records, and saturated dedupe fail closed. Invitation
+and remote-proof preferences are excluded from cloud backup and device transfer.
+Android's older remote vault keys already included canonical origin; they did not
+retain an unambiguous origin/instance/account tuple. The new namespace does not
+import those records automatically. Pair this phone again if an old pairing is
+unavailable. Software compilation and focused JVM checks do not qualify native
+permission dialogs, Google TV hardware, FCM delivery, or resident persistence.
 
 ## Roadmap
 

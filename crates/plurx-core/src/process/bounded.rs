@@ -125,11 +125,22 @@ where
     P: AsRef<OsStr>,
     A: AsRef<OsStr>,
 {
+    let mut command = Command::new(program);
+    command.args(args);
+    output_command(&mut command, wall_time, max_output_bytes, work).await
+}
+
+/// A bounded child with caller-installed held descriptors and arguments.
+/// The environment and group lifetime remain identical to `output`.
+pub async fn output_command(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
-    let mut command = Command::new(program);
     command
-        .args(args)
         .env_clear()
         .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
@@ -154,7 +165,7 @@ where
     #[cfg(unix)]
     command.process_group(0);
 
-    let (mut child, job) = super::spawn_job_owned(&mut command, work)?;
+    let (mut child, job) = super::spawn_job_owned(command, work)?;
     let stdout = child
         .stdout
         .take()

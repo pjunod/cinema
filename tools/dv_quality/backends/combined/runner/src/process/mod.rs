@@ -1,0 +1,557 @@
+//! Cross-platform control of an owned, unreaped child process, and the
+//! daemon's own inherited limits on how many descriptors it may hold.
+
+pub mod bounded;
+#[cfg(test)]
+mod census;
+pub mod priority;
+pub mod rlimit;
+
+pub use priority::{ChildClass, ChildWork};
+
+use std::io;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessSignal {
+    Suspend,
+    Resume,
+    Terminate,
+}
+
+pub struct ChildJob {
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    /// The child's row in [`priority::running`]; it leaves the list when the
+    /// owner drops this job.
+    _registration: Option<priority::Registration>,
+}
+
+/// The one launcher every production child goes through.
+///
+/// Spawn without giving the child a chance to create descendants before its
+/// lifetime is tied to the daemon. Linux spawns on a persistent owner thread
+/// and installs a parent-death SIGKILL before exec, including stopped children.
+/// Other Unix platforms retain their existing lifetime behavior. On Windows the child starts suspended, enters a kill-on-close Job Object, and
+/// only then resumes.
+///
+/// `work` names the child's [`ChildClass`] and purpose: the child lowers its
+/// own CPU, I/O and OOM priority to the class's policy before `exec`
+/// ([`priority::apply`]; priority refusals never fail the spawn, but Linux
+/// ownership setup must succeed), and it is
+/// listed in [`priority::running`] until the returned job is dropped.
+/// `process::census::every_production_spawn_goes_through_the_launcher` fails
+/// on any production spawn that does not come through here.
+pub fn spawn_job_owned(
+    command: &mut tokio::process::Command,
+    work: ChildWork,
+) -> io::Result<(tokio::process::Child, ChildJob)> {
+    priority::apply(command, work.class);
+    configure_suspended(command);
+    #[allow(clippy::disallowed_methods)] // the launcher itself
+    let mut child = spawn_on_owner(
+        command,
+        || tokio::process::Command::new(""),
+        |command| command.spawn(),
+    )?;
+    let mut job = ChildJob::attach(&child).inspect_err(|_| {
+        let _ = child.start_kill();
+    })?;
+    resume_suspended(&child).inspect_err(|_| {
+        let _ = child.start_kill();
+    })?;
+    job._registration = priority::register(child.id(), command.as_std().get_program(), work);
+    Ok((child, job))
+}
+
+/// Run a short-lived helper under the same descendant lifetime contract as a
+/// long-lived transcode, with [`tokio::process::Command::output`] semantics.
+///
+/// Both streams are captured even when the caller configured them otherwise.
+/// The audited consumers depend on that override:
+///
+/// | file | calls | output consumed |
+/// |---|---:|---|
+/// | `pipeprobe.rs` | 2 | stdout and stderr |
+/// | `ffmpeg.rs` | 4 | status, stdout and stderr |
+/// | `transcode.rs` | 1 | stdout and stderr |
+/// | `subtitles.rs` | 1 | whole-track status and stderr |
+/// | `live_tv.rs` | 1 | status and stderr |
+/// | `live_tv/caption_probe.rs` | 1 | status, stdout and stderr |
+/// | `subtitle_ride_along.rs` | 1 | status, stdout and stderr |
+///
+/// Subtitle window extraction uses the bounded diagnostic child instead of
+/// this helper, so its VTT pipe and diagnostics have explicit byte limits.
+///
+/// Dropping this future drops the job after Tokio has requested child
+/// termination, so timeout and cancellation cannot strand a grandchild
+/// holding a Windows cache file open. This helper deliberately does not bound
+/// captured output; callers with that contract use the bounded primitive.
+pub async fn output_job_owned(
+    command: &mut tokio::process::Command,
+    work: ChildWork,
+) -> io::Result<std::process::Output> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let (child, _job) = spawn_job_owned(command, work)?;
+    child.wait_with_output().await
+}
+
+pub async fn status_job_owned(
+    command: &mut tokio::process::Command,
+    work: ChildWork,
+) -> io::Result<std::process::ExitStatus> {
+    let (mut child, _job) = spawn_job_owned(command, work)?;
+    child.wait().await
+}
+
+/// [`output_job_owned`] for synchronous code that already runs off the async
+/// runtime (inside `spawn_blocking`): the same class, the same Activity row,
+/// both streams captured. The child is attached to its job right after the
+/// spawn rather than created suspended, which is the contract for a probe
+/// that starts no descendants of its own.
+pub fn output_job_owned_blocking(
+    command: &mut std::process::Command,
+    work: ChildWork,
+) -> io::Result<std::process::Output> {
+    priority::apply_policy(command, work.class.policy());
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[allow(clippy::disallowed_methods)] // the blocking launcher itself
+    let mut child = spawn_on_owner(
+        command,
+        || std::process::Command::new(""),
+        |command| command.spawn(),
+    )?;
+    let mut job = match ChildJob::attach_pid(child.id()) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    job._registration = priority::register(Some(child.id()), command.get_program(), work);
+    let output = child.wait_with_output();
+    drop(job);
+    output
+}
+
+/// Linux parent-death signals follow the thread that forks, so an idle Tokio
+/// blocking worker cannot own a long-lived child. Keep one spawn thread for
+/// the process lifetime; enter the caller's runtime only for its spawn so the
+/// returned Tokio child remains bound to the caller's I/O reactor.
+fn spawn_on_owner<C, T>(
+    command: &mut C,
+    replacement: impl FnOnce() -> C,
+    spawn: impl FnOnce(&mut C) -> io::Result<T> + Send + 'static,
+) -> io::Result<T>
+where
+    C: Send + 'static,
+    T: Send + 'static,
+{
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::{mpsc, LazyLock};
+        type Request = Box<dyn FnOnce() + Send>;
+        static OWNER: LazyLock<Result<mpsc::SyncSender<Request>, String>> = LazyLock::new(|| {
+            let (sender, receiver) = mpsc::sync_channel::<Request>(0);
+            std::thread::Builder::new()
+                .name("plurx-child-owner".into())
+                .spawn(move || {
+                    while let Ok(request) = receiver.recv() {
+                        request();
+                    }
+                })
+                .map(|_| sender)
+                .map_err(|error| error.to_string())
+        });
+        let owner = OWNER
+            .as_ref()
+            .map_err(|error| io::Error::other(error.clone()))?;
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let mut owned = std::mem::replace(command, replacement());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        owner
+            .send(Box::new(move || {
+                let _runtime = runtime.as_ref().map(tokio::runtime::Handle::enter);
+                let result = spawn(&mut owned);
+                let _ = sender.send((owned, result));
+            }))
+            .map_err(|_| io::Error::other("child owner thread stopped"))?;
+        let (owned, result) = receiver
+            .recv()
+            .map_err(|_| io::Error::other("child owner thread lost spawn result"))?;
+        *command = owned;
+        result
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = replacement;
+        spawn(command)
+    }
+}
+
+#[cfg(unix)]
+impl ChildJob {
+    pub fn attach(_child: &tokio::process::Child) -> io::Result<Self> {
+        Self::attach_pid(0)
+    }
+
+    pub(crate) fn attach_pid(_pid: u32) -> io::Result<Self> {
+        Ok(Self {
+            _registration: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn configure_suspended(_command: &mut tokio::process::Command) {}
+
+#[cfg(windows)]
+pub(crate) fn configure_suspended(command: &mut tokio::process::Command) {
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+}
+
+#[cfg(unix)]
+pub(crate) fn resume_suspended(_child: &tokio::process::Child) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn resume_suspended(child: &tokio::process::Child) -> io::Result<()> {
+    let pid = child
+        .id()
+        .ok_or_else(|| io::Error::other("suspended child has no process identifier"))?;
+    signal(pid, ProcessSignal::Resume).and_then(|resumed| {
+        if resumed {
+            Ok(())
+        } else {
+            Err(io::Error::other("suspended child exited before resume"))
+        }
+    })
+}
+
+#[cfg(windows)]
+unsafe impl Send for ChildJob {}
+
+#[cfg(windows)]
+impl Drop for ChildJob {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(windows)]
+impl ChildJob {
+    pub fn attach(child: &tokio::process::Child) -> io::Result<Self> {
+        let pid = child
+            .id()
+            .ok_or_else(|| io::Error::other("child has no process identifier"))?;
+        Self::attach_pid(pid)
+    }
+
+    pub(crate) fn attach_pid(pid: u32) -> io::Result<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = io::Error::last_os_error();
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err(error);
+        }
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        if process.is_null() {
+            let error = io::Error::last_os_error();
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err(error);
+        }
+        let assigned = unsafe { AssignProcessToJobObject(handle, process) };
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(process) };
+        if assigned == 0 {
+            let error = io::Error::last_os_error();
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err(error);
+        }
+        Ok(Self {
+            handle,
+            _registration: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+pub fn signal(pid: u32, signal: ProcessSignal) -> io::Result<bool> {
+    let signal = match signal {
+        ProcessSignal::Suspend => libc::SIGSTOP,
+        ProcessSignal::Resume => libc::SIGCONT,
+        ProcessSignal::Terminate => libc::SIGKILL,
+    };
+    let pid =
+        libc::pid_t::try_from(pid).map_err(|_| io::Error::other("child pid does not fit pid_t"))?;
+    // SAFETY: the caller owns the unreaped child, so this pid cannot have
+    // been recycled before the signal is sent.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+    use std::path::Path;
+    use std::time::Duration;
+
+    const TEST_WORK: ChildWork = ChildWork::background("process test");
+
+    /// Re-exec the portable test binary instead of relying on a platform shell.
+    fn child(mode: &str) -> tokio::process::Command {
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args(["--exact", "process::tests::child_main", "--nocapture"])
+            .env("PLURX_CHILD_MODE", mode);
+        command
+    }
+
+    #[test]
+    fn child_main() {
+        match std::env::var("PLURX_CHILD_MODE").as_deref() {
+            Ok("echo") => {
+                std::io::stdout().write_all(b"out-bytes").expect("stdout");
+                std::io::stderr().write_all(b"err-bytes").expect("stderr");
+            }
+            Ok("fail") => {
+                std::io::stderr().write_all(b"reason").expect("stderr");
+                std::process::exit(3);
+            }
+            Ok("sleep") => {
+                if let Ok(path) = std::env::var("PLURX_CHILD_PID_FILE") {
+                    let path = Path::new(&path);
+                    let ready = path.with_extension("ready");
+                    std::fs::write(&ready, std::process::id().to_string()).expect("pid file");
+                    std::fs::rename(ready, path).expect("publish complete pid file");
+                }
+                std::thread::sleep(Duration::from_secs(300));
+            }
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn both_streams_are_captured() {
+        let output = output_job_owned(&mut child("echo"), TEST_WORK)
+            .await
+            .expect("child output");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("out-bytes"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("err-bytes"));
+    }
+
+    #[tokio::test]
+    async fn a_failing_child_reports_status_and_stderr() {
+        let output = output_job_owned(&mut child("fail"), TEST_WORK)
+            .await
+            .expect("child output");
+        assert_eq!(output.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("reason"));
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_configured_inherit_still_gets_bytes() {
+        let mut command = child("echo");
+        command.stdout(std::process::Stdio::inherit());
+        let output = output_job_owned(&mut command, TEST_WORK)
+            .await
+            .expect("child output");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("out-bytes"));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_future_kills_the_child() {
+        let directory = tempfile::tempdir().expect("pid directory");
+        let pid_file = directory.path().join("child.pid");
+        let mut command = child("sleep");
+        command.env("PLURX_CHILD_PID_FILE", &pid_file);
+
+        let pid: u32 = {
+            let output = output_job_owned(&mut command, TEST_WORK);
+            tokio::pin!(output);
+            // Startup can exceed the cancellation deadline on a busy runner.
+            // Keep polling the output future until the child confirms readiness;
+            // only then measure cancellation of a running, sleeping child.
+            let ready = async {
+                loop {
+                    match std::fs::read_to_string(&pid_file) {
+                        Ok(pid) => break pid.parse::<u32>().expect("numeric child pid"),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        Err(error) => panic!("read sleeping child pid: {error}"),
+                    }
+                }
+            };
+            let pid = tokio::select! {
+                result = &mut output => panic!("sleeping child exited before readiness: {result:?}"),
+                result = tokio::time::timeout(Duration::from_secs(10), ready) => {
+                    result.expect("sleeping child published its pid within startup budget")
+                }
+            };
+            let result = tokio::time::timeout(Duration::from_millis(200), &mut output).await;
+            assert!(result.is_err(), "sleeping child exceeded the deadline");
+            // Leave this scope to drop the actual future, not just its pinned
+            // reference, before checking that cancellation killed the child.
+            pid
+        };
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !signal(pid, ProcessSignal::Terminate).expect("probe dead child"),
+            "the dropped output future left its child alive"
+        );
+    }
+
+    fn collect_output_call_sites(
+        directory: &Path,
+        source_root: &Path,
+        sites: &mut BTreeMap<String, usize>,
+    ) -> io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                collect_output_call_sites(&path, source_root, sites)?;
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs")
+                && path.file_name().and_then(|value| value.to_str()) != Some("process_control.rs")
+            {
+                let source = std::fs::read_to_string(&path)?;
+                let production = source
+                    .split("#[cfg(test)]\nmod tests {")
+                    .next()
+                    .expect("source prefix");
+                let count = production.matches("output_job_owned(").count();
+                if count > 0 {
+                    let file = path
+                        .strip_prefix(source_root)
+                        .expect("source below manifest src")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .to_owned();
+                    sites.insert(file, count);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn output_job_owned_call_sites_are_the_audited_set() {
+        let expected = BTreeMap::from([
+            ("ffmpeg.rs".to_owned(), 4),
+            ("live_tv.rs".to_owned(), 1),
+            ("live_tv/caption_probe.rs".to_owned(), 1),
+            ("pipeprobe.rs".to_owned(), 2),
+            ("subtitle_ride_along.rs".to_owned(), 1),
+            ("subtitles.rs".to_owned(), 1),
+            ("transcode/media_origin.rs".to_owned(), 1),
+        ]);
+        let mut actual = BTreeMap::new();
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates directory")
+            .join("plurxd/src");
+        collect_output_call_sites(&source_root, &source_root, &mut actual)
+            .expect("audit plurxd call sites");
+        assert_eq!(actual, expected, "update the helper's caller audit");
+    }
+}
+
+#[cfg(windows)]
+pub fn signal(pid: u32, signal: ProcessSignal) -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, RtlNtStatusToDosError, STATUS_INVALID_HANDLE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
+    };
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtSuspendProcess(process: *mut core::ffi::c_void) -> i32;
+        fn NtResumeProcess(process: *mut core::ffi::c_void) -> i32;
+    }
+
+    let access = match signal {
+        ProcessSignal::Suspend | ProcessSignal::Resume => PROCESS_SUSPEND_RESUME,
+        ProcessSignal::Terminate => PROCESS_TERMINATE,
+    };
+    // SAFETY: the pid belongs to the caller's unreaped child. The returned
+    // process handle is checked and closed below.
+    let process = unsafe { OpenProcess(access, 0, pid) };
+    if process.is_null() {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(error)
+        };
+    }
+    // SAFETY: `process` is a live process handle with the access required by
+    // the selected operation.
+    let status = unsafe {
+        match signal {
+            ProcessSignal::Suspend => NtSuspendProcess(process),
+            ProcessSignal::Resume => NtResumeProcess(process),
+            ProcessSignal::Terminate => {
+                if TerminateProcess(process, 1) == 0 {
+                    -1
+                } else {
+                    0
+                }
+            }
+        }
+    };
+    // SAFETY: `process` was returned by OpenProcess and is closed once.
+    unsafe { CloseHandle(process) };
+    if status >= 0 {
+        Ok(true)
+    } else if status == STATUS_INVALID_HANDLE {
+        Ok(false)
+    } else if signal == ProcessSignal::Terminate && status == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ))
+    }
+}

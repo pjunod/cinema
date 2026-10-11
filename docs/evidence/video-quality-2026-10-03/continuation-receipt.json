@@ -1,0 +1,65 @@
+{
+  "original_checked_source": "bd24f27679faf68bf8815915b488a3e7ac2e7461",
+  "selective_web_checked_source": "affec0174b2b92139e15c08b1236c9a7e61b0715",
+  "delta_description": "Two JSDoc HTMLInputElement casts only; no runtime behavior change",
+  "delta_path": "settings-types-final-delta.patch",
+  "forgejo_run_id": 3993,
+  "forgejo_ui_index": 3972,
+  "successful_checks_not_rerun": true,
+  "checks": [
+    {
+      "name": "web syntax",
+      "job_id": 41504,
+      "outcome": "pass",
+      "execution": "original CI job"
+    },
+    {
+      "name": "media preparation and layout containment",
+      "job_id": 41504,
+      "tests_passed": 13,
+      "outcome": "pass",
+      "execution": "original CI job"
+    },
+    {
+      "name": "jsconfig served-file inventory",
+      "job_id": 41504,
+      "outcome": "pass",
+      "execution": "original CI job"
+    },
+    {
+      "name": "web-types",
+      "job_id": 41504,
+      "original_outcome": "failure",
+      "reason": "Two new TS2339 checkbox diagnostics above unchanged baseline",
+      "selective_command": "scripts/web-types --base 3197d0c58c079e485667da20e949f7275cb92cb9",
+      "selective_outcome": "pass",
+      "diagnostics": 517,
+      "keys": 83
+    },
+    {
+      "name": "player typedef",
+      "original_outcome": "not reached",
+      "first_execution_command": "node tests/web/player-typedef.test.js",
+      "outcome": "pass",
+      "fields": 182,
+      "typed_parameters": 161
+    },
+    {
+      "name": "environment-dependent operations",
+      "job_id": 41505,
+      "outcome": "pass",
+      "methods_passed": 9,
+      "execution": "only the methods that failed locally"
+    }
+  ],
+  "log_sha256": {
+    "web-41504.log": "6317e56cb819ce54602884ccc128702eabb68f8a631f4025966f66d67f2b009b",
+    "operations-41505.log": "854062bd04d005fdab855df61c92b99c56da14cf95b037cda6a45b0fc09c1fdc",
+    "web-types-selective.log": "fa647888b1ea9d6ed85b1bd34148102932971ccdf27dd3b9ca44833ef7ed90ac",
+    "player-typedef-first.log": "b758be65167b8b33a79f09447e90e888a74665f59616e5214bfb0effd4c192fb"
+  },
+  "integrated_checked_source": "757bd633e4c491bf099598c0bb6c4ec11cc067ae",
+  "integration": "Cherry-picked exact two-line JSDoc-only patch; original passing check source remains byte-identical outside these annotations and documentation.",
+  "unchanged_rust_and_build_inputs": true,
+  "selective_web_file_sha256": "eaa837f5c0c59d488ab7fb7b2662ccea9ab1b8e7842bcc6ba0730c823126ac11"
+}

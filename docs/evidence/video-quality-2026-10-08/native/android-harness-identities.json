@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "initial_source_sha256": "f52d375188a8ee3ff54e99bf7dd330d21287c749b01f902998a2320b055099c0",
+  "attempt2_source_sha256": "8e9c4785d8fdf2e53661286abb7e0cc4c72803be3b86cddb0e73d7d9312a6a9c",
+  "attempt3_and_quiet_retry_source_sha256": "37bd365d04f1d0bacb022d7951d6ec59a89d67c2440bdd073d549ae29364aae7",
+  "initial_reconstruction": "Apply android-harness-epoch.patch in reverse to current ProbeActivity.java.",
+  "attempt2_reconstruction": "Read ProbeActivity.java at commit a920a6c2e.",
+  "criteria": "All established phases still require maximum video/player-clock delta <250ms, monotonic presentation and moving Surface pixels. The epoch fix changes initial admission only; no ongoing mismatch or reversal is dropped.",
+  "review_corrected_source_sha256": "944e1cc30575c297e4d5ea64a7409205430144ed00cd3c3658b34cdf84c8fbc7",
+  "pre_review_final_reconstruction": "Read ProbeActivity.java at commit738ff237f.",
+  "historical_scope_limit": "Pre-review probes discarded below-target observations even after phase establishment. Their receipts prove admitted observations only; corrected source cannot upgrade those historical passes. Review-corrected captures are bound separately."
+}

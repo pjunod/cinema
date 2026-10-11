@@ -4,7 +4,7 @@
 
 This page tracks the playback information repair in one isolated clone. The
 implementation follows the supplied dimensions and aspect handoff. The
-candidate branch is `codex/playback-info-dimensions`; [PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526)
+candidate branch is `codex/playback-info-dimensions`; [PR #526](http://forge.lan:3000/noirr/plurx/pulls/526)
 targets `main`. Package boundaries are commits in one PR under the user's
 2026-09-25 workflow instruction.
 
@@ -19,8 +19,8 @@ targets `main`. Package boundaries are commits in one PR under the user's
 | Android delivery facts and presentation | Local checks passed | `148829768`; `:app:assembleDebug` and 35 selected unit tests passed. |
 | Adversarial implementation review | Findings addressed | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests passed their focused checks. |
 | History evidence | Passed locally | `make history-check` on the current merged base found 2,312 corrective commits, 282 client-fix anchors, twelve post-boundary landing commits. One anchor per branch corrective client commit; current main carries errata for earlier PRs #519 and #522. |
-| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 stopped at runner cache cleanup; run 3076 found an index/header status contradiction, both corrected. Run 3080 passed policy, web, Apple and Android before `main` moved. Run 3087 hit the old five-minute preflight limit, now ten. Run 3091 passed policy, web, Apple, Android and Windows before `main` moved again. Use the PR's current-head `Main promotion gate` for the final result. |
-| PR merge | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | The PR is the authoritative merge record. Merge requires a successful current-head `Main promotion gate`. |
+| Fast lane | [Live on PR #526](http://forge.lan:3000/noirr/plurx/pulls/526) | Run 3062 stopped at runner cache cleanup; run 3076 found an index/header status contradiction, both corrected. Run 3080 passed policy, web, Apple and Android before `main` moved. Run 3087 hit the old five-minute preflight limit, now ten. Run 3091 passed policy, web, Apple, Android and Windows before `main` moved again. Use the PR's current-head `Main promotion gate` for the final result. |
+| PR merge | [Live on PR #526](http://forge.lan:3000/noirr/plurx/pulls/526) | The PR is the authoritative merge record. Merge requires a successful current-head `Main promotion gate`. |
 | Production and physical session evidence | Unavailable | No real Live TV Cozi session or physical phone/TV capture was available in this isolated checkout. The stream frame is planned on web/Apple and measured only from an eligible Android player sample. |
 
 ## How to read the states
@@ -59,7 +59,7 @@ The exact merged source also passed `cargo check --workspace --locked
 warnings`, and `cargo fmt --all -- --check` with pinned Rust 1.97.1 before
 the new candidate push.
 
-Run 3062 failed at `ci-cache-prune` on `gha-nynuc-general-01`, before Rust
+Run 3062 failed at `ci-cache-prune` on `gha-media1-general-01`, before Rust
 compilation or unit tests. Its workspace had 37 GiB free against the 25 GiB
 build minimum, but the cache pruner could not satisfy its separate reserve.
 The host's Docker build cache had 17.45 GB unused; the documented operator

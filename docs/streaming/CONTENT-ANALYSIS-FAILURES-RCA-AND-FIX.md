@@ -48,7 +48,7 @@ are failing, or that every historical failed job has this cause.
 ### 2.1 Build and collection scope
 
 All four nodes reported `v0.3.0-2633-gc9e4edf4` during the investigation:
-`nynuc`, `m6`, `nuc4` and `nuc3`. The full deployed commit is
+`media1`, `lab6`, `lab4` and `lab3`. The full deployed commit is
 `c9e4edf451e12247a7aa4188903e5ba36888e7e9`.
 
 Evidence came from read-only SSH queries to the replicated database at
@@ -65,12 +65,12 @@ implementation base rather than relying on this checkout's line numbers.
 
 | Node | Duration mismatch | Budget timeout | Mismatches with usable video-duration metadata | Within 2 seconds of that video duration |
 |---|---:|---:|---:|---:|
-| nynuc | 100 | 31 | 97 | 97 |
-| m6 | 101 | 39 | 98 | 98 |
-| nuc4 | 96 | 27 | 93 | 93 |
+| media1 | 100 | 31 | 97 | 97 |
+| lab6 | 101 | 39 | 98 | 98 |
+| lab4 | 96 | 27 | 93 | 93 |
 | Total | 297 | 97 | 288 | 288 |
 
-The queried outcome table on nuc3 was empty. Of 394 retained refusal
+The queried outcome table on lab3 was empty. Of 394 retained refusal
 records on the other nodes, 75.4% were duration mismatches. All 288
 duration-mismatch records with usable primary-video metadata agreed with
 the indexed coverage to within two seconds. Nine lacked usable metadata.
@@ -118,7 +118,7 @@ budget_seconds = clamp(ceil(film_seconds / 8) + 30, 90, 1800)
 This assumes approximately 8× playback speed, adds 30 seconds and caps the
 pass at 30 minutes. File 120, **Reference film G**, retained an `exceeded the 1232s
 index budget` refusal from 2026-09-15 23:30:35 UTC. At 2026-09-17
-01:06:46.358316 UTC, nynuc logged a successful build for file 120:
+01:06:46.358316 UTC, media1 logged a successful build for file 120:
 12,247 fragments, timescale 16,000 and elapsed time 812,146 ms.
 
 That proves a later index build for this file succeeded. The collected log

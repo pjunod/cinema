@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "libplacebo_revision": "0d043c7f6f79cd3687c023454bdacbe615e4d96f",
+  "libdovi_revision": "83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+  "reviewed_evidence": {
+    "receipt.json": "69a1887082a5681302eec63f6ac808f29867f11c5fb3d6dd292884353caa4d2e",
+    "source-lock.json": "717c5fd423fe2c1696f4a636494be0a1ce0e4b7a9b1f753cb8654333ba4b25e1"
+  },
+  "copied_artifacts": {
+    "prefix/include/libplacebo/cache.h": {
+      "sha256": "8a9c73c67a560ef069999f4f087efaa8f7044c9723e0c76d6b5d0b44826a6281"
+    },
+    "prefix/include/libplacebo/colorspace.h": {
+      "sha256": "045ae8a75caa8d1dc50dcfdf1b190817af3a07c0d381df20d86178095dab9a0d"
+    },
+    "prefix/include/libplacebo/common.h": {
+      "sha256": "d61d6425038783aa93582d80d8e828ecb63fcfb6c6f9d5d1577e95d3996f4f10"
+    },
+    "prefix/include/libplacebo/config.h": {
+      "sha256": "d8cf5d7c124c48984822d8dd42f7dc2ff3d8673f7c4c65505242da4494a5f1f2"
+    },
+    "prefix/include/libplacebo/d3d11.h": {
+      "sha256": "563767b679766cb2c644d45ba0ab08cee419e1b61e9e8a4a8fa1b16ad7ab6ac6"
+    },
+    "prefix/include/libplacebo/dispatch.h": {
+      "sha256": "9c4fa74d440d598458688b9b8d937aa5f8db54efa54381c73bfbf01b4d947dd5"
+    },
+    "prefix/include/libplacebo/dither.h": {
+      "sha256": "4905faaca77818b1e4a658b55b48b1839de1a49635943411d2d1b5933156f1f5"
+    },
+    "prefix/include/libplacebo/dummy.h": {
+      "sha256": "ee5a3bebc9e9a24353f3097e3822157d492a04c4026b62e30cf8c6522bc76645"
+    },
+    "prefix/include/libplacebo/filters.h": {
+      "sha256": "84b857ee5c61e181cea655c4ba17b4b510ac441422dbf4d6eb25611f4e59c5d2"
+    },
+    "prefix/include/libplacebo/gamut_mapping.h": {
+      "sha256": "a75332f7d17b2cb55e7b16a9bcb6a88b639ec957809a7913876cab1acfe0bf69"
+    },
+    "prefix/include/libplacebo/gpu.h": {
+      "sha256": "76c4c95b8d6f7dd0512262d6e57d274725df28d6516fd2b0b247e9bcd442d0cf"
+    },
+    "prefix/include/libplacebo/log.h": {
+      "sha256": "1a3ca9b8202f27d565b56c12407f4747f1303e9e1dcf48896c89c7c7c978f5ee"
+    },
+    "prefix/include/libplacebo/opengl.h": {
+      "sha256": "ac93bc9a296b0545c83eb7bb02f71c824e3d030cb0432e83a72476b40475dbe9"
+    },
+    "prefix/include/libplacebo/options.h": {
+      "sha256": "da06ca132b642d03d4254cd2e3158194ec341a91f2141ebc9c046fb17977cf90"
+    },
+    "prefix/include/libplacebo/renderer.h": {
+      "sha256": "5b3b87d10294e4fae2548878425d7ec837c84a14529a107dd6ba95dd52e6510c"
+    },
+    "prefix/include/libplacebo/shaders/colorspace.h": {
+      "sha256": "b3fa8f34f9f164f8006d41ae0a0e9c0c2a2f4fa948aba30969f6bd3fbc1f6f2f"
+    },
+    "prefix/include/libplacebo/shaders/custom.h": {
+      "sha256": "eb7c317f6c93ce76a67f5e622d5c784e702545752a88535a4eb577fdcc74e50e"
+    },
+    "prefix/include/libplacebo/shaders/deinterlacing.h": {
+      "sha256": "c3a21191792421f6cc707c24735c4a120a2135fd36e6e58c1b895def4244efb0"
+    },
+    "prefix/include/libplacebo/shaders/dithering.h": {
+      "sha256": "d9a88640c54f1be410caa8a052bd05ad24ac9d4c71b6b9265754bf781bbc4f54"
+    },
+    "prefix/include/libplacebo/shaders/film_grain.h": {
+      "sha256": "a6df80b759aaf45bd445fce1db3bcb26fc4fdc5e52c672d294bab709eaec24ab"
+    },
+    "prefix/include/libplacebo/shaders/icc.h": {
+      "sha256": "0523a23ccf70b29aba5828b58cf4649a9c373c0a426f937dd6100845848b6122"
+    },
+    "prefix/include/libplacebo/shaders/lut.h": {
+      "sha256": "aecb43257ed72adaa095178dd0f64800827519b320439f2ddd4be0eac8e61a9b"
+    },
+    "prefix/include/libplacebo/shaders/sampling.h": {
+      "sha256": "dff03bfd6fd6fe38b8e05641252986ab301606be3fc5b914a61147ffc1ff33ae"
+    },
+    "prefix/include/libplacebo/shaders.h": {
+      "sha256": "7bcfa51503e758b2b32e6f409396730ac12e369309ae2234c4fd4444fde3d63e"
+    },
+    "prefix/include/libplacebo/swapchain.h": {
+      "sha256": "e89d20e46f6abadef8b57593103b27276711a31750d9ba27486cbe7ecdc98474"
+    },
+    "prefix/include/libplacebo/tone_mapping.h": {
+      "sha256": "dcf32f6eca4aa4e323c1396a5f1359922c5117e3f3eab845b4b5d674598f471e"
+    },
+    "prefix/include/libplacebo/utils/dav1d.h": {
+      "sha256": "f2215831184490b1a091150b9d45cf506b233017814e3864143c0f9b3d167520"
+    },
+    "prefix/include/libplacebo/utils/dav1d_internal.h": {
+      "sha256": "e30b11d68050839d26d51bc5a39fae4af55e4b8a46110f26de334452f1de97b7"
+    },
+    "prefix/include/libplacebo/utils/dolbyvision.h": {
+      "sha256": "46487cb4b604d26227710d2dc93054da9845c2d20534efbc64bc72a1305d948a"
+    },
+    "prefix/include/libplacebo/utils/frame_queue.h": {
+      "sha256": "5fc5199f1ce8f8436a2b455ec17ff751f6e817df560e791ebf61dcdadb995e51"
+    },
+    "prefix/include/libplacebo/utils/libav.h": {
+      "sha256": "34d220719e678ac891a0e5bf53ed2a6c794931f78d556c834d19b9d5ad8e16ea"
+    },
+    "prefix/include/libplacebo/utils/libav_internal.h": {
+      "sha256": "542055662c561cbccbb479a89be0ed1b6e295bbc7b2298a83d8424d053d14189"
+    },
+    "prefix/include/libplacebo/utils/upload.h": {
+      "sha256": "7bdb083ce74ea4039fc7b957dd0128d7aff398fef3e328b6a554ae97edce2dc1"
+    },
+    "prefix/include/libplacebo/vulkan.h": {
+      "sha256": "0a5d5158d354ab544d98ce5afa346f0cde4d740b133eac5b0468a8463d7c2edc"
+    },
+    "prefix/lib/aarch64-linux-gnu/libplacebo.so": {
+      "symlink": "libplacebo.so.374"
+    },
+    "prefix/lib/aarch64-linux-gnu/libplacebo.so.374": {
+      "sha256": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1"
+    },
+    "prefix/lib/aarch64-linux-gnu/pkgconfig/libplacebo.pc": {
+      "sha256": "7d272847f4110c02199c431f847b75349efc5b5a91f629257abed2af7b4b0bcb"
+    },
+    "include/libdovi/rpu_parser.h": {
+      "sha256": "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82"
+    },
+    "lib/libdovi.a": {
+      "sha256": "f9976d36eefcc1d8c000ae5f539ddfc09069b97ad6c56b6e3d665526a59cfc65"
+    }
+  },
+  "source_evidence": {
+    "dovi-source.tar.gz": "57d13f03d04a7a1b3d7dcb139b976dc3748c745c1720d4b6e44b61e5ef67b69b",
+    "dovi_tool-83e1fdad6dcd5995556235946e7c5c0f9010d5a1/Cargo.lock": "715faa8e92b23a00dd7cb317ebf4cf17741c0a955ffc5710da69c505ee494309"
+  }
+}

@@ -1,0 +1,165 @@
+{
+  "schema": "plurx.dv-m0.direct-render-controls.v1",
+  "capability": "synthetic structured-metadata EL composition and frame export",
+  "scope": "analytic-control",
+  "source_definition_sha256": "acdac69cb66b88e688771abab7fb0f5741cf3b5274bc49a11827d54937d82ec3",
+  "probe_source_sha256": "99e6f44bdab258844928264b893a918c40e313da70eb0adee7057b6593033310",
+  "probe_binary_sha256": "466b31e199c4deebb2ac463fda04542b55d800f05b553db6a24d8da298966432",
+  "library_sha256": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1",
+  "reference_method_sha256": "a2a156954e088ac071d2842bfb4d5824d3ec2862551d312d664fb5abc0c21526",
+  "libplacebo_revision": "0d043c7f6f79cd3687c023454bdacbe615e4d96f",
+  "libplacebo_api": 374,
+  "observations": [
+    {
+      "kind": "frame",
+      "case": "zero",
+      "pts": "0/1",
+      "duration": "1/24",
+      "el_bound": true,
+      "nlq_active": true,
+      "rpu_parsed": false,
+      "direct_dispatch_ok": true,
+      "render_ok": true,
+      "render_errors": 0,
+      "qualified_fel": false
+    },
+    {
+      "kind": "frame",
+      "case": "nonzero",
+      "pts": "0/1",
+      "duration": "1/24",
+      "el_bound": true,
+      "nlq_active": true,
+      "rpu_parsed": false,
+      "direct_dispatch_ok": true,
+      "render_ok": true,
+      "render_errors": 0,
+      "qualified_fel": false
+    },
+    {
+      "kind": "frame",
+      "case": "omitted",
+      "pts": "0/1",
+      "duration": "1/24",
+      "el_bound": false,
+      "nlq_active": true,
+      "rpu_parsed": false,
+      "direct_dispatch_ok": true,
+      "render_ok": true,
+      "render_errors": 0,
+      "qualified_fel": false
+    },
+    {
+      "kind": "frame",
+      "case": "shifted",
+      "pts": "0/1",
+      "duration": "1/24",
+      "el_bound": true,
+      "nlq_active": true,
+      "rpu_parsed": false,
+      "direct_dispatch_ok": true,
+      "render_ok": true,
+      "render_errors": 0,
+      "qualified_fel": false
+    },
+    {
+      "kind": "frame",
+      "case": "disabled",
+      "pts": "0/1",
+      "duration": "1/24",
+      "el_bound": true,
+      "nlq_active": false,
+      "rpu_parsed": false,
+      "direct_dispatch_ok": true,
+      "render_ok": true,
+      "render_errors": 0,
+      "qualified_fel": false
+    }
+  ],
+  "results": [
+    {
+      "case": "zero",
+      "stage": "reconstruction",
+      "max_abs_pq_error": 4.778385162385046e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "nonzero",
+      "stage": "reconstruction",
+      "max_abs_pq_error": 5.483150482210597e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "omitted",
+      "stage": "reconstruction",
+      "max_abs_pq_error": 4.778385162385046e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "shifted",
+      "stage": "reconstruction",
+      "max_abs_pq_error": 6.18505477906206e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "disabled",
+      "stage": "reconstruction",
+      "max_abs_pq_error": 4.778385162385046e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "zero",
+      "stage": "rendered",
+      "max_abs_pq_error": 4.778385162385046e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "nonzero",
+      "stage": "rendered",
+      "max_abs_pq_error": 5.483150482210597e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "omitted",
+      "stage": "rendered",
+      "max_abs_pq_error": 4.778385162385046e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "shifted",
+      "stage": "rendered",
+      "max_abs_pq_error": 6.18505477906206e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    },
+    {
+      "case": "disabled",
+      "stage": "rendered",
+      "max_abs_pq_error": 4.778385162385046e-06,
+      "max_rgb48_code_error": 1,
+      "known_answer_pass": true
+    }
+  ],
+  "actual_encoded_p7": false,
+  "rpu_parser_tested": false,
+  "production_qualified": false,
+  "unqualified": [
+    "HEVC BL/EL/RPU display timestamp association",
+    "resampling/chroma/half-raster EL",
+    "unsupported or malformed RPU",
+    "creative L2/L8 trims",
+    "P8.1 authoring and HDR10 base",
+    "target remapping and HDR10 metadata/encoding",
+    "hardware decoder or real GPU throughput",
+    "cancellation/queue/resource admission",
+    "physical playback"
+  ]
+}

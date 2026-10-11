@@ -1588,6 +1588,7 @@ dependencies = [
  "eventsource-client",
  "fastwebsockets",
  "flume",
+ "fs4",
  "futures-util",
  "getrandom 0.4.3",
  "hex",

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/python-unit-pr-receipts",
+  "source_attribution": "Original uncommitted worktree execution, not current-commit evidence. Passing tests are not rerun.",
+  "suite": "operations",
+  "test_file": "tests/operations/test_docs_index.py",
+  "test_file_sha256": "1cb333314f478d19e257eaa245e563d5bfd559465c261500c592faede7a48162",
+  "command": "python3 -m unittest tests.operations.test_contracts.OperationsContractCase.test_pr_ci_selects_expensive_surfaces_and_has_one_aggregate_gate tests.operations.test_docs_index.DocsIndexTest -v",
+  "output": "Four named docs-index tests ... ok; combined five-test run 1.477s, OK, exit 0",
+  "test_ids": [
+    "test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed",
+    "test_docs_index.DocsIndexTest.test_every_index_link_resolves",
+    "test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path",
+    "test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve"
+  ],
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 4
+  }
+}

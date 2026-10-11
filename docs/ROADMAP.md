@@ -1,5 +1,9 @@
 # plurx — Roadmap
 
+For the current project queue, read [Project backlog](features/PROJECT-BACKLOG.md).
+It reconciles detailed plans with their newer delivery records; the phases below
+retain historical scope and are not a reliable list of missing implementation.
+
 Sized for one developer + AI pair at a steady cadence. Every phase ends with something you actually use in your own living room — no phase is "infrastructure only" except where the infrastructure *is* the product (Phase 4). Phases are gates: a phase's exit criteria must hold before the next starts, but item order inside a phase is flexible.
 
 ## Phase 0 — Skeleton (small) ✅ DONE

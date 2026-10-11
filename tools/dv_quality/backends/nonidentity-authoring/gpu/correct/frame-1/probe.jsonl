@@ -1,0 +1,5 @@
+{"kind":"parsed_luma_curve","constant_integer":0,"constant_fraction":0,"slope_integer":1,"slope_fraction":0,"denominator":8388608}
+{"kind":"parsed_rpu","bytes":160,"profile":8,"el_type":"none","parser_error":false,"bl_depth":10,"el_depth":10,"vdr_depth":12,"mapping_segments":1,"nlq_method":"disabled","creative_l2_count":0,"creative_l8_count":0,"creative_trims_applied":false}
+{"kind":"parsed_l1","min_pq":0,"max_pq":4094,"avg_pq":2047}
+{"kind":"environment","api":374,"output_format":"rgba32f","format_pixel_size":16,"input_domain":"decoded Main10 native DV components; point centered-chroma reconstruction","rpu_input":"libdovi parsed UNSPEC62 NAL; guarded synthetic subset"}
+{"kind":"frame","case":"zero","pts":"1/24","duration":"1/24","el_bound":false,"nlq_active":false,"rpu_parsed":true,"direct_dispatch_ok":true,"render_ok":true,"render_errors":0,"qualified_fel":false}

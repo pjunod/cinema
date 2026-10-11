@@ -1,0 +1,294 @@
+{
+  "result": "completed",
+  "binary_sha256": "d296540f5d52c9007d83fb6289d14dcbfd75e1d1115604b5a49db49609350660",
+  "binary_source_commit": "9e018160c63a6984bac291decec2cc9083528fdd",
+  "harness_source_commit": "af2156beaddcbf06b85ceae5dce1fe54aa7f921d",
+  "harness_sha256": "91cb6c482147a9f45a25845aa5653e0f3fc7836b7f3af33134c97958f0c38fcc",
+  "web_overlay": false,
+  "decode_facts_identity_available": true,
+  "checks": [
+    {
+      "name": "end_of_series_no_successor_no_repeated_metadata",
+      "result": "passed"
+    },
+    {
+      "name": "autoplay_off_does_not_prepare",
+      "result": "passed"
+    },
+    {
+      "name": "navigation_close_cancels_inflight_preparation",
+      "result": "passed"
+    }
+  ],
+  "trials": [
+    {
+      "mode": "unprepared",
+      "metadata_response_delay_ms": 80,
+      "trigger_kind": "natural_ended",
+      "trigger_to_frame_ms": 294.45800000596137,
+      "last_outgoing_to_first_successor_ms": 383.3000000000011,
+      "media_bytes": 3220242,
+      "metadata_bytes": 12189,
+      "errors": [],
+      "new_stalls": 0,
+      "first_successor_media_time": 0,
+      "direct_media_gets": [
+        {
+          "path": "/api/v1/files/1/direct",
+          "method": "GET",
+          "start_ms": 161.12645799999882,
+          "bytes": 1610121,
+          "status": 206,
+          "end_ms": 165.89100000000326
+        },
+        {
+          "path": "/api/v1/files/2/direct",
+          "method": "GET",
+          "start_ms": 12600.940833,
+          "bytes": 1610121,
+          "status": 206,
+          "end_ms": 12603.393291999993
+        }
+      ],
+      "daemon_cpu_elapsed_ms": 100.0,
+      "rss_before_bytes": 612777984,
+      "rss_after_bytes": 524845056,
+      "host_load_before": {
+        "load_average": [
+          16.79248046875,
+          13.4482421875,
+          17.3857421875
+        ],
+        "cpu_count": 16,
+        "competing_build_processes": [
+          {
+            "command": "java",
+            "cpu_percent": 0
+          },
+          {
+            "command": "java",
+            "cpu_percent": 0
+          },
+          {
+            "command": "qemu-system-aarch64-headless",
+            "cpu_percent": 3.2
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo-clippy",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "rustc",
+            "cpu_percent": 94.1
+          },
+          {
+            "command": "rustc",
+            "cpu_percent": 97.2
+          },
+          {
+            "command": "cargo-fmt",
+            "cpu_percent": 1.6
+          }
+        ]
+      },
+      "host_load_after": {
+        "load_average": [
+          16.84423828125,
+          13.6083984375,
+          17.37255859375
+        ],
+        "cpu_count": 16,
+        "competing_build_processes": [
+          {
+            "command": "java",
+            "cpu_percent": 0
+          },
+          {
+            "command": "java",
+            "cpu_percent": 0
+          },
+          {
+            "command": "qemu-system-aarch64-headless",
+            "cpu_percent": 2.9
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo-clippy",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "rustc",
+            "cpu_percent": 100
+          },
+          {
+            "command": "rustc",
+            "cpu_percent": 99.5
+          }
+        ]
+      }
+    },
+    {
+      "mode": "prepared",
+      "metadata_response_delay_ms": 80,
+      "trigger_kind": "natural_ended",
+      "trigger_to_frame_ms": 44.282000008941395,
+      "last_outgoing_to_first_successor_ms": 135.6999999999971,
+      "media_bytes": 2433810,
+      "metadata_bytes": 24217,
+      "errors": [],
+      "new_stalls": 0,
+      "first_successor_media_time": 0,
+      "direct_media_gets": [
+        {
+          "path": "/api/v1/files/1/direct",
+          "method": "GET",
+          "start_ms": 504.9997500000027,
+          "bytes": 823689,
+          "status": 206,
+          "end_ms": 507.3692499999888
+        },
+        {
+          "path": "/api/v1/files/2/direct",
+          "method": "GET",
+          "start_ms": 12643.297957999996,
+          "bytes": 1610121,
+          "status": 206,
+          "end_ms": 12654.563708000001
+        }
+      ],
+      "daemon_cpu_elapsed_ms": 110.0,
+      "rss_before_bytes": 524845056,
+      "rss_after_bytes": 463257600,
+      "host_load_before": {
+        "load_average": [
+          16.84423828125,
+          13.6083984375,
+          17.37255859375
+        ],
+        "cpu_count": 16,
+        "competing_build_processes": [
+          {
+            "command": "java",
+            "cpu_percent": 0
+          },
+          {
+            "command": "java",
+            "cpu_percent": 0
+          },
+          {
+            "command": "qemu-system-aarch64-headless",
+            "cpu_percent": 2.9
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo-clippy",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "rustc",
+            "cpu_percent": 100
+          },
+          {
+            "command": "rustc",
+            "cpu_percent": 99.5
+          }
+        ]
+      },
+      "host_load_after": {
+        "load_average": [
+          16.33154296875,
+          13.63232421875,
+          17.3134765625
+        ],
+        "cpu_count": 16,
+        "competing_build_processes": [
+          {
+            "command": "java",
+            "cpu_percent": 0
+          },
+          {
+            "command": "java",
+            "cpu_percent": 0
+          },
+          {
+            "command": "qemu-system-aarch64-headless",
+            "cpu_percent": 3.1
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo-clippy",
+            "cpu_percent": 0
+          },
+          {
+            "command": "cargo",
+            "cpu_percent": 0
+          },
+          {
+            "command": "rustc",
+            "cpu_percent": 99.2
+          },
+          {
+            "command": "rustc",
+            "cpu_percent": 97.3
+          }
+        ]
+      }
+    }
+  ],
+  "limits": [
+    "Shared host has unrelated workloads; paired observations are not idle capacity or statistically significant fleet estimates.",
+    "Generated local AVC/AAC media, not representative film or physical display qualification.",
+    "Operating-system page cache uncontrolled; cold means no successor metadata preparation.",
+    "Presentation callback means compositor submission, not physical panel acknowledgement.",
+    "Metadata delay is an explicit network experiment input, never a measured fleet RTT."
+  ],
+  "interpretation": [
+    "Single final compiled-release confirmation pair supplements original 16-cell episode matrix; it does not replace its sample distribution.",
+    "Successor media_time 0 and full frame sequence tie callbacks to new episode. requestVideoFrameCallback is browser compositor presentation evidence, not physical panel proof.",
+    "Two media GETs in each trial. Browser range cache supplied some predecessor bytes in prepared cell, so transferred bytes differ; this is not claimed as prewarm bandwidth savings.",
+    "Metadata work increased from 12,189 to 24,217 bytes as expected for preparation. Daemon CPU was 100 vs 110 ms over full trial; this is bounded overhead, not zero-cost preparation.",
+    "Startup caption probes completed and no owned child remained during the cells. Other owners started two compiler processes during these captures; census retained. No idle-host capacity or statistical memory-equivalence claim.",
+    "Close boundary has no surviving preparation, page or session after cancellation, confirming the root-cause fix from the embedded release asset."
+  ]
+}

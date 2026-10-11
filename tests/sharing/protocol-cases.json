@@ -1,0 +1,220 @@
+{
+  "version": 2,
+  "note": "Synthetic identities only. Rows are consumed by Rust, web, Swift and Kotlin tests; see docs/features/SHARED-LIBRARIES-IMPLEMENTATION.md, Shared protocol fixture parity matrix. layer b = what B (Rust) validates or emits; client = what a client validates; both = both.",
+  "cases": [
+    {"id":"huge-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"9007199254740993"},"expected":"accepted","source_position_ms":0},
+    {"id":"noncanonical-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"01"},"expected":"invalid","source_position_ms":0},
+    {"id":"overflow-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"9223372036854775808"},"expected":"invalid","source_position_ms":0},
+    {"id":"zero-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"0"},"expected":"accepted","source_position_ms":0},
+    {"id":"i64-max-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"9223372036854775807"},"expected":"accepted","source_position_ms":0},
+    {"id":"empty-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":""},"expected":"invalid","source_position_ms":0},
+    {"id":"negative-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"-1"},"expected":"invalid","source_position_ms":0},
+    {"id":"signed-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"+1"},"expected":"invalid","source_position_ms":0},
+    {"id":"fractional-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"1.0"},"expected":"invalid","source_position_ms":0},
+    {"id":"padded-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":" 1"},"expected":"invalid","source_position_ms":0},
+    {"id":"exponent-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"1e3"},"expected":"invalid","source_position_ms":0},
+    {"id":"non-ascii-digit-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"\u0661"},"expected":"invalid","source_position_ms":0}
+  ],
+  "context": {
+    "reference": {"import_id":"10000000-0000-4000-8000-000000000003","server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002","library_id":"9007199254740993","item_id":"9223372036854775807"},
+    "file_id": "9007199254740993",
+    "revision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "lifecycle_generation": 7,
+    "file_base": "/api/v1/shared/imports/10000000-0000-4000-8000-000000000003/files/LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"
+  },
+  "status_tokens": [
+    {"id":"word","token":"running","expected":"accepted"},
+    {"id":"encoder","token":"h264_videotoolbox","expected":"accepted"},
+    {"id":"punctuation","token":"a.b-c_9","expected":"accepted"},
+    {"id":"max-length","token":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","expected":"accepted"},
+    {"id":"empty","token":"","expected":"invalid"},
+    {"id":"overlong","token":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","expected":"invalid"},
+    {"id":"prose","token":"two words","expected":"invalid"},
+    {"id":"markup","token":"<b>","expected":"invalid"},
+    {"id":"path","token":"a/b","expected":"invalid"},
+    {"id":"non-ascii","token":"\u00e9","expected":"invalid"},
+    {"id":"newline","token":"line\nbreak","expected":"invalid"},
+    {"id":"percent","token":"100%","expected":"invalid"}
+  ],
+  "shared_status": {
+    "accepted": {"subject":"shared","reference":{"item":{"import_id":"10000000-0000-4000-8000-000000000003","server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002","library_id":"9007199254740993","item_id":"9223372036854775807"},"file_id":"9007199254740993","revision":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","lifecycle_generation":7},"session_id":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","incarnation_id":"b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1","control_epoch":3,"status":{"active_encode_milli_realtime":1500,"active_encode_age_ms":4000,"active_encode_active_ms":3900,"active_encode_segments":4,"active_encode_candidate_id":null,"target_height":720,"encoder":"h264_videotoolbox","tone_map_peak_nits":null,"tone_map_peak_source":null,"playlist_shape":"vod","producer_state":"running","producer_hold":null,"producer_decision":null,"control_demand":"active","reported_position_ms":30000,"client_runway_ms":42000,"render_state":"rendering","server_ready_state":"ready","server_ready_anchor_ms":30000,"server_ready_end_ms":72000,"server_ready_seconds":42.0,"server_next_ready_start_ms":null,"server_next_ready_end_ms":null,"published_end_ms":72000,"ready_ahead_end_ms":72000,"fetched_end_ms":40000,"fetched_segment":6,"ahead_seconds":42,"materialized_segments":12,"planned_segments":300,"materialized_bytes":12000000,"planned_bytes":300000000,"working_set_bytes":12000000,"working_set_budget_bytes":2000000000,"completed_cache_bytes":0,"admitted":true,"delivered_bytes":6000000,"delivered_bps":4000000,"delivered_idle_ms":120,"http_wait_count":0,"http_wait_oldest_ms":null,"http_wait_segment":null,"status_generated_unix_ms":1800000000000,"suspended":false,"final":false}},
+    "mutations": [
+      {"id":"status-encoder-prose","layer":"both","path":["status","encoder"],"expected":"invalid","value":"two words"},
+      {"id":"status-hold-path","layer":"both","path":["status","producer_hold"],"expected":"invalid","value":"/srv/media/film.mkv"},
+      {"id":"status-state-overlong","layer":"both","path":["status","producer_state"],"expected":"invalid","value":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+      {"id":"status-decision-markup","layer":"both","path":["status","producer_decision"],"expected":"invalid","value":"<script>"},
+      {"id":"status-optional-token-absent","layer":"both","path":["status","producer_hold"],"expected":"accepted","value":null},
+      {"id":"status-optional-token-word","layer":"both","path":["status","producer_hold"],"expected":"accepted","value":"paused_client"},
+      {"id":"status-height-zero","layer":"b","path":["status","target_height"],"expected":"invalid","value":0},
+      {"id":"status-unsafe-bytes","layer":"b","path":["status","delivered_bytes"],"expected":"invalid","value":9007199254740992},
+      {"id":"status-negative-ready-seconds","layer":"b","path":["status","server_ready_seconds"],"expected":"invalid","value":-1.0},
+      {"id":"status-unknown-field","layer":"b","path":["status","local_session_id"],"expected":"invalid","value":"1"},
+      {"id":"envelope-subject-local","layer":"client","path":["subject"],"expected":"invalid","value":"local"},
+      {"id":"envelope-foreign-session","layer":"client","path":["session_id"],"expected":"invalid","value":"5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a"},
+      {"id":"envelope-foreign-revision","layer":"client","path":["reference","revision"],"expected":"invalid","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+      {"id":"envelope-foreign-file","layer":"client","path":["reference","file_id"],"expected":"invalid","value":"1"},
+      {"id":"envelope-foreign-item","layer":"client","path":["reference","item","item_id"],"expected":"invalid","value":"1"},
+      {"id":"envelope-foreign-import","layer":"client","path":["reference","item","import_id"],"expected":"invalid","value":"20000000-0000-4000-8000-000000000004"},
+      {"id":"envelope-status-array","layer":"client","path":["status"],"expected":"invalid","value":[]},
+      {"id":"envelope-foreign-incarnation","layer":"client","path":["incarnation_id"],"expected":"invalid","value":"5b5b5b5b-5b5b-45b5-85b5-5b5b5b5b5b5b"},
+      {"id":"envelope-foreign-control-epoch","layer":"client","path":["control_epoch"],"expected":"invalid","value":9},
+      {"id":"envelope-missing-incarnation","layer":"client","path":["incarnation_id"],"expected":"invalid","op":"remove"},
+      {"id":"envelope-unknown-key","layer":"client","path":["local_session_id"],"expected":"invalid","value":"1"}
+    ],
+    "word_fields": ["encoder","playlist_shape","producer_state","producer_hold","producer_decision","control_demand","render_state","server_ready_state","tone_map_peak_source"]
+  },
+  "control_refusals": {
+    "source": [
+      {"id":"stale-control","source":{"code":"stale_control","retry_after_ms":null},"valid":true,"b":{"status":409,"code":"stale_control","retry_after_ms":null},"client":"stop"},
+      {"id":"owner-changed","source":{"code":"owner_changed","retry_after_ms":null},"valid":true,"b":{"status":409,"code":"owner_changed","retry_after_ms":null},"client":"stop"},
+      {"id":"rate-limited","source":{"code":"rate_limited","retry_after_ms":250},"valid":true,"b":{"status":429,"code":"control_rate_limited","retry_after_ms":250},"client":"retry"},
+      {"id":"session-ended","source":{"code":"session_ended","retry_after_ms":null},"valid":true,"b":{"status":410,"code":"session_ended","retry_after_ms":null},"client":"stop"},
+      {"id":"owner-transition","source":{"code":"owner_transition","retry_after_ms":500},"valid":true,"b":{"status":425,"code":"owner_transition","retry_after_ms":500},"client":"retry"},
+      {"id":"owner-lost","source":{"code":"owner_lost","retry_after_ms":null},"valid":true,"b":{"status":410,"code":"owner_lost","retry_after_ms":null},"client":"stop"},
+      {"id":"unavailable","source":{"code":"unavailable","retry_after_ms":500},"valid":true,"b":{"status":503,"code":"control_unavailable","retry_after_ms":500},"client":"retry"},
+      {"id":"rate-limited-without-hint","source":{"code":"rate_limited","retry_after_ms":null},"valid":false},
+      {"id":"rate-limited-hint-over-cap","source":{"code":"rate_limited","retry_after_ms":60001},"valid":false},
+      {"id":"owner-transition-foreign-hint","source":{"code":"owner_transition","retry_after_ms":250},"valid":false},
+      {"id":"unavailable-without-hint","source":{"code":"unavailable","retry_after_ms":null},"valid":false},
+      {"id":"stale-control-with-hint","source":{"code":"stale_control","retry_after_ms":5},"valid":false},
+      {"id":"unknown-code","source":{"code":"prepare","retry_after_ms":null},"valid":false},
+      {"id":"raw-prose-field","source":{"code":"owner_lost","retry_after_ms":null,"message":"raw Source prose"},"valid":false}
+    ],
+    "b_precheck": [
+      {"id":"foreign-generation","request_patch":{"generation":"20000000-0000-4000-8000-000000000004"},"b":{"status":409,"code":"stale_control","retry_after_ms":null},"client":"stop"},
+      {"id":"foreign-owner-epoch","request_patch":{"control_epoch":99},"b":{"status":409,"code":"owner_changed","retry_after_ms":null},"client":"stop"},
+      {"id":"acknowledgement-without-successor","request_patch":{"acknowledgement":{"action_id":"a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0","state":"metadata_ready","buffered_through_ms":null,"committed_media_origin_ms":null,"first_frame_unix_ms":null}},"b":{"status":409,"code":"stale_control","retry_after_ms":null},"client":"stop"},
+      {"id":"current-request","request_patch":{},"b":null,"client":null}
+    ]
+  },
+  "control_preparation": [
+    {"id":"source-declines","source":"none","b":"none","client":"declined"},
+    {"id":"source-staging","source":"staging","b":"none","client":"declined"},
+    {"id":"older-source-absent","source":null,"b":null,"client":"armed"}
+  ],
+  "hls_start": {
+    "source": {"session_id":"5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a","playlist_url":"/api/v1/hls/5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a/index.m3u8?native=1&subtitle=2","duration_ms":100000,"start_seconds":30.5,"media_origin_ms":29800,"height":1080,"encoder":"libx264","vod":true,"ladder":[{"height":1080,"total_kbps":8000,"peak_kbps":12000}],"control":{"protocol":"plurx-playback-control-v1","url":"/api/v1/hls/5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a/control","generation":"5b5b5b5b-5b5b-45b5-85b5-5b5b5b5b5b5b","control_epoch":9,"next_exchange_ms":5000,"lease_timeout_ms":300000}},
+    "receiver": {"session_id":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","incarnation_id":"b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1","control_epoch":3},
+    "public": {"session_id":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","playlist_url":"/api/v1/hls/b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0/index.m3u8?native=1&subtitle=2","duration_ms":100000,"start_seconds":30.5,"media_origin_ms":29800,"height":1080,"encoder":"libx264","vod":true,"ladder":[{"height":1080,"total_kbps":8000,"peak_kbps":12000}],"control":{"protocol":"plurx-playback-control-v1","url":"/api/v1/hls/b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0/control","generation":"b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1","control_epoch":3,"next_exchange_ms":5000,"lease_timeout_ms":300000}},
+    "note": "{session} in a value is the Source session for layer b and the B session for layer client",
+    "mutations": [
+      {"id":"vod-false","layer":"both","path":["vod"],"expected":"invalid","value":false},
+      {"id":"rolling-lease","layer":"both","path":["control","lease_timeout_ms"],"expected":"invalid","value":60000},
+      {"id":"foreign-exchange-cadence","layer":"both","path":["control","next_exchange_ms"],"expected":"invalid","value":1000},
+      {"id":"missing-control","layer":"both","path":["control"],"expected":"invalid","op":"remove"},
+      {"id":"negative-start","layer":"both","path":["start_seconds"],"expected":"invalid","value":-1.0},
+      {"id":"unsafe-duration","layer":"both","path":["duration_ms"],"expected":"invalid","value":9007199254740992},
+      {"id":"segment-playlist","layer":"both","path":["playlist_url"],"expected":"invalid","value":"/api/v1/hls/{session}/seg1.m4s"},
+      {"id":"playlist-token-query","layer":"both","path":["playlist_url"],"expected":"invalid","value":"/api/v1/hls/{session}/index.m3u8?token=x"},
+      {"id":"control-url-not-control","layer":"both","path":["control","url"],"expected":"invalid","value":"/api/v1/hls/{session}/status"},
+      {"id":"generation-not-v4","layer":"both","path":["control","generation"],"expected":"invalid","value":"5b5b5b5b-5b5b-15b5-85b5-5b5b5b5b5b5b"},
+      {"id":"foreign-protocol","layer":"both","path":["control","protocol"],"expected":"invalid","value":"plurx-playback-control-v2"},
+      {"id":"control-epoch-zero","layer":"both","path":["control","control_epoch"],"expected":"invalid","value":0},
+      {"id":"negative-media-origin","layer":"both","path":["media_origin_ms"],"expected":"accepted","value":-2000},
+      {"id":"master-playlist","layer":"both","path":["playlist_url"],"expected":"accepted","value":"/api/v1/hls/{session}/master.m3u8"},
+      {"id":"source-playlist-on-b-session","layer":"b","path":["playlist_url"],"expected":"invalid","value":"/api/v1/hls/b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0/index.m3u8"},
+      {"id":"public-playlist-on-source-session","layer":"client","path":["playlist_url"],"expected":"invalid","value":"/api/v1/hls/5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a/index.m3u8"},
+      {"id":"public-control-on-source-session","layer":"client","path":["control","url"],"expected":"invalid","value":"/api/v1/hls/5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a/control"}
+    ]
+  },
+  "direct": {
+    "mimes": ["video/mp4","video/webm","video/x-matroska","video/mp2t","video/x-msvideo","audio/mp4","audio/aac","audio/mpeg","audio/flac","audio/ogg","audio/wav","audio/x-ms-wma","application/octet-stream"],
+    "source": {"session_id":"5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a","control_epoch":9,"length":4096,"mime":"video/x-matroska"},
+    "b_session": "b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0",
+    "public": {"presentation":"direct","session_id":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","url":"/api/v1/shared/imports/10000000-0000-4000-8000-000000000003/files/LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL/direct?session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","length":4096,"mime":"video/x-matroska"},
+    "mutations": [
+      {"id":"mime-html","layer":"both","path":["mime"],"expected":"invalid","value":"text/html"},
+      {"id":"mime-uppercase","layer":"both","path":["mime"],"expected":"invalid","value":"VIDEO/MP4"},
+      {"id":"length-unsafe","layer":"both","path":["length"],"expected":"invalid","value":9007199254740992},
+      {"id":"length-negative","layer":"both","path":["length"],"expected":"invalid","value":-1},
+      {"id":"mime-octet-stream","layer":"both","path":["mime"],"expected":"accepted","value":"application/octet-stream"},
+      {"id":"length-zero","layer":"both","path":["length"],"expected":"accepted","value":0},
+      {"id":"source-epoch-zero","layer":"b","path":["control_epoch"],"expected":"invalid","value":0},
+      {"id":"source-session-uppercase","layer":"b","path":["session_id"],"expected":"invalid","value":"5A5A5A5A-5A5A-4A5A-8A5A-5A5A5A5A5A5A"},
+      {"id":"source-control-url","layer":"b","path":["control"],"expected":"invalid","value":{"url":"/api/v1/hls/5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a/control"}},
+      {"id":"public-control-field","layer":"client","path":["control"],"expected":"invalid","value":{}},
+      {"id":"public-missing-mime","layer":"client","path":["mime"],"expected":"invalid","op":"remove"},
+      {"id":"public-presentation-vod","layer":"client","path":["presentation"],"expected":"invalid","value":"vod"},
+      {"id":"public-session-not-v4","layer":"client","path":["session_id"],"expected":"invalid","value":"b0b0b0b0-b0b0-10b0-80b0-b0b0b0b0b0b0"},
+      {"id":"public-url-token","layer":"client","path":["url"],"expected":"invalid","value":"/api/v1/shared/imports/10000000-0000-4000-8000-000000000003/files/LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL/direct?session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0&token=x"},
+      {"id":"public-url-local","layer":"client","path":["url"],"expected":"invalid","value":"/api/v1/files/1/direct"},
+      {"id":"public-url-other-session","layer":"client","path":["url"],"expected":"invalid","value":"/api/v1/shared/imports/10000000-0000-4000-8000-000000000003/files/LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL/direct?session=b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1"}
+    ]
+  },
+  "direct_session_query": [
+    {"id":"exact","query":"session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","expected":"accepted"},
+    {"id":"uppercase","query":"session=B0B0B0B0-B0B0-40B0-80B0-B0B0B0B0B0B0","expected":"invalid"},
+    {"id":"trailing-token","query":"session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0&token=x","expected":"invalid"},
+    {"id":"leading-token","query":"token=x&session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","expected":"invalid"},
+    {"id":"duplicate","query":"session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0&session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","expected":"invalid"},
+    {"id":"nil","query":"session=00000000-0000-0000-0000-000000000000","expected":"invalid"},
+    {"id":"empty","query":"session=","expected":"invalid"},
+    {"id":"v1-uuid","query":"session=b0b0b0b0-b0b0-10b0-80b0-b0b0b0b0b0b0","expected":"invalid"},
+    {"id":"braced","query":"session={b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0}","expected":"invalid"},
+    {"id":"wrong-key","query":"Session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","expected":"invalid"},
+    {"id":"unhyphenated","query":"session=b0b0b0b0b0b040b080b0b0b0b0b0b0b0","expected":"invalid"}
+  ],
+  "file_suffixes": [
+    {"suffix":"decision","expected":"accepted","b":"decision"},
+    {"suffix":"hls/sessions","expected":"accepted","b":"start"},
+    {"suffix":"direct","expected":"accepted","b":"direct"},
+    {"suffix":"stream.mp4","expected":"accepted","b":"closed"},
+    {"suffix":"subs/0","expected":"accepted","b":"asset"},
+    {"suffix":"subs/4095.vtt","expected":"accepted","b":"asset"},
+    {"suffix":"subs/12/overlay.json","expected":"accepted","b":"asset"},
+    {"suffix":"subs/2/overlay/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png","expected":"accepted","b":"asset"},
+    {"suffix":"chapters/4095/thumb","expected":"accepted","b":"asset"},
+    {"suffix":"subs/4096","expected":"invalid"},
+    {"suffix":"subs/4096.vtt","expected":"invalid"},
+    {"suffix":"chapters/4096/thumb","expected":"invalid"},
+    {"suffix":"subs/4096/overlay.json","expected":"invalid"},
+    {"suffix":"subs/01","expected":"invalid"},
+    {"suffix":"subs/-1","expected":"invalid"},
+    {"suffix":"subs/0/overlay/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png","expected":"invalid"},
+    {"suffix":"subs/0/overlay/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jpg","expected":"invalid"},
+    {"suffix":"direct?session=x","expected":"invalid"},
+    {"suffix":"../direct","expected":"invalid"},
+    {"suffix":"/direct","expected":"invalid"},
+    {"suffix":"status","expected":"invalid"},
+    {"suffix":"hls/sessions/../control","expected":"invalid"},
+    {"suffix":"subs/0%2fvtt","expected":"invalid"},
+    {"suffix":"chapters/1/thumb/extra","expected":"invalid"},
+    {"suffix":"","expected":"invalid"}
+  ],
+  "asset_session_query": [
+    {"id":"absent","query":"","expected":"accepted"},
+    {"id":"token-only","query":"token=x","expected":"accepted"},
+    {"id":"exact-session","query":"session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","expected":"accepted","session":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0"},
+    {"id":"token-then-session","query":"token=x&session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","expected":"accepted","session":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0"},
+    {"id":"session-then-token","query":"session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0&token=x","expected":"accepted","session":"b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0"},
+    {"id":"duplicate-token","query":"token=x&token=y","expected":"invalid"},
+    {"id":"duplicate-session","query":"session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0&session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","expected":"invalid"},
+    {"id":"uppercase-session","query":"session=B0B0B0B0-B0B0-40B0-80B0-B0B0B0B0B0B0","expected":"invalid"},
+    {"id":"nil-session","query":"session=00000000-0000-0000-0000-000000000000","expected":"invalid"},
+    {"id":"empty-session","query":"session=","expected":"invalid"},
+    {"id":"bare-session-key","query":"session","expected":"invalid"},
+    {"id":"unknown-key","query":"v=1","expected":"invalid"},
+    {"id":"wrong-case-key","query":"Session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0","expected":"invalid"},
+    {"id":"braced-session","query":"session={b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0}","expected":"invalid"}
+  ],
+  "presession_assets": {
+    "suffixes": ["subs/0.vtt","subs/12/overlay.json","subs/2/overlay/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png","chapters/1/thumb"],
+    "bound_query": "session=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0"
+  },
+  "resource_unsupported": {
+    "status": 422,
+    "code": "sharing_resource_unsupported",
+    "closed_suffixes": ["stream.mp4"]
+  },
+  "playback_ids": {
+    "source_request_id": "d0d0d0d0-d0d0-40d0-80d0-d0d0d0d0d0d0",
+    "viewer_playback_id": "player-fixture",
+    "viewer_request_id": "e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0",
+    "receiver_playback_id": "shared-d0d0d0d0-d0d0-40d0-80d0-d0d0d0d0d0d0"
+  },
+  "receiver_recovery": {
+    "status": {"last_scan_at_ms":1800000000000,"in_flight":["b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1"],"retired_total":2,"stranded":[{"incarnation_id":"c0c0c0c0-c0c0-40c0-80c0-c0c0c0c0c0c0","reason":"dispatch_unknown","observed_at_ms":1800000000000}]},
+    "stranded_max": 32,
+    "rendered": ["2 retired","1 in progress","1 stranded","c0c0c0c0-c0c0-40c0-80c0-c0c0c0c0c0c0: dispatch unknown"]
+  }
+}

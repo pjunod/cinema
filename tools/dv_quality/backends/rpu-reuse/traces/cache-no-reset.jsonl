@@ -1,0 +1,4 @@
+{"kind":"cache_state","phase":"initial","result":0,"profile":8,"compression":1,"mapping_present":false,"cache_zero_present":false,"color_present":false,"luma":[-1,-1],"source_min_pq":-1}
+{"kind":"cache_state","phase":"full_seed","result":0,"profile":8,"compression":1,"mapping_present":true,"cache_zero_present":true,"color_present":true,"luma":[0,8388608],"source_min_pq":0}
+{"kind":"cache_state","phase":"declared_new_epoch_without_reset","result":0,"profile":8,"compression":1,"mapping_present":true,"cache_zero_present":true,"color_present":true,"luma":[0,8388608],"source_min_pq":0}
+{"kind":"cache_state","phase":"reuse_parse","result":0,"profile":8,"compression":1,"mapping_present":true,"cache_zero_present":true,"color_present":true,"luma":[0,8388608],"source_min_pq":1}

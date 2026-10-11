@@ -24,10 +24,7 @@ const THUMB_WIDTH: i64 = 500;
 /// The ffmpeg binary; overridable via `PLURX_FFMPEG` for jellyfin-ffmpeg or a
 /// pinned path — same convention as the transcoder and prober.
 fn ffmpeg_bin() -> String {
-    std::env::var("PLURX_FFMPEG")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "ffmpeg".to_owned())
+    crate::process::media_tool_bin("ffmpeg", std::env::var("PLURX_FFMPEG").ok())
 }
 
 /// Recreate already-published Home artwork on this node without changing the

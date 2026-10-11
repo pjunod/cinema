@@ -413,3 +413,18 @@ impl From<Infallible> for Error {
         Self::Error(value.to_string().into())
     }
 }
+
+// Reserved transaction certificate: emitted only by the SQLite writer after an
+// exact first-statement layout guard fails and its explicit rollback succeeds.
+impl Error {
+    pub const SOURCE_LAYOUT_GUARD_SQL: &'static str = "INSERT INTO sharing_source_dispatch_guard SELECT 1,0 WHERE NOT EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version=$1)";
+    pub const SOURCE_LAYOUT_GUARD_DDL: &'static str = "CREATE TABLE sharing_source_dispatch_guard (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CONSTRAINT plurx_source_layout_guard_v1 CHECK(passed=1)) STRICT";
+    pub(crate) const SOURCE_LAYOUT_ROLLBACK_CERTIFICATE: &'static str =
+        "plurx_source_layout_guard_v1: statement_zero_explicit_rollback_complete";
+
+    /// A definitive pre-application rollback, not an unknown commit or a
+    /// certificate for any later statement or ordinary constraint failure.
+    pub fn is_source_layout_guard_rollback(&self) -> bool {
+        matches!(self, Self::Transaction(message) if message.as_ref() == Self::SOURCE_LAYOUT_ROLLBACK_CERTIFICATE)
+    }
+}

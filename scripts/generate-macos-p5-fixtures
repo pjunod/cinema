@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Materialize original CC0 strict Profile5 runtime controls from the sibling generator."""
+import argparse
+import hashlib
+import json
+import math
+import runpy
+from pathlib import Path
+import subprocess
+import tempfile
+
+CASES = (
+    ("fresh", "p5.mp4", None, 0),
+    ("variable", "p5-frame-bound.mp4", None, 0),
+    ("missing_first", "p5-missing-first.mp4", 0, 0),
+    ("missing_midstream", "p5-missing-midstream.mp4", 10, 0),
+    ("missing_seek_start", "p5-missing-seek-start.mp4", 0, 1),
+    ("malformed_first", "p5-malformed-first.mp4", 0, 0),
+    ("malformed_midstream", "p5-malformed-midstream.mp4", 10, 0),
+    ("omitted_color_first", "p5-omitted-color-first.mp4", 0, 0),
+    ("omitted_color_midstream", "p5-omitted-color-mapping-reuse-midstream.mp4", 10, 0),
+)
+
+
+# Original fixture linear RGB values in BT.2020 primaries, in cd/m2. The
+# interpretation oracle is independent of FFmpeg and Dolby renderer output.
+COLOR_RGB_NITS = ((100, 30, 20), (30, 100, 20), (20, 30, 100),
+                  (100, 100, 20), (20, 100, 100), (100, 20, 100))
+BT2020_TO_BT709 = ((1.660491, -0.587641, -0.072850),
+                  (-0.124550, 1.132900, -0.008350),
+                  (-0.018151, -0.100579, 1.118730))
+
+
+def color_interpretation_oracle():
+    """Bound hue interpretation, not an exact/mastered SDR tone curve.
+
+    Convert original BT.2020 linear RGB to BT.709; allow a common gain from
+    0.2 to 0.9 at the 100-nit patches, clip gamut and apply BT.709's OETF.
+    A 12-code margin covers nonuniform ITP gamut/tone treatment and lossy
+    encoding. Bounds remain chromatically distinct from neutral/green-only
+    interpretation. No rendered pixels are used to calculate these bounds.
+    """
+    def oetf(value):
+        value = min(1.0, max(0.0, value))
+        return 4.5 * value if value < 0.018 else 1.099 * value ** 0.45 - 0.099
+
+    ranges = []
+    for rgb in COLOR_RGB_NITS:
+        linear = [sum(c * v for c, v in zip(row, rgb)) / 100 for row in BT2020_TO_BT709]
+        samples = []
+        for gain_step in range(200, 901):
+            r, g, b = [oetf(value * gain_step / 1000) for value in linear]
+            y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            samples.append((16 + 219 * y, 128 + 224 * (b - y) / 1.8556,
+                            128 + 224 * (r - y) / 1.5748))
+        ranges.append([[max(0, math.floor(min(row[c] for row in samples)) - 12),
+                        min(255, math.ceil(max(row[c] for row in samples)) + 12)]
+                       for c in range(3)])
+    return dict(scope="color interpretation only; not per-frame tone-map influence or a mastered SDR target",
+                source_rgb_nits=COLOR_RGB_NITS, bt2020_to_bt709=BT2020_TO_BT709,
+                common_gain_interval=[0.2, 0.9], code_margin=12,
+                sample_centers=[[10 + 20 * i, 67] for i in range(6)],
+                yuv420p_ranges=ranges)
+
+
+def materialize(source, output):
+    output.mkdir(parents=True, exist_ok=True)
+    cases = []
+    for key, name, maximum, seek in CASES:
+        data = (source / name).read_bytes()
+        path = "strict_p5_" + key + ".mp4"
+        (output / path).write_bytes(data)
+        cases.append(dict(id=key, path=path, sha256=hashlib.sha256(data).hexdigest(),
+                          byte_length=len(data), negative_max_frames=maximum, seek_seconds=seek))
+    terminal = runpy.run_path(str(Path(__file__).with_name("append-macos-p5-terminal-nals")))
+    terminal_media = terminal["terminal_cases"]((source / "p5.mp4").read_bytes())
+    for kind in ("eos", "eob", "eos_eob"):
+        data = terminal_media[kind]
+        key = "terminal_" + kind
+        path = "strict_p5_" + key + ".mp4"
+        (output / path).write_bytes(data)
+        cases.append(dict(id=key, path=path, sha256=hashlib.sha256(data).hexdigest(),
+                          byte_length=len(data), negative_max_frames=None, seek_seconds=0))
+    bindings = sorted(json.loads((source / "frame-bound-association.json").read_text()),
+                      key=lambda row: row["presentation_pts"])
+    reference = json.loads((source / "reference.json").read_text())
+    manifest = dict(schema_version=1, generator_recipe_version=3, license="CC0-1.0",
+                    source_shape=[320, 180], frame_count=24, frame_rate=[12, 1],
+                    source_sample_aspect_ratio="1:1", source_codes=reference["patches_source_codes"],
+                    color_interpretation_oracle=color_interpretation_oracle(),
+                    variable_frame_metadata=[dict(pts=row["presentation_pts"],
+                        dm_metadata_id=row["dm_metadata_id"], source_max_pq=row["source_max_pq"])
+                        for row in bindings], cases=cases)
+    if sum(row["byte_length"] for row in cases) > 256 * 1024:
+        raise ValueError("strict Profile5 controls exceed their fixed media budget")
+    (output / "strict-p5.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ffmpeg", type=Path, required=True)
+    parser.add_argument("--ffprobe", type=Path, required=True)
+    parser.add_argument("--rpu-generator", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="plurx-strict-p5-") as temporary:
+        source = Path(temporary) / "source"
+        subprocess.run([str(Path(__file__).with_name("generate-macos-extension-fixtures")),
+                        "--family", "p5", "--ffmpeg", str(args.ffmpeg), "--ffprobe", str(args.ffprobe),
+                        "--rpu-generator", str(args.rpu_generator), "--output", str(source), "--lossless"],
+                       stdin=subprocess.DEVNULL, check=True, timeout=240, capture_output=True)
+        manifest = materialize(source, args.output)
+    print(json.dumps(dict(cases=len(manifest["cases"]), media_bytes=sum(row["byte_length"] for row in manifest["cases"])), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

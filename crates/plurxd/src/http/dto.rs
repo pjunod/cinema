@@ -419,11 +419,13 @@ pub struct FileDto {
     /// time. Empty for containers with no authored chapters.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chapters: Vec<ChapterDto>,
-    /// Whether the file is actually readable on the server right now. `false`
-    /// means the path no longer resolves (unmounted share, moved/deleted file,
-    /// wrong container mount) — the client shows this and refuses to "play"
-    /// something that isn't there. Set by the handler, not from the row.
+    /// Legacy playback hint. False only after an observed unavailable path;
+    /// unknown stays true so the authoritative source open may still succeed.
     pub available: bool,
+    /// Bounded node-local observation; `unknown` does not refuse playback.
+    pub availability: &'static str,
+    /// Unix milliseconds of the observation, absent only if none is usable.
+    pub availability_observed_at_ms: Option<i64>,
     /// Server-owned reader actions for this exact detected format.  Clients
     /// consume the surface entry instead of inferring Read from an extension.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -631,6 +633,8 @@ impl FileDto {
             part_offset_ms: 0,
             chapters: Vec::new(),
             available: true,
+            availability: "unknown",
+            availability_observed_at_ms: None,
             reader,
             reader_revision,
             probed: f.probed,

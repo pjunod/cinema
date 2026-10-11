@@ -1,0 +1,26 @@
+{
+  "argv": [
+    "/work/mux_rgb",
+    "/work/rgb48le.bin",
+    "/work/timing.tsv",
+    "/work/reconstructed.nut"
+  ],
+  "program_sha256": "6bb418e2e438f4847690c5e5ec61b3b333e7aecae8e177b867744415278c0490",
+  "input_sha256": {
+    "rgb48le.bin": "cda0b0d5e2eac53bb024a9906fccc8ce10ab287d485aa49cd6f1ea7476344293",
+    "timing.tsv": "2e50d75385ebcb9955cca948704546536dd7fb840309bf5a965728fe63c76614"
+  },
+  "cwd": "/work",
+  "environment": {
+    "LD_LIBRARY_PATH": null,
+    "VK_ICD_FILENAMES": null,
+    "XDG_RUNTIME_DIR": null,
+    "LC_ALL": "C"
+  },
+  "exit": 0,
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "output_sha256": {
+    "reconstructed.nut": "0a575dd9d3f2b80d03eefcd6ad65abfea1c0e53d7fb12873479306c410535351"
+  }
+}

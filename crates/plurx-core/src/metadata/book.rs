@@ -667,10 +667,7 @@ fn attached_picture_stream(probe: &str) -> Option<i64> {
 }
 
 fn ffmpeg_bin() -> String {
-    std::env::var("PLURX_FFMPEG")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "ffmpeg".to_owned())
+    crate::process::media_tool_bin("ffmpeg", std::env::var("PLURX_FFMPEG").ok())
 }
 
 async fn extract_attached_picture(

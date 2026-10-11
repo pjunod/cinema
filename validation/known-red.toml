@@ -5,3 +5,91 @@ version = 1
 # Bare names and suffixes are intentionally invalid because two targets can
 # expose the same function name.
 entries = []
+
+
+# Explicit opt-in fixtures are a separate inventory from temporarily broken
+# tests. Their exact commands supply a disposable namespace; they are never
+# counted as known-red, and never qualify a production Tailscale topology.
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end"
+owner = "sharing"
+reason = "Real production-selected B and Source voters plus actual FFmpeg Start, resources and confirmed End require a disposable pinned TLS CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b"
+owner = "sharing"
+reason = "Real B and Source voters driving actual FFmpeg Encoded and Native text playback, status and control through B require a disposable pinned TLS CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_direct_range_head_through_b"
+owner = "sharing"
+reason = "Real B and Source voters relaying direct-play GET, HEAD, Range, 416 and If-Range through B on one Source claim, plus logout ending an open body, require a disposable pinned TLS CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_source_direct_range_head_through_b -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot"
+owner = "sharing"
+reason = "A directed quality change through the real pinned B (preparation none, a fresh Start at the sampled position published beside its predecessor, then the predecessor superseded with a confirmed Source End that frees its Source slot) requires a disposable pinned TLS CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort"
+owner = "sharing"
+reason = "A prepared directed change through the real pinned B over H1 and H2 (B stages its own successor as a second Source session, offers prepare naming only B URLs after publication, serves its playlist before commit, replays a commit byte-identical and retires the predecessor with a confirmed Source End, and an abort frees the successor's Source slot and refuses a late commit) requires a disposable pinned TLS CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart"
+owner = "sharing"
+reason = "Pinned transport response-loss recovery requires an isolated numeric CGNAT fixture, not the host network."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --bin plurxd http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/tests/sharing_daemon_restart.rs::sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart"
+owner = "sharing"
+reason = "Separate shipped daemon processes require a disposable CGNAT namespace and persistent fixture stores."
+requires = "Unix disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --test sharing_daemon_restart sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/sharing_start_decode.rs::http::sharing_start_decode::tests::sharing_start_transport_pinned_source_h1_and_receiver_h1_h2_preserve_raw_envelope"
+owner = "sharing"
+reason = "Mock Source actor envelope uses real pinned Source H1 and B H1/H2 transport in a disposable CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::sharing_start_decode::tests::sharing_start_transport_pinned_source_h1_and_receiver_h1_h2_preserve_raw_envelope -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login"
+owner = "sharing"
+reason = "Authenticated Source and B authority requires a real pinned peer in a disposable CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope"
+owner = "sharing"
+reason = "Authenticated Source and B authority requires a real pinned peer in a disposable CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection"
+owner = "sharing"
+reason = "Authenticated Source and B authority requires a real pinned peer in a disposable CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs::http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure"
+owner = "sharing"
+reason = "Actual selected receiver members and accepted H2 drivers forward protected media to a retained owner and settle End only after physical driver closure; pinned Source transport requires an isolated CGNAT namespace. This fixture does not qualify remote-only mounts or production Tailscale topology."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure -- --ignored --exact --nocapture"

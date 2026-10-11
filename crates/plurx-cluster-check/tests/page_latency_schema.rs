@@ -10,7 +10,7 @@ fn fixture() -> Value {
         "started_at_unix_ms": 1_000,
         "finished_at_unix_ms": 2_000,
         "runner": {
-            "hardware": "m6-pro",
+            "hardware": "lab6-pro",
             "storage_device": "nvme",
             "network_path": "lan-ethernet"
         },

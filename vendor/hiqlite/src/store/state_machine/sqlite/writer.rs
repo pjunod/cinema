@@ -37,10 +37,31 @@ pub enum WriterRequest {
     SnapshotApply((String, oneshot::Sender<Result<(), StorageError<NodeId>>>)),
     MetadataRead(oneshot::Sender<StateMachineData>),
     MetadataMembership(MetaMembershipRequest),
+    MetadataApplied((Option<LogId<NodeId>>, oneshot::Sender<()>)),
     Backup(BackupRequest),
     Shutdown(oneshot::Sender<()>),
+    #[cfg(feature = "validation-test-helpers")]
+    RegisterPrecommitHold {
+        hold: ValidationPrecommitHold,
+        registered: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
+    HoldForStartupDrain {
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
     #[allow(clippy::upper_case_acronyms)]
     RTT(RTTRequest),
+}
+
+/// Instance-local validation ownership; absent from production builds.
+#[cfg(feature = "validation-test-helpers")]
+#[derive(Debug)]
+pub struct ValidationPrecommitHold {
+    pub exact_statement: String,
+    pub entered: oneshot::Sender<()>,
+    pub release: std::sync::mpsc::Receiver<()>,
+    pub until: std::time::Instant,
 }
 
 #[derive(Debug)]
@@ -100,6 +121,85 @@ pub struct SnapshotResponse {
     pub meta: StateMachineData,
 }
 
+struct SnapshotCopyCompletion {
+    meta: StateMachineData,
+    result: Result<(), std::io::Error>,
+    ack: oneshot::Sender<Result<SnapshotResponse, StorageError<NodeId>>>,
+}
+
+enum WriterEvent {
+    Request(Result<WriterRequest, RecvError>),
+    Copy(Result<SnapshotCopyCompletion, RecvError>),
+}
+
+fn complete_snapshot_copy(
+    completion: SnapshotCopyCompletion,
+    sm_data: &mut StateMachineData,
+    writer: &rusqlite::Connection,
+) {
+    // A cancelled builder cannot publish this generation. Its retained copy
+    // has already released the read mark; keep the prior live snapshot id.
+    if completion.ack.is_closed() {
+        return;
+    }
+    let result = completion
+        .result
+        .and_then(|()| {
+            // Applied entries and membership may have advanced during the copy.
+            // Never replace them with the older cut's metadata.
+            let mut live = sm_data.clone();
+            live.last_snapshot_id = completion.meta.last_snapshot_id.clone();
+            persist_metadata(writer, &live).map_err(std::io::Error::other)?;
+            *sm_data = live;
+            Ok(SnapshotResponse {
+                meta: completion.meta,
+            })
+        })
+        .map_err(|error| StorageError::IO {
+            source: StorageIOError::write(&error),
+        });
+    let _ = completion.ack.send(result);
+}
+
+fn start_snapshot_copy(
+    request: SnapshotRequest,
+    writer: &rusqlite::Connection,
+    sm_data: &StateMachineData,
+    runtime: &runtime::Handle,
+    completion_tx: &flume::Sender<SnapshotCopyCompletion>,
+) -> bool {
+    if request.ack.is_closed() {
+        return false;
+    }
+    let mut meta = sm_data.clone();
+    meta.last_snapshot_id = Some(request.snapshot_id.to_string());
+    match pin_snapshot_cut(writer, &meta, sm_data) {
+        Ok(reader) => {
+            let completion_tx = completion_tx.clone();
+            runtime.spawn_blocking(move || {
+                // Release the WAL read mark before completion even if the
+                // builder reply was cancelled while the copy was running.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    copy_snapshot(reader, &request.path)
+                }))
+                .unwrap_or_else(|_| Err(std::io::Error::other("snapshot copy panicked")));
+                let _ = completion_tx.send(SnapshotCopyCompletion {
+                    meta,
+                    result,
+                    ack: request.ack,
+                });
+            });
+            true
+        }
+        Err(error) => {
+            let _ = request.ack.send(Err(StorageError::IO {
+                source: StorageIOError::write(&error),
+            }));
+            false
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct MetaPersistRequest {
     pub data: StateMachineData,
@@ -150,6 +250,11 @@ pub fn spawn_writer(
         let mut sm_data = StateMachineData::default();
         let mut ts_last_backup = None;
         let mut shutdown_ack: Option<oneshot::Sender<()>> = None;
+        let (copy_tx, copy_rx) = flume::unbounded();
+        let mut copy_in_flight = false;
+        let mut pending_snapshot: Option<SnapshotRequest> = None;
+        #[cfg(feature = "validation-test-helpers")]
+        let mut precommit_hold: Option<ValidationPrecommitHold> = None;
 
         // TODO should we maybe save a backup task handle in case of shutdown overlap?
 
@@ -173,7 +278,24 @@ CREATE TABLE IF NOT EXISTS _metadata
         )
         .expect("_metadata table creation to always succeed");
 
-        'main: while let Ok(req) = rx.recv() {
+        'main: loop {
+            if !copy_in_flight && let Some(request) = pending_snapshot.take() {
+                copy_in_flight = start_snapshot_copy(request, &conn, &sm_data, &rt, &copy_tx);
+            }
+            let event = flume::Selector::new()
+                .recv(&rx, WriterEvent::Request)
+                .recv(&copy_rx, WriterEvent::Copy)
+                .wait();
+            let req = match event {
+                WriterEvent::Request(Ok(request)) => request,
+                WriterEvent::Request(Err(_)) => break,
+                WriterEvent::Copy(Ok(completion)) => {
+                    copy_in_flight = false;
+                    complete_snapshot_copy(completion, &mut sm_data, &conn);
+                    continue;
+                }
+                WriterEvent::Copy(Err(_)) => break,
+            };
             match req {
                 WriterRequest::Query(query) => match query {
                     Query::Execute(q) => {
@@ -301,6 +423,12 @@ CREATE TABLE IF NOT EXISTS _metadata
                     }
 
                     Query::Transaction(req) => {
+                        #[cfg(feature = "validation-test-helpers")]
+                        let matches_hold = precommit_hold.as_ref().is_some_and(|hold| {
+                            req.queries
+                                .iter()
+                                .any(|query| query.sql.as_ref() == hold.exact_statement)
+                        });
                         sm_data.last_applied_log_id = req.last_applied_log_id;
 
                         let txn = match conn.transaction() {
@@ -316,6 +444,7 @@ CREATE TABLE IF NOT EXISTS _metadata
 
                         let mut results = Vec::with_capacity(req.queries.len());
                         let mut query_err = None;
+                        let mut layout_guard_failed = false;
                         let mut txn_env = TransactionEnv::default();
 
                         'outer: for (stmt_index, state_machine::Query { sql, params }) in
@@ -324,6 +453,9 @@ CREATE TABLE IF NOT EXISTS _metadata
                             if log_statements {
                                 info!("Query::Transaction:\n{sql}\n{params:?}");
                             }
+
+                            let exact_layout_guard =
+                                is_exact_source_layout_guard(stmt_index, sql.as_ref(), &params);
 
                             let mut stmt = match txn.prepare_cached(sql.as_ref()) {
                                 Ok(stmt) => stmt,
@@ -412,12 +544,15 @@ CREATE TABLE IF NOT EXISTS _metadata
                                     }
                                 }
                             } else {
-                                let res = stmt.raw_execute().map_err(Error::from);
+                                let res = stmt.raw_execute();
                                 match res {
                                     Ok(r) => {
                                         results.push(Ok(r));
                                     }
                                     Err(err) => {
+                                        layout_guard_failed = exact_layout_guard
+                                            && is_source_layout_check_failure(&err);
+                                        let err = Error::from(err);
                                         query_err =
                                             Some(Error::Transaction(err.to_string().into()));
                                         break;
@@ -427,13 +562,32 @@ CREATE TABLE IF NOT EXISTS _metadata
                         }
 
                         if let Some(err) = query_err {
-                            if let Err(e) = txn.rollback() {
-                                error!("Error during txn rollback: {:?}", e);
-                            }
+                            let rollback_succeeded = match txn.rollback() {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    error!("Error during txn rollback: {:?}", e);
+                                    false
+                                }
+                            };
+                            let err = source_layout_rollback_result(
+                                err,
+                                layout_guard_failed,
+                                rollback_succeeded,
+                            );
                             req.tx
                                 .send(Err(err))
                                 .expect("oneshot tx to never be dropped");
                         } else {
+                            #[cfg(feature = "validation-test-helpers")]
+                            if matches_hold && let Some(hold) = precommit_hold.take() {
+                                let _ = hold.entered.send(());
+                                let remaining = hold
+                                    .until
+                                    .saturating_duration_since(std::time::Instant::now());
+                                // Retain the actual uncommitted Transaction and writer.
+                                // Sender drop or the finite bound always releases it.
+                                let _ = hold.release.recv_timeout(remaining);
+                            }
                             match txn.commit() {
                                 Ok(()) => {
                                     req.tx
@@ -500,42 +654,37 @@ CREATE TABLE IF NOT EXISTS _metadata
                     req.tx.send(res).unwrap();
                 }
 
-                WriterRequest::Snapshot(SnapshotRequest {
-                    snapshot_id,
-                    path,
-                    // last_membership,
-                    ack,
-                }) => {
-                    sm_data.last_snapshot_id = Some(snapshot_id.to_string());
-                    persist_metadata(&conn, &sm_data).expect("Metadata persist to never fail");
-
-                    match create_snapshot(
-                        &conn,
-                        // snapshot_id,
-                        path,
-                        // sm_data.last_applied_log_id,
-                        // sm_data.last_membership.clone(),
-                    ) {
-                        Ok(_) => {
-                            if let Err(err) = conn.execute("PRAGMA optimize", []) {
-                                error!("Error during 'PRAGMA optimize': {}", err);
-                            }
-
-                            ack.send(Ok(SnapshotResponse {
-                                meta: sm_data.clone(),
-                            }))
+                WriterRequest::Snapshot(request) => {
+                    if copy_in_flight {
+                        // A cancelled builder releases snapshot_files before
+                        // its retained copy completes. Keep one successor
+                        // without blocking ordinary applies behind that copy.
+                        if pending_snapshot
+                            .as_ref()
+                            .is_some_and(|pending| !pending.ack.is_closed())
+                        {
+                            let error = std::io::Error::new(
+                                std::io::ErrorKind::WouldBlock,
+                                "snapshot successor already queued",
+                            );
+                            let _ = request.ack.send(Err(StorageError::IO {
+                                source: StorageIOError::write(&error),
+                            }));
+                        } else {
+                            pending_snapshot = Some(request);
                         }
-                        Err(err) => {
-                            error!("Error creating new snapshot: {:?}", err);
-                            ack.send(Err(StorageError::IO {
-                                source: StorageIOError::write(&err),
-                            }))
-                        }
+                        continue;
                     }
-                    .expect("snapshot listener to always exists");
+                    copy_in_flight = start_snapshot_copy(request, &conn, &sm_data, &rt, &copy_tx);
                 }
 
                 WriterRequest::SnapshotApply((path, ack)) => {
+                    if copy_in_flight {
+                        if let Ok(completion) = copy_rx.recv() {
+                            complete_snapshot_copy(completion, &mut sm_data, &conn);
+                        }
+                        copy_in_flight = false;
+                    }
                     let start = Instant::now();
                     info!("Starting snapshot restore from {}", path);
                     let result = conn.restore(
@@ -618,6 +767,11 @@ CREATE TABLE IF NOT EXISTS _metadata
                     req.ack.send(()).unwrap();
                 }
 
+                WriterRequest::MetadataApplied((log_id, ack)) => {
+                    sm_data.last_applied_log_id = log_id;
+                    let _ = ack.send(());
+                }
+
                 WriterRequest::Backup(req) => {
                     sm_data.last_applied_log_id = req.last_applied_log_id;
 
@@ -695,10 +849,29 @@ CREATE TABLE IF NOT EXISTS _metadata
                     shutdown_ack = Some(ack);
                     break;
                 }
+                #[cfg(test)]
+                WriterRequest::HoldForStartupDrain { entered, release } => {
+                    let _ = entered.send(());
+                    let _ = release.blocking_recv();
+                }
+                #[cfg(feature = "validation-test-helpers")]
+                WriterRequest::RegisterPrecommitHold { hold, registered } => {
+                    precommit_hold = Some(hold);
+                    let _ = registered.send(());
+                }
             }
         }
 
         warn!("SQL writer is shutting down");
+        if copy_in_flight && let Ok(completion) = copy_rx.recv() {
+            complete_snapshot_copy(completion, &mut sm_data, &conn);
+        }
+        if let Some(request) = pending_snapshot
+            && start_snapshot_copy(request, &conn, &sm_data, &rt, &copy_tx)
+            && let Ok(completion) = copy_rx.recv()
+        {
+            complete_snapshot_copy(completion, &mut sm_data, &conn);
+        }
 
         // make sure metadata is persisted before shutting down
         persist_metadata(&conn, &sm_data).expect("Error persisting metadata");
@@ -760,10 +933,97 @@ Got:      {}
 }
 
 #[inline]
-fn create_snapshot(conn: &rusqlite::Connection, path: String) -> Result<(), rusqlite::Error> {
-    let q = format!("VACUUM main INTO '{path}'");
-    conn.execute(&q, ())?;
-    Ok(())
+fn pin_snapshot_cut(
+    writer: &rusqlite::Connection,
+    cut: &StateMachineData,
+    live: &StateMachineData,
+) -> Result<rusqlite::Connection, std::io::Error> {
+    let result = (|| -> Result<_, rusqlite::Error> {
+        let journal: String = writer.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if !journal.eq_ignore_ascii_case("wal") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        persist_metadata(writer, cut)?;
+        let reader = rusqlite::Connection::open_with_flags(
+            writer
+                .path()
+                .ok_or(rusqlite::Error::InvalidPath(std::path::PathBuf::new()))?,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        reader.execute_batch("BEGIN")?;
+        // BEGIN alone is deferred. Reading this row establishes the exact WAL
+        // read mark while the single writer still owns the cut.
+        let _: Vec<u8> =
+            reader.query_row("SELECT data FROM _metadata WHERE key = 'meta'", [], |row| {
+                row.get(0)
+            })?;
+        Ok(reader)
+    })();
+    // The live database must not claim an unsuccessful copy's new id.
+    let restore = persist_metadata(writer, live);
+    restore.map_err(std::io::Error::other)?;
+    result.map_err(std::io::Error::other)
+}
+
+fn copy_snapshot(reader: rusqlite::Connection, path: &str) -> Result<(), std::io::Error> {
+    #[cfg(test)]
+    let page_limit = snapshot_copy_test_hook(path);
+    let mut destination = rusqlite::Connection::open(path).map_err(std::io::Error::other)?;
+    #[cfg(test)]
+    if let Some(limit) = page_limit {
+        destination
+            .pragma_update(None, "max_page_count", limit)
+            .map_err(std::io::Error::other)?;
+    }
+    let backup =
+        rusqlite::backup::Backup::new(&reader, &mut destination).map_err(std::io::Error::other)?;
+    backup
+        .run_to_completion(256, Duration::from_millis(1), None)
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+struct SnapshotCopyTestHook {
+    pinned: flume::Sender<()>,
+    release: flume::Receiver<()>,
+    page_limit: Option<i64>,
+}
+
+#[cfg(test)]
+static SNAPSHOT_COPY_TEST_HOOKS: std::sync::Mutex<
+    std::collections::BTreeMap<String, SnapshotCopyTestHook>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(test)]
+fn snapshot_copy_test_hook(path: &str) -> Option<i64> {
+    let hook = {
+        let mut hooks = SNAPSHOT_COPY_TEST_HOOKS.lock().unwrap();
+        let key = hooks
+            .keys()
+            .find(|prefix| path.starts_with(prefix.as_str()))
+            .cloned();
+        key.and_then(|key| hooks.remove(&key))
+    };
+    hook.and_then(|hook| {
+        let _ = hook.pinned.send(());
+        hook.release.recv().unwrap();
+        hook.page_limit
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn inject_snapshot_copy_full(prefix: String) {
+    let (pinned, _) = flume::bounded(1);
+    let (release, release_rx) = flume::bounded(1);
+    release.send(()).unwrap();
+    SNAPSHOT_COPY_TEST_HOOKS.lock().unwrap().insert(
+        prefix,
+        SnapshotCopyTestHook {
+            pinned,
+            release: release_rx,
+            page_limit: Some(1),
+        },
+    );
 }
 
 fn create_backup(
@@ -980,4 +1240,490 @@ fn apply_migration(txn: rusqlite::Transaction, migration: Migration) -> Result<(
 
     txn.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_cut_tests {
+    use super::*;
+    use openraft::{CommittedLeaderId, Membership};
+    use std::collections::BTreeSet;
+
+    fn log(index: u64) -> Option<LogId<NodeId>> {
+        Some(LogId::new(CommittedLeaderId::new(1, 1), index))
+    }
+
+    async fn execute(writer: &flume::Sender<WriterRequest>, sql: String, index: u64) {
+        let (tx, rx) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Query(Query::Execute(SqlExecute {
+                sql: sql.into(),
+                params: vec![],
+                last_applied_log_id: log(index),
+                tx,
+            })))
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+    }
+
+    async fn metadata(writer: &flume::Sender<WriterRequest>) -> StateMachineData {
+        let (tx, rx) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::MetadataRead(tx))
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    fn image_metadata(connection: &rusqlite::Connection) -> StateMachineData {
+        let bytes: Vec<u8> = connection
+            .query_row("SELECT data FROM _metadata WHERE key='meta'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        deserialize(&bytes).unwrap()
+    }
+
+    async fn fixture() -> (std::path::PathBuf, flume::Sender<WriterRequest>) {
+        let root = std::env::temp_dir().join(format!("hiqlite-cut-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let connection = rusqlite::Connection::open(root.join("live.db")).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0;",
+            )
+            .unwrap();
+        let writer = spawn_writer(
+            connection,
+            1,
+            root.join("lock").to_string_lossy().into_owned(),
+            false,
+            false,
+            #[cfg(feature = "backup")]
+            30,
+        );
+        execute(
+            &writer,
+            "CREATE TABLE rows_at_cut (id INTEGER PRIMARY KEY, payload BLOB)".into(),
+            1,
+        )
+        .await;
+        execute(
+            &writer,
+            "INSERT INTO rows_at_cut VALUES (1, zeroblob(8192))".into(),
+            2,
+        )
+        .await;
+        (root, writer)
+    }
+
+    async fn shutdown(root: std::path::PathBuf, writer: flume::Sender<WriterRequest>) {
+        let (ack, rx) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Shutdown(ack))
+            .await
+            .unwrap();
+        rx.await.unwrap();
+        drop(writer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn paused_copy(
+        writer: &flume::Sender<WriterRequest>,
+        path: &str,
+        page_limit: Option<i64>,
+    ) -> (
+        flume::Sender<()>,
+        oneshot::Receiver<Result<SnapshotResponse, StorageError<NodeId>>>,
+    ) {
+        let (pinned, pinned_rx) = flume::bounded(1);
+        let (release, release_rx) = flume::bounded(1);
+        SNAPSHOT_COPY_TEST_HOOKS.lock().unwrap().insert(
+            path.to_owned(),
+            SnapshotCopyTestHook {
+                pinned,
+                release: release_rx,
+                page_limit,
+            },
+        );
+        let (ack, rx) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Snapshot(SnapshotRequest {
+                snapshot_id: Uuid::now_v7(),
+                path: path.into(),
+                ack,
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), pinned_rx.recv_async())
+            .await
+            .unwrap()
+            .unwrap();
+        (release, rx)
+    }
+
+    #[tokio::test]
+    async fn fixed_readmark_copy_allows_1000_applies_and_membership_without_cut_drift() {
+        let (root, writer) = fixture().await;
+        let first_membership =
+            StoredMembership::new(log(3), Membership::new(vec![BTreeSet::from([1])], None));
+        let (ack, rx) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::MetadataMembership(MetaMembershipRequest {
+                last_membership: first_membership.clone(),
+                last_applied_log_id: log(3),
+                ack,
+            }))
+            .await
+            .unwrap();
+        rx.await.unwrap();
+        let path = root.join("copy.db").to_string_lossy().into_owned();
+        let (release, copy) = paused_copy(&writer, &path, None).await;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            for index in 4..1004 {
+                execute(
+                    &writer,
+                    format!("INSERT INTO rows_at_cut VALUES ({index}, zeroblob(8192))"),
+                    index,
+                )
+                .await;
+            }
+            let (ack, rx) = oneshot::channel();
+            writer
+                .send_async(WriterRequest::MetadataMembership(MetaMembershipRequest {
+                    last_membership: StoredMembership::new(
+                        log(1004),
+                        Membership::new(vec![BTreeSet::from([1, 2])], None),
+                    ),
+                    last_applied_log_id: log(1004),
+                    ack,
+                }))
+                .await
+                .unwrap();
+            rx.await.unwrap();
+        })
+        .await
+        .expect("applies must finish while copy remains paused");
+        let checkpoint = rusqlite::Connection::open(root.join("live.db")).unwrap();
+        checkpoint.busy_timeout(Duration::ZERO).unwrap();
+        let busy: i64 = checkpoint
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy, 1, "read mark must prevent WAL reset during copy");
+        release.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(10), copy)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.meta.last_applied_log_id, log(3));
+        assert_eq!(response.meta.last_membership, first_membership);
+        let image = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            image
+                .query_row("SELECT count(*) FROM rows_at_cut", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let meta = image_metadata(&image);
+        assert_eq!(meta.last_applied_log_id, response.meta.last_applied_log_id);
+        assert_eq!(meta.last_membership, response.meta.last_membership);
+        assert_eq!(meta.last_snapshot_id, response.meta.last_snapshot_id);
+        let live = metadata(&writer).await;
+        assert_eq!(live.last_applied_log_id, log(1004));
+        assert_ne!(live.last_membership, first_membership);
+        assert_eq!(live.last_snapshot_id, response.meta.last_snapshot_id);
+        let busy: i64 = checkpoint
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy, 0, "completion must release read mark");
+        assert_eq!(
+            std::fs::metadata(root.join("live.db-wal")).unwrap().len(),
+            0
+        );
+        drop(image);
+        drop(checkpoint);
+        shutdown(root, writer).await;
+    }
+
+    #[tokio::test]
+    async fn full_destination_copy_keeps_live_metadata_and_database_intact() {
+        let (root, writer) = fixture().await;
+        let before = metadata(&writer).await;
+        let path = root.join("full.db").to_string_lossy().into_owned();
+        let (release, copy) = paused_copy(&writer, &path, Some(1)).await;
+        execute(
+            &writer,
+            "INSERT INTO rows_at_cut VALUES (3, zeroblob(8192))".into(),
+            3,
+        )
+        .await;
+        release.send(()).unwrap();
+        assert!(
+            copy.await.unwrap().is_err(),
+            "SQLite max_page_count must cause a real SQLITE_FULL error"
+        );
+        let live = metadata(&writer).await;
+        assert_eq!(live.last_snapshot_id, before.last_snapshot_id);
+        assert_eq!(live.last_applied_log_id, log(3));
+        let connection = rusqlite::Connection::open(root.join("live.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM rows_at_cut", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let busy: i64 = connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy, 0);
+        drop(connection);
+        shutdown(root, writer).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_copy_reply_retains_reader_and_queues_successor_without_blocking_apply() {
+        let (root, writer) = fixture().await;
+        let first_path = root.join("first.db").to_string_lossy().into_owned();
+        let (release, first) = paused_copy(&writer, &first_path, None).await;
+        drop(first);
+        let second_path = root.join("second.db").to_string_lossy().into_owned();
+        let (ack, second) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Snapshot(SnapshotRequest {
+                snapshot_id: Uuid::now_v7(),
+                path: second_path.clone(),
+                ack,
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            execute(
+                &writer,
+                "INSERT INTO rows_at_cut VALUES (3, zeroblob(8192))".into(),
+                3,
+            ),
+        )
+        .await
+        .expect("queued successor must not block applies");
+        release.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.meta.last_applied_log_id, log(3));
+        let image = rusqlite::Connection::open(second_path).unwrap();
+        assert_eq!(
+            image
+                .query_row("SELECT count(*) FROM rows_at_cut", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(image_metadata(&image).last_applied_log_id, log(3));
+        let connection = rusqlite::Connection::open(root.join("live.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(image);
+        drop(connection);
+        shutdown(root, writer).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PLURX_K02_ENOSPC_DIR on an agent-owned bounded filesystem"]
+    async fn real_enospc_on_an_owned_bounded_filesystem_preserves_live_state() {
+        use std::io::Write;
+        let bounded = std::path::PathBuf::from(
+            std::env::var_os("PLURX_K02_ENOSPC_DIR")
+                .expect("explicit owned bounded filesystem is mandatory"),
+        );
+        let available = fs4::available_space(&bounded).unwrap();
+        assert!(
+            fs4::total_space(&bounded).unwrap() <= 32 * 1024 * 1024,
+            "refuse to fill a host filesystem even if its remaining space is low"
+        );
+        assert!(
+            available > 0 && available < 32 * 1024 * 1024,
+            "refuse a broad or already full filesystem"
+        );
+        let (root, writer) = fixture().await;
+        execute(
+            &writer,
+            "INSERT INTO rows_at_cut VALUES (3, zeroblob(67108864))".into(),
+            3,
+        )
+        .await;
+        let before = metadata(&writer).await;
+        let path = bounded.join(format!("snapshot-{}.db", Uuid::now_v7()));
+        let (ack, rx) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Snapshot(SnapshotRequest {
+                snapshot_id: Uuid::now_v7(),
+                path: path.to_string_lossy().into_owned(),
+                ack,
+            }))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect_err("64MiB source cannot fit bounded destination");
+        assert!(
+            format!("{error}").contains("full"),
+            "must fail for storage capacity, not another cause: {error}"
+        );
+        // Confirm the operating system's actual ENOSPC on this isolated volume,
+        // not merely a simulated page limit. No host filesystem is filled.
+        let confirmation = bounded.join(format!("enospc-{}.bin", Uuid::now_v7()));
+        let os_error = match std::fs::File::create(&confirmation) {
+            Ok(mut file) => file.write_all(&vec![0; 32 * 1024 * 1024]).unwrap_err(),
+            Err(error) => error,
+        };
+        assert_eq!(os_error.raw_os_error(), Some(28));
+        let live = metadata(&writer).await;
+        assert_eq!(live.last_snapshot_id, before.last_snapshot_id);
+        assert_eq!(live.last_applied_log_id, before.last_applied_log_id);
+        let connection = rusqlite::Connection::open(root.join("live.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        println!(
+            "bounded ENOSPC receipt: available_before={available}, source_blob_bytes=67108864, snapshot_error={error}, os_errno=28, integrity=ok, readmark_released=true"
+        );
+        drop(connection);
+        if confirmation.exists() {
+            std::fs::remove_file(confirmation).unwrap();
+        }
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+        shutdown(root, writer).await;
+    }
+}
+
+fn is_source_layout_check_failure(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(code, Some(message))
+        if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
+        && message == "CHECK constraint failed: plurx_source_layout_guard_v1")
+}
+
+fn source_layout_rollback_result(
+    original: Error,
+    exact_guard_failed: bool,
+    rollback_succeeded: bool,
+) -> Error {
+    if exact_guard_failed && rollback_succeeded {
+        Error::Transaction(Error::SOURCE_LAYOUT_ROLLBACK_CERTIFICATE.into())
+    } else {
+        original
+    }
+}
+
+fn is_exact_source_layout_guard(index: usize, sql: &str, params: &[Param]) -> bool {
+    index == 0
+        && sql == Error::SOURCE_LAYOUT_GUARD_SQL
+        && matches!(params, [Param::Integer(81 | 82)])
+}
+
+#[cfg(test)]
+mod source_layout_rollback_tests {
+    use super::*;
+
+    #[test]
+    fn source_layout_certificate_requires_exact_first_guard_and_completed_rollback() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE cluster_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER); INSERT INTO cluster_meta VALUES(1,82); CREATE TABLE application(value INTEGER);").unwrap();
+        conn.execute_batch(Error::SOURCE_LAYOUT_GUARD_DDL).unwrap();
+        // A matching layout inserts zero guard rows and can commit application work.
+        let txn = conn.transaction().unwrap();
+        assert_eq!(
+            txn.execute(Error::SOURCE_LAYOUT_GUARD_SQL, [82]).unwrap(),
+            0
+        );
+        txn.execute("INSERT INTO application VALUES(1)", [])
+            .unwrap();
+        txn.commit().unwrap();
+        let txn = conn.transaction().unwrap();
+        let failure = txn
+            .execute(Error::SOURCE_LAYOUT_GUARD_SQL, [81])
+            .unwrap_err();
+        assert!(is_source_layout_check_failure(&failure));
+        let exact =
+            is_exact_source_layout_guard(0, Error::SOURCE_LAYOUT_GUARD_SQL, &[Param::Integer(81)]);
+        let original = Error::Transaction(Error::from(failure).to_string().into());
+        let result = source_layout_rollback_result(original, exact, txn.rollback().is_ok());
+        assert!(result.is_source_layout_guard_rollback());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM application", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sharing_source_dispatch_guard",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        for (index, sql, params) in [
+            (1, Error::SOURCE_LAYOUT_GUARD_SQL, vec![Param::Integer(81)]),
+            (0, "SELECT 1", vec![Param::Integer(81)]),
+            (0, Error::SOURCE_LAYOUT_GUARD_SQL, vec![Param::Integer(80)]),
+            (
+                0,
+                Error::SOURCE_LAYOUT_GUARD_SQL,
+                vec![Param::Text("81".into())],
+            ),
+            (
+                0,
+                Error::SOURCE_LAYOUT_GUARD_SQL,
+                vec![Param::Integer(81), Param::Integer(82)],
+            ),
+        ] {
+            assert!(!is_exact_source_layout_guard(index, sql, &params));
+        }
+        assert!(
+            !source_layout_rollback_result(Error::Transaction("original".into()), true, false)
+                .is_source_layout_guard_rollback()
+        );
+        assert!(
+            !source_layout_rollback_result(Error::Transaction("original".into()), false, true)
+                .is_source_layout_guard_rollback()
+        );
+        conn.execute_batch(
+            "CREATE TABLE other(value INTEGER CONSTRAINT other_check CHECK(value=1));",
+        )
+        .unwrap();
+        let other = conn.execute("INSERT INTO other VALUES(0)", []).unwrap_err();
+        assert!(!is_source_layout_check_failure(&other));
+    }
 }

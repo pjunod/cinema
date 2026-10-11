@@ -17,8 +17,8 @@ const PACKAGE_COLS: &str = "id, request_id, user_id, file_id, node_id, source_pa
     effective_rate_control, target_height, audio_index, audio_offset_ms, \
     output_width, output_height, subtitle_index, subtitle_language, subtitle_mode, state, phase, progress_millis, estimated_bytes, \
     reserved_bytes, actual_bytes, duration_ms, error_code, error_message, created_at, updated_at, \
-    last_access_at, expires_at";
-const PACKAGE_COL_COUNT: usize = 34;
+    last_access_at, expires_at, audio_recipe";
+const PACKAGE_COL_COUNT: usize = 35;
 
 fn package_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OfflinePackage> {
     Ok(OfflinePackage {
@@ -56,6 +56,7 @@ fn package_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OfflinePackage>
         updated_at: row.get(31)?,
         last_access_at: row.get(32)?,
         expires_at: row.get(33)?,
+        audio_recipe: row.get(34)?,
     })
 }
 
@@ -138,6 +139,13 @@ impl OfflinePackageStore for SqliteStore {
         max_bytes_per_user: i64,
         max_bytes_global: i64,
     ) -> Result<OfflineCreateOutcome, StoreError> {
+        if package.audio_recipe.as_deref().is_some_and(|snapshot| {
+            crate::playback::audio::AudioDelivery::parse_encoded_snapshot(snapshot).is_none()
+        }) {
+            return Err(StoreError::Database(
+                "invalid offline audio recipe".to_owned(),
+            ));
+        }
         if crate::transcode::EffectiveRateControl::parse_snapshot(&package.effective_rate_control)
             .is_none()
         {
@@ -217,10 +225,10 @@ impl OfflinePackageStore for SqliteStore {
                     source_size, source_mtime, effective_rate_control, target_height, audio_index,
                     audio_offset_ms, output_width, output_height, subtitle_index,
                     subtitle_language, subtitle_mode, state, phase,
-                    estimated_bytes, reserved_bytes, expires_at
+                    estimated_bytes, reserved_bytes, expires_at, audio_recipe
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                    ?14, ?15, ?16, ?17, 'queued', 'waiting_for_encoder', ?18, ?19, ?20
+                    ?14, ?15, ?16, ?17, 'queued', 'waiting_for_encoder', ?18, ?19, ?20, ?21
                  )",
                 params![
                     requested.id,
@@ -243,6 +251,7 @@ impl OfflinePackageStore for SqliteStore {
                     requested.estimated_bytes,
                     requested.reserved_bytes,
                     requested.expires_at,
+                    requested.audio_recipe,
                 ],
             )?;
             let created = tx.query_row(
@@ -1122,6 +1131,7 @@ mod tests {
 
     fn request_for(request_id: &str, user_id: i64) -> NewOfflinePackage {
         NewOfflinePackage {
+            audio_recipe: None,
             id: format!("pkg-{request_id}"),
             request_id: request_id.to_owned(),
             user_id,

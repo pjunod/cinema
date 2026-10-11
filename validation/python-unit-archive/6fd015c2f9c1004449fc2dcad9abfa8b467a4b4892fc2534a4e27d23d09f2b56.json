@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/k08-partial-upstream-evidence",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_hiqlite_patch_ledger.py",
+  "test_file_sha256": "8f1f411a12dd3e418238ebd8b0d68926c1600791177e10cd3f38a708c3d61c41",
+  "test_ids": [
+    "test_hiqlite_patch_ledger.HiqlitePatchLedgerCase.test_each_prose_patch_has_one_owned_ledger_row",
+    "test_hiqlite_patch_ledger.HiqlitePatchLedgerCase.test_the_removal_condition_can_be_met"
+  ],
+  "command": "Two SEPARATE original root invocations, not one grouped command:\npython3 -m unittest tests.operations.test_hiqlite_patch_ledger.HiqlitePatchLedgerCase.test_each_prose_patch_has_one_owned_ledger_row\npython3 -m unittest tests.operations.test_hiqlite_patch_ledger.HiqlitePatchLedgerCase.test_the_removal_condition_can_be_met",
+  "output": "Root-attributed original tool-result summary, not reconstructed raw log: tool7aaab9 exit0 one unittest PASS/0.001s; tool997a9f exit0 one unittest PASS/0.001s. These are two separate original invocations on staged source3fc5d18ad6ca7ed203cd45b3f8e6f861b048a0cd; count2 below is their combined per-ID success count, not a fabricated grouped runner result. Original raw output is unavailable after compaction; root directly verified both successes before compaction. No replay or current-commit execution is claimed.",
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 2
+  }
+}

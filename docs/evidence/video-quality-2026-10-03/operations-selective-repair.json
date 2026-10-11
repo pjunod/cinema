@@ -1,0 +1,15 @@
+{
+  "command": "make operations-check",
+  "methods_run": 614,
+  "passing_methods_retained": 604,
+  "failed_methods": 10,
+  "failed_subtests_and_errors": 13,
+  "inventory_correction": "native content qualification adds one explicitly reasoned ignored test; separate native execution passed",
+  "inventory_retry_passed": 1,
+  "linux_environment_retries_pending": 9,
+  "environment_causes": [
+    "local sandbox denies loopback bind and pgrep",
+    "macOS lacks GNU timeout required for the Linux janitor bound"
+  ],
+  "no_production_change": true
+}

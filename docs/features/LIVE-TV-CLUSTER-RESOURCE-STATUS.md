@@ -20,7 +20,7 @@ The user's existing checkouts are not build or edit workspaces for this work.
 | Guide, Activity and reminders | Implemented | Source-refresh lease, persistent guide copies and local worker Activity are integrated; validation pending. |
 | Developer enablement and clients | Implemented | Advisory Developer control and protocol 5 intents wired on web, Apple and Android. iOS/tvOS and Android compilation passed. |
 | One adversarial code review | Complete | Five findings corrected and verified in the same independent review pass; approved for final lane. |
-| Fast lane and merge | Live result | [PR #537 checks and merge state](http://192.168.4.7:3000/noirr/plurx/pulls/537) are the authoritative result; one unit/fast-lane set, then failures only. |
+| Fast lane and merge | Live result | [PR #537 checks and merge state](http://forge.lan:3000/noirr/plurx/pulls/537) are the authoritative result; one unit/fast-lane set, then failures only. |
 
 ## Current-main integration
 

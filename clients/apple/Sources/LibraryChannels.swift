@@ -336,6 +336,7 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var itemObserver: AVPlayerItemObserver?
     private var itemEventTask: Task<Void, Never>?
     private let remoteCommands = LiveRemoteCommands()
+    private let displayWake = PlaybackDisplayWake()
     private let audioSessionObserver = PlaybackAudioSessionObserver()
     private var progressObserver: Any?
     private let playbackControl = PlaybackControlSession()
@@ -437,16 +438,17 @@ final class LibraryChannelPlayerController: ObservableObject {
             observeItem(item, channel: channel, sequence: expected)
             observeProgress(item, sequence: expected)
             player.play()
+            displayWake.track(player, hasVideo: true)
             remoteCommands.start(
                 title: title ?? channel.name,
                 playing: true,
                 play: { [weak self] in
-                    guard let self, self.paused else { return }
-                    Task { await self.togglePause() }
+                    guard let self else { return }
+                    Task { await self.setPaused(false) }
                 },
                 pause: { [weak self] in
-                    guard let self, !self.paused else { return }
-                    Task { await self.togglePause() }
+                    guard let self else { return }
+                    Task { await self.setPaused(true) }
                 },
                 toggle: { [weak self] in
                     guard let self else { return }
@@ -515,8 +517,21 @@ final class LibraryChannelPlayerController: ObservableObject {
     }
 
     func togglePause() async {
+        await setPaused(!(paused || systemPaused))
+    }
+
+    /// The viewer's transport press. iOS does not promise an `.ended` for
+    /// every `.began`, so under a system hold the press itself ends it, and
+    /// takes the audio session back when it is a Play.
+    func setPaused(_ pause: Bool) async {
         guard let channel = watching else { return }
-        if paused {
+        let held = systemPaused
+        if held { systemPaused = false }
+        guard pause != paused || held else { return }
+        if !pause {
+            #if os(iOS)
+            if held { try? AVAudioSession.sharedInstance().setActive(true) }
+            #endif
             if let resolved,
                serverNowMs() >= resolved.endsAtMs {
                 await tune(channel)
@@ -605,6 +620,8 @@ final class LibraryChannelPlayerController: ObservableObject {
             player.pause()
             message = "Paused — audio route disconnected"
             playbackControl.playerChanged()
+        case .interruption(.ignore):
+            break
         }
     }
 
@@ -689,6 +706,14 @@ final class LibraryChannelPlayerController: ObservableObject {
                     self.handleItemFailure(item, sequence: sequence)
                 case .failedToPlayToEnd(let error):
                     self.handleItemFailure(item, sequence: sequence, notificationError: error)
+                case .timeControl(.playing, _) where self.systemPaused:
+                    // AVKit's own Play button reaches the player directly. Film
+                    // playing is the hold over even when iOS never says so;
+                    // left set, the reporter would keep the producer on Hold.
+                    self.systemPaused = false
+                    self.paused = false
+                    self.message = "Following live · seeking and watch history are off"
+                    self.playbackControl.playerChanged()
                 case .playbackStalled, .newErrorLogEntry, .timeControl,
                      .interruption, .routeLost, .status:
                     break
@@ -949,7 +974,7 @@ struct LibraryChannelsView: View {
                     #if os(tvOS)
                     Button("Fullscreen") { fullscreen = true }
                     #endif
-                    Button(controller.paused ? "Resume live" : "Pause") { Task { await controller.togglePause() } }
+                    Button(controller.paused || controller.systemPaused ? "Resume live" : "Pause") { Task { await controller.togglePause() } }
                     Button("Watch from start") {
                         returnChannel = channel
                         personalPlayback = PlayContext(
@@ -983,7 +1008,7 @@ struct LibraryChannelsView: View {
             VStack(alignment: .trailing, spacing: 12) {
                 Button("Return to channels") { fullscreen = false }
                 if controller.watching != nil {
-                    Button(controller.paused ? "Resume live" : "Pause") {
+                    Button(controller.paused || controller.systemPaused ? "Resume live" : "Pause") {
                         Task { await controller.togglePause() }
                     }
                     Button("Stop") {

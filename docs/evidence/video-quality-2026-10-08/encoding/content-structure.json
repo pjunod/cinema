@@ -1,0 +1,31 @@
+{
+  "source_revision": "1088d7529401297bddced74bfa11c166457468d8",
+  "method": "source inspection, not runtime proof",
+  "foreground_analysis": {
+    "analysis_callers": [
+      "crates/plurxd/src/transcode/manager/produce.rs:1124",
+      "crates/plurxd/src/transcode/manager/produce.rs:1460"
+    ],
+    "metadata_only_lookup": "crates/plurxd/src/transcode/content_encoding.rs:251",
+    "conclusion": "Only speculative and offline durable producers invoke sample analysis. Request/cache lookups inspect persisted reports; they do not probe, hash or score media."
+  },
+  "immutable_package": {
+    "reference": "crates/plurxd/src/transcode/manager/produce.rs:1448",
+    "conclusion": "The offline worker ignores a newly measured recommendation for its accepted package; the immutable accepted rate-control snapshot is retained."
+  },
+  "metadata_fallback": {
+    "reference": "crates/plurxd/src/transcode/content_encoding.rs:562",
+    "original_public_sources": [
+      "animation",
+      "live-action"
+    ],
+    "observed_missing": [
+      "color_primaries",
+      "color_transfer",
+      "color_space",
+      "color_range"
+    ],
+    "expected_outcome": "source_outside_sdr_sample_contract",
+    "decision": "Retain ordinary baseline recipes; do not infer mastering or normalize ambiguous originals into an eligibility success."
+  }
+}

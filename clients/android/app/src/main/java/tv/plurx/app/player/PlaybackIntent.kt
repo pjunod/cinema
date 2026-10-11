@@ -1,6 +1,9 @@
 package tv.plurx.app.player
 
+import tv.plurx.app.data.CreateSessionReq
+import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.PlaybackQuality
+import tv.plurx.app.data.PresentationTarget
 import java.util.UUID
 import kotlin.math.abs
 
@@ -27,6 +30,14 @@ class PlaybackIntent(
     /** The newest quality the viewer asked for, even before its plan exists. */
     var desiredQuality: PlaybackQuality = initialQuality
         private set
+    /** A failed optional choice preserves the incumbent's standing wire recipe. */
+    var retainedControlQuality: QualitySelection? = null
+        private set
+    private var retainedExecutionQuality: PlaybackQuality? = null
+
+    @Synchronized
+    fun qualityForMedia(): PlaybackQuality = retainedExecutionQuality ?: desiredQuality
+
     /** Viewer transport intent survives plan/controller replacement too. */
     var playbackRequested: Boolean = true
         private set
@@ -67,6 +78,34 @@ class PlaybackIntent(
             tv.plurx.app.data.MediaIntentSelection(selection.quality, selection.codec,
                 selection.dynamicRange, selection.audioTrack, selection.audioOffsetMs, selection.subtitle))
     }
+
+    /** Manual media ownership is negotiated independently of Auto policy. */
+    @Synchronized
+    internal fun bindSessionIntent(
+        body: CreateSessionReq,
+        caps: DeviceCaps,
+        serverProtocol: String?,
+        planProtocol: String?,
+        displayAwareAuto: Boolean,
+        selection: ClientSelection,
+        presentationTarget: PresentationTarget?,
+    ): CreateSessionReq {
+        if (serverProtocol != "route-v1" || planProtocol != "route-v1") return body
+        return body.copy(
+            caps = if (displayAwareAuto) caps.copy(
+                display = caps.display.copy(presentation_target = presentationTarget),
+            ) else caps,
+            intent = mediaIntent(selection),
+            height = if (displayAwareAuto && desiredQuality == PlaybackQuality.Auto)
+                automaticCandidateId?.let {
+                    automaticCandidateHeight?.takeIf { height ->
+                        height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
+                    }
+                } ?: if (automaticCandidateId == null) body.height else null
+            else body.height,
+        )
+    }
+
     private var presentedFrames = 0L
     private var lastAudioPositionMs: Long? = null
     private var audioObservedAtMs = 0L
@@ -86,6 +125,7 @@ class PlaybackIntent(
         val sequence: Long,
         val quality: PlaybackQuality,
         val tappedAtMs: Long,
+        val incumbentQuality: PlaybackQuality,
     )
 
     var pendingQualityChange: PendingQualityChange? = null
@@ -95,6 +135,8 @@ class PlaybackIntent(
     @Synchronized
     fun adoptQuality(quality: PlaybackQuality) {
         desiredQuality = quality
+        retainedControlQuality = null
+        retainedExecutionQuality = null
     }
 
     /**
@@ -116,8 +158,11 @@ class PlaybackIntent(
         quality: PlaybackQuality,
         tappedAtMs: Long = monotonicNowMs(),
     ): PendingQualityChange {
+        val incumbentQuality = qualityForMedia()
         desiredQuality = quality
-        return PendingQualityChange(++nextSequence, quality, tappedAtMs)
+        retainedControlQuality = null
+        retainedExecutionQuality = null
+        return PendingQualityChange(++nextSequence, quality, tappedAtMs, incumbentQuality)
             .also { pendingQualityChange = it }
     }
 
@@ -132,6 +177,16 @@ class PlaybackIntent(
         if (controlSequence != null && controlSequence > 0L) {
             controlSequenceFloor = maxOf(controlSequenceFloor ?: 0L, controlSequence)
         }
+        return true
+    }
+
+    /** Settle only the exact failed request; the saved preference remains intact. */
+    @Synchronized
+    fun retainFailedQuality(pending: PendingQualityChange, incumbent: QualitySelection): Boolean {
+        if (!retainQualityChange(pending, null)) return false
+        retainedControlQuality = incumbent
+        retainedExecutionQuality = pending.incumbentQuality
+        pendingQualityChange = null
         return true
     }
 
@@ -506,7 +561,7 @@ internal class PlaybackControlBootstrapFence {
 }
 
 /** A later transport/track command carries an outstanding plan change with it. */
-internal class PlaybackPlanReplacement(private val activeQuality: PlaybackQuality) {
+internal class PlaybackPlanReplacement(private var activeQuality: PlaybackQuality) {
     private var reload: ((Long, PlaybackQuality) -> Unit)? = null
     private var publishedGeneration: Long? = null
 
@@ -514,9 +569,12 @@ internal class PlaybackPlanReplacement(private val activeQuality: PlaybackQualit
         reload = callback
     }
 
+    /** A retained source may present a new quality without replacing its plan. */
+    fun presented(quality: PlaybackQuality) { activeQuality = quality }
+
     fun route(intent: PlaybackIntent, force: Boolean = false, retry: Boolean = false): Boolean {
         val pending = intent.pendingSeek ?: return false
-        val desired = intent.desiredQuality
+        val desired = intent.qualityForMedia()
         if (!force && desired == activeQuality) return false
         val callback = reload ?: return false
         if (retry || publishedGeneration != pending.sequence) {
@@ -530,6 +588,23 @@ internal class PlaybackPlanReplacement(private val activeQuality: PlaybackQualit
         reload = null
     }
 }
+
+/** A copied progressive or HLS stream may begin at a preceding keyframe.
+ * Keep first-frame, generation, selection and later-output evidence together
+ * before allowing the film clock to prove arrival at the requested target. */
+internal fun copyPrerollHasRenderedProgress(
+    transport: PlaybackMediaTransport?,
+    pending: PlaybackIntent.PendingSeek,
+    firstFrame: Triple<Long, Long, Int>,
+    foreground: Boolean,
+    playing: Boolean,
+    selectionReady: Boolean,
+    renderedOutputCount: Int,
+): Boolean =
+    (transport == PlaybackMediaTransport.ProgressiveRemux || transport == PlaybackMediaTransport.HlsCopy) &&
+        firstFrame.first == pending.sequence &&
+        firstFrame.second in (pending.targetMs - 2_000L)..pending.targetMs &&
+        foreground && playing && selectionReady && renderedOutputCount > firstFrame.third
 
 /**
  * Deadline for a requested destination, independent of the departing clock.

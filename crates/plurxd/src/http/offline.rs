@@ -392,7 +392,11 @@ pub async fn create(
     let output_size = plurx_core::transcode::output_size(&file, rung.height);
     let effective_rate_control = state
         .transcode
-        .effective_rate_control_for_new_offline_package(&file)
+        .effective_rate_control_for_new_offline_package(
+            &file,
+            rung.height,
+            subtitle_mode == "burned",
+        )
         .await
         .map_err(|message| {
             typed(
@@ -402,6 +406,24 @@ pub async fn create(
             )
         })?
         .snapshot_value();
+    // Portable encoded packages retain AAC/48 kHz and the existing stereo
+    // default. No device route claim is inferred from a download request.
+    let selected_audio = request
+        .audio_index
+        .and_then(|index| {
+            file.audio_streams
+                .iter()
+                .find(|stream| stream.index == index)
+        })
+        .or_else(|| file.audio_streams.first());
+    let audio_delivery = plurx_core::playback::audio::resolve_audio(
+        selected_audio,
+        &plurx_core::playback::DeviceProfile::from_caps_v2(
+            &plurx_core::playback::DeviceCaps::default(),
+        ),
+        plurx_core::playback::audio::AudioRoute::EncodedVod,
+        file.audio_offset_ms,
+    );
     let new = NewOfflinePackage {
         id: uuid::Uuid::new_v4().to_string(),
         request_id: request.request_id,
@@ -412,6 +434,9 @@ pub async fn create(
         source_size: file.size,
         source_mtime: file.mtime,
         effective_rate_control,
+        audio_recipe: Some(
+            serde_json::to_string(&audio_delivery).expect("audio snapshot serialization"),
+        ),
         target_height: rung.height,
         output_width: output_size.map(|(width, _)| width),
         output_height: output_size.map(|(_, height)| height),
@@ -1872,6 +1897,7 @@ mod tests {
     ) -> OfflinePackage {
         let (source_path, source_size, source_mtime) = source_snapshot;
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: id.into(),
             request_id: format!("request-{id}"),
             user_id: fixture.user.id,

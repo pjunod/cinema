@@ -105,7 +105,12 @@ data class LiveTvGridCell(
     val clipped: Boolean,
 )
 
-data class LiveTvGridRow(val channel: LiveTvChannel, val cells: List<LiveTvGridCell>)
+data class LiveTvGridRow(
+    val channel: LiveTvChannel,
+    val cells: List<LiveTvGridCell>,
+    /** The station's logo from the same guide the cells came from; null draws the callsign. */
+    val logo: String? = null,
+)
 
 data class LiveTvGridLayout(
     val rows: List<LiveTvGridRow>,
@@ -183,6 +188,37 @@ object LiveTvGuideReducer {
     fun channel(guide: LiveTvGuide?, channelId: String): LiveTvGuideChannel? =
         guide?.channels?.firstOrNull { it.id == channelId }
 
+    const val STATION_LOGO_MAX_LENGTH: Int = 512
+    private val STATION_LOGO_AUTHORITY =
+        Regex("""(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+])(?::([0-9]{1,5}))?""")
+
+    /**
+     * The station's logo address, or null for the callsign fallback.
+     *
+     * A transcription of the web's `stationLogoUrl`, checked against
+     * `tests/playback/live-tv-guide-cases.json` `station_logo`, whose `rule`
+     * is the specification. The station is matched by lineup id and the
+     * guide's own HDHomeRun artwork is the only source. The rule is textual on
+     * purpose: this is a third-party address inside a client that holds a
+     * bearer token, and "whatever `java.net.URI` tolerates" is not the set the
+     * other two clients accept. The accepted string is returned with its
+     * scheme spelled `https://` and otherwise verbatim — Coil's fetcher
+     * matches the scheme case-sensitively.
+     */
+    fun stationLogoUrl(guide: LiveTvGuide?, channelId: String): String? {
+        val value = channel(guide, channelId)?.image_url ?: return null
+        if (value.isEmpty() || value.length > STATION_LOGO_MAX_LENGTH) return null
+        if (value.any { it.code < 0x21 || it.code > 0x7e }) return null
+        if (value.length < 8 || !value.substring(0, 8).equals("https://", ignoreCase = true)) return null
+        val rest = value.substring(8)
+        val cut = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
+        val authority = STATION_LOGO_AUTHORITY.matchEntire(if (cut == -1) rest else rest.substring(0, cut))
+            ?: return null
+        val port = authority.groupValues[1]
+        if (port.isNotEmpty() && port.toInt() > 65535) return null
+        return "https://$rest"
+    }
+
     /**
      * The start instant belongs to the programme that starts; the end instant
      * does not. Without that rule a viewer at exactly 8:30 sees two programmes
@@ -246,7 +282,7 @@ object LiveTvGuideReducer {
                 // ceiling a feed of one-second programmes would compose tens of
                 // thousands of buttons in one pass and hang the app.
             }.take(MAX_CELLS_PER_ROW)
-            LiveTvGridRow(entry, cells)
+            LiveTvGridRow(entry, cells, stationLogoUrl(guide, entry.id))
         }
         return LiveTvGridLayout(
             rows = rows,

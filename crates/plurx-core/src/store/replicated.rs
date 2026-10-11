@@ -158,6 +158,125 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Receiver and all grants revoke in the same boundary.
+    SqliteTransactionSite {
+        module: "remote.rs",
+        method: "revoke_remote_receiver",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // Cleanup bounds and reference validity fence transport admission.
+    SqliteTransactionSite {
+        module: "invitations.rs",
+        method: "start_invitation_transport",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Validate a retained reference before queueing and clearing it together.
+    SqliteTransactionSite {
+        module: "invitations.rs",
+        method: "queue_invitation_reference",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Reject invalid references before queueing and clearing consent state.
+    SqliteTransactionSite {
+        module: "invitations.rs",
+        method: "queue_invitation_cleanup",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Event and cooldown writes follow the conditional admission result.
+    SqliteTransactionSite {
+        module: "invitations.rs",
+        method: "admit_invitation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    // Capsule shape and rows must share one read snapshot; no authority is
+    // inferred from missing optional objects.
+    SqliteTransactionSite {
+        module: "sharing.rs",
+        method: "sharing_purpose_archive_rows",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
+    },
+    SqliteTransactionSite {
+        module: "sharing.rs",
+        method: "sharing_revision_key_rows",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
+    },
+    SqliteTransactionSite {
+        module: "sharing.rs",
+        method: "sharing_file_locator_key_rows",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
+    },
+    // Exact guarded SQL is supplied by the sharing owner and executed as one
+    // batch; returned counts never branch into a second authority write here.
+    SqliteTransactionSite {
+        module: "sharing.rs",
+        method: "sharing_txn",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    // Explicit switch and fresh generation publish together; no observation
+    // of readiness or caller data branches inside this fixed write batch.
+    SqliteTransactionSite {
+        module: "jellyfin_login.rs",
+        method: "set_jellyfin_compatibility",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // Expired non-active rows and bounded conditional admission are fixed SQL.
+    SqliteTransactionSite {
+        module: "jellyfin_play.rs",
+        method: "create_jellyfin_play",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // Activation binds the native reference only while the exact pending row
+    // remains, and supersedes the scope's older rows only when that
+    // conditional update wrote one; the supersede matches this activation's
+    // nonce. The replicated twin runs both in one transaction.
+    SqliteTransactionSite {
+        module: "jellyfin_play.rs",
+        method: "activate_jellyfin_play",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    // The password-matched mint admits both replacement writes; a collision
+    // or later statement failure rolls the whole scoped replacement back.
+    SqliteTransactionSite {
+        module: "jellyfin_login.rs",
+        method: "replace_jellyfin_login_inner",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    // One read expands the missing page IDs into conditional inserts; read-back
+    // returns the durable winners. The replicated twin batches missing inserts
+    // in one Raft entry and consistently reads the winning mappings afterward.
+    SqliteTransactionSite {
+        module: "jellyfin_identity.rs",
+        method: "jellyfin_entity_ids",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
     SqliteTransactionSite {
         module: "background_jobs.rs",
         method: "queue_transaction",
@@ -220,6 +339,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadExpandWrite,
+    },
+    SqliteTransactionSite {
+        module: "library.rs",
+        method: "delete_library",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
     },
     SqliteTransactionSite {
         module: "library_channels.rs",
@@ -311,13 +437,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
-    SqliteTransactionSite {
-        module: "watch.rs",
-        method: "set_watched_tree",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadExpandWrite,
-    },
+    // Manual tree marks now use one shared atomic statement plus revision triggers.
     SqliteTransactionSite {
         module: "media.rs",
         method: "delete_files",
@@ -351,7 +471,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         method: "invalidate_cache_entry",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
+        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "cache.rs",
@@ -529,7 +649,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "claim_analysis_request_compatible",
+        method: "claim_analysis_request_for_capacity",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -611,6 +731,18 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::WriteReadBack,
     },
+    // Prune, then the fenced attribution insert; a zero count means the
+    // observation did not apply and nothing is returned. Only an applied
+    // observation reads the scope's memory back. The replicated twin commits
+    // the same two writes in one `txn`, branches on the insert's count, and
+    // issues the read as a separate consistent read.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "observe_candidate_recovery",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
     SqliteTransactionSite {
         module: "sessions.rs",
         method: "claim_media_session_request",
@@ -634,7 +766,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "sessions.rs",
-        method: "activate_media_session",
+        method: "activate_with_authority",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -711,7 +843,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "sessions.rs",
-        method: "renew_media_sessions",
+        method: "renew_with_authority",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
@@ -749,13 +881,34 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         method: "maintain_media_sessions",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
+        shape: TransactionShape::ReadBranchWrite,
     },
+    // Continuous quality: prune superseded settled receipts, insert this one
+    // `ON CONFLICT DO NOTHING`, then read the winning receipt back.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "request_quality_cancellation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
+    },
+    // Fenced settle, then read whether the receipt is settled for this owner.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "settle_quality_cancellation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
+    },
+    // One migration step: its DDL, the foreign-key integrity read that
+    // decides whether it may commit, and the `user_version` stamp, in one
+    // transaction. `migrate` itself no longer opens one; it calls this per
+    // step, so the marker can never commit apart from the shape it names.
     SqliteTransactionSite {
         module: "mod.rs",
-        method: "migrate",
+        method: "apply_migration_step",
         is_async: false,
-        mechanism: TransactionMechanism::RawBeginBatch,
+        mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
@@ -1004,6 +1157,21 @@ mod tests {
         ),
         ("dvr.rs", include_str!("sqlite/dvr.rs")),
         ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
+        ("remote.rs", include_str!("sqlite/remote.rs")),
+        ("invitations.rs", include_str!("sqlite/invitations.rs")),
+        (
+            "jellyfin_identity.rs",
+            include_str!("sqlite/jellyfin_identity.rs"),
+        ),
+        (
+            "jellyfin_catalog.rs",
+            include_str!("sqlite/jellyfin_catalog.rs"),
+        ),
+        ("jellyfin_play.rs", include_str!("sqlite/jellyfin_play.rs")),
+        (
+            "jellyfin_login.rs",
+            include_str!("sqlite/jellyfin_login.rs"),
+        ),
         ("library.rs", include_str!("sqlite/library.rs")),
         (
             "library_channels.rs",
@@ -1026,6 +1194,7 @@ mod tests {
         ("reading.rs", include_str!("sqlite/reading.rs")),
         ("sessions.rs", include_str!("sqlite/sessions.rs")),
         ("shared_cache.rs", include_str!("sqlite/shared_cache.rs")),
+        ("sharing.rs", include_str!("sqlite/sharing.rs")),
         ("telemetry.rs", include_str!("sqlite/telemetry.rs")),
         (
             "timeline_annotations.rs",
@@ -1052,14 +1221,20 @@ mod tests {
     fn method_source(site: &SqliteTransactionSite) -> &'static str {
         let source = source_for(site.module);
         let keyword = if site.is_async { "async fn" } else { "fn" };
-        let declaration = format!("    {keyword} {}", site.method);
+        let declaration = format!("{keyword} {}", site.method);
         let start = source
             .match_indices(&declaration)
             .find_map(|(start, _)| {
-                matches!(
-                    source.as_bytes().get(start + declaration.len()),
-                    Some(b'(' | b'<')
-                )
+                (source[..start]
+                    .rsplit('\n')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                    && matches!(
+                        source.as_bytes().get(start + declaration.len()),
+                        Some(b'(' | b'<')
+                    ))
                 .then_some(start)
             })
             .unwrap_or_else(|| {
@@ -1069,9 +1244,10 @@ mod tests {
                 )
             });
         let tail = &source[start + declaration.len()..];
-        let next_async = tail.find("\n    async fn ");
-        let next_sync = tail.find("\n    fn ");
-        let end = [next_async, next_sync]
+        // Classify the actual boundary owner, including the shared free
+        // activation/renewal helpers, rather than their delegating methods.
+        let end = ["\n    async fn ", "\n    fn ", "\nasync fn ", "\nfn "]
+            .map(|declaration| tail.find(declaration))
             .into_iter()
             .flatten()
             .min()
@@ -1201,7 +1377,26 @@ mod tests {
         // links together so a failed delete remains retryable.
         // Reconciliation adds one atomic successor-insert / predecessor-retire
         // batch. Its SQL predicates own all branching, as in the replicated twin.
-        assert_eq!(methods.len(), 96);
+        //
+        // 97 with authenticated candidate recovery: `observe_candidate_recovery`
+        // prunes and inserts in one boundary and returns the scope's memory
+        // only when the fenced insert applied. The migration boundary moved
+        // from `migrate` into `apply_migration_step` without changing the
+        // count: one boundary per step, now stamping `user_version` inside it.
+
+        // Jellyfin play activation binds and conditionally supersedes in one
+        // boundary that branches on the binding's rows affected.
+        // Merged with main's candidate recovery: 96 + 4 + 1.
+        //
+        // 103 with continuous quality's two `sessions.rs` boundaries:
+        // `request_quality_cancellation` prunes, inserts and reads the winning
+        // receipt back, and `settle_quality_cancellation` settles and reads
+        // whether the receipt is settled for this owner.
+        // Sharing adds three coherent capsule read snapshots and one verbatim
+        // guarded transaction, each measured in sqlite/sharing.rs.
+        // Cinema adds one paired receiver/grant revoke and four guarded
+        // invitation admission/cleanup boundaries, registered above.
+        assert_eq!(methods.len(), 113);
     }
 
     #[test]

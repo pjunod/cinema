@@ -1,0 +1,37 @@
+{
+  "scope": "retained sharp failure independent decoder in-loop filter ablation; no encode",
+  "argv": [
+    "/opt/homebrew/Cellar/ffmpeg/9.0.1_1/bin/ffmpeg",
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-threads",
+    "1",
+    "-skip_loop_filter",
+    "all",
+    "-i",
+    "/owned/retained-sharp-capture/encoded.mp4",
+    "-frames:v",
+    "1",
+    "-pix_fmt",
+    "yuv420p10le",
+    "-f",
+    "rawvideo",
+    "/owned/hdr-analysis/decoded-no-loopfilter.yuv"
+  ],
+  "seconds": 0.062492166995070875,
+  "exit": 0,
+  "stderr": "",
+  "tool_sha256": "9f5ddd4f8b36eb07b0c5d60ab6ea1e618bedd70bc45feab82b4dc23be1596ad1",
+  "version": "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "maximum": 39,
+  "mean": 0.40218846450617285,
+  "at_original_max": 138,
+  "raw_sha256": "7f588a6811e200059d951b6738f47a4d36666cd5634a1ef477460098278b3134",
+  "receipt_provenance": {
+    "kind": "sanitized derivative of locally retained execution receipt",
+    "raw_receipt_sha256": "3f5474d6260930932e3bf7f8ff5ff4ec36e3e550be8f7bfedd8b0cfd588d62ef",
+    "sanitization": "private source names/paths replaced, media title tags omitted, infrastructure host normalized; numerical measurements unchanged"
+  }
+}

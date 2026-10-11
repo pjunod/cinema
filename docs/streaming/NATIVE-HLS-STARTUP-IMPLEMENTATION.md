@@ -52,7 +52,7 @@ disable Dolby Vision; weaken source identity, authorization, serving fences
 or lease checks; enlarge the server's five-second publication deadline;
 change established-playback recovery policy; create a second request registry;
 or claim that disk spin-up caused this incident. The storage trigger remains
-unproved. Do not restart or deploy to nynuc while implementing this contract.
+unproved. Do not restart or deploy to media1 while implementing this contract.
 
 ## 2. Verified starting points — inspect these seams before editing
 
@@ -539,7 +539,7 @@ any added document in the same commit. Rebase/integrate current main and
 rerun checks against that exact candidate before claiming merge readiness.
 Follow the effort and promotion gates in AGENTS.md; a fast gate alone is
 not release qualification. Deliver a reviewable patch/PR and results; do not
-silently restart or deploy to nynuc as a side effect of finishing the code.
+silently restart or deploy to media1 as a side effect of finishing the code.
 
 ## 9. Review disposition and evidence limits
 

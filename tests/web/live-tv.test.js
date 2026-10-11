@@ -75,7 +75,7 @@ function startupHarness(options={}) {
      function liveTvMessage(message){messages.push(message);}
      function liveTvSelect(id){return watchLiveTv(LIVE_TV.channels.findIndex(channel=>channel.id===id));}
      function closeLiveTvStats(){} function liveTvCaptionTracks(){return [];}
-     function liveTvRefreshCaptionControls(){} function liveTvInPip(){return false;}
+     function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvInPip(){return false;}
      function liveTvTrackSlot(){}
      function liveTvShowHost(){document.getElementById('live-tv-host').hidden=false;}
      function liveTvSetMode(mode){document.getElementById('live-tv-host').dataset.mode=mode;}
@@ -88,6 +88,34 @@ function startupHarness(options={}) {
 }
 
 async function main() {
+  await test("station logos use the matching guide channel and reject unsafe artwork URLs", () => {
+    const state={guide:{channels:[
+      {id:"other",image_url:"https://images.example/other.png"},
+      {id:"one",image_url:"https://images.example/cbs6.png?size=large&theme=color",
+        programmes:[{image_url:"https://images.example/movie.jpg"}]},
+    ]}};
+    const esc=value=>String(value).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    const {url,markup}=new Function("LIVE_TV","esc","PlurxLiveTv",`${shipped("liveTvStationLogoUrl")}\n${shipped("liveTvStationLogo")}\nreturn {url:liveTvStationLogoUrl,markup:liveTvStationLogo};`)(state,esc,liveTv);
+    const channel={id:"one",guide_name:'CBS <6> "HD"'};
+    assert.equal(url(channel),"https://images.example/cbs6.png?size=large&theme=color");
+    assert.equal(url({id:"absent"}),null);
+    const html=markup(channel);
+    assert.match(html,/src="https:\/\/images.example\/cbs6.png\?size=large&amp;theme=color"/);
+    assert.match(html,/CBS &lt;6&gt; &quot;HD&quot;/);
+    assert.match(html,/referrerpolicy="no-referrer"/);
+    assert.doesNotMatch(html,/movie.jpg|other.png/);
+    for(const value of [undefined,null,"","not a URL","/local.png","//images.example/logo.png",
+      "http://images.example/logo.png","javascript:alert(1)","data:image/svg+xml,test",
+      "https://user:secret@images.example/logo.png","https://user@images.example/logo.png",
+      "https://images.example/"+"a".repeat(512)]){
+      state.guide.channels[1].image_url=value;
+      assert.equal(url(channel),null,String(value));
+      assert.doesNotMatch(markup(channel),/<img/);
+      assert.match(markup(channel),/lt-chip-fallback/);
+    }
+    state.guide=null;
+    assert.equal(url(channel),null,"cold or unavailable guide leaves the callsign");
+  });
   await test("live transport follows playback state instead of offering Play and Pause together", () => {
     const state={},lease={current:null},actions=[];
     const button={setAttribute(name,value){this[name]=value;}};
@@ -458,11 +486,12 @@ async function main() {
     const transport={dataset:{},innerHTML:"",value:"off",parentElement:{hidden:true}};
     const document={getElementById:id=>id==="live-tv-video"?{textTracks:tracks}
       :id==="live-tv-captions"?select:null,querySelectorAll:()=>[select,transport]};
-    const controls=new Function("document","esc",[
+    const controls=new Function("document","esc","localStorage",[
       shipped("liveTvCaptionTracks"),shipped("liveTvCaptionTrackLabel"),
+      shipped("liveTvSavedCaption"),shipped("liveTvSaveCaption"),shipped("liveTvApplySavedCaption"),
       shipped("liveTvRefreshCaptionControls"),shipped("liveTvSelectCaption"),
       "return {refresh:liveTvRefreshCaptionControls,select:liveTvSelectCaption};",
-    ].join("\n"))(document,String);
+    ].join("\n"))(document,String,memoryStorage());
     controls.refresh();
     assert.match(select.innerHTML,/English 708/);
     assert.match(select.innerHTML,/English CC1/);
@@ -488,6 +517,96 @@ async function main() {
     assert.equal(select.parentElement.hidden,true);
     assert.equal(transport.parentElement.hidden,true);
     assert.match(shipped("liveTvStatsTelemetry"),/selectedCaption\?liveTvCaptionTrackLabel/);
+  });
+
+  // The handlers live-tv.js wires to the media element: `addtrack` offers the
+  // saved pick, `change` only repaints the selector.
+  function captionControls(tracks, select, storage) {
+    const document={getElementById:id=>id==="live-tv-video"?{textTracks:tracks}:null,
+      querySelectorAll:()=>[select]};
+    assert.match(shell,/\nlet LIVE_TV_CAPTIONS_OFFERED=new WeakSet\(\);\n/);
+    return new Function("document","esc","localStorage",[
+      "let LIVE_TV_CAPTIONS_OFFERED=new WeakSet();",
+      shipped("liveTvCaptionTracks"),shipped("liveTvCaptionTrackLabel"),
+      shipped("liveTvSavedCaption"),shipped("liveTvSaveCaption"),shipped("liveTvApplySavedCaption"),
+      shipped("liveTvCaptionsAttaching"),shipped("liveTvCaptionTrackAdded"),
+      shipped("liveTvRefreshCaptionControls"),shipped("liveTvSelectCaption"),
+      "return {added:track=>liveTvCaptionTrackAdded({track}),changed:liveTvRefreshCaptionControls,",
+      "  attaching:liveTvCaptionsAttaching,select:liveTvSelectCaption};",
+    ].join("\n"))(document,String,storage);
+  }
+
+  await test("a captions track that appears later follows the viewer's saved pick", () => {
+    const tracks=[];
+    const caption=()=>({kind:"captions",label:"English CC1",language:"en",mode:"hidden"});
+    const select={dataset:{},innerHTML:"",value:"off",parentElement:{hidden:true}};
+    const controls=captionControls(tracks,select,memoryStorage());
+    // hls.js adds the track on its first cue, hidden. Nothing saved: it stays so.
+    controls.attaching();
+    tracks.push(caption());
+    controls.added(tracks[0]);
+    assert.equal(tracks[0].mode,"hidden");
+    assert.equal(select.value,"off");
+    controls.select("0");
+    assert.equal(tracks[0].mode,"showing");
+    // The next channel's player makes a fresh hidden track: the pick follows it.
+    controls.attaching();
+    tracks.splice(0,tracks.length,caption());
+    controls.added(tracks[0]);
+    assert.equal(tracks[0].mode,"showing");
+    assert.equal(select.value,"0");
+    // hls.js reuses the track the last attach left (disabled at detach) and
+    // announces it again: the new attach offers the pick to it too.
+    tracks[0].mode="disabled";
+    controls.attaching();
+    controls.added(tracks[0]);
+    assert.equal(tracks[0].mode,"showing");
+    // Turned off, the next track stays hidden.
+    controls.select("off");
+    controls.attaching();
+    tracks.splice(0,tracks.length,caption());
+    controls.added(tracks[0]);
+    assert.equal(tracks[0].mode,"hidden");
+    assert.equal(select.value,"off");
+  });
+
+  await test("captions turned off outside the selector stay off", () => {
+    const tracks=[{kind:"captions",label:"English CC1",language:"en",mode:"hidden"}];
+    const select={dataset:{},innerHTML:"",value:"off",parentElement:{hidden:true}};
+    const controls=captionControls(tracks,select,memoryStorage());
+    controls.attaching();
+    controls.added(tracks[0]);
+    controls.select("0");
+    assert.equal(tracks[0].mode,"showing");
+    // iOS Safari's fullscreen CC menu turns them off: the list fires `change`
+    // with nothing showing, and the saved pick must not turn them back on.
+    tracks[0].mode="disabled";
+    controls.changed();
+    assert.equal(tracks[0].mode,"disabled");
+    assert.equal(select.value,"off");
+    // A repeated announcement of the same track in the same attach is not a
+    // new track either.
+    controls.added(tracks[0]);
+    assert.equal(tracks[0].mode,"disabled");
+    // The wiring: only an added track is offered the pick, on the list (a new
+    // track) and on the element (hls.js's reused one); a change only repaints.
+    const wiring=shipped("liveTvWireHost");
+    assert.match(wiring,/textTracks\?\.addEventListener\?\.\("addtrack",liveTvCaptionTrackAdded\)/);
+    assert.match(wiring,/video\.addEventListener\("addtrack",liveTvCaptionTrackAdded\)/);
+    assert.match(wiring,/textTracks\?\.addEventListener\?\.\("change",liveTvRefreshCaptionControls\)/);
+    assert.doesNotMatch(shipped("liveTvRefreshCaptionControls"),/liveTvApplySavedCaption/);
+    assert.match(shipped("liveTvAttachSession"),/liveTvCaptionsAttaching\(\);\n\s*if\(window\.Hls&&Hls\.isSupported\(\)\)\{/);
+  });
+
+  await test("an hls.js page claims CEA-608 only, so it is never advertised SERVICE1", () => {
+    const decoders=hls=>new Function("Hls",
+      `${shipped("liveTvCaptionDecoders")} return liveTvCaptionDecoders();`)(hls||undefined);
+    assert.deepEqual(decoders({isSupported:()=>true}),["cea608"]);
+    assert.deepEqual(decoders(null),["cea608","cea708"]);
+    assert.match(shipped("liveTvPlaybackEnvelope"),/caption_decoders:liveTvCaptionDecoders\(\)/);
+    // The attach picks hls.js on the same test the claim is made on.
+    assert.match(fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/pages/live-tv-controls.js"),"utf8"),
+      /if\(window\.Hls&&Hls\.isSupported\(\)\)\{/);
   });
 
   await test("protected channels are visible but never watchable", () => {
@@ -693,7 +812,7 @@ async function main() {
 
   await test("autoplay rejection releases the tuner within the play deadline", async () => {
     let clock = 1000, poll, releases = 0, statuses = 0;
-    const video = { paused: true, canPlayType: () => "maybe", play: async () => { throw new Error("autoplay denied"); } };
+    const video = { paused: true, pause() { this.paused = true; }, canPlayType: () => "maybe", play: async () => { throw new Error("autoplay denied"); } };
     const nodes = { "live-tv-video": video, "live-tv-host": { hidden: true }, "live-tv-title": {} };
     // `support` is a non-optional enum on the wire, so a fixture channel that
     // omits it is not a channel this client can ever receive.
@@ -704,7 +823,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -726,7 +845,7 @@ async function main() {
     // the instant you dock. Nothing here asserts source text: it drives the
     // real poll across a real route change.
     let clock = 1000, poll, keepalives = 0, statuses = 0, releases = 0, frames = 240;
-    const video = { paused: false, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
+    const video = { paused: false, pause() { this.paused = true; }, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
       getVideoPlaybackQuality: () => ({ totalVideoFrames: frames }) };
     const nodes = { "live-tv-video": video, "live-tv-host": { hidden: true, dataset: {} }, "live-tv-title": {} };
     const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0 };
@@ -739,7 +858,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "ROUTING",
       `const location=ROUTING, PLAYER=null, API='/api', window={};
        let PAGE_RENDER_GENERATION=ROUTING.generation;
-       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){} function liveTvSetMode(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -771,7 +890,7 @@ async function main() {
     // media, no poll and no Stop control, holding a tuner invisibly.
     let clock = 1000, poll, releases = 0;
     const started = deferred(), grant = deferred();
-    const video = { paused: false, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
+    const video = { paused: false, pause() { this.paused = true; }, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
       getVideoPlaybackQuality: () => ({ totalVideoFrames: 240 }) };
     const nodes = { "live-tv-video": video, "live-tv-host": { hidden: true, dataset: {} }, "live-tv-title": {} };
     const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0, starting: null };
@@ -785,7 +904,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "ROUTING", "MODES",
       `const location=ROUTING, PLAYER=null, API='/api', window={};
        let PAGE_RENDER_GENERATION=1;
-       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvSetMode(mode){ MODES.push(mode); }
        function liveTvHost(){ return document.getElementById("live-tv-host"); }
@@ -839,7 +958,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval",
       "PlurxLiveTv", "PLAYER", "closePlayer", "reportProgress",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -865,7 +984,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -880,7 +999,7 @@ async function main() {
   await test("a frozen picture still expires even while position climbs", async () => {
     let clock = 1000, poll, releases = 0;
     // The mirror image: the timeline advances but nothing is decoded.
-    const video = { paused: false, currentTime: 10, canPlayType: () => "maybe", play: async () => {},
+    const video = { paused: false, pause() { this.paused = true; }, currentTime: 10, canPlayType: () => "maybe", play: async () => {},
       getVideoPlaybackQuality: () => ({ totalVideoFrames: 500 }) };
     const nodes = { "live-tv-video": video, "live-tv-host": { hidden: true }, "live-tv-title": {} };
     const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0 };
@@ -890,7 +1009,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -1243,7 +1362,7 @@ async function main() {
     const attach = new Function(
       "LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "API",
       `const location={hash:"#/live-tv"}, PAGE_RENDER_GENERATION=1, window={};
-       function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){} function liveTvShowHost(){}
+       function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvMessage(){} function liveTvFailure(){} function liveTvShowHost(){}
        function liveTvSetMode(){} function liveTvInPip(){ return false; }
        async function stopLiveTv(){} async function watchLiveTv(){}
        ${shipped("liveTvNow")}${shipped("liveTvAttachSession")} return liveTvAttachSession;`,
@@ -1489,7 +1608,7 @@ async function main() {
   });
 
   await test("both readiness views render every row the server sends, and gate nothing", () => {
-    // The Developer enable sections are advisory by construction: they map the
+    // The Live TV readiness sections are advisory by construction: they map the
     // server's `checks` array, whatever is in it. A row the daemon adds later
     // appears without a web change, and no row can disable a control.
     const guideView = new Function("esc", `${shipped("liveTvGuideReadyView")} return liveTvGuideReadyView;`)(
@@ -1578,7 +1697,7 @@ async function main() {
     const load = new Function(
       "PlurxLiveTv", "PlaybackPolicy", "LIVE_TV", "api", "AbortSignal", "Date", "setTimeout", "clearTimeout",
       `let PAGE_RENDER_GENERATION=1; const location={hash:"#/live-tv"};
-       function renderLiveTvChannels(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){}
+       function renderLiveTvChannels(){} function liveTvRefreshCaptionControls(){} function liveTvCaptionsAttaching(){} function liveTvMessage(){}
        // The guide read also kicks the DVR wave off; that is its own test.
        async function loadLiveTvDvr(){}
        ${shipped("loadLiveTvGuide")}${shipped("scheduleLiveTvGuide")} return loadLiveTvGuide;`,
@@ -1606,7 +1725,7 @@ async function main() {
 
   await test("Live TV awaits fullscreen exit before hiding, with iPhone entry fallback", async () => {
     const events = [], panel = { hidden: false, dataset: { mode: "full" }, contains: () => false };
-    const video = { webkitEnterFullscreen: () => events.push("iphone-enter") };
+    const video = { paused: false, pause() { this.paused = true; }, webkitEnterFullscreen: () => events.push("iphone-enter") };
     const exited = deferred(), neverSettles = deferred(), listeners = new Map();
     const document = { getElementById: id => id === "live-tv-host" ? panel : id === "live-tv-video" ? video : null,
       addEventListener: (name, listener) => listeners.set(name, listener),
@@ -1624,6 +1743,7 @@ async function main() {
     const closing = control.stopLiveTv();
     await Promise.resolve();
     assert.deepEqual(events, ["exit", "release"]);
+    assert.equal(video.paused, true, "the local picture is paused while fullscreen exit and release remain pending");
     assert.equal(panel.hidden, false, "the fullscreen subtree must remain mounted until exit settles");
     assert.equal(panel.dataset.mode, "slot", "a late fullscreenchange cannot reveal a stopped host");
     exited.resolve();
@@ -1657,8 +1777,8 @@ async function main() {
   });
 
   await test("theater viewers can discover Live TV without administrator access", () => {
-    const nav = new Function("ME", "location", `${shipped("theaterNavItems")} return theaterNavItems;`)(
-      { is_admin: false }, { hash: "#/live-tv" });
+    const nav = new Function("ME", "location", "featureVisible", `${shipped("theaterNavItems")} return theaterNavItems;`)(
+      { is_admin: false }, { hash: "#/live-tv" }, () => true);
     const items = nav("live-tv");
     assert.deepEqual(items.find(item => item.tab === "live-tv"), {
       tab: "live-tv", href: "#/live-tv", label: "Live TV", on: true,
@@ -1679,25 +1799,44 @@ async function main() {
       live_tv_output_height: 720, live_tv_max_output_height: 720 }]);
   });
 
-  await test("Developer enable saves even when readiness is unmet or unavailable", async () => {
+  await test("the Live TV on/off switch saves through the Live TV writer, whatever readiness says", async () => {
+    // Graduated from Developer to Settings → Live TV (2026-10-10). The switch
+    // goes through the same fenced writer as the tuner card, and nothing on
+    // the readiness mount reaches the request.
     for (const readiness of ["Not met", "Readiness unavailable"]) {
-      const writes = [], saved = { live_tv_enabled: true, live_tv_config_generation: 9 };
-      const nodes = { "dev-live-tv-enable": { checked: true },
-        "dev-live-tv-readiness": { textContent: readiness },
-        "dev-live-tv-error": { textContent: "", isConnected: true } };
-      let cached;
-      const save = new Function("SETTINGS", "document", "api", "cacheSettings", "toast", "setCardSaved", "AbortSignal",
+      const writes = [], replaced = [], saved = { live_tv_enabled: true, live_tv_config_generation: 9 };
+      const nodes = { "lt-enable": { checked: true }, "lt-enable-readiness": { textContent: readiness } };
+      const save = new Function("SETTINGS", "document", "liveTvSettingsWrite", "replaceLiveTvCard", "liveTvEnableCard",
         `${shipped("saveLiveTvEnable")} return saveLiveTvEnable;`)(
         { live_tv_config_generation: 8 }, { getElementById: id => nodes[id] },
-        async (route, request) => { writes.push([route, request.method, request.body]); return saved; },
-        value => { cached = value; }, () => {}, button => { button.disabled = false; }, AbortSignal);
-      const button = { disabled: false, isConnected: true };
-      await save(button);
-      assert.deepEqual(writes, [["/settings", "PUT", { live_tv_config_generation: 8, live_tv_enabled: true }]]);
-      assert.equal(cached, saved);
-      assert.equal(nodes["dev-live-tv-error"].textContent, "");
-      assert.equal(button.disabled, false);
+        async (body, button, errorId) => { writes.push([body, errorId]); return saved; },
+        (...args) => { replaced.push(args); }, value => `card:${value.live_tv_enabled}`);
+      assert.equal(await save({}), true);
+      assert.deepEqual(writes, [[{ live_tv_config_generation: 8, live_tv_enabled: true }, "lt-enable-error"]]);
+      assert.deepEqual(replaced, [["live-tv-enable", "card:true", "lt-enable"]]);
     }
+  });
+
+  await test("a refused Live TV switch save leaves the card as the operator left it", async () => {
+    const replaced = [];
+    const save = new Function("SETTINGS", "document", "liveTvSettingsWrite", "replaceLiveTvCard", "liveTvEnableCard",
+      `${shipped("saveLiveTvEnable")} return saveLiveTvEnable;`)(
+      { live_tv_config_generation: 8 }, { getElementById: () => ({ checked: false }) },
+      async () => false, (...args) => { replaced.push(args); }, () => "card");
+    assert.equal(await save({}), false);
+    assert.deepEqual(replaced, []);
+  });
+
+  await test("Settings → Live TV opens with the on/off switch and owns the deinterlace cadence", () => {
+    const panel = shipped("liveTvPanel");
+    const order = ["liveTvEnableCard(", "liveTvSettingsCard(", "liveTvDeinterlaceCard(", "liveTvGuideCard(", "dvrCard(", "libraryChannelsSettingsCard("]
+      .map(call => panel.indexOf(call));
+    assert.ok(order.every(index => index > 0), `every Live TV card is drawn: ${order}`);
+    assert.deepEqual([...order].sort((a, b) => a - b), order, "in the order the section reads");
+    for (const name of ["liveTvEnableCard", "liveTvDeinterlaceCard"]) {
+      assert.doesNotMatch(shipped(name), /devGraduation/, `${name} is a finished setting, not a Developer card`);
+    }
+    assert.doesNotMatch(shipped("liveTvSettingsCard"), /settings\/developer/, "the tuner card no longer sends the operator to Developer");
   });
 
   // ---- the shared guide cases, reproduced by the web renderer -------------
@@ -1728,6 +1867,24 @@ async function main() {
           `${c.name}: progress ${answer.progress} != ${c.expect.progress}`,
         );
       }
+    }
+  });
+
+  await test("stationLogoUrl answers every shared station_logo case", () => {
+    // The rule the Apple and Android guides transcribe. It lived in the page
+    // until 2026-10-04, outside this fixture, which is how both native guides
+    // shipped without logos while the web had them: nothing failed.
+    const logos = CASES.station_logo;
+    for (const c of logos.match) {
+      assert.equal(liveTv.stationLogoUrl(CASES.guide, c.channel), c.expect, c.name);
+    }
+    assert.equal(
+      liveTv.stationLogoUrl(null, logos.no_guide.channel), logos.no_guide.expect, logos.no_guide.name,
+    );
+    for (const c of logos.values) {
+      const channel = { id: "logo", guide_number: "0.1", programmes: [] };
+      if (Object.prototype.hasOwnProperty.call(c, "image_url")) channel.image_url = c.image_url;
+      assert.equal(liveTv.stationLogoUrl({ channels: [channel] }, "logo"), c.expect, c.name);
     }
   });
 
@@ -2084,7 +2241,7 @@ async function main() {
     assert.match(shell, /\.lt-mark\{[^}]*position:absolute/s);
     assert.match(shell, /\.lt-mark \.dot\{[^}]*width:8px;height:8px/s);
     assert.match(shell, /\.lt-recbar\{[^}]*position:absolute[^}]*bottom:0/s);
-    assert.match(shell, /\.lt-grow\{[^}]*height:52px/s, "the grid row height is unchanged");
+    assert.match(shell, /\.lt-grow\{[^}]*height:68px/s, "marks fit inside the station-logo row");
     assert.match(shell, /\.lt-row\{[^}]*min-height:78px/s, "the list row height is unchanged");
     assert.match(shipped("liveTvGridMarkup"), /liveTvMarks\(row\.channel\.id,cell\.programme,false\)/);
     assert.match(shipped("liveTvRowMarkup"), /liveTvMarks\(channel\.id,at\.now,true\)/);

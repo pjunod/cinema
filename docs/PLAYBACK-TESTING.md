@@ -314,8 +314,10 @@ effective transition time depends on how fast the operator returns to the app,
 and a playback that advanced in between two changes begins a new recovery
 episode. That makes the result both frustrating and ambiguous.
 
-Install and sign in to a debug build once, then run the device through the
-LAN-reachable shaper from the Mac that can see it through `devicectl`:
+Install and sign in to a debug build once, then close that target app before
+starting the run. The runner refuses a target that is already running: it cannot
+claim an existing viewer session. Run through the LAN-reachable shaper from the
+Mac that can see the device through `devicectl`:
 
 ```bash
 scripts/playback-lab device-run \
@@ -329,8 +331,11 @@ scripts/playback-lab device-run \
 
 The command performs the entire sequence:
 
-1. It binds a reverse proxy on the Mac and launches the installed app directly
-   into the selected file and quality through debug-only command-line defaults.
+1. It reserves a new mode-0600 evidence file, binds and checks the reverse proxy,
+   resolves the canonical device and installed bundle, and acquires an exclusive
+   local device lease. It durably records launch intent before launching the
+   app into the selected file through debug-only command-line defaults.
+   Omitting `--height` preserves Auto; providing it selects manual quality.
 2. The app reports a probe every two seconds with film position, contiguous
    AVPlayer runway, buffer flags, access-log throughput, session/rung, and
    attempt identity.
@@ -338,14 +343,101 @@ The command performs the entire sequence:
    from 8 Mb/s to 1.1 Mb/s. After the recovered attempt presents its first
    frame, it changes to 350 kb/s eight seconds later. No operator timing enters
    the result.
-4. The command retains every probe, TTFF, stall, transition, and shaped-byte
-   ledger in one JSON artifact. It then relaunches the app without acceptance
-   arguments, returning the device to normal use.
+4. Whether observation finishes or fails, the runner checks the exact PID and
+   executable returned by launch, terminates that owned process if still
+   present, and polls until it is absent. Only then does it activate production
+   Noirr Cinema (`tv.plurx.app`) without acceptance arguments or
+   `--terminate-existing`. The proxy closes after device cleanup. The final
+   JSON verdict includes telemetry and every run, cleanup, restore, artifact,
+   and proxy error; a cleanup failure fails the command.
 
 The launch hook and periodic probes compile only in `DEBUG`. A normal release
 build has neither the direct-playback entry point nor a way to enable the extra
 telemetry. The control API uses a random token, and neither that token nor the
 app's bearer credential is written to the evidence artifact.
+
+#### Device ownership, interruptions, and recovery
+
+Use `--bundle-id` for a separately installed diagnostic app. Its owned PID must
+exit even when a wrapper supplies a custom production-restoration callback;
+an existing production process is left intact. `--leave-running` is rejected.
+The runner neither uninstalls apps nor terminates by bundle name, process name,
+or a guessed PID. An existing `--json` path is refused to preserve prior evidence.
+
+Every checkout on the Mac shares leases under
+`~/.local/state/plurx/playback-lab/device-leases/`, keyed by a hash of the
+canonical device UUID. Device aliases and different diagnostic bundle IDs
+therefore cannot run concurrently. This is a local lease, not a lock against
+other Macs or tools outside this runner. The lease records the run ID, evidence
+path, installed bundle executable scope, launch intent, returned PID/executable,
+and final cleanup status. Intent and ownership writes use atomic replacement
+and file/directory synchronization. The observed `devicectl` schema provides no
+process start discriminator: during one continuous run the returned PID and
+normalized exact executable are checked again before termination. A same-path
+PID reuse between that check and termination remains a platform limitation.
+A different executable is an identity conflict and is never terminated.
+
+SIGINT and SIGTERM interrupt observation and flow through the same cleanup;
+handlers remain installed through cleanup, including repeated signals. Each
+device command has a 15-second deadline plus bounded host-child termination;
+process-exit polling has a 10-second window, with each census independently
+bounded. A launch timeout or malformed reply can mean that an app started
+without returning an identity. The runner then retains an unresolved lease and
+never infers ownership from a later census. Disconnects, failed termination,
+and identity conflicts likewise preserve the lease and fail the run. The host
+proxy is still closed, but production is not restored until owned-process
+absence has been verified. Artifact-write failures retain the lease as an
+audit fallback even when the diagnostic is already absent.
+
+A hard host kill or power loss cannot execute cleanup. Any remaining lease,
+even an empty or old one, blocks another run and requires manual reconciliation.
+Read its receipt, reconnect the device, and obtain fresh installed-app and
+process information before deciding whether a diagnostic is still present.
+Do not terminate a recorded stale PID: it may now belong to another process.
+After independently confirming the diagnostic is absent, preserve the receipt
+and remove only the reconciled lease. The runner deliberately has no automatic
+stale-lease recovery. Use a new evidence filename for a subsequent run.
+
+#### Cleanup implementation review and regression evidence
+
+The reviewed cleanup plan addressed the background diagnostic processes that
+remained alive after acceptance wrappers returned. Its adversarial findings
+are implemented as the following contracts:
+
+| Review finding | Implementation and regression |
+| --- | --- |
+| Launch can succeed before its reply is lost | Durable prelaunch intent; timeout/malformed reply tests retain an unresolved lease without guessing a PID. |
+| Concurrent runs or stale receipts can claim another process | Canonical per-device lease shared across checkouts; alias contention, stale lease, preexisting app, and PID-reuse tests. |
+| A successful terminate call does not prove exit | Fresh identity check and bounded absence polling; no-op termination and already-absent tests. |
+| Restore hooks and failures can bypass cleanup | Outer owned-PID cleanup precedes awaited production restoration and proxy close; combined observation, termination, artifact, and proxy-error tests. |
+| Signals can leave a background decoder alive | Real local child-process SIGINT/SIGTERM tests send a second signal during asynchronous cleanup and require a final receipt. |
+| Device JSON paths differ in slash count | Canonical file-URL normalization; four-slash launch URL and UUID-casing test. |
+
+Run the focused contracts without any physical device calls:
+
+```bash
+PLAYBACK_LAB_TEST_FILTER='device-run|device command' \
+  node tests/playback/network-shaping.test.js
+```
+
+The single adversarial PR review (PR #895) found a P2 finalization race: a
+SIGINT/SIGTERM arriving during the final receipt write or lease release could
+be recorded without changing the successful verdict. The handler now records
+interruption as a failure immediately. Final receipt writes reconcile signals
+that arrive while writing, and finalization checks again after lease release
+before synchronously removing handlers. Four regressions inject both signals
+at both asynchronous boundaries and require matching failed returned/durable
+verdicts, verified diagnostic absence, and no recreated lease.
+
+Local validation on the current main base passed all 22 focused cleanup
+contracts, all 137 shaping contracts (`node tests/playback/network-shaping.test.js`),
+and all four documentation-index contracts (`python3 -m unittest discover
+-s tests/operations -p test_docs_index.py`). No physical-device run was performed.
+
+All adapters in those contracts use an in-memory process table; the signal and
+command-timeout tests spawn ordinary local Node children. The task owns only
+`scripts/playback-lab`, `tests/playback/network-shaping.test.js`, and this
+existing document; Apple runtime/RCA changes are a separate disjoint task.
 
 For exploratory control without launching a device, `device-proxy` exposes
 authenticated status, next-stage, and evidence endpoints. Its randomly

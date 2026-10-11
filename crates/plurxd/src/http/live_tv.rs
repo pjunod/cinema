@@ -100,7 +100,7 @@ pub(crate) async fn guide_document(
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
         )));
     }
     let window = requested_window(&config, query);
@@ -548,7 +548,7 @@ pub(crate) async fn start_session(
     let mut config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
         )));
     }
     let Json(body) = body.unwrap_or(Json(PublicLiveTvStart {
@@ -831,10 +831,32 @@ async fn live_tv_enabled_config(state: &AppState) -> Result<LiveTvConfig, ApiErr
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
         )));
     }
     Ok(config)
+}
+
+/// The CLOSED-CAPTIONS renditions for the services the owner advertised to
+/// this viewer, or nothing. The owner lists only the proved services the
+/// viewer's player decodes (`advertise_proven_captions`): `CC1` alone for
+/// hls.js, which has no CEA-708 decoder and would show `SERVICE1` as a phantom
+/// second track that takes over CC1's label.
+fn caption_renditions(services: Option<&str>) -> String {
+    let listed =
+        |name: &str| services.is_some_and(|list| list.split(',').any(|service| service == name));
+    let cc1 = listed("CC1");
+    let mut renditions = String::new();
+    if cc1 {
+        renditions.push_str("#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc\",NAME=\"English CC1\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,INSTREAM-ID=\"CC1\"\n");
+    }
+    if listed("SERVICE1") {
+        renditions.push_str(&format!(
+            "#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc\",NAME=\"English 708\",LANGUAGE=\"en\",DEFAULT={},AUTOSELECT=YES,INSTREAM-ID=\"SERVICE1\"\n",
+            if cc1 { "NO" } else { "YES" }
+        ));
+    }
+    renditions
 }
 
 /// HLS master for one activated viewer. The signed owner status already
@@ -858,11 +880,9 @@ pub(crate) async fn master(
             .map(|reason| reason.explanation.as_str())
     });
     let mut body = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
-    let advertised = services == Some("CC1,SERVICE1");
-    if advertised {
-        body.push_str("#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc\",NAME=\"English CC1\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,INSTREAM-ID=\"CC1\"\n");
-        body.push_str("#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc\",NAME=\"English 708\",LANGUAGE=\"en\",DEFAULT=NO,AUTOSELECT=YES,INSTREAM-ID=\"SERVICE1\"\n");
-    }
+    let renditions = caption_renditions(services);
+    let advertised = !renditions.is_empty();
+    body.push_str(&renditions);
     let bandwidth = delivery
         .and_then(|plan| plan.max_bitrate_bps)
         .unwrap_or(8_000_000)
@@ -970,7 +990,7 @@ pub(crate) async fn channels(
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
         )));
     }
     let snapshot = owner_snapshot(&state, &config, false, false)
@@ -2201,6 +2221,20 @@ fn sanitize_public_error(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_master_lists_only_the_caption_services_the_owner_advertised() {
+        let both = super::caption_renditions(Some("CC1,SERVICE1"));
+        assert!(both.contains("INSTREAM-ID=\"CC1\""));
+        assert!(both.contains("DEFAULT=NO,AUTOSELECT=YES,INSTREAM-ID=\"SERVICE1\""));
+        // What an hls.js viewer is advertised: no SERVICE1 rendition at all.
+        let hls_js = super::caption_renditions(Some("CC1"));
+        assert!(hls_js.contains("NAME=\"English CC1\""));
+        assert!(!hls_js.contains("SERVICE1"));
+        assert!(!hls_js.contains("English 708"));
+        assert_eq!(super::caption_renditions(None), "");
+        assert_eq!(super::caption_renditions(Some("")), "");
+    }
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;

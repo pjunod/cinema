@@ -1,0 +1,1104 @@
+2026-10-03T06:02:36.8323907Z Runner abb7d495-35dc-4cf0-860c-71cadd2c962c (version:v13.1.0) received task 15489 of job web_compile, triggered by event: push
+2026-10-03T06:02:36.8338265Z workflow prepared
+2026-10-03T06:02:36.8405459Z   ☁️  git fetch 'https://data.forgejo.org/actions/checkout' skipped; ref=11d5960a326750d5838078e36cf38b85af677262 cached
+2026-10-03T06:02:36.8701531Z   ☁️  git fetch 'https://data.forgejo.org/actions/setup-node' skipped; ref=49933ea5288caeca8642d1e84afbd3f7d6820020 cached
+2026-10-03T06:02:36.9333179Z ⭐ Run Main https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+2026-10-03T06:02:37.0897813Z   ❓ add-matcher /opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/act/actions/60/fb33f7cb380f115be3108372372f24c70a0dabf92c0088a63d68b62aa10f72/dist/problem-matcher.json
+2026-10-03T06:02:37.0898145Z ::add-matcher::/opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/act/actions/60/fb33f7cb380f115be3108372372f24c70a0dabf92c0088a63d68b62aa10f72/dist/problem-matcher.json
+2026-10-03T06:02:37.0900228Z Syncing repository: noirr/plurx
+2026-10-03T06:02:37.0901970Z ##[group]Getting Git version info
+2026-10-03T06:02:37.0902251Z Working directory is '/opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/hostexecutor'
+2026-10-03T06:02:37.0920879Z [command]/usr/bin/git version
+2026-10-03T06:02:37.0966000Z git version 2.55.0
+2026-10-03T06:02:37.0983016Z ##[endgroup]
+2026-10-03T06:02:37.0995639Z Temporarily overriding HOME='/opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/tmp/b3ec51b3-1ddb-460b-9701-d46607da7fc7' before making global git config changes
+2026-10-03T06:02:37.0995893Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-03T06:02:37.0998870Z [command]/usr/bin/git config --global --add safe.directory /opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/hostexecutor
+2026-10-03T06:02:37.1032689Z Deleting the contents of '/opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/hostexecutor'
+2026-10-03T06:02:37.1035186Z ##[group]Initializing the repository
+2026-10-03T06:02:37.1037373Z [command]/usr/bin/git init /opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/hostexecutor
+2026-10-03T06:02:37.1087809Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-03T06:02:37.1088120Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-03T06:02:37.1088226Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-03T06:02:37.1088360Z hint: call:
+2026-10-03T06:02:37.1088467Z hint:
+2026-10-03T06:02:37.1088592Z hint: 	git config --global init.defaultBranch <name>
+2026-10-03T06:02:37.1088696Z hint:
+2026-10-03T06:02:37.1088784Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-03T06:02:37.1088883Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-03T06:02:37.1088984Z hint:
+2026-10-03T06:02:37.1089080Z hint: 	git branch -m <name>
+2026-10-03T06:02:37.1089178Z hint:
+2026-10-03T06:02:37.1089263Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-03T06:02:37.1089923Z Initialized empty Git repository in /opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/hostexecutor/.git/
+2026-10-03T06:02:37.1095277Z [command]/usr/bin/git remote add origin http://192.168.4.7:3000/noirr/plurx
+2026-10-03T06:02:37.1121403Z ##[endgroup]
+2026-10-03T06:02:37.1121552Z ##[group]Disabling automatic garbage collection
+2026-10-03T06:02:37.1123370Z [command]/usr/bin/git config --local gc.auto 0
+2026-10-03T06:02:37.1144703Z ##[endgroup]
+2026-10-03T06:02:37.1144964Z ##[group]Setting up auth
+2026-10-03T06:02:37.1148810Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-03T06:02:37.1172945Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-03T06:02:37.1554699Z [command]/usr/bin/git config --local --name-only --get-regexp http\.http\:\/\/192\.168\.4\.7\:3000\/\.extraheader
+2026-10-03T06:02:37.1581846Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.http\:\/\/192\.168\.4\.7\:3000\/\.extraheader' && git config --local --unset-all 'http.http://192.168.4.7:3000/.extraheader' || :"
+2026-10-03T06:02:37.1861811Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-03T06:02:37.1884042Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-03T06:02:37.2157773Z [command]/usr/bin/git config --local http.http://192.168.4.7:3000/.extraheader AUTHORIZATION: basic ***
+2026-10-03T06:02:37.2187038Z ##[endgroup]
+2026-10-03T06:02:37.2187208Z ##[group]Fetching the repository
+2026-10-03T06:02:37.2193790Z [command]/usr/bin/git -c protocol.version=2 fetch --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+2026-10-03T06:02:49.0582306Z From http://192.168.4.7:3000/noirr/plurx
+2026-10-03T06:02:49.0582845Z  * [new branch]          agent/acceptance-self-dating -> origin/agent/acceptance-self-dating
+2026-10-03T06:02:49.0582997Z  * [new branch]          agent/activity-node-hostnames -> origin/agent/activity-node-hostnames
+2026-10-03T06:02:49.0583143Z  * [new branch]          agent/address-pr80-review -> origin/agent/address-pr80-review
+2026-10-03T06:02:49.0583266Z  * [new branch]          agent/address-pr85-review -> origin/agent/address-pr85-review
+2026-10-03T06:02:49.0583419Z  * [new branch]          agent/analysis-handoff  -> origin/agent/analysis-handoff
+2026-10-03T06:02:49.0583536Z  * [new branch]          agent/analysis-node-hostnames -> origin/agent/analysis-node-hostnames
+2026-10-03T06:02:49.0583685Z  * [new branch]          agent/apple-ask-terminal-race -> origin/agent/apple-ask-terminal-race
+2026-10-03T06:02:49.0583818Z  * [new branch]          agent/apple-pacing-hold-freeze -> origin/agent/apple-pacing-hold-freeze
+2026-10-03T06:02:49.0583895Z  * [new branch]          agent/apple/issue-144-offline-download-location -> origin/agent/apple/issue-144-offline-download-location
+2026-10-03T06:02:49.0583973Z  * [new branch]          agent/apple/issue-150-episode-thumb-play -> origin/agent/apple/issue-150-episode-thumb-play
+2026-10-03T06:02:49.0584021Z  * [new branch]          agent/apple/issue-166-tvos-season-focus -> origin/agent/apple/issue-166-tvos-season-focus
+2026-10-03T06:02:49.0584101Z  * [new branch]          agent/apple/issue-169-pgs-device-acceptance -> origin/agent/apple/issue-169-pgs-device-acceptance
+2026-10-03T06:02:49.0584158Z  * [new branch]          agent/apple/issue-191-pgs-nil -> origin/agent/apple/issue-191-pgs-nil
+2026-10-03T06:02:49.0584224Z  * [new branch]          agent/axis-case-link-floor -> origin/agent/axis-case-link-floor
+2026-10-03T06:02:49.0584276Z  * [new branch]          agent/axis-case-scope   -> origin/agent/axis-case-scope
+2026-10-03T06:02:49.0584355Z  * [new branch]          agent/axis-set-widening -> origin/agent/axis-set-widening
+2026-10-03T06:02:49.0584422Z  * [new branch]          agent/builder/issue-199-cluster-check-coverage -> origin/agent/builder/issue-199-cluster-check-coverage
+2026-10-03T06:02:49.0584498Z  * [new branch]          agent/builder/issue-214-offline-subtitle-identity-coverage -> origin/agent/builder/issue-214-offline-subtitle-identity-coverage
+2026-10-03T06:02:49.0584596Z  * [new branch]          agent/builder/issue-221-apple-pgs-cue-monotonicity -> origin/agent/builder/issue-221-apple-pgs-cue-monotonicity
+2026-10-03T06:02:49.0584646Z  * [new branch]          agent/builder/issue-231-trakt-credential-envelope-encryption -> origin/agent/builder/issue-231-trakt-credential-envelope-encryption
+2026-10-03T06:02:49.0584721Z  * [new branch]          agent/builder/issue-232-compacted-growth -> origin/agent/builder/issue-232-compacted-growth
+2026-10-03T06:02:49.0584772Z  * [new branch]          agent/builder/issue-233-watch-state-status -> origin/agent/builder/issue-233-watch-state-status
+2026-10-03T06:02:49.0584820Z  * [new branch]          agent/builder/issue-240-hls-early-exit -> origin/agent/builder/issue-240-hls-early-exit
+2026-10-03T06:02:49.0584884Z  * [new branch]          agent/builder/issue-246-web-auto-controller -> origin/agent/builder/issue-246-web-auto-controller
+2026-10-03T06:02:49.0584954Z  * [new branch]          agent/builder/issue-247-native-stall-reopen -> origin/agent/builder/issue-247-native-stall-reopen
+2026-10-03T06:02:49.0585012Z  * [new branch]          agent/builder/issue-262-cluster-membership -> origin/agent/builder/issue-262-cluster-membership
+2026-10-03T06:02:49.0585062Z  * [new branch]          agent/builder/issue-265-track-facts-selection -> origin/agent/builder/issue-265-track-facts-selection
+2026-10-03T06:02:49.0585121Z  * [new branch]          agent/builder/issue-266-detail-track-facts -> origin/agent/builder/issue-266-detail-track-facts
+2026-10-03T06:02:49.0585169Z  * [new branch]          agent/builder/issue-267-burn-playlist-wait -> origin/agent/builder/issue-267-burn-playlist-wait
+2026-10-03T06:02:49.0585216Z  * [new branch]          agent/builder/issue-272-auto-abr-switch -> origin/agent/builder/issue-272-auto-abr-switch
+2026-10-03T06:02:49.0585287Z  * [new branch]          agent/builder/issue-279-hiqlite-import-chunk -> origin/agent/builder/issue-279-hiqlite-import-chunk
+2026-10-03T06:02:49.0585335Z  * [new branch]          agent/builder/issue-282-import-byte-budget -> origin/agent/builder/issue-282-import-byte-budget
+2026-10-03T06:02:49.0585388Z  * [new branch]          agent/builder/issue-288-tvos-track-selection -> origin/agent/builder/issue-288-tvos-track-selection
+2026-10-03T06:02:49.0585440Z  * [new branch]          agent/builder/issue-289-android-track-facts-selection -> origin/agent/builder/issue-289-android-track-facts-selection
+2026-10-03T06:02:49.0585494Z  * [new branch]          agent/builder/issue-301-shutdown-followups -> origin/agent/builder/issue-301-shutdown-followups
+2026-10-03T06:02:49.0585545Z  * [new branch]          agent/builder/issue-304-wal-budget -> origin/agent/builder/issue-304-wal-budget
+2026-10-03T06:02:49.0585597Z  * [new branch]          agent/builder/issue-310-credential-generation -> origin/agent/builder/issue-310-credential-generation
+2026-10-03T06:02:49.0585655Z  * [new branch]          agent/builder/issue-310-credential-generation-v10 -> origin/agent/builder/issue-310-credential-generation-v10
+2026-10-03T06:02:49.0585714Z  * [new branch]          agent/builder/issue-310-credential-generation-v11 -> origin/agent/builder/issue-310-credential-generation-v11
+2026-10-03T06:02:49.0585769Z  * [new branch]          agent/builder/issue-310-credential-generation-v2 -> origin/agent/builder/issue-310-credential-generation-v2
+2026-10-03T06:02:49.0585822Z  * [new branch]          agent/builder/issue-310-credential-generation-v3 -> origin/agent/builder/issue-310-credential-generation-v3
+2026-10-03T06:02:49.0586208Z  * [new branch]          agent/builder/issue-310-credential-generation-v5 -> origin/agent/builder/issue-310-credential-generation-v5
+2026-10-03T06:02:49.0586742Z  * [new branch]          agent/builder/issue-310-credential-generation-v6 -> origin/agent/builder/issue-310-credential-generation-v6
+2026-10-03T06:02:49.0586847Z  * [new branch]          agent/builder/issue-310-credential-generation-v7 -> origin/agent/builder/issue-310-credential-generation-v7
+2026-10-03T06:02:49.0586936Z  * [new branch]          agent/builder/issue-310-credential-generation-v8 -> origin/agent/builder/issue-310-credential-generation-v8
+2026-10-03T06:02:49.0587045Z  * [new branch]          agent/builder/issue-323-cluster-membership-ui -> origin/agent/builder/issue-323-cluster-membership-ui
+2026-10-03T06:02:49.0587196Z  * [new branch]          agent/builder/issue-324-offline-package-node-removal -> origin/agent/builder/issue-324-offline-package-node-removal
+2026-10-03T06:02:49.0587285Z  * [new branch]          agent/builder/issue-342-tombstone-offline-fence-v2 -> origin/agent/builder/issue-342-tombstone-offline-fence-v2
+2026-10-03T06:02:49.0587404Z  * [new branch]          agent/builder/issue-349-android-stall-downgrade -> origin/agent/builder/issue-349-android-stall-downgrade
+2026-10-03T06:02:49.0587960Z  * [new branch]          agent/builder/issue-349-android-stall-downgrade-v2 -> origin/agent/builder/issue-349-android-stall-downgrade-v2
+2026-10-03T06:02:49.0588080Z  * [new branch]          agent/builder/issue-349-android-stall-downgrade-v3 -> origin/agent/builder/issue-349-android-stall-downgrade-v3
+2026-10-03T06:02:49.0588164Z  * [new branch]          agent/builder/issue-350-skip-credits-marker-bounds -> origin/agent/builder/issue-350-skip-credits-marker-bounds
+2026-10-03T06:02:49.0588242Z  * [new branch]          agent/builder/issue-351-apple-credits-estimate-hedge -> origin/agent/builder/issue-351-apple-credits-estimate-hedge
+2026-10-03T06:02:49.0588319Z  * [new branch]          agent/builder/issue-351-apple-credits-estimate-hedge-v2 -> origin/agent/builder/issue-351-apple-credits-estimate-hedge-v2
+2026-10-03T06:02:49.0588418Z  * [new branch]          agent/builder/issue-352-android-skip-credits-hedge -> origin/agent/builder/issue-352-android-skip-credits-hedge
+2026-10-03T06:02:49.0591312Z  * [new branch]          agent/builder/issue-352-android-skip-credits-hedge-v2 -> origin/agent/builder/issue-352-android-skip-credits-hedge-v2
+2026-10-03T06:02:49.0591427Z  * [new branch]          agent/builder/issue-353-provenance-repair -> origin/agent/builder/issue-353-provenance-repair
+2026-10-03T06:02:49.0591525Z  * [new branch]          agent/builder/issue-353-web-credits-estimate-hedge -> origin/agent/builder/issue-353-web-credits-estimate-hedge
+2026-10-03T06:02:49.0591648Z  * [new branch]          agent/builder/issue-368-hiqlite-timeout-vs-wal-contract -> origin/agent/builder/issue-368-hiqlite-timeout-vs-wal-contract
+2026-10-03T06:02:49.0591774Z  * [new branch]          agent/builder/issue-368-timeout-wal-distinction -> origin/agent/builder/issue-368-timeout-wal-distinction
+2026-10-03T06:02:49.0591937Z  * [new branch]          agent/builder/issue-368-timeout-wal-provenance-repair -> origin/agent/builder/issue-368-timeout-wal-provenance-repair
+2026-10-03T06:02:49.0592029Z  * [new branch]          agent/builder/issue-374-daemon-lock-release-race -> origin/agent/builder/issue-374-daemon-lock-release-race
+2026-10-03T06:02:49.0592178Z  * [new branch]          agent/builder/issue-381-port-collision-vs-schema-verdict -> origin/agent/builder/issue-381-port-collision-vs-schema-verdict
+2026-10-03T06:02:49.0592283Z  * [new branch]          agent/builder/issue-386-ffmpeg-burst-probe -> origin/agent/builder/issue-386-ffmpeg-burst-probe
+2026-10-03T06:02:49.0592380Z  * [new branch]          agent/builder/issue-417-cluster-activity-transport -> origin/agent/builder/issue-417-cluster-activity-transport
+2026-10-03T06:02:49.0592518Z  * [new branch]          agent/builder/issue-451-activation-hiqlite-markers -> origin/agent/builder/issue-451-activation-hiqlite-markers
+2026-10-03T06:02:49.0592611Z  * [new branch]          agent/builder/issue-451-marker-provenance-repair -> origin/agent/builder/issue-451-marker-provenance-repair
+2026-10-03T06:02:49.0592748Z  * [new branch]          agent/builder/issue-550-macos-anonymous-memory -> origin/agent/builder/issue-550-macos-anonymous-memory
+2026-10-03T06:02:49.0592879Z  * [new branch]          agent/builder/issue-550-macos-anonymous-memory-v2 -> origin/agent/builder/issue-550-macos-anonymous-memory-v2
+2026-10-03T06:02:49.0593044Z  * [new branch]          agent/cinema-plex-benchmark -> origin/agent/cinema-plex-benchmark
+2026-10-03T06:02:49.0593137Z  * [new branch]          agent/cluster-auth-scope -> origin/agent/cluster-auth-scope
+2026-10-03T06:02:49.0593252Z  * [new branch]          agent/cluster-operations-rail -> origin/agent/cluster-operations-rail
+2026-10-03T06:02:49.0593361Z  * [new branch]          agent/cluster-panel-followups -> origin/agent/cluster-panel-followups
+2026-10-03T06:02:49.0593453Z  * [new branch]          agent/compile-loop-doc  -> origin/agent/compile-loop-doc
+2026-10-03T06:02:49.0593574Z  * [new branch]          agent/compile-loop-fmt  -> origin/agent/compile-loop-fmt
+2026-10-03T06:02:49.0593670Z  * [new branch]          agent/core/issue-143-network-shaping-lab -> origin/agent/core/issue-143-network-shaping-lab
+2026-10-03T06:02:49.0593817Z  * [new branch]          agent/core/issue-158-rate-control-refresh -> origin/agent/core/issue-158-rate-control-refresh
+2026-10-03T06:02:49.0593911Z  * [new branch]          agent/core/issue-165-pgs-overlay-torn-generation -> origin/agent/core/issue-165-pgs-overlay-torn-generation
+2026-10-03T06:02:49.0595582Z  * [new branch]          agent/core/issue-168-pgs-parser-prereqs -> origin/agent/core/issue-168-pgs-parser-prereqs
+2026-10-03T06:02:49.0595992Z  * [new branch]          agent/core/issue-177-network-priors -> origin/agent/core/issue-177-network-priors
+2026-10-03T06:02:49.0596151Z  * [new branch]          agent/developer-page-manifest -> origin/agent/developer-page-manifest
+2026-10-03T06:02:49.0596403Z  * [new branch]          agent/developer-settings -> origin/agent/developer-settings
+2026-10-03T06:02:49.0596614Z  * [new branch]          agent/discovery-machine-name -> origin/agent/discovery-machine-name
+2026-10-03T06:02:49.0596804Z  * [new branch]          agent/dv-convert-legacy-caps -> origin/agent/dv-convert-legacy-caps
+2026-10-03T06:02:49.0597099Z  * [new branch]          agent/dv-guard-fixture-anchor -> origin/agent/dv-guard-fixture-anchor
+2026-10-03T06:02:49.0597342Z  * [new branch]          agent/dv-m0-record-and-call-sites -> origin/agent/dv-m0-record-and-call-sites
+2026-10-03T06:02:49.0597750Z  * [new branch]          agent/dv-m1-web-caps-on-create -> origin/agent/dv-m1-web-caps-on-create
+2026-10-03T06:02:49.0598130Z  * [new branch]          agent/dv-m1a-learned-limit-rate -> origin/agent/dv-m1a-learned-limit-rate
+2026-10-03T06:02:49.0598413Z  * [new branch]          agent/dv-m2-rejection-report -> origin/agent/dv-m2-rejection-report
+2026-10-03T06:02:49.0598743Z  * [new branch]          agent/dv-m2a-verdict-scope -> origin/agent/dv-m2a-verdict-scope
+2026-10-03T06:02:49.0598946Z  * [new branch]          agent/dv-m3-index-outcomes -> origin/agent/dv-m3-index-outcomes
+2026-10-03T06:02:49.0599174Z  * [new branch]          agent/dv-m6-dual-layer-rule -> origin/agent/dv-m6-dual-layer-rule
+2026-10-03T06:02:49.0599367Z  * [new branch]          agent/fix-apple-detail-edge-clipping -> origin/agent/fix-apple-detail-edge-clipping
+2026-10-03T06:02:49.0599637Z  * [new branch]          agent/fix-apple-periodic-stall -> origin/agent/fix-apple-periodic-stall
+2026-10-03T06:02:49.0599886Z  * [new branch]          agent/fix-apple-seek    -> origin/agent/fix-apple-seek
+2026-10-03T06:02:49.0600822Z  * [new branch]          agent/fix-apple-tv-seeking-recovery -> origin/agent/fix-apple-tv-seeking-recovery
+2026-10-03T06:02:49.0601961Z  * [new branch]          agent/fix-appletv-playback-loop -> origin/agent/fix-appletv-playback-loop
+2026-10-03T06:02:49.0602068Z  * [new branch]          agent/fix-appletv-profile5-black -> origin/agent/fix-appletv-profile5-black
+2026-10-03T06:02:49.0602168Z  * [new branch]          agent/fix-ipad-buffering-recovery -> origin/agent/fix-ipad-buffering-recovery
+2026-10-03T06:02:49.0602253Z  * [new branch]          agent/fix-new-media-artwork -> origin/agent/fix-new-media-artwork
+2026-10-03T06:02:49.0602338Z  * [new branch]          agent/fix-skip-credits-layout -> origin/agent/fix-skip-credits-layout
+2026-10-03T06:02:49.0602411Z  * [new branch]          agent/fix-tv-artwork-retry -> origin/agent/fix-tv-artwork-retry
+2026-10-03T06:02:49.0602494Z  * [new branch]          agent/fix-web-playback-freezes -> origin/agent/fix-web-playback-freezes
+2026-10-03T06:02:49.0602563Z  * [new branch]          agent/fragment-index-attempt-history -> origin/agent/fragment-index-attempt-history
+2026-10-03T06:02:49.0602637Z  * [new branch]          agent/fragment-index-lease-heartbeat -> origin/agent/fragment-index-lease-heartbeat
+2026-10-03T06:02:49.0602712Z  * [new branch]          agent/fragment-index-lease-renew -> origin/agent/fragment-index-lease-renew
+2026-10-03T06:02:49.0602784Z  * [new branch]          agent/fragment-index-queue-health -> origin/agent/fragment-index-queue-health
+2026-10-03T06:02:49.0602865Z  * [new branch]          agent/hls-startup-demand-deadlock -> origin/agent/hls-startup-demand-deadlock
+2026-10-03T06:02:49.0602942Z  * [new branch]          agent/lead/issue-142-n4-status-reconcile -> origin/agent/lead/issue-142-n4-status-reconcile
+2026-10-03T06:02:49.0603059Z  * [new branch]          agent/lead/issue-142-status-n4-73-truth -> origin/agent/lead/issue-142-status-n4-73-truth
+2026-10-03T06:02:49.0603153Z  * [new branch]          agent/lead/issue-160-doc-versions-historical -> origin/agent/lead/issue-160-doc-versions-historical
+2026-10-03T06:02:49.0603234Z  * [new branch]          agent/lead/issue-300-prove-fix-target-isolation -> origin/agent/lead/issue-300-prove-fix-target-isolation
+2026-10-03T06:02:49.0603343Z  * [new branch]          agent/lead/issue-315-benchmark-eof-property -> origin/agent/lead/issue-315-benchmark-eof-property
+2026-10-03T06:02:49.0603422Z  * [new branch]          agent/lead/issue-315-benchmark-eof-property-replacement -> origin/agent/lead/issue-315-benchmark-eof-property-replacement
+2026-10-03T06:02:49.0603533Z  * [new branch]          agent/lead/issue-322-regressions-fragment-dir -> origin/agent/lead/issue-322-regressions-fragment-dir
+2026-10-03T06:02:49.0604674Z  * [new branch]          agent/lead/issue-334-model-neutral-worker-names -> origin/agent/lead/issue-334-model-neutral-worker-names
+2026-10-03T06:02:49.0605091Z  * [new branch]          agent/lead/issue-335-mobile-version-merge-base -> origin/agent/lead/issue-335-mobile-version-merge-base
+2026-10-03T06:02:49.0605294Z  * [new branch]          agent/lead/issue-335-mobile-version-merge-base-v3 -> origin/agent/lead/issue-335-mobile-version-merge-base-v3
+2026-10-03T06:02:49.0605350Z  * [new branch]          agent/lead/issue-340-approval-carry-forward -> origin/agent/lead/issue-340-approval-carry-forward
+2026-10-03T06:02:49.0605431Z  * [new branch]          agent/lead/issue-350-skip-credits-clean-recovery -> origin/agent/lead/issue-350-skip-credits-clean-recovery
+2026-10-03T06:02:49.0605480Z  * [new branch]          agent/lead/issue-350-skip-credits-clean-recovery-v2 -> origin/agent/lead/issue-350-skip-credits-clean-recovery-v2
+2026-10-03T06:02:49.0605543Z  * [new branch]          agent/lead/issue-350-skip-credits-provenance-repair-v3 -> origin/agent/lead/issue-350-skip-credits-provenance-repair-v3
+2026-10-03T06:02:49.0605597Z  * [new branch]          agent/lead/issue-387-pin-ci-ffmpeg -> origin/agent/lead/issue-387-pin-ci-ffmpeg
+2026-10-03T06:02:49.0605659Z  * [new branch]          agent/lead/issue-387-pin-ci-ffmpeg-v2 -> origin/agent/lead/issue-387-pin-ci-ffmpeg-v2
+2026-10-03T06:02:49.0605707Z  * [new branch]          agent/lead/issue-387-pin-ci-ffmpeg-v3 -> origin/agent/lead/issue-387-pin-ci-ffmpeg-v3
+2026-10-03T06:02:49.0605752Z  * [new branch]          agent/lead/issue-387-pin-ci-ffmpeg-v4 -> origin/agent/lead/issue-387-pin-ci-ffmpeg-v4
+2026-10-03T06:02:49.0605812Z  * [new branch]          agent/lead/issue-509-apple-build-claim -> origin/agent/lead/issue-509-apple-build-claim
+2026-10-03T06:02:49.0605867Z  * [new branch]          agent/lead/issue-620-panoptic-theme -> origin/agent/lead/issue-620-panoptic-theme
+2026-10-03T06:02:49.0605930Z  * [new branch]          agent/lead/issue-620-panovic-theme -> origin/agent/lead/issue-620-panovic-theme
+2026-10-03T06:02:49.0605978Z  * [new branch]          agent/learner-media-capacity -> origin/agent/learner-media-capacity
+2026-10-03T06:02:49.0606038Z  * [new branch]          agent/learner-peer-authority -> origin/agent/learner-peer-authority
+2026-10-03T06:02:49.0606084Z  * [new branch]          agent/m3-client-sequence -> origin/agent/m3-client-sequence
+2026-10-03T06:02:49.0606135Z  * [new branch]          agent/m3-closed         -> origin/agent/m3-closed
+2026-10-03T06:02:49.0606199Z  * [new branch]          agent/m5-acceptance-refresh -> origin/agent/m5-acceptance-refresh
+2026-10-03T06:02:49.0606247Z  * [new branch]          agent/m5-fleet-acceptance -> origin/agent/m5-fleet-acceptance
+2026-10-03T06:02:49.0606306Z  * [new branch]          agent/m5-handoff        -> origin/agent/m5-handoff
+2026-10-03T06:02:49.0606349Z  * [new branch]          agent/m5-recon-and-status -> origin/agent/m5-recon-and-status
+2026-10-03T06:02:49.0606406Z  * [new branch]          agent/m5-status-close   -> origin/agent/m5-status-close
+2026-10-03T06:02:49.0606455Z  * [new branch]          agent/m55-apple-held    -> origin/agent/m55-apple-held
+2026-10-03T06:02:49.0606498Z  * [new branch]          agent/m55-results       -> origin/agent/m55-results
+2026-10-03T06:02:49.0606554Z  * [new branch]          agent/m55-spike-execution -> origin/agent/m55-spike-execution
+2026-10-03T06:02:49.0606603Z  * [new branch]          agent/m55-spike-protocol -> origin/agent/m55-spike-protocol
+2026-10-03T06:02:49.0606666Z  * [new branch]          agent/m55-staged-generations -> origin/agent/m55-staged-generations
+2026-10-03T06:02:49.0606710Z  * [new branch]          agent/m55-staged-generations-handoff -> origin/agent/m55-staged-generations-handoff
+2026-10-03T06:02:49.0606767Z  * [new branch]          agent/m5a-verification-doc -> origin/agent/m5a-verification-doc
+2026-10-03T06:02:49.0606813Z  * [new branch]          agent/m5a-web-stall-defers -> origin/agent/m5a-web-stall-defers
+2026-10-03T06:02:49.0606858Z  * [new branch]          agent/m5b-web-ended     -> origin/agent/m5b-web-ended
+2026-10-03T06:02:49.0606919Z  * [new branch]          agent/m5d-apple-followups -> origin/agent/m5d-apple-followups
+2026-10-03T06:02:49.0606961Z  * [new branch]          agent/m5d-apple-return-path -> origin/agent/m5d-apple-return-path
+2026-10-03T06:02:49.0607018Z  * [new branch]          agent/m5e-apple-item-failure -> origin/agent/m5e-apple-item-failure
+2026-10-03T06:02:49.0607066Z  * [new branch]          agent/m5e-apple-ladder-scope -> origin/agent/m5e-apple-ladder-scope
+2026-10-03T06:02:49.0607167Z  * [new branch]          agent/m5e-apple-stall-defers -> origin/agent/m5e-apple-stall-defers
+2026-10-03T06:02:49.0607214Z  * [new branch]          agent/m5f-android-return-path -> origin/agent/m5f-android-return-path
+2026-10-03T06:02:49.0607258Z  * [new branch]          agent/m5g-android-player-error -> origin/agent/m5g-android-player-error
+2026-10-03T06:02:49.0607314Z  * [new branch]          agent/m5g-android-stall-defers -> origin/agent/m5g-android-stall-defers
+2026-10-03T06:02:49.0607355Z  * [new branch]          agent/m6-android-on-main -> origin/agent/m6-android-on-main
+2026-10-03T06:02:49.0607418Z  * [new branch]          agent/m6-android-prepared-replacement -> origin/agent/m6-android-prepared-replacement
+2026-10-03T06:02:49.0607462Z  * [new branch]          agent/m6-android-status-landed -> origin/agent/m6-android-status-landed
+2026-10-03T06:02:49.0607514Z  * [new branch]          agent/m6-axis-case-handoff -> origin/agent/m6-axis-case-handoff
+2026-10-03T06:02:49.0607561Z  * [new branch]          agent/m6-axis-finding   -> origin/agent/m6-axis-finding
+2026-10-03T06:02:49.0607603Z  * [new branch]          agent/m6-caller-handoff -> origin/agent/m6-caller-handoff
+2026-10-03T06:02:49.0607659Z  * [new branch]          agent/m6-candidate-request -> origin/agent/m6-candidate-request
+2026-10-03T06:02:49.0607702Z  * [new branch]          agent/m6-candidate-ruling -> origin/agent/m6-candidate-ruling
+2026-10-03T06:02:49.0607753Z  * [new branch]          agent/m6-candidate-shape -> origin/agent/m6-candidate-shape
+2026-10-03T06:02:49.0607797Z  * [new branch]          agent/m6-capability-retention -> origin/agent/m6-capability-retention
+2026-10-03T06:02:49.0607905Z  * [new branch]          agent/m6-client-capability -> origin/agent/m6-client-capability
+2026-10-03T06:02:49.0607954Z  * [new branch]          agent/m6-executor-tests -> origin/agent/m6-executor-tests
+2026-10-03T06:02:49.0607996Z  * [new branch]          agent/m6-gate-both-engines -> origin/agent/m6-gate-both-engines
+2026-10-03T06:02:49.0608052Z  * [new branch]          agent/m6-grade-correction -> origin/agent/m6-grade-correction
+2026-10-03T06:02:49.0608096Z  * [new branch]          agent/m6-grade-intent   -> origin/agent/m6-grade-intent
+2026-10-03T06:02:49.0608153Z  * [new branch]          agent/m6-handoff        -> origin/agent/m6-handoff
+2026-10-03T06:02:49.0608193Z  * [new branch]          agent/m6-preparation-decision -> origin/agent/m6-preparation-decision
+2026-10-03T06:02:49.0608248Z  * [new branch]          agent/m6-preparation-executor -> origin/agent/m6-preparation-executor
+2026-10-03T06:02:49.0608290Z  * [new branch]          agent/m6-preparation-slot -> origin/agent/m6-preparation-slot
+2026-10-03T06:02:49.0608335Z  * [new branch]          agent/m6-prepare-action -> origin/agent/m6-prepare-action
+2026-10-03T06:02:49.0608392Z  * [new branch]          agent/m6-resolve-height -> origin/agent/m6-resolve-height
+2026-10-03T06:02:49.0608433Z  * [new branch]          agent/m6-resolve-plan   -> origin/agent/m6-resolve-plan
+2026-10-03T06:02:49.0608485Z  * [new branch]          agent/m6-resolver-map   -> origin/agent/m6-resolver-map
+2026-10-03T06:02:49.0608525Z  * [new branch]          agent/m6-review-fixes   -> origin/agent/m6-review-fixes
+2026-10-03T06:02:49.0608582Z  * [new branch]          agent/m6-seam-playback-id -> origin/agent/m6-seam-playback-id
+2026-10-03T06:02:49.0608626Z  * [new branch]          agent/m6-selection-moved -> origin/agent/m6-selection-moved
+2026-10-03T06:02:49.0608667Z  * [new branch]          agent/m6-shadow-cost    -> origin/agent/m6-shadow-cost
+2026-10-03T06:02:49.0608722Z  * [new branch]          agent/m6-shadow-counterfactual -> origin/agent/m6-shadow-counterfactual
+2026-10-03T06:02:49.0608766Z  * [new branch]          agent/m6-shadow-metric  -> origin/agent/m6-shadow-metric
+2026-10-03T06:02:49.0608822Z  * [new branch]          agent/m6-shadow-question -> origin/agent/m6-shadow-question
+2026-10-03T06:02:49.0608863Z  * [new branch]          agent/m6-shadow-reading -> origin/agent/m6-shadow-reading
+2026-10-03T06:02:49.0608912Z  * [new branch]          agent/m6-stage-and-commit -> origin/agent/m6-stage-and-commit
+2026-10-03T06:02:49.0608956Z  * [new branch]          agent/m6-stage-on-prepare -> origin/agent/m6-stage-on-prepare
+2026-10-03T06:02:49.0608996Z  * [new branch]          agent/m6-status         -> origin/agent/m6-status
+2026-10-03T06:02:49.0609051Z  * [new branch]          agent/m7-m3-seek-coalescing -> origin/agent/m7-m3-seek-coalescing
+2026-10-03T06:02:49.0609092Z  * [new branch]          agent/m7-r-m3-temp-sweep-race -> origin/agent/m7-r-m3-temp-sweep-race
+2026-10-03T06:02:49.0609146Z  * [new branch]          agent/m7-subtitle-readiness -> origin/agent/m7-subtitle-readiness
+2026-10-03T06:02:49.0609189Z  * [new branch]          agent/m7-subtitle-windows -> origin/agent/m7-subtitle-windows
+2026-10-03T06:02:49.0609247Z  * [new branch]          agent/m8-control-owner-lost -> origin/agent/m8-control-owner-lost
+2026-10-03T06:02:49.0609290Z  * [new branch]          agent/m8-hard-owner-loss -> origin/agent/m8-hard-owner-loss
+2026-10-03T06:02:49.0609331Z  * [new branch]          agent/m8-live-lease-fix -> origin/agent/m8-live-lease-fix
+2026-10-03T06:02:49.0609383Z  * [new branch]          agent/m8-readiness      -> origin/agent/m8-readiness
+2026-10-03T06:02:49.0609423Z  * [new branch]          agent/m8-shared-store-correction -> origin/agent/m8-shared-store-correction
+2026-10-03T06:02:49.0609480Z  * [new branch]          agent/marker-prewarm-consumer -> origin/agent/marker-prewarm-consumer
+2026-10-03T06:02:49.0609523Z  * [new branch]          agent/native-apple-subtitles -> origin/agent/native-apple-subtitles
+2026-10-03T06:02:49.0609578Z  * [new branch]          agent/p7-media-session-takeover -> origin/agent/p7-media-session-takeover
+2026-10-03T06:02:49.0609625Z  * [new branch]          agent/p8-media-ops      -> origin/agent/p8-media-ops
+2026-10-03T06:02:49.0609666Z  * [new branch]          agent/perf2-n0          -> origin/agent/perf2-n0
+2026-10-03T06:02:49.0609723Z  * [new branch]          agent/perf2-n0-android  -> origin/agent/perf2-n0-android
+2026-10-03T06:02:49.0609766Z  * [new branch]          agent/perf2-n0-apple    -> origin/agent/perf2-n0-apple
+2026-10-03T06:02:49.0609821Z  * [new branch]          agent/perf2-n1          -> origin/agent/perf2-n1
+2026-10-03T06:02:49.0609861Z  * [new branch]          agent/perf2-n1-acceptance-docs -> origin/agent/perf2-n1-acceptance-docs
+2026-10-03T06:02:49.0609916Z  * [new branch]          agent/perf2-n1-harness  -> origin/agent/perf2-n1-harness
+2026-10-03T06:02:49.0609962Z  * [new branch]          agent/perf2-n1-harness-review -> origin/agent/perf2-n1-harness-review
+2026-10-03T06:02:49.0610004Z  * [new branch]          agent/perf2-n1-qsv-default -> origin/agent/perf2-n1-qsv-default
+2026-10-03T06:02:49.0610185Z  * [new branch]          agent/pic-android-fixes -> origin/agent/pic-android-fixes
+2026-10-03T06:02:49.0610232Z  * [new branch]          agent/pic-apple-fixes   -> origin/agent/pic-apple-fixes
+2026-10-03T06:02:49.0610294Z  * [new branch]          agent/pic-bar-row       -> origin/agent/pic-bar-row
+2026-10-03T06:02:49.0610336Z  * [new branch]          agent/pic-ci-gates      -> origin/agent/pic-ci-gates
+2026-10-03T06:02:49.0610387Z  * [new branch]          agent/pic-fence-docs    -> origin/agent/pic-fence-docs
+2026-10-03T06:02:49.0610429Z  * [new branch]          agent/pic-followups     -> origin/agent/pic-followups
+2026-10-03T06:02:49.0610471Z  * [new branch]          agent/pic-m1-web        -> origin/agent/pic-m1-web
+2026-10-03T06:02:49.0610529Z  * [new branch]          agent/pic-m2-android    -> origin/agent/pic-m2-android
+2026-10-03T06:02:49.0610571Z  * [new branch]          agent/pic-m3-apple      -> origin/agent/pic-m3-apple
+2026-10-03T06:02:49.0610641Z  * [new branch]          agent/pic-m4-fence      -> origin/agent/pic-m4-fence
+2026-10-03T06:02:49.0610682Z  * [new branch]          agent/pic-m5-nav        -> origin/agent/pic-m5-nav
+2026-10-03T06:02:49.0610737Z  * [new branch]          agent/pic-web-fixes     -> origin/agent/pic-web-fixes
+2026-10-03T06:02:49.0610781Z  * [new branch]          agent/playback-caps-v2-m1-index-identities -> origin/agent/playback-caps-v2-m1-index-identities
+2026-10-03T06:02:49.0610826Z  * [new branch]          agent/playback-caps-v2-m2-dv-columns -> origin/agent/playback-caps-v2-m2-dv-columns
+2026-10-03T06:02:49.0610885Z  * [new branch]          agent/playback-caps-v2-m3-caps-document -> origin/agent/playback-caps-v2-m3-caps-document
+2026-10-03T06:02:49.0610928Z  * [new branch]          agent/playback-caps-v2-m3b-web-caps -> origin/agent/playback-caps-v2-m3b-web-caps
+2026-10-03T06:02:49.0611000Z  * [new branch]          agent/playback-caps-v2-m4-grade-negotiation -> origin/agent/playback-caps-v2-m4-grade-negotiation
+2026-10-03T06:02:49.0611042Z  * [new branch]          agent/playback-caps-v2-m5a-convert -> origin/agent/playback-caps-v2-m5a-convert
+2026-10-03T06:02:49.0611093Z  * [new branch]          agent/playback-caps-v2-m5a-dv-record -> origin/agent/playback-caps-v2-m5a-dv-record
+2026-10-03T06:02:49.0611137Z  * [new branch]          agent/playback-caps-v2-m5a-strip-record -> origin/agent/playback-caps-v2-m5a-strip-record
+2026-10-03T06:02:49.0611177Z  * [new branch]          agent/playback-caps-v2-m5a0-correction -> origin/agent/playback-caps-v2-m5a0-correction
+2026-10-03T06:02:49.0611234Z  * [new branch]          agent/playback-caps-v2-m5a0-spike -> origin/agent/playback-caps-v2-m5a0-spike
+2026-10-03T06:02:49.0611304Z  * [new branch]          agent/playback-caps-v2-m6-learned-limits -> origin/agent/playback-caps-v2-m6-learned-limits
+2026-10-03T06:02:49.0611356Z  * [new branch]          agent/preparation-deadline -> origin/agent/preparation-deadline
+2026-10-03T06:02:49.0611397Z  * [new branch]          agent/preparation-gate  -> origin/agent/preparation-gate
+2026-10-03T06:02:49.0611448Z  * [new branch]          agent/redesign-mobile-item-pages -> origin/agent/redesign-mobile-item-pages
+2026-10-03T06:02:49.0611491Z  * [new branch]          agent/relay-gate-harness -> origin/agent/relay-gate-harness
+2026-10-03T06:02:49.0611531Z  * [new branch]          agent/release-0.3.0     -> origin/agent/release-0.3.0
+2026-10-03T06:02:49.0611579Z  * [new branch]          agent/request-identity  -> origin/agent/request-identity
+2026-10-03T06:02:49.0611620Z  * [new branch]          agent/restore-dv-convert-test -> origin/agent/restore-dv-convert-test
+2026-10-03T06:02:49.0611674Z  * [new branch]          agent/sampled-source-attestation -> origin/agent/sampled-source-attestation
+2026-10-03T06:02:49.0611714Z  * [new branch]          agent/stage-on-prepare  -> origin/agent/stage-on-prepare
+2026-10-03T06:02:49.0611767Z  * [new branch]          agent/stage-on-prepare-v2 -> origin/agent/stage-on-prepare-v2
+2026-10-03T06:02:49.0611809Z  * [new branch]          agent/stage-on-prepare-v3 -> origin/agent/stage-on-prepare-v3
+2026-10-03T06:02:49.0611847Z  * [new branch]          agent/staged-lease-deadline -> origin/agent/staged-lease-deadline
+2026-10-03T06:02:49.0611901Z  * [new branch]          agent/status-fleet-run-1 -> origin/agent/status-fleet-run-1
+2026-10-03T06:02:49.0611940Z  * [new branch]          agent/status-item8-complete -> origin/agent/status-item8-complete
+2026-10-03T06:02:49.0611992Z  * [new branch]          agent/status-learner    -> origin/agent/status-learner
+2026-10-03T06:02:49.0612030Z  * [new branch]          agent/status-m3-block   -> origin/agent/status-m3-block
+2026-10-03T06:02:49.0612082Z  * [new branch]          agent/status-m3-built   -> origin/agent/status-m3-built
+2026-10-03T06:02:49.0612122Z  * [new branch]          agent/status-m3-gaps    -> origin/agent/status-m3-gaps
+2026-10-03T06:02:49.0612163Z  * [new branch]          agent/status-m5c-disposition -> origin/agent/status-m5c-disposition
+2026-10-03T06:02:49.0612219Z  * [new branch]          agent/status-m6-close   -> origin/agent/status-m6-close
+2026-10-03T06:02:49.0612261Z  * [new branch]          agent/status-m6-night   -> origin/agent/status-m6-night
+2026-10-03T06:02:49.0612315Z  * [new branch]          agent/status-node-hostnames -> origin/agent/status-node-hostnames
+2026-10-03T06:02:49.0612370Z  * [new branch]          agent/status-startup-deadlock -> origin/agent/status-startup-deadlock
+2026-10-03T06:02:49.0612423Z  * [new branch]          agent/store-shard-fleet -> origin/agent/store-shard-fleet
+2026-10-03T06:02:49.0612469Z  * [new branch]          agent/trakt-link-note-race -> origin/agent/trakt-link-note-race
+2026-10-03T06:02:49.0612511Z  * [new branch]          agent/tv-episode-media-info -> origin/agent/tv-episode-media-info
+2026-10-03T06:02:49.0612567Z  * [new branch]          agent/vod-m0            -> origin/agent/vod-m0
+2026-10-03T06:02:49.0612610Z  * [new branch]          agent/vod-m1            -> origin/agent/vod-m1
+2026-10-03T06:02:49.0612663Z  * [new branch]          agent/vod-m1b           -> origin/agent/vod-m1b
+2026-10-03T06:02:49.0612704Z  * [new branch]          agent/vod-m2            -> origin/agent/vod-m2
+2026-10-03T06:02:49.0612761Z  * [new branch]          agent/vod-m2c           -> origin/agent/vod-m2c
+2026-10-03T06:02:49.0612804Z  * [new branch]          agent/vod-m2d           -> origin/agent/vod-m2d
+2026-10-03T06:02:49.0612852Z  * [new branch]          agent/web-ask-bound     -> origin/agent/web-ask-bound
+2026-10-03T06:02:49.0612909Z  * [new branch]          agent/web-reporter-browser-gate -> origin/agent/web-reporter-browser-gate
+2026-10-03T06:02:49.0612952Z  * [new branch]          agent/web-reporter-timer -> origin/agent/web-reporter-timer
+2026-10-03T06:02:49.0613009Z  * [new branch]          agent/web-stall-harness-real-threshold -> origin/agent/web-stall-harness-real-threshold
+2026-10-03T06:02:49.0613078Z  * [new branch]          agent/windows-port-plan -> origin/agent/windows-port-plan
+2026-10-03T06:02:49.0613132Z  * [new branch]          android/playback-surface -> origin/android/playback-surface
+2026-10-03T06:02:49.0613177Z  * [new branch]          android/playback-surface-compile -> origin/android/playback-surface-compile
+2026-10-03T06:02:49.0613222Z  * [new branch]          android/playback-surface-reach -> origin/android/playback-surface-reach
+2026-10-03T06:02:49.0613304Z  * [new branch]          apple/banner-actions    -> origin/apple/banner-actions
+2026-10-03T06:02:49.0613347Z  * [new branch]          apple/playback-surface  -> origin/apple/playback-surface
+2026-10-03T06:02:49.0613419Z  * [new branch]          apple/playback-surface-compile -> origin/apple/playback-surface-compile
+2026-10-03T06:02:49.0613461Z  * [new branch]          apple/playback-surface-reach -> origin/apple/playback-surface-reach
+2026-10-03T06:02:49.0613517Z  * [new branch]          archive/apple-hls-reconnect-draft-20260811 -> origin/archive/apple-hls-reconnect-draft-20260811
+2026-10-03T06:02:49.0613567Z  * [new branch]          archive/pr189-intermediate-review-draft-20260814 -> origin/archive/pr189-intermediate-review-draft-20260814
+2026-10-03T06:02:49.0613618Z  * [new branch]          badges                  -> origin/badges
+2026-10-03T06:02:49.0613673Z  * [new branch]          badges-ci               -> origin/badges-ci
+2026-10-03T06:02:49.0613714Z  * [new branch]          badges-lint             -> origin/badges-lint
+2026-10-03T06:02:49.0613771Z  * [new branch]          badges-pr-ci            -> origin/badges-pr-ci
+2026-10-03T06:02:49.0613813Z  * [new branch]          badges-pr-lint          -> origin/badges-pr-lint
+2026-10-03T06:02:49.0613863Z  * [new branch]          build/m6-phase3-prime   -> origin/build/m6-phase3-prime
+2026-10-03T06:02:49.0613906Z  * [new branch]          chore/fable-review-fallback -> origin/chore/fable-review-fallback
+2026-10-03T06:02:49.0613948Z  * [new branch]          ci/fast-lane-by-default -> origin/ci/fast-lane-by-default
+2026-10-03T06:02:49.0614006Z  * [new branch]          clients/remediation     -> origin/clients/remediation
+2026-10-03T06:02:49.0614047Z  * [new branch]          codex/a02-restore-20260924 -> origin/codex/a02-restore-20260924
+2026-10-03T06:02:49.0614103Z  * [new branch]          codex/a03-library-paging-restore -> origin/codex/a03-library-paging-restore
+2026-10-03T06:02:49.0614146Z  * [new branch]          codex/a04-browser-stability -> origin/codex/a04-browser-stability
+2026-10-03T06:02:49.0614202Z  * [new branch]          codex/activity-peer-read-fix -> origin/codex/activity-peer-read-fix
+2026-10-03T06:02:49.0614246Z  * [new branch]          codex/adaptive-developer-advisory -> origin/codex/adaptive-developer-advisory
+2026-10-03T06:02:49.0614292Z  * [new branch]          codex/analysis-operations-ui -> origin/codex/analysis-operations-ui
+2026-10-03T06:02:49.0614349Z  * [new branch]          codex/analysis-queue-instrumentation -> origin/codex/analysis-queue-instrumentation
+2026-10-03T06:02:49.0614392Z  * [new branch]          codex/analysis-reconciliation -> origin/codex/analysis-reconciliation
+2026-10-03T06:02:49.0614451Z  * [new branch]          codex/analysis-reconciliation-inventories -> origin/codex/analysis-reconciliation-inventories
+2026-10-03T06:02:49.0614494Z  * [new branch]          codex/android-live-playback-version -> origin/codex/android-live-playback-version
+2026-10-03T06:02:49.0614549Z  * [new branch]          codex/ansible-mobile-deploys -> origin/codex/ansible-mobile-deploys
+2026-10-03T06:02:49.0614606Z  * [new branch]          codex/apple-channel-playback-decision -> origin/codex/apple-channel-playback-decision
+2026-10-03T06:02:49.0614648Z  * [new branch]          codex/apple-channel-playback-freeze -> origin/codex/apple-channel-playback-freeze
+2026-10-03T06:02:49.0614707Z  * [new branch]          codex/apple-cold-intent -> origin/codex/apple-cold-intent
+2026-10-03T06:02:49.0614748Z  * [new branch]          codex/apple-live-start-and-empty-chapters -> origin/codex/apple-live-start-and-empty-chapters
+2026-10-03T06:02:49.0614802Z  * [new branch]          codex/apple-pip         -> origin/codex/apple-pip
+2026-10-03T06:02:49.0614845Z  * [new branch]          codex/apple-session-urlsession-recovery -> origin/codex/apple-session-urlsession-recovery
+2026-10-03T06:02:49.0614904Z  * [new branch]          codex/apple-ui-polish   -> origin/codex/apple-ui-polish
+2026-10-03T06:02:49.0614947Z  * [new branch]          codex/appletv-playback-and-live-details -> origin/codex/appletv-playback-and-live-details
+2026-10-03T06:02:49.0614990Z  * [new branch]          codex/architecture-review-build-status -> origin/codex/architecture-review-build-status
+2026-10-03T06:02:49.0615045Z  * [new branch]          codex/architecture-review-evidence-0927 -> origin/codex/architecture-review-evidence-0927
+2026-10-03T06:02:49.0615091Z  * [new branch]          codex/architecture-review-postmerge-evidence -> origin/codex/architecture-review-postmerge-evidence
+2026-10-03T06:02:49.0615148Z  * [new branch]          codex/artifact-prune    -> origin/codex/artifact-prune
+2026-10-03T06:02:49.0615190Z  * [new branch]          codex/artwork-refresh-exact-id -> origin/codex/artwork-refresh-exact-id
+2026-10-03T06:02:49.0615243Z  * [new branch]          codex/audiobook-support -> origin/codex/audiobook-support
+2026-10-03T06:02:49.0615284Z  * [new branch]          codex/audit-validation-history -> origin/codex/audit-validation-history
+2026-10-03T06:02:49.0615351Z  * [new branch]          codex/avatar-browser-playback -> origin/codex/avatar-browser-playback
+2026-10-03T06:02:49.0615406Z  * [new branch]          codex/badges            -> origin/codex/badges
+2026-10-03T06:02:49.0615447Z  * [new branch]          codex/badges-ci         -> origin/codex/badges-ci
+2026-10-03T06:02:49.0615499Z  * [new branch]          codex/badges-lint       -> origin/codex/badges-lint
+2026-10-03T06:02:49.0615540Z  * [new branch]          codex/badges-pr-ci      -> origin/codex/badges-pr-ci
+2026-10-03T06:02:49.0615594Z  * [new branch]          codex/badges-pr-lint    -> origin/codex/badges-pr-lint
+2026-10-03T06:02:49.0615637Z  * [new branch]          codex/bittorrent-advisory -> origin/codex/bittorrent-advisory
+2026-10-03T06:02:49.0615677Z  * [new branch]          codex/bump-android-build-80 -> origin/codex/bump-android-build-80
+2026-10-03T06:02:49.0615731Z  * [new branch]          codex/bump-apple-version-0.2.2 -> origin/codex/bump-apple-version-0.2.2
+2026-10-03T06:02:49.0615773Z  * [new branch]          codex/bump-mobile-build-11 -> origin/codex/bump-mobile-build-11
+2026-10-03T06:02:49.0615831Z  * [new branch]          codex/capacity-truth    -> origin/codex/capacity-truth
+2026-10-03T06:02:49.0615872Z  * [new branch]          codex/catalog-layout-fix -> origin/codex/catalog-layout-fix
+2026-10-03T06:02:49.0615926Z  * [new branch]          codex/ci-artifact-quota -> origin/codex/ci-artifact-quota
+2026-10-03T06:02:49.0615969Z  * [new branch]          codex/ci-cache-foundation -> origin/codex/ci-cache-foundation
+2026-10-03T06:02:49.0616009Z  * [new branch]          codex/ci-disk-headroom  -> origin/codex/ci-disk-headroom
+2026-10-03T06:02:49.0616064Z  * [new branch]          codex/ci-enable-stall-auto -> origin/codex/ci-enable-stall-auto
+2026-10-03T06:02:49.0616104Z  * [new branch]          codex/ci-main-stability -> origin/codex/ci-main-stability
+2026-10-03T06:02:49.0616156Z  * [new branch]          codex/ci-native-arm-shadow -> origin/codex/ci-native-arm-shadow
+2026-10-03T06:02:49.0616199Z  * [new branch]          codex/ci-runner-mode    -> origin/codex/ci-runner-mode
+2026-10-03T06:02:49.0616253Z  * [new branch]          codex/ci-store-sharding -> origin/codex/ci-store-sharding
+2026-10-03T06:02:49.0616305Z  * [new branch]          codex/ci-test-overhaul  -> origin/codex/ci-test-overhaul
+2026-10-03T06:02:49.0616346Z  * [new branch]          codex/ci-windows-baremetal-routing -> origin/codex/ci-windows-baremetal-routing
+2026-10-03T06:02:49.0616403Z  * [new branch]          codex/client-contract-capability -> origin/codex/client-contract-capability
+2026-10-03T06:02:49.0616446Z  * [new branch]          codex/client-prepared-switch-contract -> origin/codex/client-prepared-switch-contract
+2026-10-03T06:02:49.0616506Z  * [new branch]          codex/client-recovery   -> origin/codex/client-recovery
+2026-10-03T06:02:49.0616568Z  * [new branch]          codex/cluster-activity-delivery-flake -> origin/codex/cluster-activity-delivery-flake
+2026-10-03T06:02:49.0616638Z  * [new branch]          codex/cluster-artwork-identity -> origin/codex/cluster-artwork-identity
+2026-10-03T06:02:49.0616706Z  * [new branch]          codex/cluster-artwork-leave-safety -> origin/codex/cluster-artwork-leave-safety
+2026-10-03T06:02:49.0616776Z  * [new branch]          codex/cluster-auth-touch-coalescing -> origin/codex/cluster-auth-touch-coalescing
+2026-10-03T06:02:49.0616845Z  * [new branch]          codex/cluster-dvr-transaction-audit -> origin/codex/cluster-dvr-transaction-audit
+2026-10-03T06:02:49.0616914Z  * [new branch]          codex/cluster-failover-hardening -> origin/codex/cluster-failover-hardening
+2026-10-03T06:02:49.0616977Z  * [new branch]          codex/cluster-host-leader -> origin/codex/cluster-host-leader
+2026-10-03T06:02:49.0617038Z  * [new branch]          codex/cluster-job-leases -> origin/codex/cluster-job-leases
+2026-10-03T06:02:49.0617118Z  * [new branch]          codex/cluster-operations-status -> origin/codex/cluster-operations-status
+2026-10-03T06:02:49.0617188Z  * [new branch]          codex/cluster-page-latency-fix -> origin/codex/cluster-page-latency-fix
+2026-10-03T06:02:49.0617252Z  * [new branch]          codex/cluster-performance-plan -> origin/codex/cluster-performance-plan
+2026-10-03T06:02:49.0617317Z  * [new branch]          codex/cluster-short-hostname -> origin/codex/cluster-short-hostname
+2026-10-03T06:02:49.0617387Z  * [new branch]          codex/cluster-singleton-process-proof-v2 -> origin/codex/cluster-singleton-process-proof-v2
+2026-10-03T06:02:49.0617458Z  * [new branch]          codex/cluster-transport-m3 -> origin/codex/cluster-transport-m3
+2026-10-03T06:02:49.0617527Z  * [new branch]          codex/cluster-worker-activity -> origin/codex/cluster-worker-activity
+2026-10-03T06:02:49.0617597Z  * [new branch]          codex/clustering-m0     -> origin/codex/clustering-m0
+2026-10-03T06:02:49.0617675Z  * [new branch]          codex/clustering-m1a-store-parity -> origin/codex/clustering-m1a-store-parity
+2026-10-03T06:02:49.0617746Z  * [new branch]          codex/clustering-m1b-auth-store -> origin/codex/clustering-m1b-auth-store
+2026-10-03T06:02:49.0617848Z  * [new branch]          codex/clustering-m1c-media-fts -> origin/codex/clustering-m1c-media-fts
+2026-10-03T06:02:49.0617983Z  * [new branch]          codex/clustering-m1d-remaining-store -> origin/codex/clustering-m1d-remaining-store
+2026-10-03T06:02:49.0618036Z  * [new branch]          codex/clustering-m2a-import-staging -> origin/codex/clustering-m2a-import-staging
+2026-10-03T06:02:49.0618081Z  * [new branch]          codex/clustering-m2c-import-hardening -> origin/codex/clustering-m2c-import-hardening
+2026-10-03T06:02:49.0618129Z  * [new branch]          codex/collapse-audio-tracks -> origin/codex/collapse-audio-tracks
+2026-10-03T06:02:49.0618173Z  * [new branch]          codex/collapse-subtitle-tracks -> origin/codex/collapse-subtitle-tracks
+2026-10-03T06:02:49.0618217Z  * [new branch]          codex/commit-binds-to-origin -> origin/codex/commit-binds-to-origin
+2026-10-03T06:02:49.0618262Z  * [new branch]          codex/compact-mobile-media-layout -> origin/codex/compact-mobile-media-layout
+2026-10-03T06:02:49.0618306Z  * [new branch]          codex/compact-playback-stats -> origin/codex/compact-playback-stats
+2026-10-03T06:02:49.0618353Z  * [new branch]          codex/continuous-quality-cq0 -> origin/codex/continuous-quality-cq0
+2026-10-03T06:02:49.0618396Z  * [new branch]          codex/control-action-hold -> origin/codex/control-action-hold
+2026-10-03T06:02:49.0618443Z  * [new branch]          codex/control-action-telemetry -> origin/codex/control-action-telemetry
+2026-10-03T06:02:49.0618486Z  * [new branch]          codex/control-advisory-actions -> origin/codex/control-advisory-actions
+2026-10-03T06:02:49.0618542Z  * [new branch]          codex/control-capture-envelope -> origin/codex/control-capture-envelope
+2026-10-03T06:02:49.0618589Z  * [new branch]          codex/control-client-verdicts -> origin/codex/control-client-verdicts
+2026-10-03T06:02:49.0618632Z  * [new branch]          codex/control-hold-clients -> origin/codex/control-hold-clients
+2026-10-03T06:02:49.0618673Z  * [new branch]          codex/control-terminal-retry -> origin/codex/control-terminal-retry
+2026-10-03T06:02:49.0618715Z  * [new branch]          codex/control-wire-conformance -> origin/codex/control-wire-conformance
+2026-10-03T06:02:49.0618764Z  * [new branch]          codex/d02-m1-20260924   -> origin/codex/d02-m1-20260924
+2026-10-03T06:02:49.0618810Z  * [new branch]          codex/d02-remaining     -> origin/codex/d02-remaining
+2026-10-03T06:02:49.0618862Z  * [new branch]          codex/d03-grants-and-clients -> origin/codex/d03-grants-and-clients
+2026-10-03T06:02:49.0618923Z  * [new branch]          codex/decoder-effort-handoff -> origin/codex/decoder-effort-handoff
+2026-10-03T06:02:49.0618979Z  * [new branch]          codex/decoder-final-promotion -> origin/codex/decoder-final-promotion
+2026-10-03T06:02:49.0619026Z  * [new branch]          codex/decoder-m7-remainder-audit -> origin/codex/decoder-m7-remainder-audit
+2026-10-03T06:02:49.0619072Z  * [new branch]          codex/decoder-m7b-contract -> origin/codex/decoder-m7b-contract
+2026-10-03T06:02:49.0619129Z  * [new branch]          codex/decoder-m7b-inventory -> origin/codex/decoder-m7b-inventory
+2026-10-03T06:02:49.0619189Z  * [new branch]          codex/decoder-m7b-spec  -> origin/codex/decoder-m7b-spec
+2026-10-03T06:02:49.0619239Z  * [new branch]          codex/decoder-recovery-docs -> origin/codex/decoder-recovery-docs
+2026-10-03T06:02:49.0619284Z  * [new branch]          codex/decoder-selection-m0 -> origin/codex/decoder-selection-m0
+2026-10-03T06:02:49.0619325Z  * [new branch]          codex/decoder-selection-m1 -> origin/codex/decoder-selection-m1
+2026-10-03T06:02:49.0619387Z  * [new branch]          codex/decoder-selection-m2 -> origin/codex/decoder-selection-m2
+2026-10-03T06:02:49.0619444Z  * [new branch]          codex/decoder-selection-m3a -> origin/codex/decoder-selection-m3a
+2026-10-03T06:02:49.0619498Z  * [new branch]          codex/decoder-selection-m3b -> origin/codex/decoder-selection-m3b
+2026-10-03T06:02:49.0619541Z  * [new branch]          codex/decoder-selection-m3b2 -> origin/codex/decoder-selection-m3b2
+2026-10-03T06:02:49.0619589Z  * [new branch]          codex/decoder-selection-m3c -> origin/codex/decoder-selection-m3c
+2026-10-03T06:02:49.0619651Z  * [new branch]          codex/decoder-selection-m3c2 -> origin/codex/decoder-selection-m3c2
+2026-10-03T06:02:49.0619704Z  * [new branch]          codex/decoder-selection-m3c3 -> origin/codex/decoder-selection-m3c3
+2026-10-03T06:02:49.0619754Z  * [new branch]          codex/decoder-selection-m3c4 -> origin/codex/decoder-selection-m3c4
+2026-10-03T06:02:49.0619796Z  * [new branch]          codex/decoder-selection-m3c5 -> origin/codex/decoder-selection-m3c5
+2026-10-03T06:02:49.0619850Z  * [new branch]          codex/decoder-selection-m3d -> origin/codex/decoder-selection-m3d
+2026-10-03T06:02:49.0619909Z  * [new branch]          codex/decoder-selection-m3e -> origin/codex/decoder-selection-m3e
+2026-10-03T06:02:49.0619963Z  * [new branch]          codex/decoder-selection-m3f -> origin/codex/decoder-selection-m3f
+2026-10-03T06:02:49.0620009Z  * [new branch]          codex/decoder-selection-m4 -> origin/codex/decoder-selection-m4
+2026-10-03T06:02:49.0620049Z  * [new branch]          codex/decoder-selection-m5a -> origin/codex/decoder-selection-m5a
+2026-10-03T06:02:49.0620102Z  * [new branch]          codex/decoder-selection-m5a-census -> origin/codex/decoder-selection-m5a-census
+2026-10-03T06:02:49.0620167Z  * [new branch]          codex/decoder-selection-m5b -> origin/codex/decoder-selection-m5b
+2026-10-03T06:02:49.0620222Z  * [new branch]          codex/decoder-selection-m5c-spec -> origin/codex/decoder-selection-m5c-spec
+2026-10-03T06:02:49.0620266Z  * [new branch]          codex/decoder-selection-m5c-spec2 -> origin/codex/decoder-selection-m5c-spec2
+2026-10-03T06:02:49.0620310Z  * [new branch]          codex/decoder-selection-m5c1 -> origin/codex/decoder-selection-m5c1
+2026-10-03T06:02:49.0620351Z  * [new branch]          codex/decoder-selection-m5c2a -> origin/codex/decoder-selection-m5c2a
+2026-10-03T06:02:49.0620394Z  * [new branch]          codex/decoder-selection-m5c2b -> origin/codex/decoder-selection-m5c2b
+2026-10-03T06:02:49.0620439Z  * [new branch]          codex/decoder-selection-m5c2c -> origin/codex/decoder-selection-m5c2c
+2026-10-03T06:02:49.0620500Z  * [new branch]          codex/decoder-selection-m5c2d -> origin/codex/decoder-selection-m5c2d
+2026-10-03T06:02:49.0620558Z  * [new branch]          codex/decoder-selection-m5c3 -> origin/codex/decoder-selection-m5c3
+2026-10-03T06:02:49.0620607Z  * [new branch]          codex/decoder-selection-m5c3a -> origin/codex/decoder-selection-m5c3a
+2026-10-03T06:02:49.0620650Z  * [new branch]          codex/decoder-selection-m5c3b -> origin/codex/decoder-selection-m5c3b
+2026-10-03T06:02:49.0620714Z  * [new branch]          codex/decoder-selection-m5c3c -> origin/codex/decoder-selection-m5c3c
+2026-10-03T06:02:49.0620769Z  * [new branch]          codex/decoder-selection-m5c3d -> origin/codex/decoder-selection-m5c3d
+2026-10-03T06:02:49.0620822Z  * [new branch]          codex/decoder-selection-m7a -> origin/codex/decoder-selection-m7a
+2026-10-03T06:02:49.0620865Z  * [new branch]          codex/decoder-selection-status -> origin/codex/decoder-selection-status
+2026-10-03T06:02:49.0620907Z  * [new branch]          codex/delegate-mobile-deploys-to-ansible -> origin/codex/delegate-mobile-deploys-to-ansible
+2026-10-03T06:02:49.0620948Z  * [new branch]          codex/desired-admission -> origin/codex/desired-admission
+2026-10-03T06:02:49.0620986Z  * [new branch]          codex/desired-ownership -> origin/codex/desired-ownership
+2026-10-03T06:02:49.0621024Z  * [new branch]          codex/desired-persistence -> origin/codex/desired-persistence
+2026-10-03T06:02:49.0621062Z  * [new branch]          codex/desired-selection -> origin/codex/desired-selection
+2026-10-03T06:02:49.0621111Z  * [new branch]          codex/developer-settings-cleanup -> origin/codex/developer-settings-cleanup
+2026-10-03T06:02:49.0621159Z  * [new branch]          codex/docs-status-v028  -> origin/codex/docs-status-v028
+2026-10-03T06:02:49.0621213Z  * [new branch]          codex/document-playback-routing -> origin/codex/document-playback-routing
+2026-10-03T06:02:49.0621265Z  * [new branch]          codex/drain-bound       -> origin/codex/drain-bound
+2026-10-03T06:02:49.0621308Z  * [new branch]          codex/drain-feasibility -> origin/codex/drain-feasibility
+2026-10-03T06:02:49.0621356Z  * [new branch]          codex/dv-conversion-policy-status -> origin/codex/dv-conversion-policy-status
+2026-10-03T06:02:49.0621402Z  * [new branch]          codex/dv-schema-test-versions -> origin/codex/dv-schema-test-versions
+2026-10-03T06:02:49.0621461Z  * [new branch]          codex/ebook-reader-m4b-android -> origin/codex/ebook-reader-m4b-android
+2026-10-03T06:02:49.0621514Z  * [new branch]          codex/effort-train      -> origin/codex/effort-train
+2026-10-03T06:02:49.0621558Z  * [new branch]          codex/encoded-bootstrap-guards -> origin/codex/encoded-bootstrap-guards
+2026-10-03T06:02:49.0621600Z  * [new branch]          codex/enforce-mobile-version-increments -> origin/codex/enforce-mobile-version-increments
+2026-10-03T06:02:49.0621649Z  * [new branch]          codex/fast-unit-tests   -> origin/codex/fast-unit-tests
+2026-10-03T06:02:49.0621705Z  * [new branch]          codex/final-main-apple-evidence -> origin/codex/final-main-apple-evidence
+2026-10-03T06:02:49.0621758Z  * [new branch]          codex/final-main-l03-caption-evidence -> origin/codex/final-main-l03-caption-evidence
+2026-10-03T06:02:49.0621804Z  * [new branch]          codex/finish-cinema-handoff -> origin/codex/finish-cinema-handoff
+2026-10-03T06:02:49.0621844Z  * [new branch]          codex/fix-aac-restart-phase -> origin/codex/fix-aac-restart-phase
+2026-10-03T06:02:49.0621883Z  * [new branch]          codex/fix-android-landscape-video -> origin/codex/fix-android-landscape-video
+2026-10-03T06:02:49.0621923Z  * [new branch]          codex/fix-android-library-hang -> origin/codex/fix-android-library-hang
+2026-10-03T06:02:49.0621975Z  * [new branch]          codex/fix-android-playback-routing -> origin/codex/fix-android-playback-routing
+2026-10-03T06:02:49.0622033Z  * [new branch]          codex/fix-android-unreachable-resume -> origin/codex/fix-android-unreachable-resume
+2026-10-03T06:02:49.0622080Z  * [new branch]          codex/fix-apple-hdr-direct-playlist -> origin/codex/fix-apple-hdr-direct-playlist
+2026-10-03T06:02:49.0622126Z  * [new branch]          codex/fix-apple-hdr-master -> origin/codex/fix-apple-hdr-master
+2026-10-03T06:02:49.0622168Z  * [new branch]          codex/fix-apple-hdr-output -> origin/codex/fix-apple-hdr-output
+2026-10-03T06:02:49.0622225Z  * [new branch]          codex/fix-apple-hdr-signaling -> origin/codex/fix-apple-hdr-signaling
+2026-10-03T06:02:49.0622290Z  * [new branch]          codex/fix-apple-hls-hysteresis -> origin/codex/fix-apple-hls-hysteresis
+2026-10-03T06:02:49.0622341Z  * [new branch]          codex/fix-apple-native-seek-hang -> origin/codex/fix-apple-native-seek-hang
+2026-10-03T06:02:49.0622388Z  * [new branch]          codex/fix-apple-playback-freeze -> origin/codex/fix-apple-playback-freeze
+2026-10-03T06:02:49.0622431Z  * [new branch]          codex/fix-apple-playback-info-lifetime -> origin/codex/fix-apple-playback-info-lifetime
+2026-10-03T06:02:49.0622489Z  * [new branch]          codex/fix-apple-subtitle-warning -> origin/codex/fix-apple-subtitle-warning
+2026-10-03T06:02:49.0622559Z  * [new branch]          codex/fix-apple-tvos-control-size -> origin/codex/fix-apple-tvos-control-size
+2026-10-03T06:02:49.0622622Z  * [new branch]          codex/fix-artifact-prune-runner -> origin/codex/fix-artifact-prune-runner
+2026-10-03T06:02:49.0622688Z  * [new branch]          codex/fix-ci-coverage-badges -> origin/codex/fix-ci-coverage-badges
+2026-10-03T06:02:49.0622747Z  * [new branch]          codex/fix-cinema-unit-tests -> origin/codex/fix-cinema-unit-tests
+2026-10-03T06:02:49.0622798Z  * [new branch]          codex/fix-cluster-daemon-readiness -> origin/codex/fix-cluster-daemon-readiness
+2026-10-03T06:02:49.0622845Z  * [new branch]          codex/fix-coming-soon-artwork -> origin/codex/fix-coming-soon-artwork
+2026-10-03T06:02:49.0622891Z  * [new branch]          codex/fix-compose-network-conflict -> origin/codex/fix-compose-network-conflict
+2026-10-03T06:02:49.0622935Z  * [new branch]          codex/fix-dolby-vision-device-playback -> origin/codex/fix-dolby-vision-device-playback
+2026-10-03T06:02:49.0622984Z  * [new branch]          codex/fix-dolby-vision-quality -> origin/codex/fix-dolby-vision-quality
+2026-10-03T06:02:49.0623028Z  * [new branch]          codex/fix-dv-default-sample-size -> origin/codex/fix-dv-default-sample-size
+2026-10-03T06:02:49.0623073Z  * [new branch]          codex/fix-dv-live-tv    -> origin/codex/fix-dv-live-tv
+2026-10-03T06:02:49.0623132Z  * [new branch]          codex/fix-google-tv-dv-detection -> origin/codex/fix-google-tv-dv-detection
+2026-10-03T06:02:49.0623190Z  * [new branch]          codex/fix-high-tier-apple-hdr -> origin/codex/fix-high-tier-apple-hdr
+2026-10-03T06:02:49.0623255Z  * [new branch]          codex/fix-hiqlite-metadata-atomic -> origin/codex/fix-hiqlite-metadata-atomic
+2026-10-03T06:02:49.0623315Z  * [new branch]          codex/fix-hiqlite-raft-socket-leak -> origin/codex/fix-hiqlite-raft-socket-leak
+2026-10-03T06:02:49.0623378Z  * [new branch]          codex/fix-hiqlite-sparse-roster -> origin/codex/fix-hiqlite-sparse-roster
+2026-10-03T06:02:49.0623439Z  * [new branch]          codex/fix-hiqlite-wal-recovery -> origin/codex/fix-hiqlite-wal-recovery
+2026-10-03T06:02:49.0623504Z  * [new branch]          codex/fix-hls-replacement-activation-race -> origin/codex/fix-hls-replacement-activation-race
+2026-10-03T06:02:49.0623569Z  * [new branch]          codex/fix-hls-sliding-window-53 -> origin/codex/fix-hls-sliding-window-53
+2026-10-03T06:02:49.0623632Z  * [new branch]          codex/fix-host-discovery -> origin/codex/fix-host-discovery
+2026-10-03T06:02:49.0623689Z  * [new branch]          codex/fix-ios-detail-actions -> origin/codex/fix-ios-detail-actions
+2026-10-03T06:02:49.0623736Z  * [new branch]          codex/fix-ios-home-hero-insets -> origin/codex/fix-ios-home-hero-insets
+2026-10-03T06:02:49.0623782Z  * [new branch]          codex/fix-ios-ui-regressions -> origin/codex/fix-ios-ui-regressions
+2026-10-03T06:02:49.0623825Z  * [new branch]          codex/fix-ipad-playback-menu -> origin/codex/fix-ipad-playback-menu
+2026-10-03T06:02:49.0623867Z  * [new branch]          codex/fix-ipad-player-system-overlays -> origin/codex/fix-ipad-player-system-overlays
+2026-10-03T06:02:49.0623911Z  * [new branch]          codex/fix-mobile-hdr-regressions -> origin/codex/fix-mobile-hdr-regressions
+2026-10-03T06:02:49.0623955Z  * [new branch]          codex/fix-nightly-playback-startup -> origin/codex/fix-nightly-playback-startup
+2026-10-03T06:02:49.0624003Z  * [new branch]          codex/fix-offline-recovery-fixture -> origin/codex/fix-offline-recovery-fixture
+2026-10-03T06:02:49.0624047Z  * [new branch]          codex/fix-play-menu-lifetime -> origin/codex/fix-play-menu-lifetime
+2026-10-03T06:02:49.0624089Z  * [new branch]          codex/fix-playback-freezes-53 -> origin/codex/fix-playback-freezes-53
+2026-10-03T06:02:49.0624131Z  * [new branch]          codex/fix-playback-stall-fallback -> origin/codex/fix-playback-stall-fallback
+2026-10-03T06:02:49.0624189Z  * [new branch]          codex/fix-pr606-ci      -> origin/codex/fix-pr606-ci
+2026-10-03T06:02:49.0624232Z  * [new branch]          codex/fix-probe-schema-drift -> origin/codex/fix-probe-schema-drift
+2026-10-03T06:02:49.0624272Z  * [new branch]          codex/fix-profile5-green -> origin/codex/fix-profile5-green
+2026-10-03T06:02:49.0624313Z  * [new branch]          codex/fix-profile5-tone-map -> origin/codex/fix-profile5-tone-map
+2026-10-03T06:02:49.0624351Z  * [new branch]          codex/fix-replicated-schema-migration -> origin/codex/fix-replicated-schema-migration
+2026-10-03T06:02:49.0624395Z  * [new branch]          codex/fix-replicated-schema-migration-v2 -> origin/codex/fix-replicated-schema-migration-v2
+2026-10-03T06:02:49.0624435Z  * [new branch]          codex/fix-runner-root-ownership -> origin/codex/fix-runner-root-ownership
+2026-10-03T06:02:49.0624477Z  * [new branch]          codex/fix-rustsec-audit-permissions -> origin/codex/fix-rustsec-audit-permissions
+2026-10-03T06:02:49.0624519Z  * [new branch]          codex/fix-short-hostnames -> origin/codex/fix-short-hostnames
+2026-10-03T06:02:49.0624557Z  * [new branch]          codex/fix-sparse-cluster-join -> origin/codex/fix-sparse-cluster-join
+2026-10-03T06:02:49.0624599Z  * [new branch]          codex/fix-vod-audio-seek -> origin/codex/fix-vod-audio-seek
+2026-10-03T06:02:49.0624639Z  * [new branch]          codex/fix-vod-index-minimal-hevc -> origin/codex/fix-vod-index-minimal-hevc
+2026-10-03T06:02:49.0624678Z  * [new branch]          codex/fix-wal-generation-aba -> origin/codex/fix-wal-generation-aba
+2026-10-03T06:02:49.0624716Z  * [new branch]          codex/fleet-client-evidence -> origin/codex/fleet-client-evidence
+2026-10-03T06:02:49.0624756Z  * [new branch]          codex/fleet-evidence-20260925 -> origin/codex/fleet-evidence-20260925
+2026-10-03T06:02:49.0624799Z  * [new branch]          codex/forgejo-browser-startup -> origin/codex/forgejo-browser-startup
+2026-10-03T06:02:49.0624840Z  * [new branch]          codex/forgejo-local-ci  -> origin/codex/forgejo-local-ci
+2026-10-03T06:02:49.0624882Z  * [new branch]          codex/forgejo-qualification-final -> origin/codex/forgejo-qualification-final
+2026-10-03T06:02:49.0624922Z  * [new branch]          codex/forgejo-registry  -> origin/codex/forgejo-registry
+2026-10-03T06:02:49.0624961Z  * [new branch]          codex/forgejo-smoke     -> origin/codex/forgejo-smoke
+2026-10-03T06:02:49.0625001Z  * [new branch]          codex/forgejo-store-verdict -> origin/codex/forgejo-store-verdict
+2026-10-03T06:02:49.0625039Z  * [new branch]          codex/free-fall-playback-repair -> origin/codex/free-fall-playback-repair
+2026-10-03T06:02:49.0625080Z  * [new branch]          codex/furious-dv-stall-fix -> origin/codex/furious-dv-stall-fix
+2026-10-03T06:02:49.0625119Z  * [new branch]          codex/global-seek-controls -> origin/codex/global-seek-controls
+2026-10-03T06:02:49.0625164Z  * [new branch]          codex/handoffs          -> origin/codex/handoffs
+2026-10-03T06:02:49.0625206Z  * [new branch]          codex/hdhomerun-android-live-tv -> origin/codex/hdhomerun-android-live-tv
+2026-10-03T06:02:49.0625247Z  * [new branch]          codex/hdhomerun-atsc3-antenna -> origin/codex/hdhomerun-atsc3-antenna
+2026-10-03T06:02:49.0625285Z  * [new branch]          codex/hdhomerun-atsc3-plays -> origin/codex/hdhomerun-atsc3-plays
+2026-10-03T06:02:49.0625325Z  * [new branch]          codex/hdhomerun-client-recovery -> origin/codex/hdhomerun-client-recovery
+2026-10-03T06:02:49.0625413Z  * [new branch]          codex/hdhomerun-endless-source -> origin/codex/hdhomerun-endless-source
+2026-10-03T06:02:49.0625515Z  * [new branch]          codex/hdhomerun-forgejo-sync -> origin/codex/hdhomerun-forgejo-sync
+2026-10-03T06:02:49.0625568Z  * [new branch]          codex/hdhomerun-hardware-acceptance -> origin/codex/hdhomerun-hardware-acceptance
+2026-10-03T06:02:49.0625610Z  * [new branch]          codex/hdhomerun-hardware-evidence -> origin/codex/hdhomerun-hardware-evidence
+2026-10-03T06:02:49.0625652Z  * [new branch]          codex/hdhomerun-hardware-findings -> origin/codex/hdhomerun-hardware-findings
+2026-10-03T06:02:49.0625692Z  * [new branch]          codex/hdhomerun-live-10bit -> origin/codex/hdhomerun-live-10bit
+2026-10-03T06:02:49.0625732Z  * [new branch]          codex/hdhomerun-live-hls -> origin/codex/hdhomerun-live-hls
+2026-10-03T06:02:49.0625774Z  * [new branch]          codex/hdhomerun-live-probesize -> origin/codex/hdhomerun-live-probesize
+2026-10-03T06:02:49.0625814Z  * [new branch]          codex/hdhomerun-m5-docs -> origin/codex/hdhomerun-m5-docs
+2026-10-03T06:02:49.0625857Z  * [new branch]          codex/hdhomerun-review-closeout -> origin/codex/hdhomerun-review-closeout
+2026-10-03T06:02:49.0625900Z  * [new branch]          codex/hdhomerun-startup-diagnostics -> origin/codex/hdhomerun-startup-diagnostics
+2026-10-03T06:02:49.0625941Z  * [new branch]          codex/hdhomerun-status-refresh -> origin/codex/hdhomerun-status-refresh
+2026-10-03T06:02:49.0625984Z  * [new branch]          codex/hdhomerun-two-node-acceptance -> origin/codex/hdhomerun-two-node-acceptance
+2026-10-03T06:02:49.0626026Z  * [new branch]          codex/hdhomerun-web-live-tv -> origin/codex/hdhomerun-web-live-tv
+2026-10-03T06:02:49.0626067Z  * [new branch]          codex/hdhomerun-web-progress -> origin/codex/hdhomerun-web-progress
+2026-10-03T06:02:49.0626110Z  * [new branch]          codex/hdr-tone-map-probe -> origin/codex/hdr-tone-map-probe
+2026-10-03T06:02:49.0626148Z  * [new branch]          codex/hevc-color-correctness -> origin/codex/hevc-color-correctness
+2026-10-03T06:02:49.0626188Z  * [new branch]          codex/hidden-gates-inventory -> origin/codex/hidden-gates-inventory
+2026-10-03T06:02:49.0626229Z  * [new branch]          codex/hls-claim-test-followup -> origin/codex/hls-claim-test-followup
+2026-10-03T06:02:49.0626268Z  * [new branch]          codex/hls-cleanup-clock-followup -> origin/codex/hls-cleanup-clock-followup
+2026-10-03T06:02:49.0626310Z  * [new branch]          codex/hls-cleanup-handshake -> origin/codex/hls-cleanup-handshake
+2026-10-03T06:02:49.0626349Z  * [new branch]          codex/hls-ownership-counts -> origin/codex/hls-ownership-counts
+2026-10-03T06:02:49.0626389Z  * [new branch]          codex/intent-envelope   -> origin/codex/intent-envelope
+2026-10-03T06:02:49.0626430Z  * [new branch]          codex/investigate-ipad-playback-freezes -> origin/codex/investigate-ipad-playback-freezes
+2026-10-03T06:02:49.0626471Z  * [new branch]          codex/investigate-recovered-app-code -> origin/codex/investigate-recovered-app-code
+2026-10-03T06:02:49.0626512Z  * [new branch]          codex/issue-550-regression -> origin/codex/issue-550-regression
+2026-10-03T06:02:49.0626553Z  * [new branch]          codex/issue-576-p6a-learner-admission -> origin/codex/issue-576-p6a-learner-admission
+2026-10-03T06:02:49.0626595Z  * [new branch]          codex/issue-913-avi-review -> origin/codex/issue-913-avi-review
+2026-10-03T06:02:49.0626637Z  * [new branch]          codex/issue-913-videotoolbox-mpeg4 -> origin/codex/issue-913-videotoolbox-mpeg4
+2026-10-03T06:02:49.0626679Z  * [new branch]          codex/jellyfin-compat-docs -> origin/codex/jellyfin-compat-docs
+2026-10-03T06:02:49.0626720Z  * [new branch]          codex/jellyfin-j0-trace-baseline -> origin/codex/jellyfin-j0-trace-baseline
+2026-10-03T06:02:49.0626761Z  * [new branch]          codex/jellyfin-j1-durable-identities -> origin/codex/jellyfin-j1-durable-identities
+2026-10-03T06:02:49.0626803Z  * [new branch]          codex/jellyfin-j1-protocol -> origin/codex/jellyfin-j1-protocol
+2026-10-03T06:02:49.0626845Z  * [new branch]          codex/jellyfin-j1-shared-services -> origin/codex/jellyfin-j1-shared-services
+2026-10-03T06:02:49.0626885Z  * [new branch]          codex/k03-external-observer -> origin/codex/k03-external-observer
+2026-10-03T06:02:49.0626926Z  * [new branch]          codex/l03-caption-probe -> origin/codex/l03-caption-probe
+2026-10-03T06:02:49.0626965Z  * [new branch]          codex/l03-progressive-caption-proof -> origin/codex/l03-progressive-caption-proof
+2026-10-03T06:02:49.0627008Z  * [new branch]          codex/land-clustering-m1d-main -> origin/codex/land-clustering-m1d-main
+2026-10-03T06:02:49.0627048Z  * [new branch]          codex/lenovo-physical-device-push -> origin/codex/lenovo-physical-device-push
+2026-10-03T06:02:49.0627087Z  * [new branch]          codex/library-channel-copy-start-and-contrast -> origin/codex/library-channel-copy-start-and-contrast
+2026-10-03T06:02:49.0627131Z  * [new branch]          codex/library-channel-multi-stsd -> origin/codex/library-channel-multi-stsd
+2026-10-03T06:02:49.0627171Z  * [new branch]          codex/live-hls-no-hidden-gate -> origin/codex/live-hls-no-hidden-gate
+2026-10-03T06:02:49.0627213Z  * [new branch]          codex/live-status-badges -> origin/codex/live-status-badges
+2026-10-03T06:02:49.0627257Z  * [new branch]          codex/live-tv-postmerge-ci -> origin/codex/live-tv-postmerge-ci
+2026-10-03T06:02:49.0627296Z  * [new branch]          codex/live-tv-signal-quality -> origin/codex/live-tv-signal-quality
+2026-10-03T06:02:49.0627336Z  * [new branch]          codex/live-tv-start-and-layout -> origin/codex/live-tv-start-and-layout
+2026-10-03T06:02:49.0627378Z  * [new branch]          codex/ll-hls-startup-contract -> origin/codex/ll-hls-startup-contract
+2026-10-03T06:02:49.0627419Z  * [new branch]          codex/m2-android-passive-reporter -> origin/codex/m2-android-passive-reporter
+2026-10-03T06:02:49.0627536Z  * [new branch]          codex/m2-apple-passive-reporter -> origin/codex/m2-apple-passive-reporter
+2026-10-03T06:02:49.0627617Z  * [new branch]          codex/m2-apple-snapshot-mapping -> origin/codex/m2-apple-snapshot-mapping
+2026-10-03T06:02:49.0627661Z  * [new branch]          codex/m3c-apple-caps-v2 -> origin/codex/m3c-apple-caps-v2
+2026-10-03T06:02:49.0627719Z  * [new branch]          codex/m4-drain-deadline -> origin/codex/m4-drain-deadline
+2026-10-03T06:02:49.0627761Z  * [new branch]          codex/m4-drain-design   -> origin/codex/m4-drain-design
+2026-10-03T06:02:49.0627815Z  * [new branch]          codex/m4-flow-caller-proof -> origin/codex/m4-flow-caller-proof
+2026-10-03T06:02:49.0627918Z  * [new branch]          codex/m4-flow-intention-barrier -> origin/codex/m4-flow-intention-barrier
+2026-10-03T06:02:49.0627971Z  * [new branch]          codex/m4-flow-intention-wiring -> origin/codex/m4-flow-intention-wiring
+2026-10-03T06:02:49.0628617Z  * [new branch]          codex/m4-predecessor-drain -> origin/codex/m4-predecessor-drain
+2026-10-03T06:02:49.0628712Z  * [new branch]          codex/m5-reanchor-replacement-tests -> origin/codex/m5-reanchor-replacement-tests
+2026-10-03T06:02:49.0628795Z  * [new branch]          codex/m5-sentinel-hygiene -> origin/codex/m5-sentinel-hygiene
+2026-10-03T06:02:49.0628872Z  * [new branch]          codex/m5-stale-comments -> origin/codex/m5-stale-comments
+2026-10-03T06:02:49.0628965Z  * [new branch]          codex/m6-client-build-briefs -> origin/codex/m6-client-build-briefs
+2026-10-03T06:02:49.0629041Z  * [new branch]          codex/m6-prepare-commit -> origin/codex/m6-prepare-commit
+2026-10-03T06:02:49.0629114Z  * [new branch]          codex/m6-prepare-commit-trigger -> origin/codex/m6-prepare-commit-trigger
+2026-10-03T06:02:49.0629184Z  * [new branch]          codex/m7-m4-burn-join   -> origin/codex/m7-m4-burn-join
+2026-10-03T06:02:49.0629256Z  * [new branch]          codex/m7-m4-docker-runtime-assets -> origin/codex/m7-m4-docker-runtime-assets
+2026-10-03T06:02:49.0629654Z  * [new branch]          codex/m7-m4-post-proposal-race -> origin/codex/m7-m4-post-proposal-race
+2026-10-03T06:02:49.0629723Z  * [new branch]          codex/m7-m4-retarget-fence -> origin/codex/m7-m4-retarget-fence
+2026-10-03T06:02:49.0629786Z  * [new branch]          codex/m7-m4-source-contracts -> origin/codex/m7-m4-source-contracts
+2026-10-03T06:02:49.0629848Z  * [new branch]          codex/m7-r-m1           -> origin/codex/m7-r-m1
+2026-10-03T06:02:49.0629937Z  * [new branch]          codex/m7-r-m2           -> origin/codex/m7-r-m2
+2026-10-03T06:02:49.0630006Z  * [new branch]          codex/m7-r-m3           -> origin/codex/m7-r-m3
+2026-10-03T06:02:49.0630071Z  * [new branch]          codex/main-into-effort  -> origin/codex/main-into-effort
+2026-10-03T06:02:49.0630136Z  * [new branch]          codex/main8ae8-fleet-device-evidence -> origin/codex/main8ae8-fleet-device-evidence
+2026-10-03T06:02:49.0630203Z  * [new branch]          codex/map-rustsec       -> origin/codex/map-rustsec
+2026-10-03T06:02:49.0630286Z  * [new branch]          codex/map-settings-retry-regression -> origin/codex/map-settings-retry-regression
+2026-10-03T06:02:49.0630354Z  * [new branch]          codex/marker-destination-prewarm -> origin/codex/marker-destination-prewarm
+2026-10-03T06:02:49.0630420Z  * [new branch]          codex/match-apple-play-menu -> origin/codex/match-apple-play-menu
+2026-10-03T06:02:49.0630485Z  * [new branch]          codex/media-info-status-groups -> origin/codex/media-info-status-groups
+2026-10-03T06:02:49.0630545Z  * [new branch]          codex/media-ops         -> origin/codex/media-ops
+2026-10-03T06:02:49.0630626Z  * [new branch]          codex/media-range-reliability -> origin/codex/media-range-reliability
+2026-10-03T06:02:49.0630691Z  * [new branch]          codex/media-session-takeover -> origin/codex/media-session-takeover
+2026-10-03T06:02:49.0630767Z  * [new branch]          codex/mobile-release-144 -> origin/codex/mobile-release-144
+2026-10-03T06:02:49.0630833Z  * [new branch]          codex/mobile-release-bump-20260815 -> origin/codex/mobile-release-bump-20260815
+2026-10-03T06:02:49.0630916Z  * [new branch]          codex/name-discovered-servers -> origin/codex/name-discovered-servers
+2026-10-03T06:02:49.0631005Z  * [new branch]          codex/native-client-parity-and-discovery -> origin/codex/native-client-parity-and-discovery
+2026-10-03T06:02:49.0631070Z  * [new branch]          codex/native-rolling-seek -> origin/codex/native-rolling-seek
+2026-10-03T06:02:49.0631144Z  * [new branch]          codex/newcomer-reservation -> origin/codex/newcomer-reservation
+2026-10-03T06:02:49.0631207Z  * [new branch]          codex/nightly-evidence-retention -> origin/codex/nightly-evidence-retention
+2026-10-03T06:02:49.0631293Z  * [new branch]          codex/noirr-branding    -> origin/codex/noirr-branding
+2026-10-03T06:02:49.0631364Z  * [new branch]          codex/offline-viewing   -> origin/codex/offline-viewing
+2026-10-03T06:02:49.0631445Z  * [new branch]          codex/offline-viewing-follow-up -> origin/codex/offline-viewing-follow-up
+2026-10-03T06:02:49.0631548Z  * [new branch]          codex/optical-m0-foundations -> origin/codex/optical-m0-foundations
+2026-10-03T06:02:49.0631655Z  * [new branch]          codex/optimize-pr-validation -> origin/codex/optimize-pr-validation
+2026-10-03T06:02:49.0631762Z  * [new branch]          codex/p2f-instrumentation-evidence -> origin/codex/p2f-instrumentation-evidence
+2026-10-03T06:02:49.0631849Z  * [new branch]          codex/p5-physical-safety-closure -> origin/codex/p5-physical-safety-closure
+2026-10-03T06:02:49.0631925Z  * [new branch]          codex/p5-review-followup -> origin/codex/p5-review-followup
+2026-10-03T06:02:49.0632584Z  * [new branch]          codex/p6-learner-protocol -> origin/codex/p6-learner-protocol
+2026-10-03T06:02:49.0632697Z  * [new branch]          codex/p6-learner-worker -> origin/codex/p6-learner-worker
+2026-10-03T06:02:49.0632809Z  * [new branch]          codex/p7-proxy-failure-drills -> origin/codex/p7-proxy-failure-drills
+2026-10-03T06:02:49.0632927Z  * [new branch]          codex/persistent-artwork-cache -> origin/codex/persistent-artwork-cache
+2026-10-03T06:02:49.0633046Z  * [new branch]          codex/pgs-m0-evidence   -> origin/codex/pgs-m0-evidence
+2026-10-03T06:02:49.0633174Z  * [new branch]          codex/pgs-overlay-android -> origin/codex/pgs-overlay-android
+2026-10-03T06:02:49.0633358Z  * [new branch]          codex/pgs-overlay-apple -> origin/codex/pgs-overlay-apple
+2026-10-03T06:02:49.0633464Z  * [new branch]          codex/pgs-overlay-contract -> origin/codex/pgs-overlay-contract
+2026-10-03T06:02:49.0633550Z  * [new branch]          codex/pgs-overlay-developer-switch -> origin/codex/pgs-overlay-developer-switch
+2026-10-03T06:02:49.0633671Z  * [new branch]          codex/pgs-streaming-normalizer -> origin/codex/pgs-streaming-normalizer
+2026-10-03T06:02:49.0633796Z  * [new branch]          codex/playback-control-m3-delivery-ledger -> origin/codex/playback-control-m3-delivery-ledger
+2026-10-03T06:02:49.0633889Z  * [new branch]          codex/playback-control-m3-demand-lease -> origin/codex/playback-control-m3-demand-lease
+2026-10-03T06:02:49.0633994Z  * [new branch]          codex/playback-control-m3-producer-events -> origin/codex/playback-control-m3-producer-events
+2026-10-03T06:02:49.0634081Z  * [new branch]          codex/playback-control-m3-terminal-events -> origin/codex/playback-control-m3-terminal-events
+2026-10-03T06:02:49.0634235Z  * [new branch]          codex/playback-control-m4-actor-deadline -> origin/codex/playback-control-m4-actor-deadline
+2026-10-03T06:02:49.0634325Z  * [new branch]          codex/playback-control-m4-command-sequencing -> origin/codex/playback-control-m4-command-sequencing
+2026-10-03T06:02:49.0634444Z  * [new branch]          codex/playback-control-m4-copy-lifetime -> origin/codex/playback-control-m4-copy-lifetime
+2026-10-03T06:02:49.0634528Z  * [new branch]          codex/playback-control-m4-deadline-cutoff -> origin/codex/playback-control-m4-deadline-cutoff
+2026-10-03T06:02:49.0634638Z  * [new branch]          codex/playback-control-m4-prepublication -> origin/codex/playback-control-m4-prepublication
+2026-10-03T06:02:49.0634767Z  * [new branch]          codex/playback-control-m4-producer-decision -> origin/codex/playback-control-m4-producer-decision
+2026-10-03T06:02:49.0634852Z  * [new branch]          codex/playback-control-m4-published-lifetime -> origin/codex/playback-control-m4-published-lifetime
+2026-10-03T06:02:49.0634952Z  * [new branch]          codex/playback-control-protocol -> origin/codex/playback-control-protocol
+2026-10-03T06:02:49.0635062Z  * [new branch]          codex/playback-info-episode-labels -> origin/codex/playback-info-episode-labels
+2026-10-03T06:02:49.0635182Z  * [new branch]          codex/playback-lifecycle-p1-p2 -> origin/codex/playback-lifecycle-p1-p2
+2026-10-03T06:02:49.0635272Z  * [new branch]          codex/playback-lifecycle-p3-p4 -> origin/codex/playback-lifecycle-p3-p4
+2026-10-03T06:02:49.0635369Z  * [new branch]          codex/playback-remainder-current -> origin/codex/playback-remainder-current
+2026-10-03T06:02:49.0635484Z  * [new branch]          codex/playback-sol-handoff -> origin/codex/playback-sol-handoff
+2026-10-03T06:02:49.0635571Z  * [new branch]          codex/post-627-ci       -> origin/codex/post-627-ci
+2026-10-03T06:02:49.0635690Z  * [new branch]          codex/postmerge-cleanup-test -> origin/codex/postmerge-cleanup-test
+2026-10-03T06:02:49.0635770Z  * [new branch]          codex/postmerge-janitor-path -> origin/codex/postmerge-janitor-path
+2026-10-03T06:02:49.0635900Z  * [new branch]          codex/pr506-a02-contract-repair -> origin/codex/pr506-a02-contract-repair
+2026-10-03T06:02:49.0635985Z  * [new branch]          codex/pr506-android-review-fixes -> origin/codex/pr506-android-review-fixes
+2026-10-03T06:02:49.0636088Z  * [new branch]          codex/pr506-api-build-docs-exact -> origin/codex/pr506-api-build-docs-exact
+2026-10-03T06:02:49.0636214Z  * [new branch]          codex/pr506-apple-review-fixes -> origin/codex/pr506-apple-review-fixes
+2026-10-03T06:02:49.0636300Z  * [new branch]          codex/pr506-history-anchors -> origin/codex/pr506-history-anchors
+2026-10-03T06:02:49.0636425Z  * [new branch]          codex/pr506-history-mappings -> origin/codex/pr506-history-mappings
+2026-10-03T06:02:49.0636527Z  * [new branch]          codex/pr506-producer-inventory -> origin/codex/pr506-producer-inventory
+2026-10-03T06:02:49.0636644Z  * [new branch]          codex/precommit-lint-only -> origin/codex/precommit-lint-only
+2026-10-03T06:02:49.0636725Z  * [new branch]          codex/preflight-threshold -> origin/codex/preflight-threshold
+2026-10-03T06:02:49.0636806Z  * [new branch]          codex/preparation-film-time -> origin/codex/preparation-film-time
+2026-10-03T06:02:49.0636931Z  * [new branch]          codex/prepared-handoff-postmerge -> origin/codex/prepared-handoff-postmerge
+2026-10-03T06:02:49.0637047Z  * [new branch]          codex/pretranscode-contract-followup -> origin/codex/pretranscode-contract-followup
+2026-10-03T06:02:49.0637184Z  * [new branch]          codex/public-readme-refresh -> origin/codex/public-readme-refresh
+2026-10-03T06:02:49.0637287Z  * [new branch]          codex/readiness-evidence-corrections -> origin/codex/readiness-evidence-corrections
+2026-10-03T06:02:49.0637416Z  * [new branch]          codex/reconcile-late-offline-review -> origin/codex/reconcile-late-offline-review
+2026-10-03T06:02:49.0637528Z  * [new branch]          codex/redesign-tvos-playback-info -> origin/codex/redesign-tvos-playback-info
+2026-10-03T06:02:49.0637612Z  * [new branch]          codex/release-two-binary-packaging -> origin/codex/release-two-binary-packaging
+2026-10-03T06:02:49.0637740Z  * [new branch]          codex/remove-plurx-bittorrent-enable -> origin/codex/remove-plurx-bittorrent-enable
+2026-10-03T06:02:49.0637823Z  * [new branch]          codex/remove-stale-ci-badges -> origin/codex/remove-stale-ci-badges
+2026-10-03T06:02:49.0638002Z  * [new branch]          codex/rename-plex-layout-catalog -> origin/codex/rename-plex-layout-catalog
+2026-10-03T06:02:49.0638113Z  * [new branch]          codex/restore-pr-gate-badges -> origin/codex/restore-pr-gate-badges
+2026-10-03T06:02:49.0641127Z  * [new branch]          codex/retry-undispatched-leader-write -> origin/codex/retry-undispatched-leader-write
+2026-10-03T06:02:49.0641207Z  * [new branch]          codex/risk-routed-ci    -> origin/codex/risk-routed-ci
+2026-10-03T06:02:49.0641282Z  * [new branch]          codex/roster-test-boundary -> origin/codex/roster-test-boundary
+2026-10-03T06:02:49.0641397Z  * [new branch]          codex/runner-mode-status-fix -> origin/codex/runner-mode-status-fix
+2026-10-03T06:02:49.0641509Z  * [new branch]          codex/runner-process-reaping -> origin/codex/runner-process-reaping
+2026-10-03T06:02:49.0641622Z  * [new branch]          codex/s11-m1-domain-manifest -> origin/codex/s11-m1-domain-manifest
+2026-10-03T06:02:49.0641699Z  * [new branch]          codex/s11-retained-nal-sixteen-ledger -> origin/codex/s11-retained-nal-sixteen-ledger
+2026-10-03T06:02:49.0641828Z  * [new branch]          codex/safari-seek-handoff -> origin/codex/safari-seek-handoff
+2026-10-03T06:02:49.0641907Z  * [new branch]          codex/scan-identity-hints -> origin/codex/scan-identity-hints
+2026-10-03T06:02:49.0641984Z  * [new branch]          codex/scan-identity-ownership -> origin/codex/scan-identity-ownership
+2026-10-03T06:02:49.0642489Z  * [new branch]          codex/scan-identity-repair -> origin/codex/scan-identity-repair
+2026-10-03T06:02:49.0642576Z  * [new branch]          codex/scratch-hold-capacity-fix -> origin/codex/scratch-hold-capacity-fix
+2026-10-03T06:02:49.0642638Z  * [new branch]          codex/section-four-map  -> origin/codex/section-four-map
+2026-10-03T06:02:49.0642691Z  * [new branch]          codex/self-hosted-macos-runner -> origin/codex/self-hosted-macos-runner
+2026-10-03T06:02:49.0642757Z  * [new branch]          codex/self-hosted-runners -> origin/codex/self-hosted-runners
+2026-10-03T06:02:49.0642809Z  * [new branch]          codex/serving-proof-continuity -> origin/codex/serving-proof-continuity
+2026-10-03T06:02:49.0642867Z  * [new branch]          codex/serving-visibility -> origin/codex/serving-visibility
+2026-10-03T06:02:49.0642917Z  * [new branch]          codex/settings-api-keys-ui -> origin/codex/settings-api-keys-ui
+2026-10-03T06:02:49.0642974Z  * [new branch]          codex/sharing-s1-state  -> origin/codex/sharing-s1-state
+2026-10-03T06:02:49.0643023Z  * [new branch]          codex/sharing-s2-network -> origin/codex/sharing-s2-network
+2026-10-03T06:02:49.0643071Z  * [new branch]          codex/show-server-qr-code -> origin/codex/show-server-qr-code
+2026-10-03T06:02:49.0643125Z  * [new branch]          codex/snapshot-recovery-review-followup -> origin/codex/snapshot-recovery-review-followup
+2026-10-03T06:02:49.0643183Z  * [new branch]          codex/stabilize-artwork-rerepair -> origin/codex/stabilize-artwork-rerepair
+2026-10-03T06:02:49.0643234Z  * [new branch]          codex/stabilize-media-confirm-timeout -> origin/codex/stabilize-media-confirm-timeout
+2026-10-03T06:02:49.0643285Z  * [new branch]          codex/status-after-the-client-brief -> origin/codex/status-after-the-client-brief
+2026-10-03T06:02:49.0643342Z  * [new branch]          codex/status-m5c3-m7a   -> origin/codex/status-m5c3-m7a
+2026-10-03T06:02:49.0643395Z  * [new branch]          codex/status-refresh    -> origin/codex/status-refresh
+2026-10-03T06:02:49.0643444Z  * [new branch]          codex/store-inventory-followup -> origin/codex/store-inventory-followup
+2026-10-03T06:02:49.0643493Z  * [new branch]          codex/streaming-control-contract -> origin/codex/streaming-control-contract
+2026-10-03T06:02:49.0643542Z  * [new branch]          codex/streaming-index-measurement -> origin/codex/streaming-index-measurement
+2026-10-03T06:02:49.0643596Z  * [new branch]          codex/streaming-native-parity -> origin/codex/streaming-native-parity
+2026-10-03T06:02:49.0643643Z  * [new branch]          codex/streaming-postmerge-followup -> origin/codex/streaming-postmerge-followup
+2026-10-03T06:02:49.0643690Z  * [new branch]          codex/streaming-preparation-demand -> origin/codex/streaming-preparation-demand
+2026-10-03T06:02:49.0643741Z  * [new branch]          codex/streaming-reliability-handoff -> origin/codex/streaming-reliability-handoff
+2026-10-03T06:02:49.0643792Z  * [new branch]          codex/streaming-reliability-plan -> origin/codex/streaming-reliability-plan
+2026-10-03T06:02:49.0643840Z  * [new branch]          codex/streaming-review  -> origin/codex/streaming-review
+2026-10-03T06:02:49.0643887Z  * [new branch]          codex/streaming-settlement-integration -> origin/codex/streaming-settlement-integration
+2026-10-03T06:02:49.0643957Z  * [new branch]          codex/streaming-shared-index -> origin/codex/streaming-shared-index
+2026-10-03T06:02:49.0644007Z  * [new branch]          codex/streaming-web-recovery -> origin/codex/streaming-web-recovery
+2026-10-03T06:02:49.0644067Z  * [new branch]          codex/subtitle-downloads -> origin/codex/subtitle-downloads
+2026-10-03T06:02:49.0644121Z  * [new branch]          codex/subtitle-engine-overhaul-plan -> origin/codex/subtitle-engine-overhaul-plan
+2026-10-03T06:02:49.0644171Z  * [new branch]          codex/successor-producer-finding -> origin/codex/successor-producer-finding
+2026-10-03T06:02:49.0644236Z  * [new branch]          codex/switched-and-drain -> origin/codex/switched-and-drain
+2026-10-03T06:02:49.0644285Z  * [new branch]          codex/switched-state    -> origin/codex/switched-state
+2026-10-03T06:02:49.0644346Z  * [new branch]          codex/tcl-release-canary-baseline -> origin/codex/tcl-release-canary-baseline
+2026-10-03T06:02:49.0644395Z  * [new branch]          codex/transcode-yield-reasons -> origin/codex/transcode-yield-reasons
+2026-10-03T06:02:49.0644494Z  * [new branch]          codex/transport-recovery-ci-m0 -> origin/codex/transport-recovery-ci-m0
+2026-10-03T06:02:49.0644544Z  * [new branch]          codex/transport-recovery-ci-m1 -> origin/codex/transport-recovery-ci-m1
+2026-10-03T06:02:49.0644595Z  * [new branch]          codex/transport-recovery-ci-m2 -> origin/codex/transport-recovery-ci-m2
+2026-10-03T06:02:49.0644661Z  * [new branch]          codex/transport-recovery-ci-m3 -> origin/codex/transport-recovery-ci-m3
+2026-10-03T06:02:49.0644710Z  * [new branch]          codex/transport-recovery-ci-m4 -> origin/codex/transport-recovery-ci-m4
+2026-10-03T06:02:49.0644776Z  * [new branch]          codex/transport-recovery-ci-m5 -> origin/codex/transport-recovery-ci-m5
+2026-10-03T06:02:49.0644825Z  * [new branch]          codex/transport-recovery-postmerge-fixes -> origin/codex/transport-recovery-postmerge-fixes
+2026-10-03T06:02:49.0644887Z  * [new branch]          codex/transport-recovery-ui-baseline -> origin/codex/transport-recovery-ui-baseline
+2026-10-03T06:02:49.0644937Z  * [new branch]          codex/tvos-cinematic-detail -> origin/codex/tvos-cinematic-detail
+2026-10-03T06:02:49.0644984Z  * [new branch]          codex/tvos-detail-lower-left -> origin/codex/tvos-detail-lower-left
+2026-10-03T06:02:49.0645050Z  * [new branch]          codex/tvos-see-all-contrast -> origin/codex/tvos-see-all-contrast
+2026-10-03T06:02:49.0645095Z  * [new branch]          codex/unified-playback-stats -> origin/codex/unified-playback-stats
+2026-10-03T06:02:49.0645158Z  * [new branch]          codex/unify-native-play-menu -> origin/codex/unify-native-play-menu
+2026-10-03T06:02:49.0645207Z  * [new branch]          codex/unit-test-cleanup -> origin/codex/unit-test-cleanup
+2026-10-03T06:02:49.0645269Z  * [new branch]          codex/validation-framework -> origin/codex/validation-framework
+2026-10-03T06:02:49.0645319Z  * [new branch]          codex/video-quality-batch -> origin/codex/video-quality-batch
+2026-10-03T06:02:49.0645367Z  * [new branch]          codex/video-quality-content -> origin/codex/video-quality-content
+2026-10-03T06:02:49.0645429Z  * [new branch]          codex/video-quality-encoder -> origin/codex/video-quality-encoder
+2026-10-03T06:02:49.0645478Z  * [new branch]          codex/video-quality-hdr -> origin/codex/video-quality-hdr
+2026-10-03T06:02:49.0645541Z  * [new branch]          codex/video-quality-kickoff -> origin/codex/video-quality-kickoff
+2026-10-03T06:02:49.0645591Z  * [new branch]          codex/video-quality-program -> origin/codex/video-quality-program
+2026-10-03T06:02:49.0645651Z  * [new branch]          codex/video-quality-validation -> origin/codex/video-quality-validation
+2026-10-03T06:02:49.0645700Z  * [new branch]          codex/visible-transcode-and-offline-controls -> origin/codex/visible-transcode-and-offline-controls
+2026-10-03T06:02:49.0645751Z  * [new branch]          codex/vod-admission-fairness -> origin/codex/vod-admission-fairness
+2026-10-03T06:02:49.0645818Z  * [new branch]          codex/vod-demand-reliability -> origin/codex/vod-demand-reliability
+2026-10-03T06:02:49.0645866Z  * [new branch]          codex/vod-detach-convergence -> origin/codex/vod-detach-convergence
+2026-10-03T06:02:49.0645930Z  * [new branch]          codex/vod-failure-classes -> origin/codex/vod-failure-classes
+2026-10-03T06:02:49.0645977Z  * [new branch]          codex/vod-incident-recovery -> origin/codex/vod-incident-recovery
+2026-10-03T06:02:49.0646040Z  * [new branch]          codex/vod-index-cluster-cache -> origin/codex/vod-index-cluster-cache
+2026-10-03T06:02:49.0646089Z  * [new branch]          codex/vod-index-recovery -> origin/codex/vod-index-recovery
+2026-10-03T06:02:49.0646136Z  * [new branch]          codex/vod-m4            -> origin/codex/vod-m4
+2026-10-03T06:02:49.0646200Z  * [new branch]          codex/vod-m4-evidence   -> origin/codex/vod-m4-evidence
+2026-10-03T06:02:49.0646247Z  * [new branch]          codex/vod-no-legacy     -> origin/codex/vod-no-legacy
+2026-10-03T06:02:49.0646311Z  * [new branch]          codex/vod-recipe-production-recovery -> origin/codex/vod-recipe-production-recovery
+2026-10-03T06:02:49.0646359Z  * [new branch]          codex/vod-refusal-attribution -> origin/codex/vod-refusal-attribution
+2026-10-03T06:02:49.0646420Z  * [new branch]          codex/vod-session-close-cleanup -> origin/codex/vod-session-close-cleanup
+2026-10-03T06:02:49.0646472Z  * [new branch]          codex/web-layout-containment -> origin/codex/web-layout-containment
+2026-10-03T06:02:49.0646519Z  * [new branch]          codex/web-seek-loader-frame -> origin/codex/web-seek-loader-frame
+2026-10-03T06:02:49.0646585Z  * [new branch]          codex/windows-ci-reliability -> origin/codex/windows-ci-reliability
+2026-10-03T06:02:49.0646632Z  * [new branch]          codex/windows-port-m1   -> origin/codex/windows-port-m1
+2026-10-03T06:02:49.0646712Z  * [new branch]          codex/windows-port-m2   -> origin/codex/windows-port-m2
+2026-10-03T06:02:49.0646760Z  * [new branch]          codex/wo-01-scan-store-hardening -> origin/codex/wo-01-scan-store-hardening
+2026-10-03T06:02:49.0646824Z  * [new branch]          codex/wo-02-pr90-followup -> origin/codex/wo-02-pr90-followup
+2026-10-03T06:02:49.0646875Z  * [new branch]          codex/wo-03-ci-pipeline-fixes -> origin/codex/wo-03-ci-pipeline-fixes
+2026-10-03T06:02:49.0646923Z  * [new branch]          codex/wo-04-evidence-discipline -> origin/codex/wo-04-evidence-discipline
+2026-10-03T06:02:49.0646988Z  * [new branch]          codex/wo-05-hls-flow-control -> origin/codex/wo-05-hls-flow-control
+2026-10-03T06:02:49.0647039Z  * [new branch]          codex/wo-06-apple-player-followups -> origin/codex/wo-06-apple-player-followups
+2026-10-03T06:02:49.0647106Z  * [new branch]          codex/wo-07-offline-viewing-followups -> origin/codex/wo-07-offline-viewing-followups
+2026-10-03T06:02:49.0647158Z  * [new branch]          codex/wo-10-db-backup   -> origin/codex/wo-10-db-backup
+2026-10-03T06:02:49.0647221Z  * [new branch]          docs/cluster-panel-followups -> origin/docs/cluster-panel-followups
+2026-10-03T06:02:49.0647270Z  * [new branch]          docs/dv-p7-effort-landed -> origin/docs/dv-p7-effort-landed
+2026-10-03T06:02:49.0647321Z  * [new branch]          docs/dv-p7-web-delivery-handoff -> origin/docs/dv-p7-web-delivery-handoff
+2026-10-03T06:02:49.0647387Z  * [new branch]          docs/dvr-hardware-prompt -> origin/docs/dvr-hardware-prompt
+2026-10-03T06:02:49.0647433Z  * [new branch]          docs/fast-lane-by-default -> origin/docs/fast-lane-by-default
+2026-10-03T06:02:49.0647496Z  * [new branch]          docs/fragment-index-queue-repair -> origin/docs/fragment-index-queue-repair
+2026-10-03T06:02:49.0647547Z  * [new branch]          docs/live-tv-reliability-shipping -> origin/docs/live-tv-reliability-shipping
+2026-10-03T06:02:49.0647613Z  * [new branch]          docs/live-tv-start-stall-surface -> origin/docs/live-tv-start-stall-surface
+2026-10-03T06:02:49.0647664Z  * [new branch]          docs/m6-axis-receipt-and-phase3 -> origin/docs/m6-axis-receipt-and-phase3
+2026-10-03T06:02:49.0647712Z  * [new branch]          docs/m6-status-close    -> origin/docs/m6-status-close
+2026-10-03T06:02:49.0647775Z  * [new branch]          docs/m7-r-m3-status     -> origin/docs/m7-r-m3-status
+2026-10-03T06:02:49.0647828Z  * [new branch]          docs/offline-viewing-review -> origin/docs/offline-viewing-review
+2026-10-03T06:02:49.0647946Z  * [new branch]          docs/perf2-plan         -> origin/docs/perf2-plan
+2026-10-03T06:02:49.0648029Z  * [new branch]          docs/playback-caps-v2-plan -> origin/docs/playback-caps-v2-plan
+2026-10-03T06:02:49.0648092Z  * [new branch]          docs/playback-surface-contract -> origin/docs/playback-surface-contract
+2026-10-03T06:02:49.0648144Z  * [new branch]          docs/playback-surface-handoff -> origin/docs/playback-surface-handoff
+2026-10-03T06:02:49.0648191Z  * [new branch]          docs/playback-surface-m0 -> origin/docs/playback-surface-m0
+2026-10-03T06:02:49.0648257Z  * [new branch]          docs/player-input-contract -> origin/docs/player-input-contract
+2026-10-03T06:02:49.0648307Z  * [new branch]          docs/retro-2026-08-09-review -> origin/docs/retro-2026-08-09-review
+2026-10-03T06:02:49.0648373Z  * [new branch]          docs/status-853-merged  -> origin/docs/status-853-merged
+2026-10-03T06:02:49.0648424Z  * [new branch]          docs/status-869-merged  -> origin/docs/status-869-merged
+2026-10-03T06:02:49.0648481Z  * [new branch]          docs/status-deployed-0923 -> origin/docs/status-deployed-0923
+2026-10-03T06:02:49.0648532Z  * [new branch]          docs/status-truth-sweep -> origin/docs/status-truth-sweep
+2026-10-03T06:02:49.0648581Z  * [new branch]          docs/ui-layouts-proposals -> origin/docs/ui-layouts-proposals
+2026-10-03T06:02:49.0648631Z  * [new branch]          docs/verification-refresh -> origin/docs/verification-refresh
+2026-10-03T06:02:49.0648679Z  * [new branch]          docs/vod-presentation-plan -> origin/docs/vod-presentation-plan
+2026-10-03T06:02:49.0648730Z  * [new branch]          effort/architecture-review-2026-09-20 -> origin/effort/architecture-review-2026-09-20
+2026-10-03T06:02:49.0648784Z  * [new branch]          effort/ci-execution-acceleration -> origin/effort/ci-execution-acceleration
+2026-10-03T06:02:49.0648836Z  * [new branch]          effort/cluster-throughput -> origin/effort/cluster-throughput
+2026-10-03T06:02:49.0648882Z  * [new branch]          effort/cluster-transport-recovery -> origin/effort/cluster-transport-recovery
+2026-10-03T06:02:49.0648931Z  * [new branch]          effort/content-analysis-index -> origin/effort/content-analysis-index
+2026-10-03T06:02:49.0648986Z  * [new branch]          effort/decoder-selection-recovery -> origin/effort/decoder-selection-recovery
+2026-10-03T06:02:49.0649037Z  * [new branch]          effort/dv-p7-web-delivery -> origin/effort/dv-p7-web-delivery
+2026-10-03T06:02:49.0649086Z  * [new branch]          effort/few-second-startup -> origin/effort/few-second-startup
+2026-10-03T06:02:49.0649134Z  * [new branch]          effort/fragment-index-queue-repair -> origin/effort/fragment-index-queue-repair
+2026-10-03T06:02:49.0649188Z  * [new branch]          effort/hdhomerun-live-tv -> origin/effort/hdhomerun-live-tv
+2026-10-03T06:02:49.0649237Z  * [new branch]          effort/jellyfin-compat  -> origin/effort/jellyfin-compat
+2026-10-03T06:02:49.0649286Z  * [new branch]          effort/live-tv-dvr      -> origin/effort/live-tv-dvr
+2026-10-03T06:02:49.0649336Z  * [new branch]          effort/live-tv-guide    -> origin/effort/live-tv-guide
+2026-10-03T06:02:49.0649397Z  * [new branch]          effort/live-tv-native-layouts -> origin/effort/live-tv-native-layouts
+2026-10-03T06:02:49.0649444Z  * [new branch]          effort/live-tv-reliability -> origin/effort/live-tv-reliability
+2026-10-03T06:02:49.0649491Z  * [new branch]          effort/m4-flow-intention -> origin/effort/m4-flow-intention
+2026-10-03T06:02:49.0649534Z  * [new branch]          effort/m7-burn-join     -> origin/effort/m7-burn-join
+2026-10-03T06:02:49.0649579Z  * [new branch]          effort/optical-media    -> origin/effort/optical-media
+2026-10-03T06:02:49.0649624Z  * [new branch]          effort/playback-caps-v2-m5b -> origin/effort/playback-caps-v2-m5b
+2026-10-03T06:02:49.0649675Z  * [new branch]          effort/playback-lifecycle -> origin/effort/playback-lifecycle
+2026-10-03T06:02:49.0649721Z  * [new branch]          effort/player-input-contract -> origin/effort/player-input-contract
+2026-10-03T06:02:49.0649766Z  * [new branch]          effort/scan-identity    -> origin/effort/scan-identity
+2026-10-03T06:02:49.0649811Z  * [new branch]          effort/settings-reorg   -> origin/effort/settings-reorg
+2026-10-03T06:02:49.0649895Z  * [new branch]          effort/shared-libraries -> origin/effort/shared-libraries
+2026-10-03T06:02:49.0649942Z  * [new branch]          effort/transport-recovery-ci -> origin/effort/transport-recovery-ci
+2026-10-03T06:02:49.0649988Z  * [new branch]          effort/video-quality    -> origin/effort/video-quality
+2026-10-03T06:02:49.0650032Z  * [new branch]          effort/web-seek         -> origin/effort/web-seek
+2026-10-03T06:02:49.0650076Z  * [new branch]          effort/windows-port     -> origin/effort/windows-port
+2026-10-03T06:02:49.0650123Z  * [new branch]          feat/client-connectivity-failures -> origin/feat/client-connectivity-failures
+2026-10-03T06:02:49.0650169Z  * [new branch]          feat/playback-stats-ledger -> origin/feat/playback-stats-ledger
+2026-10-03T06:02:49.0650216Z  * [new branch]          feat/ui-layouts         -> origin/feat/ui-layouts
+2026-10-03T06:02:49.0650260Z  * [new branch]          feat/ui-layouts-g4      -> origin/feat/ui-layouts-g4
+2026-10-03T06:02:49.0650305Z  * [new branch]          fix/add-.swarm-to-.dockerignore -> origin/fix/add-.swarm-to-.dockerignore
+2026-10-03T06:02:49.0650353Z  * [new branch]          fix/apple-control-reporter-main-actor-trap -> origin/fix/apple-control-reporter-main-actor-trap
+2026-10-03T06:02:49.0650399Z  * [new branch]          fix/apple-live-tv-reveal-focus-trap -> origin/fix/apple-live-tv-reveal-focus-trap
+2026-10-03T06:02:49.0650447Z  * [new branch]          fix/apple-tv-live-focus -> origin/fix/apple-tv-live-focus
+2026-10-03T06:02:49.0650492Z  * [new branch]          fix/appletv-stall-watchdog -> origin/fix/appletv-stall-watchdog
+2026-10-03T06:02:49.0650540Z  * [new branch]          fix/attestation-ledger-row -> origin/fix/attestation-ledger-row
+2026-10-03T06:02:49.0650587Z  * [new branch]          fix/background-job-history-eviction -> origin/fix/background-job-history-eviction
+2026-10-03T06:02:49.0650633Z  * [new branch]          fix/bootstrap-private-repo -> origin/fix/bootstrap-private-repo
+2026-10-03T06:02:49.0650677Z  * [new branch]          fix/cache-floor-ceiling -> origin/fix/cache-floor-ceiling
+2026-10-03T06:02:49.0650723Z  * [new branch]          fix/ci-janitor-container-aware-idle -> origin/fix/ci-janitor-container-aware-idle
+2026-10-03T06:02:49.0650773Z  * [new branch]          fix/close-control-exits -> origin/fix/close-control-exits
+2026-10-03T06:02:49.0650819Z  * [new branch]          fix/dolby-vision-profile5 -> origin/fix/dolby-vision-profile5
+2026-10-03T06:02:49.0650865Z  * [new branch]          fix/durable-queue-retention-pressure -> origin/fix/durable-queue-retention-pressure
+2026-10-03T06:02:49.0650913Z  * [new branch]          fix/dvr-writable-root-and-store -> origin/fix/dvr-writable-root-and-store
+2026-10-03T06:02:49.0650964Z  * [new branch]          fix/engine-probe-help-bound -> origin/fix/engine-probe-help-bound
+2026-10-03T06:02:49.0651013Z  * [new branch]          fix/exact-worker-roles  -> origin/fix/exact-worker-roles
+2026-10-03T06:02:49.0651058Z  * [new branch]          fix/ffmpeg-hls-write-boundary -> origin/fix/ffmpeg-hls-write-boundary
+2026-10-03T06:02:49.0651110Z  * [new branch]          fix/heartbeat-serving-role-window -> origin/fix/heartbeat-serving-role-window
+2026-10-03T06:02:49.0651159Z  * [new branch]          fix/hevc-inband-retention -> origin/fix/hevc-inband-retention
+2026-10-03T06:02:49.0651215Z  * [new branch]          fix/hls-segment-delivery-telemetry -> origin/fix/hls-segment-delivery-telemetry
+2026-10-03T06:02:49.0651265Z  * [new branch]          fix/ledger-877          -> origin/fix/ledger-877
+2026-10-03T06:02:49.0651311Z  * [new branch]          fix/live-tv-owner-request-id -> origin/fix/live-tv-owner-request-id
+2026-10-03T06:02:49.0651358Z  * [new branch]          fix/live-tv-tablet-fullscreen -> origin/fix/live-tv-tablet-fullscreen
+2026-10-03T06:02:49.0651407Z  * [new branch]          fix/m52-ledger          -> origin/fix/m52-ledger
+2026-10-03T06:02:49.0651456Z  * [new branch]          fix/player-input-fence-comments -> origin/fix/player-input-fence-comments
+2026-10-03T06:02:49.0651504Z  * [new branch]          fix/raft-media-starvation-evidence -> origin/fix/raft-media-starvation-evidence
+2026-10-03T06:02:49.0651553Z  * [new branch]          fix/record-what-is-on   -> origin/fix/record-what-is-on
+2026-10-03T06:02:49.0651600Z  * [new branch]          fix/recovery-auth-census -> origin/fix/recovery-auth-census
+2026-10-03T06:02:49.0651651Z  * [new branch]          fix/rolling-publication-trap -> origin/fix/rolling-publication-trap
+2026-10-03T06:02:49.0651705Z  * [new branch]          fix/runner-work-reaper  -> origin/fix/runner-work-reaper
+2026-10-03T06:02:49.0651751Z  * [new branch]          fix/scratch-hold-publication-deadline -> origin/fix/scratch-hold-publication-deadline
+2026-10-03T06:02:49.0651802Z  * [new branch]          fix/ui-activity-poll-determinism -> origin/fix/ui-activity-poll-determinism
+2026-10-03T06:02:49.0651851Z  * [new branch]          fix/vod-sidecar-priors  -> origin/fix/vod-sidecar-priors
+2026-10-03T06:02:49.0651901Z  * [new branch]          fix/vod-successor-encoder-permit -> origin/fix/vod-successor-encoder-permit
+2026-10-03T06:02:49.0651948Z  * [new branch]          fix/web-check-green     -> origin/fix/web-check-green
+2026-10-03T06:02:49.0651996Z  * [new branch]          integration/streaming-reliability-into-main -> origin/integration/streaming-reliability-into-main
+2026-10-03T06:02:49.0652073Z  * [new branch]          integration/transport-recovery-postmerge-into-main -> origin/integration/transport-recovery-postmerge-into-main
+2026-10-03T06:02:49.0652133Z  * [new branch]          m7-remainder-plan       -> origin/m7-remainder-plan
+2026-10-03T06:02:49.0652184Z  * [new branch]          main                    -> origin/main
+2026-10-03T06:02:49.0652233Z  * [new branch]          maintenance/ignore-swarm-runtime -> origin/maintenance/ignore-swarm-runtime
+2026-10-03T06:02:49.0652281Z  * [new branch]          opus/c07-durable-census -> origin/opus/c07-durable-census
+2026-10-03T06:02:49.0652328Z  * [new branch]          opus/client-evidence    -> origin/opus/client-evidence
+2026-10-03T06:02:49.0652375Z  * [new branch]          opus/d02-successor-focus -> origin/opus/d02-successor-focus
+2026-10-03T06:02:49.0652426Z  * [new branch]          opus/encoder-lab-evidence -> origin/opus/encoder-lab-evidence
+2026-10-03T06:02:49.0652472Z  * [new branch]          opus/p02-repro-continuation -> origin/opus/p02-repro-continuation
+2026-10-03T06:02:49.0652522Z  * [new branch]          perf/ci-fast-lane       -> origin/perf/ci-fast-lane
+2026-10-03T06:02:49.0652567Z  * [new branch]          plan/L-01               -> origin/plan/L-01
+2026-10-03T06:02:49.0652615Z  * [new branch]          plan/S-03               -> origin/plan/S-03
+2026-10-03T06:02:49.0652664Z  * [new branch]          plan/S-07               -> origin/plan/S-07
+2026-10-03T06:02:49.0652710Z  * [new branch]          plan/S-08               -> origin/plan/S-08
+2026-10-03T06:02:49.0652756Z  * [new branch]          plan/S-10               -> origin/plan/S-10
+2026-10-03T06:02:49.0652801Z  * [new branch]          plan/S-12               -> origin/plan/S-12
+2026-10-03T06:02:49.0652850Z  * [new branch]          plan/W-01               -> origin/plan/W-01
+2026-10-03T06:02:49.0652898Z  * [new branch]          playback/recovery-additions -> origin/playback/recovery-additions
+2026-10-03T06:02:49.0652944Z  * [new branch]          reland/535-509          -> origin/reland/535-509
+2026-10-03T06:02:49.0653000Z  * [new branch]          release/mobile-builds-20260829 -> origin/release/mobile-builds-20260829
+2026-10-03T06:02:49.0653051Z  * [new branch]          release/v0.2.8          -> origin/release/v0.2.8
+2026-10-03T06:02:49.0653103Z  * [new branch]          review/pgs-start-path-rca -> origin/review/pgs-start-path-rca
+2026-10-03T06:02:49.0653148Z  * [new branch]          task/live-tv-m1-review-fixes -> origin/task/live-tv-m1-review-fixes
+2026-10-03T06:02:49.0653194Z  * [new branch]          task/live-tv-m3-web     -> origin/task/live-tv-m3-web
+2026-10-03T06:02:49.0653238Z  * [new branch]          task/live-tv-m4-apple   -> origin/task/live-tv-m4-apple
+2026-10-03T06:02:49.0653287Z  * [new branch]          task/live-tv-m5-android -> origin/task/live-tv-m5-android
+2026-10-03T06:02:49.0653331Z  * [new branch]          web/activity-stream-card -> origin/web/activity-stream-card
+2026-10-03T06:02:49.0653376Z  * [new branch]          web/playback-surface    -> origin/web/playback-surface
+2026-10-03T06:02:49.0653419Z  * [new branch]          web/playback-surface-reach -> origin/web/playback-surface-reach
+2026-10-03T06:02:49.0653465Z  * [new branch]          wip/loose-work-2026-08-29 -> origin/wip/loose-work-2026-08-29
+2026-10-03T06:02:49.0653516Z  * [new tag]             v0.2.7                  -> v0.2.7
+2026-10-03T06:02:49.0653562Z  * [new tag]             v0.2.8                  -> v0.2.8
+2026-10-03T06:02:49.0653609Z  * [new tag]             v0.3.0                  -> v0.3.0
+2026-10-03T06:02:49.0653842Z [command]/usr/bin/git rev-parse --verify --quiet bd24f27679faf68bf8815915b488a3e7ac2e7461^{object}
+2026-10-03T06:02:49.0653894Z bd24f27679faf68bf8815915b488a3e7ac2e7461
+2026-10-03T06:02:49.0654187Z ##[endgroup]
+2026-10-03T06:02:49.0654323Z ##[group]Determining the checkout info
+2026-10-03T06:02:49.0654439Z ##[endgroup]
+2026-10-03T06:02:49.0654489Z [command]/usr/bin/git sparse-checkout disable
+2026-10-03T06:02:49.0703912Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-03T06:02:49.0721922Z ##[group]Checking out the ref
+2026-10-03T06:02:49.0724255Z [command]/usr/bin/git checkout --progress --force bd24f27679faf68bf8815915b488a3e7ac2e7461
+2026-10-03T06:02:49.4378464Z Note: switching to 'bd24f27679faf68bf8815915b488a3e7ac2e7461'.
+2026-10-03T06:02:49.4378991Z 
+2026-10-03T06:02:49.4379141Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-10-03T06:02:49.4379289Z changes and commit them, and you can discard any commits you make in this
+2026-10-03T06:02:49.4379449Z state without impacting any branches by switching back to a branch.
+2026-10-03T06:02:49.4379593Z 
+2026-10-03T06:02:49.4379676Z If you want to create a new branch to retain commits you create, you may
+2026-10-03T06:02:49.4379769Z do so (now or later) by using -c with the switch command. Example:
+2026-10-03T06:02:49.4379858Z 
+2026-10-03T06:02:49.4379978Z   git switch -c <new-branch-name>
+2026-10-03T06:02:49.4380060Z 
+2026-10-03T06:02:49.4380141Z Or undo this operation with:
+2026-10-03T06:02:49.4380219Z 
+2026-10-03T06:02:49.4380300Z   git switch -
+2026-10-03T06:02:49.4380384Z 
+2026-10-03T06:02:49.4380462Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-10-03T06:02:49.4380553Z 
+2026-10-03T06:02:49.4380633Z HEAD is now at bd24f2767 test(playback): wire successor preparation into extracted player owners
+2026-10-03T06:02:49.4425228Z ##[endgroup]
+2026-10-03T06:02:49.4487446Z [command]/usr/bin/git log -1 --format=%H
+2026-10-03T06:02:49.4523263Z bd24f27679faf68bf8815915b488a3e7ac2e7461
+2026-10-03T06:02:49.4532368Z ##[group]Removing auth
+2026-10-03T06:02:49.4535612Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-03T06:02:49.4566037Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-03T06:02:49.4889052Z [command]/usr/bin/git config --local --name-only --get-regexp http\.http\:\/\/192\.168\.4\.7\:3000\/\.extraheader
+2026-10-03T06:02:49.4913796Z http.http://192.168.4.7:3000/.extraheader
+2026-10-03T06:02:49.4918907Z [command]/usr/bin/git config --local --unset-all http.http://192.168.4.7:3000/.extraheader
+2026-10-03T06:02:49.4940377Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.http\:\/\/192\.168\.4\.7\:3000\/\.extraheader' && git config --local --unset-all 'http.http://192.168.4.7:3000/.extraheader' || :"
+2026-10-03T06:02:49.5219255Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-03T06:02:49.5244384Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-03T06:02:49.5526036Z ##[endgroup]
+2026-10-03T06:02:49.5530467Z ::remove-matcher owner=checkout-git::
+2026-10-03T06:02:49.6927759Z Found in cache @ /opt/forgejo-runner-extra-gha-rogg16-general-05/tool-cache/node/22.23.3/x64
+2026-10-03T06:02:49.6928084Z (node:3330110) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-03T06:02:49.6928236Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-03T06:02:49.6934726Z ##[group]Environment details
+2026-10-03T06:02:49.8765992Z node: v22.23.3
+2026-10-03T06:02:49.8766361Z npm: 10.9.9
+2026-10-03T06:02:49.8766499Z yarn: 
+2026-10-03T06:02:49.8766979Z ##[endgroup]
+2026-10-03T06:02:49.8767663Z ##[add-matcher]/opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/act/actions/89/c2ae98ca3347a8148d507f3771b13e21b5693d978f56d37540dffffc76eb2a/.github/tsc.json
+2026-10-03T06:02:49.8768017Z ##[add-matcher]/opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/act/actions/89/c2ae98ca3347a8148d507f3771b13e21b5693d978f56d37540dffffc76eb2a/.github/eslint-stylish.json
+2026-10-03T06:02:49.8769624Z ##[add-matcher]/opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/act/actions/89/c2ae98ca3347a8148d507f3771b13e21b5693d978f56d37540dffffc76eb2a/.github/eslint-compact.json
+2026-10-03T06:02:51.1681446Z js-check: 70 served script(s) and 0 inline block(s) OK — /opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/hostexecutor/crates/plurxd/src/web/index.html
+2026-10-03T06:02:52.5258991Z TAP version 13
+2026-10-03T06:02:52.5530847Z # PASS shipped grid and long-track content stay inside their owners
+2026-10-03T06:02:52.5572311Z # Subtest: fractional content columns have explicit non-intrinsic floors
+2026-10-03T06:02:52.5576459Z ok 1 - fractional content columns have explicit non-intrinsic floors
+2026-10-03T06:02:52.5577524Z   ---
+2026-10-03T06:02:52.5577697Z   duration_ms: 0.599523
+2026-10-03T06:02:52.5578035Z   type: 'test'
+2026-10-03T06:02:52.5578188Z   ...
+2026-10-03T06:02:52.5581867Z # Subtest: media info track chips remain boxes with a separate more row
+2026-10-03T06:02:52.5582858Z ok 2 - media info track chips remain boxes with a separate more row
+2026-10-03T06:02:52.5583203Z   ---
+2026-10-03T06:02:52.5583284Z   duration_ms: 0.801912
+2026-10-03T06:02:52.5583328Z   type: 'test'
+2026-10-03T06:02:52.5583370Z   ...
+2026-10-03T06:02:52.5969579Z # Subtest: preparation groups count every part once and start collapsed
+2026-10-03T06:02:52.5971305Z ok 3 - preparation groups count every part once and start collapsed
+2026-10-03T06:02:52.5971654Z   ---
+2026-10-03T06:02:52.5971714Z   duration_ms: 31.025138
+2026-10-03T06:02:52.5971788Z   type: 'test'
+2026-10-03T06:02:52.5971842Z   ...
+2026-10-03T06:02:52.5972779Z # Subtest: cancelled and unknown preparation never claim core completion
+2026-10-03T06:02:52.5973898Z ok 4 - cancelled and unknown preparation never claim core completion
+2026-10-03T06:02:52.5974241Z   ---
+2026-10-03T06:02:52.5974299Z   duration_ms: 1.618197
+2026-10-03T06:02:52.5974351Z   type: 'test'
+2026-10-03T06:02:52.5974413Z   ...
+2026-10-03T06:02:52.5975436Z # Subtest: refresh preserves subtitle disclosure focus and unchanged snapshots
+2026-10-03T06:02:52.5975884Z ok 5 - refresh preserves subtitle disclosure focus and unchanged snapshots
+2026-10-03T06:02:52.5976122Z   ---
+2026-10-03T06:02:52.5976177Z   duration_ms: 1.148721
+2026-10-03T06:02:52.5976241Z   type: 'test'
+2026-10-03T06:02:52.5976286Z   ...
+2026-10-03T06:02:52.5977318Z # Subtest: manual and automatic refresh join one flight and terminal work stops polling
+2026-10-03T06:02:52.5978367Z ok 6 - manual and automatic refresh join one flight and terminal work stops polling
+2026-10-03T06:02:52.5978948Z   ---
+2026-10-03T06:02:52.5979299Z   duration_ms: 1.120502
+2026-10-03T06:02:52.5979481Z   type: 'test'
+2026-10-03T06:02:52.5979616Z   ...
+2026-10-03T06:02:52.5979770Z # Subtest: refresh keeps keyboard focus in the list when its group disappears
+2026-10-03T06:02:52.5979901Z ok 7 - refresh keeps keyboard focus in the list when its group disappears
+2026-10-03T06:02:52.5980037Z   ---
+2026-10-03T06:02:52.5980181Z   duration_ms: 0.857615
+2026-10-03T06:02:52.5980292Z   type: 'test'
+2026-10-03T06:02:52.5980400Z   ...
+2026-10-03T06:02:52.5981317Z # Subtest: a navigation discards the old preparation response
+2026-10-03T06:02:52.5981808Z ok 8 - a navigation discards the old preparation response
+2026-10-03T06:02:52.5981996Z   ---
+2026-10-03T06:02:52.5982057Z   duration_ms: 0.613126
+2026-10-03T06:02:52.5982110Z   type: 'test'
+2026-10-03T06:02:52.5982163Z   ...
+2026-10-03T06:02:52.5982666Z # Subtest: next episode prewarm is single flight and publishes no playback state
+2026-10-03T06:02:52.5985225Z ok 9 - next episode prewarm is single flight and publishes no playback state
+2026-10-03T06:02:52.5985495Z   ---
+2026-10-03T06:02:52.5985587Z   duration_ms: 2.445819
+2026-10-03T06:02:52.5985663Z   type: 'test'
+2026-10-03T06:02:52.5985736Z   ...
+2026-10-03T06:02:52.5987445Z # Subtest: next episode prewarm aborts on seek and autoplay off and drops late reads
+2026-10-03T06:02:52.5988012Z ok 10 - next episode prewarm aborts on seek and autoplay off and drops late reads
+2026-10-03T06:02:52.5988232Z   ---
+2026-10-03T06:02:52.5988287Z   duration_ms: 2.306032
+2026-10-03T06:02:52.5988340Z   type: 'test'
+2026-10-03T06:02:52.5988388Z   ...
+2026-10-03T06:02:52.5988808Z # Subtest: next episode metadata expires without background polling or stale acceptance
+2026-10-03T06:02:52.5989190Z ok 11 - next episode metadata expires without background polling or stale acceptance
+2026-10-03T06:02:52.5989418Z   ---
+2026-10-03T06:02:52.5989472Z   duration_ms: 1.178303
+2026-10-03T06:02:52.5989523Z   type: 'test'
+2026-10-03T06:02:52.5989583Z   ...
+2026-10-03T06:02:52.5990016Z # Subtest: next episode preparation crosses seasons through the same bounded resolver
+2026-10-03T06:02:52.5990376Z ok 12 - next episode preparation crosses seasons through the same bounded resolver
+2026-10-03T06:02:52.5990581Z   ---
+2026-10-03T06:02:52.5990632Z   duration_ms: 1.024485
+2026-10-03T06:02:52.5990686Z   type: 'test'
+2026-10-03T06:02:52.5990732Z   ...
+2026-10-03T06:02:52.5991165Z # Subtest: next episode preparation skips distant paused seeking and non-episode playback
+2026-10-03T06:02:52.5992044Z ok 13 - next episode preparation skips distant paused seeking and non-episode playback
+2026-10-03T06:02:52.5992830Z   ---
+2026-10-03T06:02:52.5992919Z   duration_ms: 4.022631
+2026-10-03T06:02:52.5993006Z   type: 'test'
+2026-10-03T06:02:52.5993094Z   ...
+2026-10-03T06:02:52.6049048Z 1..13
+2026-10-03T06:02:52.6049287Z # tests 13
+2026-10-03T06:02:52.6049393Z # suites 0
+2026-10-03T06:02:52.6049519Z # pass 13
+2026-10-03T06:02:52.6049623Z # fail 0
+2026-10-03T06:02:52.6049740Z # cancelled 0
+2026-10-03T06:02:52.6049896Z # skipped 0
+2026-10-03T06:02:52.6050029Z # todo 0
+2026-10-03T06:02:52.6050462Z # duration_ms 91.37219
+2026-10-03T06:02:52.6454301Z PASS jsconfig.json lists all 64 served rows the checker reads
+2026-10-03T06:02:55.4463345Z web-types: FAIL — crates/plurxd/src/web/pages/settings-developer.js TS2339: 9 now, baseline allows 7
+2026-10-03T06:02:55.4464117Z   crates/plurxd/src/web/pages/settings-developer.js:17:72 TS2339 Property 'value' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464359Z   crates/plurxd/src/web/pages/settings-developer.js:18:70 TS2339 Property 'value' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464471Z   crates/plurxd/src/web/pages/settings-developer.js:19:65 TS2339 Property 'value' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464520Z   crates/plurxd/src/web/pages/settings-developer.js:130:53 TS2339 Property 'value' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464567Z   crates/plurxd/src/web/pages/settings-developer.js:189:51 TS2339 Property 'checked' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464634Z   crates/plurxd/src/web/pages/settings-developer.js:201:23 TS2339 Property 'checked' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464690Z   crates/plurxd/src/web/pages/settings-developer.js:565:125 TS2339 Property 'checked' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464737Z   crates/plurxd/src/web/pages/settings-developer.js:591:140 TS2339 Property 'checked' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464785Z   crates/plurxd/src/web/pages/settings-developer.js:606:131 TS2339 Property 'checked' does not exist on type 'HTMLElement'.
+2026-10-03T06:02:55.4464883Z web-types: 1 key(s) rose above tests/web/tsc-baseline.tsv. Remove the new diagnostics; if one is truly intended, run scripts/web-types --accept-increase "<why>".
+2026-10-03T06:02:55.4464951Z web-types: installing typescript 6.0.3 (npm ci --prefix tools/web-types)
+2026-10-03T06:02:55.4530054Z ⚙️ [runner]: RUN exit status 1
+2026-10-03T06:02:55.4531711Z Skipping step 'https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' due to 'success()'
+2026-10-03T06:02:55.4599991Z ⭐ Run Post https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+2026-10-03T06:02:55.5303352Z [command]/usr/bin/git version
+2026-10-03T06:02:55.5340844Z git version 2.55.0
+2026-10-03T06:02:55.5361377Z   ⚙  ***
+2026-10-03T06:02:55.5376237Z Temporarily overriding HOME='/opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/tmp/d4cf0840-0030-43f5-b907-62ef87a34547' before making global git config changes
+2026-10-03T06:02:55.5376424Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-03T06:02:55.5392170Z [command]/usr/bin/git config --global --add safe.directory /opt/forgejo-runner-extra-gha-rogg16-general-05/_work/ac553cb57d3f54a9/hostexecutor
+2026-10-03T06:02:55.5430090Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-03T06:02:55.5459133Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-03T06:02:55.5791331Z [command]/usr/bin/git config --local --name-only --get-regexp http\.http\:\/\/192\.168\.4\.7\:3000\/\.extraheader
+2026-10-03T06:02:55.5814898Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.http\:\/\/192\.168\.4\.7\:3000\/\.extraheader' && git config --local --unset-all 'http.http://192.168.4.7:3000/.extraheader' || :"
+2026-10-03T06:02:55.6105086Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-03T06:02:55.6128662Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-03T06:02:55.6462506Z   ✅  Success - Post https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+2026-10-03T06:02:55.6504719Z 🏁  Job failed
+2026-10-03T06:02:55.7054097Z Job 'fast web syntax gate' failed
+

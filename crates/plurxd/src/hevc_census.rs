@@ -62,6 +62,17 @@ pub(crate) async fn probe_json_for_copy(
     file: &MediaFile,
 ) -> Result<Option<String>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
+    probe_json_for_copy_from(store, file, probe_json).await
+}
+
+/// [`probe_json_for_copy`] for a caller that already holds the stored probe
+/// (a rolling start reads it with the file and its settings in one
+/// statement). The store is touched only when the census must be measured.
+pub(crate) async fn probe_json_for_copy_from(
+    store: &dyn Store,
+    file: &MediaFile,
+    probe_json: Option<String>,
+) -> Result<Option<String>, StoreError> {
     if !hevc_census::needs_census(file, probe_json.as_deref()) || recently_failed(file) {
         return Ok(probe_json);
     }

@@ -51,7 +51,8 @@ pub const REPOSITION_GAP_SECONDS: u32 = 60;
 /// One attached reader's demand, in plan indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Demand {
-    /// The segment this reader's in-flight GET is waiting on, if it has one.
+    /// The segment this reader's in-flight GET or admitted, bounded quality
+    /// preparation request is waiting on, if it has one.
     ///
     /// This is a *request*, not a guess about what it might want: the
     /// connection is open, the response has not started, and the client's
@@ -62,11 +63,14 @@ pub struct Demand {
     /// The reader's current playback anchor. Accepted control owns this
     /// position; GET order and speculative prefetch do not advance it.
     pub frontier: u32,
-    /// This admitted GET is nearest to the reader's accepted playback anchor
-    /// inside its current buffer window.
+    /// This admitted request is nearest to the reader's accepted playback or
+    /// preparation anchor inside its current buffer window.
     /// Other admitted GETs remain owed, but cannot make an abandoned seek
     /// destination outrank the one the viewer has just selected.
     pub foreground: bool,
+    /// A bounded, admitted quality preparation needs this boundary directly;
+    /// it cannot spend the ordinary copy restart horizon encoding old gaps.
+    pub bounded_preparation: bool,
     pub arrival_order: Option<u64>,
 }
 
@@ -78,6 +82,7 @@ impl Demand {
             blocked_on: None,
             frontier,
             foreground: false,
+            bounded_preparation: false,
             arrival_order: None,
         }
     }
@@ -88,6 +93,7 @@ impl Demand {
             blocked_on: Some(index),
             frontier: index,
             foreground: false,
+            bounded_preparation: false,
             arrival_order: None,
         }
     }
@@ -359,18 +365,30 @@ pub fn decide(
             // Each current viewer's nearest GET competes in admission order.
             // Opportunistic production near the current cursor must not let
             // one viewer's continuing prefetch starve a rewind by another.
-            return serve_blocked(manifest, &[oldest.1], position, reposition);
-        }
-        return serve_blocked(
-            manifest,
-            if foreground.is_empty() {
-                &owed
+            let restart_gap = if demands
+                .iter()
+                .any(|demand| demand.bounded_preparation && demand.blocked_on == Some(oldest.1))
+            {
+                0
             } else {
-                &foreground
-            },
-            position,
-            reposition,
-        );
+                reposition
+            };
+            return serve_blocked(manifest, &[oldest.1], position, restart_gap);
+        }
+        let selected = if foreground.is_empty() {
+            &owed
+        } else {
+            &foreground
+        };
+        let restart_gap = if demands
+            .iter()
+            .any(|demand| demand.bounded_preparation && demand.blocked_on == Some(selected[0]))
+        {
+            0
+        } else {
+            reposition
+        };
+        return serve_blocked(manifest, selected, position, restart_gap);
     }
 
     // Nothing is blocked, so this is ahead-fill, and it runs *forward from the
@@ -578,6 +596,44 @@ mod tests {
     }
 
     #[test]
+    fn bounded_quality_preparation_repositions_an_already_running_producer() {
+        let manifest = manifest(200);
+        let mut preparation = Demand::waiting_on(15);
+        preparation.foreground = true;
+        let active = positioned(10);
+        assert_eq!(
+            decide(&manifest, &[preparation], active, &[]),
+            Action::Produce { next: 10 },
+            "ordinary nearby GET reads forward"
+        );
+        preparation.bounded_preparation = true;
+        assert_eq!(
+            decide(&manifest, &[waiting(3), preparation], active, &[]),
+            Action::Reposition { to: 15 },
+            "bounded preparation starts at its own boundary"
+        );
+        assert_eq!(
+            decide(&manifest, &[preparation], positioned(15), &[]),
+            Action::Produce { next: 15 },
+            "a repositioned producer is not restarted repeatedly"
+        );
+        let mut foreign = Demand::waiting_on(12);
+        foreign.foreground = true;
+        foreign.arrival_order = Some(1);
+        assert_eq!(
+            decide(&manifest, &[preparation, foreign], active, &[]),
+            Action::Produce { next: 10 },
+            "another viewer keeps ordinary policy and ordered priority"
+        );
+        preparation.bounded_preparation = false;
+        assert_eq!(
+            decide(&manifest, &[preparation], active, &[]),
+            Action::Produce { next: 10 },
+            "settled preparation restores ordinary policy"
+        );
+    }
+
+    #[test]
     fn current_playback_beats_both_an_old_low_wait_and_later_far_prefetch() {
         let manifest = manifest(200);
         let mut current = Demand::waiting_on(90);
@@ -618,12 +674,14 @@ mod tests {
             blocked_on: Some(90),
             frontier: 90,
             foreground: true,
+            bounded_preparation: false,
             arrival_order: Some(1),
         };
         let rewind_viewer = Demand {
             blocked_on: Some(3),
             frontier: 3,
             foreground: true,
+            bounded_preparation: false,
             arrival_order: Some(2),
         };
         assert_eq!(
@@ -639,6 +697,7 @@ mod tests {
             blocked_on: Some(91),
             frontier: 91,
             foreground: true,
+            bounded_preparation: false,
             arrival_order: Some(3),
         };
         assert_eq!(
@@ -922,6 +981,7 @@ mod tests {
             blocked_on: Some(3),
             frontier: 30,
             foreground: false,
+            bounded_preparation: false,
             arrival_order: None,
         }];
         match decide(&manifest, &readers, position(Some(29)), &[]) {

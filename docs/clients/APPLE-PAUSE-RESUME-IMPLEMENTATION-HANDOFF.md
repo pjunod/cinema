@@ -31,8 +31,8 @@ shows enough retained client media to make that wait unnecessary.
 ## 1. Evidence — the paused player already had 62.3 seconds buffered
 
 Read-only collection used `docker logs --since 12h --tail 30000 plurxd` on
-`m6`, `nynuc`, `nuc3`, and `nuc4`, through the existing deployment SSH access.
-The matching Heartstopper session was on `m6`, file ID `1674`, episode
+`lab6`, `media1`, `lab3`, and `lab4`, through the existing deployment SSH access.
+The matching Heartstopper session was on `lab6`, file ID `1674`, episode
 “Meet,” with copied HEVC video at 2160p. Server build:
 `v0.3.0-2770-g6fb0901d`. No server or player was restarted during collection.
 

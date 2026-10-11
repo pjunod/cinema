@@ -1,0 +1,57 @@
+ffmpeg_source_sha256=7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+vmaf_source_sha256=7178c4833639e6b989ecae73131d02f70735fdb3fc2c7d84bc36c9c3461d93b1
+model=vmaf_v0.6.1 (built in)
+ae6815ebad4afcb8e2cd98f523e92fbc5702c80b89b482a190974f021ccc2c2d  /usr/local/lib/plurx/vmaf-ffmpeg
+
+Elf file type is EXEC (Executable file)
+Entry point 0x41def0
+There are 10 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset             VirtAddr           PhysAddr
+                 FileSiz            MemSiz              Flags  Align
+  LOAD           0x0000000000000000 0x0000000000400000 0x0000000000400000
+                 0x0000000000000860 0x0000000000000860  R      0x1000
+  LOAD           0x0000000000001000 0x0000000000401000 0x0000000000401000
+                 0x0000000000467ded 0x0000000000467ded  R E    0x1000
+  LOAD           0x0000000000469000 0x0000000000869000 0x0000000000869000
+                 0x000000000011d95d 0x000000000011d95d  R      0x1000
+  LOAD           0x0000000000586ee8 0x0000000000987ee8 0x0000000000987ee8
+                 0x00000000000bfa68 0x0000000000211b98  RW     0x1000
+  NOTE           0x0000000000000270 0x0000000000400270 0x0000000000400270
+                 0x0000000000000020 0x0000000000000020  R      0x8
+  NOTE           0x0000000000000290 0x0000000000400290 0x0000000000400290
+                 0x0000000000000044 0x0000000000000044  R      0x4
+  TLS            0x0000000000586ee8 0x0000000000987ee8 0x0000000000987ee8
+                 0x0000000000000070 0x00000000000000d0  R      0x8
+  GNU_PROPERTY   0x0000000000000270 0x0000000000400270 0x0000000000400270
+                 0x0000000000000020 0x0000000000000020  R      0x8
+  GNU_STACK      0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x0000000000000000 0x0000000000000000  RW     0x10
+  GNU_RELRO      0x0000000000586ee8 0x0000000000987ee8 0x0000000000987ee8
+                 0x0000000000044118 0x0000000000044118  R      0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.property .note.gnu.build-id .note.ABI-tag .rela.plt 
+   01     .init .plt .text __libc_freeres_fn .fini 
+   02     .rodata .stapsdt.base .eh_frame .gcc_except_table 
+   03     .tdata .init_array .fini_array .data.rel.ro .got .got.plt .data __libc_subfreeres __libc_IO_vtables __libc_atexit .bss __libc_freeres_ptrs 
+   04     .note.gnu.property 
+   05     .note.gnu.build-id .note.ABI-tag 
+   06     .tdata .tbss 
+   07     .note.gnu.property 
+   08     
+   09     .tdata .init_array .fini_array .data.rel.ro .got 
+ffmpeg version 8.1.3 Copyright (c) 2000-2026 the FFmpeg developers
+built with gcc 12 (Debian 12.2.0-14+deb12u1)
+configuration: --disable-shared --enable-static --disable-autodetect --disable-everything --disable-programs --enable-ffmpeg --disable-doc --disable-debug --disable-network --enable-avdevice --enable-indev=lavfi --enable-protocol='file,pipe' --enable-demuxer=matroska --enable-decoder='h264,ffv1,rawvideo,wrapped_avframe' --enable-parser=h264 --enable-encoder=wrapped_avframe --enable-muxer=null --enable-filter='libvmaf,scale,format,setpts,split,testsrc2,buffer,buffersink,null' --enable-libvmaf --pkg-config-flags=--static --extra-ldexeflags=-static --extra-libs=-lstdc++
+libavutil      60. 26.103 / 60. 26.103
+libavcodec     62. 28.103 / 62. 28.103
+libavformat    62. 12.103 / 62. 12.103
+libavdevice    62.  3.103 / 62.  3.103
+libavfilter    11. 14.103 / 11. 14.103
+libswscale      9.  5.103 /  9.  5.103
+libswresample   6.  3.103 /  6.  3.103
+
+Exiting with exit code 0

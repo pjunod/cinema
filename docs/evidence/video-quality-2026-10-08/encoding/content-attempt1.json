@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "scope": "source_local_real_title_recipe_measurement",
+  "production_job_integration": false,
+  "source_revision": "1088d7529401297bddced74bfa11c166457468d8",
+  "resource_limits": {
+    "cpu_threads": 2,
+    "wall_seconds": 600,
+    "scratch_bytes": 1073741824
+  },
+  "script_sha256": "fbf2167d80696ea09a339aa434337c40dd68c8b59ffa3308cc778df43ce08634",
+  "cases": [],
+  "cleanup": {
+    "container_removed": true,
+    "private_media_removed": true
+  },
+  "limits": [
+    "60-second copied excerpts, not whole-film guarantee",
+    "isolated current shipping encoder/scorer; no durable cache/offline owner invocation",
+    "single encode timing per recipe; not fleet throughput",
+    "no private media exported"
+  ],
+  "image": "sha256:e7f036e7d1c40d407f20f178c68e857b79f1828b62c921236272a24c2c303cec",
+  "tools": {
+    "encoder": "ffmpeg version 8.1.3-Jellyfin Copyright (c) 2000-2026 the FFmpeg developers",
+    "probe": "ffprobe version 8.1.3-Jellyfin Copyright (c) 2007-2026 the FFmpeg developers",
+    "scorer": "ffmpeg version 8.1.3 Copyright (c) 2000-2026 the FFmpeg developers"
+  },
+  "recipes": {
+    "vbr": [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-b:v",
+      "4000k",
+      "-maxrate",
+      "6000k",
+      "-bufsize",
+      "8000k",
+      "-profile:v",
+      "high",
+      "-threads",
+      "2"
+    ],
+    "q18": [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "18",
+      "-maxrate",
+      "6000k",
+      "-bufsize",
+      "8000k",
+      "-profile:v",
+      "high",
+      "-threads",
+      "2"
+    ],
+    "q23": [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-maxrate",
+      "6000k",
+      "-bufsize",
+      "8000k",
+      "-profile:v",
+      "high",
+      "-threads",
+      "2"
+    ],
+    "q28": [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "28",
+      "-maxrate",
+      "6000k",
+      "-bufsize",
+      "8000k",
+      "-profile:v",
+      "high",
+      "-threads",
+      "2"
+    ]
+  },
+  "status": "incomplete",
+  "error": "RuntimeError: media command failed: [out#0/matroska @ 0x62e4c8ebb6c0] Error opening output /var/tmp/plurx-content-qualification-vjquyywo/source.mkv: Permission denied\nError opening output file /var/tmp/plurx-content-qualification-vjquyywo/source.mkv.\nError opening output files: Permission denied\n"
+}

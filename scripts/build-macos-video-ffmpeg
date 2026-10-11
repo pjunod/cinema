@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""Assemble a private, pinned Jellyfin macOS package; never install it globally.
+
+Package mode retains the official portable binary's complete dependency set,
+rather than rebuilding a reduced FFmpeg with incidental host libraries. The
+upstream release API publishes the archive hashes below. Source, patch series,
+dependency recipes, licenses, configure and linked-library facts accompany the
+candidate. Capability declarations are not graph or media qualification.
+
+Usage: build-macos-video-ffmpeg --output /absolute/new/directory
+Offline: add --archive ARCHIVE --source-archive SOURCE_ARCHIVE.
+The source archive is from the pinned tag URL; its checksum is also fixed.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import xml.etree.ElementTree as ET
+
+
+TAG = "v8.1.3-1"
+COMMIT = "253db2a7b0a8045c54ce68ce33d7f601229b1822"
+SOURCE_URL = f"https://codeload.github.com/jellyfin/jellyfin-ffmpeg/tar.gz/refs/tags/{TAG}"
+SOURCE_SHA256 = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140"
+ARCHIVES = {
+    "arm64": ("macarm64", "22445d7299742749ad2eeb9ce87963d50def0357e45b3e6c7b69987c8365dbf6"),
+    "x86_64": ("mac64", "cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a167b093d4bb6fb"),
+}
+REQUIRED = {
+    "filters": ["scale_vt", "tonemap_videotoolbox", "tonemapx", "zscale", "tonemap",
+                "ass", "subtitles", "overlay", "bwdif", "hwupload", "hwdownload", "sidedata"],
+    "decoders": ["ac4", "h264", "hevc", "aac", "ac3", "eac3", "dca"],
+    "encoders": ["h264_videotoolbox", "hevc_videotoolbox", "libx264", "aac", "ac3", "libopus"],
+    "bsfs": ["dovi_rpu", "hevc_metadata", "hevc_mp4toannexb", "h264_mp4toannexb", "aac_adtstoasc"],
+    "muxers": ["hls", "mp4", "mpegts", "matroska"],
+    "demuxers": ["ac4", "mpegts", "mov", "matroska"],
+}
+FILTER_OPTIONS = {
+    "scale_vt": ["w", "h", "format", "color_matrix", "color_primaries", "color_transfer"],
+    "tonemap_videotoolbox": ["tonemap", "tonemap_mode", "format", "transfer", "matrix", "primaries", "range", "apply_dovi"],
+    "tonemapx": ["tonemap", "format", "transfer", "matrix", "primaries", "range", "apply_dovi"],
+}
+
+
+def digest(path):
+    checksum = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            checksum.update(block)
+    return checksum.hexdigest()
+
+
+def run(argv):
+    # Do not leak the operator environment into child logs or provenance.
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=30, check=True,
+                            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"})
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def acquire(local, url, expected, destination):
+    if local:
+        shutil.copyfile(local, destination)
+    else:
+        subprocess.run(["/usr/bin/curl", "--proto", "=https", "--tlsv1.2", "--fail",
+                        "--location", "--retry", "2", "--max-time", "180", url,
+                        "--output", str(destination)], check=True, timeout=190)
+    actual = digest(destination)
+    if actual != expected:
+        raise ValueError(f"archive checksum mismatch: expected {expected}, got {actual}")
+
+
+def source_provenance(archive, destination):
+    files = {}
+    with tarfile.open(archive) as source:
+        for member in source:
+            # Retain inspectable patch/license/dependency recipes. The complete
+            # original source archive is retained alongside this selection.
+            relative = Path(*Path(member.name).parts[1:])
+            if not member.isfile() or relative.is_absolute() or ".." in relative.parts:
+                continue
+            selected = (str(relative).startswith(("debian/patches/", "builder/"))
+                        or str(relative) in ["COPYING.GPLv2", "COPYING.GPLv3", "COPYING.LGPLv2.1",
+                                             "COPYING.LGPLv3", "LICENSE.md", "debian/changelog"])
+            if not selected:
+                continue
+            contents = source.extractfile(member).read()
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            files[str(relative)] = hashlib.sha256(contents).hexdigest()
+    if "debian/patches/series" not in files or "builder/buildmac.sh" not in files:
+        raise ValueError("source archive lacks pinned Jellyfin patch/build provenance")
+    return files
+
+
+def local_svn_source_files(path, config):
+    """Read the already-built working-copy inventory without a remote SVN query."""
+    document = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
+        str(config), "status", "--verbose", "--xml", str(path)], text=True, timeout=30)
+    root = path.resolve()
+    files = []
+    for entry in ET.fromstring(document).iter("entry"):
+        state = entry.find("wc-status")
+        if state is None or state.get("item") in {"unversioned", "ignored", "external", "missing", "deleted"}:
+            continue
+        item = Path(entry.attrib["path"]).resolve()
+        if not item.is_relative_to(root):
+            raise ValueError("SVN source inventory escapes its working copy")
+        if item.is_file() and not item.is_symlink():
+            files.append((item, str(item.relative_to(root))))
+    if not files:
+        raise ValueError("SVN source inventory contains no tracked files")
+    return sorted(files)
+
+
+def verify_bwdif_metal_binding(source):
+    """Match separate Metal buffer namespaces in the exact compiled source."""
+    host = (source / "libavfilter/vf_bwdif_videotoolbox.m").read_text()
+    shader = (source / "libavfilter/metal/vf_bwdif_videotoolbox.metal").read_text()
+    host_indices = re.findall(r"setBuffer:s->mtlParamsBuffer\s+offset:0\s+atIndex:(\d+)", host)
+    shader_indices = re.findall(r"constant\s+params\s*&\s*p\s*\[\[buffer\((\d+)\)\]\]", shader)
+    if len(host_indices) != 1 or len(shader_indices) != 1 or host_indices != shader_indices:
+        raise ValueError("native BWDIF Metal parameter buffer binding disagrees with shader")
+    return int(host_indices[0])
+
+
+def retain_compiled_source(prepared, evidence, historical_lineage=None):
+    """Retain exact local patch inputs and every built dependency's source."""
+    verify_bwdif_metal_binding(prepared / "source")
+    manifest = json.loads((prepared / "prepared-source.json").read_text())
+    if manifest.get("source_commit") != COMMIT or manifest.get("source_sha256") != SOURCE_SHA256:
+        raise ValueError("prepared build does not match pinned Jellyfin source")
+    local = sorted(Path(__file__).with_name("macos-video-ffmpeg-patches").glob("*.patch"))
+    expected = {p.name: digest(p) for p in local}
+    if not expected or manifest.get("local_patches") != expected:
+        raise ValueError("prepared build's local patch set does not match this recipe")
+    retained = {}
+    for patch in local:
+        actual = prepared / "local-patches" / patch.name
+        if actual.is_symlink() or digest(actual) != expected[patch.name]:
+            raise ValueError("prepared build patch input changed")
+        destination = evidence / "local-patches" / patch.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(actual, destination)
+        retained[patch.name] = expected[patch.name]
+    # The prepared tree carries all source and dependency recipes; retain the
+    # small private build changes as well, so this is a reproducible source offer.
+    recipes = evidence / "compiled-build-recipes"
+    recipes.mkdir()
+    for relative in ["prepared-source.json", "build.sh", "source/builder/buildmac.sh",
+                     "source/builder/images/macos/00-dep.sh", "source/builder/scripts.d/50-x265.sh"]:
+        source = prepared / relative
+        target = recipes / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    if "dependency_source_inputs" in manifest or historical_lineage is not None:
+        import importlib.machinery
+        import importlib.util
+        helper = Path(__file__).with_name("macos-video-dependency-offers.py")
+        loader = importlib.machinery.SourceFileLoader("dependency_offers", str(helper))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        closure = (module.retain_historical_build(prepared, evidence, historical_lineage)
+                   if historical_lineage is not None else module.retain_archive_build(prepared, evidence))
+        return {"local_patches": retained, "contract": manifest["contract"], **closure}
+    offers = evidence / "dependency-source"
+    offers.mkdir()
+    facts = {}
+    dependencies = prepared / "source/builder/build"
+    for path in sorted(dependencies.iterdir()):
+        if path.is_file() and path.name.endswith((".tar.gz", ".tar.xz", ".zip")):
+            target = offers / path.name
+            shutil.copyfile(path, target)
+            facts[path.name] = {"sha256": digest(target), "kind": "upstream-source-archive"}
+        elif path.is_dir() and (path / ".git").exists():
+            # Public dependency clones only; archive source, never repository
+            # configuration, credential helpers or build products.
+            commit = subprocess.check_output(["/usr/bin/git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+            target = offers / (path.name + "-" + commit + ".tar.gz")
+            subprocess.run(["/usr/bin/git", "-C", str(path), "archive", "--format=tar.gz",
+                            "--output", str(target), commit], check=True, timeout=60)
+            facts[path.name] = {"sha256": digest(target), "commit": commit, "kind": "git-source-archive"}
+            # Submodules are separate source trees and must not disappear from
+            # the source offer merely because git archive omits their contents.
+            for nested in sorted(path.rglob(".git")):
+                if nested == path / ".git":
+                    continue
+                directory = nested.parent
+                nested_commit = subprocess.check_output(["/usr/bin/git", "-C", str(directory), "rev-parse", "HEAD"], text=True).strip()
+                name = str(directory.relative_to(dependencies)).replace("/", "--")
+                target = offers / (name + "-" + nested_commit + ".tar.gz")
+                subprocess.run(["/usr/bin/git", "-C", str(directory), "archive", "--format=tar.gz",
+                                "--output", str(target), nested_commit], check=True, timeout=60)
+                facts[name] = {"sha256": digest(target), "commit": nested_commit, "kind": "git-submodule-source-archive"}
+        elif path.is_dir() and (path / ".svn").exists():
+            target = offers / (path.name + "-svn-source.tar.gz")
+            with tarfile.open(target, "w:gz") as archive:
+                # LAME source has already been configured; retain original SVN
+                # content with exact revision, not generated native objects.
+                for item, name in local_svn_source_files(path, prepared / "svn-config"):
+                    archive.add(item, arcname=name)
+            info = subprocess.check_output(["svn", "--non-interactive", "--no-auth-cache", "--config-dir",
+                str(prepared / "svn-config"), "info", "--show-item", "revision", str(path)], text=True).strip()
+            facts[path.name] = {"sha256": digest(target), "revision": info, "kind": "svn-source-archive"}
+    if not facts:
+        raise ValueError("compiled package lacks retained dependency sources")
+    (offers / "manifest.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
+    return {"local_patches": retained, "dependency_sources": facts,
+            "contract": manifest["contract"]}
+
+
+def verify_strict_options(executable, evidence):
+    for name in ["tonemapx", "tonemap_videotoolbox"]:
+        help_text = run([str(executable), "-hide_banner", "-h", f"filter={name}"])
+        if not re.search(r"^\s+require_dovi\s+<", help_text, re.MULTILINE):
+            raise ValueError("compiled package lacks required renderer boundary enforcement")
+    decoder_help = run([str(executable), "-hide_banner", "-h", "decoder=hevc"])
+    full_help = (evidence / "full-help.txt").read_text()
+    if not re.search(r"^\s+-strict_dovi\s+<", decoder_help, re.MULTILINE) or "require_hardware" not in full_help:
+        raise ValueError("compiled package lacks associated Dolby state/hardware decoder enforcement")
+    (evidence / "decoder-hevc.txt").write_text(decoder_help)
+
+
+def verify_prepared_subtitle_options(executable, evidence, patches):
+    """New prepared contract only; official portable baseline remains supported."""
+    if "0004-prepare-and-composite-videotoolbox-subtitles.patch" not in patches:
+        return False
+    expected = {"subtitles_vt_images": {"font_provider"},
+                "subtitles": {"font_provider"},
+                "overlay_videotoolbox": {"ass", "bitmap"}}
+    for name, options in expected.items():
+        text = run([str(executable), "-hide_banner", "-h", "filter=" + name])
+        declared = set(re.findall(r"^\s+(\w+)\s+<", text, re.MULTILINE))
+        if not re.search(r"^Filter " + re.escape(name) + r"$", text, re.MULTILINE) or not options <= declared:
+            raise ValueError("prepared GPU subtitle contract lacks filter/options: " + name)
+        if "font_provider" in options and not re.search(r"^\s+fontconfig\s", text, re.MULTILINE):
+            raise ValueError("prepared subtitle contract lacks explicit Fontconfig authority")
+        (evidence / ("filter-" + name + ".txt")).write_text(text)
+    return True
+
+
+def attach_source_parser(package, stage, evidence):
+    """Copy only the explicit exact-source parser and inspectable provenance."""
+    manifest_path = package / "provenance/manifest.json"
+    artifact = package / "bin/plurx-source-parser.wasm"
+    if not package.is_absolute() or artifact.is_symlink() or manifest_path.is_symlink():
+        raise ValueError("source parser package must use explicit regular artifacts")
+    manifest = json.loads(manifest_path.read_text())
+    if (manifest.get("source_sha256") != SOURCE_SHA256 or manifest.get("source_commit") != COMMIT
+            or manifest.get("parser_abi") != "plurx-source-wasi-p1-v1-wasmtime-49.0.2"):
+        raise ValueError("source parser package source/ABI does not match pinned Jellyfin")
+    actual = digest(artifact)
+    if (actual != manifest.get("module_sha256") or artifact.stat().st_size != manifest.get("module_bytes")
+            or artifact.read_bytes()[:8] != b"\0asm\1\0\0\0"):
+        raise ValueError("source parser artifact does not match its manifest")
+    retained = {}
+    source = package / "provenance"
+    if source.is_symlink():
+        raise ValueError("source parser provenance must not be a symlink")
+    for item in sorted(source.rglob("*")):
+        if item.is_symlink() or (not item.is_dir() and not item.is_file()):
+            raise ValueError("source parser provenance contains an unsafe member")
+        if item.is_file():
+            relative = item.relative_to(source)
+            if ".git" in relative.parts:
+                raise ValueError("source parser provenance must not carry a Git checkout")
+            target = evidence / "source-parser" / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(item, target)
+            retained[str(relative)] = digest(target)
+    shutil.copyfile(artifact, stage / "plurx-source-parser.wasm")
+    return {"sha256": actual, "bytes": artifact.stat().st_size,
+            "parser_abi": manifest["parser_abi"], "provenance_sha256": retained,
+            "qualification": "package-integrity-only"}
+
+
+def inventory(binary, evidence):
+    facts = {}
+    for kind, names in REQUIRED.items():
+        output = run([str(binary), "-hide_banner", f"-{kind}"])
+        (evidence / f"{kind}.txt").write_text(output)
+        if kind == "bsfs":
+            declared = {line.strip() for line in output.splitlines()}
+        else:
+            declared = set(re.findall(r"^\s*[A-Z.]{1,6}\s+(\S+)\s", output, re.MULTILINE))
+            declared = {alias for name in declared for alias in name.split(",")}
+        missing = sorted(set(names) - declared)
+        if missing:
+            raise ValueError(f"candidate lacks required {kind}: {', '.join(missing)}")
+        facts[kind] = {name: "declared" for name in names}
+    for name, options in FILTER_OPTIONS.items():
+        output = run([str(binary), "-hide_banner", "-h", f"filter={name}"])
+        (evidence / f"filter-{name}.txt").write_text(output)
+        if not re.search(rf"^Filter {re.escape(name)}$", output, re.MULTILINE):
+            raise ValueError(f"candidate does not declare filter {name}")
+        declared = set(re.findall(r"^\s+(\w+)\s+<", output, re.MULTILINE))
+        if not set(options) <= declared:
+            raise ValueError(f"candidate filter {name} lacks required options")
+    full_help = run([str(binary), "-hide_banner", "-h", "full"])
+    (evidence / "full-help.txt").write_text(full_help)
+    for option in ["readrate", "readrate_initial_burst", "fps_mode"]:
+        if not re.search(rf"^-{option}(?:\[:[^\]]+\])?\s", full_help, re.MULTILINE):
+            raise ValueError(f"candidate lacks pacing/presentation option {option}")
+    return facts
+
+
+def build_font_tools(prepared, jobs):
+    """Continue the pinned FC recipe and stage its relocatable deployed authority."""
+    prefix = prepared / "prefix"
+    source = prepared / "source/builder/build/fc"
+    output = prepared / "font-tools"
+    if output.exists() or not source.is_dir():
+        raise ValueError("Fontconfig tool stage must be new and the pinned FC source completed")
+    policy_path = Path(__file__).with_name("macos-video-dependency-sources.json")
+    policy = json.loads(policy_path.read_text())["fc"]
+    prepared_facts = json.loads((prepared / "prepared-source.json").read_text())
+    if prepared_facts.get("font_tools_builder_sha256") != digest(Path(__file__)):
+        raise ValueError("prepared font tool builder differs from its source contract")
+    commands = [["meson", "configure", str(source / "build"), "-Dtools=enabled",
+                 f"-Dc_link_args=['-L{prefix / 'lib'}','-lbrotlicommon']"],
+                ["ninja", "-C", str(source / "build"), f"-j{jobs}",
+                 "fc-list/fc-list", "fc-conflist/fc-conflist"]]
+    output.mkdir()
+    (output / "bin").mkdir()
+    (output / "fontconfig/conf.d").mkdir(parents=True)
+    provenance = output / "provenance"
+    provenance.mkdir()
+    with (provenance / "build.log").open("wb") as log:
+        environment = dict(os.environ)
+        environment["PKG_CONFIG_PATH"] = str(prefix / "lib/pkgconfig")
+        for command in commands:
+            subprocess.run(command, stdin=subprocess.DEVNULL, stdout=log,
+                           stderr=subprocess.STDOUT, check=True, timeout=600, env=environment)
+    (provenance / "build-commands.json").write_text(json.dumps(commands, indent=2) + "\n")
+    shutil.copyfile(Path(__file__), provenance / "build-macos-video-ffmpeg")
+    shutil.copyfile(policy_path, provenance / policy_path.name)
+    shutil.copyfile(source / "COPYING", provenance / "COPYING-fontconfig")
+    facts = {"schema_version": 1, "source_role": "fc", "source_commit": policy["commit"],
+             "source_sha256": policy["sha256"], "binaries": {}, "configuration": {},
+             "qualification": "build/package identity only"}
+    for name in ["fc-list", "fc-conflist"]:
+        binary = output / "bin" / name
+        shutil.copy2(source / "build" / name / name, binary)
+        closure = run(["/usr/bin/otool", "-L", str(binary)])
+        libraries = re.findall(r"^\s+(\S+) \(", closure, re.MULTILINE)
+        (provenance / f"{name}-libraries.txt").write_text(closure)
+        facts["binaries"][name] = {"sha256": digest(binary), "bytes": binary.stat().st_size,
+                                  "architecture": run(["/usr/bin/lipo", "-archs", str(binary)]).strip(),
+                                  "linked_libraries": libraries}
+    config = (prefix / "etc/fonts/fonts.conf").read_text()
+    config = re.sub(r'^\s*<cachedir(?![^>]*prefix="xdg")[^>]*>[^<]*</cachedir>\s*$',
+                    '', config, flags=re.MULTILINE)
+    if str(prefix) in config:
+        raise ValueError("font config retains the private build prefix")
+    (output / "fontconfig/fonts.conf").write_text(config)
+    for rule in sorted((prefix / "etc/fonts/conf.d").iterdir()):
+        if not rule.name.endswith(".conf"):
+            continue
+        original = rule.resolve(strict=True)
+        if not original.is_relative_to(prefix.resolve()) or not original.is_file():
+            raise ValueError("font rule is outside the pinned prefix")
+        data = original.read_bytes()
+        if str(prefix).encode() in data:
+            raise ValueError("font rule retains the private build prefix")
+        (output / "fontconfig/conf.d" / rule.name).write_bytes(data)
+    facts["configuration"] = {path.relative_to(output / "fontconfig").as_posix(): digest(path)
+                              for path in (output / "fontconfig").rglob("*") if path.is_file()}
+    (provenance / "manifest.json").write_text(json.dumps(facts, sort_keys=True, indent=2) + "\n")
+    return facts
+
+
+def validate_font_tools(package, facts):
+    """Verify the deployed sibling layout against the pinned source-role policy."""
+    policy = json.loads(Path(__file__).with_name("macos-video-dependency-sources.json").read_text())["fc"]
+    if (not isinstance(facts, dict) or facts.get("schema_version") != 1
+            or facts.get("source_role") != "fc" or facts.get("source_commit") != policy["commit"]
+            or facts.get("source_sha256") != policy["sha256"]):
+        raise ValueError("Fontconfig source provenance differs from the pinned recipe")
+    if not isinstance(facts.get("binaries"), dict) or set(facts["binaries"]) != {"fc-list", "fc-conflist"}:
+        raise ValueError("Fontconfig tool binary inventory differs")
+    for name, claimed in facts["binaries"].items():
+        binary = package / name
+        if not isinstance(claimed, dict) or binary.is_symlink() or not binary.is_file() or digest(binary) != claimed.get("sha256") or binary.stat().st_size != claimed.get("bytes"):
+            raise ValueError("Fontconfig tool bytes differ from the source-bound manifest")
+        with binary.open("rb") as stream:
+            header = stream.read(32)
+        if len(header) != 32 or header[:4] != b"\xcf\xfa\xed\xfe" or int.from_bytes(header[12:16], "little") != 2:
+            raise ValueError("Fontconfig tool is not a native Mach-O executable")
+        architecture = {0x0100000C: "arm64", 0x01000007: "x86_64"}.get(int.from_bytes(header[4:8], "little"))
+        libraries = re.findall(r"^\s+(\S+) \(", run(["/usr/bin/otool", "-L", str(binary)]), re.MULTILINE)
+        if architecture != platform.machine() or architecture != claimed.get("architecture"):
+            raise ValueError("Fontconfig tool architecture differs")
+        if not libraries or libraries != claimed.get("linked_libraries") or any(not name.startswith(("/usr/lib/", "/System/Library/")) for name in libraries):
+            raise ValueError("Fontconfig tool has an undeclared or non-system dependency")
+    for directory, expected in [(package / "fontconfig", facts.get("configuration", {})),
+                                (package / "provenance/font-tools", facts.get("provenance_sha256", {}))]:
+        actual = {}
+        if not directory.is_dir() or directory.is_symlink():
+            raise ValueError("Fontconfig tool configuration/provenance is absent")
+        for path in directory.rglob("*"):
+            if path.is_symlink():
+                raise ValueError("Fontconfig tool tree contains a symlink")
+            if path.is_file():
+                actual[path.relative_to(directory).as_posix()] = digest(path)
+        if not isinstance(expected, dict) or actual != expected or not actual:
+            raise ValueError("Fontconfig tool configuration/provenance inventory differs")
+    if "fonts.conf" not in facts["configuration"]:
+        raise ValueError("Fontconfig tools have no relocatable default configuration")
+    return facts
+
+
+def attach_font_tools(prepared, stage):
+    source = prepared / "font-tools"
+    manifest = source / "provenance/manifest.json"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError("prepared subtitle build requires source-bound Fontconfig tools")
+    facts = json.loads(manifest.read_text())
+    for name in ["fc-list", "fc-conflist"]:
+        binary = source / "bin" / name
+        if binary.is_symlink() or not binary.is_file():
+            raise ValueError("prepared Fontconfig tool is not a regular executable")
+        shutil.copyfile(binary, stage / name)
+        (stage / name).chmod(0o755)
+    for relative in ["fontconfig", "provenance"]:
+        original = source / relative
+        if original.is_symlink() or any(path.is_symlink() for path in original.rglob("*")):
+            raise ValueError("prepared Fontconfig tool tree contains a symlink")
+        destination = stage / ("fontconfig" if relative == "fontconfig" else "provenance/font-tools")
+        shutil.copytree(original, destination)
+    facts["provenance_sha256"] = {
+        path.relative_to(stage / "provenance/font-tools").as_posix(): digest(path)
+        for path in (stage / "provenance/font-tools").rglob("*") if path.is_file()}
+    return validate_font_tools(stage, facts)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, help="new private package directory")
+    parser.add_argument("--font-tools-build", type=Path, help="continue pinned FC tools and stage configuration")
+    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--archive", type=Path, help="checksum-verified local official binary archive")
+    parser.add_argument("--source-archive", type=Path, help="checksum-verified local pinned source archive")
+    parser.add_argument("--historical-build-lineage", type=Path,
+                        help="Explicit hash-bound historical archive/helper/log closure; no synthetic consumption receipt")
+    parser.add_argument("--prepared-build", type=Path,
+                        help="completed private source build from prepare-macos-video-ffmpeg")
+    parser.add_argument("--source-parser-package", type=Path,
+                        help="explicit pinned parser package; companion is copied beside ffprobe")
+    args = parser.parse_args()
+    if args.font_tools_build:
+        if not 1 <= args.jobs <= 8 or not args.font_tools_build.is_absolute():
+            parser.error("font tools require an absolute prepared root and bounded jobs")
+        print(json.dumps(build_font_tools(args.font_tools_build, args.jobs), sort_keys=True))
+        return
+    if args.output is None:
+        parser.error("package output is required")
+    if args.historical_build_lineage is not None and args.prepared_build is None:
+        parser.error("historical lineage requires a completed prepared build")
+    if platform.system() != "Darwin" or platform.machine() not in ARCHIVES:
+        parser.error("native arm64 or x86_64 macOS is required")
+    output = args.output
+    if not output.is_absolute() or output.exists():
+        parser.error("output must be an absolute, new directory")
+    repo = Path(__file__).resolve().parent.parent
+    output = output.resolve()
+    if output.is_relative_to(repo) or any(output.is_relative_to(Path(root)) for root in
+                                         ["/Applications", "/Library", "/System", "/usr", "/opt"]):
+        parser.error("use a private task directory outside the checkout and global install paths")
+    target, expected = ARCHIVES[platform.machine()]
+    name = f"jellyfin-ffmpeg_8.1.3-1_portable_{target}-gpl.tar.xz"
+    url = f"https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/{TAG}/{name}"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".mac-video-package-", dir=output.parent) as work:
+        stage = Path(work)
+        evidence = stage / "provenance"
+        evidence.mkdir()
+        archive = evidence / name
+        source = evidence / "jellyfin-ffmpeg-source.tar.gz"
+        if args.prepared_build:
+            prepared = args.prepared_build
+            if not prepared.is_absolute() or prepared.is_relative_to(repo):
+                raise ValueError("prepared build must be an explicit private task directory")
+            acquire(args.source_archive or prepared / "jellyfin-ffmpeg-source.tar.gz",
+                    SOURCE_URL, SOURCE_SHA256, source)
+            for name in ["ffmpeg", "ffprobe"]:
+                binary = prepared / "source/builder" / name
+                if binary.is_symlink() or not binary.is_file():
+                    raise ValueError("prepared build has no completed regular executables")
+                shutil.copyfile(binary, stage / name)
+                (stage / name).chmod(0o755)
+        else:
+            acquire(args.archive, url, expected, archive)
+            acquire(args.source_archive, SOURCE_URL, SOURCE_SHA256, source)
+            with tarfile.open(archive) as package:
+                members = package.getmembers()
+                if {member.name for member in members} != {"ffmpeg", "ffprobe"} or len(members) != 2:
+                    raise ValueError("unexpected official package members")
+                for member in members:
+                    if not member.isfile():
+                        raise ValueError("official executables must be regular files")
+                    executable = stage / member.name
+                    executable.write_bytes(package.extractfile(member).read())
+                    executable.chmod(0o755)
+        files = source_provenance(source, evidence / "source")
+        binaries = {}
+        for name in ["ffmpeg", "ffprobe"]:
+            executable = stage / name
+            version = run([str(executable), "-version"])
+            if not version.startswith(f"{name} version 8.1.3-Jellyfin"):
+                raise ValueError("unexpected Jellyfin executable version")
+            architecture = run(["/usr/bin/lipo", "-archs", str(executable)]).splitlines()[-1].strip()
+            if architecture != platform.machine():
+                raise ValueError("candidate architecture does not match native host")
+            closure = run(["/usr/bin/otool", "-L", str(executable)])
+            dependencies = re.findall(r"^\s+(\S+) \(", closure, re.MULTILINE)
+            if not dependencies or any(not item.startswith(("/System/Library/", "/usr/lib/"))
+                                       for item in dependencies):
+                raise ValueError("candidate has an external/nonportable library dependency")
+            (evidence / f"{name}-version.txt").write_text(version)
+            (evidence / f"{name}-libraries.txt").write_text("\n".join(dependencies) + "\n")
+            (evidence / f"{name}-load-commands.txt").write_text(
+                run(["/usr/bin/otool", "-l", str(executable)]))
+            binaries[name] = {"sha256": digest(executable), "architecture": architecture,
+                              "linked_libraries": dependencies}
+        facts = inventory(stage / "ffmpeg", evidence)
+        receipt = {
+            "schema_version": 1, "mode": "compiled-pinned-jellyfin" if args.prepared_build else "official-portable-package", "source_tag": TAG,
+            "source_commit": COMMIT, "source_url": SOURCE_URL, "source_sha256": SOURCE_SHA256,
+            "binary_archive_url": url, "binary_archive_sha256": expected,
+            "release_metadata_url": f"https://api.github.com/repos/jellyfin/jellyfin-ffmpeg/releases/tags/{TAG}",
+            "checksum_authority": "GitHub official release asset digest",
+            "source_recipe_sha256": files, "binaries": binaries, "capabilities": facts,
+            "patch_digest": hashlib.sha256(json.dumps(
+                {name: value for name, value in files.items() if name.startswith("debian/patches/")},
+                sort_keys=True).encode()).hexdigest(),
+            "qualification": "declarations-only",
+            "limitations": ["No installed-daemon baseline inferred", "No graph/performance/quality qualification",
+                            "AC-4 and Dolby sample acceptance remain required", "No global install performed",
+                            "Private candidate: redistribution dependency-source/license closure remains required"],
+        }
+        if args.prepared_build:
+            receipt["compiled_source"] = retain_compiled_source(args.prepared_build, evidence, args.historical_build_lineage)
+            receipt.pop("binary_archive_url")
+            receipt.pop("binary_archive_sha256")
+            receipt["checksum_authority"] = "pinned source and local compiled binary digests"
+            verify_strict_options(stage / "ffmpeg", evidence)
+            if verify_prepared_subtitle_options(stage / "ffmpeg", evidence, receipt["compiled_source"]["local_patches"]):
+                receipt["capabilities"]["filters"]["subtitles_vt_images"] = "declared"
+                receipt["font_tools"] = attach_font_tools(args.prepared_build, stage)
+            receipt["patch_digest"] = hashlib.sha256(json.dumps({
+                "jellyfin": receipt["patch_digest"], "local": receipt["compiled_source"]["local_patches"]
+            }, sort_keys=True).encode()).hexdigest()
+        if args.source_parser_package:
+            receipt["source_parser"] = attach_source_parser(args.source_parser_package, stage, evidence)
+        (evidence / "manifest.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        # Publish only after verification. Never overwrite an existing package.
+        if output.exists():
+            raise ValueError("output appeared during packaging; refusing replacement")
+        stage.rename(output)
+    print(json.dumps({"output": str(output), "manifest": str(output / "provenance/manifest.json"),
+                      "ffmpeg_sha256": binaries["ffmpeg"]["sha256"]}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
+        print(f"macOS video package failed: {error}", file=sys.stderr)
+        sys.exit(1)

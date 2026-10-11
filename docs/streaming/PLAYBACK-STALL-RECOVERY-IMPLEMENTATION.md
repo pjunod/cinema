@@ -11,7 +11,7 @@ Companion to [PLAYBACK.md](../PLAYBACK.md) (delivery behavior), the
 (which owner may stop playback), and
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (delivery workflow).
 This document owns the bounded repair of the October 1 Safari incident on
-nynuc. Read the current [AGENTS.md](../../AGENTS.md) and
+media1. Read the current [AGENTS.md](../../AGENTS.md) and
 [web source map](../clients/WEB-SHELL-LAYOUT.md) before building. Re-resolve
 the symbols below against the implementation base; concurrent playback work
 must be integrated, not overwritten.
@@ -122,31 +122,31 @@ diagnostics or proven lifecycle fixes; no policy change is implied by them.
 ## 2. Incident baseline — facts, reproduced mechanisms and remaining hypotheses
 
 The viewer used Safari web playback of Heated Rivalry S1E1, file ID 645,
-through nynuc. The deployed build selected rolling copy-HLS while the VOD
+through media1. The deployed build selected rolling copy-HLS while the VOD
 index was pending. The following times are **2026-10-01 EDT**; add four hours
 for the UTC server logs.
 
 | Time / observation | Established conclusion | Limit |
 |---|---|---|
-| 12:02:42: nuc4, m6 and nynuc lost serving authority within 82 ms | Expired quorum proof fenced mutable media; nynuc terminated the producer and Activity removed the session | No leader change, container restart or OOM was observed; the delayed proof's underlying cause was not retained |
+| 12:02:42: lab4, lab6 and media1 lost serving authority within 82 ms | Expired quorum proof fenced mutable media; media1 terminated the producer and Activity removed the session | No leader change, container restart or OOM was observed; the delayed proof's underlying cause was not retained |
 | 12:03:12–17: automatic reopen and playback resumed | Recovery worked once | A new presentation still had to satisfy the startup actor |
 | Viewer paused around 2:03 into the episode; replacement expired at 12:03:45 | `startup_expired` won despite prior visible playback and continuing control reports | Complete intermediate control snapshots were not persisted; user confirmed the pause |
 | 12:03:49: orphan sweep removed retired directories | The sweeper did not recognize retired ownership | Later cleanup repeatedly reported missing files and kept promises charged |
 | 12:13:54: all three voters lost proof again | A separate cluster interruption killed the current stream | A seek's ordinary ownership fence must not be mislabeled as global quorum loss |
 | 12:14:22: exhausted overlay; screenshot at 12:16:26 shows 7:03 | Recovery count was still spent; the exhaustion owner internally paused playback | The paused icon is not evidence of a viewer Pause command |
-| 12:30:05: all three voters lost proof; nynuc killed the stream; buffer ran out at 12:30:42 and exhaustion followed at 12:30:50 | A third captured interruption has the same authority-loss → producer termination → buffer exhaustion chain | The delay's initiating mechanism remains unknown |
+| 12:30:05: all three voters lost proof; media1 killed the stream; buffer ran out at 12:30:42 and exhaustion followed at 12:30:50 | A third captured interruption has the same authority-loss → producer termination → buffer exhaustion chain | The delay's initiating mechanism remains unknown |
 | 12:32:36: another shared authority loss after a manual recovery | The cluster problem recurred independently of recovery-budget policy | That recovery selected VOD; do not assume this brief loss killed the new immutable presentation |
 | Cluster index artifact built at 12:25:33.430; VOD attached at 12:32:30.600 and again at 12:33:00.590 | A subsequent explicit reopen could use the completed index | Index completion was about 4 minutes 32 seconds before the 12:30:05 fence, not an observed in-place switch at the stall |
 | 12:33–12:34 screenshots: watch ledger says live fallback; Activity and Playback Info say VOD; Control includes `serving_fenced` | Session and catalogue-based labels disagree; VOD mode does not erase a control-authority failure | Producer `held` means ahead-window pacing, not a viewer pause |
-| Wider log window, 10:39–12:50 EDT: 32 authority losses on nynuc | The four playback-correlated losses above are a subset of a recurring fleet incident | Several series repeat near 16 minutes; exact loop attribution still needs timing evidence |
+| Wider log window, 10:39–12:50 EDT: 32 authority losses on media1 | The four playback-correlated losses above are a subset of a recurring fleet incident | Several series repeat near 16 minutes; exact loop attribution still needs timing evidence |
 
-Re-reading the retained nynuc log for **14:39–16:50 UTC** confirms 32
+Re-reading the retained media1 log for **14:39–16:50 UTC** confirms 32
 loss/recovery pairs and 16 pairs of loss timestamps separated by 960 ± 2
 seconds. Examples are 16:02:42 → 16:18:42 → 16:34:42 and 16:00:35 →
 16:16:35 → 16:32:36 → 16:48:36 UTC. Not every loss fits an exact period.
 The Opus fleet review reports cross-voter coincidence within about 80 ms;
 the original four playback windows were independently correlated across
-voters. The full nynuc capture gives loss-to-recovery intervals of roughly
+voters. The full media1 capture gives loss-to-recovery intervals of roughly
 0.052–1.692 seconds, rather than the review's narrower duration range.
 These intervals describe logged authority state, not request duration.
 
@@ -289,7 +289,7 @@ similarity alone cannot convict either loop or exclude a concurrent CI job.
 for two expected recurrence intervals, with one start/end record per
 reconcile run, trigger, node, run sequence, channel duration and outcome;
 record cachekeep start/end too. Keep identifiers in bounded event records,
-not metric labels. Join these records to leader nuc4's linearizable/apply
+not metric labels. Join these records to leader lab4's linearizable/apply
 timing and the in-flight proof snapshot in §4.1. Capture the actual queue,
 lock or scheduling boundary if the long operation overlaps the proof gap.
 Use one isolated targeted reproduction to distinguish mere overlap from a
@@ -303,31 +303,31 @@ rote. If no causal relationship emerges, retain the negative result and
 test the runner hypothesis below. In either case, correlated host evidence
 can distinguish a loop's direct blocking from workload-induced contention.
 
-The user identified nynuc's dual role as media node and Forgejo runner.
-An older [runner investigation](../ci/NYNUC-RUNNER-ORPHANED-SLEEP-PROCESSES.md)
+The user identified media1's dual role as media node and Forgejo runner.
+An older [runner investigation](../ci/MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md)
 records memory pressure counters and orphaned stopped processes on September
 8. That is context, not evidence for October 1. Follow
 [runner disk ownership](../ci/RUNNER-DISK.md) and the existing
 [service resource work](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md)
 instead of starting another cleanup project.
 
-**Runner historical pass:** map jobs actually assigned to nynuc to the
+**Runner historical pass:** map jobs actually assigned to media1 to the
 retained loss windows, including job ID, runner, workload, start/end and configured
 concurrency. Collect whatever host/cgroup samples exist for those windows;
 record missing historical samples as missing. Ten-minute averages and
 since-boot counters cannot establish a sub-second cause.
 
-At 12:33:12 EDT, a read-only snapshot found five active nynuc runner
+At 12:33:12 EDT, a read-only snapshot found five active media1 runner
 services, CPU pressure `avg10=0.00`, memory pressure `avg10=0.24`, and I/O
 pressure `avg10=3.69`. These are Linux PSI percentages, sampled after the
-failures; active runner services do not prove active jobs. Leader nuc4's
+failures; active runner services do not prove active jobs. Leader lab4's
 contemporaneous CPU/memory/I/O `avg10` values were zero. Retain these as
 context only, not attribution or evidence excluding a short earlier spike.
 
 **Conditional runner comparison:** only if the first pass does not establish
 the initiating mechanism, collect up to 30 minutes of ordinary CI activity
 and the same playback path, then up to 30 minutes with new job dispatch to
-nynuc drained through the supported runner controls. Let active jobs finish;
+media1 drained through the supported runner controls. Let active jobs finish;
 do not cancel another user's build or kill runner processes. Do not generate
 an unbounded stress workload on the production viewer's host. Keep the media
 build, source and client path comparable. Capture at one-second intervals:
@@ -338,15 +338,15 @@ build, source and client path comparable. Capture at one-second intervals:
   the transcode work directory;
 - network retransmission/drop deltas and relevant peer latency;
 - proof attempt duration, tick lateness, term/indices and fence events on
-  nynuc **and** leader nuc4 / voter m6;
+  media1 **and** leader lab4 / voter lab6;
 - actual runner job/container cgroup membership, including containers that
   are not charged to their runner service's cgroup.
 
 **How to read it:** overlapping CI jobs alone prove overlap. A causal claim
 needs a pressure spike that aligns with a named proof stage, a plausible
 quorum-wide propagation path, and a controlled change or isolated replay
-that removes that mechanism. Leader nuc4 can normally form a majority with
-m6 without nynuc; explain why that path was affected before blaming nynuc
+that removes that mechanism. Leader lab4 can normally form a majority with
+lab6 without media1; explain why that path was affected before blaming media1
 alone. A quiet drained run reduces suspicion but does not prove causality.
 
 If contention is demonstrated, make the narrow operational correction at
@@ -830,7 +830,7 @@ discard the active viewer's session to obtain evidence. Record rollout and
 rollback by artifact identity. No persistent host setting is silently
 changed during observation.
 
-One bounded Safari acceptance session on nynuc must cover the Checkpoint C
+One bounded Safari acceptance session on media1 must cover the Checkpoint C
 sequence, the original rolling copy-HLS route, and native-HLS plus hls.js
 where the fixtures support both. Use controlled injected failures in the
 isolated harness for partition/deadline races; do not deliberately partition
@@ -889,7 +889,7 @@ findings; it does not claim Opus has reapproved the revised wording.
 
 | Finding | Disposition / verification |
 |---|---|
-| F1 · P1: periodic in-process trigger deserves priority over CI | Accepted in §§2 and 4.2. Independently counted 32 nynuc losses and repeated near-16-minute intervals. Reconcile timing is now the first experiment, runner comparison conditional. Qualified the review's exact-period and duration claims: not every loss is periodic, and the full captured duration range is wider. Correlation remains a hypothesis until the delayed stage and initiating operation are traced. |
+| F1 · P1: periodic in-process trigger deserves priority over CI | Accepted in §§2 and 4.2. Independently counted 32 media1 losses and repeated near-16-minute intervals. Reconcile timing is now the first experiment, runner comparison conditional. Qualified the review's exact-period and duration claims: not every loss is periodic, and the full captured duration range is wider. Correlation remains a hypothesis until the delayed stage and initiating operation are traced. |
 | F2 · P1: timeout logging happens after authority expiry | Accepted in §4.1. Capture a coherent process-local in-flight attempt at the expiry boundary; link its later timeout by sequence. Add the ordering regression in §7. Lease sizing remains outside this repair. |
 | F3 · P2: name the invariant and fence blast radius | Accepted as the explicit open architecture ruling in §1.1. Preserve generation fencing in this PR; permanent teardown versus safely retaining a suspended actor needs evidence about asymmetric proof, takeover and recovery. No claim that simultaneous logged loss makes takeover impossible. |
 | F4 · P2: restrict crash sweeper instead of adding a guard | Accepted in §5.3. One startup pass before admission, existing retirement ownership afterward; periodic unrelated cache work preserved. Ambiguous/shared/durable ownership must be excluded, not guessed. No new live-process ownership map. |

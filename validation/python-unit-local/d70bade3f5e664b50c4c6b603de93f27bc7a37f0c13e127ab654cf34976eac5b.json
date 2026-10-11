@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/architecture-current-main-integration",
+  "suite": "operations",
+  "test_file": "tests/operations/test_api_doc_routes.py",
+  "test_file_sha256": "31dc7e6bd40c337d15516999e9b6b5db101ba834a4fcc8f50b4cbd32cfe183fd",
+  "source_commit": null,
+  "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tests/operations python3 -m unittest test_api_doc_routes.ApiDocRoutesTest.test_the_route_count_the_document_claims_is_the_count_there_is -v",
+  "test_ids": [
+    "test_api_doc_routes.ApiDocRoutesTest.test_the_route_count_the_document_claims_is_the_count_there_is"
+  ],
+  "output": "Observed local tool3199f6 exit0: sole named test ... ok; Ran1 in0.657s; OK. Original uncommitted docs/API.md count241 worktree atop4273245db6fb8496a379dd102d9ec572ca95c9de; API.md SHA256319214adf10086bf8e9c3ee3ae130c1fb2fb1ca9e9ce861189ceb7311c2a985d. Failed gate3720/job39424 at427 claimed240; only failed ID rerun. No CI attribution for this local success.",
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  }
+}

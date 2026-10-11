@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Bounded original synthetic Dolby correctness controls; never a speed gate."""
+import argparse
+from array import array
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def qualify_raw_pixels(ffmpeg, corpus, output):
+    output.mkdir()
+    rows = []
+    for name in ["p5.mp4", "p5-frame-bound.mp4"]:
+        for tonemap in [False, True]:
+            samples, group = [], []
+            for hardware in [False, True]:
+                label = name[:-4] + ("-cpu-tone" if tonemap else "-decoded") + ("-vt" if hardware else "-software")
+                argv = [str(ffmpeg), "-nostdin", "-hide_banner", "-y", "-xerror", "-loglevel", "verbose",
+                        "-threads", "1", "-strict_dovi", "1", "-err_detect", "explode"]
+                if hardware:
+                    argv += ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld",
+                             "-hwaccel_flags", "+require_hardware"]
+                argv += ["-i", str(corpus / name), "-map", "0:v:0", "-an", "-sn"]
+                chain = ["hwdownload", "format=p010le"] if hardware else []
+                # Only the declared P5 corpus uses this layout metadata adapter.
+                # The required parsed RPU supplies the actual color interpretation.
+                chain += ["setparams=colorspace=unknown", "format=yuv420p10le"]
+                if tonemap:
+                    chain += ["tonemapx=tonemap=hable:format=yuv420p:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:apply_dovi=1:require_dovi=1"]
+                target = output / (label + ".yuv")
+                argv += ["-vf", ",".join(chain), "-c:v", "rawvideo", "-pix_fmt", "yuv420p" if tonemap else "yuv420p10le",
+                         "-fps_mode", "passthrough", "-f", "rawvideo", str(target)]
+                result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                (output / (label + ".log")).write_bytes(result.stderr)
+                data = target.read_bytes() if target.exists() else b""
+                size = 320 * 180 * 3 // 2 * (1 if tonemap else 2)
+                row = {"fixture": name, "fixture_sha256": digest(corpus / name),
+                       "renderer": "cpu-tonemapx" if tonemap else "none", "decode": "vt" if hardware else "software",
+                       "argv": argv, "exit": result.returncode, "bytes": len(data), "frames": len(data) // size,
+                       "sha256": hashlib.sha256(data).hexdigest(),
+                       "frame_sha256": [hashlib.sha256(data[i:i + size]).hexdigest() for i in range(0, len(data), size)],
+                       "hardware_decode_verified": b"VideoToolbox hardware decoder verified." in result.stderr}
+                values = array("B" if tonemap else "H")
+                values.frombytes(data)
+                samples.append(values)
+                group.append(row)
+            differences = [abs(a - b) for a, b in zip(*samples)]
+            match = len(samples[0]) == len(samples[1]) and all(x == 0 for x in differences)
+            rows.append({"runs": group, "all_plane_bytes_equal": match,
+                         "maximum_sample_difference": max(differences, default=0),
+                         "mean_sample_difference": sum(differences) / len(differences) if differences else None,
+                         "passed": match and all(r["exit"] == 0 and r["frames"] == 24 for r in group)
+                         and group[1]["hardware_decode_verified"]})
+    # Forced generic interpretation is a diagnostic comparison only. It is
+    # never a fallback recipe: every admitted graph requires supported P5 data.
+    source = output / "p5-cpu-tone-software.yuv"
+    comparison = output / "p5-forced-generic-comparison.yuv"
+    argv = [str(ffmpeg), "-nostdin", "-hide_banner", "-y", "-xerror", "-threads", "1",
+            "-strict_dovi", "1", "-err_detect", "explode", "-i", str(corpus / "p5.mp4"), "-an",
+            "-vf", "setparams=colorspace=bt2020nc,format=yuv420p10le,tonemapx=tonemap=hable:format=yuv420p:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:apply_dovi=0:require_dovi=0",
+            "-c:v", "rawvideo", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-f", "rawvideo", str(comparison)]
+    result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    (output / "p5-forced-generic-comparison.log").write_bytes(result.stderr)
+    left, right = source.read_bytes(), comparison.read_bytes() if comparison.exists() else b""
+    changes = [abs(a - b) for a, b in zip(left, right)]
+    influence = {"argv": argv, "exit": result.returncode, "bytes": len(right),
+                 "sha256": hashlib.sha256(right).hexdigest(), "changed_bytes": sum(value != 0 for value in changes),
+                 "maximum_difference": max(changes, default=0),
+                 "passed": result.returncode == 0 and len(left) == len(right) and any(changes)}
+    passed = all(row["passed"] for row in rows) and influence["passed"]
+    (output / "receipt.json").write_text(json.dumps({"ffmpeg_sha256": digest(ffmpeg),
+        "qualification": "original-synthetic-pixel-transport-and-same-renderer-control",
+        "groups": rows, "rpu_pixel_influence": influence, "passed": passed}, indent=2) + "\n")
+    return passed
+
+
+def qualify(ffmpeg, ffprobe, corpus, output, selected_cases=None):
+    output.mkdir(parents=True, exist_ok=False)
+    raw_pixels_passed = qualify_raw_pixels(ffmpeg, corpus, output / "raw-pixels")
+    negative = json.loads((corpus / 'negative-variants.json').read_text())
+    cases = [('positive', 'p5.mp4', None, None),
+             ('explicit-reuse', 'p5-explicit-reuse.mp4', None, None),
+             ('frame-bound', 'p5-frame-bound.mp4', None, None),
+             ('seek-positive', 'p5.mp4', '1', None),
+             ('renderer-missing', 'p5.mp4', None, 0.0)]
+    cases += [(row['path'][3:-4], row['path'],
+               '1' if 'seek-start' in row['path'] else None,
+               int(row['affected_presentation_pts']) / 12288)
+              for row in negative]
+    if selected_cases:
+        unknown = set(selected_cases) - {case[0] for case in cases}
+        if unknown:
+            raise ValueError("unknown qualification case: " + ", ".join(sorted(unknown)))
+        cases = [case for case in cases if case[0] in selected_cases]
+    rows = []
+    for hardware in [False, True]:
+        for metal in [False, True]:
+            graph = ('vt' if hardware else 'software') + ('-metal' if metal else '-cpu')
+            for label, name, seek, affected in cases:
+                stem = graph + '-' + label
+                destination = output / (stem + '.mkv')
+                argv = [str(ffmpeg), '-nostdin', '-hide_banner', '-y', '-xerror',
+                        '-loglevel', 'verbose', '-threads', '1', '-strict_dovi', '1',
+                        '-err_detect', 'explode']
+                if hardware:
+                    argv += ['-hwaccel', 'videotoolbox', '-hwaccel_output_format',
+                             'videotoolbox_vld', '-hwaccel_flags', '+require_hardware']
+                if seek:
+                    argv += ['-ss', seek]
+                argv += ['-i', str(corpus / name), '-map', '0:v:0', '-an']
+                chain = []
+                if metal:
+                    if not hardware:
+                        chain += ['format=yuv420p10le', 'setparams=colorspace=unknown', 'format=p010le', 'hwupload']
+                    chain += ['tonemap_videotoolbox=tonemap=hable:format=nv12:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:apply_dovi=1:require_dovi=1']
+                else:
+                    if hardware:
+                        chain += ['hwdownload', 'format=p010le']
+                    chain += ['setparams=colorspace=unknown', 'format=yuv420p10le', 'tonemapx=tonemap=hable:format=yuv420p:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:apply_dovi=1:require_dovi=1']
+                if label == 'renderer-missing':
+                    chain.insert(0, 'sidedata=mode=delete:type=DOVI_METADATA')
+                if metal and not hardware:
+                    argv += ['-init_hw_device', 'videotoolbox=vt', '-filter_hw_device', 'vt']
+                argv += ['-vf', ','.join(chain), '-c:v', 'h264_videotoolbox',
+                         '-allow_sw', '0', '-bf', '0', '-g', '12', '-fps_mode',
+                         'passthrough', str(destination)]
+                result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                (output / (stem + '.log')).write_bytes(result.stderr)
+                probe_argv = [str(ffprobe), '-v', 'error', '-show_packets', '-show_streams', '-of', 'json', str(destination)]
+                probe = subprocess.run(probe_argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                (output / (stem + '-probe.json')).write_bytes(probe.stdout)
+                observed = json.loads(probe.stdout) if probe.returncode == 0 else {}
+                times = [float(p['pts_time']) for p in observed.get('packets', []) if 'pts_time' in p]
+                # Accurate input seek resets output timestamps. Preserve association
+                # with source presentation time when checking forbidden publication.
+                source_times = [t + float(seek or 0) for t in times]
+                missing = affected is not None
+                diagnostic = any(marker in result.stderr for marker in [
+                    b'Required current-access-unit Dolby state missing',
+                    b'Required effective Dolby metadata missing or unsupported',
+                    b'Error parsing DOVI NAL unit'])
+                expected_times = [float(seek or 0) + i / 12 for i in range(12 if seek else 24)]
+                timeline_matches = len(source_times) == len(expected_times) and all(
+                    abs(actual - expected) < .002 for actual, expected in zip(source_times, expected_times))
+                passed = (result.returncode != 0 and diagnostic and not any(abs(t - affected) < .002 for t in source_times)) if missing else (result.returncode == 0 and timeline_matches)
+                verified = b'VideoToolbox hardware decoder verified.' in result.stderr
+                if hardware and (not missing or times) and not verified:
+                    passed = False
+                row = {'graph': graph, 'case': label, 'argv': argv,
+                       'fixture_sha256': digest(corpus / name),
+                       'fixture_scope': 'nonconforming-pinned-parser-robustness' if label == 'explicit-reuse' else 'original-synthetic-correctness',
+                       'exit': result.returncode,
+                       'hardware_decode_verified': verified, 'strict_failure_diagnostic': diagnostic,
+                       'encoded_packets': len(times),
+                       'source_presentation_times': source_times,
+                       'forbidden_source_presentation_time': affected,
+                       'affected_frame_published': missing and any(abs(t - affected) < .002 for t in source_times),
+                       'artifact_sha256': digest(destination) if destination.exists() else None,
+                       'probe_argv': probe_argv, 'probe_exit': probe.returncode, 'passed': passed}
+                rows.append(row)
+                (output / 'receipt.json').write_text(json.dumps({'qualification': 'synthetic-correctness-only',
+                    'ffmpeg_sha256': digest(ffmpeg), 'ffprobe_sha256': digest(ffprobe),
+                    'raw_pixels_passed': raw_pixels_passed, 'selected_cases': selected_cases or 'complete-default-matrix', 'cases': rows, 'passed': raw_pixels_passed and all(r['passed'] for r in rows)}, indent=2) + '\n')
+    return raw_pixels_passed and all(row['passed'] for row in rows)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ['ffmpeg', 'ffprobe', 'corpus', 'output']:
+        parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--case', action='append', dest='selected_cases', help='repeat for a bounded explicitly labeled subset; default runs all controls')
+    args = parser.parse_args()
+    raise SystemExit(0 if qualify(args.ffmpeg.resolve(), args.ffprobe.resolve(), args.corpus.resolve(), args.output.resolve(), args.selected_cases) else 1)

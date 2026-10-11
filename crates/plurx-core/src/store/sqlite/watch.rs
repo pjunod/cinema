@@ -16,29 +16,6 @@ const WATCHED_THRESHOLD: f64 = 0.95;
 /// unwatched, since nothing ever marks a picture seen.
 const PLAYABLE_KINDS: &str = "'movie','episode','video','audiobook'";
 
-/// Every playable item at or under `item_id`, depth-first through whatever
-/// container chain sits above it — season → episode, show → season → episode,
-/// or the arbitrarily deep folder trees a home library mirrors from disk.
-/// A movie has no children and returns just itself.
-fn playable_leaves(conn: &rusqlite::Connection, item_id: i64) -> rusqlite::Result<Vec<i64>> {
-    let mut stmt = conn.prepare(&format!(
-        "WITH RECURSIVE tree(id) AS (
-             SELECT id FROM items WHERE id = ?1
-             -- UNION, not UNION ALL: it dedupes, so a corrupt parent cycle
-             -- terminates instead of spinning the recursion forever.
-             UNION
-             SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id
-         )
-         SELECT i.id FROM tree t JOIN items i ON i.id = t.id
-         WHERE i.kind IN ({PLAYABLE_KINDS})
-         ORDER BY i.id"
-    ))?;
-    let ids = stmt
-        .query_map(params![item_id], |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<i64>>>()?;
-    Ok(ids)
-}
-
 fn watch_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<WatchState> {
     Ok(WatchState {
         position_ms: row.get(base)?,
@@ -79,6 +56,60 @@ fn watch_map_on(
     Ok(rows)
 }
 
+/// The watch-rollup statements' plan is pinned so `sqlite_stat1` cannot
+/// change it (K-05). The plan without statistics drives from the requested
+/// trees: each root and its descendants by rowid and `idx_items_parent`, then
+/// each tree row's item by rowid. With statistics (the Hiqlite voters always
+/// have them: the vendored state machine runs `PRAGMA optimize`) the planner
+/// instead skip-scanned every item through `idx_items_library_kind` for the
+/// playable kinds and probed the tree through an automatic index, 2.6 → 7.9 ms
+/// on the K-05 fixture. So: `NOT INDEXED` on the seed and on the leaf join
+/// leaves them only the rowid, `INDEXED BY idx_items_parent` names the one
+/// index the recursion uses, and `CROSS JOIN` keeps the tree as the outer
+/// loop. `watch_rollup_plans_do_not_depend_on_statistics` pins the plan on
+/// both backends' statements. The Hiqlite statements in `hiqlite_media.rs`
+/// carry the same three pins.
+///
+/// One walk for the whole page: the recursion carries the root it started
+/// from alongside each descendant, so a single pass can group the leaf counts
+/// back onto the containers that asked. UNION (not UNION ALL) still dedupes,
+/// so a parent cycle terminates — and a (root, id) pair is unique per root, so
+/// two containers on the same page never contaminate each other's count.
+fn watch_rollups_sql(list: &str) -> String {
+    format!(
+        "WITH RECURSIVE tree(root, id) AS (
+                 SELECT id, id FROM items NOT INDEXED WHERE id IN ({list})
+                 UNION
+                 SELECT t.root, i.id FROM items i INDEXED BY idx_items_parent
+                 JOIN tree t ON i.parent_id = t.id
+             )
+             SELECT t.root, COUNT(*), COALESCE(SUM(w.watched), 0)
+             FROM tree t
+             CROSS JOIN items i NOT INDEXED ON i.id = t.id
+             LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
+             WHERE i.kind IN ({PLAYABLE_KINDS})
+             GROUP BY t.root"
+    )
+}
+
+/// [`watch_rollups_sql`] for one container, with the same pins.
+fn watch_rollup_sql() -> String {
+    format!(
+        "WITH RECURSIVE tree(id) AS (
+             SELECT id FROM items NOT INDEXED WHERE id = ?2
+             UNION
+             SELECT i.id FROM items i INDEXED BY idx_items_parent
+             JOIN tree t ON i.parent_id = t.id
+         )
+         SELECT COUNT(*),
+                COALESCE(SUM(w.watched), 0)
+         FROM tree t
+         CROSS JOIN items i NOT INDEXED ON i.id = t.id
+         LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
+         WHERE i.kind IN ({PLAYABLE_KINDS})"
+    )
+}
+
 fn watch_rollups_on(
     conn: &rusqlite::Connection,
     user_id: i64,
@@ -90,26 +121,7 @@ fn watch_rollups_on(
     // ids are our own row ids (trusted i64s), so an inline IN-list is
     // safe — same reasoning `child_counts` runs on.
     let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-    // One walk for the whole page: the recursion carries the root it
-    // started from alongside each descendant, so a single pass can
-    // group the leaf counts back onto the containers that asked.
-    // UNION (not UNION ALL) still dedupes, so a parent cycle
-    // terminates — and a (root, id) pair is unique per root, so two
-    // containers on the same page never contaminate each other's
-    // count.
-    let sql = format!(
-        "WITH RECURSIVE tree(root, id) AS (
-                 SELECT id, id FROM items WHERE id IN ({list})
-                 UNION
-                 SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
-             )
-             SELECT t.root, COUNT(*), COALESCE(SUM(w.watched), 0)
-             FROM tree t
-             JOIN items i ON i.id = t.id
-             LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
-             WHERE i.kind IN ({PLAYABLE_KINDS})
-             GROUP BY t.root"
-    );
+    let sql = watch_rollups_sql(&list);
     super::trace_statement("watch_rollups", &sql);
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
@@ -439,81 +451,119 @@ impl WatchStore for SqliteStore {
         .await
     }
 
+    async fn jellyfin_progress_is_current(
+        &self,
+        write: &crate::store::JellyfinProgressWrite,
+    ) -> Result<bool, StoreError> {
+        crate::store::jellyfin_play::validate_key(
+            &write.provenance.play_id,
+            &write.provenance.scope,
+        )?;
+        let item_id = write.item_id;
+        let p = write.provenance.clone();
+        self.with_conn(move |conn| {
+            let now: i64 = conn.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            Ok(conn.query_row(
+                crate::store::jellyfin_watch::CURRENT,
+                params![
+                    p.play_id,
+                    p.scope.user_id,
+                    p.scope.token_digest,
+                    p.scope.device_digest,
+                    p.scope.client_family.as_str(),
+                    p.manual_revision,
+                    item_id,
+                    now
+                ],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+    async fn put_jellyfin_progress(
+        &self,
+        write: crate::store::JellyfinProgressWrite,
+        expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        let expected = expected.copied();
+        self.with_conn(move |conn| {
+            let now: i64 = conn.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            let (expected, context) =
+                crate::store::jellyfin_watch::progress_context(&write, now, expected.as_ref())?;
+            let p = &write.provenance;
+            Ok(conn
+                .query_row(
+                    crate::store::jellyfin_watch::PROGRESS,
+                    params![
+                        write.item_id,
+                        write.duration_ms,
+                        write.position_ms,
+                        p.scope.user_id,
+                        now,
+                        p.play_id,
+                        p.scope.token_digest,
+                        p.scope.device_digest,
+                        p.scope.client_family.as_str(),
+                        p.manual_revision,
+                        expected,
+                        context
+                    ],
+                    |row| watch_from_row(row, 0),
+                )
+                .optional()?)
+        })
+        .await
+    }
     async fn set_watched(
         &self,
         user_id: i64,
         item_id: i64,
         watched: bool,
     ) -> Result<(), StoreError> {
+        let sql = crate::store::jellyfin_watch::manual_sql(false, watched);
         self.with_conn(move |conn| {
-            if watched {
-                // Marking watched jumps the position to the end if known.
-                conn.execute(
-                    "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at)
-                     VALUES (?1, ?2, 0, 1, unixepoch())
-                     ON CONFLICT(user_id, item_id) DO UPDATE SET
-                         watched = 1, updated_at = unixepoch()",
-                    params![user_id, item_id],
-                )?;
-            } else {
-                // Un-watching clears progress so it leaves continue-watching.
-                conn.execute(
-                    "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at)
-                     VALUES (?1, ?2, 0, 0, unixepoch())
-                     ON CONFLICT(user_id, item_id) DO UPDATE SET
-                         watched = 0, position_ms = 0, updated_at = unixepoch()",
-                    params![user_id, item_id],
-                )?;
-            }
+            let now: i64 = conn.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params![item_id, user_id, now, Option::<String>::None],
+                |row| row.get::<_, i64>(0),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(())
         })
         .await
     }
-
     async fn set_watched_tree(
         &self,
         user_id: i64,
         item_id: i64,
         watched: bool,
     ) -> Result<Vec<i64>, StoreError> {
+        self.set_watched_tree_with_origin(user_id, item_id, watched, None)
+            .await
+    }
+    async fn set_watched_tree_with_origin(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        origin: Option<&crate::store::JellyfinPlayScope>,
+    ) -> Result<Vec<i64>, StoreError> {
+        let origin = origin.cloned();
+        let sql = crate::store::jellyfin_watch::manual_sql(true, watched);
         self.with_conn(move |conn| {
-            let tx = conn.unchecked_transaction()?;
-            let ids = playable_leaves(&tx, item_id)?;
-            // The upsert's DO UPDATE carries a WHERE, so a row already in the
-            // target state is left alone entirely — `execute` returns 0 and the
-            // id never enters `changed`. That is what keeps re-marking a
-            // finished series from re-notifying about all forty episodes, and
-            // it keeps `updated_at` honest: it means "when this changed", not
-            // "when someone last clicked the button".
-            let mut changed = Vec::new();
-            {
-                let mut stmt = if watched {
-                    tx.prepare(
-                        "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at)
-                         VALUES (?1, ?2, 0, 1, unixepoch())
-                         ON CONFLICT(user_id, item_id) DO UPDATE SET
-                             watched = 1, updated_at = unixepoch()
-                         WHERE watch_state.watched = 0",
-                    )?
-                } else {
-                    // Un-watching clears progress too, so a half-watched episode
-                    // counts as changed even though its flag was already 0 —
-                    // otherwise it would linger in continue-watching.
-                    tx.prepare(
-                        "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at)
-                         VALUES (?1, ?2, 0, 0, unixepoch())
-                         ON CONFLICT(user_id, item_id) DO UPDATE SET
-                             watched = 0, position_ms = 0, updated_at = unixepoch()
-                         WHERE watch_state.watched = 1 OR watch_state.position_ms <> 0",
-                    )?
-                };
-                for id in ids {
-                    if stmt.execute(params![user_id, id])? > 0 {
-                        changed.push(id);
-                    }
-                }
-            }
-            tx.commit()?;
+            let now: i64 = conn.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            let origin = crate::store::jellyfin_watch::origin_json(user_id, origin.as_ref(), now)?;
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![item_id, user_id, now, origin], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            let mut changed = rows
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter_map(|(id, changed)| (changed != 0).then_some(id))
+                .collect::<Vec<_>>();
+            changed.sort_unstable();
             Ok(changed)
         })
         .await
@@ -521,23 +571,10 @@ impl WatchStore for SqliteStore {
 
     async fn watch_rollup(&self, user_id: i64, item_id: i64) -> Result<WatchRollup, StoreError> {
         self.watch_read_pooled(move |conn| {
-            let (leaves, watched) = conn.query_row(
-                &format!(
-                    "WITH RECURSIVE tree(id) AS (
-                         SELECT id FROM items WHERE id = ?2
-                         UNION
-                         SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id
-                     )
-                     SELECT COUNT(*),
-                            COALESCE(SUM(w.watched), 0)
-                     FROM tree t
-                     JOIN items i ON i.id = t.id
-                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
-                     WHERE i.kind IN ({PLAYABLE_KINDS})"
-                ),
-                params![user_id, item_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )?;
+            let (leaves, watched) =
+                conn.query_row(&watch_rollup_sql(), params![user_id, item_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })?;
             Ok(WatchRollup { leaves, watched })
         })
         .await
@@ -647,6 +684,206 @@ mod tests {
             "SEARCH w USING INDEX sqlite_autoindex_watch_state_1 (user_id=? AND item_id=?)",
             "{plan:?}"
         );
+    }
+
+    /// `EXPLAIN QUERY PLAN` detail lines for every statement in `statements`
+    /// on `store`'s writer connection, user 1 and item 1 bound positionally.
+    async fn plans_of(
+        store: &SqliteStore,
+        statements: Vec<(&'static str, String)>,
+    ) -> Vec<(&'static str, Vec<String>)> {
+        store
+            .with_conn(move |conn| {
+                let mut plans = Vec::new();
+                for (name, sql) in statements {
+                    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let arity = stmt.parameter_count();
+                    let params = (0..arity).map(|_| 1_i64).collect::<Vec<_>>();
+                    let details = stmt
+                        .query_map(rusqlite::params_from_iter(params), |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    plans.push((name, details));
+                }
+                Ok(plans)
+            })
+            .await
+            .expect("plans")
+    }
+
+    /// K-05: the watch-rollup plan is the same with and without
+    /// `sqlite_stat1`, and it drives from the requested trees. The statistics
+    /// are the K-05 fixture's (`analysis_limit = 400; ANALYZE`, recorded in
+    /// `benchmarks/evidence/query-plans-012d8a3a.md`); the Hiqlite voters
+    /// carry the same shape because the vendored state machine runs
+    /// `PRAGMA optimize`. The statement as it was before the pins is the
+    /// control: with these statistics it skip-scans every item through
+    /// `idx_items_library_kind`, which is what made it 3x slower, so this test
+    /// fails if the statistics stop provoking the regression as well as if a
+    /// pin is removed. The replicated statements are planned twice: on the
+    /// standalone schema, and on a bare connection loaded with the replicated
+    /// `CATALOG_SCHEMA` itself, so an `idx_items_parent` renamed or dropped
+    /// there (the pins name it with `INDEXED BY`) fails here rather than on a
+    /// voter.
+    #[tokio::test]
+    async fn watch_rollup_plans_do_not_depend_on_statistics() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let unpinned = format!(
+            "WITH RECURSIVE tree(root, id) AS (
+                 SELECT id, id FROM items WHERE id IN (1,2,3)
+                 UNION
+                 SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
+             )
+             SELECT t.root, COUNT(*), COALESCE(SUM(w.watched), 0)
+             FROM tree t
+             JOIN items i ON i.id = t.id
+             LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
+             WHERE i.kind IN ({})
+             GROUP BY t.root",
+            super::PLAYABLE_KINDS
+        );
+        #[cfg_attr(not(feature = "hiqlite-store"), allow(unused_mut))]
+        let mut statements = vec![
+            ("sqlite watch_rollups", super::watch_rollups_sql("1,2,3")),
+            ("sqlite watch_rollup", super::watch_rollup_sql()),
+        ];
+        #[cfg(feature = "hiqlite-store")]
+        statements.extend([
+            (
+                "hiqlite watch_rollups",
+                crate::store::hiqlite_media::watch_rollups_sql(),
+            ),
+            (
+                "hiqlite watch_rollup",
+                crate::store::hiqlite_media::watch_rollup_sql(),
+            ),
+            (
+                "hiqlite watch_summary",
+                crate::store::hiqlite_media::watch_summary_sql(),
+            ),
+        ]);
+        let without = plans_of(&store, statements.clone()).await;
+
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(WATCH_ROLLUP_FIXTURE_STATISTICS)?;
+                Ok(())
+            })
+            .await
+            .expect("load the fixture's statistics");
+        let control = plans_of(&store, vec![("unpinned", unpinned)]).await;
+        assert!(
+            control[0]
+                .1
+                .iter()
+                .any(|line| line == "SCAN i USING COVERING INDEX idx_items_library_kind"),
+            "the statistics no longer provoke the K-05 regression, so this test proves \
+             nothing about the pins: {control:?}"
+        );
+        let with = plans_of(&store, statements).await;
+
+        assert_eq!(without, with, "a watch-rollup plan changed with statistics");
+        assert_watch_rollup_plans_pinned(&with);
+
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let replicated = [
+                (
+                    "replicated-schema watch_rollups",
+                    crate::store::hiqlite_media::watch_rollups_sql(),
+                ),
+                (
+                    "replicated-schema watch_rollup",
+                    crate::store::hiqlite_media::watch_rollup_sql(),
+                ),
+                (
+                    "replicated-schema watch_summary",
+                    crate::store::hiqlite_media::watch_summary_sql(),
+                ),
+            ];
+            let conn = rusqlite::Connection::open_in_memory().expect("open");
+            conn.execute_batch(crate::store::hiqlite_catalog::CATALOG_SCHEMA)
+                .expect("install the replicated catalogue schema");
+            let without = conn_plans_of(&conn, &replicated);
+            conn.execute_batch(WATCH_ROLLUP_FIXTURE_STATISTICS)
+                .expect("load the fixture's statistics");
+            let with = conn_plans_of(&conn, &replicated);
+            assert_eq!(
+                without, with,
+                "a replicated watch-rollup plan changed with statistics"
+            );
+            assert_watch_rollup_plans_pinned(&with);
+        }
+    }
+
+    /// The K-05 fixture's `sqlite_stat1` (see
+    /// `benchmarks/evidence/query-plans-012d8a3a.md`).
+    const WATCH_ROLLUP_FIXTURE_STATISTICS: &str = "ANALYZE;
+         DELETE FROM sqlite_stat1;
+         INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES
+             ('items', 'idx_items_book_work', '0 0'),
+             ('items', 'idx_items_missing_artwork', '75600 401'),
+             ('items', 'idx_items_added', '75600 1'),
+             ('items', 'idx_items_parent', '75600 23'),
+             ('items', 'idx_items_library_kind', '75600 401 401'),
+             ('files', 'idx_files_item', '100000 2'),
+             ('files', 'sqlite_autoindex_files_1', '100000 1'),
+             ('watch_state', 'idx_watch_updated', '35000 401 1'),
+             ('watch_state', 'sqlite_autoindex_watch_state_1', '35000 401 1');
+         ANALYZE sqlite_schema;";
+
+    /// [`plans_of`] on a bare connection. Preparing fails, and so does the
+    /// test, when an `INDEXED BY` pin names an index the schema lacks.
+    #[cfg(feature = "hiqlite-store")]
+    fn conn_plans_of(
+        conn: &rusqlite::Connection,
+        statements: &[(&'static str, String)],
+    ) -> Vec<(&'static str, Vec<String>)> {
+        statements
+            .iter()
+            .map(|(name, sql)| {
+                let mut stmt = conn
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .unwrap_or_else(|error| panic!("{name} does not plan: {error}"));
+                let params = (0..stmt.parameter_count())
+                    .map(|_| 1_i64)
+                    .collect::<Vec<_>>();
+                let details = stmt
+                    .query_map(rusqlite::params_from_iter(params), |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+                    .unwrap_or_else(|error| panic!("{name} plan: {error}"));
+                (*name, details)
+            })
+            .collect()
+    }
+
+    /// Every pinned rollup drives from the requested trees through
+    /// `idx_items_parent` and the `items` primary key, never through
+    /// `idx_items_library_kind` or an automatic index.
+    fn assert_watch_rollup_plans_pinned(plans: &[(&'static str, Vec<String>)]) {
+        for (name, plan) in plans {
+            assert!(
+                plan.iter()
+                    .any(|line| line
+                        == "SEARCH i USING COVERING INDEX idx_items_parent (parent_id=?)"),
+                "{name}: {plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .any(|line| line == "SEARCH i USING INTEGER PRIMARY KEY (rowid=?)"),
+                "{name}: {plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|line| line.contains("idx_items_library_kind")
+                        || line.contains("AUTOMATIC")),
+                "{name}: {plan:?}"
+            );
+        }
     }
 
     #[tokio::test]

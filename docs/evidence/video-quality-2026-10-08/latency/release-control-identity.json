@@ -1,0 +1,30 @@
+{
+  "created_at": "2026-10-09T02:54:13.429391+00:00",
+  "source_commit": "af2156beaddcbf06b85ceae5dce1fe54aa7f921d",
+  "binary_sha256": "818804326c87f90d92cac6acd395b8f41be70a300b5bda3750f964d854eb012a",
+  "binary_bytes": 168401256,
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "command": "CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo +1.97.1 build --release --locked --offline -p plurxd",
+  "rustflags": null,
+  "patch_sha256": {
+    "release-independent-probe.patch": "5219cdb57b11307fc507b8eb2359c7f8ea7350241f7218bbb2f918e5cb8eab96",
+    "release-per-frame-roundtrip.patch": "b5a7495470a75475ec83a6d4f88b246d7e064d6b8c3b5bda85f1136a3aed4136"
+  },
+  "runtime_manifest_sha256": "ec68e047caee48262e76d88a2326673b2662cb2d3cde4dbbaadf94ce726475df",
+  "current_manifest_sha256": "026825991bb8b694097d6806a30a2c8361140e120448b46fc73eea0b2f8a5402",
+  "runtime_diff": {
+    "crates/plurxd/src/decode_facts.rs": {
+      "current": "f1d0b109845404db032acf3dc581fdd8d7cf1e3003e84ca26b1ba8da16305e0e",
+      "control": "f2d52d21f1ea6e4120f6513d5941b618f4f4e5ace949e60accf30f314c4bd27b"
+    },
+    "crates/plurxd/src/http/hls/response.rs": {
+      "current": "31b4f649607d668c2560bf289cb9b2c18e2398d5b00291cf42642e07bff54698",
+      "control": "12bf25d13988dc094e2a1493dffb0b7b68468e8f9f58a02a5b6d90bd21167dd7"
+    }
+  },
+  "build_log_sha256": "c7e2ad630e107cc3f5c4c9cbad61c8e1ddcab253299995b54688c925097f80a6",
+  "control_design": "combined-independent-probe-and-per-frame-roundtrip",
+  "shipping_runtime_patch": false,
+  "stored_sanitized_build_log_sha256": "1c88bcc2fd3c35119ad8f348eb30554f74c6584f58be203677b3c6fc49e7b574",
+  "build_log_path_redaction": "Only owned checkout path and local home prefix were replaced; original hash retained above."
+}

@@ -11,6 +11,24 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
+
+## 2026-09-24 · Watch view: menus and Playback info escape the picture; the picture goes under the header
+
+**Branch `fix/watch-popovers-escape-picture`, pull request open as a draft;
+not merged, nothing deployed.** Paul's report of 2026-09-24 on the new web
+watch view: the Playback info readout ran past the bottom of the picture and
+was cut off there, the subtitle menu ran past its top so half of it could not
+be chosen, and scrolling the page slid the picture over the main navigation.
+One cause: the slot player's host was fixed at z-index 90 with a clip-path to
+its own box. It now sits under the page's chrome (z-index 10) and clips
+nothing; `positionMenu` / `positionStats` bound each popover to the viewport
+minus the stuck chrome (`watchPopoverBounds`) and re-run on every scroll
+frame. Record: [docs/clients/WATCH-VIEW-LAYOUT.md](WATCH-VIEW-LAYOUT.md)
+(“The picture under the page; the menus and the readout over it”). Browser
+acceptance extended with a thirty-track menu, the Diagnostics readout and a
+scrolled-under-the-header check; passes on fine and coarse pointers.
+Native clients untouched.
+
 ## 2026-09-22 · PGS subtitles stopped blocking the start path
 
 
@@ -95,7 +113,7 @@ thing it did differently from every merge that stuck — worth avoiding
 (merge stacks bottom-up and open the upper PR against `main` fresh) until the
 cause is known.
 
-**Deployed to all four nodes 2026-09-23 19:28 UTC** (`v0.3.0-3626-gfad591a46`, each node's own build report; the ride-along self-test passed on ffmpeg 8.1.2-Jellyfin). The first `deploy.yml` run called nuc4 and m6 "already at" that build while their containers were a day old, because their checkouts had moved without a rebuild; `-e force=true` rebuilt them, and `pjunod/ansible#4` now rebuilds whenever the running image's revision label differs from the checkout. **The mobile apps and the overlay switch are not done**: devices need Apple 179 / Android 119, then
+**Deployed to all four nodes 2026-09-23 19:28 UTC** (`v0.3.0-3626-gfad591a46`, each node's own build report; the ride-along self-test passed on ffmpeg 8.1.2-Jellyfin). The first `deploy.yml` run called lab4 and lab6 "already at" that build while their containers were a day old, because their checkouts had moved without a rebuild; `-e force=true` rebuilt them, and `pjunod/ansible#4` now rebuilds whenever the running image's revision label differs from the checkout. **The mobile apps and the overlay switch are not done**: devices need Apple 179 / Android 119, then
 the overlay's
 enablement check — two devices, one Android and one Apple, one playing a DV
 title and one an HDR10 title, a seek each way — before the gate

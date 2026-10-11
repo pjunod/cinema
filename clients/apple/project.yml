@@ -16,7 +16,7 @@ settings:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "205"
+    CURRENT_PROJECT_VERSION: "230"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -39,6 +39,12 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.app
         TARGETED_DEVICE_FAMILY: "1,2"          # iPhone + iPad
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: iOS.entitlements
+      configs:
+        Debug:
+          APNS_ENVIRONMENT: development
+        Release:
+          APNS_ENVIRONMENT: production
     info:
       path: Support/iOS-Info.plist
       properties:
@@ -113,6 +119,8 @@ targets:
     platform: iOS
     sources:
       - path: Tests
+      - path: ../../crates/plurx-core/tests/fixtures/remote-control-v1.json
+        buildPhase: resources
       - path: ../../tests/contracts/channel-subject-wire.json
         buildPhase: resources
       - path: ../../tests/contracts/native-api.json
@@ -132,6 +140,8 @@ targets:
       - path: ../../tests/playback/pgs-overlay-cases.json
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
+        buildPhase: resources
+      - path: ../../tests/sharing/protocol-cases.json
         buildPhase: resources
     dependencies:
       - target: plurx-iOS
@@ -147,6 +157,8 @@ targets:
     platform: tvOS
     sources:
       - path: Tests
+      - path: ../../crates/plurx-core/tests/fixtures/remote-control-v1.json
+        buildPhase: resources
       - path: ../../tests/contracts/channel-subject-wire.json
         buildPhase: resources
       - path: ../../tests/contracts/native-api.json
@@ -167,6 +179,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
         buildPhase: resources
+      - path: ../../tests/sharing/protocol-cases.json
+        buildPhase: resources
     dependencies:
       - target: plurx-tvOS
     settings:
@@ -175,6 +189,19 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/plurx.app/plurx"
         BUNDLE_LOADER: "$(TEST_HOST)"
+
+  plurx-iOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests/LibraryRowsNavigationTests.swift
+    dependencies:
+      - target: plurx-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.app.uitests.ios
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: plurx-iOS
 
   plurx-tvOSUITests:
     type: bundle.ui-testing
@@ -217,3 +244,12 @@ schemes:
     test:
       targets:
         - plurx-tvOSUITests
+
+  plurx-iOS-library-ui:
+    build:
+      targets:
+        plurx-iOS: all
+        plurx-iOSUITests: [test]
+    test:
+      targets:
+        - plurx-iOSUITests

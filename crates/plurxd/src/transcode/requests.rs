@@ -95,7 +95,7 @@ impl Drop for RequestClaim<'_> {
 /// What claiming a `request_id` resolved to.
 pub(super) enum Claimed<'a> {
     /// This call owns the create; the claim must be completed or dropped.
-    Mine(RequestClaim<'a>, SessionRequest),
+    Mine(RequestClaim<'a>, Box<SessionRequest>),
     /// An identical create already made this session.
-    Recovered(StartInfo),
+    Recovered(Box<StartInfo>),
 }

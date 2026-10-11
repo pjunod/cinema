@@ -1,0 +1,19 @@
+{
+  "kind": "supplement-to-immutable-Grain720-NAL-evidence-capsule",
+  "capsule_manifest_sha256": "e7b65e09b2fd8f8fb1ba857410a11dac7e0eb9677f94c56985032ad652e16ce4",
+  "files": [
+    {
+      "name": "actual-runtime-config.json",
+      "sha256": "f6d7b6262e3005950c9cee04437e5e2cd4a912ecd98b5a5dd59a5b7c13eabd00",
+      "scope": "actual historical parser Docker inspect; not later runtime/image admission"
+    },
+    {
+      "name": "actual-parser-process.json",
+      "sha256": "618f728613c6df1e4cfbe711207e7f906479aa595d93e7c1b3670201e4693a6c",
+      "scope": "actual historical offline parser argv/FD/process; no media producer or capability"
+    }
+  ],
+  "original_capsule_zip_unchanged": true,
+  "no_runtime_control_corpus_execution": true,
+  "retention_owner": "root architecture effort"
+}

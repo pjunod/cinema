@@ -14,6 +14,47 @@ accepted, each iPhone, iPad, and Apple TV installs that build through
 TestFlight. “Deploy to all Apple devices” therefore includes that explicit
 on-device install/update step.
 
+## Raspberry Pi 5 — automated setup
+
+On 64-bit Raspberry Pi OS Trixie Desktop, run setup from the cloned repository as your normal
+desktop user. It presents the installation plan and requests `sudo` for system
+changes. Docker is the default server runtime; the HDMI browser runs in the
+normal desktop session.
+
+```sh
+make pi-setup                                      # Docker server and HDMI launcher
+make pi-setup PI_SETUP_FLAGS='--server-runtime native' # native binary with systemd instead
+make pi-setup PI_SETUP_FLAGS='--role server'         # headless server only
+make pi-setup PI_SETUP_FLAGS='--role cinema --url http://media1:32400' # HDMI client only
+```
+
+These are alternative first-install commands. Add `--media /mnt/movies` for
+each existing media directory; Docker mounts these paths read-only at the same
+location. Add `--autostart` to start the launcher when you log into the desktop.
+Setup does not change OS login settings. Use `--dry-run` to inspect the plan and
+`--yes` for an unattended install.
+
+The Pi runtime supplies the request decoder, pixel-layout conversion and a
+separate static scanner parser; it also provisions an isolated HEVC-capable
+Chromium for the launcher. The browser sandbox remains enabled and the system
+browser remains available. Initial installation builds the server and media
+runtime from pinned source, so it needs network access, free disk space and
+time to compile.
+
+```sh
+make pi-status       # inspect the owned installation
+make pi-upgrade      # apply the checked-out revision, retaining installation choices
+make pi-uninstall    # remove owned installation files, retain databases and login profile
+```
+
+Setup refuses to overwrite an existing deployment it does not own. Upgrade
+stages its replacement before switching the server and restores the previous
+artifact if readiness fails. Shared prerequisites remain installed on ordinary
+uninstall. The [Pi installation plan](../docs/clients/RASPBERRY-PI-INSTALLATION.md)
+describes ownership and recovery; the [live Pi status](../docs/clients/RASPBERRY-PI-STATUS.md)
+records verification, including display-output limitations. An installed
+decoder does not establish HDR or Dolby Vision HDMI output on a particular TV.
+
 ## Docker / Compose (recommended for homelabs)
 
 One command from the repository root brings the stack up for the first time:
@@ -26,16 +67,16 @@ It writes `deploy/.env` (with your uid/gid) and
 `deploy/docker-compose.override.yml` from their examples when they are
 missing, creates the data directory named in `.env`, runs `make docker-up`,
 and then waits for `/readyz` and prints the version the server reports.
-Host-specific bits (media mounts, GPU, and shared Docker networks) live in
+Host-specific bits (media mounts, explicit GPU selections, and shared Docker networks) live in
 that untracked override file, so pulling updates never conflicts with local
-edits — put your mounts and GPU there and run `make docker-up` again; that is
+edits — put your mounts there and run `make docker-up` again; that is
 the deploy from then on. By hand, the same first run is:
 
 ```sh
 cd deploy
 cp .env.example .env                   # PUID/PGID, ports, the data directory
 cp docker-compose.override.example.yml docker-compose.override.yml
-$EDITOR docker-compose.override.yml   # your media mounts (host:container:ro), your GPU
+$EDITOR docker-compose.override.yml   # your media mounts (host:container:ro)
 cd .. && make docker-up                  # builds from source; stamps the commit into the build
 ```
 
@@ -43,8 +84,9 @@ Open `http://<host>:32400` and create your admin account. If Plex still owns
 TCP 32400, set `PLURX_HTTP_PORT` in `.env` and use that port instead.
 Library paths in
 the web UI are the *container-side* paths (e.g. `/media/movies`). For
-hardware transcode, uncomment the GPU block in your override (Intel/AMD via
-`/dev/dri`, NVIDIA via the container toolkit). If another service (a
+hardware transcode, `make docker-up` detects local Linux GPUs and their
+device groups automatically. NVIDIA hosts need NVIDIA Container Toolkit
+installed and configured for Docker. If another service (a
 still-running Plex) owns UDP 32414, set `PLURX_GDM_PORT` in `.env`
 (see `.env.example`).
 
@@ -66,6 +108,73 @@ named the same way — every node of one logical server reports the same
 `PLURX_SERVER_NAME`, and it is the host name and the address that tell them
 apart. A node with neither falls back to the first twelve characters of its
 node id, which is the only case where a picker shows a UUID.
+
+### Sharing uses an explicit Linux bridge profile
+
+The ordinary Compose service stays on Docker networking. Shared libraries use
+a separate TLS listener; the default node-local `host_loopback` profile binds
+only loopback. To make that listener reachable through Docker's loopback-only
+host publication, select `docker_bridge` explicitly in a node-local TOML file.
+The hosting profile does not change the saved Settings → Developer → Sharing
+switch or make readiness a condition of saving it.
+
+Start from [the opt-in Compose recipe](docker-compose.sharing.example.yml) and
+[the matching node-local config](sharing-bridge.example.toml). Choose a free
+RFC1918 bridge subnet and keep its static container address identical to
+`sharing.egress.address`. Preserve any existing server, storage and cluster
+sections when preparing the config file.
+
+```sh
+cp deploy/docker-compose.sharing.example.yml deploy/docker-compose.sharing.yml
+cp deploy/sharing-bridge.example.toml deploy/sharing-bridge.toml
+$EDITOR deploy/sharing-bridge.toml deploy/docker-compose.sharing.yml
+export COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.sharing.yml
+make docker-startup-budget-check  # renders Compose and checks the chosen bridge recipe
+```
+
+The recipe binds the process to `0.0.0.0:32444` inside its namespace and
+publishes exactly `127.0.0.1:32444:32444/tcp` on the host. It mounts the TOML
+file read-only at `/etc/plurx/plurx.toml`, keeps the ordinary app network,
+and adds an explicit bridge with a static IPv4 address. Its `gw_priority: 1`
+selects that bridge as the default gateway; any other attached network must
+have a lower gateway priority. Use Compose 2.33.1 or newer (the recipe was
+rendered with 2.40.3). Do not publish the
+sharing port on a host wildcard or host Tailscale address. Do not move
+`plurxd` to host networking or mount the tailscaled socket.
+
+The existing `make docker-up` and `make docker-image-up` preflight checks
+readable node-local `docker_bridge` config against the rendered publication,
+static address, explicit default-gateway selection, bridge declaration and
+read-only config mount. A failure
+refuses that deployment before replacement. This is configuration evidence:
+it cannot prove the running host's port isolation, firewall, Tailscale route,
+or no-WAN behavior. An opaque config baked into an image or supplied through
+an unreadable mount is outside this recipe's evidence.
+
+Provision a node-only TLS identity in the existing data directory before
+starting Sharing. The CLI refuses to overwrite existing identity files:
+
+```sh
+cd deploy
+docker compose run --rm --no-deps plurxd sharing init-tls --key-directory /var/lib/plurx/sharing-tls
+```
+
+The host operator configures raw TCP Serve to preserve the Cinema TLS pin:
+
+```sh
+tailscale serve --bg --tcp=32443 tcp://127.0.0.1:32444
+tailscale serve status --json
+```
+
+Outbound peer sockets bind the configured container address and still accept
+only verified numeric Tailscale destinations, pinned TLS and authenticated
+Source identities. The host must provide and qualify forwarding/SNAT from
+that bridge to Tailscale. Qualify from inside the actual container, including
+rejection of a WAN route when Tailscale is unavailable. If private name
+resolution cannot reach Tailscale's resolver, provision the verified numeric
+endpoint hint through Sharing administration. There is no public DNS,
+redirect or environment-proxy fallback. Network qualification remains open
+until its runtime receipt exists; choosing this profile does not certify it.
 
 ### Writable media is a narrow, explicit opt-in
 
@@ -377,8 +486,36 @@ The Docker image defaults to **jellyfin-ffmpeg**, which bundles a current Intel
 media driver + libva + oneVPL. This matters for newer silicon: an Arc / Meteor
 Lake / **Arrow Lake** iGPU (on the kernel `xe` driver) is years newer than the
 VA driver Debian ships, so the distro ffmpeg fails VAAPI init with an I/O error
-while jellyfin-ffmpeg drives it fine. Pass the GPU through and add the render
-group in your compose override:
+while jellyfin-ffmpeg drives it fine. Both `make docker-up` and
+`make docker-image-up` prepare GPU access before their startup-budget check:
+
+- Local native Linux Docker: expose `/dev/dri` when present and add the numeric
+  groups owning its character devices, so the configured non-root user can
+  access them. Hosts without GPU devices need no special configuration.
+- NVIDIA: detect a working host driver, request the GPUs through NVIDIA
+  Container Toolkit, and include `compute,video,utility,graphics` driver capabilities.
+  `graphics` supplies the Vulkan libraries used by GPU tone mapping. Encoding
+  runs in the Plurx container; no GPU sidecar is needed. If the toolkit hook
+  is missing, detection prints the required setup and leaves NVIDIA passthrough
+  unset; other hardware and software paths remain available.
+- Existing device selections and NVIDIA reservations keep their selected
+  devices/count. Existing groups and extra NVIDIA capabilities are preserved.
+- macOS, Docker Desktop, and remote Docker engines: keep explicit device
+  configuration; local host probes cannot describe the engine's hardware.
+  Native macOS Plurx already detects VideoToolbox; Linux containers cannot
+  use the macOS VideoToolbox framework.
+
+The helper writes one temporary Compose fragment, uses it for both preflight
+and startup, then removes it even if startup fails. It keeps the existing
+base/override selection and never rewrites your override. The
+`docker hardware:` line reports added device mappings, numeric groups, and
+NVIDIA capabilities; it reports configuration, not a passed encode probe.
+Plurx still validates encoders at startup and respects its encoder preference.
+
+For fully manual passthrough, put `PLURX_DOCKER_GPU=manual` in `deploy/.env`.
+This skips automatic configuration without disabling any server capability.
+Direct `docker compose up` also uses only your explicit device settings.
+For example, the Intel/AMD block in your override is:
 
 ```yaml
     devices:
@@ -557,6 +694,9 @@ Do not replace the exact path with `/mnt` or another broad media root.
 
 ## Run as a service — launchd (macOS)
 
+Setting up a Mac from scratch? Follow the step-by-step
+[macOS install guide](MACOS.md); this section is the reference behind it.
+
 Runs plurxd as a **LaunchAgent** in your login session — start-at-login, restart
 on crash. A user agent rather than a boot-time system daemon on purpose:
 VideoToolbox hardware transcoding needs a logged-in GUI session, which a daemon
@@ -568,14 +708,25 @@ One command from the repository root:
 make install          # or: make install-macos
 ```
 
-It builds `plurxd` from this checkout, installs ffmpeg with Homebrew when it
-is missing, puts the binary in the Homebrew prefix (no sudo on Apple Silicon;
+It builds `plurxd` from this checkout, installs the pinned **Jellyfin FFmpeg
+8.1.3-1** portable build (checksum-verified, into
+`<prefix>/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/`; Homebrew's ffmpeg is never
+used — see the [macOS guide](MACOS.md#the-media-engine-jellyfin-ffmpeg-813-1)),
+puts the binary in the Homebrew prefix (no sudo on Apple Silicon;
 `--prefix` in `INSTALL_FLAGS` chooses another), renders the agent plist with
 your home directory and the real `plurxd`/`ffmpeg`/`ffprobe` paths, bootstraps
 and starts it, then waits for `/readyz` and prints the version the server
 reports. Run it again to upgrade: the agent is booted out before its binary
 is replaced, and an existing plist is yours — the installer never overwrites
-it, so `plutil -replace` edits survive. `make uninstall` boots the agent out
+it, so `plutil -replace` edits survive. Run it as your login user, never through
+`sudo`: the agent belongs to your GUI session (`gui/<uid>`), so a root run is
+refused before it builds anything. The installer asks for sudo itself when it
+needs it: for a destination you cannot write (`/usr/local/bin` on Intel), and
+once to hand back whatever an earlier `sudo` run left root-owned — the build
+tree and cargo cache, the binary and engine in a Homebrew prefix,
+`~/Library/LaunchAgents` itself (not the other agents in it), the plist,
+`~/Library/Application Support/plurx` and the log.
+`make uninstall` boots the agent out
 and removes the plist and binary, and keeps
 `~/Library/Application Support/plurx`. `make uninstall-docker` is the Compose
 counterpart (`docker compose down`; `.env`, the override, and data stay).
@@ -595,16 +746,20 @@ user-session hardware policy cannot be inferred safely.
 By hand, the same install is:
 
 ```sh
-# 1. Install the binary + ffmpeg (Homebrew satisfies the runtime dep)
-brew install ffmpeg
+# 1. Install the binary + Jellyfin FFmpeg 8.1.3-1 (macarm64 on Apple Silicon,
+#    mac64 on Intel; check the SHA-256 against deploy/MACOS.md)
 sudo install -m755 plurxd /usr/local/bin/plurxd     # /opt/homebrew/bin on Apple Silicon
+JF=/usr/local/libexec/plurx/jellyfin-ffmpeg-8.1.3-1
+curl -fLO https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-1/jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz
+shasum -a 256 jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz
+sudo mkdir -p "$JF" && sudo tar -xJf jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz -C "$JF"
 
 # 2. Fill in your username + real binary paths, drop the agent into place
 mkdir -p ~/Library/LaunchAgents "$HOME/Library/Application Support/plurx"
 sed -e "s|YOUR_USERNAME|$USER|g" \
     -e "s|/usr/local/bin/plurxd|$(command -v plurxd)|" \
-    -e "s|/usr/local/bin/ffmpeg|$(command -v ffmpeg)|" \
-    -e "s|/usr/local/bin/ffprobe|$(command -v ffprobe)|" \
+    -e "s|/usr/local/bin/ffmpeg|$JF/ffmpeg|" \
+    -e "s|/usr/local/bin/ffprobe|$JF/ffprobe|" \
     deploy/com.plurx.plurxd.plist > ~/Library/LaunchAgents/com.plurx.plurxd.plist
 
 # 3. Load, enable, and start it (modern launchctl)
@@ -704,6 +859,7 @@ conversion Off until a real pod proves the filesystem contract above.
 | Port | Proto | Purpose |
 |---|---|---|
 | 32400 | TCP | HTTP API + web app (and the Plex-compat façade) |
+| 8096 | TCP | Jellyfin compatibility at the server root, Jellyfin's standard port, so a Jellyfin client given only a host connects; answers only while Settings → Developer enables it (host port movable via `PLURX_JELLYFIN_HOST_PORT`) |
 | 32414 | UDP | GDM discovery so Plex/Kodi clients find the server on the LAN (host port movable via `PLURX_GDM_PORT`, but discovery only works on 32414) |
 | 5353 | UDP multicast | Bonjour `_plurx._tcp` discovery for native clients; the Compose companion owns this on the host network |
 
@@ -749,3 +905,135 @@ fallback prevents custom TOML deadlines from accidentally shipping with a
 shorter health grace. An explicit command-line `--config` takes
 precedence over `PLURX_CONFIG`, matching the server. A direct `docker compose
 up` bypasses the preflight.
+
+## Raspberry Pi — native server and the existing fullscreen web player
+
+Use Raspberry Pi OS 64-bit and the existing ARM64 server binary. Install the
+server with `deploy/install linux --binary /absolute/path/plurxd`; the normal
+systemd installation and `/readyz` checks still apply. Select your native
+FFmpeg and matching ffprobe with `PLURX_FFMPEG` and `PLURX_FFPROBE` in the
+service's existing configuration. Also set `PLURX_BOUND_FFPROBE` to a separate,
+fully static ARM64 FFprobe for descriptor-bound local source facts. Native
+Pi OS FFmpeg/ffprobe can pass scans and hardware probes while caps-v2 web VOD
+creation still fails: its bound facts collector needs a self-contained
+executable identity, which the general-purpose dynamic ffprobe cannot supply.
+When unset, `PLURX_BOUND_FFPROBE` falls back to `PLURX_FFPROBE`; that fallback
+is insufficient for this native setup. Keep the identity checks intact.
+
+Build that dedicated parser on Linux ARM64 with the existing
+[`scripts/build-static-ffprobe`](../scripts/build-static-ffprobe). It pins
+FFmpeg 8.1.3 and verifies the source archive's SHA-256 before building. The
+host needs a C toolchain (`build-essential`, including make and binutils),
+`pkg-config`, `curl`, `ca-certificates`, `xz-utils`, and the static development
+libraries `zlib1g-dev`, `libbz2-dev`, `liblzma-dev` and `libc6-dev`. Build as a
+normal user into a staging directory; installation into system paths is a
+separate privileged step. Run from the repository root:
+
+```bash
+# Build the pinned local-file parser and retain its rebuild/identity receipts.
+mkdir -p "$HOME/plurx-static-probe"
+sh scripts/build-static-ffprobe \
+  "$HOME/plurx-static-probe/ffprobe" "$HOME/plurx-static-probe/receipts"
+# Install the parser outside /home, which the service's ProtectHome hides.
+sudo install -d /usr/local/lib/plurx /usr/share/doc/plurx/ffprobe
+sudo install -m 0755 "$HOME/plurx-static-probe/ffprobe" /usr/local/lib/plurx/ffprobe
+sudo cp -a "$HOME/plurx-static-probe/receipts/." /usr/share/doc/plurx/ffprobe/
+# Add these three separate entries with sudo systemctl edit plurxd.
+```
+
+```ini
+[Service]
+Environment=PLURX_FFMPEG=/usr/bin/ffmpeg
+Environment=PLURX_FFPROBE=/usr/bin/ffprobe
+Environment=PLURX_BOUND_FFPROBE=/usr/local/lib/plurx/ffprobe
+```
+
+Replace the first two paths if your measured native runtime lives elsewhere,
+then restart `plurxd`. Do not point them at the minimal static parser: it has
+network and device inputs disabled and only file/pipe protocols enabled. The
+build script verifies the version and rejects ELF program headers containing
+`INTERP` or `DYNAMIC`; static FFmpeg libraries alone are insufficient. Retain
+the generated source archive, resolved `config.h`/`config.mak`, version,
+licenses, dependency copyright files and `build.txt` source/binary hash and
+ELF receipts with the deployed binary. The Dockerfile already builds and
+ships this dedicated parser independently of its general media runtime.
+Capture all three resolved executable paths, versions and the bound parser's
+binary receipt in private acceptance notes. A successful build establishes
+parser identity, not successful Pi playback; exercise real caps-v2 VOD next.
+
+A generic `drm` advertisement is only a candidate: the server's operational
+request-decoder probe must succeed for each selected HEVC bit-depth class. Software encoding
+still needs transferred CPU frames. Pi 5 has no hardware video encoder.
+
+The standard ARM64 container keeps its pinned Jellyfin media runtime. Its
+request-decoder support is unproven; replacing that runtime would risk the
+existing AC-4, Dolby Vision and tone-map contracts. Native compatible FFmpeg
+is the initial server acceleration route.
+
+**Desktop launcher:** run these commands as your normal desktop user. Python
+3 and an already installed Chromium are prerequisites. The installer neither
+installs a browser nor changes the server unit or desktop autostart settings.
+
+```bash
+python3 deploy/pi-player install --url http://localhost:32400 --dry-run
+python3 deploy/pi-player install --url http://localhost:32400
+# Open “Plurx HDMI” from the desktop application's menu; sign in normally.
+python3 deploy/pi-player launch                  # launch in your desktop session
+python3 deploy/pi-player uninstall --dry-run     # preview ownership checks
+python3 deploy/pi-player uninstall               # retain browser login/profile
+```
+
+Use `--chromium /absolute/path/chromium` if discovery cannot find your installed
+browser. URLs must be HTTP(S) origins with an optional trailing slash: paths,
+credentials, query strings and fragments are refused to keep tokens out of
+process arguments. The launcher uses Chromium's normal sandbox and a separate
+`~/.local/share/plurx-hdmi/profile`; it never opens your usual browser profile.
+Root launch is refused. A dedicated desktop application entry launches the
+existing web UI fullscreen; no new client or recovery supervisor is involved.
+
+Installation is repeatable while the recorded files remain unchanged.
+Uninstall checks ownership hashes before removing the launcher, its URL
+configuration and application entry; modified or unowned files require manual
+attention. It retains the isolated browser profile and an ownership receipt,
+so reinstall restores the launcher without deleting login state. To remove
+that profile yourself, first exit its Chromium process, then inspect and
+remove the dedicated directory. Symlinked installation paths are refused.
+No running browser is stopped by uninstall.
+
+**Device access:** inspect actual `/dev/video*`, `/dev/media*` and
+`/dev/dri/renderD*` ownership on the target. Grant the `plurx` service only the
+`video`/`render` groups its measured native path requires, through a systemd
+drop-in with `SupplementaryGroups=video render` where those groups exist.
+Restart the service after changing its groups. The desktop browser uses the
+logged-in user's session permissions; service group membership does not grant
+browser access. Never make nodes world-writable, hard-code a video-node number,
+or infer support from a node's filename. Existing service restrictions remain
+in force until you deliberately edit them.
+
+**Readiness report:** this command reads the host and runs bounded version and
+advertisement commands; it writes no configuration or packages. Each command
+has a three-second deadline and a 16 KiB output bound. Missing tools are
+reported without stopping the report. `--ffmpeg`, `--ffprobe` and `--chromium`
+select installed executable paths; these overrides are executed as the current
+user and should identify trusted tools.
+
+```bash
+python3 deploy/pi-player readiness
+python3 deploy/pi-player readiness --json > pi-readiness.json
+```
+
+How to read it: `missing`, `unavailable`, `failed`, `timeout` and `output_limit`
+identify a tool needing attention. `ok` means the command exited successfully,
+not that hardware decoding works. Versions may be `unknown`. Device read/write
+fields describe this diagnostic user's effective access, not service access.
+Only allowlisted version strings and hardware-method names are relayed; arbitrary
+tool output, environment variables and executable directory paths are omitted.
+Review OS/device identifiers before sharing the receipt outside your deployment.
+
+Browser HEVC also depends on the installed Chromium build, kernel, Mesa and
+Wayland path. Record their package versions and inspect Chromium media
+diagnostics during actual playback. MediaCapabilities predicts support and
+efficiency; it cannot identify the active decoder. No 4K60, HDR or concurrent
+capacity is established by this readiness report. The physical cases and
+pending evidence are listed in the
+[Pi implementation plan](../docs/clients/RASPBERRY-PI-IMPLEMENTATION.md).

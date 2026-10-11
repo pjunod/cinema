@@ -12,6 +12,8 @@ import android.os.Build
 import android.util.Log
 import android.view.Display
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.Format
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.audio.AudioCapabilities
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
@@ -97,7 +99,10 @@ object Caps {
         }
         val video = videoCodecCaps(videoLimits)
 
-        val audio = audioCodecClaims(decoderMimes, sinkEncodings(context))
+        val encodings = sinkEncodings(context)
+        val audio = audioCodecClaims(decoderMimes, encodings)
+        val sinkFacts = liveSinkFacts(context)
+        val audioSinks = audioSinkClaims(decoderMimes, encodings, sinkFacts.aacChannels)
 
         val hdrTypes = displayHdrTypes(context)
         // Ask the same Media3 decoder selector that ExoPlayer uses. The raw
@@ -131,6 +136,7 @@ object Caps {
         Log.i(
             LOG_TAG,
             "model=${Build.MODEL} hdrTypes=${hdrTypes.sorted()} " +
+                "audioSinks=${audioSinks.joinToString { "${it.codec}:${it.max_channels}${if (it.passthrough) "p" else ""}" }} " +
                 "dvDecoders=${dolbyVisionDecoderProbe.names} " +
                 "rawDvProfiles=${rawDolbyVisionProfiles.sorted()} " +
                 "claimedDvProfiles=$dolbyVisionProfiles caps=$result",
@@ -139,7 +145,8 @@ object Caps {
             legacyQuery = result,
             audioOutputRoute = audioOutputRoute(context),
             document = capsDocument(
-                video = if (Session.displayAwareAuto) video else video.copy(decoderEntries = emptyList()),
+                video = video,
+                displayAwareAuto = Session.displayAwareAuto,
                 audio = audio,
                 hdrTypes = hdrTypes,
                 decoderDolbyVisionProfiles = dolbyVisionProfiles,
@@ -148,6 +155,8 @@ object Caps {
                     build = BuildConfig.VERSION_CODE.toString().take(48),
                     ua = Build.MODEL.take(160),
                 ),
+                audioSinks = audioSinks,
+                hlsHevcSampleEntries = hlsHevcSampleEntries(context, video),
             ).let { document ->
                 if (Session.decoderCompactionContract == DECODER_COMPACTION_CONTRACT && document.video.size <= MAX_CLIENT_DECODER_ENTRIES) {
                     document.copy(decoder_compaction = DECODER_COMPACTION_CONTRACT)
@@ -209,8 +218,7 @@ object Caps {
             LiveSinkFacts.MIN_AAC_CHANNELS
         } else {
             try {
-                val manager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-                hdmiPcmChannelsOf(manager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS).toList())
+                hdmiPcmChannelsOf(activeOutputDevices(context))
             } catch (_: Exception) {
                 LiveSinkFacts.MIN_AAC_CHANNELS
             }
@@ -219,6 +227,25 @@ object Caps {
             deinterlaces = television,
             aacChannels = channels.coerceIn(LiveSinkFacts.MIN_AAC_CHANNELS, LiveSinkFacts.MAX_AAC_CHANNELS),
         )
+    }
+
+    /**
+     * The outputs media would play to now. On API 33+ that is the active
+     * route, so Bluetooth headphones on a television are not mistaken for its
+     * HDMI receiver; older releases can only list every output.
+     */
+    private fun activeOutputDevices(context: Context): List<AudioDeviceInfo> {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            manager.getAudioDevicesForAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build(),
+            )
+        } else {
+            manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
+        }
     }
 
     /** The widest PCM channel count an HDMI-class output device advertises, or stereo. */
@@ -359,6 +386,39 @@ object Caps {
     )
 
     /** Non-secure, non-tunneled Dolby Vision decoders Media3 can actually select. */
+    // The app uses Media3 HlsMediaSource with its fragmented-MP4 extractor.
+    // Ask that same decoder selector about every advertised HEVC rectangle and
+    // profile; a platform registry entry alone cannot admit this transport.
+    private fun hlsHevcSampleEntries(context: Context, video: VideoCodecCaps): List<String> = try {
+        val entries = video.decoderEntries.filter { entry ->
+            entry.codec == "hevc" && entry.profiles.any { it == "main" || it.startsWith("main10") }
+        }
+        val decoders = MediaCodecUtil.getDecoderInfos(MimeTypes.VIDEO_H265, false, false)
+        val supported = entries.isNotEmpty() && entries.all { entry ->
+            val width = entry.maxWidth
+            val rate = entry.maxFrameRate
+            width != null && rate != null && entry.profiles.filter { it == "main" || it.startsWith("main10") }.all { profile ->
+                val codec = when (profile) {
+                    "main" -> "hvc1.1.6.L153.B0"
+                    "main10", "main10_hdr10" -> "hvc1.2.4.L153.B0"
+                    else -> null
+                }
+                codec != null && decoders.any { decoder ->
+                    decoder.isFormatSupported(context, Format.Builder()
+                        .setSampleMimeType(MimeTypes.VIDEO_H265)
+                        .setCodecs(codec)
+                        .setWidth(width)
+                        .setHeight(entry.maxHeight)
+                        .setFrameRate(rate.numerator.toFloat() / rate.denominator)
+                        .build())
+                }
+            }
+        }
+        if (supported) listOf("hvc1") else emptyList()
+    } catch (_: Exception) {
+        emptyList()
+    }
+
     private fun decoderDolbyVisionProbe(): DolbyVisionDecoderProbe = try {
         val decoders = MediaCodecUtil.getDecoderInfos(
             DOLBY_VISION_MIME,

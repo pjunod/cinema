@@ -1,0 +1,25 @@
+{
+  "scope": "analytic chroma-siting mechanics only",
+  "rgb_rounding_bound_codes": 1,
+  "bound_chosen_before_rgb_control_execution": true,
+  "results": [
+    {
+      "location": "center",
+      "point_source_x_phase": 1,
+      "point_source_y_phase": 1,
+      "native_max_code_error": 0,
+      "rgb_ncl_max_code_error": 0,
+      "native_output_sha256": "8d118c3964e86a714abf7dfa32550a29ec5de3afc837fe095696bcb3f770ed7b",
+      "rgb_output_sha256": "8eb2929248a077f23508ce7070a22bf1211a8055e17c0f4da9c867891ae60b26"
+    },
+    {
+      "location": "left",
+      "point_source_x_phase": 0,
+      "point_source_y_phase": 1,
+      "native_max_code_error": 0,
+      "rgb_ncl_max_code_error": 0,
+      "native_output_sha256": "3f89beffffc0ea275db7d01f8d66ef9efd0a8f7faee891a0f0fdf9ab0db071bb",
+      "rgb_output_sha256": "fe31665c0c0202313d6bb54ccf1ae0f88a153ddbfc68614890f12aaf7d3a941f"
+    }
+  ]
+}

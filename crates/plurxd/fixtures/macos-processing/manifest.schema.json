@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "aggregate_media_bytes": {
+      "maximum": 2097152,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "corpus_version": {
+      "const": 1
+    },
+    "fixtures": {
+      "items": {
+        "properties": {
+          "available": {
+            "const": true
+          },
+          "byte_length": {
+            "maximum": 2097152,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "class": {
+            "enum": [
+              "sdr",
+              "hdr10"
+            ]
+          },
+          "duration_seconds": {
+            "const": 1.0
+          },
+          "expected": {
+            "additionalProperties": false,
+            "properties": {
+              "avg_frame_rate": {
+                "const": "12/1"
+              },
+              "codec_name": {
+                "const": "hevc"
+              },
+              "color_primaries": {
+                "enum": [
+                  "bt709",
+                  "bt2020",
+                  "bt2020nc",
+                  "smpte2084",
+                  "tv"
+                ],
+                "type": "string"
+              },
+              "color_range": {
+                "enum": [
+                  "bt709",
+                  "bt2020",
+                  "bt2020nc",
+                  "smpte2084",
+                  "tv"
+                ],
+                "type": "string"
+              },
+              "color_space": {
+                "enum": [
+                  "bt709",
+                  "bt2020",
+                  "bt2020nc",
+                  "smpte2084",
+                  "tv"
+                ],
+                "type": "string"
+              },
+              "color_transfer": {
+                "enum": [
+                  "bt709",
+                  "bt2020",
+                  "bt2020nc",
+                  "smpte2084",
+                  "tv"
+                ],
+                "type": "string"
+              },
+              "field_order": {
+                "const": "progressive"
+              },
+              "frame_count": {
+                "const": 12
+              },
+              "height": {
+                "const": 180
+              },
+              "pix_fmt": {
+                "enum": [
+                  "yuv420p",
+                  "yuv420p10le"
+                ]
+              },
+              "profile": {
+                "enum": [
+                  "Main",
+                  "Main 10"
+                ]
+              },
+              "sample_aspect_ratio": {
+                "const": "1:1"
+              },
+              "width": {
+                "const": 320
+              }
+            },
+            "required": [
+              "codec_name",
+              "profile",
+              "pix_fmt",
+              "width",
+              "height",
+              "frame_count",
+              "avg_frame_rate",
+              "sample_aspect_ratio",
+              "field_order",
+              "color_primaries",
+              "color_transfer",
+              "color_space",
+              "color_range"
+            ],
+            "type": "object"
+          },
+          "generation_argv": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 2,
+            "type": "array"
+          },
+          "id": {
+            "enum": [
+              "sdr8",
+              "sdr10",
+              "hdr10"
+            ]
+          },
+          "input_pixels": {
+            "type": "object"
+          },
+          "output_expectations": {
+            "items": {
+              "properties": {
+                "graph_id": {
+                  "enum": [
+                    "vt_scale_sdr",
+                    "vt_tonemap_native",
+                    "vt_tonemap_metal"
+                  ]
+                }
+              },
+              "required": [
+                "graph_id",
+                "expected",
+                "pixels",
+                "timestamps",
+                "forbidden_side_data"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "path": {
+            "enum": [
+              "sdr8.mp4",
+              "sdr10.mp4",
+              "hdr10.mp4"
+            ]
+          },
+          "provenance": {
+            "properties": {
+              "generator_recipe_version": {
+                "const": 1
+              },
+              "license": {
+                "const": "CC0-1.0"
+              }
+            },
+            "required": [
+              "source",
+              "license",
+              "license_file",
+              "generator",
+              "generator_recipe_version"
+            ],
+            "type": "object"
+          },
+          "role": {
+            "const": "smoke"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "sha256",
+          "byte_length",
+          "class",
+          "duration_seconds",
+          "role",
+          "available",
+          "expected",
+          "input_pixels",
+          "provenance",
+          "generation_argv",
+          "output_expectations"
+        ],
+        "type": "object"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "generator_recipe_version": {
+      "const": 1
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "producer": {
+      "required": [
+        "ffmpeg_version",
+        "ffmpeg_sha256",
+        "ffprobe_sha256"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "size_budget_bytes": {
+      "const": 2097152
+    }
+  },
+  "required": [
+    "schema_version",
+    "corpus_version",
+    "generator_recipe_version",
+    "size_budget_bytes",
+    "aggregate_media_bytes",
+    "producer",
+    "fixtures",
+    "limitations"
+  ],
+  "title": "plurx initial Mac processing runtime smoke corpus v1",
+  "type": "object"
+}

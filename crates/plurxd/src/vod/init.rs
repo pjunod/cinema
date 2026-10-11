@@ -80,8 +80,12 @@ pub(super) async fn regenerate_init_head(
         ),
         crate::ffmpeg::drain_diagnostics(stderr)
     );
-    if !diagnostic.trim().is_empty() {
-        tracing::warn!(target: "plurxd::vodserve", %diagnostic, "VOD head regeneration diagnostic");
+    let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
+    if !diagnostic.informational.is_empty() {
+        tracing::debug!(target: "plurxd::vodserve", informational = %diagnostic.informational, "VOD head regeneration informational output");
+    }
+    if !diagnostic.actionable.is_empty() {
+        tracing::warn!(target: "plurxd::vodserve", diagnostic = %diagnostic.actionable, "VOD head regeneration diagnostic");
     }
     let muxer = muxer?;
     if !source.unchanged() {
@@ -93,6 +97,15 @@ pub(super) async fn regenerate_init_head(
         return Err(HeadRegenerationError::Failed(
             "the immutable media engine changed during head regeneration".to_owned(),
         ));
+    }
+    if let Some(audio) = recipe
+        .encoding
+        .as_ref()
+        .and_then(|encoding| encoding.shared_audio.as_ref())
+    {
+        audio
+            .verify_init(&muxer)
+            .map_err(|error| HeadRegenerationError::Failed(error.to_string()))?;
     }
     identity
         .served_init_for(&muxer)
@@ -238,7 +251,16 @@ pub(super) async fn load_identity(path: &Path) -> Option<InitIdentity> {
 
 /// Persist the identity tmp-then-rename, like every other rendition file:
 /// absent or complete, never partial.
+#[cfg(test)]
 pub(super) async fn store_identity(path: &Path, identity: &InitIdentity) -> io::Result<()> {
+    store_identity_observed(path, identity, None).await
+}
+
+pub(super) async fn store_identity_observed(
+    path: &Path,
+    identity: &InitIdentity,
+    allowance: Option<&Arc<super::copy_preparation::PreparationAllowance>>,
+) -> io::Result<()> {
     let stored = StoredIdentity {
         muxer_init: identity.muxer_init.clone(),
         served_init: identity.served_init.clone(),
@@ -246,9 +268,20 @@ pub(super) async fn store_identity(path: &Path, identity: &InitIdentity) -> io::
     };
     let bytes = serde_json::to_vec(&stored)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let pending = allowance
+        .map(|allowance| {
+            allowance
+                .begin(bytes.len() as u64)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))
+        })
+        .transpose()?;
     let tmp = path.with_extension("json.tmp");
     tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, path).await
+    tokio::fs::rename(&tmp, path).await?;
+    if let Some(pending) = pending {
+        pending.commit(false);
+    }
+    Ok(())
 }
 
 pub(super) async fn sync_file(path: &Path) -> io::Result<()> {

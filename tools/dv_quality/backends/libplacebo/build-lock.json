@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "base_image_index": "rust@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97",
+  "platform": "linux/arm64",
+  "tested_image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+  "source_archives": [
+    {
+      "component": "libplacebo",
+      "revision": "0d043c7f6f79cd3687c023454bdacbe615e4d96f",
+      "filename": "libplacebo-source.tar.gz",
+      "url": "https://codeload.github.com/haasn/libplacebo/tar.gz/0d043c7f6f79cd3687c023454bdacbe615e4d96f",
+      "sha256": "fd72d09e83a7776f4ec5f2c2f13712ee085a97c75473de2041d09801c49db621"
+    },
+    {
+      "component": "Vulkan-Headers",
+      "revision": "74d8a6cb930c68ef617b202c3ff3c59d919e086b",
+      "filename": "vulkan-headers-source.tar.gz",
+      "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/74d8a6cb930c68ef617b202c3ff3c59d919e086b",
+      "sha256": "75967a8288ff16044a86d1af462b96d2e75c435937efb75f2bb4102ab0382f29"
+    }
+  ],
+  "source_patches": [],
+  "build_flags": [
+    "--buildtype=release",
+    "-Dvulkan=enabled",
+    "-Dopengl=disabled",
+    "-Dd3d11=disabled",
+    "-Dglslang=enabled",
+    "-Dshaderc=disabled",
+    "-Ddovi=enabled",
+    "-Dlibdovi=disabled",
+    "-Ddemos=false",
+    "-Dtests=false",
+    "-Dxxhash=enabled"
+  ],
+  "python_build_versions": {
+    "meson": "1.10.0",
+    "Jinja2": "3.1.6",
+    "MarkupSafe": "3.0.3"
+  },
+  "dependency_resolution": "apt signed live bookworm repositories and version-pinned pip without wheel hashes; rebuild resolution may drift; not a fully locked/snapshot-reproducible dependency build",
+  "package_versions_sha256": "8ea0008880e0ea14e18570455d5c477817315e217bc1ac9d7a439b59c204e023",
+  "tested_library_sha256": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1",
+  "shader_identifier_fix": "Harness uses public pl_shader_alloc id200 for EL. Two pl_dispatch_begin calls had matching namespaces and omitted composition; harness correctness discovery, not established upstream defect.",
+  "vs_placebo_status": "Source surveyed2.0.3 API371wrap; plugin not built/executed in this bounded probe. Direct reviewedplanlibplacebo API374 tested separately.",
+  "tested_probe_source_sha256": "99e6f44bdab258844928264b893a918c40e313da70eb0adee7057b6593033310",
+  "tested_probe_binary_sha256": "466b31e199c4deebb2ac463fda04542b55d800f05b553db6a24d8da298966432",
+  "review_fixes": [
+    "finite BL/EL/RGBA output/alpha required",
+    "nonstandard or overflowed JSON numbers rejected",
+    "shifted RGB48 compared against exact shifted reference",
+    "explicit new reference destination; new scratch replay only"
+  ]
+}

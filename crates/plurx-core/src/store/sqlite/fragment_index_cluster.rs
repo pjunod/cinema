@@ -815,12 +815,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
-    async fn claim_analysis_request_compatible(
+    async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
         pipeline_version: Option<&str>,
         now_ms: i64,
         lease_expires_ms: i64,
+        viewer_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -833,6 +834,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let pipeline_version = pipeline_version.map(str::to_owned);
         self.with_conn(move |conn| {
             let capacity = super::super::fragment_index_cluster::analysis_source_capacity_clause("?3");
+            let viewer = if viewer_only {
+                super::super::fragment_index_cluster::analysis_live_viewer_clause("?3")
+            } else { "1".to_owned() };
             let max_attempts = configured_max_attempts(conn)?;
             let backoff_base_ms = configured_backoff_base_ms(conn)?;
             let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
@@ -885,7 +889,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                             AND component <> 'subtitle_source' AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
-                            AND {capacity}
+                            AND {capacity} AND {viewer}
                           ORDER BY CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
                             OR (component = 'fragment_index' AND EXISTS (
                                 SELECT 1 FROM background_job_waiters waiter
@@ -919,7 +923,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE request_id = ?4 AND fence = ?5
                     AND state = 'queued' AND not_before_ms <= ?3
                     AND (?6 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?6)
-                    AND {capacity}"),
+                    AND {capacity} AND {viewer}"),
                 params![
                     node_id,
                     lease_expires_ms,
@@ -2325,6 +2329,102 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
+    async fn cluster_fragment_index_availability(
+        &self,
+        node_id: &str,
+        probes: &[crate::store::ClusterIndexAvailabilityProbe],
+    ) -> Result<Vec<bool>, StoreError> {
+        use crate::store::fragment_index_cluster::{
+            check_cluster_index_availability_batch, cluster_index_availability_answers,
+            cluster_index_availability_keys,
+        };
+        check_cluster_index_availability_batch(probes)?;
+        if probes.is_empty() {
+            return Ok(Vec::new());
+        }
+        crate::store::record_http_cluster_index_availability_call();
+        let node_id = node_id.to_owned();
+        let probes = probes.to_vec();
+        self.with_read(move |conn| {
+            let file_ids: Vec<i64> = probes.iter().map(|probe| probe.file_id).collect();
+            let versions: Vec<&str> = probes
+                .iter()
+                .map(|probe| probe.object_version.as_str())
+                .collect();
+            let file_ids = serde_json::to_string(&file_ids)
+                .map_err(|error| StoreError::Task(error.to_string()))?;
+            let versions = serde_json::to_string(&versions)
+                .map_err(|error| StoreError::Task(error.to_string()))?;
+            let attested = conn
+                .prepare(
+                    "SELECT node_id, file_id, object_version, source_size, source_mtime,
+                            source_sha256, observed_at_ms
+                       FROM cluster_fragment_index_sources
+                      WHERE node_id = ?1
+                        AND file_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?2))
+                        AND object_version IN (SELECT value FROM json_each(?3))",
+                )?
+                .query_map(params![node_id, file_ids, versions], |row| {
+                    Ok(FragmentIndexSourceObservation {
+                        node_id: row.get(0)?,
+                        file_id: row.get(1)?,
+                        object_version: row.get(2)?,
+                        source_size: row.get(3)?,
+                        source_mtime: row.get(4)?,
+                        source_sha256: row.get(5)?,
+                        observed_at_ms: row.get(6)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let keyed = cluster_index_availability_keys(&probes, &attested);
+            let keys: Vec<&str> = keyed
+                .iter()
+                .flatten()
+                .map(|(key, _)| key.as_str())
+                .collect();
+            if keys.is_empty() {
+                return Ok(vec![false; probes.len()]);
+            }
+            let keys = serde_json::to_string(&keys)
+                .map_err(|error| StoreError::Task(error.to_string()))?;
+            let artifacts = conn
+                .prepare(
+                    "SELECT k.value, a.cache_key, a.file_id, a.source_size, a.source_mtime,
+                            a.source_sha256, a.pipeline_sha256, a.blob_sha256, a.bytes,
+                            a.built_by_node_id, a.built_at_ms
+                       FROM json_each(?1) k
+                       JOIN cluster_fragment_index_artifacts a
+                         ON a.cache_key = COALESCE((
+                              SELECT h.generation_cache_key
+                                FROM cluster_fragment_index_heads h
+                               WHERE h.logical_cache_key = k.value
+                            ), k.value)",
+                )?
+                .query_map(params![keys], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        ClusterFragmentIndexArtifact {
+                            cache_key: row.get(1)?,
+                            file_id: row.get(2)?,
+                            source_size: row.get(3)?,
+                            source_mtime: row.get(4)?,
+                            source_sha256: row.get(5)?,
+                            pipeline_sha256: row.get(6)?,
+                            blob_sha256: row.get(7)?,
+                            bytes: row.get(8)?,
+                            built_by_node_id: row.get(9)?,
+                            built_at_ms: row.get(10)?,
+                        },
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(cluster_index_availability_answers(
+                &probes, &keyed, &artifacts,
+            ))
+        })
+        .await
+    }
+
     async fn enqueue_cluster_fragment_index(
         &self,
         job: &NewClusterFragmentIndexJob,
@@ -2807,7 +2907,7 @@ mod tests {
             pipeline_version: analysis.pipeline_version.clone(),
             video_identity: analysis.video_identity.clone(),
             target_node_id: analysis.target_node_id.clone(),
-            user_id,
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
             playback_id: "playback-one".to_owned(),
             now_ms: 1_001,
         };
@@ -2908,7 +3008,7 @@ mod tests {
             pipeline_version: request.pipeline_version.clone(),
             video_identity: request.video_identity.clone(),
             target_node_id: request.target_node_id.clone(),
-            user_id,
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
             playback_id: format!("viewer-{user_id}"),
             now_ms: 1_005,
         };

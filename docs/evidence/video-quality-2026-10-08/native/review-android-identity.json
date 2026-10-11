@@ -1,0 +1,215 @@
+{
+  "schema": 1,
+  "result": "All four corrected native cases passed; cleanup confirmation separately completed.",
+  "runtime": "Media3 1.10.1 / Android TV API36 arm64-v8a / swiftshader /2cores /2048MiB",
+  "harness_sha256": "944e1cc30575c297e4d5ea64a7409205430144ed00cd3c3658b34cdf84c8fbc7",
+  "apk_sha256": "fc2bfd696b2f1396a828bf184563da2f7886ec4b6cdd2af36e4461a7a55716da",
+  "identity_note": "Computed after run from unchanged source/APK inputs. Launcher constructed these identities before launch, but its final receipt write was skipped by the immediate post-exit ADB assertion; no unavailable pre/post identity comparison is claimed.",
+  "cases": [
+    {
+      "case": "animation-bf0",
+      "result": "pass",
+      "receipt": "review-android-animation-bf0.json",
+      "receipt_sha256": "4b5214926fcf5f1be01b8b8da0be934da425b614e2ee4d39345f199b1c976ab3",
+      "prior_receipt_absence_verified": true,
+      "phases": [
+        {
+          "phase": "start",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 76,
+          "successful_surface_copies": 75,
+          "distinct_pixel_fingerprints": 75,
+          "maximum_video_to_player_clock_seconds": 0.03666600000000009
+        },
+        {
+          "phase": "forward",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 76,
+          "successful_surface_copies": 75,
+          "distinct_pixel_fingerprints": 75,
+          "maximum_video_to_player_clock_seconds": 0.03566599999999909
+        },
+        {
+          "phase": "backward",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 75,
+          "successful_surface_copies": 71,
+          "distinct_pixel_fingerprints": 70,
+          "maximum_video_to_player_clock_seconds": 0.06200000000000028
+        },
+        {
+          "phase": "restart",
+          "result": "pass",
+          "initial_floor_exclusions": 3,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 76,
+          "successful_surface_copies": 75,
+          "distinct_pixel_fingerprints": 75,
+          "maximum_video_to_player_clock_seconds": 0.04733300000000007
+        }
+      ]
+    },
+    {
+      "case": "animation-bf2",
+      "result": "pass",
+      "receipt": "review-android-animation-bf2.json",
+      "receipt_sha256": "4af31e308ef3eb22ba950b97bcace36e8744423d44f093083f7c73388f77072f",
+      "prior_receipt_absence_verified": true,
+      "phases": [
+        {
+          "phase": "start",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 75,
+          "successful_surface_copies": 73,
+          "distinct_pixel_fingerprints": 73,
+          "maximum_video_to_player_clock_seconds": 0.159666
+        },
+        {
+          "phase": "forward",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 76,
+          "successful_surface_copies": 73,
+          "distinct_pixel_fingerprints": 73,
+          "maximum_video_to_player_clock_seconds": 0.057666000000001105
+        },
+        {
+          "phase": "backward",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 76,
+          "successful_surface_copies": 74,
+          "distinct_pixel_fingerprints": 74,
+          "maximum_video_to_player_clock_seconds": 0.02066699999999999
+        },
+        {
+          "phase": "restart",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 76,
+          "successful_surface_copies": 74,
+          "distinct_pixel_fingerprints": 74,
+          "maximum_video_to_player_clock_seconds": 0.048666000000000764
+        }
+      ]
+    },
+    {
+      "case": "live-action-bf0",
+      "result": "pass",
+      "receipt": "review-android-live-action-bf0.json",
+      "receipt_sha256": "fb65f0fc179adf6e0151f567796f60baccbcc780fcf38b9f4377cbf2ba88e730",
+      "prior_receipt_absence_verified": true,
+      "phases": [
+        {
+          "phase": "start",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 60,
+          "successful_surface_copies": 57,
+          "distinct_pixel_fingerprints": 57,
+          "maximum_video_to_player_clock_seconds": 0.05233299999999999
+        },
+        {
+          "phase": "forward",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 61,
+          "successful_surface_copies": 61,
+          "distinct_pixel_fingerprints": 61,
+          "maximum_video_to_player_clock_seconds": 0.026332999999999274
+        },
+        {
+          "phase": "backward",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 61,
+          "successful_surface_copies": 61,
+          "distinct_pixel_fingerprints": 61,
+          "maximum_video_to_player_clock_seconds": 0.02833299999999994
+        },
+        {
+          "phase": "restart",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 61,
+          "successful_surface_copies": 61,
+          "distinct_pixel_fingerprints": 61,
+          "maximum_video_to_player_clock_seconds": 0.014332999999998819
+        }
+      ]
+    },
+    {
+      "case": "live-action-bf2",
+      "result": "pass",
+      "receipt": "review-android-live-action-bf2.json",
+      "receipt_sha256": "05a901bbe05879b92dfe0a012a0e1ff201434e6cc7510e1e2af434148b098f33",
+      "prior_receipt_absence_verified": true,
+      "phases": [
+        {
+          "phase": "start",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 61,
+          "successful_surface_copies": 60,
+          "distinct_pixel_fingerprints": 60,
+          "maximum_video_to_player_clock_seconds": 0.020999999999999908
+        },
+        {
+          "phase": "forward",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 61,
+          "successful_surface_copies": 61,
+          "distinct_pixel_fingerprints": 61,
+          "maximum_video_to_player_clock_seconds": 0.019665999999999073
+        },
+        {
+          "phase": "backward",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 61,
+          "successful_surface_copies": 61,
+          "distinct_pixel_fingerprints": 61,
+          "maximum_video_to_player_clock_seconds": 0.01666600000000029
+        },
+        {
+          "phase": "restart",
+          "result": "pass",
+          "initial_floor_exclusions": 0,
+          "prior_epoch_callbacks": 0,
+          "frames_observed": 61,
+          "successful_surface_copies": 61,
+          "distinct_pixel_fingerprints": 61,
+          "maximum_video_to_player_clock_seconds": 0.024665999999999855
+        }
+      ]
+    }
+  ],
+  "launcher_exit_code": 1,
+  "launcher_failure": "After all four passing case receipts were written and the emulator child exited, immediate adb-devices absence assertion saw a residual transport registration. This is cleanup confirmation failure, not a media verdict.",
+  "cleanup_recovery": {
+    "bounded_serial_absence_check_seconds": 20,
+    "serial_absent": true,
+    "owned_avd_and_ini_removed": true,
+    "completed_unix": 1791516965.257612
+  },
+  "scope": "Target admission only before phase establishment; all later same-epoch timestamps reach reversal/clock checks. Unchanged250ms clock bound and moving Surface pixels. Historical receipts remain limited to admitted timestamps."
+}

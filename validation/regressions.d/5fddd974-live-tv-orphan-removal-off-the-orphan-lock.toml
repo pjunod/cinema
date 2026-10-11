@@ -21,5 +21,5 @@ with an error by SESSION_DRAIN_TIMEOUT (+100 ms), and a drain that wants none \
 to succeed at once. With the removal awaited inline under the orphan lock \
 again (the seam applied to that inline await) and the list taken without a \
 deadline, the retry pass never returns and the test fails at its first bound \
-(exit 101, run on nuc3). Runs in the local and hosted Rust gates.
+(exit 101, run on lab3). Runs in the local and hosted Rust gates.
 """

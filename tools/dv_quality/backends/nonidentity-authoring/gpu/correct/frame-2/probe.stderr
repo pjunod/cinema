@@ -1,0 +1,664 @@
+level4: Initialized libplacebo v7.374.0 (API v374)
+level5: No VkInstance provided, creating one...
+level5: Available instance version: 1.3.239
+level5: Spent 1.611 ms enumerating instance layers
+level5: Available layers:
+level5:     VK_LAYER_MESA_device_select (v1.3.211)
+level5:     VK_LAYER_MESA_overlay (v1.3.211)
+level5: Spent 8.452 ms enumerating instance extensions
+level5: Available instance extensions:
+level5:     VK_KHR_device_group_creation
+level5:     VK_KHR_external_fence_capabilities
+level5:     VK_KHR_external_memory_capabilities
+level5:     VK_KHR_external_semaphore_capabilities
+level5:     VK_KHR_get_physical_device_properties2
+level5:     VK_KHR_get_surface_capabilities2
+level5:     VK_KHR_surface
+level5:     VK_KHR_surface_protected_capabilities
+level5:     VK_KHR_wayland_surface
+level5:     VK_KHR_xcb_surface
+level5:     VK_KHR_xlib_surface
+level5:     VK_EXT_debug_report
+level5:     VK_EXT_debug_utils
+level5:     VK_KHR_portability_enumeration
+level4: Creating vulkan instance with extensions:
+level4:     VK_KHR_surface
+level4:     VK_KHR_get_surface_capabilities2
+level4:     VK_KHR_portability_enumeration
+level5: Spent 0.279 ms creating vulkan instance
+level4: Probing for vulkan devices:
+level5: Spent 0.424 ms enumerating physical devices
+level4:     GPU 0: llvmpipe (LLVM 15.0.6, 128 bits) v1.3.230 (software)
+level4:            uuid: 6D:65:73:61:32:32:2E:33:2E:36:00:00:00:00:00:00
+level4: Vulkan device properties:
+level4:     Device Name: llvmpipe (LLVM 15.0.6, 128 bits)
+level4:     Device ID: 10005:0
+level4:     Device UUID: 6D:65:73:61:32:32:2E:33:2E:36:00:00:00:00:00:00
+level4:     Driver version: 1
+level4:     API version: 1.3.230
+level4:     Driver ID: VK_DRIVER_ID_MESA_LLVMPIPE
+level4:     Driver name: llvmpipe
+level4:     Driver info: Mesa 22.3.6 (LLVM 15.0.6)
+level4:     Conformance version: 1.3.1.1
+level4:     Driver UUID: 6C:6C:76:6D:70:69:70:65:55:55:49:44:00:00:00:00
+level5: Queue families supported by device:
+level5:     0: flags 0x7 num 1
+level5: Using graphics queue 0
+level5: Spent 0.042 ms enumerating device extensions
+level5: Available device extensions:
+level5:     VK_KHR_8bit_storage
+level5:     VK_KHR_16bit_storage
+level5:     VK_KHR_bind_memory2
+level5:     VK_KHR_buffer_device_address
+level5:     VK_KHR_copy_commands2
+level5:     VK_KHR_create_renderpass2
+level5:     VK_KHR_dedicated_allocation
+level5:     VK_KHR_depth_stencil_resolve
+level5:     VK_KHR_descriptor_update_template
+level5:     VK_KHR_device_group
+level5:     VK_KHR_draw_indirect_count
+level5:     VK_KHR_driver_properties
+level5:     VK_KHR_dynamic_rendering
+level5:     VK_KHR_external_fence
+level5:     VK_KHR_external_memory
+level5:     VK_KHR_external_memory_fd
+level5:     VK_KHR_external_semaphore
+level5:     VK_KHR_format_feature_flags2
+level5:     VK_KHR_get_memory_requirements2
+level5:     VK_KHR_image_format_list
+level5:     VK_KHR_imageless_framebuffer
+level5:     VK_KHR_incremental_present
+level5:     VK_KHR_maintenance1
+level5:     VK_KHR_maintenance2
+level5:     VK_KHR_maintenance3
+level5:     VK_KHR_maintenance4
+level5:     VK_KHR_multiview
+level5:     VK_KHR_pipeline_library
+level5:     VK_KHR_push_descriptor
+level5:     VK_KHR_relaxed_block_layout
+level5:     VK_KHR_sampler_mirror_clamp_to_edge
+level5:     VK_KHR_separate_depth_stencil_layouts
+level5:     VK_KHR_shader_atomic_int64
+level5:     VK_KHR_shader_clock
+level5:     VK_KHR_shader_draw_parameters
+level5:     VK_KHR_shader_float16_int8
+level5:     VK_KHR_shader_float_controls
+level5:     VK_KHR_shader_integer_dot_product
+level5:     VK_KHR_shader_subgroup_extended_types
+level5:     VK_KHR_shader_terminate_invocation
+level5:     VK_KHR_spirv_1_4
+level5:     VK_KHR_storage_buffer_storage_class
+level5:     VK_KHR_swapchain
+level5:     VK_KHR_swapchain_mutable_format
+level5:     VK_KHR_synchronization2
+level5:     VK_KHR_timeline_semaphore
+level5:     VK_KHR_uniform_buffer_standard_layout
+level5:     VK_KHR_variable_pointers
+level5:     VK_KHR_vulkan_memory_model
+level5:     VK_KHR_zero_initialize_workgroup_memory
+level5:     VK_EXT_4444_formats
+level5:     VK_EXT_attachment_feedback_loop_layout
+level5:     VK_EXT_border_color_swizzle
+level5:     VK_EXT_calibrated_timestamps
+level5:     VK_EXT_color_write_enable
+level5:     VK_EXT_conditional_rendering
+level5:     VK_EXT_custom_border_color
+level5:     VK_EXT_depth_clip_control
+level5:     VK_EXT_depth_clip_enable
+level5:     VK_EXT_depth_range_unrestricted
+level5:     VK_EXT_extended_dynamic_state
+level5:     VK_EXT_extended_dynamic_state2
+level5:     VK_EXT_extended_dynamic_state3
+level5:     VK_EXT_external_memory_host
+level5:     VK_EXT_graphics_pipeline_library
+level5:     VK_EXT_host_query_reset
+level5:     VK_EXT_image_2d_view_of_3d
+level5:     VK_EXT_image_robustness
+level5:     VK_EXT_index_type_uint8
+level5:     VK_EXT_inline_uniform_block
+level5:     VK_EXT_line_rasterization
+level5:     VK_EXT_multi_draw
+level5:     VK_EXT_multisampled_render_to_single_sampled
+level5:     VK_EXT_non_seamless_cube_map
+level5:     VK_EXT_pipeline_creation_cache_control
+level5:     VK_EXT_pipeline_creation_feedback
+level5:     VK_EXT_post_depth_coverage
+level5:     VK_EXT_primitive_topology_list_restart
+level5:     VK_EXT_primitives_generated_query
+level5:     VK_EXT_private_data
+level5:     VK_EXT_provoking_vertex
+level5:     VK_EXT_rasterization_order_attachment_access
+level5:     VK_EXT_robustness2
+level5:     VK_EXT_sampler_filter_minmax
+level5:     VK_EXT_scalar_block_layout
+level5:     VK_EXT_separate_stencil_usage
+level5:     VK_EXT_shader_atomic_float
+level5:     VK_EXT_shader_atomic_float2
+level5:     VK_EXT_shader_demote_to_helper_invocation
+level5:     VK_EXT_shader_stencil_export
+level5:     VK_EXT_shader_subgroup_ballot
+level5:     VK_EXT_shader_subgroup_vote
+level5:     VK_EXT_shader_viewport_index_layer
+level5:     VK_EXT_subgroup_size_control
+level5:     VK_EXT_texel_buffer_alignment
+level5:     VK_EXT_transform_feedback
+level5:     VK_EXT_vertex_attribute_divisor
+level5:     VK_EXT_vertex_input_dynamic_state
+level5:     VK_ARM_rasterization_order_attachment_access
+level5:     VK_GOOGLE_decorate_string
+level5:     VK_GOOGLE_hlsl_functionality1
+level4: Creating vulkan device with extensions:
+level4:     VK_KHR_swapchain
+level4:     VK_KHR_push_descriptor
+level4:     VK_KHR_external_memory_fd
+level4:     VK_EXT_external_memory_host
+level5: Spent 2.687 ms creating vulkan device
+level4: Memory heaps supported by device:
+level4:     0: flags 0x1 size 2048M
+level5: Memory types supported by device:
+level5:     0: flags 0xf heap 0
+level4: Memory summary:     0 used     0 res     0 alloc, efficiency 100.00%, utilization 100.00%, max page:  128M
+level4: glslang version: 12.0.0
+level4: Initialized SPIR-V compiler 'glslang'
+level5: Handle type VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT (0x10) is not exportable
+level5: Handle type VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT (0x8) is not exportable
+level5: Handle type VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT (0x8) is not importable
+level5: Handle type VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT (0x10) is not exportable
+level5: Tex caps for VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT (0x8) unsupported: no DRM modifiers
+level5: Tex caps for VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT (0x8) unsupported: no DRM modifiers
+level5: Storable format 'bgra8' has no matching GLSL format qualifier but read/write without format is not supported.. disabling
+level5: Minimum texel alignment: 48
+level4: GPU information:
+level4:     GLSL version: 450 (vulkan)
+level4:       max_shmem_size:            32768
+level4:       max_group_threads:         1024
+level4:       max_group_size[0]:         1024
+level4:       max_group_size[1]:         1024
+level4:       max_group_size[2]:         1024
+level4:       subgroup_size:             4
+level4:       min_gather_offset:         -32
+level4:       max_gather_offset:         31
+level4:     Limits:
+level4:       thread_safe:               1
+level4:       callbacks:                 1
+level4:       max_buf_size:              2147483648
+level4:       max_ubo_size:              65536
+level4:       max_ssbo_size:             134217728
+level4:       max_vbo_size:              2147483648
+level4:       max_mapped_size:           2147483648
+level4:       max_buffer_texels:         134217728
+level4:       align_host_ptr:            4096
+level4:       host_cached:               1
+level4:       max_tex_1d_dim:            16384
+level4:       max_tex_2d_dim:            16384
+level4:       max_tex_3d_dim:            4096
+level4:       blittable_1d_3d:           1
+level4:       buf_transfer:              1
+level4:       align_tex_xfer_pitch:      128
+level4:       align_tex_xfer_offset:     128
+level4:       max_variable_comps:        0
+level4:       max_constants:             18446744073709551615
+level4:       max_pushc_size:            128
+level4:       align_vertex_stride:       1
+level4:       max_dispatch[0]:           65535
+level4:       max_dispatch[1]:           65535
+level4:       max_dispatch[2]:           65535
+level4:       fragment_queues:           1
+level4:       compute_queues:            1
+level4:     External API interop:
+level4:       UUID: 6D:65:73:61:32:32:2E:33:2E:36:00:00:00:00:00:00
+level4:       PCI: 0000:00:00:0
+level4:       buf export caps: 0x1
+level4:       buf import caps: 0x11
+level4:       tex export caps: 0x1
+level4:       tex import caps: 0x11
+level4:       sync export caps: 0x0
+level4:       sync import caps: 0x0
+level5: GPU texture formats:
+level5:     NAME                 TYPE   SIZE COMP CAPS         EMU DEPTH         HOST_BITS     GLSL_TYPE  GLSL_FMT   FOURCC
+level5:     r8                   UNORM  1    R    SsLRbBVutHWG n   {8  0  0  0 } {8  0  0  0 } float      r8         R8    
+level5:     rg8                  UNORM  2    RG   SsLRbBVutHWG n   {8  8  0  0 } {8  8  0  0 } vec2       rg8        GR88  
+level5:     rgba8                UNORM  4    RGBA SsLRbBVutHWG n   {8  8  8  8 } {8  8  8  8 } vec4       rgba8      AB24  
+level5:     rgb10a2              UNORM  4    RGBA SsLRbBVutHWG n   {10 10 10 2 } {10 10 10 2 } vec4       rgb10_a2   AB30  
+level5:     r16                  UNORM  2    R    SsLRbBVutHWG n   {16 0  0  0 } {16 0  0  0 } float      r16        R16   
+level5:     r16hf                FLOAT  2    R    SsLRbBVutHWG n   {16 0  0  0 } {16 0  0  0 } float      r16f             
+level5:     rg16                 UNORM  4    RG   SsLRbBVutHWG n   {16 16 0  0 } {16 16 0  0 } vec2       rg16       GR32  
+level5:     rg16hf               FLOAT  4    RG   SsLRbBVutHWG n   {16 16 0  0 } {16 16 0  0 } vec2       rg16f            
+level5:     rgba16               UNORM  8    RGBA SsLRbBVutHWG n   {16 16 16 16} {16 16 16 16} vec4       rgba16     AB48  
+level5:     rgba16hf             FLOAT  8    RGBA SsLRbBVutHWG n   {16 16 16 16} {16 16 16 16} vec4       rgba16f    AB4H  
+level5:     r32f                 FLOAT  4    R    SsLRbBVutHWG n   {32 0  0  0 } {32 0  0  0 } float      r32f             
+level5:     rg32f                FLOAT  8    RG   SsLRbBVutHWG n   {32 32 0  0 } {32 32 0  0 } vec2       rg32f            
+level5:     rgba32f              FLOAT  16   RGBA SsLRbBVutHWG n   {32 32 32 32} {32 32 32 32} vec4       rgba32f          
+level5:     r8s                  SNORM  1    R    SsLR-BVutHWG n   {8  0  0  0 } {8  0  0  0 } float      r8_snorm         
+level5:     rg8s                 SNORM  2    RG   SsLR-BVutHWG n   {8  8  0  0 } {8  8  0  0 } vec2       rg8_snorm        
+level5:     rgba8s               SNORM  4    RGBA SsLR-BVutHWG n   {8  8  8  8 } {8  8  8  8 } vec4       rgba8_snorm       
+level5:     r16s                 SNORM  2    R    SsLR-BVutHWG n   {16 0  0  0 } {16 0  0  0 } float      r16_snorm        
+level5:     rg16s                SNORM  4    RG   SsLR-BVutHWG n   {16 16 0  0 } {16 16 0  0 } vec2       rg16_snorm       
+level5:     rgba16s              SNORM  8    RGBA SsLR-BVutHWG n   {16 16 16 16} {16 16 16 16} vec4       rgba16_snorm       
+level5:     a1rgb5               UNORM  2    ARGB S-LRbBVu-H-G n   {1  5  5  5 } {1  5  5  5 } vec4                  BA15  
+level5:     a1bgr5               UNORM  2    ABGR S-LRbBVu-H-G n   {1  5  5  5 } {1  5  5  5 } vec4                  RA15  
+level5:     argb4                UNORM  2    ARGB S-LRbBVu-H-G n   {4  4  4  4 } {4  4  4  4 } vec4                  BA12  
+level5:     bgr5a1               UNORM  2    BGRA S-LRbBVu-H-G n   {5  5  5  1 } {5  5  5  1 } vec4                  AR15  
+level5:     bgr565               UNORM  2    BGR  S-LRbBVu-H-G n   {5  6  5  0 } {5  6  5  0 } vec3                  RG16  
+level5:     bgra8                UNORM  4    BGRA S-LRbBVu-H-G n   {8  8  8  8 } {8  8  8  8 } vec4                  AR24  
+level5:     rgb565               UNORM  2    RGB  S-LRb-Vu-H-G n   {5  6  5  0 } {5  6  5  0 } vec3                  BG16  
+level5:     bgr10a2              UNORM  4    BGRA S-LRb-Vu-H-G n   {10 10 10 2 } {10 10 10 2 } vec4                  AR30  
+level5:     rgb32f               FLOAT  12   RGB  S-LRb-Vu-H-G n   {32 32 32 0 } {32 32 32 0 } vec3                        
+level5:     r8i                  SINT   1    R    Ss-R-BVutHWG n   {8  0  0  0 } {8  0  0  0 } int        r8i              
+level5:     r8u                  UINT   1    R    Ss-R-BVutHWG n   {8  0  0  0 } {8  0  0  0 } uint       r8ui             
+level5:     rg8i                 SINT   2    RG   Ss-R-BVutHWG n   {8  8  0  0 } {8  8  0  0 } ivec2      rg8i             
+level5:     rg8u                 UINT   2    RG   Ss-R-BVutHWG n   {8  8  0  0 } {8  8  0  0 } uvec2      rg8ui            
+level5:     rgba8i               SINT   4    RGBA Ss-R-BVutHWG n   {8  8  8  8 } {8  8  8  8 } ivec4      rgba8i           
+level5:     rgba8u               UINT   4    RGBA Ss-R-BVutHWG n   {8  8  8  8 } {8  8  8  8 } uvec4      rgba8ui          
+level5:     rgb10a2u             UINT   4    RGBA Ss-R-BVutHWG n   {10 10 10 2 } {10 10 10 2 } uvec4      rgb10_a2ui       
+level5:     r16i                 SINT   2    R    Ss-R-BVutHWG n   {16 0  0  0 } {16 0  0  0 } int        r16i             
+level5:     r16u                 UINT   2    R    Ss-R-BVutHWG n   {16 0  0  0 } {16 0  0  0 } uint       r16ui            
+level5:     rg16i                SINT   4    RG   Ss-R-BVutHWG n   {16 16 0  0 } {16 16 0  0 } ivec2      rg16i            
+level5:     rg16u                UINT   4    RG   Ss-R-BVutHWG n   {16 16 0  0 } {16 16 0  0 } uvec2      rg16ui           
+level5:     rgba16i              SINT   8    RGBA Ss-R-BVutHWG n   {16 16 16 16} {16 16 16 16} ivec4      rgba16i          
+level5:     rgba16u              UINT   8    RGBA Ss-R-BVutHWG n   {16 16 16 16} {16 16 16 16} uvec4      rgba16ui         
+level5:     r32i                 SINT   4    R    Ss-R-BVutHWG n   {32 0  0  0 } {32 0  0  0 } int        r32i             
+level5:     r32u                 UINT   4    R    Ss-R-BVutHWG n   {32 0  0  0 } {32 0  0  0 } uint       r32ui            
+level5:     rg32i                SINT   8    RG   Ss-R-BVutHWG n   {32 32 0  0 } {32 32 0  0 } ivec2      rg32i            
+level5:     rg32u                UINT   8    RG   Ss-R-BVutHWG n   {32 32 0  0 } {32 32 0  0 } uvec2      rg32ui           
+level5:     rgba32i              SINT   16   RGBA Ss-R-BVutHWG n   {32 32 32 32} {32 32 32 32} ivec4      rgba32i          
+level5:     rgba32u              UINT   16   RGBA Ss-R-BVutHWG n   {32 32 32 32} {32 32 32 32} uvec4      rgba32ui         
+level5:     rgb10a2s             SNORM  4    RGBA S-LR--Vu-H-G n   {10 10 10 2 } {10 10 10 2 } vec4                        
+level5:     bgr10a2s             SNORM  4    BGRA S-LR--Vu-H-G n   {10 10 10 2 } {10 10 10 2 } vec4                        
+level5:     bgra8i               SINT   4    BGRA S--R-BVu-H-G n   {8  8  8  8 } {8  8  8  8 } ivec4                       
+level5:     bgra8u               UINT   4    BGRA S--R-BVu-H-G n   {8  8  8  8 } {8  8  8  8 } uvec4                       
+level5:     bgr10a2u             UINT   4    BGRA S--R-BVu-H-G n   {10 10 10 2 } {10 10 10 2 } uvec4                       
+level5:     rgb32i               SINT   12   RGB  S--R--Vu-H-G n   {32 32 32 0 } {32 32 32 0 } ivec3                       
+level5:     rgb32u               UINT   12   RGB  S--R--Vu-H-G n   {32 32 32 0 } {32 32 32 0 } uvec3                       
+level5:     gr4                  UNORM  1    GR   ---------H-- n   {4  4  0  0 } {4  4  0  0 }                             
+level5:     abgr4                UNORM  2    ABGR ---------H-- n   {4  4  4  4 } {4  4  4  4 }                       RA12  
+level5:     rgb8i                SINT   3    RGB  ------Vu-H-- n   {8  8  8  0 } {8  8  8  0 } ivec3                       
+level5:     rgb8s                SNORM  3    RGB  ------Vu-H-- n   {8  8  8  0 } {8  8  8  0 } vec3                        
+level5:     rgb8u                UINT   3    RGB  ------Vu-H-- n   {8  8  8  0 } {8  8  8  0 } uvec3                       
+level5:     bgr8                 UNORM  3    BGR  ------Vu-H-- n   {8  8  8  0 } {8  8  8  0 } vec3                  RG24  
+level5:     bgr8i                SINT   3    BGR  ------Vu-H-- n   {8  8  8  0 } {8  8  8  0 } ivec3                       
+level5:     bgr8u                UINT   3    BGR  ------Vu-H-- n   {8  8  8  0 } {8  8  8  0 } uvec3                       
+level5:     rgb10a2i             SINT   4    RGBA ---------H-- n   {10 10 10 2 } {10 10 10 2 }                             
+level5:     bgr10a2i             SINT   4    BGRA ---------H-- n   {10 10 10 2 } {10 10 10 2 }                             
+level5:     rx10                 UNORM  2    R    ---------H-- n   {10 0  0  0 } {16 0  0  0 }                             
+level5:     rxgx10               UNORM  4    RG   ---------H-- n   {10 10 0  0 } {16 16 0  0 }                             
+level5:     rx12                 UNORM  2    R    ---------H-- n   {12 0  0  0 } {16 0  0  0 }                             
+level5:     rxgx12               UNORM  4    RG   ---------H-- n   {12 12 0  0 } {16 16 0  0 }                             
+level5:     rgb16hf              FLOAT  6    RGB  ------Vu-H-- n   {16 16 16 0 } {16 16 16 0 } vec3                        
+level5:     rgb16i               SINT   6    RGB  ------Vu-H-- n   {16 16 16 0 } {16 16 16 0 } ivec3                       
+level5:     rgb16s               SNORM  6    RGB  ------Vu-H-- n   {16 16 16 0 } {16 16 16 0 } vec3                        
+level5:     rgb16u               UINT   6    RGB  ------Vu-H-- n   {16 16 16 0 } {16 16 16 0 } uvec3                       
+level5:     rgb8                 UNORM  3    RGB  SsLRbBVu-HWG y   {8  8  8  0 } {8  8  8  0 } vec3       rgba8      BG24  
+level5:     rgb16                UNORM  6    RGB  SsLRbBVu-HWG y   {16 16 16 0 } {16 16 16 0 } vec3       rgba16           
+level5:     r16f                 FLOAT  4    R    SsLRbB---HWG y   {16 0  0  0 } {32 0  0  0 }            r16f             
+level5:     rg16f                FLOAT  8    RG   SsLRbB---HWG y   {16 16 0  0 } {32 32 0  0 }            rg16f            
+level5:     rgba16f              FLOAT  16   RGBA SsLRbB---HWG y   {16 16 16 16} {32 32 32 32}            rgba16f          
+level5:     rgb16f               FLOAT  12   RGB  ---------H-- y   {16 16 16 0 } {32 32 32 0 }                             
+level5:     g8_b8_r8_420         UNORM  0         ------------ n   {8  8  8  0 } {0  0  0  0 }                       YU12  
+level5:     g8_b8_r8_422         UNORM  0         ------------ n   {8  8  8  0 } {0  0  0  0 }                       YU16  
+level5:     g8_b8_r8_444         UNORM  0         ------------ n   {8  8  8  0 } {0  0  0  0 }                       YU24  
+level5:     g8_br8_420           UNORM  0         ------------ n   {8  8  8  0 } {0  0  0  0 }                       NV12  
+level5:     g8_br8_422           UNORM  0         ------------ n   {8  8  8  0 } {0  0  0  0 }                       NV16  
+level5:     g8_br8_444           UNORM  0         ------------ n   {8  8  8  0 } {0  0  0  0 }                       NV24  
+level5:     gx10_bx10_rx10_420   UNORM  0         ------------ n   {10 10 10 0 } {0  0  0  0 }                             
+level5:     gx10_bx10_rx10_422   UNORM  0         ------------ n   {10 10 10 0 } {0  0  0  0 }                             
+level5:     gx10_bx10_rx10_444   UNORM  0         ------------ n   {10 10 10 0 } {0  0  0  0 }                       Q410  
+level5:     gx10_bxrx10_420      UNORM  0         ------------ n   {10 10 10 0 } {0  0  0  0 }                       P010  
+level5:     gx10_bxrx10_422      UNORM  0         ------------ n   {10 10 10 0 } {0  0  0  0 }                       P210  
+level5:     gx10_bxrx10_444      UNORM  0         ------------ n   {10 10 10 0 } {0  0  0  0 }                             
+level5:     gx12_bx12_rx12_420   UNORM  0         ------------ n   {12 12 12 0 } {0  0  0  0 }                             
+level5:     gx12_bx12_rx12_422   UNORM  0         ------------ n   {12 12 12 0 } {0  0  0  0 }                             
+level5:     gx12_bx12_rx12_444   UNORM  0         ------------ n   {12 12 12 0 } {0  0  0  0 }                             
+level5:     gx12_bxrx12_420      UNORM  0         ------------ n   {12 12 12 0 } {0  0  0  0 }                       P012  
+level5:     gx12_bxrx12_422      UNORM  0         ------------ n   {12 12 12 0 } {0  0  0  0 }                             
+level5:     gx12_bxrx12_444      UNORM  0         ------------ n   {12 12 12 0 } {0  0  0  0 }                             
+level5:     g16_b16_r16_420      UNORM  0         ------------ n   {16 16 16 0 } {0  0  0  0 }                             
+level5:     g16_b16_r16_422      UNORM  0         ------------ n   {16 16 16 0 } {0  0  0  0 }                             
+level5:     g16_b16_r16_444      UNORM  0         ------------ n   {16 16 16 0 } {0  0  0  0 }                             
+level5:     g16_br16_420         UNORM  0         ------------ n   {16 16 16 0 } {0  0  0  0 }                       P016  
+level5:     g16_br16_422         UNORM  0         ------------ n   {16 16 16 0 } {0  0  0  0 }                             
+level5:     g16_br16_444         UNORM  0         ------------ n   {16 16 16 0 } {0  0  0  0 }                             
+level5: Allocating 262144 memory of type 0xf (id 0) in heap 0: /work/p81_nonidentity_probe.c:260
+level5: Memory types supported by device:
+level5:     0: flags 0xf heap 0
+level5: Spent 0.047 ms allocating slab
+level5: Allocating 196992 memory of type 0xf (id 0) in heap 0: ../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/gpu/utils.c:576
+level5: Memory types supported by device:
+level5:     0: flags 0xf heap 0
+level5: Spent 0.038 ms allocating slab
+level5: vertex shader source:
+level5: [  1] #version 450
+level5: [  2] #extension GL_KHR_shader_subgroup_basic : enable 
+level5: [  3] #extension GL_KHR_shader_subgroup_vote : enable 
+level5: [  4] #extension GL_KHR_shader_subgroup_arithmetic : enable 
+level5: [  5] #extension GL_KHR_shader_subgroup_ballot : enable 
+level5: [  6] #extension GL_KHR_shader_subgroup_shuffle : enable 
+level5: [  7] #extension GL_KHR_shader_subgroup_clustered : enable 
+level5: [  8] #extension GL_KHR_shader_subgroup_quad : enable 
+level5: [  9] #extension GL_ARB_uniform_buffer_object : enable
+level5: [ 10] #extension GL_ARB_texture_gather : enable
+level5: [ 11] #define PRECISE precise 
+level5: [ 12] layout(std430, push_constant) uniform PushC {
+level5: [ 13]     layout(offset=0) vec4 _6;
+level5: [ 14]     layout(offset=16) float _7;
+level5: [ 15]     layout(offset=20) float _8;
+level5: [ 16]     layout(offset=32) vec4 _9;
+level5: [ 17]     layout(offset=48) float _a;
+level5: [ 18]     layout(offset=52) float _b;
+level5: [ 19]     layout(offset=64) vec4 _c;
+level5: [ 20]     layout(offset=80) float _d;
+level5: [ 21]     layout(offset=84) float _e;
+level5: [ 22]     layout(offset=96) vec3 _10;
+level5: [ 23] };
+level5: [ 24] layout(constant_id=0) const float _4 = 1; 
+level5: [ 25] layout(constant_id=1) const float _5 = 1; 
+level5: [ 26] layout(binding=0) uniform  sampler2D _2;
+level5: [ 27] layout(std140, binding=1) uniform _13 {
+level5: [ 28]     layout(offset=0) mat3 _f;
+level5: [ 29]     layout(offset=48) mat3 _11;
+level5: [ 30] };
+level5: [ 31] layout(location=0) in vec2 _14;
+level5: [ 32] layout(location=0) out vec2 _3;
+level5: [ 33] layout(location=1) in vec2 _15;
+level5: [ 34] void main() {
+level5: [ 35] _3 = _14;
+level5: [ 36] vec2 va_pos = _15; 
+level5: [ 37] gl_Position = vec4(va_pos, 0.0, 1.0); 
+level5: [ 38] }
+level5: fragment shader source:
+level5: [  1] #version 450
+level5: [  2] #extension GL_KHR_shader_subgroup_basic : enable 
+level5: [  3] #extension GL_KHR_shader_subgroup_vote : enable 
+level5: [  4] #extension GL_KHR_shader_subgroup_arithmetic : enable 
+level5: [  5] #extension GL_KHR_shader_subgroup_ballot : enable 
+level5: [  6] #extension GL_KHR_shader_subgroup_shuffle : enable 
+level5: [  7] #extension GL_KHR_shader_subgroup_clustered : enable 
+level5: [  8] #extension GL_KHR_shader_subgroup_quad : enable 
+level5: [  9] #extension GL_ARB_uniform_buffer_object : enable
+level5: [ 10] #extension GL_ARB_texture_gather : enable
+level5: [ 11] #define PRECISE precise 
+level5: [ 12] layout(std430, push_constant) uniform PushC {
+level5: [ 13]     layout(offset=0) vec4 _6;
+level5: [ 14]     layout(offset=16) float _7;
+level5: [ 15]     layout(offset=20) float _8;
+level5: [ 16]     layout(offset=32) vec4 _9;
+level5: [ 17]     layout(offset=48) float _a;
+level5: [ 18]     layout(offset=52) float _b;
+level5: [ 19]     layout(offset=64) vec4 _c;
+level5: [ 20]     layout(offset=80) float _d;
+level5: [ 21]     layout(offset=84) float _e;
+level5: [ 22]     layout(offset=96) vec3 _10;
+level5: [ 23] };
+level5: [ 24] layout(constant_id=0) const float _4 = 1; 
+level5: [ 25] layout(constant_id=1) const float _5 = 1; 
+level5: [ 26] layout(binding=0) uniform  sampler2D _2;
+level5: [ 27] layout(std140, binding=1) uniform _13 {
+level5: [ 28]     layout(offset=0) mat3 _f;
+level5: [ 29]     layout(offset=48) mat3 _11;
+level5: [ 30] };
+level5: [ 31] layout(location=0) in vec2 _3;
+level5: [ 32] layout(location=0) out vec4 out_color;
+level5: [ 33] 
+level5: [ 34] vec4 _1() {
+level5: [ 35] // pl_shader_sample_direct                                  
+level5: [ 36] vec4 color = vec4(_4) * vec4(textureLod(_2, _3, 0.0));   
+level5: [ 37] // pl_shader_decode_color 
+level5: [ 38] { 
+level5: [ 39] color.rgb *= vec3(_5); 
+level5: [ 40] // pl_shader_reshape                  
+level5: [ 41] {                                     
+level5: [ 42] vec3 sig;                             
+level5: [ 43] vec4 coeffs;                          
+level5: [ 44] float s;                              
+level5: [ 45] sig = clamp(color.rgb, 0.0, 1.0);     
+level5: [ 46] s = sig[0]; 
+level5: [ 47] coeffs = _6; 
+level5: [ 48] s = (coeffs.z * s + coeffs.y) * s + coeffs.x; 
+level5: [ 49] color[0] = clamp(s, _7, _8); 
+level5: [ 50] s = sig[1]; 
+level5: [ 51] coeffs = _9; 
+level5: [ 52] s = (coeffs.z * s + coeffs.y) * s + coeffs.x; 
+level5: [ 53] color[1] = clamp(s, _a, _b); 
+level5: [ 54] s = sig[2]; 
+level5: [ 55] coeffs = _c; 
+level5: [ 56] s = (coeffs.z * s + coeffs.y) * s + coeffs.x; 
+level5: [ 57] color[2] = clamp(s, _d, _e); 
+level5: [ 58] } 
+level5: [ 59] color.rgb = _f * color.rgb + _10; 
+level5: [ 60] color.rgb = pow(max(color.rgb, 0.0), vec3(1.0/78.84375));   
+level5: [ 61] color.rgb = max(color.rgb - vec3(0.8359375), 0.0)            
+level5: [ 62]              / (vec3(18.8515625) - vec3(18.6875) * color.rgb);     
+level5: [ 63] color.rgb = pow(color.rgb, vec3(1.0/0.1593017578125));             
+level5: [ 64] color.rgb = _11 * color.rgb; 
+level5: [ 65] color.rgb = pow(max(color.rgb, 0.0), vec3(0.1593017578125));       
+level5: [ 66] color.rgb = (vec3(0.8359375) + vec3(18.8515625) * color.rgb)         
+level5: [ 67]              / (vec3(1.0) + vec3(18.6875) * color.rgb);    
+level5: [ 68] color.rgb = pow(color.rgb, vec3(78.84375));                 
+level5: [ 69] }
+level5: [ 70] return color;
+level5: [ 71] }
+level5: [ 72] 
+level5: [ 73] void main() {
+level5: [ 74] out_color = _1();
+level5: [ 75] }
+level5: Specialization constant values:
+level5:   constant_id=0: 1.000000
+level5:   constant_id=1: 1.000000
+level4: Spent 44.667 ms translating SPIR-V
+level5: Spent 2.606 ms translating SPIR-V
+level5: Spent 0.019 ms compiling shader
+level5: Spent 0.525 ms creating pipeline
+level5: Pass statistics: size 0, SPIR-V: vert 0 frag 0 comp 0
+level5: Allocating 261888 memory of type 0xf (id 0) in heap 0: ../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/dispatch.c:949
+level5: Memory types supported by device:
+level5:     0: flags 0xf heap 0
+level5: Spent 0.060 ms allocating slab
+level5: Allocating 261888 memory of type 0xf (id 0) in heap 0: ../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/gpu/utils.c:1175
+level5: Memory types supported by device:
+level5:     0: flags 0xf heap 0
+level5: Spent 0.049 ms allocating slab
+level5: Imported host pointer is not page-aligned. This should normally be fine on most platforms, but may cause issues in some rare circumstances.
+level5: Imported object offset 2896 conflicts with alignment 64!
+level5:   for malloc: ../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/gpu/utils.c:631
+level5: Allocating 196992 memory of type 0xf (id 0) in heap 0: ../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/gpu/utils.c:645
+level5: Memory types supported by device:
+level5:     0: flags 0xf heap 0
+level5: Spent 0.100 ms allocating slab
+level5: vertex shader source:
+level5: [  1] #version 450
+level5: [  2] #extension GL_KHR_shader_subgroup_basic : enable 
+level5: [  3] #extension GL_KHR_shader_subgroup_vote : enable 
+level5: [  4] #extension GL_KHR_shader_subgroup_arithmetic : enable 
+level5: [  5] #extension GL_KHR_shader_subgroup_ballot : enable 
+level5: [  6] #extension GL_KHR_shader_subgroup_shuffle : enable 
+level5: [  7] #extension GL_KHR_shader_subgroup_clustered : enable 
+level5: [  8] #extension GL_KHR_shader_subgroup_quad : enable 
+level5: [  9] #extension GL_ARB_uniform_buffer_object : enable
+level5: [ 10] #extension GL_ARB_texture_gather : enable
+level5: [ 11] #define PRECISE precise 
+level5: [ 12] layout(std430, push_constant) uniform PushC {
+level5: [ 13]     layout(offset=0) vec4 _6;
+level5: [ 14]     layout(offset=16) float _7;
+level5: [ 15]     layout(offset=20) float _8;
+level5: [ 16]     layout(offset=32) vec4 _9;
+level5: [ 17]     layout(offset=48) float _a;
+level5: [ 18]     layout(offset=52) float _b;
+level5: [ 19]     layout(offset=64) vec4 _c;
+level5: [ 20]     layout(offset=80) float _d;
+level5: [ 21]     layout(offset=84) float _e;
+level5: [ 22]     layout(offset=96) vec3 _10;
+level5: [ 23] };
+level5: [ 24] layout(constant_id=0) const float _2 = 1; 
+level5: [ 25] layout(constant_id=1) const float _3 = 1; 
+level5: [ 26] layout(constant_id=2) const float _8004 = 1; 
+level5: [ 27] layout(constant_id=3) const float _4 = 1; 
+level5: [ 28] layout(constant_id=4) const float _5 = 1; 
+level5: [ 29] layout(binding=0) uniform  sampler2D _8002;
+level5: [ 30] layout(std140, binding=1) uniform _14 {
+level5: [ 31]     layout(offset=0) mat3 _f;
+level5: [ 32]     layout(offset=48) mat3 _11;
+level5: [ 33] };
+level5: [ 34] layout(location=0) in vec2 _15;
+level5: [ 35] layout(location=0) out vec2 _8003;
+level5: [ 36] layout(location=1) in vec2 _16;
+level5: [ 37] void main() {
+level5: [ 38] _8003 = _15;
+level5: [ 39] vec2 va_pos = _16; 
+level5: [ 40] gl_Position = vec4(va_pos, 0.0, 1.0); 
+level5: [ 41] }
+level5: fragment shader source:
+level5: [  1] #version 450
+level5: [  2] #extension GL_KHR_shader_subgroup_basic : enable 
+level5: [  3] #extension GL_KHR_shader_subgroup_vote : enable 
+level5: [  4] #extension GL_KHR_shader_subgroup_arithmetic : enable 
+level5: [  5] #extension GL_KHR_shader_subgroup_ballot : enable 
+level5: [  6] #extension GL_KHR_shader_subgroup_shuffle : enable 
+level5: [  7] #extension GL_KHR_shader_subgroup_clustered : enable 
+level5: [  8] #extension GL_KHR_shader_subgroup_quad : enable 
+level5: [  9] #extension GL_ARB_uniform_buffer_object : enable
+level5: [ 10] #extension GL_ARB_texture_gather : enable
+level5: [ 11] #define PRECISE precise 
+level5: [ 12] layout(std430, push_constant) uniform PushC {
+level5: [ 13]     layout(offset=0) vec4 _6;
+level5: [ 14]     layout(offset=16) float _7;
+level5: [ 15]     layout(offset=20) float _8;
+level5: [ 16]     layout(offset=32) vec4 _9;
+level5: [ 17]     layout(offset=48) float _a;
+level5: [ 18]     layout(offset=52) float _b;
+level5: [ 19]     layout(offset=64) vec4 _c;
+level5: [ 20]     layout(offset=80) float _d;
+level5: [ 21]     layout(offset=84) float _e;
+level5: [ 22]     layout(offset=96) vec3 _10;
+level5: [ 23] };
+level5: [ 24] layout(constant_id=0) const float _2 = 1; 
+level5: [ 25] layout(constant_id=1) const float _3 = 1; 
+level5: [ 26] layout(constant_id=2) const float _8004 = 1; 
+level5: [ 27] layout(constant_id=3) const float _4 = 1; 
+level5: [ 28] layout(constant_id=4) const float _5 = 1; 
+level5: [ 29] layout(binding=0) uniform  sampler2D _8002;
+level5: [ 30] layout(std140, binding=1) uniform _14 {
+level5: [ 31]     layout(offset=0) mat3 _f;
+level5: [ 32]     layout(offset=48) mat3 _11;
+level5: [ 33] };
+level5: [ 34] layout(location=0) in vec2 _8003;
+level5: [ 35] layout(location=0) out vec4 out_color;
+level5: [ 36] 
+level5: [ 37] vec4 _8001() {
+level5: [ 38] // pl_shader_sample_direct                                  
+level5: [ 39] vec4 color = vec4(_8004) * vec4(textureLod(_8002, _8003, 0.0));   
+level5: [ 40] return color;
+level5: [ 41] }
+level5: [ 42] 
+level5: [ 43] vec4 _1() {
+level5: [ 44] vec4 color = vec4(_2, vec2(_3), 1.0);   
+level5: [ 45] // pass_read_image                        
+level5: [ 46] {                                         
+level5: [ 47] vec4 tmp;                                 
+level5: [ 48] tmp = vec4(_4) * _8001(); 
+level5: [ 49] color[0] = tmp[0];
+level5: [ 50] color[1] = tmp[1];
+level5: [ 51] color[2] = tmp[2];
+level5: [ 52] }
+level5: [ 53] // pl_shader_decode_color 
+level5: [ 54] { 
+level5: [ 55] color.rgb *= vec3(_5); 
+level5: [ 56] // pl_shader_reshape                  
+level5: [ 57] {                                     
+level5: [ 58] vec3 sig;                             
+level5: [ 59] vec4 coeffs;                          
+level5: [ 60] float s;                              
+level5: [ 61] sig = clamp(color.rgb, 0.0, 1.0);     
+level5: [ 62] s = sig[0]; 
+level5: [ 63] coeffs = _6; 
+level5: [ 64] s = (coeffs.z * s + coeffs.y) * s + coeffs.x; 
+level5: [ 65] color[0] = clamp(s, _7, _8); 
+level5: [ 66] s = sig[1]; 
+level5: [ 67] coeffs = _9; 
+level5: [ 68] s = (coeffs.z * s + coeffs.y) * s + coeffs.x; 
+level5: [ 69] color[1] = clamp(s, _a, _b); 
+level5: [ 70] s = sig[2]; 
+level5: [ 71] coeffs = _c; 
+level5: [ 72] s = (coeffs.z * s + coeffs.y) * s + coeffs.x; 
+level5: [ 73] color[2] = clamp(s, _d, _e); 
+level5: [ 74] } 
+level5: [ 75] color.rgb = _f * color.rgb + _10; 
+level5: [ 76] color.rgb = pow(max(color.rgb, 0.0), vec3(1.0/78.84375));   
+level5: [ 77] color.rgb = max(color.rgb - vec3(0.8359375), 0.0)            
+level5: [ 78]              / (vec3(18.8515625) - vec3(18.6875) * color.rgb);     
+level5: [ 79] color.rgb = pow(color.rgb, vec3(1.0/0.1593017578125));             
+level5: [ 80] color.rgb = _11 * color.rgb; 
+level5: [ 81] color.rgb = pow(max(color.rgb, 0.0), vec3(0.1593017578125));       
+level5: [ 82] color.rgb = (vec3(0.8359375) + vec3(18.8515625) * color.rgb)         
+level5: [ 83]              / (vec3(1.0) + vec3(18.6875) * color.rgb);    
+level5: [ 84] color.rgb = pow(color.rgb, vec3(78.84375));                 
+level5: [ 85] }
+level5: [ 86] // pl_shader_encode_color 
+level5: [ 87] { 
+level5: [ 88] }
+level5: [ 89] vec4 _12 = color;                 
+level5: [ 90] color = vec4(0.0, 0.0, 0.0, 1.0); 
+level5: [ 91] color[0] = _12[0]; 
+level5: [ 92] color[1] = _12[1]; 
+level5: [ 93] color[2] = _12[2]; 
+level5: [ 94] return color;
+level5: [ 95] }
+level5: [ 96] 
+level5: [ 97] void main() {
+level5: [ 98] out_color = _1();
+level5: [ 99] }
+level5: Specialization constant values:
+level5:   constant_id=0: 0.000000
+level5:   constant_id=1: 0.500489
+level5:   constant_id=2: 1.000000
+level5:   constant_id=3: 1.000000
+level5:   constant_id=4: 1.000000
+level5: Spent 0.951 ms translating SPIR-V
+level5: Spent 2.585 ms translating SPIR-V
+level5: Spent 0.018 ms compiling shader
+level5: Spent 0.463 ms creating pipeline
+level5: Pass statistics: size 0, SPIR-V: vert 0 frag 0 comp 0
+level5: Imported object offset 2896 conflicts with alignment 64!
+level5:   for malloc: ../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/gpu/utils.c:631
+level5: Waiting for remaining commands...
+level5: Memory heaps supported by device:
+level5:     0: flags 0x1 size 2048M
+level5: Memory types supported by device:
+level5:     0: flags 0xf heap 0
+level5: Memory pool 0:
+level5:     Compatible types: 0x1
+level5:     Optimal flags: 0x1
+level5:     Slab  0:        f x   64K:     0 used     0 res  256K alloc from heap 0, efficiency 100.00%  [/work/p81_nonidentity_probe.c:268]
+level5:     Pool summary:     0 used     0 res  256K alloc, efficiency 100.00%, utilization 0.00%
+level5: Memory pool 1:
+level5:     Compatible types: 0xffffffff
+level5:     Optimal flags: 0x3
+level5:     Buffer flags: 0x3
+level5:     Slab  0:        7 x   64K:     0 used     0 res  192K alloc from heap 0, efficiency 100.00%  [../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/gpu/utils.c:576]
+level5:     Pool summary:     0 used     0 res  192K alloc, efficiency 100.00%, utilization 0.00%
+level5: Memory pool 2:
+level5:     Compatible types: 0xffffffff
+level5:     Required flags: 0x1
+level5:     Optimal flags: 0x2
+level5:     Buffer flags: 0x13
+level5:     Slab  0: 3fffffffffffffff x  4224:     0 used     0 res  255K alloc from heap 0, efficiency 100.00%  [../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/dispatch.c:949]
+level5:     Pool summary:     0 used     0 res  255K alloc, efficiency 100.00%, utilization 0.00%
+level5: Memory pool 3:
+level5:     Compatible types: 0xffffffff
+level5:     Required flags: 0x1
+level5:     Optimal flags: 0x2
+level5:     Buffer flags: 0xc3
+level5:     Slab  0: 3fffffffffffffff x  4224:     0 used     0 res  255K alloc from heap 0, efficiency 100.00%  [../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/gpu/utils.c:1175]
+level5:     Pool summary:     0 used     0 res  255K alloc, efficiency 100.00%, utilization 0.00%
+level5: Memory pool 4:
+level5:     Compatible types: 0xffffffff
+level5:     Required flags: 0x2
+level5:     Optimal flags: 0x8
+level5:     Buffer flags: 0x3
+level5:     Slab  0:        7 x   64K:     0 used     0 res  192K alloc from heap 0, efficiency 100.00%  [../libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/gpu/utils.c:645]
+level5:     Pool summary:     0 used     0 res  192K alloc, efficiency 100.00%, utilization 0.00%
+level5: Memory summary:     0 used     0 res 1152K alloc, efficiency 100.00%, utilization 0.00%, max page:  128M
+level5: Freeing slab of size  256K
+level5: Freeing slab of size  192K
+level5: Freeing slab of size  255K
+level5: Freeing slab of size  255K
+level5: Freeing slab of size  192K

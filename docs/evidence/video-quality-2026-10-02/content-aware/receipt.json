@@ -1,0 +1,106 @@
+{
+  "deadline_negative_control": {
+    "budget_seconds": 0.01,
+    "qualities": [
+      23
+    ]
+  },
+  "fixture_filters": {
+    "easy": "color=c=0x303060:s=320x180:r=24:d=6",
+    "motion": "testsrc2=s=320x180:r=24:d=6"
+  },
+  "fixture_output_args": [
+    "-vf",
+    "setsar=1,setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+    "-c:v",
+    "libx264",
+    "-crf",
+    "0",
+    "-threads",
+    "1"
+  ],
+  "fixture_scope": "generated 320x180 24fps six-second BT.709 H.264 lossless controls; three one-second windows; not representative title acceptance",
+  "host": "arm64",
+  "invocation_options": {
+    "bitrate_kbps": 500,
+    "budget_seconds": 120,
+    "height": 180,
+    "min_vmaf": 90,
+    "qualities": [
+      18,
+      23,
+      28
+    ],
+    "scratch_bytes": 104857600,
+    "threads": 1,
+    "window_seconds": 1,
+    "windows": 3
+  },
+  "kind": "content-aware-synthetic-smoke",
+  "regression_tests": {
+    "command": "python3 -m unittest tests.operations.test_content_aware_encoding -v",
+    "count": 14,
+    "direct_linux_check": "Source-only transfer to lab4 was denied by automatic approval review; no Linux test run occurred. Normal repository CI validation remains pending.",
+    "host": "macOS ARM64",
+    "source_revalidation": "Full SHA256 re-read under the original deadline; frozen metadata same-size replacement regression emits inconclusive and no recommendation."
+  },
+  "reports": {
+    "easy": {
+      "error": null,
+      "outcome": "measured",
+      "recommendation": {
+        "decision": "retain_baseline",
+        "mode": "vbr",
+        "rejected": {
+          "q18": [
+            "aggregate_savings_below_10_percent"
+          ],
+          "q23": [
+            "aggregate_savings_below_10_percent"
+          ],
+          "q28": [
+            "aggregate_savings_below_10_percent"
+          ]
+        }
+      },
+      "sha256": "a886b806e2cea29aacef17ba4b2236dcf4d7d9a303ede50a731c0abda1424596"
+    },
+    "motion": {
+      "error": null,
+      "outcome": "measured",
+      "recommendation": {
+        "decision": "retain_baseline",
+        "mode": "vbr",
+        "rejected": {
+          "q18": [
+            "window_2:mean_regression",
+            "aggregate_savings_below_10_percent"
+          ],
+          "q23": [
+            "window_0:mean_regression",
+            "window_0:p10_regression",
+            "window_1:mean_regression",
+            "window_2:mean_regression",
+            "window_2:p10_regression"
+          ],
+          "q28": [
+            "window_0:mean_regression",
+            "window_0:p10_regression",
+            "window_1:mean_regression",
+            "window_1:p10_regression",
+            "window_2:mean_regression",
+            "window_2:p10_regression"
+          ]
+        }
+      },
+      "sha256": "4a24e59d78816699177e005967ebc050e12e026a3cde49821663d05c02052da7"
+    },
+    "motion-deadline": {
+      "error": "total wall-clock budget exhausted",
+      "outcome": "inconclusive",
+      "recommendation": null,
+      "sha256": "faaa772aaaa58de1b1592dbf247741d63ee57442d4c6bfb41acbb0da6638d144"
+    }
+  },
+  "scope": "offline_sample_recommendation"
+}

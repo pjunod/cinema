@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Opt-in analytic Mac processing -> CPU subtitle corpus/seek/cancel qualification.
+
+Uses existing native FFmpeg, repository CC0 SDR8/HDR10/HLG fixtures, libass and
+original two-object PGS artwork. No daemon, device, library or global package is
+changed. Native processing must supply scale_vt and tonemap_videotoolbox. Output
+is an explicit fresh private directory; logs and source/package hashes remain
+there. These finite graph assertions do not claim display/performance acceptance.
+"""
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import signal
+import struct
+import subprocess
+import time
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ffmpeg', type=pathlib.Path, required=True, help='explicit existing native FFmpeg executable')
+    parser.add_argument('--out', type=pathlib.Path, required=True, help='fresh private receipt/media directory')
+    parser.add_argument('--fixtures', type=pathlib.Path, default=ROOT / 'crates/plurxd/fixtures/macos-processing')
+    args = parser.parse_args()
+    if not args.ffmpeg.is_absolute() or not args.ffmpeg.is_file():
+        parser.error('--ffmpeg requires an existing absolute executable path')
+    if not os.access(args.ffmpeg, os.X_OK):
+        parser.error('--ffmpeg is not executable')
+    root = args.out.resolve()
+    if root.exists():
+        parser.error('--out already exists; choose a fresh receipt directory')
+    root.mkdir(parents=True)
+    fixture = args.fixtures.resolve()
+    ff = str(args.ffmpeg.resolve())
+    pkg = pathlib.Path(ff).parent
+    rows = []
+    inputs_identity = {name: hashlib.sha256((fixture / (name + '.mp4')).read_bytes()).hexdigest() for name in ['sdr8', 'hdr10', 'hlg']}
+    (root / 'identity.json').write_text(json.dumps({'ffmpeg_sha256': hashlib.sha256(pathlib.Path(ff).read_bytes()).hexdigest(), 'driver_sha256': hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(), 'input_sha256': inputs_identity}, indent=2) + '\n')
+
+    def run(name, args, timeout=30):
+        argv = [ff, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y'] + args
+        start = time.monotonic()
+        r = subprocess.run(argv, capture_output=True, timeout=timeout)
+        (root / (name + '.stderr')).write_bytes(r.stderr)
+        rows.append({'name': name, 'argv': argv, 'exit': r.returncode, 'seconds': time.monotonic() - start})
+        if r.returncode:
+            raise RuntimeError(name + ': ' + r.stderr.decode()[-2500:])
+        return r.stdout
+    ASS = '[Script Info]\n    ScriptType: v4.00+\n    PlayResX: 320\n    PlayResY: 180\n    [V4+ Styles]\n    Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n    Style: Default,Arial,18,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n    [Events]\n    Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n    Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\an7\\pos(20,20)\\fad(300,300)}Anchor\n    Dialogue: 1,0:00:02.00,0:00:04.00,Default,,0,0,0,,{\\an5\\move(80,80,240,80)\\c&H00FF00&}Moving\n    Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\\an9\\pos(308,160)\\alpha&H80&\\c&H0000FF&}Half\n    Dialogue: 0,0:00:07.50,0:00:08.50,Default,,0,0,0,,{\\an7\\pos(5,5)}End\n    '
+    (root / 'semantic.ass').write_text(ASS)
+
+    def seg(t, typ, data):
+        return b'PG' + struct.pack('>IIBH', int(t * 90000), 0, typ, len(data)) + data
+
+    def pc(number, state, objects):
+        data = struct.pack('>HHBHBBBB', 320, 180, 16, number, state, 0, 0, len(objects))
+        return data + b''.join((struct.pack('>HBBHH', oid, w, 0, x, y) for oid, w, x, y in objects))
+
+    def obj(oid, width, height, index):
+        rle = (bytes([index]) * width + b'\x00\x00') * height
+        return struct.pack('>HBB', oid, 0, 192) + (len(rle) + 4).to_bytes(3, 'big') + struct.pack('>HH', width, height) + rle
+    objects = [(1, 0, 220, 140), (2, 1, 20, 20)]
+    windows = bytes([2, 0]) + struct.pack('>HHHH', 220, 140, 80, 30) + bytes([1]) + struct.pack('>HHHH', 20, 20, 40, 20)
+    palette = bytes([0, 0, 1, 81, 240, 90, 128, 2, 145, 34, 54, 255])
+    blue = bytes([0, 1, 1, 81, 240, 90, 128, 2, 41, 110, 240, 255])
+    sup = b''.join([seg(1, 22, pc(1, 128, objects)), seg(1, 23, windows), seg(1, 20, palette), seg(1, 21, obj(1, 80, 30, 1)), seg(1, 21, obj(2, 40, 20, 2)), seg(1, 128, b''), seg(3, 22, pc(2, 0, objects)), seg(3, 20, blue), seg(3, 128, b''), seg(5, 22, pc(3, 0, [])), seg(5, 128, b'')])
+    (root / 'semantic.sup').write_bytes(sup)
+    metal = 'scale_vt=w=160:h=90:format=p010le,tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12:apply_dovi=0'
+    sdr = 'scale_vt=w=160:h=90:format=nv12'
+    inputs = {}
+    for family in ['sdr8', 'hdr10', 'hlg']:
+        src = root / (family + '-8s.mp4')
+        run(family + '-loop', ['-stream_loop', '7', '-i', str(fixture / (family + '.mp4')), '-map', '0:v', '-c', 'copy', '-t', '8', str(src)])
+        inputs[family] = src
+        pgs = root / (family + '-semantic.mkv')
+        run(family + '-pgs-mux', ['-i', str(src), '-itsoffset', '1', '-i', str(root / 'semantic.sup'), '-map', '0:v', '-map', '1:s', '-c', 'copy', str(pgs)])
+    outputs = {}
+    for family, src in inputs.items():
+        process = sdr if family == 'sdr8' else metal
+        for op in ['plain', 'text', 'bitmap']:
+            args = ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox_vld', '-i', str(src if op != 'bitmap' else root / (family + '-semantic.mkv')), '-an', '-sn', '-dn']
+            if op == 'bitmap':
+                args += ['-filter_complex', '[0:v]' + process + ',hwdownload,format=nv12[v];[0:s:0]scale=160:90[s];[v][s]overlay=eof_action=pass[o]', '-map', '[o]']
+            else:
+                args += ['-vf', process + ',hwdownload,format=nv12' + (",subtitles='" + str(root / 'semantic.ass') + "'" if op == 'text' else '')]
+            data = run(family + '-' + op, args + ['-frames:v', '96', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'])
+            outputs[family, op] = data
+            assert len(data) == 96 * 160 * 90 * 3, (family, op, len(data))
+
+        def region(i, x1, y1, x2, y2):
+            a = outputs[family, 'text']
+            b = outputs[family, 'plain']
+            values = []
+            for y in range(y1, y2):
+                for x in range(x1, x2):
+                    p = (i * 14400 + y * 160 + x) * 3
+                    values.append(sum((abs(a[p + j] - b[p + j]) for j in range(3))))
+            return sum(values) / len(values)
+        anchor = [region(i, 8, 8, 52, 22) for i in [10, 12, 15, 18, 30, 33, 36]]
+        assert anchor[0] < 1 and anchor[1] < 1 and (anchor[3] > 5) and (anchor[-1] < 1), (family, anchor)
+
+        def moving(i):
+            a = outputs[family, 'text']
+            b = outputs[family, 'plain']
+            xs = []
+            for y in range(32, 48):
+                for x in range(10, 150):
+                    p = (i * 14400 + y * 160 + x) * 3
+                    if sum((abs(a[p + j] - b[p + j]) for j in range(3))) > 40:
+                        xs.append(x)
+            return sum(xs) / len(xs)
+        centers = [moving(i) for i in [27, 39, 45]]
+        assert centers[-1] - centers[0] > 35, (family, centers)
+        free = region(78, 0, 0, 160, 90)
+        assert free < 0.01, (family, free)
+
+        def pixel(op, i, x, y):
+            a = outputs[family, op]
+            p = (i * 14400 + y * 160 + x) * 3
+            return list(a[p:p + 3])
+        samples = {str(i): {'red': pixel('bitmap', i, 130, 75), 'palette': pixel('bitmap', i, 20, 15), 'base_red': pixel('plain', i, 130, 75), 'base_palette': pixel('plain', i, 20, 15)} for i in [6, 18, 42, 66, 90]}
+        assert samples['6']['red'] == samples['6']['base_red'] and samples['66']['red'] == samples['66']['base_red'] and (samples['90']['palette'] == samples['90']['base_palette']), (family, samples)
+        assert samples['18']['red'] != samples['18']['base_red'] and samples['18']['palette'][1] > samples['18']['palette'][0] and (samples['42']['palette'][2] > samples['42']['palette'][0]), (family, samples)
+        rows.append({'name': family + '-semantics', 'frames': 96, 'anchor_fade_region_deltas': anchor, 'moving_centroids': centers, 'free_region_delta': free, 'bitmap_samples': samples, 'sha256': {op: hashlib.sha256(outputs[family, op]).hexdigest() for op in ['plain', 'text', 'bitmap']}})
+    (root / 'corpus-receipt.json').write_text(json.dumps({'ffmpeg_sha256': hashlib.sha256((pkg / 'ffmpeg').read_bytes()).hexdigest(), 'observations': rows}, indent=2) + '\n')
+    rows = []
+
+    def run(name, args):
+        argv = [ff, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y'] + args
+        r = subprocess.run(argv, capture_output=True, timeout=20)
+        (root / (name + '.stderr')).write_bytes(r.stderr)
+        row = {'name': name, 'argv': argv, 'exit': r.returncode}
+        rows.append(row)
+        if r.returncode:
+            raise RuntimeError(name + ': ' + r.stderr.decode()[-2000:])
+        return r.stdout
+    metal = 'scale_vt=w=160:h=90:format=p010le,tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12:apply_dovi=0'
+    sdr = 'scale_vt=w=160:h=90:format=nv12'
+    for family in ['sdr8', 'hdr10', 'hlg']:
+        process = sdr if family == 'sdr8' else metal
+        sidecar = root / (family + '-full.mks')
+        run(family + '-sidecar', ['-copyts', '-i', str(root / (family + '-semantic.mkv')), '-map', '0:s:0', '-c', 'copy', '-f', 'matroska', str(sidecar)])
+        for target in [2.5, 4.5, 6.5]:
+            for operation in ['plain', 'text', 'bitmap']:
+                args = ['-copyts', '-noaccurate_seek', '-ss', str(max(target - 2, 0)), '-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox_vld', '-i', str(root / (family + '-8s.mp4'))]
+                if operation == 'bitmap':
+                    args += ['-i', str(sidecar), '-filter_complex', '[0:v]' + process + ',hwdownload,format=nv12[v];[1:s:0]scale=160:90[s];[v][s]overlay=eof_action=pass,trim=start=' + str(target) + ',setpts=PTS-STARTPTS[o]', '-map', '[o]']
+                else:
+                    args += ['-vf', process + ',hwdownload,format=nv12' + (",subtitles='" + str(root / 'semantic.ass') + "'" if operation == 'text' else '') + ',trim=start=' + str(target) + ',setpts=PTS-STARTPTS']
+                args += ['-an', '-sn', '-dn', '-frames:v', '12', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']
+                data = run(f'{family}-seek-{target}-{operation}', args)
+                assert len(data) == 12 * 160 * 90 * 3, (family, target, operation, len(data))
+                rows[-1].update(frames=12, sha256=hashlib.sha256(data).hexdigest())
+                (root / f'{family}-seek-{target}-{operation}.rgb').write_bytes(data)
+
+            def difference(a, b, region):
+                x1, y1, x2, y2 = region
+                total = 0
+                for y in range(y1, y2):
+                    for x in range(x1, x2):
+                        p = (y * 160 + x) * 3
+                        total += sum((abs(a[p + j] - b[p + j]) for j in range(3)))
+                return total / ((x2 - x1) * (y2 - y1))
+            plain = (root / f'{family}-seek-{target}-plain.rgb').read_bytes()
+            text = (root / f'{family}-seek-{target}-text.rgb').read_bytes()
+            bitmap = (root / f'{family}-seek-{target}-bitmap.rgb').read_bytes()
+            region = (8, 8, 52, 22) if target == 2.5 else (130, 72, 156, 89) if target == 4.5 else (0, 0, 160, 90)
+            text_delta = difference(text, plain, region)
+            bitmap_delta = difference(bitmap, plain, (115, 72, 145, 83))
+            assert text_delta > 5 and bitmap_delta > 5 if target < 5 else text_delta == 0 and bitmap_delta == 0, (family, target, text_delta, bitmap_delta)
+            rows.append({'name': f'{family}-seek-{target}-semantic-assertion', 'text_region_delta': text_delta, 'bitmap_region_delta': bitmap_delta, 'active': target < 5})
+    for family in ['sdr8', 'hdr10', 'hlg']:
+        process = sdr if family == 'sdr8' else metal
+        args = ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox_vld', '-i', str(root / (family + '-8s.mp4')), '-an', '-sn', '-dn', '-vf', process + ",hwdownload,format=nv12,subtitles='" + str(root / 'semantic.ass') + "',trim=start=7.5,setpts=PTS-STARTPTS", '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']
+        end = run(family + '-active-eof', args)
+        assert len(end) == 6 * 160 * 90 * 3, (family, len(end))
+        plain_args = [a.replace(",subtitles='" + str(root / 'semantic.ass') + "'", '') for a in args]
+        plain = run(family + '-plain-eof', plain_args)
+        deltas = []
+        for i in range(6):
+            total = 0
+            for y in range(15):
+                for x in range(30):
+                    p = (i * 14400 + y * 160 + x) * 3
+                    total += sum((abs(end[p + j] - plain[p + j]) for j in range(3)))
+            deltas.append(total / 450)
+        assert all((n > 1 for n in deltas)), (family, deltas)
+        rows.append({'name': family + '-eof-assertion', 'frames': 6, 'complete_eof': True, 'active_cue_visible': True, 'cue_region_deltas': deltas})
+    for operation in ['text', 'bitmap']:
+        target = root / (operation + '-cancel.ts')
+        args = [ff, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-re', '-stream_loop', '-1', '-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox_vld', '-i', str(root / ('hlg-semantic.mkv' if operation == 'bitmap' else 'hlg-8s.mp4')), '-an', '-sn', '-dn']
+        if operation == 'bitmap':
+            args += ['-filter_complex', '[0:v]' + metal + ',hwdownload,format=nv12[v];[0:s:0]scale=160:90[s];[v][s]overlay=eof_action=pass[o]', '-map', '[o]']
+        else:
+            args += ['-vf', metal + ",hwdownload,format=nv12,subtitles='" + str(root / 'semantic.ass') + "'"]
+        args += ['-c:v', 'h264_videotoolbox', '-allow_sw', '0', '-bf', '0', '-b:v', '500k', '-f', 'mpegts', str(target)]
+        with (root / (operation + '-cancel.stderr')).open('wb') as log:
+            child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)
+            time.sleep(2.2)
+            assert child.poll() is None, (operation, 'exited before cancel')
+            started = time.monotonic()
+            os.killpg(child.pid, signal.SIGTERM)
+            try:
+                code = child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+                raise
+            elapsed = time.monotonic() - started
+        try:
+            os.kill(child.pid, 0)
+            reaped = False
+        except ProcessLookupError:
+            reaped = True
+        assert reaped and target.stat().st_size > 0, (operation, reaped, target.stat().st_size)
+        rows.append({'name': operation + '-cancellation', 'argv': args, 'exit': code, 'reaped': reaped, 'cancel_reap_seconds': elapsed, 'output_bytes': target.stat().st_size})
+    (root / 'seek-cancel-receipt.json').write_text(json.dumps({'ffmpeg_sha256': hashlib.sha256((pkg / 'ffmpeg').read_bytes()).hexdigest(), 'observations': rows}, indent=2) + '\n')
+    print(json.dumps({'out': str(root), 'corpus': 'pass', 'seek_eof_cancellation': 'pass'}))
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/python-unit-pr-receipts",
+  "suite": "validation",
+  "test_file": "tests/validation/test_python_unit_receipts.py",
+  "test_file_sha256": "1bd7cab631b00177d2ce6b00f7152c8d5e462068214229d75d634c612506a427",
+  "command": "python3 -m unittest tests.validation.test_python_unit_receipts.PythonReceiptCase.test_http_diagnostics_reveal_only_status_and_normalized_path tests.validation.test_python_unit_receipts.PythonReceiptCase.test_collaborator_403_accepts_only_explicit_verified_owner_enrollment tests.validation.test_python_unit_receipts.PythonReceiptCase.test_literal_job_and_step_local_artifact_identity_do_not_need_job_outputs tests.validation.test_python_unit_receipts.PythonReceiptCase.test_failed_prepare_recovery_requires_exact_run_job_source_and_log",
+  "output": "Ran 4 tests in 0.014s; OK; exit0",
+  "test_ids": [
+    "test_python_unit_receipts.PythonReceiptCase.test_http_diagnostics_reveal_only_status_and_normalized_path",
+    "test_python_unit_receipts.PythonReceiptCase.test_collaborator_403_accepts_only_explicit_verified_owner_enrollment",
+    "test_python_unit_receipts.PythonReceiptCase.test_literal_job_and_step_local_artifact_identity_do_not_need_job_outputs",
+    "test_python_unit_receipts.PythonReceiptCase.test_failed_prepare_recovery_requires_exact_run_job_source_and_log"
+  ],
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 4
+  },
+  "source_attribution": "Original local worktree first four new focused passes after zero-unit gate3705 failed prepare. Prior nineteen passes not rerun. Later static update of old concurrency assertion is not relabeled as execution. Fake transport/permission/source-proof fixtures, no network/test suites."
+}

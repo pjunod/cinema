@@ -1,0 +1,36 @@
+{
+  "argv": [
+    "/work/fel_export",
+    "/work/b2-normal/frames/bl-frame-005.rpu.nal",
+    "/work/b2-normal/frames/bl-frame-005.yuv420p10le",
+    "/work/b2-normal/frames/el-frame-005.yuv420p10le",
+    "208/1000",
+    "41/1000"
+  ],
+  "program_sha256": "437c7926e765260361336f96c76c96e8db74c6986e6d71c59663ba7d8be005fc",
+  "input_sha256": {
+    "b2-normal/frames/bl-frame-005.rpu.nal": "fc580fa753c45d3db2f2881ded2cf09f07dee2fe94ff329baec50941f35a3eb6",
+    "b2-normal/frames/bl-frame-005.yuv420p10le": "3dc0eae3f41f181a176885a5259da60d0015bcdb0977e84eae1601b38973ef86",
+    "b2-normal/frames/el-frame-005.yuv420p10le": "4298647f45ca773faec717d4dec735ee0f4dc0c6ee6140d9bb2608ec1d558279"
+  },
+  "cwd": "/work/render-5",
+  "environment": {
+    "LD_LIBRARY_PATH": "/work/prefix/lib/aarch64-linux-gnu",
+    "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.aarch64.json",
+    "XDG_RUNTIME_DIR": "/work/runtime",
+    "LC_ALL": "C"
+  },
+  "exit": 0,
+  "stdout_sha256": "46bff44a4f199476c0ef89d9960d0b868a334a4a12a28626b757d6e8e0244184",
+  "stderr_sha256": "b119eb81cf0f060df0c5c26dca492ad71f48825d8dfbc3962f70f7b39c41f053",
+  "output_sha256": {
+    "render-5/outputs/nonzero-rendered.rgba32f": "2c2fda29688be387be2a1f44c795b966d73bfba75fac7ad9731b18deb319fd09",
+    "render-5/outputs/nonzero-rendered.rgb48le": "d3a3ca458e7785f3913088ca4b19fea92a9e32572b1bc1fd737b9bbd33aaf35b",
+    "render-5/outputs/nonzero-reconstruction.rgba32f": "2c2fda29688be387be2a1f44c795b966d73bfba75fac7ad9731b18deb319fd09",
+    "render-5/outputs/nonzero-reconstruction.rgb48le": "d3a3ca458e7785f3913088ca4b19fea92a9e32572b1bc1fd737b9bbd33aaf35b",
+    "render-5/outputs/nonzero-el.rgba32f": "1d9f4d4b6ae7558ac884c84ae304b694b5f5a89fd3ce9a8e9b4003d79377ab3e",
+    "render-5/outputs/nonzero-el.rgb48le": "e2567aa4e6fdcd2515d31349e755d9d9bb7e4d6a8cc7132a7d35ab89e505917c",
+    "render-5/outputs/nonzero-bl.rgb48le": "1523b9ec119cc1e355e03c257a6335a9f72d83e68537cbbe3ace37857e8cf1e8",
+    "render-5/outputs/nonzero-bl.rgba32f": "4c3561c0774478a67ac01950d7389c174efce8ad6c8d0b20f0d031f9eebf562e"
+  }
+}

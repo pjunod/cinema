@@ -1,0 +1,57 @@
+--- a/crates/plurxd/src/http/hls/response.rs
++++ b/crates/plurxd/src/http/hls/response.rs
+@@ -366,6 +366,9 @@
+ #[derive(Default)]
+ struct AcceptedPrefix {
+     pieces: Vec<(usize, tokio::time::Instant)>,
++    // Measurement-only handshake; storage and delivery units are unchanged.
++    reconciled: usize,
++    reconciled_changed: Arc<tokio::sync::Notify>,
+ }
+ 
+ pub(super) struct ResidentBatch {
+@@ -535,7 +538,7 @@
+                     // Holding the prefix lock through deadline selection makes an
+                     // acceptance race settle before failure; body polls use the
+                     // same lock for their fence and prefix recording.
+-                    let prefix = accepted
++                    let mut prefix = accepted
+                         .lock()
+                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                     for &(bytes, at) in &prefix.pieces[reconciled..] {
+@@ -554,6 +557,8 @@
+                         }
+                     }
+                     reconciled = prefix.pieces.len();
++                    prefix.reconciled = reconciled;
++                    prefix.reconciled_changed.notify_one();
+                     if delivered == len {
+                         if delivery(LocalDeliveryEvent::Finished) {
+                             complete.take().expect("one completion")();
+@@ -638,6 +643,26 @@
+                 };
+             }
+             if let Some(current) = &mut batch {
++                // Counterfactual only: require the existing owner to reconcile
++                // each 4 KiB acceptance before the next body frame can run.
++                loop {
++                    let (waiting, changed, deadline) = {
++                        let prefix = current.accepted.lock()
++                            .unwrap_or_else(std::sync::PoisonError::into_inner);
++                        let last = prefix.pieces.last()
++                            .map_or(current.progress_started, |(_, at)| *at);
++                        (prefix.pieces.len() > prefix.reconciled,
++                         Arc::clone(&prefix.reconciled_changed),
++                         (last + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline))
++                    };
++                    if !waiting { break; }
++                    tokio::select! {
++                        biased;
++                        () = terminal.signal.cancelled() => break,
++                        _ = tokio::time::sleep_until(deadline) => break,
++                        () = changed.notified() => {}
++                    }
++                }
+                 let mut prefix = current
+                     .accepted
+                     .lock()

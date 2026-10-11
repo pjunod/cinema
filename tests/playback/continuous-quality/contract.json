@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "description": "Strict continuous-media transactions. Requests are independent of legacy control JSON. Completed append facts survive lost acknowledgement, cancellation and takeover.",
+  "initial_attachment": {
+    "client_instance_id": "00000000-0000-4000-8000-00000000ca03",
+    "lifetime_id": "movie",
+    "attachment_id": "00000000-0000-4000-8000-00000000ca04",
+    "family_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "generation": "00000000-0000-4000-8000-00000000ca01",
+  "control_epoch": 1,
+  "steps": [
+    {
+      "request": {
+        "version": 1,
+        "generation": "00000000-0000-4000-8000-00000000ca01",
+        "control_epoch": 1,
+        "attachment": {
+          "client_instance_id": "00000000-0000-4000-8000-00000000ca03",
+          "lifetime_id": "movie",
+          "attachment_id": "00000000-0000-4000-8000-00000000ca04",
+          "family_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "transaction_id": "00000000-0000-4000-8000-00000000ca02",
+        "sequence": 1,
+        "operation": {
+          "kind": "prepare",
+          "intent_revision": 1,
+          "target_rendition_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "state": "preparing",
+      "reserved": 0
+    },
+    {
+      "owner_ready": {
+        "transaction_id": "00000000-0000-4000-8000-00000000ca02",
+        "intervals": [
+          {
+            "artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "rendition_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "timescale": 24000,
+            "from_tick": 240240,
+            "through_tick": 288288,
+            "byte_length": 500000
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "version": 1,
+        "generation": "00000000-0000-4000-8000-00000000ca01",
+        "control_epoch": 1,
+        "attachment": {
+          "client_instance_id": "00000000-0000-4000-8000-00000000ca03",
+          "lifetime_id": "movie",
+          "attachment_id": "00000000-0000-4000-8000-00000000ca04",
+          "family_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "transaction_id": "00000000-0000-4000-8000-00000000ca02",
+        "sequence": 2,
+        "operation": {
+          "kind": "scheduled",
+          "intervals": [
+            {
+              "artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "rendition_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "timescale": 24000,
+              "from_tick": 240240,
+              "through_tick": 288288,
+              "byte_length": 500000
+            }
+          ]
+        }
+      },
+      "state": "scheduled",
+      "reserved": 1
+    },
+    {
+      "request": {
+        "version": 1,
+        "generation": "00000000-0000-4000-8000-00000000ca01",
+        "control_epoch": 1,
+        "attachment": {
+          "client_instance_id": "00000000-0000-4000-8000-00000000ca03",
+          "lifetime_id": "movie",
+          "attachment_id": "00000000-0000-4000-8000-00000000ca04",
+          "family_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "transaction_id": "00000000-0000-4000-8000-00000000ca02",
+        "sequence": 3,
+        "operation": {
+          "kind": "cancel_unappended",
+          "completed": [
+            {
+              "artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "rendition_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "timescale": 24000,
+              "from_tick": 240240,
+              "through_tick": 288288,
+              "byte_length": 500000
+            }
+          ]
+        }
+      },
+      "state": "appended",
+      "reserved": 1
+    },
+    {
+      "request": {
+        "version": 1,
+        "generation": "00000000-0000-4000-8000-00000000ca01",
+        "control_epoch": 1,
+        "attachment": {
+          "client_instance_id": "00000000-0000-4000-8000-00000000ca03",
+          "lifetime_id": "movie",
+          "attachment_id": "00000000-0000-4000-8000-00000000ca04",
+          "family_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "transaction_id": "00000000-0000-4000-8000-00000000ca02",
+        "sequence": 3,
+        "operation": {
+          "kind": "cancel_unappended",
+          "completed": [
+            {
+              "artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "rendition_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "timescale": 24000,
+              "from_tick": 240240,
+              "through_tick": 288288,
+              "byte_length": 500000
+            }
+          ]
+        }
+      },
+      "state": "appended",
+      "reserved": 1,
+      "replay": true
+    },
+    {
+      "adopt_epoch": 2
+    },
+    {
+      "request": {
+        "version": 1,
+        "generation": "00000000-0000-4000-8000-00000000ca01",
+        "control_epoch": 2,
+        "attachment": {
+          "client_instance_id": "00000000-0000-4000-8000-00000000ca03",
+          "lifetime_id": "movie",
+          "attachment_id": "00000000-0000-4000-8000-00000000ca04",
+          "family_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "transaction_id": "00000000-0000-4000-8000-00000000ca02",
+        "sequence": 1,
+        "operation": {
+          "kind": "presented",
+          "artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "film_tick": 241241,
+          "observed_at_ms": 2000
+        }
+      },
+      "state": "presented",
+      "reserved": 1
+    }
+  ]
+}

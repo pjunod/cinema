@@ -15,4 +15,6 @@
 <full-backup-content>
     <exclude domain="file" path="offline/" />
     <exclude domain="file" path="datastore/" />
+    <exclude domain="sharedpref" path="cinema-remote-secrets.xml" />
+    <exclude domain="sharedpref" path="cinema-invitation-state.xml" />
 </full-backup-content>

@@ -1449,12 +1449,22 @@ pub async fn atomic_write_child(
     destination: &str,
     bytes: &[u8],
 ) -> io::Result<()> {
+    atomic_write_child_owned(directory, destination, bytes.to_vec()).await
+}
+
+/// Move the allocation and any attached admission owner into the actual
+/// blocking writer. Cancelling its async caller cannot release that ownership
+/// before the held-directory write, sync, rename and cleanup settle.
+pub async fn atomic_write_child_owned<T: AsRef<[u8]> + Send + 'static>(
+    directory: &Path,
+    destination: &str,
+    bytes: T,
+) -> io::Result<()> {
     let directory = directory.to_owned();
     let destination = child_name(destination)?;
-    let bytes = bytes.to_vec();
     tokio::task::spawn_blocking(move || {
         let directory = open_directory_nofollow_blocking(&directory)?;
-        atomic_write_blocking(&directory, &destination, &bytes)
+        atomic_write_blocking(&directory, &destination, bytes.as_ref())
     })
     .await
     .map_err(io::Error::other)?

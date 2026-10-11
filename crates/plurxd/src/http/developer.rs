@@ -107,6 +107,299 @@ pub(crate) struct DeveloperReadiness {
     pub items: Vec<DeveloperEnableItem>,
 }
 
+/// The clock guard's enable switch. Every row is advisory: an operator can
+/// turn enforcement on with any of them unmet, and off at any time.
+fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
+    use plurx_core::cluster::clock::{ClusterClockState, CLOCK_OFFSET_REFUSAL_MS};
+    let guard = state.membership.clock_guard();
+    let snapshot = guard.snapshot();
+    let would_refuse = guard.check_evidence().err();
+    let peers = snapshot.peers.len();
+    let learners = snapshot.unobserved_learners;
+    // Unobserved learners are reported but never required: a non-voting
+    // member's stopped clock does not refuse any guarded decision.
+    let learner_note = if learners == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {learners} unobserved learner(s) reported but not required (no vote; \
+             a learner beyond the bound refuses only its own sessions and promotion)"
+        )
+    };
+    let measured = peers.saturating_sub(learners);
+    let (coverage_status, coverage, worst) = match snapshot.state {
+        ClusterClockState::NoPeers => (
+            RequirementStatus::Met,
+            "No committed remote members to observe".to_owned(),
+            None,
+        ),
+        ClusterClockState::Bounded { worst_abs_upper_us } => (
+            RequirementStatus::Met,
+            format!(
+                "{measured} / {peers} committed remote members reachable and bounded{learner_note}"
+            ),
+            (measured > 0).then_some(worst_abs_upper_us),
+        ),
+        ClusterClockState::Incomplete {
+            unknown_peers,
+            worst_abs_upper_us,
+        } => (
+            RequirementStatus::Unmet,
+            format!(
+                "{} / {peers} committed remote members bounded; {unknown_peers} unreachable, \
+                 unanswered or roster unproved{learner_note}",
+                peers.saturating_sub(unknown_peers + learners)
+            ),
+            (peers > unknown_peers + learners).then_some(worst_abs_upper_us),
+        ),
+    };
+    let limit_us = CLOCK_OFFSET_REFUSAL_MS * 1_000;
+    let (bound_status, bound) = match worst {
+        Some(value) => (
+            if value <= limit_us {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unmet
+            },
+            format!(
+                "{} ms worst |offset| + uncertainty among bounded voters; the limit is \
+                 {CLOCK_OFFSET_REFUSAL_MS} ms",
+                value as f64 / 1_000.0
+            ),
+        ),
+        None => (
+            RequirementStatus::Unobservable,
+            "No member offset observation applies; an unknown member has no numeric offset"
+                .to_owned(),
+        ),
+    };
+    let current = match would_refuse {
+        None => "current evidence would admit every guarded decision".to_owned(),
+        Some(cause) => format!("current evidence would refuse guarded decisions ({cause})"),
+    };
+    DeveloperEnableItem {
+        id: "cluster_clock",
+        title: "Cluster clock guard enforcement",
+        enabled: Some(enforced),
+        setting: Some("cluster_clock_guard_enforced"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "coverage",
+                title: "Every voter reachable and observed",
+                status: coverage_status,
+                evidence: coverage,
+            },
+            DeveloperRequirement {
+                id: "upper_bound",
+                title: "Worst observed offset within 2 s",
+                status: bound_status,
+                evidence: bound,
+            },
+            DeveloperRequirement {
+                id: "ntp",
+                title: "NTP running on every node",
+                status: RequirementStatus::Unobservable,
+                evidence: "This process measures offsets but does not read any node's time \
+                           synchronisation daemon; check chronyd or systemd-timesyncd on each \
+                           node"
+                    .to_owned(),
+            },
+            DeveloperRequirement {
+                id: "consequence",
+                title: "What enforcement refuses",
+                status: if would_refuse.is_none() {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: format!(
+                    "While enforced, one down or unreachable voter makes coverage unknown, \
+                     which refuses session takeover, the expired-session scan and membership \
+                     changes on every node (fenced removal of that member still works); a down \
+                     learner is reported and refuses only its own promotion and the takeover \
+                     or expiry of the sessions it owns, until it returns or is removed; and \
+                     two consecutive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms make /readyz \
+                     answer 503. Startup is never refused. Now: {current}; \
+                     plurx_cluster_clock_advisory_refusals_total counts what it would have \
+                     refused while off"
+                ),
+            },
+        ],
+    }
+}
+
+/// `POST /api/v1/developer/macos-video-processing/reprobe` — admin, bounded,
+/// asynchronous and independent of the preference's Save operation.
+pub(crate) async fn reprobe_macos_video(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let manager = std::sync::Arc::clone(&state.transcode);
+    let cancelled = state.shutdown.clone();
+    let report = manager.macos_video_diagnostics();
+    tokio::spawn(async move {
+        manager.reprobe_macos_video(&cancelled).await;
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "accepted": true, "report": report,
+            "note": "A bounded worker-local compatibility observation is requested; saved preference and running plans are unchanged"
+        })),
+    )
+}
+
+/// Neutral admin entry point; saved Mac choices do not govern Linux probing.
+pub(crate) async fn reprobe_video_processing(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let manager = std::sync::Arc::clone(&state.transcode);
+    let cancelled = state.shutdown.clone();
+    let report = serde_json::json!({"macos": manager.macos_video_diagnostics(),
+        "linux_dolby": manager.linux_dolby_diagnostics()});
+    tokio::spawn(async move {
+        manager.reprobe_video_processing(&cancelled).await;
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        Json(serde_json::json!({"accepted": true, "report": report})),
+    )
+}
+
+fn macos_effective_encoder_requirement(
+    id: &'static str,
+    state: &AppState,
+    preference: &str,
+) -> DeveloperRequirement {
+    let encoder = state.transcode.encoder_for_preference(preference);
+    DeveloperRequirement { id, title: "Effective VideoToolbox encoder",
+        status: if encoder == plurx_core::transcode::Encoder::VideoToolbox { RequirementStatus::Met } else { RequirementStatus::Unmet },
+        evidence: format!("The existing Hardware acceleration choice {} resolves on this worker to {}. Mac processing and HEVC output preserve that selection. Auto's startup encode benchmark can select Software even when VideoToolbox graphs work; it does not measure the complete processing cost. Choose VideoToolbox through the existing Hardware acceleration setting when wanted. This advisory result never disables Save or overrides explicit Software.", if preference.is_empty() { "auto" } else { preference }, encoder.label()) }
+}
+
+fn macos_video_processing(
+    state: &AppState,
+    enabled: bool,
+    preference: &str,
+) -> DeveloperEnableItem {
+    let report = state.transcode.macos_video_report();
+    let requirement = |id, title, observation: &crate::macos_video::GraphObservation| {
+        DeveloperRequirement {
+        id, title,
+        status: match observation.availability {
+            plurx_core::transcode::MacosProcessingAvailability::Available => RequirementStatus::Met,
+            plurx_core::transcode::MacosProcessingAvailability::Pending => RequirementStatus::Unknown,
+            plurx_core::transcode::MacosProcessingAvailability::Unavailable => RequirementStatus::Unmet,
+        },
+        evidence: format!("This worker's bounded runtime observation is {} (generation {}). Compatibility requires a working /usr/bin/otool dependency inventory (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both tools, and no DYLD override. It is separate from performance, visual and client qualification.", observation.reason.as_str(), report.generation),
+    }
+    };
+    let diagnostics = state.transcode.macos_video_diagnostics();
+    let graph_requirement = |id, title, graphs: &[&str]| {
+        let observations: Vec<_> = graphs
+            .iter()
+            .map(|graph| {
+                let row = diagnostics.get("graphs").and_then(|rows| rows.get(*graph));
+                (
+                    row.and_then(|row| row.get("availability"))
+                        .and_then(serde_json::Value::as_str),
+                    format!(
+                        "{graph}: {}",
+                        row.and_then(|row| row.get("reason"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("not_observed")
+                    ),
+                )
+            })
+            .collect();
+        let status = if observations
+            .iter()
+            .all(|(value, _)| *value == Some("available"))
+        {
+            RequirementStatus::Met
+        } else if observations
+            .iter()
+            .any(|(value, _)| value.is_none() || *value == Some("unavailable"))
+        {
+            RequirementStatus::Unmet
+        } else {
+            RequirementStatus::Unknown
+        };
+        DeveloperRequirement { id, title, status,
+            evidence: format!("Independent complete graph observations: {}. A missing or failed graph retains the compatible existing route; this advisory result never changes the saved choice or establishes display/client qualification.", observations.iter().map(|(_, reason)| reason.as_str()).collect::<Vec<_>>().join("; ")) }
+    };
+    DeveloperEnableItem {
+        id: "macos_video_processing", title: "Mac video processing", enabled: Some(enabled),
+        setting: Some("macos_video_processing_enabled"),
+        requirements: vec![
+            macos_effective_encoder_requirement("effective_encoder", state, preference),
+            requirement("sdr_scale", "Progressive SDR scaling", &report.sdr_scale),
+            requirement("hdr10_metal", "HDR10 to SDR processing", &report.hdr10_metal),
+            graph_requirement("hlg_metal", "HLG to SDR processing", &["hlg_metal"]),
+            graph_requirement("subtitle_burns", "SDR, HDR10 and HLG subtitle burns", &["sdr_text_burn", "hdr10_text_burn", "hlg_text_burn", "sdr_bitmap_burn", "hdr10_bitmap_burn", "hlg_bitmap_burn"]),
+            graph_requirement("deinterlace", "SDR frame and field deinterlacing", &["sdr_bwdif_frame", "sdr_bwdif_field"]),
+            graph_requirement("dolby_vision", "Strict Dolby Vision profile 5", &["p5_software_cpu", "p5_vt_tonemapx", "p5_software_metal", "p5_vt_metal"]),
+            graph_requirement("live_upload", "Live TV software decode and native processing", &["live_sdr_upload_scale", "live_sdr_upload_bwdif_frame", "live_sdr_upload_bwdif_field"]),
+            DeveloperRequirement { id: "delivery_qualification", title: "Visual and streaming qualification",
+                status: RequirementStatus::Unobservable,
+                evidence: "This daemon does not hold an exact-implementation display/client, startup, concurrency or soak qualification receipt. Normalized continuous VOD also requires platform-bound source facts and compatible decoder/encoder ceilings for each source. Runtime smoke availability never claims these checks passed and never overrides the saved choice.".into() },
+        ],
+    }
+}
+
+fn macos_hevc_output(state: &AppState, enabled: bool, preference: &str) -> DeveloperEnableItem {
+    let diagnostics = state.transcode.macos_video_diagnostics();
+    let requirement = |id, title, graphs: &[&str]| {
+        let observations: Vec<_> = graphs
+            .iter()
+            .map(|graph| {
+                let observation = diagnostics.get("graphs").and_then(|rows| rows.get(*graph));
+                let availability = observation
+                    .and_then(|row| row.get("availability"))
+                    .and_then(serde_json::Value::as_str);
+                let reason = observation
+                    .and_then(|row| row.get("reason"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("not_observed");
+                (availability, format!("{graph}: {reason}"))
+            })
+            .collect();
+        let status = if observations
+            .iter()
+            .any(|(value, _)| *value == Some("available"))
+        {
+            RequirementStatus::Met
+        } else if observations
+            .iter()
+            .any(|(value, _)| *value == Some("pending"))
+        {
+            RequirementStatus::Unknown
+        } else {
+            RequirementStatus::Unmet
+        };
+        DeveloperRequirement {
+            id, title, status,
+            evidence: format!(
+                "This worker's independently observed graphs are {}. Either native or host-memory processing may supply this output. SDR and HDR10 have separate compatibility; availability does not establish client or display qualification.",
+                observations.iter().map(|(_, reason)| reason.as_str()).collect::<Vec<_>>().join("; ")
+            ),
+        }
+    };
+    DeveloperEnableItem {
+        id: "macos_hevc_output", title: "Mac HEVC output", enabled: Some(enabled),
+        setting: Some("macos_hevc_output_enabled"),
+        requirements: vec![
+            macos_effective_encoder_requirement("hevc_effective_encoder", state, preference),
+            requirement("hevc_sdr", "Negotiated SDR HEVC", &["hevc_sdr", "hevc_sdr_host"]),
+            requirement("hevc_hdr10", "Negotiated HDR10 Main10 HEVC", &["hevc_hdr10", "hevc_hdr10_host"]),
+            DeveloperRequirement { id: "hevc_delivery_qualification", title: "Client and HDR presentation qualification",
+                status: RequirementStatus::Unobservable,
+                evidence: "Independent HEVC negotiation, produced segments, seek/resume, fallback and target clients still require qualification. HDR10 preservation also requires an HDR display and retained effective static metadata. The saved choice is always accepted.".into() },
+        ],
+    }
+}
+
 /// `GET /api/v1/developer/readiness` — admin, read-only, advisory.
 pub(crate) async fn readiness(
     _admin: AdminUser,
@@ -137,11 +430,14 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    // Missing is off: the key's own contract, and what the queue worker and
+    // the serving path read. A `true` default here showed this card enabled
+    // on a node whose creates answered "shared preparation is disabled".
     let content_analysis_on = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
             .map(String::as_str),
-        true,
+        false,
     );
 
     // Parsed exactly the way the engine parses it. That was the point when all
@@ -198,6 +494,19 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
+    // Missing is off, exactly as the session-create reads parse it.
+    let sdr_master_codecs_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
+            .map(String::as_str),
+        false,
+    );
+    let clock_guard_enforced = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
+            .map(String::as_str),
+        false,
+    );
     let display_mode_events = state
         .store
         .playback_events(&PlaybackEventQuery {
@@ -212,6 +521,49 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            DeveloperEnableItem {
+                id:"cinema_remote_control",title:"Cinema remote control",
+                enabled:Some(settings.get(super::remote::FEATURE_KEY).is_some_and(|v|v=="1")),
+                setting:Some("cinema_remote_control"),
+                requirements:vec![DeveloperRequirement {
+                    id:"clients",title:"Receiver and companion qualification",
+                    status:RequirementStatus::Unobservable,
+                    evidence:"The server provides authenticated pairing and node-owned control. Native/browser integration and physical remote qualification are not observable here; this advisory never rejects Save.".into(),
+                }],
+            },
+            DeveloperEnableItem {
+                id:"cinema_remote_invitations",title:"Cinema background invitations",
+                enabled:Some(settings.get("cinema.remote_invitations").is_some_and(|v|v=="1")),
+                setting:Some("cinema_remote_invitations"),
+                requirements:vec![
+                    DeveloperRequirement { id:"broker",title:"Optional notification broker",status:RequirementStatus::Unobservable,evidence:"An independently operated broker is required for visible APNs or FCM delivery. Configuration and provider availability never reject Save.".into() },
+                    DeveloperRequirement { id:"consent",title:"Explicit phone and screen consent",status:RequirementStatus::Unobservable,evidence:"Each phone must explicitly enroll a paired screen and report native permission or resident-service readiness; saved consent survives unavailable delivery.".into() },
+                    DeveloperRequirement { id:"delivery",title:"Native background and notification tap qualification",status:RequirementStatus::Unobservable,evidence:"Physical visible delivery and native tap reauthentication are unverified here. Readiness is advisory; invitations never acquire control or start playback.".into() },
+                ],
+            },
+            macos_video_processing(&state, plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED).map(String::as_str), false), settings.get(plurx_core::store::keys::HWACCEL).map(String::as_str).unwrap_or_default()),
+            macos_hevc_output(&state, plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::MACOS_HEVC_OUTPUT_ENABLED).map(String::as_str), false), settings.get(plurx_core::store::keys::HWACCEL).map(String::as_str).unwrap_or_default()),
+            cinema_sharing(
+                &state,
+                plurx_core::store::stored_switch(
+                    settings
+                        .get(plurx_core::store::keys::SHARING_ENABLED)
+                        .map(String::as_str),
+                    false,
+                ),
+            ).await,
+            DeveloperEnableItem {
+                id:"jellyfin_compatibility",title:"Jellyfin client compatibility",
+                enabled:Some(plurx_core::store::stored_switch(settings.get(plurx_core::store::keys::JELLYFIN_COMPATIBILITY_ENABLED).map(String::as_str),false)),
+                setting:Some("jellyfin_compatibility_enabled"),
+                requirements:vec![DeveloperRequirement { id:"client_qualification",title:"Pinned clients qualified",
+                    status:RequirementStatus::Unobservable,
+                    evidence:"The frozen-candidate browsing, playback, tracks and recovery qualification receipt is not visible to this daemon. The saved choice remains authoritative.".into() },
+                    jellyfin_standard_port(&state)],
+            },
+            clock_measurement(&state, clock_guard_enforced),
             durable_cluster_work(&state).await,
             bounded_catalogue_reads(
                 &state,
@@ -245,6 +597,7 @@ pub(crate) async fn readiness(
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(prepared_handoff_on),
+            sdr_master_codecs(sdr_master_codecs_on),
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
@@ -256,17 +609,465 @@ pub(crate) async fn readiness(
             )
             .await,
             subtitle_backfill(&state, subtitle_backfill_on).await,
-            subtitle_not_ready_503(plurx_core::store::stored_switch(
-                settings
-                    .get(plurx_core::store::keys::SUBTITLE_NOT_READY_503)
-                    .map(String::as_str),
-                false,
-            )),
             chapter_thumbnails(&state).await,
             dolby_vision_convert(convert_on),
+            dolby_vision_hdr_processing(plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::DV_HDR_PROCESSING).map(String::as_str), false)),
+            dolby_vision_fel_reencode(plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::DV_FEL_REENCODE).map(String::as_str), false)),
             source_probe_comparison().await,
+            output_preparation(&state, &settings).await,
+            rolling_retention(&state, &settings).await,
+            display_aware_auto(&state, &settings).await,
+            network_priors_item(playback_switch(
+                &settings,
+                plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS,
+            )),
         ],
     }))
+}
+
+/// The playback switches are parsed with `trim() == "1"` by every engine site
+/// that reads them (`system.rs`, `hls/create.rs`, `hls/link_receipts.rs`,
+/// `network.rs`), not with `stored_switch`. A row that accepted `true` here
+/// would report a switch on that the engine treats as off.
+fn playback_switch(settings: &std::collections::BTreeMap<String, String>, key: &str) -> bool {
+    settings.get(key).is_some_and(|value| value.trim() == "1")
+}
+
+/// How many nodes could own a playback session, as far as this node can read.
+/// `Ok(1)` for a standalone install, which has no roster to read.
+async fn session_owner_candidates(state: &AppState) -> Result<usize, String> {
+    if !state.membership.is_replicated() {
+        return Ok(1);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(3), state.membership.status()).await {
+        Ok(Ok(status)) => Ok(status.nodes.len()),
+        Ok(Err(error)) => Err(format!("the local roster could not be read ({error})")),
+        Err(_) => Err(
+            "the local roster did not answer within the three-second observation budget".to_owned(),
+        ),
+    }
+}
+
+/// Fit Auto to display (`playback.display_aware_auto`), and what it silently
+/// depends on (defect D6). Five server paths that let Auto move *up* — link
+/// receipts, their acknowledgement, the candidate veto and the stored prior —
+/// return early unless `playback.network_priors` is `"1"`, so with priors off
+/// display-aware Auto can only move quality down. Receipts are accepted only
+/// by the node that owns the session, and network identity is IPv4-only.
+/// None of that is changed here: this card says it out loud. Every row is
+/// advisory and nothing reads it on Save.
+async fn display_aware_auto(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> DeveloperEnableItem {
+    display_aware_auto_item(
+        playback_switch(
+            settings,
+            plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO,
+        ),
+        playback_switch(settings, plurx_core::store::keys::PLAYBACK_AUTO_ABR),
+        playback_switch(settings, plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS),
+        session_owner_candidates(state).await,
+    )
+}
+
+fn display_aware_auto_item(
+    enabled: bool,
+    auto_abr_on: bool,
+    priors_on: bool,
+    owner_candidates: Result<usize, String>,
+) -> DeveloperEnableItem {
+    let (owner_status, owner_evidence) = match owner_candidates {
+        Ok(nodes) if nodes <= 1 => (
+            RequirementStatus::Met,
+            "One node: every session is placed on this node, which is the node that accepts \
+             its link receipts"
+                .to_owned(),
+        ),
+        Ok(nodes) => (
+            RequirementStatus::Unknown,
+            format!(
+                "{nodes} nodes in the local roster: sessions placed on a peer get no link \
+                 receipts, so for those sessions Auto behaves as if network priors were off. \
+                 This route cannot see where any one session was placed"
+            ),
+        ),
+        Err(error) => (
+            RequirementStatus::Unavailable,
+            format!("Whether sessions can be placed on a peer is unknown: {error}"),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "display_aware_auto",
+        title: "Fit Auto to display",
+        enabled: Some(enabled),
+        setting: Some("playback_display_aware_auto"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "auto_abr",
+                title: "Adaptive Auto quality is on",
+                status: if auto_abr_on {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: if auto_abr_on {
+                    "playback.auto_abr is on: clients may change rungs after playback starts"
+                        .to_owned()
+                } else {
+                    "playback.auto_abr is off: Fit Auto to display chooses the starting rung, \
+                     but nothing adapts during playback. Turning off one switch does not stop \
+                     the other"
+                        .to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "network_priors",
+                title: "Network priors are on",
+                status: if priors_on {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: if priors_on {
+                    "On: link receipts are accepted, so Auto may upgrade and a link stall may \
+                     step quality down"
+                        .to_owned()
+                } else {
+                    "Off: Auto never upgrades and a link stall retries the same quality; \
+                     producer and decoder recovery still work"
+                        .to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "local_session_owner",
+                title: "Sessions are owned by the node that serves them",
+                status: owner_status,
+                evidence: owner_evidence,
+            },
+            DeveloperRequirement {
+                id: "ipv4_client",
+                title: "Clients reach the server over IPv4",
+                status: RequirementStatus::Unknown,
+                evidence: "Network identity is an IPv4 /24, from Forwarded, X-Forwarded-For or \
+                           X-Real-IP, otherwise the socket peer. A client that connects over \
+                           IPv6 with no forwarded IPv4 address gets no network identity, so it \
+                           never gets link evidence and Auto never upgrades for it. This route \
+                           cannot see which clients connect over IPv6"
+                    .to_owned(),
+            },
+        ],
+    }
+}
+
+/// `playback.network_priors`: the switch display-aware Auto needs in order to
+/// move up. Until now it had no Settings control at all. Both rows are
+/// statements about this build, not about the deployment.
+fn network_priors_item(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "network_priors",
+        title: "Network priors",
+        enabled: Some(enabled),
+        setting: Some("playback_network_priors"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "priors_history",
+                title: "What turning it on stores",
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "Per user, client class and IPv4 /24 network: a conservative throughput \
+                     estimate and the lowest rung that starved there, kept on this node for {} \
+                     days. Nothing new is folded in while this is off",
+                    plurx_core::store::keys::NETWORK_PRIOR_RETAIN_DAYS
+                ),
+            },
+            DeveloperRequirement {
+                id: "priors_cold_start",
+                title: "What it changes for Auto's starting rung",
+                status: RequirementStatus::Met,
+                evidence: "With history for the viewer's network, Auto starts below a rung that \
+                           starved there or at the highest peak-safe rung; with none it keeps \
+                           today's start. It also lets link receipts through, which is what \
+                           allows Fit Auto to display to upgrade"
+                    .to_owned(),
+            },
+        ],
+    }
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / f64::from(1_u32 << 30))
+}
+
+/// Complete-output preparation queued by VOD starts (`vod.output_preparation`).
+///
+/// No `setting`: the switch is three-valued (`off`, `copy`,
+/// `copy_and_encoded`) and the readiness switch walk PUTs booleans. The card
+/// has its own selector. Every row is advisory.
+async fn output_preparation(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> DeveloperEnableItem {
+    use plurx_core::store::background_jobs::{JobKind, JobQuery, JobState};
+    let mode = crate::vodserve::OutputPreparation::parse(
+        settings
+            .get(plurx_core::store::keys::VOD_OUTPUT_PREPARATION)
+            .map(String::as_str),
+    );
+    let budget = crate::cachekeep::cache_budget(
+        settings
+            .get(plurx_core::store::keys::CACHE_MAX_GB)
+            .map(String::as_str),
+    );
+    let mut counts = Vec::new();
+    let mut unavailable = None;
+    for kind in [JobKind::CopyOutputPrepare, JobKind::EncodedOutputPrepare] {
+        for job_state in [JobState::Queued, JobState::Running] {
+            match state
+                .store
+                .list_jobs(JobQuery {
+                    node_id: None,
+                    state: Some(job_state),
+                    kind: Some(kind),
+                    after_id: None,
+                    limit: plurx_core::store::background_jobs::MAX_PAGE_SIZE,
+                })
+                .await
+            {
+                Ok(page) => counts.push((
+                    kind,
+                    job_state,
+                    page.jobs.len(),
+                    page.next_after_id.is_some(),
+                )),
+                Err(error) => unavailable = Some(error.to_string()),
+            }
+        }
+    }
+    let count_of = |kind: JobKind, job_state: JobState| {
+        counts
+            .iter()
+            .find(|(k, s, _, _)| *k == kind && *s == job_state)
+            .map_or_else(
+                || "?".to_owned(),
+                |(_, _, n, more)| format!("{n}{}", if *more { "+" } else { "" }),
+            )
+    };
+    let queued_evidence = match &unavailable {
+        Some(error) => format!("The job list could not be read: {error}"),
+        None => format!(
+            "Copy: {} queued, {} running. Encoded: {} queued, {} running. \
+              Settings → Jobs filtered by kind lists them; turning a kind off cancels its \
+              queued rows within a minute (plurx_output_preparation_drained_total)",
+            count_of(JobKind::CopyOutputPrepare, JobState::Queued),
+            count_of(JobKind::CopyOutputPrepare, JobState::Running),
+            count_of(JobKind::EncodedOutputPrepare, JobState::Queued),
+            count_of(JobKind::EncodedOutputPrepare, JobState::Running),
+        ),
+    };
+    let storage = state.transcode.preparation_storage_diagnostics().await;
+    let idle = state.transcode.pretranscode_worker_idle();
+    DeveloperEnableItem {
+        id: "output_preparation",
+        title: "Complete-output preparation from VOD starts",
+        enabled: Some(mode != crate::vodserve::OutputPreparation::Off),
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "output_mode",
+                title: "Which preparation a VOD start may queue",
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "{}: off queues nothing, copy queues remux preparation, copy_and_encoded \
+                      also queues a whole-title background encode. A preparation runs whether \
+                      or not the pre-transcode schedule is on",
+                    mode.as_str()
+                ),
+            },
+            DeveloperRequirement {
+                id: "output_budget",
+                title: "A retained-output budget",
+                status: if budget.is_some() {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: match budget {
+                    Some(bytes) => format!(
+                        "cache.max_gb allows {} of retained output (unset means the 50 GB \
+                          default the settings page shows)",
+                        gib(bytes)
+                    ),
+                    None => {
+                        "cache.max_gb is 0: preparations would have nowhere to publish".to_owned()
+                    }
+                },
+            },
+            DeveloperRequirement {
+                id: "output_storage_ownership",
+                title: "Private preparation storage and cleanup",
+                status: if storage.inventory_complete { RequirementStatus::Met } else { RequirementStatus::Unavailable },
+                evidence: format!("Private media: {} bytes. Pending cleanup: {} owners, {} bytes, oldest {} seconds, failure {}. Cold/unknown cache: {} bytes. Startup inventory complete: {}. Completion keeps storage capacity until cleanup settles.", storage.private_media_bytes, storage.pending_cleanup_count, storage.pending_cleanup_bytes, storage.oldest_cleanup_seconds, storage.last_failure_class, storage.cold_unknown_bytes, storage.inventory_complete),
+            },
+            DeveloperRequirement {
+                id: "output_jobs",
+                title: "Queued and running preparation",
+                status: if unavailable.is_some() {
+                    RequirementStatus::Unavailable
+                } else {
+                    RequirementStatus::Met
+                },
+                evidence: queued_evidence,
+            },
+            DeveloperRequirement {
+                id: "output_node_idle",
+                title: "This node's background encoder is idle",
+                status: if idle {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: if idle {
+                    "Idle now: a claimed preparation may start".to_owned()
+                } else {
+                    "Busy with foreground or offline work: preparation yields until it is idle"
+                        .to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "output_stop",
+                title: "What Stop in Activity does",
+                status: RequirementStatus::Met,
+                evidence: "It cancels the preparation running on the node that answers the \
+                  request (not one running on a peer), and the next play of that title \
+                  may queue it again"
+                    .to_owned(),
+            },
+        ],
+    }
+}
+
+/// Retaining a rolling session's complete output (`vod.rolling_retention`).
+async fn rolling_retention(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> DeveloperEnableItem {
+    let enabled = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::VOD_ROLLING_RETENTION)
+            .map(String::as_str),
+        false,
+    );
+    let budget = crate::cachekeep::cache_budget(
+        settings
+            .get(plurx_core::store::keys::CACHE_MAX_GB)
+            .map(String::as_str),
+    );
+    let facts = state.transcode.rolling_retention_facts().await;
+    let live_bytes = facts
+        .rows
+        .iter()
+        .fold(0_u64, |sum, row| sum.saturating_add(row.bytes));
+    let reserve = crate::scratch_ledger::RETAINED_HEADROOM_RESERVE_BYTES;
+    DeveloperEnableItem {
+        id: "rolling_retention",
+        title: "Retain rolling sessions' complete output",
+        enabled: Some(enabled),
+        setting: Some("vod_rolling_retention"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "retention_same_filesystem",
+                title: "Session scratch and the retained namespace share a filesystem",
+                status: match facts.same_filesystem {
+                    Some(true) => RequirementStatus::Met,
+                    Some(false) => RequirementStatus::Unmet,
+                    None => RequirementStatus::Unavailable,
+                },
+                evidence: match facts.same_filesystem {
+                    Some(true) => "Same device: segments can be hard-linked".to_owned(),
+                    Some(false) if cfg!(windows) => {
+                        "Windows: no device identity to prove one filesystem, so retention \
+                          stays off on this node"
+                            .to_owned()
+                    }
+                    Some(false) => "Different devices: a link would fail with EXDEV, so a \
+                      collection is refused before it reserves anything"
+                        .to_owned(),
+                    None => "The scratch or namespace directory could not be read".to_owned(),
+                },
+            },
+            DeveloperRequirement {
+                id: "retention_budget",
+                title: "A retained-output budget",
+                status: if budget.is_some() {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: match budget {
+                    Some(bytes) => format!(
+                        "cache.max_gb allows {} (unset means the 50 GB default)",
+                        gib(bytes)
+                    ),
+                    None => "cache.max_gb is 0: nothing can be retained".to_owned(),
+                },
+            },
+            DeveloperRequirement {
+                id: "retention_headroom",
+                title: "Free space beyond everything scratch may write",
+                status: match facts.admits {
+                    Ok(()) => RequirementStatus::Met,
+                    Err("headroom_unsampled") => RequirementStatus::Unknown,
+                    Err(_) => RequirementStatus::Unmet,
+                },
+                evidence: match facts.slack {
+                    Some(slack) => format!(
+                        "Slack {} against a {} reserve ({}); sampled every 30 s, and a sample \
+                          older than 60 s refuses",
+                        if slack < 0 {
+                            format!("-{}", gib(slack.unsigned_abs()))
+                        } else {
+                            gib(slack.unsigned_abs())
+                        },
+                        gib(reserve.unsigned_abs()),
+                        match facts.admits {
+                            Ok(()) => "captures may link",
+                            Err(reason) => reason,
+                        }
+                    ),
+                    None => {
+                        "No free-space sample yet: retention refuses until one exists".to_owned()
+                    }
+                },
+            },
+            DeveloperRequirement {
+                id: "retention_live_bytes",
+                title: "What retention holds on this node",
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "{} across {} artifacts; Activity lists each with a Stop (this node only)",
+                    gib(live_bytes),
+                    facts.rows.len()
+                ),
+            },
+            DeveloperRequirement {
+                id: "retention_cleanup_pending",
+                title: "Nothing waiting on the collector",
+                status: if facts.cleanup_pending == 0 {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: format!(
+                    "{} orphan or retired directories still to delete; the collector spends up \
+                      to 250 ms per 30 s tick on them",
+                    facts.cleanup_pending
+                ),
+            },
+        ],
+    }
 }
 
 async fn bounded_catalogue_reads(state: &AppState, enabled: bool) -> DeveloperEnableItem {
@@ -886,6 +1687,78 @@ fn dolby_vision_convert(enabled: bool) -> DeveloperEnableItem {
     }
 }
 
+// Readiness describes missing evidence, never permission or effective processing.
+fn dolby_vision_hdr_processing(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "dolby_vision_hdr_processing",
+        title: "Process Dolby Vision for HDR output",
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_hdr_processing"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "dv_hdr_backend_reference",
+                title: "Qualified backend and reference",
+                status: RequirementStatus::Unmet,
+                evidence: "Dolby Vision processing for HDR10 is not yet available on playback workers. Your preference is saved; compatible playback remains available.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_encoder_matrix",
+                title: "Production encoder matrix",
+                status: RequirementStatus::Unobservable,
+                evidence: "Processing still needs testing with the encoders used by playback workers.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_bitrate_quality",
+                title: "Quality at delivery bitrates",
+                status: RequirementStatus::Unobservable,
+                evidence: "Independent quality comparisons at delivery bitrates are still pending.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_hdr_physical_playback",
+                title: "Physical playback validation",
+                status: RequirementStatus::Unobservable,
+                evidence: "Startup, seeking, fallback and sustained playback still need testing on supported devices. Your saved preference remains authoritative.".into(),
+            },
+        ],
+    }
+}
+
+// Readiness describes missing evidence, never permission or effective processing.
+fn dolby_vision_fel_reencode(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "dolby_vision_fel_reencode",
+        title: "Preserve FEL when converting to Profile 8.1",
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_fel_reencode"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "dv_fel_backend_reference",
+                title: "Qualified backend and reference",
+                status: RequirementStatus::Unmet,
+                evidence: "FEL-preserving Profile 8.1 conversion is not yet available on playback workers. Your preference is saved; permitted conversion keeps its existing fallback.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_encoder_matrix",
+                title: "Production encoder matrix",
+                status: RequirementStatus::Unobservable,
+                evidence: "Processing still needs testing with the encoders used by playback workers.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_bitrate_quality",
+                title: "Quality at delivery bitrates",
+                status: RequirementStatus::Unobservable,
+                evidence: "Independent quality comparisons at delivery bitrates are still pending.".into(),
+            },
+            DeveloperRequirement {
+                id: "dv_fel_physical_playback",
+                title: "Physical playback validation",
+                status: RequirementStatus::Unobservable,
+                evidence: "Startup, seeking, fallback and sustained playback still need testing on supported devices. Your saved preference remains authoritative.".into(),
+            },
+        ],
+    }
+}
+
 /// Image subtitles served as an overlay rather than hidden or burned in.
 ///
 /// This was `PLURX_PGS_OVERLAY`, a boot-time environment read that decided
@@ -1492,6 +2365,33 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
     }
 }
 
+/// S-10's SDR master `CODECS`. The switch is the whole decision; its one row
+/// says what nobody has measured yet and never refuses the save. It is
+/// `unknown` by construction — no observation this daemon can make proves it:
+/// whether AVPlayer still offers every SDR variant once the master names its
+/// codecs is a physical-device result, and a daemon that served such a master
+/// has no way to see a rung the player silently dropped before fetching it.
+fn sdr_master_codecs(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "sdr_master_codecs",
+        title: "CODECS on SDR master playlists",
+        enabled: Some(enabled),
+        setting: Some("playback_sdr_master_codecs"),
+        requirements: vec![DeveloperRequirement {
+            id: "sdr_codecs_device_requalification",
+            title: "Apple TV and iPhone keep every SDR variant with CODECS printed",
+            status: RequirementStatus::Unknown,
+            evidence: "Not recorded: the S-10 device re-qualification \
+                       (HONEST-MASTER-PLAYLIST \u{a7}5.4) is a physical-device result this \
+                       daemon cannot read, and a variant AVPlayer drops on CODECS is never \
+                       fetched, so no server counter can see it. Advisory only. The value is \
+                       fixed when a session is created; a session rebuilt after an owner \
+                       takeover or VOD resurrection reads the current value."
+                .to_owned(),
+        }],
+    }
+}
+
 fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
     let staged = crate::playback_control::preparation_staged_snapshot();
     let prepare_capable = crate::playback_control::prepare_capable_snapshot();
@@ -1687,59 +2587,6 @@ fn human_bytes(bytes: u64) -> String {
 /// Refusing a subtitle segment whose sidecar has failed, instead of serving a
 /// syntactically valid empty track.
 ///
-/// Every row is an engine observation, and not one of them is consulted by
-/// the settings write. The honest answer for all three is `Unobservable`
-/// today, and saying so is the point: the measurement is *"does this engine
-/// keep playing video through a subtitle 503"*, which is a fact about
-/// AVPlayer, Media3 and hls.js running on real devices, not a fact a server
-/// process can read off itself. An operator who has run the physical
-/// verification may turn this on over three grey rows.
-fn subtitle_not_ready_503(enabled: bool) -> DeveloperEnableItem {
-    let engine = |id: &'static str, title: &'static str, detail: String| DeveloperRequirement {
-        id,
-        title,
-        status: RequirementStatus::Unobservable,
-        evidence: detail,
-    };
-
-    DeveloperEnableItem {
-        id: "subtitle_not_ready_503",
-        title: "Refuse a subtitle segment whose extraction failed",
-        enabled: Some(enabled),
-        setting: Some("subtitle_not_ready_503"),
-        requirements: vec![
-            engine(
-                "avplayer_survives_subtitle_refusal",
-                "AVPlayer keeps the picture through a subtitle 503",
-                "AVPlayer allows a subtitle segment roughly two seconds and blocks the muxed \
-                 video while it waits, so a refusal on that request is the one with a picture \
-                 riding on it. Whether it drops the legible selection and plays on, or stalls \
-                 the video, is a measurement on an Apple TV and an iPad — not something this \
-                 process can read. Off until it is taken."
-                    .to_owned(),
-            ),
-            engine(
-                "media3_survives_subtitle_refusal",
-                "Media3 keeps the picture through a subtitle 503",
-                "ExoPlayer's HLS text renderer may surface a 4xx/5xx on a subtitle rendition as \
-                 a fatal source error rather than a text-track error. The distinction decides \
-                 whether an Android viewer loses their subtitles or their film, and it is a \
-                 measurement on a device."
-                    .to_owned(),
-            ),
-            engine(
-                "hlsjs_survives_subtitle_refusal",
-                "hls.js keeps the picture through a subtitle 503",
-                "hls.js retries subtitle fragments on its own schedule and escalates to a fatal \
-                 network error after its retry budget. Whether the bundled 1.6.16 build treats a \
-                 503 with `Retry-After` on a subtitle rendition as recoverable is a browser \
-                 measurement."
-                    .to_owned(),
-            ),
-        ],
-    }
-}
-
 /// Recording from the tuner to a disk. Every row here is a fact this process
 /// read just now, and not one of them is consulted by the settings write:
 /// `dvr_enabled` is a plain switch, and an operator who can see the deployment
@@ -2030,9 +2877,111 @@ fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
     ]}
 }
 
+fn sharing_endpoint_requirement(
+    observed: Result<Option<plurx_core::sharing::EndpointManifest>, plurx_core::error::StoreError>,
+) -> DeveloperRequirement {
+    let (status, evidence) = match observed {
+        Ok(None) => (RequirementStatus::Unmet, "No private Sharing endpoints are configured. In Settings → Sharing, open This Cinema’s endpoints and save the Tailnet address, private .ts.net name, forwarded port and verified certificate pin before creating an invitation. Enabling Sharing does not configure these endpoints.".into()),
+        Ok(Some(manifest)) if manifest.revision > 0 && plurx_core::sharing::validate_endpoints(&manifest.endpoints).is_ok() => (RequirementStatus::Met, format!("{} approved private Sharing endpoint(s) are configured at revision {}. This confirms configuration only; Tailscale reachability, TCP forwarding and access policy have not been verified here.", manifest.endpoints.len(), manifest.revision)),
+        Ok(Some(_)) => (RequirementStatus::Unmet, "The configured Sharing endpoints are invalid. Review This Cinema’s endpoints in Settings → Sharing and verify the private addresses, forwarded port and certificate pins.".into()),
+        Err(_) => (RequirementStatus::Unknown, "The configured Sharing endpoints could not be read. Reload before changing them; this observation does not establish whether an endpoint is configured or reachable.".into()),
+    };
+    DeveloperRequirement {
+        id: "endpoints",
+        title: "Configured private Sharing endpoints",
+        status,
+        evidence,
+    }
+}
+
+async fn cinema_sharing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    // Refresh through this existing admin read, without a background task or
+    // mutating the saved enablement choice.
+    state
+        .sharing
+        .observe_source_activation_current(state.membership.source_layout_ready().await.ok());
+    let endpoints = sharing_endpoint_requirement(state.store.sharing_endpoint_manifest().await);
+    let status = state.sharing.status();
+    DeveloperEnableItem {id:"cinema_sharing",title:"Cinema shared libraries",enabled:Some(enabled),setting:Some("sharing_enabled"),requirements:vec![
+        DeveloperRequirement {id:"source_activation",title:"Current Source activation",status:match status.source_activation_current {Some(true)=>RequirementStatus::Met,Some(false)=>RequirementStatus::Unmet,None=>RequirementStatus::Unknown},evidence:match status.source_activation_current {Some(true)=>"The current Source layout is verified. Startup activation remains a separate historical observation; playback still requires its live authority checks.".into(),Some(false)=>"Source activation is pending. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Your saved choice is unchanged.".into(),None=>"The current Source layout could not be verified. Readiness is advisory and saving remains available.".into()}},
+        DeveloperRequirement {id:"listener",title:"Private sharing listener",status:if status.listener=="listening" {RequirementStatus::Met}else{RequirementStatus::Unmet},evidence:format!("This node reports {} at {} inside its process network namespace. A listening socket does not prove another Cinema can reach it. Ordinary local APIs never mount private peer routes.",status.listener,status.listener_address)},
+        DeveloperRequirement {id:"tls",title:"Node certificate and pin",status:if status.certificate.is_some() && status.certificate_renewal=="healthy" {RequirementStatus::Met}else{RequirementStatus::Unknown},evidence:status.certificate.map(|certificate|format!("Certificate expires at {} ms UTC. Renewal status: {}. The identity pin is shown under sharing status.",certificate.expires_at_ms,status.certificate_renewal)).unwrap_or_else(||"No active node certificate was observed. Enabling may create one; a missing key beside an existing certificate requires repair.".into())},
+        endpoints,
+        DeveloperRequirement {id:"network",title:"Tailscale reachability and access policy",status:RequirementStatus::Unknown,evidence:"Sharing requires Tailscale installed and signed in on the host, private TCP forwarding to the Sharing TLS listener, a reachable container ingress path and qualified outbound egress, and an access policy allowing the other Cinema. This process has not detected or verified the host installation, sign-in, forwarding or two-home reachability; a listener or configured endpoints alone do not prove them.".into()},
+        DeveloperRequirement {id:"qualification",title:"Shared catalogue and client qualification",status:RequirementStatus::Unknown,evidence:"S3–S8 session, catalogue, playback, private history and native device qualification remain in progress. No supported media is advertised yet.".into()},
+    ]}
+}
+
+/// Whether a Jellyfin client given only this server's host can connect: that
+/// is Jellyfin's standard port at the root, which this process opens beside
+/// its own. It reads only this process's listener; a container host's port
+/// publishing is outside its view, and the evidence says so.
+fn jellyfin_standard_port(state: &AppState) -> DeveloperRequirement {
+    use crate::http::JellyfinStandardPort;
+    let (status, evidence) = match state.jellyfin_standard_port.current() {
+        JellyfinStandardPort::Listening(address) => (
+            RequirementStatus::Met,
+            format!(
+                "This process answers Jellyfin clients at the root of {address}, so a client given only this server's host connects. Whether a container host publishes that port is outside this process's view."
+            ),
+        ),
+        JellyfinStandardPort::Unavailable { address, error } => (
+            RequirementStatus::Unmet,
+            format!(
+                "This process could not listen on {address} ({error}). Until that port is free, or server.jellyfin_port names another, clients need this server's /jellyfin address."
+            ),
+        ),
+        JellyfinStandardPort::Off => (
+            RequirementStatus::Unmet,
+            "This process opened no Jellyfin standard-port listener: server.jellyfin_port is 0 or names the main port, or startup has not reached it. Clients need this server's /jellyfin address.".into(),
+        ),
+    };
+    DeveloperRequirement {
+        id: "standard_port",
+        title: "Reachable by host alone",
+        status,
+        evidence,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sharing_endpoint_readiness_distinguishes_missing_configured_and_unreadable() {
+        use plurx_core::sharing::{Endpoint, EndpointManifest};
+        let missing = sharing_endpoint_requirement(Ok(None));
+        assert_eq!(missing.status, RequirementStatus::Unmet);
+        assert!(missing.evidence.contains("before creating an invitation"));
+        let manifest = EndpointManifest {
+            revision: 1,
+            endpoints: vec![Endpoint {
+                ipv4: "100.64.0.1".parse().expect("valid Tailnet fixture address"),
+                ipv6: None,
+                ts_fqdn: "cinema.example.ts.net".into(),
+                port: 32443,
+                spki_sha256: "a".repeat(64),
+            }],
+        };
+        let configured = sharing_endpoint_requirement(Ok(Some(manifest.clone())));
+        assert_eq!(configured.status, RequirementStatus::Met);
+        assert!(configured.evidence.contains("configuration only"));
+        assert!(configured.evidence.contains("have not been verified"));
+        assert!(!configured
+            .evidence
+            .contains(&manifest.endpoints[0].spki_sha256));
+        let invalid = sharing_endpoint_requirement(Ok(Some(EndpointManifest {
+            revision: 1,
+            endpoints: vec![],
+        })));
+        assert_eq!(invalid.status, RequirementStatus::Unmet);
+        let unavailable = sharing_endpoint_requirement(Err(
+            plurx_core::error::StoreError::Database("private detail".into()),
+        ));
+        assert_eq!(unavailable.status, RequirementStatus::Unknown);
+        assert!(!unavailable.evidence.contains("private detail"));
+    }
 
     #[test]
     fn developer_item_renders_each_requirement_from_real_probes() {
@@ -2130,5 +3079,114 @@ mod tests {
             matched.requirements[0].status,
             RequirementStatus::Met
         ));
+    }
+
+    /// D6: display-aware Auto moves up only with `playback.network_priors`
+    /// on, and until this card that dependency was invisible. The card names
+    /// it, reads it, and the priors switch is a Developer switch of its own.
+    #[test]
+    fn display_aware_auto_lists_network_priors_and_reports_its_state() {
+        let priors_off = display_aware_auto_item(true, true, false, Ok(1));
+        assert_eq!(priors_off.id, "display_aware_auto");
+        assert_eq!(priors_off.setting, Some("playback_display_aware_auto"));
+        assert_eq!(
+            priors_off
+                .requirements
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [
+                "auto_abr",
+                "network_priors",
+                "local_session_owner",
+                "ipv4_client"
+            ]
+        );
+        let priors_row = |item: &DeveloperEnableItem| {
+            item.requirements
+                .iter()
+                .find(|row| row.id == "network_priors")
+                .map(|row| (row.status, row.evidence.clone()))
+                .expect("the network priors row")
+        };
+        let (status, evidence) = priors_row(&priors_off);
+        assert_eq!(status, RequirementStatus::Unmet);
+        assert!(
+            evidence.contains("Auto never upgrades")
+                && evidence.contains("a link stall retries the same quality")
+                && evidence.contains("producer and decoder recovery still work"),
+            "{evidence}"
+        );
+
+        let priors_on = display_aware_auto_item(true, true, true, Ok(1));
+        assert_eq!(priors_row(&priors_on).0, RequirementStatus::Met);
+
+        // Adaptive Auto is read, not assumed.
+        assert_eq!(priors_on.requirements[0].status, RequirementStatus::Met);
+        assert_eq!(
+            display_aware_auto_item(true, false, true, Ok(1)).requirements[0].status,
+            RequirementStatus::Unmet
+        );
+
+        // A single node owns every session; a roster with peers cannot say
+        // where a given session landed, and an unreadable roster says so.
+        assert_eq!(priors_on.requirements[2].status, RequirementStatus::Met);
+        let clustered = display_aware_auto_item(true, true, true, Ok(3));
+        assert_eq!(clustered.requirements[2].status, RequirementStatus::Unknown);
+        assert!(
+            clustered.requirements[2]
+                .evidence
+                .contains("sessions placed on a peer get no link receipts"),
+            "{}",
+            clustered.requirements[2].evidence
+        );
+        let unread = display_aware_auto_item(true, true, true, Err("roster down".to_owned()));
+        assert_eq!(
+            unread.requirements[2].status,
+            RequirementStatus::Unavailable
+        );
+        assert!(unread.requirements[2].evidence.contains("roster down"));
+
+        // IPv6 is a limit this route cannot observe, whatever else is true.
+        assert_eq!(clustered.requirements[3].status, RequirementStatus::Unknown);
+        assert!(clustered.requirements[3].evidence.contains("IPv6"));
+
+        for saved in [false, true] {
+            let priors = network_priors_item(saved);
+            assert_eq!(priors.id, "network_priors");
+            assert_eq!(priors.setting, Some("playback_network_priors"));
+            assert_eq!(priors.enabled, Some(saved));
+            assert!(priors
+                .requirements
+                .iter()
+                .all(|row| row.evidence.len() > 20));
+        }
+    }
+
+    /// Readiness reports; it never decides. Every combination of red rows
+    /// leaves the switch where the operator saved it, in both directions.
+    #[test]
+    fn display_aware_auto_readiness_never_refuses_the_switch() {
+        for saved in [false, true] {
+            for auto_abr in [false, true] {
+                for priors in [false, true] {
+                    for owners in [Ok(1), Ok(4), Err("unreadable".to_owned())] {
+                        let item = display_aware_auto_item(saved, auto_abr, priors, owners);
+                        assert_eq!(
+                            item.enabled,
+                            Some(saved),
+                            "rows never move the saved switch (auto_abr {auto_abr}, \
+                             priors {priors})"
+                        );
+                        assert_eq!(
+                            item.setting,
+                            Some("playback_display_aware_auto"),
+                            "the switch stays a switch the readiness walk can write"
+                        );
+                        assert!(item.requirements.iter().all(|row| row.evidence.len() > 20));
+                    }
+                }
+            }
+        }
     }
 }

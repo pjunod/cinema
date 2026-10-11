@@ -81,7 +81,7 @@ def _route_arguments(segment: str) -> list[str]:
     return [m.group(1) for m in re.finditer(pattern, segment)]
 
 
-def _resolve_constant(name: str) -> str:
+def _resolve_constant(name: str, owner: Path | None = None) -> str:
     """A route path held in a constant is still a route path.
 
     Seventeen of them are, and they are the whole internal control plane, so
@@ -93,6 +93,26 @@ def _resolve_constant(name: str) -> str:
     short = parts[-1]
     module = parts[-2] if len(parts) > 1 else None
     declaration = re.compile(r'const\s+%s\s*:\s*&str\s*=\s*"([^"]+)"' % re.escape(short))
+    # A #[path] child module alias is scoped to its declaring file. Source
+    # and receiver both name their distinct forwarding children `forwarding`.
+    # Resolve that declaration before the global inventory, never whichever
+    # same-named constant happens to be scanned first.
+    if owner is not None and module is None:
+        local = declaration.search(owner.read_text(encoding="utf-8"))
+        if local is not None:
+            return local.group(1)
+    if owner is not None and module is not None:
+        child = re.search(
+            r'#\[path\s*=\s*"([^"]+)"\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+'
+            + re.escape(module) + r'\s*;',
+            owner.read_text(encoding="utf-8"),
+        )
+        if child is not None:
+            declared = owner.parent / child.group(1)
+            match = declaration.search(declared.read_text(encoding="utf-8"))
+            if match is None:
+                raise AssertionError(f"no {short} declaration in scoped module {declared}")
+            return match.group(1)
     candidates: list[tuple[bool, str]] = []
     for path in CRATES.rglob("*.rs"):
         if "/target/" in str(path) or "/build/" in str(path):
@@ -140,15 +160,71 @@ def _nested_router_routes(segment: str) -> set[str]:
     return routes
 
 
-def _merged_router_routes(segment: str) -> set[str]:
-    """Expand `.merge(module::named_router())` at the current prefix."""
+def _module_router_calls(segment: str) -> list[tuple[str, str]]:
+    """Read a module call inside an actual merge, including state arguments.
+
+    The caller supplies only a registered router chain. Balanced arguments are
+    skipped rather than searched for route declarations or unrelated modules.
+    Limits keep malformed input from silently expanding this inventory scan.
+    """
+    calls: list[tuple[str, str]] = []
+    start = re.compile(r"\.merge\(\s*((?:(?:crate|super|self)::)?[A-Za-z_]\w*)::([A-Za-z_]\w*)\(")
+    for match in start.finditer(segment):
+        depth = 1
+        quoted = False
+        escaped = False
+        end = None
+        for cursor in range(match.end(), min(len(segment), match.end() + 8192)):
+            char = segment[cursor]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+                continue
+            if char == '"':
+                quoted = True
+            elif char == "(":
+                depth += 1
+                if depth > 64:
+                    raise AssertionError("module router argument nesting exceeds inventory bound")
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    end = cursor + 1
+                    break
+        if end is None:
+            raise AssertionError("unbalanced or oversized module router arguments")
+        tail = end
+        while tail < len(segment) and segment[tail].isspace():
+            tail += 1
+        if tail >= len(segment) or segment[tail] != ")":
+            raise AssertionError("module router call does not close its merge")
+        calls.append((match.group(1), match.group(2)))
+    return calls
+
+
+def _merged_router_routes(
+    segment: str, context: Path | None = None, visiting: frozenset[tuple[Path, str]] = frozenset(),
+) -> set[str]:
+    """Expand actual module router merges at the current prefix."""
     routes: set[str] = set()
-    merged = re.compile(
-        r"\.merge\(\s*((?:crate::)?[A-Za-z_]\w*)::([A-Za-z_]\w*)\(\)\s*\)"
-    )
-    for module, function in merged.findall(segment):
+    for module, function in _module_router_calls(segment):
         base = ROUTER.parent.parent if module.startswith("crate::") else ROUTER.parent
-        source = (base / f"{module.removeprefix('crate::')}.rs").read_text(encoding="utf-8")
+        owner = base / f"{module.split('::')[-1]}.rs"
+        if context is not None:
+            child = re.search(
+                r'#\[path\s*=\s*"([^"]+)"\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+'
+                + re.escape(module) + r'\s*;', context.read_text(encoding="utf-8"),
+            )
+            if child is not None:
+                owner = context.parent / child.group(1)
+        key = (owner, function)
+        if key in visiting or len(visiting) >= 32:
+            raise AssertionError(f"module router delegation cycle or bound at {key}")
+        source = owner.read_text(encoding="utf-8")
         subrouter = re.search(
             rf"(?:pub(?:\(crate\))?\s+)?fn\s+{re.escape(function)}\([^)]*\)[^{{]*\{{(?P<body>.*?)^\}}",
             source,
@@ -160,9 +236,14 @@ def _merged_router_routes(segment: str) -> set[str]:
             routes.add(
                 argument.strip('"')
                 if argument.startswith('"')
-                else _resolve_constant(argument)
+                else _resolve_constant(argument, owner)
             )
-        routes.update(_merged_router_routes(subrouter.group("body")))
+        body = subrouter.group("body")
+        routes.update(_merged_router_routes(body, owner, visiting | {key}))
+        # A pure router wrapper delegates its complete return value. Follow
+        # only that expression and its scoped module, not unrelated functions.
+        if re.fullmatch(r"[A-Za-z_]\w*::[A-Za-z_]\w*\([^(){};]*\)", body.strip()):
+            routes.update(_merged_router_routes(".merge(" + body.strip() + ")", owner, visiting | {key}))
     return routes
 
 
@@ -262,6 +343,24 @@ def tabulated_paths() -> set[str]:
 
 
 class ApiDocRoutesTest(unittest.TestCase):
+    def test_module_merges_preserve_zero_args_and_expand_balanced_state_args_only(self) -> None:
+        zero = _merged_router_routes(".merge(sharing::admin_router())")
+        state = _merged_router_routes(".merge(sharing::admin_router(state.clone()))")
+        nested = _merged_router_routes('.merge(sharing::admin_router(choose(state.clone(), "literal ) (")))')
+        self.assertEqual(zero, state)
+        self.assertEqual(state, nested)
+        self.assertIn("/sharing/settings", state)
+        self.assertEqual(len(state), 16)
+        self.assertIn("/sharing/imports/{import}/libraries", state)
+        self.assertEqual(_merged_router_routes(".merge(super::shared_library::admin_library_router(state))"), {"/sharing/imports/{import}/libraries"})
+        self.assertFalse(any(path.startswith("/sharing/v1/") for path in state),
+                         "unregistered private peer routers are not swept from the module")
+        self.assertEqual(_module_router_calls("let candidate = sharing::peer_router(state.clone());"), [])
+        self.assertEqual(_module_router_calls(".merge(local_router)"), [])
+        for malformed in [".merge(sharing::admin_router(state.clone())", ".merge(sharing::admin_router(" + "(" * 65]:
+            with self.assertRaises(AssertionError):
+                _module_router_calls(malformed)
+
     def test_every_registered_route_is_documented(self) -> None:
         """A route nobody can find is a route that gets reimplemented."""
         documented = documented_paths()

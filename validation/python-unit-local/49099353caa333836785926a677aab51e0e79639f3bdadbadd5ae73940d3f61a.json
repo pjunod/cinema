@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/a05-android-adaptive-controller",
+  "suite": "operations",
+  "test_file": "tests/operations/test_a05_superseded_controller.py",
+  "test_file_sha256": "6e7065fa7fcec4e221149513d22d090c4edfde7f337b16a035b47eb906fa1012",
+  "source_commit": null,
+  "command": "python3 -m unittest tests.operations.test_a05_superseded_controller.SupersededA05ControllerTests.test_removed_height_controller_does_not_reappear",
+  "test_ids": ["test_a05_superseded_controller.SupersededA05ControllerTests.test_removed_height_controller_does_not_reappear"],
+  "output": "Original local tool chunk f5db10 exit0 on uncommitted source at8505df8797f4: Ran 1 test in 0.000s; OK. Exact test-file hash retained. Negative-control tool chunk6a2717 with temporary obsolete adapter artifact: 1 test/1 failure; artifact deleted before this sole pass. No CI run or final-commit execution attribution. No other tests executed.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}

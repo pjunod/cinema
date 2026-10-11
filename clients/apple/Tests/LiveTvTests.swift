@@ -639,38 +639,58 @@ final class LiveTvTests: XCTestCase {
 
     // ---- the advisory enable card ---------------------------------------
 
-    /// Paul's standing rule: nothing in the code gates a feature; the Developer
-    /// tab says what is needed and whether each part is met, and never refuses
-    /// the enable. These two tests are that rule, pinned.
-    func testTheDeveloperCardDrawsEveryReadinessRowTheServerSendsAndGatesNothing() throws {
-        // The Developer enable card: what is needed to turn Live TV on safely
-        // and whether each part is met right now, from the same
-        // `/live-tv/readiness` read the web card makes — beside the button,
-        // never in its way.
-        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
+    /// Paul's standing rule: nothing in the code gates a feature; an enable
+    /// section says what is needed and whether each part is met, and never
+    /// refuses the enable. These two tests are that rule, pinned.
+    func testTheLiveTvEnableCardDrawsEveryReadinessRowTheServerSendsAndGatesNothing() throws {
+        // The Settings → Live TV enable card (graduated from Developer): what
+        // is needed to turn Live TV on safely and whether each part is met
+        // right now, from the same `/live-tv/readiness` read the web card
+        // makes — beside the button, never in its way.
+        let settings = try Self.appleSource("LiveTvSettingsView.swift")
         let model = try Self.appleSource("LiveTvAdminModel.swift")
-        let section = try XCTUnwrap(developer.range(of: "Section(\"Enable Live TV · advisory enablement\")"))
-        let card = String(developer[section.lowerBound...])
+        let section = try XCTUnwrap(settings.range(of: "Section(\"Enable Live TV\")"))
+        let next = try XCTUnwrap(settings.range(of: "Section(\"HDHomeRun Live TV\")"))
+        let card = String(settings[section.lowerBound..<next.lowerBound])
         XCTAssertEqual(card.components(separatedBy: "ForEach(prerequisites.checks) { check in").count - 1, 1,
-                       "every row the server sends, drawn on the Developer card")
+                       "every row the server sends, drawn on the enable card")
+        // A graduated card no longer says what it waits on.
+        XCTAssertFalse(card.contains("Leaves Developer"))
+        XCTAssertFalse(card.contains("Graduation"))
         XCTAssertTrue(card.contains("Label(\"\\(check.ready ? \"Met\" : \"Not met\"): \\(check.message)\","))
         XCTAssertTrue(card.contains("Readiness unavailable: \\(error). You can still enable Live TV."))
         XCTAssertTrue(card.contains("await admin.loadPrerequisites()"))
         XCTAssertFalse(card.contains("check.id =="))
         for gate in ["disabled(!admin.prerequisites", "disabled(admin.prerequisites", "prerequisites.ready",
                      "prerequisitesError == nil"] {
-            XCTAssertFalse(developer.contains(gate), "\(gate) would let an advisory check block the enable")
+            XCTAssertFalse(settings.contains(gate), "\(gate) would let an advisory check block the enable")
         }
         // The enable gates on an in-flight request only.
         XCTAssertTrue(card.contains("Button(saved.liveTvEnabled ? \"Disable Live TV and drain sessions\" : \"Enable Live TV\")"))
         XCTAssertTrue(card.contains("}.disabled(admin.busy)"))
         // Loaded when the card opens, re-read after a save, and read from GET
         // /live-tv/readiness — never the refresh the Live TV screen's check makes.
-        XCTAssertTrue(model.contains("await loadPrerequisites()\n            message = surface.loadedMessage"))
+        XCTAssertTrue(model.contains("await loadPrerequisites()\n            message = Self.loadedMessage"))
         XCTAssertTrue(model.contains("prerequisites = try await api.currentReadiness()"))
-        XCTAssertTrue(LiveTvAdminSurface.developer.readsEnablePrerequisites)
-        XCTAssertFalse(LiveTvAdminSurface.liveTvSettings.readsEnablePrerequisites)
-        XCTAssertTrue(developer.contains("LiveTvAdminModel(surface: .developer)"))
+        // One surface: the screen that draws the enable card is the only one
+        // that loads Live TV settings, so the reads carry no surface flag.
+        XCTAssertFalse(model.contains("LiveTvAdminSurface"))
+        XCTAssertTrue(settings.contains("LiveTvAdminModel()"))
+        // Nothing on the Live TV screen sends the reader to Developer for the
+        // switch it now draws itself.
+        XCTAssertFalse(settings.contains("Settings → Developer"))
+        XCTAssertFalse(LiveTvAdminModel.readyMessage.contains("Developer"))
+        XCTAssertFalse(LiveTvAdminModel.needsAttentionMessage.contains("Developer"))
+        // The switch now shares a screen with the tuner form: pressing it must
+        // not throw away an unsaved tuner edit, as the web's card does not.
+        XCTAssertTrue(model.contains("if case .configure = change { keepsDraft = false }"))
+        XCTAssertTrue(model.contains("var keepsDraft = dirty\n"))
+        let write = try XCTUnwrap(model.components(separatedBy: "func write(_ change: LiveTvSettingsChange)").last)
+        let draftAt = try XCTUnwrap(write.range(of: "let draft = (ipv4: ipv4"))
+        let applyAt = try XCTUnwrap(write.range(of: "apply(settings)"))
+        XCTAssertLessThan(draftAt.lowerBound, applyAt.lowerBound, "the draft is read before the snapshot replaces it")
+        XCTAssertEqual(LiveTvFailure(code: "live_tv_disabled").errorDescription,
+                       "Live TV is off. An administrator can enable it in Settings → Live TV.")
         let api = try Self.appleSource("LiveTv.swift")
         XCTAssertTrue(api.contains("request(\"live-tv/readiness\", method: \"GET\""))
     }
@@ -691,10 +711,11 @@ final class LiveTvTests: XCTestCase {
         XCTAssertFalse(source.contains("\"start_recovery\""),
                        "start_recovery needs no special case; it is a row like any other")
         XCTAssertFalse(source.contains("\"guide_age\""))
-        // Met/unmet colouring, and nothing else, hangs off `ready`.
+        // Met/unmet colouring, and nothing else, hangs off `ready` — on the
+        // saved-configuration, guide and enable-prerequisite cards.
         XCTAssertEqual(
             source.components(separatedBy: "systemImage: check.ready ? \"checkmark.circle\" : \"exclamationmark.triangle\"").count - 1,
-            2)
+            3)
         // Advisory means advisory: no readiness value may reach a `disabled`.
         for gate in ["disabled(!readiness", "disabled(readiness", "disabled(!guideReadiness",
                      "disabled(guideReadiness", "readiness.ready ||", "!readiness.ready"] {
@@ -721,16 +742,18 @@ final class LiveTvTests: XCTestCase {
 
     // ---- where the server Live TV settings are drawn --------------------
 
-    /// The web moved the tuner, guide, recording and Library channel cards
-    /// from Developer to Settings → Live TV, and Paul's Developer rule says a
-    /// finished setting does not wait in Developer. Settings → Live TV draws
-    /// the four cards and their saves; Developer draws none of them.
-    func testLiveTvSettingsOwnTheFourCardsTheWebMovedAndDeveloperListsNoneOfThem() throws {
+    /// The web moved the Live TV enable switch and the tuner, guide,
+    /// recording and Library channel cards from Developer to Settings → Live
+    /// TV, and Paul's Developer rule says a finished setting does not wait in
+    /// Developer. Settings → Live TV draws the five cards and their saves,
+    /// enable first; Developer draws none of them.
+    func testLiveTvSettingsOwnTheFiveCardsTheWebMovedAndDeveloperListsNoneOfThem() throws {
         XCTAssertEqual(LiveTvSettingsPlacement.liveTvSettings,
-                       ["HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"])
+                       ["Enable Live TV", "HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"])
         let settings = try Self.appleSource("LiveTvSettingsView.swift")
         let developer = try Self.appleSource("LiveTvDeveloperView.swift")
         let moved: [String: [String]] = [
+            "Enable Live TV": ["write(.enabled(", "admin.loadPrerequisites()", "ForEach(prerequisites.checks)"],
             "HDHomeRun Live TV": ["write(.configure(", "admin.checkReadiness()", "ForEach(readiness.checks)"],
             "Programme guide": ["admin.loadGuideReadiness()", "ForEach(guideReadiness.checks)"],
             "Recording": ["Toggle(\"Enable recording\"", "write(.dvrEnabled("],
@@ -750,42 +773,74 @@ final class LiveTvTests: XCTestCase {
                 XCTAssertFalse(developer.contains(call), "Developer must not draw \(title) (\(call))")
             }
         }
-        // The Developer view no longer reads the guide it no longer draws.
-        XCTAssertTrue(developer.contains("LiveTvAdminModel(surface: .developer)"))
-        XCTAssertTrue(settings.contains("LiveTvAdminModel(surface: .liveTvSettings)"))
-        XCTAssertFalse(LiveTvAdminSurface.developer.readsGuide)
-        XCTAssertTrue(LiveTvAdminSurface.liveTvSettings.readsGuide)
+        // The Developer view draws no server Live TV card, so it reads no
+        // server Live TV settings at all.
+        XCTAssertFalse(developer.contains("LiveTvAdminModel("))
+        XCTAssertTrue(settings.contains("LiveTvAdminModel()"))
     }
 
     /// Every Developer card that stays says what it is waiting on — the web's
-    /// `devGraduation` line — and the Live TV enable is one of them.
+    /// `devGraduation` line. The Live TV enable switch graduated to Settings →
+    /// Live TV, and bounded pause/resume and prepared quality handoff to
+    /// Settings → Playback, so none of them waits here any more.
     func testEveryDeveloperCardThatStaysSaysWhatItWaitsOn() throws {
         let developer = try Self.appleSource("LiveTvDeveloperView.swift")
-        XCTAssertEqual(LiveTvSettingsPlacement.developer.count, 3)
+        XCTAssertEqual(LiveTvSettingsPlacement.developer,
+                       ["Cinema remotes · advisory enablement", "Screen invitations · advisory readiness"])
         for title in LiveTvSettingsPlacement.developer {
             XCTAssertTrue(developer.contains("Section(\"\(title)\")"), title)
         }
         XCTAssertEqual(developer.components(separatedBy: "Section(\"").count - 1,
                        LiveTvSettingsPlacement.developer.count,
                        "a Developer card must be listed in LiveTvSettingsPlacement.developer")
-        for line in [LiveTvSettingsPlacement.enableLiveTvGraduation,
-                     LiveTvSettingsPlacement.boundedResumeGraduation,
-                     LiveTvSettingsPlacement.preparedHandoffGraduation] {
-            XCTAssertTrue(line.hasPrefix("Leaves Developer when: "))
-            XCTAssertTrue(line.contains(" Then: "))
+        for title in LiveTvSettingsPlacement.developer {
+            let card = try XCTUnwrap(developer.components(separatedBy: "Section(\"\(title)\")").last, title)
+                .components(separatedBy: "Section(\"")[0]
+            XCTAssertTrue(card.contains("Awaiting "), title)
+            XCTAssertTrue(card.contains("graduates "), title)
         }
-        XCTAssertTrue(LiveTvSettingsPlacement.enableLiveTvGraduation
-            .hasSuffix("Then: the switch moves to Settings → Live TV as a permanent on/off."))
-        for name in ["enableLiveTvGraduation", "boundedResumeGraduation", "preparedHandoffGraduation"] {
-            XCTAssertTrue(developer.contains("Text(LiveTvSettingsPlacement.\(name))"), name)
+        for graduated in ["Enable Live TV", "Bounded pause/resume", "Prepared quality handoff"] {
+            XCTAssertFalse(developer.contains("Section(\"\(graduated)"), "\(graduated) graduated out of Developer")
         }
+        for toggle in ["Toggle(\"Enable bounded pause/resume\"", "Toggle(\"Enable two-player prepared handoff\"",
+                       "write(.enabled("] {
+            XCTAssertFalse(developer.contains(toggle), toggle)
+        }
+    }
+
+    /// Bounded pause/resume and prepared quality handoff graduated from
+    /// Developer to Settings → Playback with their switches, their saved values
+    /// (the same `@AppStorage` keys and defaults) and their advisory rows, and
+    /// without a "Leaves Developer" line.
+    func testPlaybackOwnsTheGraduatedPauseAndHandoffSwitches() throws {
+        let settings = try Self.appleSource("SettingsView.swift")
+        let playback = try XCTUnwrap(settings.components(separatedBy: "Text(\"Playback\")").first)
+        XCTAssertTrue(playback.contains("Toggle(\"Bounded pause/resume\", isOn: $boundedResumeEnabled)"))
+        XCTAssertTrue(playback.contains("Toggle(\"Prepared quality handoff\", isOn: $preparedHandoffEnabled)"))
+        XCTAssertTrue(playback.contains("{ PlaybackHandoffDetailsView() }"))
+        XCTAssertEqual(settings.components(separatedBy: "@AppStorage(\"plurx.boundedResume\") private var boundedResumeEnabled = true").count - 1, 2)
+        XCTAssertEqual(settings.components(separatedBy: "@AppStorage(\"plurx.preparedHandoff\") private var preparedHandoffEnabled = true").count - 1, 2)
+        let details = try XCTUnwrap(settings.components(separatedBy: "struct PlaybackHandoffDetailsView: View {").last)
+        let bounded = try XCTUnwrap(details.components(separatedBy: "Section(\"Bounded pause/resume\")").last)
+            .components(separatedBy: "Section(\"")[0]
+        XCTAssertTrue(bounded.contains("Toggle(\"Enable bounded pause/resume\", isOn: $boundedResumeEnabled)"))
+        XCTAssertTrue(bounded.contains("Matched physical Apple TV latency: Not met"))
+        let handoff = try XCTUnwrap(details.components(separatedBy: "Section(\"Prepared quality handoff\")").last)
+        XCTAssertTrue(handoff.contains("Toggle(\"Enable two-player prepared handoff\", isOn: $preparedHandoffEnabled)"))
+        XCTAssertTrue(handoff.contains("Fleet and link evidence: Not met · Checked during playback"))
+        XCTAssertTrue(handoff.contains("PreparedSwitchMeasurement.audioRequirements(accessLogAvailable: true)"))
+        XCTAssertTrue(details.contains("@ObservedObject private var handoff = Caps.PreparedHandoffTelemetry.shared"))
+        // Advisory: no row reaches either switch, and nothing waits on Developer.
+        XCTAssertFalse(details.contains(".disabled("))
+        XCTAssertFalse(settings.contains("Leaves Developer"))
+        XCTAssertFalse(settings.contains("advisory enablement"))
     }
 
     /// Settings reaches Live TV the way it reaches Developer: one focusable
     /// row that pushes the screen, on iOS and tvOS alike.
     func testSettingsReachesLiveTvSettingsLikeDeveloper() throws {
         let settings = try Self.appleSource("SettingsView.swift")
-        let link = "NavigationLink(\"Tuner, guide, recording and Library channels\") { LiveTvSettingsView() }"
+        let link = "NavigationLink(\"On/off, tuner, guide, recording and Library channels\") { LiveTvSettingsView() }"
         XCTAssertEqual(settings.components(separatedBy: link).count - 1, 1)
         let section = try XCTUnwrap(settings.range(of: link))
         let before = settings[..<section.lowerBound]
@@ -796,7 +851,8 @@ final class LiveTvTests: XCTestCase {
             XCTAssertGreaterThan(lastEnd!.lowerBound, lastCondition.lowerBound,
                                  "the Live TV settings row must not be platform-conditional")
         }
-        XCTAssertTrue(settings.contains("NavigationLink(\"Enable Live TV and other features awaiting evidence\") { LiveTvDeveloperView() }"))
+        XCTAssertTrue(settings.contains("NavigationLink(\"Shared libraries, Cinema remotes and other features awaiting evidence\") { LiveTvDeveloperView() }"))
+        XCTAssertFalse(settings.contains("Enable Live TV"), "Enable Live TV graduated to Settings → Live TV")
     }
 
     func testTheGuideReadinessCardSurvivesAServerThatSendsMoreThanThisBuildKnows() throws {
@@ -1471,7 +1527,12 @@ final class LiveTvTests: XCTestCase {
         let tvList = source
             .components(separatedBy: "private var tvChannelList: some View {")[1]
             .components(separatedBy: "private var channelFocusIdentity: String {")[0]
-        XCTAssertFalse(tvList.contains("live.busy)"), "the touch List may disable rows; the focused one may not")
+        let disabledArguments = tvList.components(separatedBy: ".disabled(").dropFirst()
+            .map { $0.components(separatedBy: ")")[0] }
+        XCTAssertEqual(disabledArguments, ["!channel.watchable"],
+                       "the focused list only disables unwatchable rows, never a busy tune")
+        XCTAssertTrue(tvList.contains("enabled: channel.watchable && !live.busy"),
+                      "remote admission still refuses a second tune while busy")
         XCTAssertTrue(source.contains("let candidates = visibleChannels.filter(\\.watchable)"),
                       "a restore aimed at a disabled row is dropped")
 
@@ -1775,6 +1836,56 @@ final class LiveTvTests: XCTestCase {
         await controller.stop()
     }
 
+    /// The stub's playlist is refused within milliseconds, so the item fails
+    /// and the player pauses on its own; what this pins is that starting a
+    /// channel claims the display at all. Release on pause and stop is the
+    /// claim's own behaviour, pinned in `DisplayWakeTests`.
+    func testLiveTvHoldsTheDisplayWhenAChannelStarts() async {
+        let recorder = DisplayWakeRecorder()
+        let owner = DisplayWakeOwner { recorder.applied.append($0) }
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started()),
+            displayWake: owner
+        )
+        XCTAssertTrue(recorder.applied.isEmpty, "nothing is claimed before a channel starts")
+        await controller.watch(channel)
+        let held = expectation(description: "starting a channel holds the screensaver off")
+        let poll = Task { @MainActor in
+            while !Task.isCancelled {
+                if recorder.applied.contains(true) { held.fulfill(); return }
+                await Task.yield()
+            }
+        }
+        await fulfillment(of: [held], timeout: 3)
+        poll.cancel()
+        await controller.stop()
+    }
+
+    func testLiveTvViewerPlayEndsASystemHoldThatIOSNeverEnded() async {
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started())
+        )
+        await controller.watch(channel)
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        XCTAssertEqual(controller.surfaceMessage, "Paused — audio interrupted")
+        controller.togglePause()
+        XCTAssertFalse(controller.systemPaused, "the viewer's press ends a hold iOS never ended")
+        XCTAssertFalse(controller.paused, "the control read Play, so the press resumes")
+        XCTAssertNil(controller.surfaceMessage)
+        controller.handleAudioSessionEvent(.interruption(.ignore))
+        XCTAssertFalse(controller.systemPaused)
+        await controller.stop()
+    }
+
+    func testLibraryChannelViewerPlayEndsASystemHoldThatIOSNeverEnded() async {
+        let controller = LibraryChannelPlayerController.testingAttached(to: libraryChannel)
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        await controller.togglePause()
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertFalse(controller.paused)
+        await controller.stop()
+    }
+
     func testLiveTvOldRouteLossKeepsVisiblePlayFunctional() async {
         let controller = LiveTvPlayerController.testing(
             requests: LiveTvMockRequests(result: started())
@@ -1952,12 +2063,28 @@ final class LiveTvTests: XCTestCase {
             let delta: Int
             let expect: String?
         }
+        struct StationLogoMatch: Decodable {
+            let name: String
+            let channel: String
+            let expect: String?
+        }
+        struct StationLogoValue: Decodable {
+            let name: String
+            let imageUrl: String?
+            let expect: String?
+        }
+        struct StationLogo: Decodable {
+            let match: [StationLogoMatch]
+            let noGuide: StationLogoMatch
+            let values: [StationLogoValue]
+        }
         let lineup: [LiveTvChannel]
         let guide: LiveTvGuide
         let programmeAt: [AiringCase]
         let grid: Grid
         let filters: [FilterCase]
         let adjacent: [AdjacentCase]
+        let stationLogo: StationLogo
     }
 
     /// `.convertFromSnakeCase` on the whole document, exactly as the client
@@ -1986,6 +2113,45 @@ final class LiveTvTests: XCTestCase {
                 XCTAssertNil(answer.progress, row.name)
             }
         }
+    }
+
+    /// The station-logo rule is the web's, transcribed. Until 2026-10-04 it
+    /// lived only in the web page, outside this fixture — which is how both
+    /// native guides shipped without logos and no suite noticed.
+    func testStationLogoAnswersEverySharedCase() throws {
+        let cases = try guideCases().stationLogo
+        XCTAssertFalse(cases.match.isEmpty, "the fixture lost its station-logo cases")
+        XCTAssertFalse(cases.values.isEmpty, "the fixture lost its station-logo values")
+        let base = try guideCases().guide
+        for row in cases.match {
+            XCTAssertEqual(LiveTvGuideReducer.stationLogoURL(base, channelId: row.channel), row.expect, row.name)
+        }
+        XCTAssertEqual(LiveTvGuideReducer.stationLogoURL(nil, channelId: cases.noGuide.channel),
+                       cases.noGuide.expect, cases.noGuide.name)
+        for row in cases.values {
+            let guide = LiveTvGuide(
+                source: "hdhomerun", freshness: "fresh", ageSeconds: 0, fetchedAt: nil,
+                window: LiveTvGuideWindow(start: 0, end: 0), refreshError: nil,
+                matchedChannels: 1, lineupChannels: 1,
+                channels: [LiveTvGuideChannel(id: "logo", guideNumber: "0.1", affiliate: nil,
+                                              imageUrl: row.imageUrl, programmes: [])])
+            XCTAssertEqual(LiveTvGuideReducer.stationLogoURL(guide, channelId: "logo"), row.expect, row.name)
+        }
+    }
+
+    /// The grid header draws the logo the layout carries, so the layout must
+    /// carry the same answer the rule gives, row by row.
+    func testGridRowsCarryTheirStationLogo() throws {
+        let cases = try guideCases()
+        let layout = LiveTvGuideReducer.gridLayout(
+            guide: cases.guide, channels: cases.lineup, window: cases.grid.window,
+            now: cases.grid.now, slotSeconds: cases.grid.slotSeconds, pxPerSlot: cases.grid.pxPerSlot)
+        for row in layout.rows {
+            XCTAssertEqual(row.logo, LiveTvGuideReducer.stationLogoURL(cases.guide, channelId: row.channel.id),
+                           row.channel.id)
+        }
+        XCTAssertEqual(layout.rows.first { $0.channel.id == "2.1" }?.logo, "https://example.invalid/cbs.png")
+        XCTAssertNil(layout.rows.first { $0.channel.id == "4.1" }?.logo)
     }
 
     func testGridLayoutPlacesEveryCellWhereTheSharedCasesSay() throws {
@@ -2805,6 +2971,27 @@ final class LiveTvTests: XCTestCase {
     /// The arrangement itself, not just the constants behind it: each of these
     /// would still be true if the numbers changed, and each is false if the
     /// rewrite is reverted.
+    /// Reducer cases cannot see whether a screen draws what the reducer says.
+    /// The logo rule once existed on the web alone and both native guides
+    /// shipped without it, so the wiring is pinned too: every surface that
+    /// names a station draws `LiveTvStationChip` with the guide's logo.
+    func testEveryStationSurfaceDrawsTheGuideLogo() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        let chips = source.components(separatedBy: "LiveTvStationChip(").count - 1
+        XCTAssertGreaterThanOrEqual(chips, 6,
+            "list row, grid header, focused details, phone details, picture badge, fullscreen identity")
+        XCTAssertTrue(source.contains("LiveTvStationChip(name: stationName, logo: logo"), "the list row draws its logo")
+        XCTAssertFalse(source.contains("Text(stationName)"), "the list row's callsign-only chip is gone")
+        XCTAssertTrue(source.contains("if let logo = row.logo {"), "the grid header draws the row's logo")
+        XCTAssertTrue(source.contains("logo: live.stationLogo(watching)"), "the picture badge draws its logo")
+        XCTAssertGreaterThanOrEqual(
+            source.components(separatedBy: "live.stationLogo(channel)").count - 1, 5,
+            "both channel lists, both detail surfaces and the fullscreen identity pass the logo")
+    }
+
     func testTheLiveTvArrangementIsWiredToTheDerivedGeometry() throws {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let source = try String(

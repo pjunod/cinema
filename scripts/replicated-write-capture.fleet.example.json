@@ -1,0 +1,8 @@
+{
+  "schema": "k03-fleet-v1",
+  "voters": [
+    {"node": "lab4", "metrics_url": "http://10.42.4.8:32400/metrics"},
+    {"node": "lab6", "metrics_url": "http://10.42.4.14:32400/metrics"},
+    {"node": "media1", "metrics_url": "http://10.42.5.236:32400/metrics"}
+  ]
+}

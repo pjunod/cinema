@@ -1,0 +1,18 @@
+{
+  "schema": "identity-composition-control-v1",
+  "width": 16,
+  "height": 16,
+  "frames": 1,
+  "domain": "full-range BT2020 PQ RGB",
+  "base_pq": "0.25 + 0.02*c + 0.005*x + 0.003*y",
+  "el_pq": "0.625 if (x+y+c)%2 else 0.375",
+  "offset": "0.5",
+  "slope": "0.2",
+  "threshold": "0",
+  "shape": "identity",
+  "nonlinear_matrix": "identity",
+  "linear_matrix": "inverse of declared HPE-BT2020 LMS-to-RGB matrix",
+  "target_mapping": "none",
+  "expected_operation": "base + (el-offset)*slope",
+  "scope": "analytic-control; declared identity arithmetic only; no proof of generic FEL or P8.1"
+}

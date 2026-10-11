@@ -1,7 +1,7 @@
 # Replicated write-rate hygiene II — the classification lease, the offline claim and the offline expiry sweep
 
 **Status:** in progress — M1–M2 merged
-([#540](http://192.168.4.7:3000/noirr/plurx/pulls/540), `4b112204b`); M4 (the
+([#540](http://forge.lan:3000/noirr/plurx/pulls/540), `4b112204b`); M4 (the
 offline expiry sweep, §3.4) built on `plan/K-10-2`; M3's fleet
 after-measurement needs a deploy · **Executes:** the two loops K-03's M0
 readout flagged outside its scope, and the expiry sweep §3.3 left for a
@@ -129,7 +129,7 @@ Line numbers are at `main` @ `91f363154`.
   preparation (`self.prepare(…)`, `offline.rs:608`): a node busy preparing
   does not sweep until it finishes. Other nodes sweep meanwhile; on a
   single-node install the sweep waits. Pre-existing, unchanged here (§7.8).
-- Open PR [#532](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+- Open PR [#532](http://forge.lan:3000/noirr/plurx/pulls/532)
   (`codex/durable-cluster-work`, head `9d0f3f5fb`) moves offline
   *preparation* onto a shared durable-work queue. It does not touch
   `expire_offline_packages`, `offline_queue_hint` or `crates/plurxd/src/offline.rs`
@@ -414,8 +414,8 @@ overrule them.
 ```text
 GPT prompt (fleet, K-10 M3). After the merge commit carrying K-10 M1–M2
 (branch plan/K-write-rate-2, PR #531; it is stacked on K-03 #405, so both
-land together) is deployed with the usual ansible playbook to nuc4, m6,
-nynuc and nuc3:
+land together) is deployed with the usual ansible playbook to lab4, lab6,
+media1 and lab3:
 1. On each voter, `curl -s http://<ip>:32400/metrics | grep -E
    'plurx_(offline_claim|classification)_ticks_total'` must list four offline
    and five classification outcomes. Over five minutes on an idle fleet,
@@ -424,9 +424,9 @@ nynuc and nuc3:
    most one voter, the others grow idle or not_owner.
 2. Reuse the K-03 M4 capture (or start one the same way): after a qualifying
    12-hour idle window, run `scripts/replicated-write-capture evaluate
-   <dir>/samples.tsv --json` and report proposals/day beside
+   <dir>/samples.tsv --fleet <voters.fleet.json> --json` and report proposals/day beside
    docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-M0.md §2.
-3. Copy (read-only, cp) the learner nuc3's /srv/plurx/hiqlite/logs/*.wal to
+3. Copy (read-only, cp) the learner lab3's /srv/plurx/hiqlite/logs/*.wal to
    /tmp and run `scripts/replicated-write-capture attribute <copies>`; report
    the shares of `metadata-classification` lease writes and `UPDATE
    offline_packages` claims.

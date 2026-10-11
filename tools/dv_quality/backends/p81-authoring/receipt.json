@@ -1,0 +1,312 @@
+{
+  "schema": "m0-p81-authored-base-analytic-v1",
+  "result": "diagnostic-control-pass",
+  "scope": "Synthetic identity-reshape P7 reconstruction -> authored Main10 base + adapted RPUs",
+  "runtime": {
+    "requested_container_platform": "linux/arm64",
+    "observed_uname": "Linux e5ebea81c3d3 7.0.12-linuxkit #1 SMP PREEMPT Fri Aug 14 16:27:59 UTC 2026 aarch64 GNU/Linux",
+    "replay_client_system": "Darwin",
+    "replay_client_architecture": "arm64",
+    "execution_mode": null,
+    "rustc": "1.97.1",
+    "ffmpeg": "5.1.9-0+deb12u1",
+    "x265": "3.5+1-f0c1022b6",
+    "image": "sha256:c1b89ba6d0323390b50bbe2ec100389a70de7c91ad34f34c70e5bd24f9cd135b",
+    "cpus": 2,
+    "memory_bytes": 2147483648
+  },
+  "replay": {
+    "entry_point": "bash replay.sh in a fresh bundle copy without libdovi-source/",
+    "public_source": "quietvoid/dovi_tool@83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+    "archive_sha256": "57d13f03d04a7a1b3d7dcb139b976dc3748c745c1720d4b6e44b61e5ef67b69b",
+    "lock": "resolved-Cargo.lock; approved CPU experiment workspace/CAPI/dev graph resolution, not pristine upstream --locked proof",
+    "live_dependencies": "Debian apt repositories and package transport are live, not a fully pinned OS snapshot; versions retained",
+    "cross_render": "Retained separate parsed-RPU/libplacebo GPU outputs checked by check_cross_render.py; authoring replay does not rerender GPU outputs",
+    "gpu_replay_dependency": "Separate parsed-RPU GPU bundle from sibling; libplacebo0d043c7f6f79cd3687c023454bdacbe615e4d96f API374"
+  },
+  "portable_import": {
+    "cli": "python3 import_cross_render.py --source GPU_REPLAY_ROOT --destination NEW_VALIDATION_ROOT/cross-render",
+    "validation_root_inputs": [
+      "check_cross_render.py",
+      "source-definition.json",
+      "analytic-hdr10-reference.rgb48le",
+      "decoded.yuv420p10le"
+    ],
+    "validation_command": "python3 NEW_VALIDATION_ROOT/check_cross_render.py",
+    "destination": "Must be absent and outside GPU source tree; no bundle-root default or in-place overwrite",
+    "copied_inventory": 33,
+    "focused_controls": 10,
+    "observed_refresh": "Corrected sibling GPU replay imported separately; all16 RGB output hashes identical to historical snapshots"
+  },
+  "synthetic_static_hdr10_metadata": {
+    "mastering_max_nits": 1000,
+    "mastering_min_nits": 0.005,
+    "mastering_chromaticity_50000_units": {
+      "green": [
+        8500,
+        39850
+      ],
+      "blue": [
+        6550,
+        2300
+      ],
+      "red": [
+        35400,
+        14600
+      ],
+      "white": [
+        15635,
+        16450
+      ]
+    },
+    "max_cll": 1000,
+    "max_fall": 400,
+    "provenance": "Explicit synthetic constants for this fixture; not measured content light, mastering verification, or image analysis"
+  },
+  "gpu_output_status": "Retained historical sibling GPU outputs with exact input/RPU/tag/output hash binding; authoring replay does not freshly render GPU",
+  "authoring": {
+    "scope": "analytic-control; standard matrix, no trims",
+    "declared_max_compression_yuv_code_error": 2,
+    "chroma_sample_location": "center; explicit point sampling",
+    "profile": "Main 10",
+    "source_to_yuv_max_code_error_vs_bt2020_ncl": 0,
+    "compression_yuv_max_code_error": 2,
+    "hdr10_decode_vs_analytic_inverse_ncl_max_rgb_code_error": 0,
+    "hdr10_decode_vs_reconstructed_max_rgb_code_error": 219,
+    "diagnostic_rgb_bound_codes": 640,
+    "bound_selection_timing": "After observed compression delta2/RGB delta218; not preregistered quality qualification",
+    "bound_derivation": "ceil(65535*3*(1/876+1.8814/896))+2; conversion/model allowance1 + observed compression2; worst blue NCL inverse",
+    "hdr10_decode_unchanged_after_rpu_insertion": true,
+    "p81_conformance": null,
+    "independent_dv_picture_reference": null,
+    "dv_enabled_render": null,
+    "result": "pass"
+  },
+  "association": {
+    "result": "pass",
+    "scope": "synthetic no-reorder elementary control",
+    "parsed_l1_tags": [
+      {
+        "min_pq": 0,
+        "max_pq": 4095,
+        "avg_pq": 2048
+      },
+      {
+        "min_pq": 0,
+        "max_pq": 4094,
+        "avg_pq": 2047
+      },
+      {
+        "min_pq": 0,
+        "max_pq": 4093,
+        "avg_pq": 2046
+      },
+      {
+        "min_pq": 0,
+        "max_pq": 4092,
+        "avg_pq": 2045
+      }
+    ],
+    "frame_count": 4,
+    "distinct_source_hashes": 4,
+    "distinct_rpu_hashes": 4,
+    "coded_duration": "1/24",
+    "manifest_time_base": "1/24",
+    "actual_container_pts": null,
+    "p81_conformance": null
+  },
+  "injection": {
+    "scope": "no-reorder synthetic analytic control",
+    "frames": 4,
+    "rpu_count": 4,
+    "rpu_sha256_by_frame": [
+      "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+      "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+      "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+      "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c"
+    ],
+    "source_definition_sha256": "86c23bec2dbc4d8283db00baf6ca177d9e1d4c76a032637db7c6adf493b5601e",
+    "nal_types": [
+      35,
+      32,
+      33,
+      34,
+      39,
+      39,
+      39,
+      20,
+      62,
+      35,
+      1,
+      62,
+      35,
+      1,
+      62,
+      35,
+      1,
+      62
+    ],
+    "exact_payload_match": true,
+    "timestamp_basis": "No reorder, four IDR/TRAIL_R access units at input 24/1; raw HEVC has no PTS timestamps",
+    "p81_conformance": null
+  },
+  "cross_render": {
+    "scope": "analytic controls; separate implementations, no independent DV picture reference",
+    "same_renderer": "Both DV-on/off outputs use same pinned libplacebo backend",
+    "threshold_selection": "25 RGBcode DV diagnostic replay cap selected after observing24; not qualification threshold",
+    "scalar_reference_scope": "Independent analytic BT2020 inverseNCL arithmetic only",
+    "double_mapping_limit": "Original P7 reshape is identity; cannot detect double application of arbitrary nonidentity reshaping",
+    "unmet_next_operation": "Nonidentity-reshape P7 reconstructed-base authoring control",
+    "creative_trims_applied": false,
+    "results": [
+      {
+        "frame_index": 0,
+        "decoded_input_file_sha256": "d459a2f163d531d425e9d50af16b3b1426baeb7715ee1124d93c1f2a66168865",
+        "selected_decoded_frame_sha256": "182bfbe370fc06cbb2c4e516eca48c91b9f563b853c737f560f158876332277f",
+        "actual_rpu_sha256": "9c85e5aacbb9f67d5ec89334dec13453fcbe4c80f7aefd76fe5962be5d499b64",
+        "actual_parsed_l1": {
+          "min_pq": 0,
+          "max_pq": 4095,
+          "avg_pq": 2048
+        },
+        "frame_selection_method": "GPU helper fseek(frame_index*64*64*3), explicit index",
+        "bound_output_hashes_by_stage": {
+          "reconstruction": {
+            "candidate_sha256": "d6891d06dc73f53b81f99543ecf368b971f594c33d0d5211e808ade760cc29ee",
+            "baseline_sha256": "e080d20649de8f34caa03d8e8be3b8723f11ab1d5d20b820a415971d90912861"
+          },
+          "rendered": {
+            "candidate_sha256": "d6891d06dc73f53b81f99543ecf368b971f594c33d0d5211e808ade760cc29ee",
+            "baseline_sha256": "e080d20649de8f34caa03d8e8be3b8723f11ab1d5d20b820a415971d90912861"
+          }
+        },
+        "same_renderer_dv_on_vs_hdr10_max_code_delta": 24,
+        "gpu_hdr10_vs_independent_inverse_ncl_max_code_delta": 1,
+        "gpu_dv_on_vs_independent_inverse_ncl_max_code_delta": 24,
+        "dv_on_sha256": "d6891d06dc73f53b81f99543ecf368b971f594c33d0d5211e808ade760cc29ee",
+        "hdr10_sha256": "e080d20649de8f34caa03d8e8be3b8723f11ab1d5d20b820a415971d90912861"
+      },
+      {
+        "frame_index": 1,
+        "decoded_input_file_sha256": "d459a2f163d531d425e9d50af16b3b1426baeb7715ee1124d93c1f2a66168865",
+        "selected_decoded_frame_sha256": "7c0014d8d8cf5bc5344922fc9ca5f7c6ab84146ae2f9d6c1931f4681e48a877b",
+        "actual_rpu_sha256": "1186fa17f90d6c64104aefca3f2a9b0c636472a549565d8a1c70a8857852dad4",
+        "actual_parsed_l1": {
+          "min_pq": 0,
+          "max_pq": 4094,
+          "avg_pq": 2047
+        },
+        "frame_selection_method": "GPU helper fseek(frame_index*64*64*3), explicit index",
+        "bound_output_hashes_by_stage": {
+          "reconstruction": {
+            "candidate_sha256": "5d89f7273ee3bc026f55677fe827a089cd668d2ce1e6f513c21281b78959746a",
+            "baseline_sha256": "e7f64e0b9e83425bd31e8f91291e34b615b85b7e48e8a4b89e046fc208f5bc52"
+          },
+          "rendered": {
+            "candidate_sha256": "5d89f7273ee3bc026f55677fe827a089cd668d2ce1e6f513c21281b78959746a",
+            "baseline_sha256": "e7f64e0b9e83425bd31e8f91291e34b615b85b7e48e8a4b89e046fc208f5bc52"
+          }
+        },
+        "same_renderer_dv_on_vs_hdr10_max_code_delta": 24,
+        "gpu_hdr10_vs_independent_inverse_ncl_max_code_delta": 1,
+        "gpu_dv_on_vs_independent_inverse_ncl_max_code_delta": 24,
+        "dv_on_sha256": "5d89f7273ee3bc026f55677fe827a089cd668d2ce1e6f513c21281b78959746a",
+        "hdr10_sha256": "e7f64e0b9e83425bd31e8f91291e34b615b85b7e48e8a4b89e046fc208f5bc52"
+      },
+      {
+        "frame_index": 2,
+        "decoded_input_file_sha256": "d459a2f163d531d425e9d50af16b3b1426baeb7715ee1124d93c1f2a66168865",
+        "selected_decoded_frame_sha256": "47008909ad1897c4be3e66d6f854912bfa3adbc087d873defed254a29c08bd08",
+        "actual_rpu_sha256": "f1d04d4310e93849fd8f48f43f2fa97e66fd44cc3815be6c70ab815bfc078a2f",
+        "actual_parsed_l1": {
+          "min_pq": 0,
+          "max_pq": 4093,
+          "avg_pq": 2046
+        },
+        "frame_selection_method": "GPU helper fseek(frame_index*64*64*3), explicit index",
+        "bound_output_hashes_by_stage": {
+          "reconstruction": {
+            "candidate_sha256": "a1117356a6410d9cb6142d66979ab7837609fe7309b885a99864677d3fb28e64",
+            "baseline_sha256": "76be5dab6cbb8c90263f8b897dc8e7289b4ee30874f698aebccf0d242b7442fe"
+          },
+          "rendered": {
+            "candidate_sha256": "a1117356a6410d9cb6142d66979ab7837609fe7309b885a99864677d3fb28e64",
+            "baseline_sha256": "76be5dab6cbb8c90263f8b897dc8e7289b4ee30874f698aebccf0d242b7442fe"
+          }
+        },
+        "same_renderer_dv_on_vs_hdr10_max_code_delta": 24,
+        "gpu_hdr10_vs_independent_inverse_ncl_max_code_delta": 1,
+        "gpu_dv_on_vs_independent_inverse_ncl_max_code_delta": 24,
+        "dv_on_sha256": "a1117356a6410d9cb6142d66979ab7837609fe7309b885a99864677d3fb28e64",
+        "hdr10_sha256": "76be5dab6cbb8c90263f8b897dc8e7289b4ee30874f698aebccf0d242b7442fe"
+      },
+      {
+        "frame_index": 3,
+        "decoded_input_file_sha256": "d459a2f163d531d425e9d50af16b3b1426baeb7715ee1124d93c1f2a66168865",
+        "selected_decoded_frame_sha256": "935c1a9f42a657868e3e9abadcbe3025fc0d1a85c2e3f13941341c8eaad20f66",
+        "actual_rpu_sha256": "97da6cab9092d87d282c65b680bb1a918a7f4f53cc13e57bd829d18f3bc6761c",
+        "actual_parsed_l1": {
+          "min_pq": 0,
+          "max_pq": 4092,
+          "avg_pq": 2045
+        },
+        "frame_selection_method": "GPU helper fseek(frame_index*64*64*3), explicit index",
+        "bound_output_hashes_by_stage": {
+          "reconstruction": {
+            "candidate_sha256": "223fdba4e718c25cc44fe6c49ecd13ecc980f6821f210f918e80c9f17f5a39ee",
+            "baseline_sha256": "c86f919a5daa0662448612da7ddba35c9bed9f3431078c09174e8b9c7865af7d"
+          },
+          "rendered": {
+            "candidate_sha256": "223fdba4e718c25cc44fe6c49ecd13ecc980f6821f210f918e80c9f17f5a39ee",
+            "baseline_sha256": "c86f919a5daa0662448612da7ddba35c9bed9f3431078c09174e8b9c7865af7d"
+          }
+        },
+        "same_renderer_dv_on_vs_hdr10_max_code_delta": 24,
+        "gpu_hdr10_vs_independent_inverse_ncl_max_code_delta": 1,
+        "gpu_dv_on_vs_independent_inverse_ncl_max_code_delta": 24,
+        "dv_on_sha256": "223fdba4e718c25cc44fe6c49ecd13ecc980f6821f210f918e80c9f17f5a39ee",
+        "hdr10_sha256": "c86f919a5daa0662448612da7ddba35c9bed9f3431078c09174e8b9c7865af7d"
+      }
+    ],
+    "p81_conformance": null,
+    "independent_dv_picture_reference": null,
+    "reference_fidelity_improvement": null,
+    "result": "diagnostic-control-pass"
+  },
+  "negative_controls": {
+    "missing_rpu": "reject",
+    "extra_rpu": "reject",
+    "swapped_rpu": "reject",
+    "swapped_decoded_frames": "reject",
+    "swapped_source_frames": "reject",
+    "truncated_decode": "reject",
+    "existing_rpu": "reject",
+    "missing_aud": "reject",
+    "close_gpu_pixel_mutation": "reject",
+    "scalar_substituted_gpu_output": "reject",
+    "swapped_gpu_picture_outputs": "reject",
+    "duplicate_gpu_stage": "reject",
+    "missing_gpu_stage": "reject",
+    "extra_gpu_row": "reject",
+    "wrong_gpu_output_hash": "reject",
+    "wrong_gpu_delta": "reject"
+  },
+  "failed_attempts": {
+    "native_rpu_encoder_option": "x2653.5 does not recognize dolby-vision-rpu",
+    "lossless": "Encoder selected Rext despite requested Main10; passing candidate uses QP0 Main10",
+    "default_chroma_location": "Default sampling did not match closed-form point fixture; explicit centered chroma fixed it"
+  },
+  "unmet": [
+    "Nonidentity-reshape P7 reconstructed-base authoring control",
+    "Independent Dolby-enabled picture reference or certified profile conformance",
+    "Actual container DV configuration/PTS and decoder B-frame reorder association",
+    "Encoded original P7 BL/EL reconstruction/timestamp association",
+    "Creative L2/L8 trim authoring or rendering; nonstandard matrix source support",
+    "Metadata semantic adaptation beyond bounded synthetic tags",
+    "Matched-rate commercial picture quality/performance/device validation"
+  ],
+  "independent_dv_picture_reference": null,
+  "p81_conformance": null,
+  "reference_fidelity_improvement": null,
+  "real_time_performance": null
+}

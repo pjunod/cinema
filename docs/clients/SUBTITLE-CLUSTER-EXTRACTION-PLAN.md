@@ -1,7 +1,7 @@
 # Subtitle extraction on the cluster — why every first subtitle waits on one node's full read, and how the pool takes it over
 
 **Status:** built — **v2** implementation contract; M0–M5 are implemented in
-[PR #507](http://192.168.4.7:3000/noirr/plurx/pulls/507), with merge
+[PR #507](http://forge.lan:3000/noirr/plurx/pulls/507), with merge
 qualification in progress and fleet and device evidence pending. The plan
 incorporates every R1–R7 finding from the
 [adversarial review](SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md); §5 binds each
@@ -83,7 +83,7 @@ The module's own constants say what that costs: `EXTRACTION_TIMEOUT = 600 s`
 because "a cold extraction is a full-source read … has legitimately taken
 ~180 s" (`:29–35`), and `SIDECAR_JOIN_BUDGET = 5 s` because extracting one
 track from file 5208 "read the entire file to produce 18,866 bytes, measured
-at 402 s on m6" (`:51–68`). Its consumers are in the table in §3.11.
+at 402 s on lab6" (`:51–68`). Its consumers are in the table in §3.11.
 
 **The burn sidecar** (`ensure_burn_file`, `subtitles.rs:1050`): a
 subtitle-only Matroska for burned transcodes, same full read, same cache
@@ -177,8 +177,8 @@ deciding here.
 
 ### 2.5 Fleet evidence, 2026-09-24
 
-Read from a copy of nynuc's hiqlite state machine and the three nodes' cache
-directories (deploy key; nuc3 is a learner and holds no media cache).
+Read from a copy of media1's hiqlite state machine and the three nodes' cache
+directories (deploy key; lab3 is a learner and holds no media cache).
 
 | Fact | Value |
 |---|---|
@@ -188,10 +188,10 @@ directories (deploy key; nuc3 is a learner and holds no media cache).
 | PGS tracks (`hdmv_pgs_subtitle`) | 6,216 (plus 17 `dvd_subtitle`, 1 `dvb_subtitle`) |
 | files with a fragment-index artefact | 4,892 |
 | `analysis_requests` by state | 11,278 `ready` · 5,248 `failed` · 130 `queued` · 4 `submitted` (`fragment_index`); 5 `ready` (`skip_markers`) |
-| VTT/burn sidecars in `<cache>/subs` | nynuc 43 · m6 31 · nuc4 6 — **80 sidecars for 46,250 text tracks** |
-| the same track extracted on more than one node | 11 keys on both nynuc and m6 (`f5216-s0`, `f5323-s0`, `f5355-s0/s1`, `f5615-s0`, `f5699-s0`, `f5999-s0`, `f6071-s0`, `f6106-s0`, `f6247-s1`, `f9-s0`); `f5323-s0` and `f9-s0` on all three |
-| subtitle-source store directories | nynuc 1 · m6 1 · **nuc4 46** — the PGS ride-along is producing on the node that runs index passes, and nowhere else |
-| store size | 13 MB on nynuc; 186 MB of `subs` sidecars |
+| VTT/burn sidecars in `<cache>/subs` | media1 43 · lab6 31 · lab4 6 — **80 sidecars for 46,250 text tracks** |
+| the same track extracted on more than one node | 11 keys on both media1 and lab6 (`f5216-s0`, `f5323-s0`, `f5355-s0/s1`, `f5615-s0`, `f5699-s0`, `f5999-s0`, `f6071-s0`, `f6106-s0`, `f6247-s1`, `f9-s0`); `f5323-s0` and `f9-s0` on all three |
+| subtitle-source store directories | media1 1 · lab6 1 · **lab4 46** — the PGS ride-along is producing on the node that runs index passes, and nowhere else |
+| store size | 13 MB on media1; 186 MB of `subs` sidecars |
 
 The duplication is real and exactly what §6.6 predicted. The ride-along's
 coverage is one node of three. And the backlog is the library: 5,217 files,
@@ -710,7 +710,7 @@ Developer item renders each requirement from the real probes. Default **off**.
 
 ## 6. Verification and rollout
 
-### 6.1 Experiments before M1 (on nuc3, synthetic sources muxed with `-copyts`, as PGS plan §6 did)
+### 6.1 Experiments before M1 (on lab3, synthetic sources muxed with `-copyts`, as PGS plan §6 did)
 
 | # | question | pass condition |
 |---|---|---|
@@ -723,7 +723,7 @@ Developer item renders each requirement from the real probes. Default **off**.
 
 ### 6.1 results — 2026-09-24, M0 cue-identity decision
 
-The experiment ran on nuc3 with `ffmpeg` and `ffprobe` 8.0.1-3ubuntu2. A
+The experiment ran on lab3 with `ffmpeg` and `ffprobe` 8.0.1-3ubuntu2. A
 six-second synthetic MKV was muxed with `-copyts`: MPEG-4 video, SRT with its
 first cue at 1.25 s, styled ASS with its first cue at 1.50 s and
 `{\pos(320,300)}`, and the repository's PGS fixture. The bare pass and the
@@ -745,7 +745,7 @@ mandatory null sentinel. The direct WebVTT comparison used
 | E4 | Five paired runs of a 120 s, 20,222,983-byte synthetic file with 12 SRT, 2 ASS and 3 PGS tracks: bare and ride indexes had the same SHA-256 (prefix `7c2242b2`). Wall time was 0.04–0.05 s for both; user CPU was 0.03 s bare and 0.03–0.04 s riding; peak RSS was 57,916–58,472 KiB bare and 58,900–59,260 KiB riding (about 0.7–1.3 MiB more). | Pass for this synthetic case; the RSS increment is recorded, not called zero. |
 | E5 | A WebVTT slave sent to `/dev/full` failed with `No space left on device`, but ffmpeg exited 0, the index matched baseline, and the other ASS/PGS outputs matched their controls; classify the failed representation `transient`. A corrupt SRT packet also left the index and other tracks intact, with FFmpeg reporting `Invalid UTF-8 in decoded subtitles text` and `Error decoding subtitles`; classify that representation `malformed`. Both its VTT cue count and framecrc count fell from two to one, so equality of those counts alone would **falsely publish an incomplete VTT as kept**. M1 must veto that decoder error and test it by name. | Isolation pass; verdict correction required in M1. |
 
-Both experiment runs used private temporary directories on nuc3, then removed
+Both experiment runs used private temporary directories on lab3, then removed
 and verified their removal. Exact generated argv and results were retained
 locally while this record was written. M0 wrote no product code and made no
 fleet deployment. The §8 audit against implementation base `f600d2823` also found that
@@ -795,7 +795,7 @@ from a node that did not produce them — **no full-source extraction runs**
 
 ### 6.4 What a session cannot do — the GPT prompt for the fleet steps
 
-> On the plurx fleet (nynuc, m6, nuc4; ansible `media/deploy.yml -e
+> On the plurx fleet (media1, lab6, lab4; ansible `media/deploy.yml -e
 > sync=false`, serial), deploy the build carrying M1–M4 of
 > `docs/clients/SUBTITLE-CLUSTER-EXTRACTION-PLAN.md`. M2 is a hiqlite schema
 > bump to v47: deploy all three voters in the same run and confirm each
@@ -866,7 +866,7 @@ from a node that did not produce them — **no full-source extraction runs**
 > protocol). Claim the plan: one draft PR (`WIP:` title) that edits the board
 > row, `Agent-Model:` / `Agent-Session:` trailers on every commit, one
 > Execution-log row per milestone in the plan file. Build M0 → M5 in order,
-> in that one PR; M0 is experiments on nuc3 whose results you record in
+> in that one PR; M0 is experiments on lab3 whose results you record in
 > §6.1. §3.9–§3.11 are contracts and override any prose that reads
 > differently. Every acceptance case named under a milestone is a test in
 > that milestone, by that name. Anything marked **STOP** is Paul's ruling:
@@ -886,15 +886,15 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v1 | [#497](http://192.168.4.7:3000/noirr/plurx/pulls/497) | Written from `936157b4b` and the 2026-09-24 fleet read in §2.5. Reviewed by Codex the same day: request changes, R1–R7. |
-| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v2 | [#497](http://192.168.4.7:3000/noirr/plurx/pulls/497) | All seven findings accepted and re-anchored at `0e2c3fd4` (every cited behaviour re-read in source); the three contracts added (§3.9–§3.11); schema moved to v46 after PR #498 took v45; acceptance split warm/cold; ready for an executing session. Nothing built. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M0 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | nuc3 E1 passed; E1b was cue-identical but byte-different. Paul directed the session to choose and continue; it chose §6.1's explicit cue-identity allowance. E1–E5 completed on nuc3; E5 exposed a text-verdict bug to fix in M1. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M1 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: typed SRT/ASS/mov_text ride-along, double-mapped ASS, decoder-error veto from E5, stored VTT and styled burn consumers, and named cases. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M2 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: subtitle schema originally drafted as Hiqlite v46 with its SQLite counterpart, deterministic foreground join, bounded repair, publication CRUD and named store cases. After PR #506 put file grants at v46 on `main`, M2 appends as Hiqlite v47 from v46. Pinned compile, format and Clippy passed on the earlier base; the merged candidate's gate is tracked on PR #507. No schema deployment. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M3 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: merge-safe publications, portable sampled digest and receiver inode binding, authenticated bounded peer route, node A → B replicated lookup scenario and named cases. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M4 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: no-index worker, foreground self-claim, bounded VTT/burn flights, typed progress and manual Developer switch; named cases include cold direct/offline requests. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M5 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: exclusive idle backfill, newest-first uncovered candidate query, telemetry and live advisory Developer diagnostics with named cases. UI baseline regenerated from 78 captures without browser errors. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. needs: §6.2 fleet/device checks after a later deployment, using the prompt above; no deployment by this PR. |
-| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 follow-up: replicated bootstrap | [#549](http://192.168.4.7:3000/noirr/plurx/pulls/549) | `make cluster-store-check` was red on `main`: v47 existed only as the v46 → v47 migration step, but `HiqliteAuthStore::bootstrap` stamps `AUTH_SCHEMA_VERSION` and never runs the chain. Every freshly bootstrapped cluster (a SQLite activation, a new install, every contract cluster) therefore had no `subtitle_source_publications` or repair epochs, and its `analysis_requests` refused `subtitle_source`. `16eac9d9d` makes the bootstrap install v47's step under its own presence guard; `fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps` pins it. The fleet migrated through the real step and is unaffected: a read-only copy of nuc3's state-machine DB on 2026-09-26 shows schema 47, all nine subtitle-source objects, and 3,273 publication rows. `e67858819` sets the v14 import parity count to 53 (`file_grants`, not K-09). `make cluster-store-check` exit 0 (208 passed). No deployment is needed. |
-| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 follow-up: bootstrap/chain parity | [#549](http://192.168.4.7:3000/noirr/plurx/pulls/549) | The single review of #549 (P2) found the cause still open: bootstrap is a hand-kept second copy of the replicated migration chain, and every existing migration contract builds its old tree from today's bootstrap, so none could notice the next step missing from it. New store contract `fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree` bootstraps one three-voter cluster fresh, loads `crates/plurx-core/tests/fixtures/hiqlite-schema-v42.sql` (the schema-42 tree `bootstrap` produced at main `58e752603`, captured once and frozen) into another, runs `open_or_migrate` through v43-v48, and compares the two object for object: tables by column/constraint definitions and options, `pragma_table_xinfo` columns, foreign keys, and canonical index, trigger and view SQL (membership-layer objects excluded by name). Revert proofs: with v47's bootstrap install disabled it reports 15 differences (the nine `subtitle_source_*` objects and the `component`/`priority`/`trigger` CHECKs of `analysis_requests`); with v48's three bootstrap indexes dropped it reports those three indexes. It runs in `make cluster-store-check`. Chosen over rebuilding bootstrap as frozen base + chain because that would change the production bootstrap path (SQLite activation, new installs) for a guard the test already provides. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v1 | [#497](http://forge.lan:3000/noirr/plurx/pulls/497) | Written from `936157b4b` and the 2026-09-24 fleet read in §2.5. Reviewed by Codex the same day: request changes, R1–R7. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v2 | [#497](http://forge.lan:3000/noirr/plurx/pulls/497) | All seven findings accepted and re-anchored at `0e2c3fd4` (every cited behaviour re-read in source); the three contracts added (§3.9–§3.11); schema moved to v46 after PR #498 took v45; acceptance split warm/cold; ready for an executing session. Nothing built. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M0 | [#507](http://forge.lan:3000/noirr/plurx/pulls/507) | lab3 E1 passed; E1b was cue-identical but byte-different. Paul directed the session to choose and continue; it chose §6.1's explicit cue-identity allowance. E1–E5 completed on lab3; E5 exposed a text-verdict bug to fix in M1. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M1 | [#507](http://forge.lan:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: typed SRT/ASS/mov_text ride-along, double-mapped ASS, decoder-error veto from E5, stored VTT and styled burn consumers, and named cases. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M2 | [#507](http://forge.lan:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: subtitle schema originally drafted as Hiqlite v46 with its SQLite counterpart, deterministic foreground join, bounded repair, publication CRUD and named store cases. After PR #506 put file grants at v46 on `main`, M2 appends as Hiqlite v47 from v46. Pinned compile, format and Clippy passed on the earlier base; the merged candidate's gate is tracked on PR #507. No schema deployment. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M3 | [#507](http://forge.lan:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: merge-safe publications, portable sampled digest and receiver inode binding, authenticated bounded peer route, node A → B replicated lookup scenario and named cases. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M4 | [#507](http://forge.lan:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: no-index worker, foreground self-claim, bounded VTT/burn flights, typed progress and manual Developer switch; named cases include cold direct/offline requests. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M5 | [#507](http://forge.lan:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: exclusive idle backfill, newest-first uncovered candidate query, telemetry and live advisory Developer diagnostics with named cases. UI baseline regenerated from 78 captures without browser errors. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. needs: §6.2 fleet/device checks after a later deployment, using the prompt above; no deployment by this PR. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 follow-up: replicated bootstrap | [#549](http://forge.lan:3000/noirr/plurx/pulls/549) | `make cluster-store-check` was red on `main`: v47 existed only as the v46 → v47 migration step, but `HiqliteAuthStore::bootstrap` stamps `AUTH_SCHEMA_VERSION` and never runs the chain. Every freshly bootstrapped cluster (a SQLite activation, a new install, every contract cluster) therefore had no `subtitle_source_publications` or repair epochs, and its `analysis_requests` refused `subtitle_source`. `16eac9d9d` makes the bootstrap install v47's step under its own presence guard; `fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps` pins it. The fleet migrated through the real step and is unaffected: a read-only copy of lab3's state-machine DB on 2026-09-26 shows schema 47, all nine subtitle-source objects, and 3,273 publication rows. `e67858819` sets the v14 import parity count to 53 (`file_grants`, not K-09). `make cluster-store-check` exit 0 (208 passed). No deployment is needed. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 follow-up: bootstrap/chain parity | [#549](http://forge.lan:3000/noirr/plurx/pulls/549) | The single review of #549 (P2) found the cause still open: bootstrap is a hand-kept second copy of the replicated migration chain, and every existing migration contract builds its old tree from today's bootstrap, so none could notice the next step missing from it. New store contract `fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree` bootstraps one three-voter cluster fresh, loads `crates/plurx-core/tests/fixtures/hiqlite-schema-v42.sql` (the schema-42 tree `bootstrap` produced at main `58e752603`, captured once and frozen) into another, runs `open_or_migrate` through v43-v48, and compares the two object for object: tables by column/constraint definitions and options, `pragma_table_xinfo` columns, foreign keys, and canonical index, trigger and view SQL (membership-layer objects excluded by name). Revert proofs: with v47's bootstrap install disabled it reports 15 differences (the nine `subtitle_source_*` objects and the `component`/`priority`/`trigger` CHECKs of `analysis_requests`); with v48's three bootstrap indexes dropped it reports those three indexes. It runs in `make cluster-store-check`. Chosen over rebuilding bootstrap as frozen base + chain because that would change the production bootstrap path (SQLite activation, new installs) for a guard the test already provides. |
 
 The sole adversarial review raised six findings (four P1, two P2). Commit `b18173eb5` fixes the HLS and PGS peer paths, active-job timeout, partial-ready repair, cross-node ride skip, and cancellation fencing. Commit `fd7356074` fixes the first fast-lane SQL contracts and fixtures; all focused cases for those changes pass. The PR gate records final qualification. The candidate first merged `dafadf043`, then `44cdfccc7`. All 21 §8 anchors were rechecked against the latter: file grants took Hiqlite v46, so subtitle M2 moved to v47; the direct endpoint and client retry behavior remained the same, though the native retry symbols shifted lines.

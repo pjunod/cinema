@@ -43,6 +43,23 @@ impl PlaybackTelemetryStore for SqliteStore {
 
 #[async_trait]
 impl NetworkPriorStore for SqliteStore {
+    async fn observe_candidate_link(
+        &self,
+        value: &crate::domain::CandidateLinkObservation,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        let value = value.clone();
+        self.with_conn(move |conn| crate::store::candidate_link::observe(conn, &value, now_ms))
+            .await
+    }
+    async fn candidate_link_prior(
+        &self,
+        binding: &crate::domain::CandidateLinkBinding,
+    ) -> Result<Option<crate::domain::CandidateLinkPrior>, StoreError> {
+        let binding = binding.clone();
+        self.with_read(move |conn| crate::store::candidate_link::get(conn, &binding))
+            .await
+    }
     async fn observe_network_prior(
         &self,
         observation: &NetworkPriorObservation,

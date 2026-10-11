@@ -43,6 +43,7 @@ class SettingsStore(private val context: Context) {
         val SUB_LANG = stringPreferencesKey("sub_lang")
         val THEME = stringPreferencesKey("theme")
         val APPEARANCE = stringPreferencesKey("appearance")
+        val LIBRARY_PRESENTATION = stringPreferencesKey("library_presentation")
         val POSTER_SIZE = stringPreferencesKey("poster_size")
         val HOME_GROUPING = stringPreferencesKey("home_grouping")
         val PLAYBACK_QUALITY = stringPreferencesKey("playback_quality")
@@ -77,6 +78,7 @@ class SettingsStore(private val context: Context) {
                 theme = ThemeId.fromStorage(p[Keys.THEME]),
                 appearance = Appearance.fromStorage(p[Keys.APPEARANCE]),
                 posterSize = PosterSize.fromStorage(p[Keys.POSTER_SIZE]),
+                libraryPresentation = LibraryPresentation.fromStorage(p[Keys.LIBRARY_PRESENTATION]),
                 homeGrouping = HomeGrouping.fromStorage(p[Keys.HOME_GROUPING]),
                 playbackQuality = PlaybackQuality.fromStorage(p[Keys.PLAYBACK_QUALITY]),
                 subtitleReadiness = SubtitleReadiness.fromStorage(p[Keys.SUBTITLE_READINESS]),
@@ -118,8 +120,9 @@ class SettingsStore(private val context: Context) {
      * same instance on a new address. The token still belongs to it, so this
      * deliberately keeps it; that is the whole difference from [saveOrigin].
      */
-    suspend fun saveServerIdentity(origin: String, instanceId: String?) {
+    suspend fun saveServerIdentity(origin: String, instanceId: String?, expectedOrigin: String? = null) {
         context.dataStore.edit { p ->
+            if (expectedOrigin != null && p[Keys.ORIGIN] != expectedOrigin) return@edit
             p[Keys.ORIGIN] = origin
             if (instanceId == null) p.remove(Keys.INSTANCE_ID) else p[Keys.INSTANCE_ID] = instanceId
         }
@@ -182,6 +185,7 @@ class SettingsStore(private val context: Context) {
             p[Keys.THEME] = value.theme.storageValue
             p[Keys.APPEARANCE] = value.appearance.storageValue
             p[Keys.POSTER_SIZE] = value.posterSize.storageValue
+            p[Keys.LIBRARY_PRESENTATION] = value.libraryPresentation.storageValue
             p[Keys.HOME_GROUPING] = value.homeGrouping.storageValue
             p[Keys.PLAYBACK_QUALITY] = value.playbackQuality.storageValue
             p[Keys.SUBTITLE_READINESS] = value.subtitleReadiness.storageValue

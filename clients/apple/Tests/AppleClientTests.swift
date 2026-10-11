@@ -1702,19 +1702,20 @@ final class AppleClientTests: XCTestCase {
 
     /// Audio advancing over a black screen is invisible to every other
     /// detector: the film clock moves, so both stall detectors reset on each
-    /// sample and AVPlayer never reports a stall. The presentation size is the
-    /// only evidence that nothing was decoded.
+    /// sample and AVPlayer never reports a stall. Current-layer readiness
+    /// distinguishes a ready frame from metadata describing its dimensions.
     @MainActor
     func testBlackFrameWatchdogFiresOnlyWhenNothingIsEverDecoded() {
         XCTAssertEqual(PlayerController.blackFrameDecodeFailureMs, 6_000)
 
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/unused.mp4"))
         var black = BlackFrameWatchdog()
         black.opened()
         for step in 0...11 {
             XCTAssertFalse(
                 black.observe(
-                    positionMs: step * 500,
-                    presentationSize: .zero,
+                    item: item, positionMs: step * 500,
+                    frameReady: false, localTargetExpected: true,
                     hasVideoSource: true,
                     playing: true
                 ),
@@ -1722,39 +1723,39 @@ final class AppleClientTests: XCTestCase {
             )
         }
         XCTAssertTrue(black.observe(
-            positionMs: 6_000,
-            presentationSize: .zero,
+            item: item, positionMs: 6_000,
+            frameReady: false, localTargetExpected: true,
             hasVideoSource: true,
             playing: true
         ))
         XCTAssertFalse(
             black.observe(
-                positionMs: 6_500,
-                presentationSize: .zero,
+                item: item, positionMs: 6_500,
+                frameReady: false, localTargetExpected: true,
                 hasVideoSource: true,
                 playing: true
             ),
             "one item enters the ladder once, not on every later sample"
         )
 
-        // A decoded picture — of any size — is the end of the matter.
+        // A ready frame on the current visible layer is the end of the matter.
         var decoding = BlackFrameWatchdog()
         for step in 0...20 {
             XCTAssertFalse(decoding.observe(
-                positionMs: step * 500,
-                presentationSize: CGSize(width: 3840, height: 2160),
+                item: item, positionMs: step * 500,
+                frameReady: true, localTargetExpected: true,
                 hasVideoSource: true,
                 playing: true
             ))
         }
         XCTAssertTrue(decoding.presentedVideo)
 
-        // An audiobook's presentation size is legitimately zero forever.
+        // Audiobooks do not need a video layer.
         var audioOnly = BlackFrameWatchdog()
         for step in 0...20 {
             XCTAssertFalse(audioOnly.observe(
-                positionMs: step * 500,
-                presentationSize: .zero,
+                item: item, positionMs: step * 500,
+                frameReady: false, localTargetExpected: true,
                 hasVideoSource: false,
                 playing: true
             ))
@@ -1764,22 +1765,22 @@ final class AppleClientTests: XCTestCase {
         var paused = BlackFrameWatchdog()
         for step in 0...20 {
             XCTAssertFalse(paused.observe(
-                positionMs: step * 500,
-                presentationSize: .zero,
+                item: item, positionMs: step * 500,
+                frameReady: false, localTargetExpected: true,
                 hasVideoSource: true,
                 playing: false
             ))
         }
         var seeking = BlackFrameWatchdog()
         XCTAssertFalse(seeking.observe(
-            positionMs: 0,
-            presentationSize: .zero,
+            item: item, positionMs: 0,
+            frameReady: false, localTargetExpected: true,
             hasVideoSource: true,
             playing: true
         ))
         XCTAssertFalse(seeking.observe(
-            positionMs: 600_000,
-            presentationSize: .zero,
+            item: item, positionMs: 600_000,
+            frameReady: false, localTargetExpected: true,
             hasVideoSource: true,
             playing: true
         ))
@@ -2306,6 +2307,14 @@ final class AppleClientTests: XCTestCase {
                        "Waiting for the server.")
         XCTAssertEqual(PlayerController.holdNotice(nil), "Waiting for the server.")
     }
+
+    func testPlaybackBufferHoldsNameTheBufferLimit() {
+        for reason in ["working_set", "no_room"] {
+            XCTAssertEqual(PlayerController.holdNotice(reason),
+                "The server’s playback buffer limit has been reached.")
+        }
+    }
+
 
     func testTimerOnlyStallsRemainUnknownToTheServer() {
         // A stationary clock identifies failed presentation, not its cause.
@@ -3542,7 +3551,7 @@ final class AppleClientTests: XCTestCase {
     @MainActor
     func testTheRowEighteenSitesLogOnceAndDrawNothing() {
         let controller = PlayerController()
-        let model = AppModel()
+        let model = AppModel(startServices: false)
         defer { controller.stop() }
         XCTAssertFalse(
             controller.noteSurfaceLogOnly("prepared_successor_abandoned:failed"),
@@ -3772,14 +3781,34 @@ final class AppleClientTests: XCTestCase {
         )
         // One explicit viewer stop survives in the centralized setter. The
         // lock screen, remote controls and on-screen toggle all route here.
+        // The public entry point only stamps viewer origin and forwards; the
+        // body that owns the stop is its `viewerOrigin:` overload, which the
+        // route-change revocation also calls (as a non-viewer origin) so that
+        // it cannot become a second stop.
         let viewerStop = "wantsPlayback = false\n            player.pause()\n            isPlaying = false"
-        let setter = try XCTUnwrap(source.range(of: "func setPlaybackRequested(_ requested: Bool) {"))
+        let entry = try XCTUnwrap(source.range(of: "func setPlaybackRequested(_ requested: Bool) {"))
+        let entryEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: entry.upperBound..<source.endIndex)
+        )
+        XCTAssertEqual(
+            String(source[entry.upperBound..<entryEnd.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "setPlaybackRequested(requested, viewerOrigin: true)",
+            "the public intent setter forwards to the one owner and does nothing else"
+        )
+        let setter = try XCTUnwrap(source.range(
+            of: "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {"
+        ))
         let setterEnd = try XCTUnwrap(
             source.range(of: "\n    }\n", range: setter.upperBound..<source.endIndex)
         )
         XCTAssertTrue(
             String(source[setter.upperBound..<setterEnd.lowerBound]).contains(viewerStop),
             "the one explicit viewer stop belongs to the centralized intent setter"
+        )
+        XCTAssertEqual(
+            source.components(separatedBy: viewerStop).count - 1, 1,
+            "the explicit viewer stop is spelled once, in the setter"
         )
         // The lock screen and remote controls reach the setter from inside
         // their own command targets — past `RemoteCommandOwner`'s current-owner
@@ -3835,8 +3864,16 @@ final class AppleClientTests: XCTestCase {
         )
         XCTAssertTrue(
             String(source[interruption.upperBound..<interruptionEnd.lowerBound])
-                .contains("wantsPlayback = false"),
+                .contains("settleSystemHoldAsPause()"),
             "declined automatic resume is the fifth, explicitly owned intent transition"
+        )
+        let settle = try XCTUnwrap(source.range(of: "private func settleSystemHoldAsPause() {"))
+        let settleEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: settle.upperBound..<source.endIndex)
+        )
+        XCTAssertTrue(
+            String(source[settle.upperBound..<settleEnd.lowerBound]).contains("wantsPlayback = false"),
+            "the end of a system hold — declined resume or the viewer's own press — writes it in one place"
         )
         let start = try XCTUnwrap(source.range(
             of: "private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {"
@@ -4089,7 +4126,7 @@ final class AppleClientTests: XCTestCase {
             "the owner's stop must record that the picture stopped presenting"
         )
         let start = try XCTUnwrap(
-            source.range(of: "private func sampleSurfacePresentation(at observedPosition: Int) {")
+            source.range(of: "private func sampleSurfacePresentation(at observedPosition: Int, evidence: LocalVideoEvidence) {")
         )
         let end = try XCTUnwrap(
             source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex)
@@ -4101,7 +4138,9 @@ final class AppleClientTests: XCTestCase {
         )
         // The contract's evidence is the position delta and the rate, plus the
         // first-frame proof — never a transport status (§3.4).
-        XCTAssertTrue(body.contains("blackFrameWatchdog.presentedVideo"))
+        XCTAssertTrue(body.contains("evidence.frameReady"))
+        XCTAssertFalse(body.contains("presentationSize"))
+        XCTAssertFalse(body.contains("blackFrameWatchdog.presentedVideo"))
         XCTAssertTrue(body.contains("rate: player.rate"))
         // The decision the sampler defers to, pinned in the same breath: the
         // evidence is collected here and weighed there, and neither half may
@@ -4717,14 +4756,29 @@ final class AppleClientTests: XCTestCase {
             after: APIError.refused(status: 503, code: "x", message: "y", positionMs: nil),
             caps: legacyCaps
         ))
+        // A bound stall reopen is the binding plus its typed reason, exactly as
+        // `applyOpenIntent` stamps it; an Auto recovery's binding carries a
+        // different reason and is not this matcher's case.
         var body = createBody()
         body.previousSessionId = "session-a"
+        body.reopenReason = PlayerController.stallReopenReason
         XCTAssertNotNil(PlayerController.unboundStallRetry(for: body, after: APIError.http(400)))
         XCTAssertNotNil(PlayerController.unboundStallRetry(
             for: body,
             after: APIError.refused(status: 400, code: "vod_invalid_height", message: "no", positionMs: nil)
         ))
         XCTAssertNil(PlayerController.unboundStallRetry(for: body, after: APIError.http(404)))
+        // The binding alone is not enough: an Auto recovery reopen carries the
+        // same `previousSessionId` with a non-stall reason, and its 400 must
+        // reach the caller's restore-and-surface path, not be retried unbound.
+        var autoReopen = createBody()
+        autoReopen.previousSessionId = "session-a"
+        autoReopen.reopenReason = "auto"
+        XCTAssertNil(PlayerController.unboundStallRetry(for: autoReopen, after: APIError.http(400)))
+        XCTAssertNil(PlayerController.unboundStallRetry(
+            for: autoReopen,
+            after: APIError.refused(status: 400, code: "vod_invalid_height", message: "no", positionMs: nil)
+        ))
     }
 
     func testPlaybackInfoRowsMatchTheSharedFieldList() throws {
@@ -5524,6 +5578,39 @@ final class AppleClientTests: XCTestCase {
             ),
             .stay
         )
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .began, options: [], wantsPlayback: false
+            ),
+            .ignore,
+            "a viewer who already paused was not paused by the system (iPad Pro, 2026-10-04)"
+        )
+    }
+
+    /// iPad Pro, 2026-10-04: paused for ten minutes, a `.began` and never an
+    /// `.ended`; Play resumed the picture and "Paused — audio interrupted" stayed
+    /// up for an hour. The viewer's press must end a hold iOS never ends.
+    @MainActor
+    func testViewerPlayEndsASystemHoldThatIOSNeverEnded() {
+        let controller = PlayerController()
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        XCTAssertTrue(controller.systemPaused)
+        controller.togglePlayPause()
+        XCTAssertFalse(controller.systemPaused, "the viewer's Play is the end of the hold")
+        XCTAssertTrue(controller.wantsPlayback, "one press under a hold is a resume, not a pause of stale intent")
+    }
+
+    @MainActor
+    func testViewerPauseEndsASystemHoldAndALateEndChangesNothing() {
+        let controller = PlayerController()
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        controller.setPlaybackRequested(false)
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertFalse(controller.wantsPlayback)
+        controller.handleAudioSessionEvent(.interruption(.ignore))
+        controller.handleAudioSessionEvent(.interruption(.stay))
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertFalse(controller.wantsPlayback)
     }
 
     @MainActor
@@ -6074,22 +6161,22 @@ final class AppleClientTests: XCTestCase {
 
         XCTAssertNil(measurement.observe(
             positionMs: 90_249,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 11
         ))
         XCTAssertNil(measurement.observe(
             positionMs: 90_500,
-            playing: false,
+            playing: false, evidence: .audioProgress,
             observedAt: 11.5
         ))
         XCTAssertEqual(measurement.observe(
             positionMs: 90_500,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 12
         ), 2_000)
         XCTAssertNil(measurement.observe(
             positionMs: 91_000,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 13
         ))
     }
@@ -6102,12 +6189,12 @@ final class AppleClientTests: XCTestCase {
 
         XCTAssertNil(measurement.observe(
             positionMs: 88_249,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 11
         ))
         XCTAssertEqual(measurement.observe(
             positionMs: 88_250,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 12.5
         ), 2_500)
     }
@@ -6120,7 +6207,7 @@ final class AppleClientTests: XCTestCase {
 
         XCTAssertEqual(measurement.observe(
             positionMs: 10_250,
-            playing: true,
+            playing: true, evidence: .audioProgress,
             observedAt: 11
         ), 1_000)
     }
@@ -6173,10 +6260,10 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(
             PlaybackAcceptanceLaunch.current(
                 defaults: defaults,
-                arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+                arguments: ["plurx", "-plurx.origin", "http://10.42.4.143:52773"]
             ),
             PlaybackAcceptanceLaunch(
-                requestedOrigin: "http://192.168.4.143:52773",
+                requestedOrigin: "http://10.42.4.143:52773",
                 itemId: 17,
                 fileId: 42,
                 startMs: 91_000,
@@ -6191,20 +6278,20 @@ final class AppleClientTests: XCTestCase {
             PlaybackAcceptanceLaunch.current(defaults: defaults, arguments: ["plurx"])
         )
         XCTAssertFalse(missingProxy.matchesActiveOrigins(
-            model: "http://192.168.4.7:32400",
-            session: "http://192.168.4.7:32400"
+            model: "http://10.42.4.7:32400",
+            session: "http://10.42.4.7:32400"
         ))
         let launch = try XCTUnwrap(PlaybackAcceptanceLaunch.current(
             defaults: defaults,
-            arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+            arguments: ["plurx", "-plurx.origin", "http://10.42.4.143:52773"]
         ))
         XCTAssertTrue(launch.matchesActiveOrigins(
-            model: "http://192.168.4.143:52773",
-            session: "http://192.168.4.143:52773"
+            model: "http://10.42.4.143:52773",
+            session: "http://10.42.4.143:52773"
         ))
         XCTAssertFalse(launch.matchesActiveOrigins(
-            model: "http://192.168.4.143:52773",
-            session: "http://192.168.4.7:32400"
+            model: "http://10.42.4.143:52773",
+            session: "http://10.42.4.7:32400"
         ))
     }
     #endif
@@ -8150,6 +8237,54 @@ final class AppleClientTests: XCTestCase {
             JSONSerialization.jsonObject(with: encoder.encode(noHEVC)) as? [String: Any]
         )
         XCTAssertNil(noHEVCJSON["progressive_hevc_sample_entries"])
+    }
+
+    func testAudioSinkClaimFollowsTheRouteAndPassesThroughOnlyToAMultichannelReceiver() throws {
+        let receiver = Caps.audioSinks(route: AudioRouteFacts(outputChannels: 8, hdmi: true))
+        let byCodec = Dictionary(uniqueKeysWithValues: receiver.map { ($0.codec, $0) })
+        XCTAssertEqual(byCodec["aac"]?.maxChannels, 8)
+        XCTAssertEqual(byCodec["aac"]?.passthrough, false)
+        XCTAssertEqual(byCodec["eac3"]?.maxChannels, 8)
+        XCTAssertEqual(byCodec["eac3"]?.passthrough, true)
+        XCTAssertEqual(byCodec["ac3"]?.maxChannels, 6)
+        XCTAssertEqual(byCodec["ac3"]?.passthrough, true)
+        XCTAssertTrue(byCodec["aac"]?.sampleRatesHz.contains(48_000) == true)
+        XCTAssertTrue(byCodec["eac3"]?.sampleRatesHz.contains(48_000) == true)
+
+        // A television's own speakers over HDMI are a stereo route: no
+        // receiver to take a bitstream.
+        let speakers = Caps.audioSinks(route: AudioRouteFacts(outputChannels: 2, hdmi: true))
+        XCTAssertTrue(speakers.allSatisfy { $0.maxChannels <= 2 && !$0.passthrough })
+
+        // Headphones, AirPlay and a phone speaker; an unreadable route floors
+        // at stereo, never a guessed surround claim.
+        for channels in [2, 1, 0] {
+            let route = Caps.audioSinks(route: AudioRouteFacts(outputChannels: channels, hdmi: false))
+            XCTAssertTrue(route.allSatisfy { $0.maxChannels == 2 && !$0.passthrough }, "\(channels)")
+        }
+        XCTAssertEqual(
+            Caps.audioSinks(route: AudioRouteFacts(outputChannels: 16, hdmi: true))
+                .first { $0.codec == "aac" }?.maxChannels,
+            8
+        )
+
+        // The claim rides the v2 document as `audio_sinks`; no route means the
+        // legacy contract.
+        let document = Caps.capsDocument(
+            hevc: true, av1: false, displayHDR: false, dolbyVision: false,
+            audioRoute: AudioRouteFacts(outputChannels: 6, hdmi: true)
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(document)) as? [String: Any]
+        )
+        let sinks = try XCTUnwrap(json["audio_sinks"] as? [[String: Any]])
+        XCTAssertEqual(sinks.count, 5)
+        XCTAssertEqual(sinks.first?["max_channels"] as? Int, 6)
+        XCTAssertNotNil(sinks.first?["sample_rates_hz"] as? [Int])
+        let legacy = Caps.capsDocument(hevc: true, av1: false, displayHDR: false, dolbyVision: false)
+        XCTAssertTrue(legacy.audioSinks.isEmpty)
     }
 
     func testDeliveryRequiresHLSDecodesAndDefaultsForOldResponses() throws {

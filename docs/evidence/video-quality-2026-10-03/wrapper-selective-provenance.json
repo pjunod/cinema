@@ -1,0 +1,23 @@
+{
+  "source_commit": "1cc9468936e3737a3e6993269cc18e06ace8e534",
+  "base_main_commit": "3197d0c58c079e485667da20e949f7275cb92cb9",
+  "workflow_sha256": "f13bbfc789b5c58a394d07147eded2ba1d727878a0cc019f507c7966378207ee",
+  "windows_job": "original main-fast-lane Windows block unchanged except pinned checkout ref",
+  "rust_setup": "original Rust runner/container/FFmpeg6/cache setup unchanged",
+  "test_scope": [
+    "state::tests::artwork_retry_pass_is_single_flight",
+    "state::tests::due_jobs_continue_while_artwork_retry_is_in_flight",
+    "state::tests::schedule_loop_dispatches_a_due_library_scan",
+    "state::tests::three_cluster_ticks_run_one_provider_pass",
+    "vodserve::tests::encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid",
+    "vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid",
+    "vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing"
+  ],
+  "restart_orchestration": "The two make vodencode-restart-check commands are expanded verbatim in a failure-accumulating loop so each executes once regardless of the first outcome.",
+  "prior_successful_suites_repeated": false,
+  "windows_requalification_reason": "New production AAC segment ownership code after original Windows pass.",
+  "wrapper_commit": "65904bfade2f6715945f52e5e070f990d7436be8",
+  "run_id": 4000,
+  "ui_index": 3979,
+  "url": "http://192.168.4.7:3000/noirr/plurx/actions/runs/3979"
+}

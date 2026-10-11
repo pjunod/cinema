@@ -1,0 +1,87 @@
+{
+  "scope": "parsed synthetic metadata and indexed decoded-frame renderer bridge",
+  "qualified_fel": false,
+  "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+  "rust": "1.97.1",
+  "libplacebo_revision": "0d043c7f6f79cd3687c023454bdacbe615e4d96f",
+  "libdovi_revision": "83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+  "library_sha256": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1",
+  "libdovi_archive_sha256": "f9976d36eefcc1d8c000ae5f539ddfc09069b97ad6c56b6e3d665526a59cfc65",
+  "fresh_parsed_replay": "passed exact controlled-refusal checks",
+  "fresh_cross_replay": "passed after image-identity fix",
+  "checker_tests": 5,
+  "encoder_frames": 4,
+  "encoder_stream": {
+    "codec_name": "hevc",
+    "profile": "Main 10",
+    "width": 64,
+    "height": 64,
+    "pix_fmt": "yuv420p10le",
+    "r_frame_rate": "24/1",
+    "color_range": "tv",
+    "color_space": "bt2020nc",
+    "color_transfer": "smpte2084",
+    "color_primaries": "bt2020",
+    "chroma_location": "center"
+  },
+  "mastering_metadata_provenance": "synthetic target primaries and10000/.005nits, not sourceRPU L6",
+  "encoder_sha256": "d97da4228ff54c987dc500e0573b5c2822cc8c5b8b89f571cd86707c33e77a92",
+  "fixture_generator_sha256": "5caf2e1ec7a9087aee5907de006e8400ead499af42f7aab72f25c28498bff066",
+  "limitations": [
+    "explicit indexed decodedframe/RPU association only",
+    "no encoded P7BL/EL association or reordered timing",
+    "no full trims/creative mapper",
+    "no independent Dolby reference",
+    "live apt/pip image resolution may drift"
+  ],
+  "image_identity_provenance": "validated and propagated from supplied prerequisite replay image-id.txt",
+  "image_identity_tests": 6,
+  "stage_build_identities": [
+    {
+      "schema": 1,
+      "stage": "parsed",
+      "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+      "platform": "linux/arm64",
+      "status": "passed",
+      "dependency_resolution": "prior replay image; live apt/pip may drift",
+      "libplacebo_library_sha256": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1"
+    },
+    {
+      "schema": 1,
+      "stage": "cross",
+      "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+      "platform": "linux/arm64",
+      "status": "passed",
+      "dependency_resolution": "prior replay image; live apt/pip may drift",
+      "libplacebo_library_sha256": "3f96093319c2479ae9557bd20b421656d7494ed7a3a474f7b9dc7a8f199c7fd1"
+    },
+    {
+      "schema": 1,
+      "stage": "encode",
+      "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+      "platform": "linux/arm64",
+      "status": "passed",
+      "dependency_resolution": "prior replay image; live apt/pip may drift"
+    },
+    {
+      "schema": 1,
+      "stage": "chroma",
+      "image_id": "sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9",
+      "platform": "linux/arm64",
+      "status": "passed",
+      "dependency_resolution": "prior replay image; live apt/pip may drift"
+    }
+  ],
+  "fresh_encoder_replay": "passed explicit centered point chroma",
+  "adversarial_review": "pending recheck of chroma and controlled-refusal fixes",
+  "superseded_encoder_sha256": "8f555e272cf027042d441a4bdeb47d94f78415bdf69a2152ea61d071c50823c0",
+  "superseded_encoder_reason": "unspecified zscale output siting conflicted with centered HEVC flag",
+  "encoder_input_rgb48_sha256": "cb8c75ab3fff4ddf4cafe10f95f2df484902dc80bbb9ed3056050ae108786faf",
+  "encoder_sample_recipe": {
+    "chroma_location": "center",
+    "filter": "point"
+  },
+  "negative_checker_tests": 6,
+  "chroma_tests": 3,
+  "actual_chroma_known_answer": "native and scalarRGB center/left controls exact0codeerror"
+}

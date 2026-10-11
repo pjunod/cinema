@@ -510,10 +510,14 @@ tuner owner or start a new session.
 POST /_internal/v1/live-tv/start
 POST /_internal/v1/live-tv/activate
 POST /_internal/v1/live-tv/snapshot
-POST /_internal/v1/live-tv/drain
+POST /_internal/v1/live-tv/drain      (historical: removed 2026-10-04)
 POST /_internal/v1/live-tv/resource
 POST /_internal/v1/live-tv/stop
 ```
+
+The `drain` route belonged to the single configured owner that #537 replaced;
+nothing sent it after that, and it was removed 2026-10-04 with the L-02 #537
+cleanup.
 
 Every body is at most 16 KiB, uses `deny_unknown_fields`, names the expected
 owner, and is bound to method, path, body, timestamp, nonce, source node, and
@@ -529,8 +533,9 @@ answers `created` or `recovered`. `activate` idempotently confirms the same
 provisional activation token and returns `activated` on every matching retry.
 `snapshot` runs on the selected owner and is the sole source of device
 readiness and lineup facts.
-`drain` fences a proposed configuration generation, waits for every old
-session/child, and signs its acknowledgement. All requests include the
+`drain` (*historical: removed 2026-10-04*) fenced a proposed configuration
+generation, waited for every old session/child, and signed its
+acknowledgement. All requests include the
 expected protocol capability and configuration/serving generations. A
 mismatch fails closed and drains a stale provisional session.
 

@@ -389,13 +389,15 @@ final class PlayerResumeTests: XCTestCase {
         controller.stop()
     }
 
-    func testDeveloperEnablementIsAdvisoryAndNeverDisablesTheToggle() throws {
+    /// Bounded pause/resume graduated from Developer to Settings → Playback;
+    /// its readiness rows stay advisory there.
+    func testPlaybackEnablementIsAdvisoryAndNeverDisablesTheToggle() throws {
         let source = try String(
-            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvDeveloperView.swift"),
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/SettingsView.swift"),
             encoding: .utf8
         )
         let section = try XCTUnwrap(source.range(
-            of: "Section(\"Bounded pause/resume · advisory enablement\")"
+            of: "Section(\"Bounded pause/resume\")"
         ))
         let tail = String(source[section.lowerBound...].prefix(1_800))
         XCTAssertTrue(tail.contains("Toggle(\"Enable bounded pause/resume\""))
@@ -505,7 +507,9 @@ final class PausedRetirementTests: XCTestCase {
 
     func testResumeConsumesTheLatchBeforeAnyInPlaceResumePath() throws {
         let source = try playerSource()
-        let play = try body(of: "func setPlaybackRequested(", in: source)
+        // The public `setPlaybackRequested(_:)` only forwards with viewer
+        // origin; the body that resumes is its `viewerOrigin:` overload.
+        let play = try body(of: "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {", in: source)
         let latch = try XCTUnwrap(play.range(
             of: "} else if let retired = currentPausedRetirement, !isChangingStream {"
         ))

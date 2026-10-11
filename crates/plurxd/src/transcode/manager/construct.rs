@@ -41,7 +41,12 @@ impl TranscodeManager {
                 "could not create ffmpeg runtime cache: {err}"
             );
         }
+        let macos_video_probe = Arc::new(crate::macos_video::MacosVideoProbe::new(
+            runtime_cache.clone(),
+        ));
         TranscodeManager {
+            source_workers: source_actor::SourceWorkerRegistry::default(),
+            source_http_starts: crate::http::shared_source_playback::SourceStartRegistry::default(),
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,
             work_dir,
@@ -67,6 +72,10 @@ impl TranscodeManager {
             measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(
             ),
             automatic_decoder_recovery: AtomicBool::new(false),
+            macos_video_processing_enabled: Arc::new(AtomicBool::new(false)),
+            macos_hevc_output_enabled: AtomicBool::new(false),
+            macos_video_preference_update: Mutex::new(()),
+            macos_video_probe,
             hooks: crate::seam_hooks::HookSlot::new(&NoopTranscodeManagerHooks),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
@@ -74,6 +83,7 @@ impl TranscodeManager {
                 crate::vodencode::CandidateProductionProofs::default(),
             ),
             pipeline,
+            encoder_override: None,
             admissions: Admissions::new(),
             cache: None,
             shared_cache: None,
@@ -111,9 +121,11 @@ impl TranscodeManager {
             dovi_passthrough_qsv: false,
             hdr10_passthrough: false,
             hdr10_passthrough_qsv: false,
-            dovi_proofs: std::sync::Mutex::new(HashMap::new()),
+            hdr10_passthrough_vaapi: false,
+            dovi_proofs: DoviProofs::default(),
             cached_limits: std::sync::RwLock::new(None),
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
+            output_enqueue: OutputEnqueueQueue::new(),
         }
     }
 
@@ -157,6 +169,11 @@ impl TranscodeManager {
         self
     }
 
+    pub fn with_hdr10_passthrough_vaapi(mut self, proved: bool) -> Self {
+        self.hdr10_passthrough_vaapi = proved;
+        self
+    }
+
     /// The tallest frame this node can actually encode HDR10 at, or 0.
     ///
     /// `/decision` needs this and cannot derive it: the renderer proofs answer
@@ -182,14 +199,11 @@ impl TranscodeManager {
     }
 
     pub(crate) fn hdr10_ceiling_with_preference(&self, preference: &str) -> i64 {
-        if !self.hdr10_passthrough {
-            return 0;
-        }
-        match self.caps.choose(preference) {
+        match self.encoder_for_preference(preference) {
+            Encoder::Vaapi if self.hdr10_passthrough_vaapi => HDR10_HEIGHT,
+            _ if !self.hdr10_passthrough => 0,
             Encoder::Qsv if self.hdr10_passthrough_qsv => HDR10_4K_HEIGHT,
             Encoder::Qsv | Encoder::Software => HDR10_HEIGHT,
-            // No measured Main10 route on this family, and dropping to
-            // software x265 costs realtime — see `hdr10_grade_for`.
             _ => 0,
         }
     }
@@ -304,6 +318,9 @@ impl TranscodeManager {
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
+        self.macos_video_probe = Arc::new(crate::macos_video::MacosVideoProbe::new(
+            self.runtime_cache.clone(),
+        ));
         self.subtitle_cache = subtitle_cache;
         self.subtitle_membership = cluster_membership.clone();
         // Renditions are durable state — admitted ones are the copy cache the
@@ -439,6 +456,8 @@ impl TranscodeManager {
             decode_facts: self.decode_facts.metrics_handle(),
             caps: self.caps.clone(),
             codec_qualification: Arc::clone(&self.codec_qualification),
+            macos_video_probe: Arc::clone(&self.macos_video_probe),
+            macos_video_processing_enabled: Arc::clone(&self.macos_video_processing_enabled),
         }
     }
 
@@ -514,19 +533,41 @@ impl TranscodeManager {
     /// request paths keep using the last completed (or fail-closed zero)
     /// sample only until its maximum age.
     pub(crate) async fn scratch_space_loop(self: Arc<Self>) {
-        let Some(cache_dir) = self.cache.as_ref().map(|cache| cache.dir.clone()) else {
-            return;
-        };
+        // A node with no pre-transcode cache root still samples the retained
+        // namespace: rolling retention's headroom needs a sample whether or
+        // not there is a cache, and without one retention refuses forever.
+        // The cache's own free-space fields are left exactly as before
+        // (never written) on such a node.
+        let cache_dir = self.cache.as_ref().map(|cache| cache.dir.clone());
         let mut interval = tokio::time::interval(SCRATCH_SAMPLE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             let (sender, mut receiver) = tokio::sync::oneshot::channel();
             let sample_path = cache_dir.clone();
+            // The retained namespace holds rolling retention's hard links;
+            // its filesystem is the one their headroom is about. Sampled in
+            // the same OS-call slot, so a dead mount still blocks one thread.
+            let retained_path = self.vod.retained_base();
             if let Err(error) = std::thread::Builder::new()
                 .name("plurx-scratch-sample".to_owned())
                 .spawn(move || {
-                    let _ = sender.send(available_cache_scratch_bytes(&sample_path));
+                    let cache = sample_path
+                        .as_deref()
+                        .and_then(available_cache_scratch_bytes);
+                    let retained = if retained_path.exists() {
+                        available_cache_scratch_bytes(&retained_path)
+                    } else if sample_path.is_some() {
+                        cache
+                    } else {
+                        // The namespace is created by the first collection;
+                        // its parent is the filesystem it will live on.
+                        retained_path
+                            .parent()
+                            .filter(|parent| parent.exists())
+                            .and_then(available_cache_scratch_bytes)
+                    };
+                    let _ = sender.send((cache, retained));
                 })
             {
                 tracing::debug!(
@@ -537,11 +578,17 @@ impl TranscodeManager {
             loop {
                 tokio::select! {
                     sample = &mut receiver => {
-                        let sample = sample.ok().flatten().unwrap_or(0).max(0);
-                        self.scratch_sample_generation.fetch_add(1, AcqRel);
-                        self.scratch_bytes_free.store(sample, Relaxed);
-                        self.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
-                        self.scratch_sample_generation.fetch_add(1, Release);
+                        let (cache, retained) = sample.unwrap_or((None, None));
+                        if cache_dir.is_some() {
+                            let sample = cache.unwrap_or(0).max(0);
+                            self.scratch_sample_generation.fetch_add(1, AcqRel);
+                            self.scratch_bytes_free.store(sample, Relaxed);
+                            self.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
+                            self.scratch_sample_generation.fetch_add(1, Release);
+                        }
+                        if let Some(free) = retained {
+                            self.record_retained_headroom(free);
+                        }
                         break;
                     }
                     _ = interval.tick() => {
@@ -549,6 +596,30 @@ impl TranscodeManager {
                         // Do not submit another one until it actually returns.
                     }
                 }
+            }
+        }
+    }
+
+    /// Publish one retained-headroom sample: free bytes on the retained
+    /// filesystem against everything scratch is authorised to write, from a
+    /// ledger snapshot and cap read in the same pass. When it fails, every
+    /// unpublished rolling collection is abandoned at once.
+    pub(crate) fn record_retained_headroom(&self, free_bytes: i64) {
+        let headroom = self.scratch_ledger.headroom();
+        headroom.record_against(
+            free_bytes,
+            &self.scratch_ledger.snapshot(),
+            &self.scratch_cap,
+        );
+        if headroom.admits(Duration::from_secs(60)).is_err() {
+            let shed = self.vod.shed_rolling_collections();
+            if shed > 0 {
+                tracing::warn!(
+                    target: "plurxd::transcode",
+                    shed,
+                    slack = headroom.slack(),
+                    "rolling retention shed: free-space headroom below the reserve"
+                );
             }
         }
     }
@@ -566,15 +637,21 @@ impl TranscodeManager {
                 encoder_families.push(family.to_owned());
             }
         }
+        // A saved node preference is an execution policy, not just inventory.
+        // Do not claim a pinned job through a detected GPU this node will not
+        // use, or advertise a hardware ceiling while running in CPU mode.
+        if let Some(preference) = &self.encoder_override {
+            encoder_families = vec![self
+                .encoder_for_preference(preference)
+                .family_name()
+                .to_owned()];
+        }
+        let uses_hardware = encoder_families.iter().any(|family| family != "software");
         PretranscodeWorkerCapabilities {
             version: plurx_core::domain::PretranscodeRequirements::VERSION,
             decoders: self.decoders.clone(),
             encoder_families,
-            max_target_height: if self.caps.nvenc
-                || self.caps.qsv
-                || self.caps.vaapi
-                || self.caps.videotoolbox
-            {
+            max_target_height: if uses_hardware {
                 MAX_HEIGHT
             } else {
                 AUTO_SOFTWARE_HEIGHT
@@ -621,6 +698,68 @@ impl TranscodeManager {
         if self.hdr10_passthrough {
             tone_map_pipelines.push(Pipeline::Hdr10Passthrough.name().to_owned());
         }
+        // Separate classes remain separate worker-local claims. A passing SDR
+        // scaler never advertises HDR, HLG, Dolby or HEVC output support.
+        if self.macos_video_processing_enabled() {
+            let report = self.macos_video_report();
+            for (pipeline, observation) in [
+                (Pipeline::VtScaleSdr, &report.sdr_scale),
+                (Pipeline::VtToneMapMetal, &report.hdr10_metal),
+            ] {
+                if observation.availability
+                    == plurx_core::transcode::MacosProcessingAvailability::Available
+                {
+                    tone_map_pipelines.push(pipeline.name().to_owned());
+                }
+            }
+        }
+        if self.macos_hevc_output_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if self
+                .macos_video_report()
+                .context(false)
+                .is_some_and(|context| {
+                    context.graph(MacosProcessingGraph::HevcHdr10Host)
+                        == MacosProcessingAvailability::Available
+                })
+                && !tone_map_pipelines
+                    .iter()
+                    .any(|name| name == Pipeline::Hdr10Passthrough.name())
+            {
+                tone_map_pipelines.push(Pipeline::Hdr10Passthrough.name().to_owned());
+            }
+        }
+        if self.macos_video_processing_enabled() && self.macos_hevc_output_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if self
+                .macos_video_report()
+                .context(true)
+                .is_some_and(|context| {
+                    context.graph(MacosProcessingGraph::HevcHdr10)
+                        == MacosProcessingAvailability::Available
+                })
+            {
+                tone_map_pipelines.push(Pipeline::VtScaleHdr10.name().to_owned());
+            }
+        }
+        if self.macos_video_processing_enabled() {
+            use plurx_core::transcode::{MacosProcessingAvailability, MacosProcessingGraph};
+            if let Some(context) = self.macos_video_report().context(true) {
+                for (graph, pipeline) in [
+                    (
+                        MacosProcessingGraph::P5SoftwareCpu,
+                        Pipeline::DoviStrictTonemapx,
+                    ),
+                    (MacosProcessingGraph::P5VtTonemapx, Pipeline::VtDoviTonemapx),
+                    (MacosProcessingGraph::P5VtMetal, Pipeline::VtDoviMetal),
+                    (MacosProcessingGraph::P5SoftwareMetal, Pipeline::DoviMetal),
+                ] {
+                    if context.graph(graph) == MacosProcessingAvailability::Available {
+                        tone_map_pipelines.push(pipeline.name().to_owned());
+                    }
+                }
+            }
+        }
         MediaNodeRuntime {
             scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
             scratch_target_bytes: SCRATCH_TARGET_BYTES,
@@ -657,12 +796,7 @@ impl TranscodeManager {
             if !self.dovi_reshape {
                 return Err("incapable");
             }
-            let proof = self
-                .dovi_proofs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&Self::dovi_proof_key(file))
-                .copied();
+            let proof = self.dovi_proofs.verdict(&Self::dovi_proof_key(file));
             if proof != Some(true) {
                 // The authoritative live path may create this proof for the
                 // selected node. Diagnostics fan-out must never be what opens
@@ -717,14 +851,19 @@ impl TranscodeManager {
         // exactly the node that should serve, and answering `false` here would
         // refuse it. Plan resolution failing means we cannot name the artifact,
         // so we claim nothing and fail closed.
-        let cache_hit = match self.resolve_movie_plan(file, &opts, encoder).await {
-            Ok(plan) => self.verified_cache_hit(&plan).await,
+        let (cache_hit, pipeline) = match self.resolve_movie_plan(file, &opts, encoder).await {
+            Ok(plan) => (
+                self.verified_cache_hit(&plan).await,
+                plan.options().pipeline.name().to_owned(),
+            ),
             Err(reason) => {
                 tracing::debug!(
                     target: "plurxd::transcode",
                     file_id = file.id, %reason, "offer cannot name an artifact"
                 );
-                false
+                // Keep the existing offer fallback without claiming that
+                // an unresolved candidate is the graph that will run.
+                (false, String::new())
             }
         };
         let (hardware_used, hardware_max) = self.hardware_slots().await;
@@ -745,7 +884,7 @@ impl TranscodeManager {
             free_hardware_slots: hardware_max.saturating_sub(hardware_used),
             free_software_threads: software_max.saturating_sub(software_used),
             encoder: encoder.family_name().to_owned(),
-            pipeline: opts.pipeline.name().to_owned(),
+            pipeline,
             recent_speed: self
                 .admissions
                 .recent_speed(&workload.class(encoder.family_name())),
@@ -853,6 +992,23 @@ impl TranscodeManager {
         requested_encoder: &str,
         prefs: &plurx_core::tracks::LangPrefs,
     ) -> String {
+        Self::pretranscode_policy_generation_with(
+            snapshot,
+            requested_encoder,
+            prefs,
+            Encoder::default_rate_mode,
+        )
+    }
+
+    /// [`Self::pretranscode_policy_generation_for`] with the family-default
+    /// table as a parameter, so a test can show what a default flip moves
+    /// without flipping one.
+    pub(super) fn pretranscode_policy_generation_with(
+        snapshot: RateControlSnapshot,
+        requested_encoder: &str,
+        prefs: &plurx_core::tracks::LangPrefs,
+        default_rate_mode: fn(Encoder) -> RateMode,
+    ) -> String {
         let audio_lang =
             plurx_core::tracks::bcp47_tag(Some(&prefs.audio_lang)).to_ascii_lowercase();
         let sub_lang = plurx_core::tracks::bcp47_tag(Some(&prefs.sub_lang)).to_ascii_lowercase();
@@ -861,32 +1017,80 @@ impl TranscodeManager {
             format!("recipe:{CACHE_RECIPE_VERSION}"),
             "contract:hls-mpegts-v1".to_owned(),
             format!("requested-encoder:{requested_encoder}"),
-            // Unset spells exactly what explicit `bitrate` spells. This is a
-            // durable dedupe key: it is stored on every speculative queue row
-            // and a mismatch is a hard `cancel_job(.., "policy_changed")`, not
-            // a yield. Every `Encoder::default_rate_mode()` is Bitrate, so the
-            // two requests resolve to the same effective policy and the key
-            // must not move because the internal type gained a third state —
-            // it would re-queue every speculative row at deploy and flip again
-            // mid-boot on every restart, when the manager's initial
-            // `RateControlSnapshot::bitrate` is replaced by the absent pair.
-            // A PR that flips a family default moves this spelling
-            // deliberately, with the artefact §3.4 requires.
-            format!(
-                "requested:{}",
-                snapshot
-                    .requested_mode
-                    .map_or_else(|| RateMode::Bitrate.as_str(), RateMode::as_str)
+            Self::speculative_rate_policy(
+                snapshot.requested_mode,
+                speculative_encoder_families(requested_encoder),
+                default_rate_mode,
             ),
             format!("quality:{:?}", snapshot.requested_quality),
             format!("audio-lang:{audio_lang}"),
             format!("subtitle-lang:{sub_lang}"),
             format!("subtitle-mode:{}", prefs.sub_mode.as_str()),
+            // The audio claim producers plan under is part of every producer
+            // key, so a row planned under another claim is another artifact.
+            format!(
+                "audio-claim:{}",
+                serde_json::to_string(&plurx_core::playback::audio::canonical_producer_claim())
+                    .expect("the producer audio claim serializes")
+            ),
         ] {
             hasher.update((value.len() as u64).to_be_bytes());
             hasher.update(value.as_bytes());
         }
         format!("speculative-auto-v2:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// The rate-control entry of the speculative dedupe key: the *effective*
+    /// requested mode on every encoder family that may claim the row.
+    ///
+    /// This is durable state. It is stored on every speculative queue row and
+    /// a mismatch is a hard `cancel_job(.., "policy_changed")`, so it must move
+    /// exactly when the policy those rows would be produced under moves:
+    ///
+    /// - An explicit mode spells itself (`requested:bitrate`,
+    ///   `requested:quality`), the pre-tri-state literal. A family default
+    ///   flip never reaches it, so queued rows under an explicit operator
+    ///   choice keep their identity.
+    /// - An unset mode resolves through each claimable family's code default.
+    ///   When those all agree it spells the agreed mode — byte-identical to
+    ///   the explicit request of that mode, because the two produce the same
+    ///   recipes — so today, with every default Bitrate, an unset pair keeps
+    ///   the key every queued row already carries (no deploy or boot churn).
+    ///   When they differ, it spells each family's mode, so a flip of one
+    ///   family moves the rows that family may claim and no others.
+    ///
+    /// The families come from the requested encoder (one family when pinned,
+    /// all of them for auto), never from this node's local pick: the key is
+    /// compared by whichever node claims the row, so a node-local answer
+    /// would cancel rows across a mixed-hardware cluster.
+    pub(super) fn speculative_rate_policy(
+        requested_mode: Option<RateMode>,
+        families: &[Encoder],
+        default_rate_mode: fn(Encoder) -> RateMode,
+    ) -> String {
+        if let Some(mode) = requested_mode {
+            return format!("requested:{}", mode.as_str());
+        }
+        let resolved = families
+            .iter()
+            .map(|family| (*family, default_rate_mode(*family)))
+            .collect::<Vec<_>>();
+        match resolved.first() {
+            Some((_, first)) if resolved.iter().all(|(_, mode)| mode == first) => {
+                format!("requested:{}", first.as_str())
+            }
+            // An empty family list is not produced by
+            // `speculative_encoder_families`; spell it as the legacy literal.
+            None => format!("requested:{}", RateMode::Bitrate.as_str()),
+            Some(_) => format!(
+                "requested:{}",
+                resolved
+                    .iter()
+                    .map(|(family, mode)| format!("{}={}", family.family_name(), mode.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
     }
 
     /// Speculative work never reserves a queue row while foreground/offline
@@ -914,7 +1118,14 @@ impl TranscodeManager {
         // Selection from the boot inventory performs no source probes. The
         // later bound-source planner may fall back to software, for which the
         // same conservative CPU reservation is already held.
-        let encoder = self.caps.choose(&policy.requested_encoder);
+        let encoder = self.encoder_for_preference(&policy.requested_encoder);
+        if !policy
+            .acceptable_encoder_families()
+            .iter()
+            .any(|family| family == encoder.family_name())
+        {
+            return Err("node backend does not satisfy the speculative encoder policy".to_owned());
+        }
         let threads = Workload::of(file, target_height).software_threads();
         let estimate = TranscodeResourceEstimate {
             hardware_slot: encoder != Encoder::Software,
@@ -965,6 +1176,21 @@ impl TranscodeManager {
             })
     }
 
+    /// Own the existing heavy-worker lane, not an encoder estimate invented
+    /// before exact resolution. The rendition driver admits the real bundle.
+    pub(crate) fn admit_encoded_preparation(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        if !self.pretranscode_worker_idle() {
+            return None;
+        }
+        Arc::clone(&self.background_heavy).try_acquire_owned().ok()
+    }
+
+    pub(crate) fn encoded_preparation_still_idle(&self, observation: u64) -> bool {
+        observation != u64::MAX
+            && self.copy_preparation_attachment_observation() == observation
+            && self.pretranscode_publication_yield_reason().is_none()
+    }
+
     pub(crate) fn fragment_worker_idle(&self, admission: &FragmentAdmission) -> bool {
         !self.admissions.live_is_waiting()
             && self.admissions.in_use() == 0
@@ -972,6 +1198,83 @@ impl TranscodeManager {
             && !self
                 .offline_waiting
                 .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// What the Developer card reports about rolling retention on this node:
+    /// whether session scratch and the retained namespace share a filesystem
+    /// (hard links need it), the live headroom slack, and what the collector
+    /// still owes.
+    pub(crate) async fn rolling_retention_facts(&self) -> RollingRetentionFacts {
+        let base = self.vod.retained_base();
+        let same_filesystem = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                // The namespace may not exist until the first collection;
+                // its parent is the filesystem it will be created on.
+                let probe = if base.exists() {
+                    base.clone()
+                } else {
+                    base.parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or(base.clone())
+                };
+                match (
+                    tokio::fs::metadata(&self.work_dir).await,
+                    tokio::fs::metadata(&probe).await,
+                ) {
+                    (Ok(work), Ok(namespace)) => Some(work.dev() == namespace.dev()),
+                    _ => None,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                Some(false)
+            }
+        };
+        let headroom = self.scratch_ledger.headroom();
+        RollingRetentionFacts {
+            same_filesystem,
+            slack: headroom.slack(),
+            admits: headroom.admits(Duration::from_secs(60)),
+            rows: self.vod.retained_snapshot(),
+            cleanup_pending: self.vod.retained_cleanup_pending(),
+        }
+    }
+
+    /// Rolling artifacts this node holds or is collecting, for Activity.
+    pub(crate) fn retained_output_snapshot(
+        &self,
+    ) -> Vec<crate::vodserve::retained::RetainedOutputRow> {
+        self.vod.retained_snapshot()
+    }
+
+    /// Activity's Stop for one retained output on this node.
+    pub(crate) fn release_retained_output(
+        &self,
+        nonce: uuid::Uuid,
+    ) -> crate::vodserve::retained::RetainedRelease {
+        self.vod.release_retained_output(nonce)
+    }
+
+    /// What `budget` still admits for complete output in the retained
+    /// registry: the capacity an output-preparation claim is checked against.
+    pub(crate) fn retained_output_remaining(&self, budget: u64) -> u64 {
+        self.vod.retained_remaining(budget)
+    }
+
+    pub(crate) fn copy_preparation_attachment_observation(&self) -> u64 {
+        self.vod.preparation_attachment_observation()
+    }
+
+    pub(crate) fn copy_preparation_still_idle(
+        &self,
+        admission: &FragmentAdmission,
+        observation: u64,
+    ) -> bool {
+        observation != u64::MAX
+            && self.copy_preparation_attachment_observation() == observation
+            && self.fragment_worker_idle(admission)
     }
 
     /// Whether [`Self::admit_fragment`] would answer right now, evaluated

@@ -1,0 +1,48 @@
+{
+  "scope": "finite real six-picture synthetic P7/FEL->timestamped HDR10 mechanism; non-serving; no production authority",
+  "result": {
+    "result": "bounded-synthetic-combined-pass",
+    "frames": 6,
+    "pts_preserved": true,
+    "stored_durations_preserved": true,
+    "gpu_max_pq_error": 1.0559171717439142e-05,
+    "gpu_max_rgb_code_error": 1,
+    "decoded_yuv_vs_independent_ncl_max_code_error": 4,
+    "decoded_rgb_vs_inverse_ncl_max_code_error": 0,
+    "decoded_rgb_vs_reconstructed_max_code_error": 323,
+    "inherited_arithmetic_rgb_bound": 1065,
+    "initial_stricter_yuv_envelope_met": false,
+    "initial_stricter_rgb_bound": 640,
+    "legacy_bound_application": "preexisting registered cap4 applied after observing current combined result; diagnostic only; no newly preregistered acceptance claim",
+    "source_sha256": "f3d70fa8e07d7fce7d233bb910858904cab0483409d748f52ae8d851333c31cb",
+    "output_sha256": "4c5a4608f08756316ae629a8a14a2981efa363d0cc06c4221e3d773fe6655f29",
+    "production_admission": false,
+    "full_dv_conformance": null,
+    "independent_dv_picture_reference": null
+  },
+  "focused_checker_tests": 17,
+  "cancel_and_deadline": "both child and descendant gone after awaited cleanup; no hard total spawn-to-reap deadline claim",
+  "memory": "capture lengths capped at65537 perstream; Vec allocation capacity and GPU/driver memory are not equated to those caps; Linux container2GiB limit is experiment cap, not measured resource admission",
+  "output_policy": "BT2020/PQ master-domain reconstruction,10000/.005 PQworkingrange clip, no creative targetmapping; synthetic10knit/.005 mastering SEI constants not a displaytarget or measured source master; no MaxCLL assertion",
+  "source_pins": {
+    "ffmpeg_decode": "bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
+    "libplacebo": "0d043c7f6f79cd3687c023454bdacbe615e4d96f",
+    "libdovi": "83e1fdad6dcd5995556235946e7c5c0f9010d5a1",
+    "process_owner": "22db9c535ee8eb5025094e67e44a87caa789c897"
+  },
+  "encoder": "observed immutable image DebianFFmpeg5.1.9/libx2653.5;214ELFclosure retained; no newdependency/source-rebuild claim",
+  "initial_failures": [
+    "Mesa SIGXFSZ due experimental RLIMIT_FSIZE1MiB affecting internalmemory-backedbuffers; removed",
+    "packedRGB inversezscale requested wrongformatfamily; fixed with acceptedgbrp16le output recipe",
+    "NUT rawRGB defaulttagRGB555; explicit avcodec_pix_fmt_to_codec_tag(RGB48LE) fixes actual consumed representation",
+    "initial combined YUVerror cap3 was exceeded(4); preservedfalse; prior preregistered4compressioncap applied diagnostically after observation"
+  ],
+  "runtime_limits": "nullstdin, one owner, finite sequentialdecode/6render/mux/encode/probe/decodedchecks; no streaming producer integration",
+  "rust_build": "Rust1.97.1, standalone copied unchanged process module; newly resolved Cargo.lock retained, not original repository--locked resolution",
+  "code_changes_after_execution": "checker wording/application of prior cap4 diagnostic; no numerical stage rerun for postcheck interpretation",
+  "production_registry": "unchanged/empty",
+  "route_or_settings_changes": false,
+  "review_correction": "fixed semantic invocation, tool identity, exact per-stage input/output inventory, cwd/material environment; actual execution regenerated; original proof preserved",
+  "lifecycle_scope": "cancel/deadline controlled hold branch of real wrapper+sleep descendant, not active GPU or encoder cancellation",
+  "identity_scope": "recorded binary identity checked against retained build identity; slim evidence has no current executable ELF files"
+}

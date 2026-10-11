@@ -43,6 +43,8 @@ pub struct DbSnapshotLastOutcome {
 /// Fixed operation/outcome projection of the database snapshot hooks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DbSnapshotMetricsSnapshot {
+    pub storage_deferrals_total: u64,
+    pub required_storage_bytes: Option<u64>,
     pub build_ok: DbSnapshotHistogram,
     pub build_error: DbSnapshotHistogram,
     pub install_ok: DbSnapshotHistogram,
@@ -58,6 +60,8 @@ const ZERO_HISTOGRAM: DbSnapshotHistogram = DbSnapshotHistogram {
 };
 
 const ZERO_SNAPSHOT: DbSnapshotMetricsSnapshot = DbSnapshotMetricsSnapshot {
+    storage_deferrals_total: 0,
+    required_storage_bytes: None,
     build_ok: ZERO_HISTOGRAM,
     build_error: ZERO_HISTOGRAM,
     install_ok: ZERO_HISTOGRAM,
@@ -91,6 +95,22 @@ impl LocalDbSnapshotMetrics {
 
 static WRITER_STATE: Mutex<DbSnapshotMetricsSnapshot> = Mutex::new(ZERO_SNAPSHOT);
 static PUBLISHED: ArcSwapOption<DbSnapshotMetricsSnapshot> = ArcSwapOption::const_empty();
+
+pub(crate) fn record_storage_deferral() {
+    let mut snapshot = WRITER_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    snapshot.storage_deferrals_total = snapshot.storage_deferrals_total.saturating_add(1);
+    PUBLISHED.store(Some(Arc::new(*snapshot)));
+}
+
+pub(crate) fn record_required_storage(required: u64) {
+    let mut snapshot = WRITER_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    snapshot.required_storage_bytes = Some(required);
+    PUBLISHED.store(Some(Arc::new(*snapshot)));
+}
 
 fn record(operation: SnapshotOperation, ok: bool, elapsed_nanos: u64) {
     let mut snapshot = WRITER_STATE

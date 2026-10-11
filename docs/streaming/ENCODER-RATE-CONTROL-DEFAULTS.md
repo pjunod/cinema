@@ -159,7 +159,8 @@ Reason: the flip must be per family and must not disturb an operator who
 chose bitrate on purpose. Without the third state, changing
 `RateMode::default()` would also override that operator's choice.
 
-`GET /api/v1/settings` keeps returning the stored pair; `GET /api/v1/system`
+`GET /api/v1/settings` returns the stored pair, with an unset mode as `null`
+(§7.4; it reported `"bitrate"` until 2026-10-02); `GET /api/v1/system`
 `encoders.quality_rc` gains `default_rate_mode` per family so the Developer
 page can print "family default: quality (qualified 2026-MM-DD, artefact
 sha256 …)". No new setting key: the existing pair is the switch, and it is
@@ -385,10 +386,10 @@ All four Linux daemons ran OCI revision
 
 | Deployment host | Selected family / boot capability | Process-lifetime encoded-session counters | Decision |
 |---|---|---|---|
-| `nynuc` (media1) | QSV selected; QSV, VA-API and software quality probes passed | QSV 0, VA-API 0, software 0, NVENC 0, VideoToolbox 0 | QSV stays Bitrate: capability is not the n2 comparison. |
-| `nuc4` (lab4) | QSV selected; QSV, VA-API and software quality probes passed | all five encoded families 0 | QSV and software stay Bitrate pending their separate captures. |
-| `nuc3` (lab3 learner) | QSV selected; QSV, VA-API and software quality probes passed | all five encoded families 0 | QSV stays Bitrate. `/api/v1/server` returned 503 on the learner; the OCI revision label, boot log and metrics remained readable. |
-| `m6` (lab6) | VA-API selected; VA-API and software quality probes passed; QSV and NVENC validation failed | VA-API 0, software 0, NVENC 0, VideoToolbox 0; copy 3 and VOD 1 | The old plan statement that no VA-API node existed is superseded. VA-API still stays Bitrate because the new process has no encoded session evidence, much less a week or an n2 comparison. |
+| `media1` (media1) | QSV selected; QSV, VA-API and software quality probes passed | QSV 0, VA-API 0, software 0, NVENC 0, VideoToolbox 0 | QSV stays Bitrate: capability is not the n2 comparison. |
+| `lab4` (lab4) | QSV selected; QSV, VA-API and software quality probes passed | all five encoded families 0 | QSV and software stay Bitrate pending their separate captures. |
+| `lab3` (lab3 learner) | QSV selected; QSV, VA-API and software quality probes passed | all five encoded families 0 | QSV stays Bitrate. `/api/v1/server` returned 503 on the learner; the OCI revision label, boot log and metrics remained readable. |
+| `lab6` (lab6) | VA-API selected; VA-API and software quality probes passed; QSV and NVENC validation failed | VA-API 0, software 0, NVENC 0, VideoToolbox 0; copy 3 and VOD 1 | The old plan statement that no VA-API node existed is superseded. VA-API still stays Bitrate because the new process has no encoded session evidence, much less a week or an n2 comparison. |
 
 The counters had restarted with the 2026-09-21 deployment, about 2.5 hours
 before this read. They are a current-process observation, not a seven-day
@@ -417,6 +418,17 @@ exists.
   spelling deliberately, with the artefact §3.4 requires, and
   `an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation`
   pins the durable value so it cannot move by accident.
+  *What feeds it now (2026-10-04).* The recipe version, the output contract,
+  the requested encoder, the effective rate policy per family, the requested
+  quality, the three language preferences, and — since the main-merge defects
+  build — the canonical producer audio claim
+  (`plurx_core::playback::audio::canonical_producer_claim`). Producers plan
+  typed audio under that claim so their keys match sink-claiming clients; the
+  claim changes every producer key, so it is part of the policy and the pinned
+  value moved once, from `08494ca1…6c67723` to `3c5e96e7…126e63fb`. Because a
+  mismatch is a hard `cancel_job(.., "policy_changed")`, nodes on two versions
+  cancel each other's rows: set `jobs.cache_produce_mins = 0` before such a
+  deploy and restore it once every node runs the new build.
 - M2 adds the balanced six-fixture n2 manifest, reproducible generation for
   **all six** fixtures it references, source/output-grade validation, and the
   exact §3.3 benefit gate. The first implementation gave the four new fixtures
@@ -425,7 +437,7 @@ exists.
   regenerated to the hash the manifest pinned; and no fixture pinned its thread
   count, so even the bit-exact four were reproducible only on a host with the
   generating machine's core count. Both are fixed and both manifests are
-  re-pinned from the corrected recipe. Measured on nuc3 (ffmpeg
+  re-pinned from the corrected recipe. Measured on lab3 (ffmpeg
   8.0.1-3ubuntu2): before the fix, two runs of `1080p-h264` gave
   `b9906d6b…`/`9f4bc7a7…` and two runs of `grainy` gave `a2ceeec5…`/`f772af54…`,
   while the bit-exact `1080p-animation` gave `53a6da75…` twice but
@@ -450,6 +462,97 @@ exists.
 3. `bitrate_for_height`, `-maxrate 1.5×`, and `-bufsize 2×` remain unchanged.
    No source-average bitrate cap is introduced.
 
+### 7.4 The flip was inert — 2026-10-02
+
+**Finding.** A read-only fleet audit found all four daemons logging
+`published validated rate-control snapshot requested_mode="bitrate"`: the
+cluster held an *explicit* `bitrate`, not an unset pair. §3.1 makes a family
+default reach only an unset pair, so flipping QSV (or any family) to `Quality`
+would have changed nothing on the fleet. Three paths produced or hid the
+explicit value:
+
+1. `GET /api/v1/settings` reported an unset pair as `"bitrate"`
+   (`settings_dto`, "compatibility value for an absent pair"), so a client
+   could not tell unset from an operator's choice.
+2. `scripts/bench rate-control` recorded that displayed value in
+   `setting_contract` and `restore_rate_settings` PUT it back after every full
+   comparison — every measured cluster ended pinned to an explicit `bitrate`.
+   This is the likely origin of the fleet's value (the 2026-08-14 media1 QSV
+   acceptance restored exactly that body).
+3. The speculative pretranscode dedupe key spelled an unset pair as
+   `requested:bitrate` whatever the families resolved to, so even on an unset
+   cluster a flip would have left every queued speculative row under the old
+   policy instead of cancelling and re-queuing it.
+
+**What changed** (branch `opus/s06-rate-control-continuation`, no default
+flipped):
+
+- The pair is tri-state end to end. `GET /api/v1/settings` reports an unset
+  mode as `null` and shows what it resolves to beside it
+  (`transcode_rate_mode_default`, `transcode_rate_mode_default_encoder`,
+  `transcode_quality_default` — the answering node's selected family, so the
+  web label reads "on this node"; display only).
+  `PUT` accepts `{"transcode_rate_mode": null, "transcode_quality": null}` as
+  the explicit clear, still as one complete pair; it stores an empty mode,
+  which every node reads back as unset. Explicit values and their
+  effective-policy snapshots are unchanged. Settings → Playback → Advanced
+  server delivery gains an **Encoder rate control** card whose **Default (per
+  encoder)** option saves the clear; no other Save sends the pair. Its quality
+  value is enabled and sent only with Quality: outside Quality it changes no
+  output but would move the speculative key's `quality:` component and cancel
+  queued rows cluster-wide.
+- `scripts/bench` restores the pair exactly as found: unset as `null`,
+  explicit as itself. It refuses, before any mutation, a server whose settings
+  response lacks `transcode_rate_mode_default`, because such a server cannot
+  say whether its `"bitrate"` was chosen.
+- The speculative key's rate-control entry now spells the *effective*
+  requested mode on each encoder family that may claim the row (the pinned
+  family, or all five for auto — never the claiming node's local pick, which
+  would cancel rows across mixed hardware). An explicit mode spells itself; an
+  unset mode spells the agreed family default when all claimable families
+  agree — byte-identical to the explicit request of that mode — and each
+  family's mode when they differ. With every default Bitrate the durable value
+  is unchanged
+  (`an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation`
+  still pins it), so this deploys without cancelling a queued row; a later
+  flip of one family moves exactly the rows that family may claim, and rows
+  queued under an explicit choice keep their identity. One bounded cost
+  belongs to that future flip, not to this change: while its PR rolls out,
+  nodes still on the old binary spell unset auto rows `requested:bitrate` and
+  updated nodes spell the per-family list, so each side cancels
+  (`policy_changed`) the other's queued auto rows until every node runs the
+  new binary. That is the intended re-queue arriving in two waves for the
+  deploy window, not a regression; pinned-family rows of unflipped families
+  and every explicit-choice row are unaffected. A change to a family's
+  `default_quality()` is still not spelled in the key (neither unset nor
+  explicit-quality-without-override rows move); that is a separate,
+  deliberate decision if one is ever made.
+
+**Operator step: return an explicit cluster value to "default".** The setting
+is replicated, so one request on any voter clears it cluster-wide. After this
+branch is deployed, either choose **Default (per encoder)** in the Encoder
+rate control card and Save, or:
+
+```bash
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"transcode_rate_mode":null,"transcode_quality":null}' \
+  http://media1:32400/api/v1/settings | jq '.transcode_rate_mode, .transcode_rate_mode_default'
+```
+
+It returns `null` and the family default; within the two-second refresh every
+node logs `requested_mode="family_default"`. While every default is Bitrate the
+clear changes no recipe, argv or speculative key — it only lets a later flip
+land. Clear it before, not after, the flip PR deploys, so the flip is measured
+against the cluster it will actually reach.
+
+**Still owed.** Nothing here measures quality or throughput. The per-family
+comparisons — M3 (QSV on media1), M4 (software on lab4) and the VA-API
+comparison on lab6 — and the §3.3 flip decision remain open; an offline
+pre-screen is being measured separately and does not replace them. Every
+`Encoder::default_rate_mode()` still returns Bitrate.
+
 ---
 
 ## Execution log
@@ -462,10 +565,11 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | Draft plan PR claimed from `main` `21eab120`; board link commit `cab6e764`. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | `46fac273`: tri-state request and per-family defaults; all defaults remain Bitrate. Pinned compile, encoder (34 + 1 integration), recipe (12 + 1 integration), and filtered plurxd rate-control (3) checks passed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | `2917a84c`: deterministic six-fixture n2 corpus, output-grade contract and benefit gate; 55 focused Python tests passed. Media1 smoke needs the read-write fleet step in §5.2. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | needs: reserved media1 n2 `vbr,qvbr` capture under the §5.3 prompt. QSV remains Bitrate. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M4 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | needs: representative lab4 n2 capture with hardware selection disabled under the §5.4 contract. Software remains Bitrate. |
-| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1/M2 review fixes | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | All three adversarial-review findings fixed. M1's dedupe key spells an unset pair `requested:bitrate` again; the two inherited fixtures gained bit-exact, seeded generation and every pinned fixture gained `-threads 1`, with both manifests re-pinned from three byte-identical generations across two core counts; and `load_rate_control_corpus` refuses `dynamic_range: hdr10` while `score_vmaf` has no tone-map. Each fix has a test that fails on revert. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M5 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | Read-only four-node census in §7.1. NVENC and VideoToolbox remain unrunnable; VA-API is selectable on m6 but has zero encoded sessions since restart. All three defaults remain Bitrate. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#414](http://forge.lan:3000/noirr/plurx/pulls/414) | Draft plan PR claimed from `main` `21eab120`; board link commit `cab6e764`. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#414](http://forge.lan:3000/noirr/plurx/pulls/414) | `46fac273`: tri-state request and per-family defaults; all defaults remain Bitrate. Pinned compile, encoder (34 + 1 integration), recipe (12 + 1 integration), and filtered plurxd rate-control (3) checks passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#414](http://forge.lan:3000/noirr/plurx/pulls/414) | `2917a84c`: deterministic six-fixture n2 corpus, output-grade contract and benefit gate; 55 focused Python tests passed. Media1 smoke needs the read-write fleet step in §5.2. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3 | [#414](http://forge.lan:3000/noirr/plurx/pulls/414) | needs: reserved media1 n2 `vbr,qvbr` capture under the §5.3 prompt. QSV remains Bitrate. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M4 | [#414](http://forge.lan:3000/noirr/plurx/pulls/414) | needs: representative lab4 n2 capture with hardware selection disabled under the §5.4 contract. Software remains Bitrate. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1/M2 review fixes | [#414](http://forge.lan:3000/noirr/plurx/pulls/414) | All three adversarial-review findings fixed. M1's dedupe key spells an unset pair `requested:bitrate` again; the two inherited fixtures gained bit-exact, seeded generation and every pinned fixture gained `-threads 1`, with both manifests re-pinned from three byte-identical generations across two core counts; and `load_rate_control_corpus` refuses `dynamic_range: hdr10` while `score_vmaf` has no tone-map. Each fix has a test that fails on revert. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M5 | [#414](http://forge.lan:3000/noirr/plurx/pulls/414) | Read-only four-node census in §7.1. NVENC and VideoToolbox remain unrunnable; VA-API is selectable on lab6 but has zero encoded sessions since restart. All three defaults remain Bitrate. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Inert-flip fix | branch `opus/s06-rate-control-continuation` | §7.4: settings DTO/PUT/web card tri-state with an explicit clear, bench restores what it found, speculative key spells the effective per-family policy (durable value unchanged while every default is Bitrate). No default flipped; M3/M4/VA-API comparisons still owed. |

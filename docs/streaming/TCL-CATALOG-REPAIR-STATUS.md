@@ -99,7 +99,7 @@ Review candidate: `56e52c50e` integrates typed outcomes and deadlines;
 commits ran the tracked lint/format/Clippy/JavaScript hook. The decoder snapshot
 regression now tests overflow at 65, matching the negotiated shared bound.
 
-Batched review: [Forgejo PR #718](http://192.168.4.7:3000/noirr/plurx/pulls/718),
+Batched review: [Forgejo PR #718](http://forge.lan:3000/noirr/plurx/pulls/718),
 reviewed head `30369ca0c`; post-review head `182f7f5a7`. The PR is ready after
 addressing the adversarial review. The desktop attachment tool does not accept this Forgejo URL, so the
 PR and status links remain explicit here. No changes to the original checkout.
@@ -265,5 +265,5 @@ requirement for this PR; no CI status is fabricated and no whole unit suite
 is repeated. Forgejo main was rechecked at `4f55ae17e`, with the integrated
 code and all reported failed regressions passing. The landing retains all
 15 Regression-Test trailers. The final merge result and landing commit are
-recorded in [PR #718](http://192.168.4.7:3000/noirr/plurx/pulls/718), which is
+recorded in [PR #718](http://forge.lan:3000/noirr/plurx/pulls/718), which is
 the authoritative completion record. Physical acceptance remains outstanding.

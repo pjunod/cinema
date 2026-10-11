@@ -1,0 +1,222 @@
+{
+  "schema": 1,
+  "case": "live-action-bf0",
+  "runtime": "Media3 1.10.1 on isolated Android emulator",
+  "os": "16",
+  "result": "fail",
+  "failure": "bounded phase deadline exceeded",
+  "phases": [],
+  "observations": [
+    {
+      "phase": "start",
+      "media_seconds": 0,
+      "player_clock_seconds": 0,
+      "wall_since_phase_seconds": 9.315,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.083333,
+      "player_clock_seconds": 0.057,
+      "wall_since_phase_seconds": 11.151,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.125,
+      "player_clock_seconds": 0.057,
+      "wall_since_phase_seconds": 11.198,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.166666,
+      "player_clock_seconds": 0.121,
+      "wall_since_phase_seconds": 11.361,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.208333,
+      "player_clock_seconds": 0.265,
+      "wall_since_phase_seconds": 11.361,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.291666,
+      "player_clock_seconds": 0.265,
+      "wall_since_phase_seconds": 11.397,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.458333,
+      "player_clock_seconds": 0.567,
+      "wall_since_phase_seconds": 12.387,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 0.666666,
+      "player_clock_seconds": 0.567,
+      "wall_since_phase_seconds": 12.409,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1,
+      "player_clock_seconds": 0.938,
+      "wall_since_phase_seconds": 15.849,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.083333,
+      "player_clock_seconds": 1.062,
+      "wall_since_phase_seconds": 15.994,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.125,
+      "player_clock_seconds": 1.062,
+      "wall_since_phase_seconds": 15.994,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.166666,
+      "player_clock_seconds": 1.27,
+      "wall_since_phase_seconds": 16.523,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.333333,
+      "player_clock_seconds": 1.27,
+      "wall_since_phase_seconds": 16.524,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.375,
+      "player_clock_seconds": 1.27,
+      "wall_since_phase_seconds": 16.624,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.416666,
+      "player_clock_seconds": 1.27,
+      "wall_since_phase_seconds": 16.624,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.458333,
+      "player_clock_seconds": 1.655,
+      "wall_since_phase_seconds": 17.731,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.5,
+      "player_clock_seconds": 1.655,
+      "wall_since_phase_seconds": 17.731,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.541666,
+      "player_clock_seconds": 1.655,
+      "wall_since_phase_seconds": 17.731,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.666666,
+      "player_clock_seconds": 1.655,
+      "wall_since_phase_seconds": 17.731,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.708333,
+      "player_clock_seconds": 1.655,
+      "wall_since_phase_seconds": 17.79,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.75,
+      "player_clock_seconds": 1.836,
+      "wall_since_phase_seconds": 19.374,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.875,
+      "player_clock_seconds": 1.836,
+      "wall_since_phase_seconds": 19.392,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    },
+    {
+      "phase": "start",
+      "media_seconds": 1.916666,
+      "player_clock_seconds": 1.836,
+      "wall_since_phase_seconds": 19.473,
+      "audio_selected": true,
+      "width": 1150,
+      "height": 480
+    }
+  ],
+  "scope": "Native codec and actual Surface pixels, timestamp progression, seeks and fresh-player restart. Audio selection and player clock measured; physical output A/V sync is not measured.",
+  "harness_sha256": "8e9c4785d8fdf2e53661286abb7e0cc4c72803be3b86cddb0e73d7d9312a6a9c",
+  "apk_sha256": "4840ff9bda05636de1616026b32ce11cc8b854fb2a857c444a7c89a0b6388d47",
+  "diagnosis": "The first-frame target+100ms bound was too narrow when startup drops early frames: later valid frames were all ignored. This is a probe admission failure, not a media decode verdict. Retained original video-to-player clock tolerance is the correct epoch-correspondence criterion."
+}

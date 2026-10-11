@@ -1,0 +1,17 @@
+{
+  "source_frame": 4,
+  "coded_arrival": 4,
+  "display_emission": 4,
+  "pts": "167/1000",
+  "duration": "41/1000",
+  "bl_sha256": "d8db2c495c21be386887658e03fa6b449a30cf3f79baff546c822377d4c188d4",
+  "el_sha256": "c85659cff2553b669b5cbc5bf583e435ba346c6d88738888963994532ed36ea5",
+  "rpu_sha256": "1ff2f693ab5f49bddd25287108e75378a1bca7922505ea96e92083605353299e",
+  "bl_path": "b0-normal/frames/bl-frame-004.yuv420p10le",
+  "el_path": "b0-normal/frames/el-frame-004.yuv420p10le",
+  "rpu_path": "b0-normal/frames/bl-frame-004.rpu.nal",
+  "parsed_l1": {
+    "max": 4091,
+    "average": 2044
+  }
+}

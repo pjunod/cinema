@@ -33,8 +33,21 @@ pub(super) struct Rendition {
     pub(super) completed_cache_budget: u64,
     pub(super) materialize_budget: Duration,
     pub(super) manifest: Mutex<Manifest>,
+    pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
+    /// Immutable storage domain. Job release cannot turn private bytes ordinary.
+    pub(super) private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+    pub(super) copy_preparation: StdMutex<Option<Arc<super::copy_preparation::CopyPreparation>>>,
+    pub(super) preparation_epoch: AtomicU64,
+    /// Identity of the complete output already handed to retained assembly
+    /// (in flight or assembled). Maintenance never re-offers it.
+    pub(super) retained_offer: StdMutex<Option<[u8; 32]>>,
+    pub(super) cancelled_preparation_epoch: AtomicU64,
     pub(super) identity: Mutex<IdentityState>,
-    pub(super) slot: ProducerSlot,
+    pub(super) slot: Arc<ProducerSlot>,
+    pub(super) source_owners: SourceRenditionOwners,
+    /// Capacity can be shared by parents of this exact immutable rendition,
+    /// without keeping a cache-only rendition admitted after the final reap.
+    pub(super) retained_admission: crate::vodencode::RetainedEncodeAdmission,
     pub(super) readers: Mutex<HashMap<String, Reader>>,
     /// Monotonic identity of each successful segment publication. The ledger
     /// stores this beside an entry index so eviction followed by ordinary
@@ -109,6 +122,11 @@ pub(super) struct Rendition {
     pub(super) handoff_expiry_armed: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
     pub(super) demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
+    /// The last fragment the output writer received, as (generation epoch,
+    /// plan entry). An expired deadline uses it to tell "the producer
+    /// delivered this entry and publication did not finish" from "the
+    /// producer never delivered it".
+    pub(super) fragment_received: StdMutex<Option<(u64, u32)>>,
 }
 
 /// The points of a [`Rendition`]'s driver that a test observes
@@ -121,13 +139,19 @@ pub(super) struct Rendition {
 /// direct `driver_pass`, caused work install [`RenditionTestHooks`]. `Any` is
 /// a supertrait only so a test can reach the test hooks behind a rendition.
 pub(super) trait RenditionHooks: std::any::Any + Send + Sync {
+    /// The actual child is already held by a cancellation-independent owner.
+    /// Production is immediately ready; tests pause the registration race.
+    fn before_producer_registration(&self) -> HookFuture<'_> {
+        Box::pin(HookReady)
+    }
+
     /// The driver chose the stopped-encoder poll and is about to wait on it.
     fn stopped_poll_armed(&self);
     /// The driver's stopped-encoder wait ended, by the poll or by a kick.
     fn stopped_poll_fired(&self);
 }
 
-/// What production installs: both points do nothing.
+/// What production installs: each hook does nothing.
 pub(super) struct NoopRenditionHooks;
 
 impl RenditionHooks for NoopRenditionHooks {
@@ -170,6 +194,84 @@ impl RenditionHooks for RenditionTestHooks {
 impl Rendition {
     pub(super) fn kick(&self) {
         self.wake.notify_one();
+    }
+
+    pub(super) fn note_fragment_received(&self, epoch: u64, entry: u32) {
+        *self
+            .fragment_received
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((epoch, entry));
+    }
+
+    /// Classify an expired materialize deadline by what this rendition is
+    /// actually doing, in the order that can be proven: a refused encoder
+    /// permit with no producer, then a delivered but unpublished fragment,
+    /// then the producer itself. `belief` is the producer slot's awaited
+    /// state: a guess here decides capacity against producer.
+    pub(super) fn materialize_verdict(&self, index: u32, belief: Producer) -> MaterializeVerdict {
+        let name = if index == INIT_DEMAND_INDEX {
+            INIT_NAME.to_owned()
+        } else {
+            segment_name(u64::from(index))
+        };
+        let expired = format!(
+            "materializing {name} exceeded the {:.1}s producer deadline",
+            self.materialize_budget.as_secs_f64()
+        );
+        let producer_present =
+            matches!(belief, Producer::Running { .. } | Producer::Stopped { .. });
+        if !producer_present {
+            if let Some(refusal) = self
+                .recipe
+                .encoding
+                .as_ref()
+                .filter(|encoding| encoding.is_waiting())
+                .and_then(|encoding| encoding.last_refusal())
+            {
+                return MaterializeVerdict::Capacity(format!(
+                    "{expired} waiting for an encoder permit; no producer ran for it ({refusal})"
+                ));
+            }
+        }
+        let epoch = self.gen_epoch.load(Relaxed);
+        let received = *self
+            .fragment_received
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let received = received
+            .filter(|(at, _)| *at == epoch)
+            .map(|(_, entry)| entry);
+        if index != INIT_DEMAND_INDEX && received == Some(index) {
+            return MaterializeVerdict::Publication(format!(
+                "{expired}: the producer delivered it, but publication did not complete"
+            ));
+        }
+        let delivered = received.map_or_else(
+            || "it delivered no fragment".to_owned(),
+            |entry| {
+                format!(
+                    "its last delivered fragment was {}",
+                    segment_name(u64::from(entry))
+                )
+            },
+        );
+        MaterializeVerdict::Producer(match belief {
+            Producer::Running { positioned_at, .. } => format!(
+                "{expired}: the producer started at {} did not deliver it; {delivered}",
+                segment_name(u64::from(positioned_at))
+            ),
+            Producer::Stopped {
+                positioned_at,
+                reason,
+                ..
+            } => format!(
+                "{expired}: the producer started at {} is stopped ({reason:?}); {delivered}",
+                segment_name(u64::from(positioned_at))
+            ),
+            Producer::Absent { .. } => {
+                format!("{expired}: no producer is running for it")
+            }
+        })
     }
 
     /// Ask (or keep asking) this producer to hand its permit to `successor`.
@@ -257,10 +359,17 @@ impl Rendition {
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
-    pub(super) async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
+    /// Detach one media reader without ending its parent playback. Family
+    /// children release media demand independently; subtitle ownership belongs
+    /// to the public parent and must survive a rung's retirement.
+    pub(super) async fn detach_media_reader(
+        &self,
+        pool: &crate::waitpool::WaitPool,
+        reader_id: &str,
+    ) {
         {
             let mut readers = self.readers.lock().await;
-            readers.remove(session_id);
+            readers.remove(reader_id);
             if readers.is_empty() {
                 *self.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
             }
@@ -271,7 +380,12 @@ impl Rendition {
         // marking the session's oldest wait foreground — so a departed
         // viewer's abandoned request outranks a present viewer's and aims the
         // producer at media nobody is watching until its deadline expires.
-        pool.retire_session(&self.key, session_id);
+        pool.retire_session(&self.key, reader_id);
+    }
+
+    /// End a legacy single-rendition playback and its parent-owned captions.
+    pub(super) async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
+        self.detach_media_reader(pool, session_id).await;
         // Every VOD session *ending* converges here — terminal and idle reap
         // alike — so this is the one place a departing viewer's subtitle
         // window is released. Reattachment is deliberately not one of them:
@@ -291,6 +405,7 @@ impl Rendition {
         let readers = self.readers.lock().await;
         readers
             .values()
+            .filter(|reader| !reader.authority_only)
             .map(|reader| reader_window(reader, self.seconds_per_segment))
             .collect()
     }
@@ -569,6 +684,34 @@ pub(super) fn terminal_reason(cause: Terminal) -> &'static str {
     }
 }
 
+pub(super) struct ResolvedMediaReader {
+    pub(super) rendition: Arc<Rendition>,
+    pub(super) block_budget: Duration,
+    pub(super) delivery: Arc<crate::meter::Meter>,
+}
+
+/// One private media reader owned by a public parent's incarnation. Its
+/// opaque reader id is independent of the public capability, so delayed old
+/// cleanup cannot remove a replacement parent's demand on shared media.
+pub(super) struct ParentMediaReader {
+    /// Only a controlled video child can release and reacquire its credit.
+    pub(super) controlled: bool,
+    pub(super) candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+    pub(super) reader_id: String,
+    pub(super) rendition: Arc<Rendition>,
+    /// Autonomous admission lasts through detach; controlled cold video may
+    /// release this claim. Workers retain their own claim through confirmed reap.
+    pub(super) _reservation: Option<crate::vodencode::EncodePermit>,
+}
+impl ParentMediaReader {
+    pub(super) async fn detach(self, pool: &crate::waitpool::WaitPool) {
+        self.rendition
+            .detach_media_reader(pool, &self.reader_id)
+            .await;
+        self.rendition.kick();
+    }
+}
+
 /// One session handle (plan §2.5): auth attribution, sliding TTL, reader
 /// window, and — once it ends for good — a tombstone.
 pub(super) struct Session {
@@ -576,7 +719,12 @@ pub(super) struct Session {
     /// publishes completion. The compact fields below retain exact 410/replay
     /// identity without retaining manifests, source handles, readers, or the
     /// producer graph until the next maintenance tick.
+    /// Private video/audio readers share this parent's authority and cleanup.
+    /// They never allocate additional public playback sessions or captions.
+    pub(super) children: Vec<ParentMediaReader>,
     pub(super) rendition: Option<Arc<Rendition>>,
+    pub(super) passive_grant: Option<Arc<passive_grant::Grant>>,
+    pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     pub(super) rendition_key: String,
     pub(super) file: Arc<MediaFile>,
     pub(super) playback_id: String,
@@ -591,6 +739,9 @@ pub(super) struct Session {
     /// viewer's `playback_id` can never end another viewer's session.
     pub(super) supersession_user: String,
     pub(super) block_budget: Duration,
+    /// `playback.sdr_master_codecs` as read when this incarnation was
+    /// created. The master reads this, never the live setting.
+    pub(super) sdr_master_codecs: bool,
     /// Serializes authority-checked control with terminal/reap transitions for
     /// this session only. Keeping the gate on the session avoids making an
     /// unrelated rolling or VOD control wait behind node-wide Store I/O.
@@ -640,6 +791,21 @@ pub(super) struct Session {
 }
 
 impl Session {
+    /// An immutable retained response keeps the viewer's control identity,
+    /// but has no missing bytes for this rendition's producer to generate.
+    pub(super) fn attachment_reader(&self, frontier: u32) -> Reader {
+        let mut reader = Reader::new(frontier);
+        reader.authority_only =
+            self.retained_output.is_some() || self.children.iter().any(|child| child.controlled);
+        reader
+    }
+
+    pub(super) fn invalidate_observational_attachment(&self) {
+        self.control
+            .lock()
+            .expect("control lock")
+            .invalidate_observational_attachment();
+    }
     /// Release this session's rendition from any handoff its preparation no
     /// longer backs (abort, rejection, settlement, tombstone, or a newer
     /// successor staged in its place).
@@ -672,6 +838,7 @@ impl Session {
     pub(super) fn abort_staged_preparation(&self) {
         {
             let mut control = self.control.lock().expect("control lock");
+            control.invalidate_observational_attachment();
             if let Some(staged) = control.staged_incarnation_id().map(str::to_owned) {
                 control.abort_preparation(&staged);
             }
@@ -680,14 +847,33 @@ impl Session {
     }
 
     pub(super) fn live_rendition(&self) -> Option<&Arc<Rendition>> {
-        self.rendition.as_ref().filter(|_| self.tombstone.is_none())
+        self.rendition.as_ref().filter(|_| self.renewable())
+    }
+
+    pub(super) fn renewable(&self) -> bool {
+        self.tombstone.is_none() && self.passive_grant.as_ref().is_none_or(|grant| grant.live())
+    }
+
+    pub(super) fn owns_response_media(&self, owner: &ResponseOwner) -> bool {
+        owner.media_child.as_ref().is_none_or(|target| {
+            self.children.iter().any(|child| {
+                child.reader_id == target.reader_id
+                    && Arc::ptr_eq(&child.rendition, &target.rendition)
+            })
+        })
     }
 
     pub(super) fn response_owner(&self) -> ResponseOwner {
         ResponseOwner {
             lifecycle: Arc::clone(&self.lifecycle),
             incarnation: Arc::clone(&self.incarnation),
+            retained_output: self
+                .retained_output
+                .as_ref()
+                .filter(|_| self.tombstone.is_none())
+                .map(Arc::clone),
             rendition: self.rendition.as_ref().map(Arc::clone),
+            media_child: None,
             rendition_key: self.rendition_key.clone(),
             file: Arc::clone(&self.file),
             tombstone: self.tombstone,
@@ -753,6 +939,59 @@ impl VodPreparationGate {
 }
 
 impl crate::playback_control::PreparationGate for VodPreparationGate {
+    fn staged_observation_is_current<'a>(
+        &'a self,
+        fence: crate::playback_control::AcceptedControlFence,
+        incarnation: String,
+        deadline: i64,
+    ) -> crate::playback_control::StagedObservationAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = self.bound(&mut sessions)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            session
+                .control
+                .lock()
+                .ok()
+                .and_then(|state| state.staged_observation_token(&fence, &incarnation, deadline))
+        })
+    }
+    fn accepted_observation<'a>(
+        &'a self,
+        identity: crate::playback_control::AcceptedControlIdentity,
+    ) -> crate::playback_control::ObservationAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = self.bound(&mut sessions)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            let answer = session.control.lock().ok()?.accepted_observation(identity);
+            answer
+        })
+    }
+
+    fn observation_is_current<'a>(
+        &'a self,
+        fence: crate::playback_control::AcceptedControlFence,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            if session.tombstone.is_some() {
+                return false;
+            }
+            session
+                .control
+                .lock()
+                .map(|state| state.observation_is_current(&fence))
+                .unwrap_or(false)
+        })
+    }
     fn stage_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: String,

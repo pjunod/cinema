@@ -1,0 +1,1001 @@
+{
+  "seed": 20260930,
+  "duration_s": 12,
+  "sample_rate_hz": 48000,
+  "fc_rms_target_dbfs": -20,
+  "pink_gain": 0.5153070544418407,
+  "layouts": {
+    "5.1": {
+      "matrix": "pan=stereo|FL=FL+0.707*FC+0.707*BL|FR=FR+0.707*FC+0.707*BR",
+      "fixtures": {
+        "fc": {
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "pcm_f32le",
+                "codec_long_name": "PCM 32-bit floating point little-endian",
+                "codec_type": "audio",
+                "codec_tag_string": "[3][0][0][0]",
+                "codec_tag": "0x0003",
+                "sample_fmt": "flt",
+                "sample_rate": "48000",
+                "channels": 6,
+                "channel_layout": "5.1",
+                "bits_per_sample": 32,
+                "initial_padding": 0,
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "duration_ts": 576000,
+                "duration": "12.000000",
+                "bit_rate": "9216000",
+                "disposition": {
+                  "default": 0,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                }
+              }
+            ]
+          },
+          "source": [
+            {
+              "channel": 0,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 1,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 2,
+              "rms_dbfs": -19.9999997585274,
+              "sample_peak_dbfs": -6.48627255822354,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -20.4,
+              "samples": 576000
+            },
+            {
+              "channel": 3,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 4,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 5,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            }
+          ],
+          "outputs": {
+            "default": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.010299862862922,
+                "sample_peak_dbfs": -9.496572595884876,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.010299862862922,
+                "sample_peak_dbfs": -9.496572595884876,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ],
+            "pan": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ],
+            "limited": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ]
+          }
+        },
+        "all": {
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "pcm_f32le",
+                "codec_long_name": "PCM 32-bit floating point little-endian",
+                "codec_type": "audio",
+                "codec_tag_string": "[3][0][0][0]",
+                "codec_tag": "0x0003",
+                "sample_fmt": "flt",
+                "sample_rate": "48000",
+                "channels": 6,
+                "channel_layout": "5.1",
+                "bits_per_sample": 32,
+                "initial_padding": 0,
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "duration_ts": 576000,
+                "duration": "12.000000",
+                "bit_rate": "9216000",
+                "disposition": {
+                  "default": 0,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                }
+              }
+            ]
+          },
+          "source": [
+            {
+              "channel": 0,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 1,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 2,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 3,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 4,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 5,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            }
+          ],
+          "outputs": {
+            "default": [
+              {
+                "channel": 0,
+                "rms_dbfs": 1.6452136256563894,
+                "sample_peak_dbfs": 4.655513099117278,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 1.7,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": 1.6452136256563894,
+                "sample_peak_dbfs": 4.655513099117278,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 1.7,
+                "samples": 576000
+              }
+            ],
+            "pan": [
+              {
+                "channel": 0,
+                "rms_dbfs": 1.644445405771374,
+                "sample_peak_dbfs": 4.654744876284883,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 1.7,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": 1.644445405771374,
+                "sample_peak_dbfs": 4.654744876284883,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 1.7,
+                "samples": 576000
+              }
+            ],
+            "limited": [
+              {
+                "channel": 0,
+                "rms_dbfs": -4.010296891058918,
+                "sample_peak_dbfs": -1.0000002900227403,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -4.0,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -4.010296891058918,
+                "sample_peak_dbfs": -1.0000002900227403,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -4.0,
+                "samples": 576000
+              }
+            ]
+          }
+        }
+      }
+    },
+    "5.1(side)": {
+      "matrix": "pan=stereo|FL=FL+0.707*FC+0.707*SL|FR=FR+0.707*FC+0.707*SR",
+      "fixtures": {
+        "fc": {
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "pcm_f32le",
+                "codec_long_name": "PCM 32-bit floating point little-endian",
+                "codec_type": "audio",
+                "codec_tag_string": "[3][0][0][0]",
+                "codec_tag": "0x0003",
+                "sample_fmt": "flt",
+                "sample_rate": "48000",
+                "channels": 6,
+                "channel_layout": "5.1(side)",
+                "bits_per_sample": 32,
+                "initial_padding": 0,
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "duration_ts": 576000,
+                "duration": "12.000000",
+                "bit_rate": "9216000",
+                "disposition": {
+                  "default": 0,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                }
+              }
+            ]
+          },
+          "source": [
+            {
+              "channel": 0,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 1,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 2,
+              "rms_dbfs": -19.9999997585274,
+              "sample_peak_dbfs": -6.48627255822354,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -20.4,
+              "samples": 576000
+            },
+            {
+              "channel": 3,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 4,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 5,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            }
+          ],
+          "outputs": {
+            "default": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.010299862862922,
+                "sample_peak_dbfs": -9.496572595884876,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.010299862862922,
+                "sample_peak_dbfs": -9.496572595884876,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ],
+            "pan": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ],
+            "limited": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ]
+          }
+        },
+        "all": {
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "pcm_f32le",
+                "codec_long_name": "PCM 32-bit floating point little-endian",
+                "codec_type": "audio",
+                "codec_tag_string": "[3][0][0][0]",
+                "codec_tag": "0x0003",
+                "sample_fmt": "flt",
+                "sample_rate": "48000",
+                "channels": 6,
+                "channel_layout": "5.1(side)",
+                "bits_per_sample": 32,
+                "initial_padding": 0,
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "duration_ts": 576000,
+                "duration": "12.000000",
+                "bit_rate": "9216000",
+                "disposition": {
+                  "default": 0,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                }
+              }
+            ]
+          },
+          "source": [
+            {
+              "channel": 0,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 1,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 2,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 3,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 4,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 5,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            }
+          ],
+          "outputs": {
+            "default": [
+              {
+                "channel": 0,
+                "rms_dbfs": 1.6452136256563894,
+                "sample_peak_dbfs": 4.655513099117278,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 1.7,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": 1.6452136256563894,
+                "sample_peak_dbfs": 4.655513099117278,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 1.7,
+                "samples": 576000
+              }
+            ],
+            "pan": [
+              {
+                "channel": 0,
+                "rms_dbfs": 1.644445405771374,
+                "sample_peak_dbfs": 4.654744876284883,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 1.7,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": 1.644445405771374,
+                "sample_peak_dbfs": 4.654744876284883,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 1.7,
+                "samples": 576000
+              }
+            ],
+            "limited": [
+              {
+                "channel": 0,
+                "rms_dbfs": -4.010296891058918,
+                "sample_peak_dbfs": -1.0000002900227403,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -4.0,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -4.010296891058918,
+                "sample_peak_dbfs": -1.0000002900227403,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -4.0,
+                "samples": 576000
+              }
+            ]
+          }
+        }
+      }
+    },
+    "7.1": {
+      "matrix": "pan=stereo|FL=FL+0.707*FC+0.5*SL+0.5*BL|FR=FR+0.707*FC+0.5*SR+0.5*BR",
+      "fixtures": {
+        "fc": {
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "pcm_f32le",
+                "codec_long_name": "PCM 32-bit floating point little-endian",
+                "codec_type": "audio",
+                "codec_tag_string": "[3][0][0][0]",
+                "codec_tag": "0x0003",
+                "sample_fmt": "flt",
+                "sample_rate": "48000",
+                "channels": 8,
+                "channel_layout": "7.1",
+                "bits_per_sample": 32,
+                "initial_padding": 0,
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "duration_ts": 576000,
+                "duration": "12.000000",
+                "bit_rate": "12288000",
+                "disposition": {
+                  "default": 0,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                }
+              }
+            ]
+          },
+          "source": [
+            {
+              "channel": 0,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 1,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 2,
+              "rms_dbfs": -19.9999997585274,
+              "sample_peak_dbfs": -6.48627255822354,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -20.4,
+              "samples": 576000
+            },
+            {
+              "channel": 3,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 4,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 5,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 6,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            },
+            {
+              "channel": 7,
+              "rms_dbfs": null,
+              "sample_peak_dbfs": null,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -70.0,
+              "samples": 576000
+            }
+          ],
+          "outputs": {
+            "default": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.010299862862922,
+                "sample_peak_dbfs": -9.496572595884876,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.010299862862922,
+                "sample_peak_dbfs": -9.496572595884876,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ],
+            "pan": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ],
+            "limited": [
+              {
+                "channel": 0,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -23.011611270985135,
+                "sample_peak_dbfs": -9.497884383497068,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -23.4,
+                "samples": 576000
+              }
+            ]
+          }
+        },
+        "all": {
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "pcm_f32le",
+                "codec_long_name": "PCM 32-bit floating point little-endian",
+                "codec_type": "audio",
+                "codec_tag_string": "[3][0][0][0]",
+                "codec_tag": "0x0003",
+                "sample_fmt": "flt",
+                "sample_rate": "48000",
+                "channels": 8,
+                "channel_layout": "7.1",
+                "bits_per_sample": 32,
+                "initial_padding": 0,
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "duration_ts": 576000,
+                "duration": "12.000000",
+                "bit_rate": "12288000",
+                "disposition": {
+                  "default": 0,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                }
+              }
+            ]
+          },
+          "source": [
+            {
+              "channel": 0,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 1,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 2,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 3,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 4,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 5,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 6,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            },
+            {
+              "channel": 7,
+              "rms_dbfs": -6.010300029875019,
+              "sample_peak_dbfs": -3.0000002493010487,
+              "samples_at_or_above_full_scale": 0,
+              "integrated_lufs": -6.0,
+              "samples": 576000
+            }
+          ],
+          "outputs": {
+            "default": [
+              {
+                "channel": 0,
+                "rms_dbfs": 3.876466875725299,
+                "sample_peak_dbfs": 6.886766076545987,
+                "samples_at_or_above_full_scale": 408000,
+                "integrated_lufs": 3.9,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": 3.876466875725299,
+                "sample_peak_dbfs": 6.886766076545987,
+                "samples_at_or_above_full_scale": 408000,
+                "integrated_lufs": 3.9,
+                "samples": 576000
+              }
+            ],
+            "pan": [
+              {
+                "channel": 0,
+                "rms_dbfs": 2.639465182359402,
+                "sample_peak_dbfs": 5.649765186778007,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 2.6,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": 2.639465182359402,
+                "sample_peak_dbfs": 5.649765186778007,
+                "samples_at_or_above_full_scale": 360000,
+                "integrated_lufs": 2.6,
+                "samples": 576000
+              }
+            ],
+            "limited": [
+              {
+                "channel": 0,
+                "rms_dbfs": -4.010296781468008,
+                "sample_peak_dbfs": -1.0000002900227403,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -4.0,
+                "samples": 576000
+              },
+              {
+                "channel": 1,
+                "rms_dbfs": -4.010296781468008,
+                "sample_peak_dbfs": -1.0000002900227403,
+                "samples_at_or_above_full_scale": 0,
+                "integrated_lufs": -4.0,
+                "samples": 576000
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "hashes": {
+    "7.1-fc-pan.wav": "4e1cec221873314530ddc4f75cadb9626b7dcb583c41ffc6f942a3ee2f9e3df5",
+    "5.1-side-all.wav": "3c03df55eb2cacaa9d9680541ccbf2814aa5e886d9e05767a1e1720cce2f2f19",
+    "7.1-fc-limited.wav": "4e1cec221873314530ddc4f75cadb9626b7dcb583c41ffc6f942a3ee2f9e3df5",
+    "7.1-fc.wav": "4fbedc79e6f31d33c1809350c9ef00f5d5759ef5ff4bd86247b9f93e07f1d076",
+    "7.1-all-limited.wav": "6eb67622d6a6a27f156173508f8504a1f67ebe7cf18430c8147b3fd0d9c4b77b",
+    "5.1-fc-default.wav": "10976c431e39111272740fa19f6c279c4f1aa74ce7755110ad4226fbb4c840f7",
+    "5.1-side-fc-limited.wav": "4e1cec221873314530ddc4f75cadb9626b7dcb583c41ffc6f942a3ee2f9e3df5",
+    "7.1-all-pan.wav": "45d989be2941a3a089178594edf4bb15f3ef3e348866aeb996323f1b99cb66f0",
+    "5.1-side-fc-pan.wav": "4e1cec221873314530ddc4f75cadb9626b7dcb583c41ffc6f942a3ee2f9e3df5",
+    "5.1-side-all-default.wav": "f2c4bc94d6149ff9ff97d2e7a353ae3bcad519d96b288b343b35656d75de2055",
+    "7.1-fc-default.wav": "10976c431e39111272740fa19f6c279c4f1aa74ce7755110ad4226fbb4c840f7",
+    "5.1-side-all-pan.wav": "4120bcfbbe58df8fabaab9588b02316c0d88b89170798446bec621b4597797a1",
+    "pink.wav": "73c3fb936b38f668d1c02c4994d895ce0eaca3780442cba44231aa57d861d942",
+    "5.1-all-pan.wav": "4120bcfbbe58df8fabaab9588b02316c0d88b89170798446bec621b4597797a1",
+    "5.1-side-fc-default.wav": "10976c431e39111272740fa19f6c279c4f1aa74ce7755110ad4226fbb4c840f7",
+    "5.1-fc.wav": "e1924bf1be7f687dcbd19931c259c0a9a5963016801e54719c03fec146d7b37a",
+    "7.1-all.wav": "8941c8fa96448d511ca3fabe3b7fa5032ccecfb3b6d2082fbc4cc1f7147cbac4",
+    "5.1-all.wav": "deaf4a1c4be77ab441b2f5e26e2d77d9ac9c376d439ea31b41d387b78957aead",
+    "5.1-fc-pan.wav": "4e1cec221873314530ddc4f75cadb9626b7dcb583c41ffc6f942a3ee2f9e3df5",
+    "5.1-all-default.wav": "f2c4bc94d6149ff9ff97d2e7a353ae3bcad519d96b288b343b35656d75de2055",
+    "7.1-all-default.wav": "b77f143b1967360a71c7795817c4b3f290eaaaa3ba7de4723aa3664d6e5d452d",
+    "5.1-side-all-limited.wav": "261268e1826b57de43be5a3f343300129ad3a23e3d261eb09e9cbb5fc764c964",
+    "5.1-fc-limited.wav": "4e1cec221873314530ddc4f75cadb9626b7dcb583c41ffc6f942a3ee2f9e3df5",
+    "5.1-side-fc.wav": "15e1b4b01d5766b3e6c5da7dd50632cdb22e75a3e1e784bfbf9d5742f218bc9e",
+    "5.1-all-limited.wav": "261268e1826b57de43be5a3f343300129ad3a23e3d261eb09e9cbb5fc764c964"
+  }
+}

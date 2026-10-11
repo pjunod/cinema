@@ -35,8 +35,14 @@ enum AppBuildInfo {
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var remoteClient: RemoteClientModel
+    // Graduated from Developer with the same keys and defaults, so a choice a
+    // viewer already made there carries over unchanged.
+    @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
+    @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
     #if os(tvOS)
     @AppStorage("plurx.liveTvLayout") private var liveTvLayoutRaw = TvLiveLayout.guidePreview.rawValue
+    @AppStorage("plurx.tvHomeLayout") private var tvHomeLayoutRaw = TvHomeLayout.classic.rawValue
     #endif
     #if os(iOS)
     @State private var confirmingSignOut = false
@@ -50,6 +56,14 @@ struct SettingsView: View {
     private var subBinding: Binding<String> {
         Binding(get: { model.subLang },
                 set: { model.setLanguages(audio: model.audioLang, sub: $0) })
+    }
+
+    private var libraryGroupingLabel: String {
+        #if os(tvOS)
+        return "Library grouping"
+        #else
+        return "Home layout"
+        #endif
     }
 
     var body: some View {
@@ -86,10 +100,13 @@ struct SettingsView: View {
                     get: { model.autoSkip },
                     set: { model.setAutoSkip($0) }
                 ))
+                Toggle("Bounded pause/resume", isOn: $boundedResumeEnabled)
+                Toggle("Prepared quality handoff", isOn: $preparedHandoffEnabled)
+                NavigationLink("Pause/resume and quality handoff readiness") { PlaybackHandoffDetailsView() }
             } header: {
                 Text("Playback")
             } footer: {
-                Text("Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on.")
+                Text("Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on. Pause/resume and quality handoff are on by default; their readiness rows are advisory and never change either switch.")
             }
 
             #if os(iOS)
@@ -142,7 +159,18 @@ struct SettingsView: View {
                         Text(size.label).tag(size)
                     }
                 }
+                #if os(tvOS)
                 Picker("Home layout", selection: Binding(
+                    get: { TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic },
+                    set: { tvHomeLayoutRaw = $0.rawValue }
+                )) {
+                    ForEach(TvHomeLayout.allCases) { layout in
+                        Text(layout.label).tag(layout)
+                    }
+                }
+                .accessibilityIdentifier("settings-tv-home-layout")
+                #endif
+                Picker(libraryGroupingLabel, selection: Binding(
                     get: { model.libraryGrouping },
                     set: { model.setLibraryGrouping($0) }
                 )) {
@@ -153,7 +181,11 @@ struct SettingsView: View {
             } header: {
                 Text("Appearance")
             } footer: {
+                #if os(tvOS)
+                Text("Classic keeps the current media shelves. Theater adds a featured title with a backdrop and Play or Resume controls. Library grouping and theme are independent of Home layout.")
+                #else
                 Text("Theme and room brightness are independent. Home layout groups shelves by media category or by individual library.")
+                #endif
             }
 
             // Server Live TV settings, as on the web's Settings → Live TV. The
@@ -171,7 +203,7 @@ struct SettingsView: View {
                     }
                 }
                 #endif
-                NavigationLink("Tuner, guide, recording and Library channels") { LiveTvSettingsView() }
+                NavigationLink("On/off, tuner, guide, recording and Library channels") { LiveTvSettingsView() }
             } header: {
                 Text("Live TV")
             } footer: {
@@ -181,6 +213,8 @@ struct SettingsView: View {
                 Text("Server settings require administrator access.")
                 #endif
             }
+
+            Section("Sharing") { NavigationLink("Shared libraries and Source status") { SharedSharingSettingsView() } }
 
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")
@@ -206,8 +240,12 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Remotes & devices") {
+                NavigationLink("Manage remote pairings") { RemoteDeviceSettingsView() }
+                Text(remoteClient.status).font(.caption)
+            }
             Section("Developer") {
-                NavigationLink("Enable Live TV and other features awaiting evidence") { LiveTvDeveloperView() }
+                NavigationLink("Shared libraries, Cinema remotes and other features awaiting evidence") { LiveTvDeveloperView() }
             }
 
             Section("About") {
@@ -244,5 +282,71 @@ struct SettingsView: View {
             Text("Kept downloads stay on this device and reappear when this Cinema profile signs in again.")
         }
         #endif
+    }
+}
+
+/// Settings → Playback → "Pause/resume and quality handoff readiness". Both
+/// switches graduated from Developer with their saved values (the same
+/// `@AppStorage` keys and defaults) and their advisory rows. Each section is a
+/// complete enable section: the switch, what it needs, and whether each part is
+/// met — and no row here disables or overrides either switch.
+struct PlaybackHandoffDetailsView: View {
+    @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
+    @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
+    @ObservedObject private var handoff = Caps.PreparedHandoffTelemetry.shared
+
+    var body: some View {
+        Form {
+            Section("Bounded pause/resume") {
+                Toggle("Enable bounded pause/resume", isOn: $boundedResumeEnabled)
+                Text("On by default. Resume consumes a healthy retained buffer immediately and gives an established on-demand item one recipe-preserving repair inside one 15-second budget.")
+                Label("Client ownership and deadline implementation: Met", systemImage: "checkmark.circle")
+                Label("Server or protocol change required: Met · None", systemImage: "checkmark.circle")
+                Label("Matched physical Apple TV latency: Not met", systemImage: "exclamationmark.triangle")
+                Text("Qualification still needs matched fresh-open and pause/resume trials on the same Apple TV, delivery presentation, recipe, cache state, and network. This unmet row never disables or overrides the switch.")
+                    .font(.caption)
+                Text("Live TV, cold startup, AirPlay, and Picture in Picture keep their existing owners and budgets. A missing local video sample is not treated as a failed picture on an external display.")
+                    .font(.caption)
+            }
+            Section("Prepared quality handoff") {
+                Toggle("Enable two-player prepared handoff", isOn: $preparedHandoffEnabled)
+                Text("On by default. This controls whether Apple advertises dual-player preparation. The checks below explain risk; they never disable or override the switch, and you can turn it off here.")
+                Label("Client implementation and first-frame proof: Met", systemImage: "checkmark.circle")
+                Label("Measured Apple cohort: Met", systemImage: "checkmark.circle")
+                Text("iPhone 17 Pro Max and Apple TV 4K (3rd generation) each completed 20 of 20 same-codec and codec/HDR handoffs.")
+                    .font(.caption)
+                Label("Server successor media priming: Met", systemImage: "checkmark.circle")
+                Text("The server reserves the successor before warming local or remote media and cleans up a refused, cancelled, or expired attempt.")
+                    .font(.caption)
+                Label("Fleet and link evidence: Not met · Checked during playback", systemImage: "exclamationmark.triangle")
+                Text("Throughput, decoder capacity, and physical-device observations improve rollout confidence. Missing or low evidence never disables this switch.")
+                    .font(.caption)
+                Label("Last directed quality change: \(handoff.lastOutcome ?? "none yet")", systemImage: "info.circle")
+                Text("What the most recent viewer-initiated quality change did. Informational only — it never blocks a change and never overrides the switch above.")
+                    .font(.caption)
+                Label("Last server preparation value: \(handoff.lastPreparation ?? "not sent")", systemImage: "info.circle")
+                Text("The newest delivery.preparation this device saw. Older servers and relays do not send it, and its absence is never read as a refusal.")
+                    .font(.caption)
+                // M3's measurements of that same change, and the one audio
+                // measurement this platform does not take. Advisory in the
+                // strict sense: no switch is attached to any of it, nothing
+                // reads it back, and an unmet condition never blocks a change.
+                if let measured = handoff.lastSwitch {
+                    Label("Frames at the switch: \(measured.frames)", systemImage: "info.circle")
+                    Label("Audio at the switch: \(measured.audio)", systemImage: "info.circle")
+                    Label("Tap to new quality: \(measured.visibleIn)", systemImage: "info.circle")
+                }
+                Text("Measuring the switch \u{2014} what it needs, and what it cannot have:")
+                    .font(.caption)
+                ForEach(PreparedSwitchMeasurement.audioRequirements(accessLogAvailable: true)) { requirement in
+                    Label(
+                        "\(requirement.title): \(requirement.met ? "Met" : "Not met")",
+                        systemImage: requirement.met ? "checkmark.circle" : "exclamationmark.triangle"
+                    )
+                    Text(requirement.detail).font(.caption)
+                }
+            }
+        }
+        .navigationTitle("Pause and quality handoff")
     }
 }

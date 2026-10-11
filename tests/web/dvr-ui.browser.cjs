@@ -23,7 +23,7 @@ const detail={deliveries:[],sessions:[],scans:[],offline:[],live_tv:[],trakt:{},
  await page.route('http://dvr.test/**',async route=>{
   const url=new URL(route.request().url());let data;const pathname=url.pathname;
   if(pathname==='/'||pathname==='/index.html')return route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(root,'index.html'))});
-  if(pathname.startsWith('/assets/')){let file=path.join(root,path.basename(pathname));if(fs.existsSync(file))return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(file)});return route.fulfill({status:404,body:''});}
+  if(pathname.startsWith('/assets/')){const file=path.resolve(root,pathname.slice('/assets/'.length));if(file.startsWith(root+path.sep)&&fs.existsSync(file))return route.fulfill({contentType:pathname.endsWith('.css')?'text/css':'text/javascript',body:fs.readFileSync(file)});return route.fulfill({status:404,body:''});}
   const key=pathname.replace('/api/v1','');
   if(key==='/server')data={name:'Cinema',version:'dev',setup_required:false};
   else if(key==='/me')data={id:'user1',username:'Paul',is_admin:true};

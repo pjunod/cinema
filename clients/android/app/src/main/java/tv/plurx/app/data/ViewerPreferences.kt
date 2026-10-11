@@ -117,10 +117,18 @@ enum class OfflineNetwork(val storageValue: String, val label: String) {
     }
 }
 
+enum class LibraryPresentation(val storageValue: String, val label: String) {
+    Rows("rows", "Rows"), Grid("grid", "Grid");
+    companion object {
+        fun fromStorage(value: String?): LibraryPresentation = entries.firstOrNull { it.storageValue == value } ?: Rows
+    }
+}
+
 data class ViewerPreferences(
     val theme: ThemeId = ThemeId.Classic,
     val appearance: Appearance = Appearance.System,
     val posterSize: PosterSize = PosterSize.Medium,
+    val libraryPresentation: LibraryPresentation = LibraryPresentation.Rows,
     val homeGrouping: HomeGrouping = HomeGrouping.Category,
     val playbackQuality: PlaybackQuality = PlaybackQuality.Auto,
     val subtitleReadiness: SubtitleReadiness = SubtitleReadiness.OnDemand,

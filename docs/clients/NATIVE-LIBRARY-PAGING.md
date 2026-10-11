@@ -1,6 +1,6 @@
 # Native library paging — pages on demand, one merged order, filtering off the main thread
 
-**Status:** ready for review · **Executes:** A5 / F-apple-5 and the
+**Status:** 5.1–5.5 merged; automated tests in place; acceptance redefined by route-metric delta (§6.1, 2026-10-02); physical Apple TV and Lenovo acceptance open · **Executes:** A5 / F-apple-5 and the
 library half of D6 / F-android-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -371,6 +371,15 @@ summary reports `loaded/total`.
 library** (Charles/`journalctl` request count on `media1`: one
 `/items?offset=0` per library, no `offset=200` until scrolling).
 
+**Acceptance amendment, 2026-10-02 — measure by route-metric delta.** *Coordinator decision, awaiting Paul's review.* The
+request-count halves of 5.2 and 5.4 cannot be measured as written: plurxd runs
+in Docker with no access log, so `journalctl -u plurxd | grep -c '/items?'`
+never returns a count, and "media1" is not necessarily where clients connect.
+They are measured instead with the procedure in §6.1 ("Route-metric
+acceptance"): the first paint of a category of *N* libraries passes when the
+calibrated `route_group="library"` delta, summed over every node, is exactly
+*N*, and it stays *N* until the viewer scrolls past the loaded prefix.
+
 ### 5.3 Apple: filtering off the main actor
 
 §3.4 Apple bullets. Tests: a stale generation's result is discarded; the
@@ -389,6 +398,15 @@ mirror 5.2 against the same fixture.
 
 **Acceptance:** `make android-test` green; on the Lenovo, the same
 one-request-per-library first paint as 5.2, observed on `media1`.
+
+**Acceptance amendment, 2026-10-02 — measure by route-metric delta.** *Coordinator decision, awaiting Paul's review.* The
+request-count halves of 5.2 and 5.4 cannot be measured as written: plurxd runs
+in Docker with no access log, so `journalctl -u plurxd | grep -c '/items?'`
+never returns a count, and "media1" is not necessarily where clients connect.
+They are measured instead with the procedure in §6.1 ("Route-metric
+acceptance"): the first paint of a category of *N* libraries passes when the
+calibrated `route_group="library"` delta, summed over every node, is exactly
+*N*, and it stays *N* until the viewer scrolls past the loaded prefix.
 
 ### 5.5 Android: filtering off the composition thread, debounced
 
@@ -430,10 +448,109 @@ change the watch filter to Unwatched and report how long the grid took to
 update and whether the count line changed as it loaded. Then search (Apple
 only) for a title you know is at the END of the alphabet, "Zero Harbor",
 and report whether it appeared, and whether the screen said "Still
-loading" first. On media1 run
-`journalctl -u plurxd --since -5min | grep -c '/items?'` and report the
-number.
+loading" first. Around each open, take the route-metric reading in §6.1
+(the `journalctl` count this prompt used to ask for cannot be taken: plurxd
+has no access log) and report every reading with its time.
 ```
+
+### 6.1 Route-metric acceptance (2026-10-02)
+
+*Coordinator decision, awaiting Paul's review.* This section replaces the request-count method of
+§5.2, §5.4 and §6.
+
+Every node exports `plurx_http_route_seconds_count{route_group="library",role=…}`
+on its unauthenticated `/metrics` (plurxd's port, 32400). The `library` group
+counts the matched `/api/v1/libraries…` and `/api/v1/library-channels…` routes
+and, of the Plex routes, only `/library`, `/library/sections` and
+`/library/sections/{id}/all` (Plex metadata is counted under `item`, parts under
+`playback`). So `/api/v1/libraries/{id}/items` is in the group but is not alone,
+and the reading is a calibrated delta, summed over every node and role, because
+a cluster client may be served by any node.
+
+```bash
+# The roster (bash: delta uses process substitution): every cluster node, by its public neutral name. Map each name to
+# the node's address locally (/etc/hosts or ssh config); do not edit real host
+# names into this document.
+NODES="media1 lab3 lab4 lab6"
+PORT=${PORT:-32400}
+
+# lib > FILE: one "<node> <count>" line per node. Fails, and the reading must
+# be discarded, if any node does not answer or exports no library counter.
+lib() {
+  for n in $NODES; do
+    c=$(curl -fsS --max-time 5 "http://$n:$PORT/metrics" |
+        awk '/^plurx_http_route_seconds_count\{route_group="library",/ {s+=$2; f=1}
+             END {if (!f) exit 1; printf "%d\n", s}') ||
+      { echo "lib: no library counter from $n" >&2; return 1; }
+    echo "$n $c"
+  done
+}
+
+# delta BEFORE AFTER: the summed per-node increase. VOID (non-zero exit, no
+# number) if any node's counter went down — a restart reset it, so the delta
+# would undercount.
+delta() {
+  join <(sort "$1") <(sort "$2") |
+    awk '{d=$3-$2; if (d<0) {print "VOID: " $1 " counter went down" > "/dev/stderr"; bad=1}; s+=d}
+         END {if (bad || NR==0) exit 1; print s}'
+}
+
+# Usage: lib > r0 || exit 1; <do the step>; lib > r1 || exit 1; delta r0 r1
+```
+
+A reading that fails `lib` or that `delta` voids is repeated, never recorded
+as 0.
+
+1. **Quiet check.** Read `lib`, wait 60 s with the device idle on Home, read
+   again. The delta must be 0; if it is not, background library traffic
+   (a scan, a channel guide refresh, another viewer) is running — wait for it
+   or note the rate and subtract it.
+2. **Calibration.** Read, open a category backed by **one** library, wait for
+   first posters, read. The delta is `1 + k`, where `k` is any non-paging
+   library call the open makes (for example a `/api/v1/libraries` refresh);
+   record `k`.
+3. **First paint.** Read, open the largest category (record its item count and
+   its library count *N*), wait for first posters without scrolling, read. Pass:
+   delta − `k` = *N*. Wait 30 s without input and read again: delta 0 (no
+   `offset=200` before scrolling).
+4. **Scroll.** Scroll to the very end and read. Expect about
+   `Σ max(1, ceil(items_i / 200))` − *N* further requests across the libraries
+   (an empty library still costs its one request) — every page once, none twice.
+5. **Watch filter.** Change the filter to Unwatched and read when the count
+   line settles: the drive-to-completion walk adds the remaining pages, once.
+
+Pass/fail is decided by steps 3 and 4; steps 1 and 2 make the number
+attributable. A delta higher than expected, with a clean quiet check, is a
+real extra request and fails the bar.
+
+**Before-numbers.** *Coordinator decision, awaiting Paul's review.* §6 asked for before/after numbers. 5.2–5.5 are already on
+every shipped build, so a before reading is not available from the fleet; the
+bars in 5.2–5.5 are absolute (one round trip per library; under 16 ms per
+keystroke or frame) and are judged on the after reading alone.
+
+### 6.2 What only physical devices can close (2026-10-02)
+
+Shipped prerequisites: an Apple build at or above the source counter
+(`CURRENT_PROJECT_VERSION` 204 on this branch) and the current Android build on
+the devices under test; a category of about 6,000 titles must exist — record
+its count before starting.
+
+- **5.2 Apple TV first paint** — §6.1 steps 1–4 against the Apple TV.
+- **5.3 Apple TV keystroke cost** — Instruments Time Profiler on the physical
+  Apple TV while typing a five-letter query into the fully loaded category;
+  main-thread time per keystroke under 16 ms. The tvOS simulator is a proxy
+  only and cannot close this.
+- **5.4 Lenovo first paint** — §6.1 steps 1–4 against the Lenovo tablet.
+- **5.5 Lenovo filter cost** — a Perfetto trace on the Lenovo while cycling the
+  watch filter four times on the fully loaded category: no main-thread frame
+  over 16 ms.
+- **Parity lines** — one dated line each in APPLE-CLIENT-PARITY.md and
+  ANDROID-CLIENT-PARITY.md from those readings.
+
+The Android `AppViewModel.libraryPages` KDoc, which still described the
+deleted `sortMerged` and a fixed server sort, was rewritten on 2026-10-02; the
+function has no caller. Both platforms still carry the no-`sort_title`
+full-walk path that §6 schedules for deletion one release later.
 
 Rollout: 5.1 deploys with the server first (additive; old clients ignore
 `sort_title`). 5.2-5.5 ship through the normal client builds
@@ -476,7 +593,10 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | 5.1 | [PR #465](http://192.168.4.7:3000/noirr/plurx/pulls/465) | Server-side total order and the exposed key. The three copies of the library `ORDER BY` — `sqlite/media.rs` and both Hiqlite paths — are one `store::item_sort_order_by`, and `Title`, `Year`, `Resolution` and `Recorded` gained `id ASC` (`Added` keeps its existing `id DESC`; §7 question 2 is answered that way, and `API.md` says so). `ItemDto` carries `sort_title`, the stored value the SQL sorts on, not a re-derivation. `tests/contracts/library-sort-cases.json` holds 30 movie items — articles, mixed case, three titles that reduce to one sort title, accented, Greek, Cyrillic and CJK titles, the `"The "` edge case the domain unit test already pins, null years, equal capture dates, items with no file — and the expected id order for all five sorts. `library_sort_fixture_matches_order` in `crates/plurx-core/tests/store_contract.rs` replays it on **both** SQLite backends (and on the three-voter Hiqlite backend when `hiqlite-contract-tests` is on), once whole and once walked at the fixture's page size of 7. *(Corrected by the review response below: the walk checks the client's `offset += returned` / short-page termination loop, not paging stability — with one `ORDER BY` for both requests they can only disagree through ties, and the guard against ties is `store::item_sort_order_tests::every_sort_ends_in_a_unique_key`.)* **Plan correction:** §5.1 names `cargo test -p plurxd library_sort`; the test that can reach both backends lives in `plurx-core`, so the command is `cargo test -p plurx-core --test store_contract library_sort_fixture_matches_order`. **A correction this session made against its own first attempt.** The fixture replay was first offered as the proof of the `, id` tie-break, and it is not one: removing `id ASC` from all four clauses leaves it passing, because SQLite returns this table's tied rows in rowid order and rowid order is exactly what the fixture expects. That it currently does is the whole reason the clause exists — nothing promises it, and the day a query plan, an index or a backend changes it, an offset-paging client reads two adjacent pages of two different orderings. The proof is therefore `store::item_sort_order_tests::every_sort_ends_in_a_unique_key`, which requires the clause rather than observing the behaviour: removing the tie-break fails it (`Title ends in "sort_title ASC", which has no unique final key`), and re-spelling the order inside a media store fails its companion. The replay is not vacuous either — ordering `Title` on the raw `title` instead of `sort_title` fails it on the first article. **Not done and not claimed:** the §5.1 `curl … | jq '.items[0].sort_title'` acceptance is a deployed-server observation and no deploy was made from here. Milestones 5.2-5.5 are **not started**: this session had no Swift toolchain, no Xcode and no Android SDK, so `LibraryMerge`, demand paging, drive-to-completion and the off-main-thread filtering could be written but not compiled, run or measured — and the plan's whole point for them is a measurement. The clients' `sort_title == nil` fallback against an older server is likewise unwritten. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | 5.1 (review response) | [PR #465](http://192.168.4.7:3000/noirr/plurx/pulls/465) | Answers the adversarial review (comment 4103). **Finding 1, fixed:** the `resolution` sort ranked every top-level row by its best file height, but the DTO carries `resolution` for movies and home videos only, so a root photo in a Home library (probed, with a real height) led the server's cursor while a client merging on `resolution ?? -1` read it as -1. The SQL now ranks by height exactly the kinds that carry a `resolution` — one predicate, `ItemKind::carries_resolution`, which `browse.rs` now uses for every `resolution` decoration — and every other kind at -1. Chosen over decorating photos because every client already treats a photo as having no resolution (the web's resolution sections and all three clients' local resorts), and badging stills would be a visible UI change on three clients. Pinned by `store::item_sort_order_tests::resolution_ranks_exactly_the_kinds_that_carry_one` (the clause's kind list against the predicate, for every kind), `library_sort_fixture_matches_order` (the fixture gained root photos 31-32 with 3024/4032-px files and asserts each item's `resolution` is what the DTO carries), and `http::tests::library_resolution_sort_is_ordered_by_the_resolution_each_row_carries` (a Home library's `?sort=resolution` response is sorted under the client's comparator applied to the keys it returned). All three fail with the old clause restored and pass with it. **Finding 2, fixed:** the replay's comment and this log's first row no longer claim the paged walk catches an order that is total whole and not paged; they credit the unit test as the guard and say the walk checks the client's walk. The fixture also gained a photo/movie pair (32, 33) that ties on every visible key, and with `id ASC` removed from the four clauses the replay now fails (`title in one request`: 33 before 32) — recorded as an observation of today's query plan (`idx_items_library_kind` yields kind order), not as the guard. |
-| 2026-09-25 | gpt-6 | agent:/root/restore_a03 | 5.2-5.5 implementation | `codex/a03-library-paging-restore` for draft [PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) | Swift and Kotlin now merge server-sorted cursors by the DTO's UTF-8 `sort_title` and each sort's total key; both grids request a page only through the visible prefix, drive to completion for a query/watch filter, report loaded and matching counts, and retain a full-walk fallback for servers without `sort_title`. Apple filters immutable snapshots in a detached task with a result generation and debounces query edits 150 ms. Android filters on `Dispatchers.Default` with `mapLatest`, and a `LibraryPager` in the view model retains pages across rotation. Shared fixture test sources cover 1/2/3 cursors and one page per library at first paint. **Compile evidence:** `make apple-build` passed for iOS/tvOS; iOS `build-for-testing` passed; Gradle `:app:compileDebugKotlin :app:compileDebugUnitTestKotlin` passed with the installed SDK. Tests were deliberately deferred to the consolidated PR's single post-review fast lane under Paul's 2026-09-24 instruction. Apple TV and Lenovo request count, frame-time, scroll and filter traces remain owed; this row does not claim §5.2-5.5 acceptance. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | 5.1 | [PR #465](http://forge.lan:3000/noirr/plurx/pulls/465) | Server-side total order and the exposed key. The three copies of the library `ORDER BY` — `sqlite/media.rs` and both Hiqlite paths — are one `store::item_sort_order_by`, and `Title`, `Year`, `Resolution` and `Recorded` gained `id ASC` (`Added` keeps its existing `id DESC`; §7 question 2 is answered that way, and `API.md` says so). `ItemDto` carries `sort_title`, the stored value the SQL sorts on, not a re-derivation. `tests/contracts/library-sort-cases.json` holds 30 movie items — articles, mixed case, three titles that reduce to one sort title, accented, Greek, Cyrillic and CJK titles, the `"The "` edge case the domain unit test already pins, null years, equal capture dates, items with no file — and the expected id order for all five sorts. `library_sort_fixture_matches_order` in `crates/plurx-core/tests/store_contract.rs` replays it on **both** SQLite backends (and on the three-voter Hiqlite backend when `hiqlite-contract-tests` is on), once whole and once walked at the fixture's page size of 7. *(Corrected by the review response below: the walk checks the client's `offset += returned` / short-page termination loop, not paging stability — with one `ORDER BY` for both requests they can only disagree through ties, and the guard against ties is `store::item_sort_order_tests::every_sort_ends_in_a_unique_key`.)* **Plan correction:** §5.1 names `cargo test -p plurxd library_sort`; the test that can reach both backends lives in `plurx-core`, so the command is `cargo test -p plurx-core --test store_contract library_sort_fixture_matches_order`. **A correction this session made against its own first attempt.** The fixture replay was first offered as the proof of the `, id` tie-break, and it is not one: removing `id ASC` from all four clauses leaves it passing, because SQLite returns this table's tied rows in rowid order and rowid order is exactly what the fixture expects. That it currently does is the whole reason the clause exists — nothing promises it, and the day a query plan, an index or a backend changes it, an offset-paging client reads two adjacent pages of two different orderings. The proof is therefore `store::item_sort_order_tests::every_sort_ends_in_a_unique_key`, which requires the clause rather than observing the behaviour: removing the tie-break fails it (`Title ends in "sort_title ASC", which has no unique final key`), and re-spelling the order inside a media store fails its companion. The replay is not vacuous either — ordering `Title` on the raw `title` instead of `sort_title` fails it on the first article. **Not done and not claimed:** the §5.1 `curl … | jq '.items[0].sort_title'` acceptance is a deployed-server observation and no deploy was made from here. Milestones 5.2-5.5 are **not started**: this session had no Swift toolchain, no Xcode and no Android SDK, so `LibraryMerge`, demand paging, drive-to-completion and the off-main-thread filtering could be written but not compiled, run or measured — and the plan's whole point for them is a measurement. The clients' `sort_title == nil` fallback against an older server is likewise unwritten. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | 5.1 (review response) | [PR #465](http://forge.lan:3000/noirr/plurx/pulls/465) | Answers the adversarial review (comment 4103). **Finding 1, fixed:** the `resolution` sort ranked every top-level row by its best file height, but the DTO carries `resolution` for movies and home videos only, so a root photo in a Home library (probed, with a real height) led the server's cursor while a client merging on `resolution ?? -1` read it as -1. The SQL now ranks by height exactly the kinds that carry a `resolution` — one predicate, `ItemKind::carries_resolution`, which `browse.rs` now uses for every `resolution` decoration — and every other kind at -1. Chosen over decorating photos because every client already treats a photo as having no resolution (the web's resolution sections and all three clients' local resorts), and badging stills would be a visible UI change on three clients. Pinned by `store::item_sort_order_tests::resolution_ranks_exactly_the_kinds_that_carry_one` (the clause's kind list against the predicate, for every kind), `library_sort_fixture_matches_order` (the fixture gained root photos 31-32 with 3024/4032-px files and asserts each item's `resolution` is what the DTO carries), and `http::tests::library_resolution_sort_is_ordered_by_the_resolution_each_row_carries` (a Home library's `?sort=resolution` response is sorted under the client's comparator applied to the keys it returned). All three fail with the old clause restored and pass with it. **Finding 2, fixed:** the replay's comment and this log's first row no longer claim the paged walk catches an order that is total whole and not paged; they credit the unit test as the guard and say the walk checks the client's walk. The fixture also gained a photo/movie pair (32, 33) that ties on every visible key, and with `id ASC` removed from the four clauses the replay now fails (`title in one request`: 33 before 32) — recorded as an observation of today's query plan (`idx_items_library_kind` yields kind order), not as the guard. |
+| 2026-09-25 | gpt-6 | agent:/root/restore_a03 | 5.2-5.5 implementation | `codex/a03-library-paging-restore` for draft [PR #506](http://forge.lan:3000/noirr/plurx/pulls/506) | Swift and Kotlin now merge server-sorted cursors by the DTO's UTF-8 `sort_title` and each sort's total key; both grids request a page only through the visible prefix, drive to completion for a query/watch filter, report loaded and matching counts, and retain a full-walk fallback for servers without `sort_title`. Apple filters immutable snapshots in a detached task with a result generation and debounces query edits 150 ms. Android filters on `Dispatchers.Default` with `mapLatest`, and a `LibraryPager` in the view model retains pages across rotation. Shared fixture test sources cover 1/2/3 cursors and one page per library at first paint. **Compile evidence:** `make apple-build` passed for iOS/tvOS; iOS `build-for-testing` passed; Gradle `:app:compileDebugKotlin :app:compileDebugUnitTestKotlin` passed with the installed SDK. Tests were deliberately deferred to the consolidated PR's single post-review fast lane under Paul's 2026-09-24 instruction. Apple TV and Lenovo request count, frame-time, scroll and filter traces remain owed; this row does not claim §5.2-5.5 acceptance. |
 | 2026-09-28 | gpt-6-astra | 01a0d5b2-d294-70c2-a7e9-d884600c68e0 | A03 measured two-row prefetch | `codex/native-review-completion-0928` | Integrated b0933f3a5: actual adaptive columns, exclusive boundary and empty/overflow safety. Android4 and Apple3 regression sources compile on both Apple platforms; no test execution yet. Apple199/Android136 reserved. Physical6000-title and page-arrival focus remain open. |
+
+| 2026-09-28 | gpt-6-astra | 01a0d5b2-d294-70c2-a7e9-d884600c68e0 | 5.2-5.5 query/filter/focus regression completion | `codex/a03-completion-0928` (next separate batch) | Apple5b32b380e extracts existing task ownership into an internal production coordinator and adds three query/completion/stale-result/150 ms regression sources. Android75e3d561f adds two actual-pager watch-filter cases, one production-grid Compose D-pad page-arrival case and its source wiring contract. Author app and test-source compilation passes; no next-batch behavior tests, review, push, signed products or devices yet. Apple200/Android137 source claims reserved above corrected PR600199/136. Named6000-title and physical frame/request/focus evidence remain open. Android category query remains excluded by section5.5. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Acceptance by route metric; doc comment | `opus/client-evidence` into the architecture effort | 5.2/5.4 acceptance redefined as the calibrated all-node `route_group="library"` delta (§6.1), since plurxd has no access log. The Android `libraryPages` KDoc no longer claims `sortMerged` and a fixed server sort; the function has no caller and the legacy walk is `LibraryPager.loadLegacyWholeCollection`. iOS and tvOS simulator suites ran on maca (maca, Xcode 27.0): `LibraryMergeTests` and `LibraryGridCoordinatorTests` passed; seven unrelated failures are recorded in the A-02 log. Physical items listed in §6.2. |

@@ -386,7 +386,7 @@ impl ConnectionResetState {
     fn begin_socket(&self) -> u64 {
         let previous = self
             .socket_epoch
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
                 Some(epoch.saturating_add(1))
             })
             .expect("socket epoch update cannot be rejected");

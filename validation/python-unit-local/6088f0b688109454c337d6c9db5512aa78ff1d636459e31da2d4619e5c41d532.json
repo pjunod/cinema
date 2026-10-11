@@ -1,0 +1,22 @@
+{
+ "version":1,"repository":1,"branch":"codex/a05-unknown-original-trial","suite":"operations",
+ "test_file":"tests/operations/test_attempt_scope_census.py",
+ "test_file_sha256":"37775ca485b1f332ff45d95c51bb5cb19224997fcf2c7ec56c2b071196644fdf",
+ "source_commit":null,
+ "command":"sh /private/tmp/a05-remaining-GCQQYa/pr692-failed-operations-only.sh (explicit 13-method unittest invocation; twelve IDs attributed here and one in the companion rolling-acquire receipt)",
+ "test_ids":[
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_a_direct_still_current_call_is_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_a_fence_used_from_another_continuation_is_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_a_fence_without_a_census_row_and_a_row_without_a_fence_are_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_a_new_hand_written_fence_is_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_a_scope_the_attempt_type_does_not_declare_is_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_a_second_copy_of_an_excused_fence_is_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_all_fences_swapped_at_once_are_each_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_an_allow_list_row_that_outlived_its_fence_is_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_prose_about_a_fence_is_not_a_fence",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_reverting_any_migrated_fence_is_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_swapping_any_fences_scope_set_is_reported",
+ "test_attempt_scope_census.AttemptScopeCensusCase.test_the_repository_agrees_with_its_own_census"],
+ "output":"Original tool80456 terminal exit0: verbose exact-selector invocation reports each of these twelve methods ... ok plus the one companion rolling-acquire method ... ok; Ran 13 tests in 6.139s; OK. This receipt attributes exactly twelve named successes from that one aggregate invocation, not a separate twelve-test run. Raw /private/tmp/a05-remaining-GCQQYa/pr692-failed-operations-only.log SHA256 ce74b3dc128a1de7329173ccd9c1998c2cacd38649eeb0a876f0859f4957b5a5. Executed on owned working repair source after failed gate3765, before normal commit; null source_commit intentionally avoids inventing committed-source execution. Only failed methods retried; no prior success repeated.",
+ "result":{"failed":0,"errors":0,"skipped":0,"expected_failures":0,"unexpected_successes":0,"count":12}
+}

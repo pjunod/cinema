@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -256,6 +257,9 @@ def _glob_fragment(pattern: str) -> str:
     return "".join(pieces)
 
 
+# History maps thousands of commits through the same catalog patterns. Cache
+# their pure compilation, bounded above the catalog's 665-pattern working set.
+@lru_cache(maxsize=1024)
 def glob_regex(pattern: str) -> re.Pattern[str]:
     """Compile a repository-relative glob where ``**`` crosses directories."""
 

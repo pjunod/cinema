@@ -100,6 +100,12 @@ operations! {
     RecordAnalysisRetryWaitPhase => "record_analysis_retry_wait_phase",
     RecordAnalysisFailedPhase => "record_analysis_failed_phase",
     TouchSharedOfflineCacheEntry => "touch_shared_offline_cache_entry",
+    SettleQualityCancellation => "settle_quality_cancellation",
+    RevokeUnboundJellyfinMediaLink => "revoke_unbound_jellyfin_media_link",
+    ObserveCandidateLink => "observe_candidate_link",
+    ObserveMeasuredLinkPrior => "observe_measured_link_prior",
+    ReclaimReceiverIngress => "reclaim_receiver_ingress",
+    RevokeUnpublishedRemoteGrant => "revoke_unpublished_remote_grant",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];
@@ -125,7 +131,7 @@ impl Metrics {
 
     fn record(&self, operation: Operation, severity: Discard, error: bool) {
         let cell = &self.cells[Self::index(operation, severity, error)];
-        let _ = cell.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = cell.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != u64::MAX).then(|| current + 1)
         });
     }
@@ -417,7 +423,10 @@ mod tests {
 
     #[test]
     fn every_classified_failure_has_a_bounded_metric_row() {
-        assert_eq!(Operation::ALL.len(), 45, "one fixed label per audited site");
+        // 46 on main #793, plus the quality cancellation settlement, the
+        // Jellyfin unbound media-link revocation, and the acknowledged Link
+        // negative's measured-Link prior fold (D6), and orphan grant revocation.
+        assert_eq!(Operation::ALL.len(), 51, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {
@@ -447,6 +456,21 @@ mod tests {
             .expect("metric row")
             .parse()
             .expect("metric value")
+    }
+
+    #[test]
+    fn unpublished_remote_grant_revocation_failure_is_lost_work() {
+        let operation = Operation::RevokeUnpublishedRemoteGrant;
+        let before = metric_value(operation, Discard::LostWork, "error");
+        observe(
+            operation,
+            Discard::LostWork,
+            Err::<(), _>("revocation Store failure"),
+        );
+        assert_eq!(
+            metric_value(operation, Discard::LostWork, "error"),
+            before + 1
+        );
     }
 
     #[tokio::test]

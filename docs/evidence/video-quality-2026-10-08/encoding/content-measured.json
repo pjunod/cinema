@@ -1,0 +1,688 @@
+{
+  "schema_version": 1,
+  "scope": "source_local_real_title_recipe_measurement",
+  "production_job_integration": false,
+  "source_revision": "1088d7529401297bddced74bfa11c166457468d8",
+  "resource_limits": {
+    "cpu_threads": 2,
+    "wall_seconds": 600,
+    "scratch_bytes": 1073741824
+  },
+  "script_sha256": "aa6fb7e3ca574bf71669a8424f47cee2ae5b0a7476228ed97b34e56eeddc5aea",
+  "cases": [
+    {
+      "identity": "real-sdr-1",
+      "excerpt_sha256": "c46ffc8517b140e9ba2262af667e4ac14f220c3ca722a91ef818a82746b8f8de",
+      "excerpt_bytes": 61323551,
+      "offset_seconds": 120,
+      "requested_excerpt_seconds": 60,
+      "source_probe": {
+        "codec_name": "h264",
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "field_order": "progressive",
+        "sample_aspect_ratio": "1:1",
+        "avg_frame_rate": "24000/1001"
+      },
+      "windows": [
+        {
+          "start_seconds": 9.336666666666668,
+          "frames": 47,
+          "modes": {
+            "vbr": {
+              "bytes": 937924,
+              "seconds": 0.9857292920351028,
+              "sha256": "904c943c1dd0172548a3c768a7e7b262ece3e3730d7e765019e0fb1dea7e226d",
+              "mean": 97.23699051063831,
+              "p10": 94.795036,
+              "frames": 47
+            },
+            "q18": {
+              "bytes": 879548,
+              "seconds": 0.9919699891470373,
+              "sha256": "ebc0da1d07589793583a9b843663ef817d4fe643b995f72d6d6e0190374639e1",
+              "mean": 97.1873155531915,
+              "p10": 95.918735,
+              "frames": 47
+            },
+            "q23": {
+              "bytes": 418806,
+              "seconds": 0.8890691809356213,
+              "sha256": "f71a8c1c269d2ee07c009aeef239d0a31ac4d17c2f95edd6fd754967ea85a5eb",
+              "mean": 92.41228619148937,
+              "p10": 90.65248,
+              "frames": 47
+            },
+            "q28": {
+              "bytes": 224055,
+              "seconds": 0.8802413968369365,
+              "sha256": "3bc16dce33680bbbfb5a05178b801af55fcf433611d020a0d20267c07f4378f9",
+              "mean": 83.18399014893616,
+              "p10": 79.690755,
+              "frames": 47
+            }
+          }
+        },
+        {
+          "start_seconds": 30.01,
+          "frames": 47,
+          "modes": {
+            "vbr": {
+              "bytes": 807663,
+              "seconds": 0.8915730000007898,
+              "sha256": "571934eba3102340352e72a9db04efc23f4295de47f8796887b87c066a75d9c5",
+              "mean": 96.21642582978723,
+              "p10": 94.932657,
+              "frames": 47
+            },
+            "q18": {
+              "bytes": 313691,
+              "seconds": 0.8479573079384863,
+              "sha256": "d9c7822acbca81d5498b147dc400d50a682bc54e03df8910daaed95f4d5a6a16",
+              "mean": 94.69505227659573,
+              "p10": 93.940649,
+              "frames": 47
+            },
+            "q23": {
+              "bytes": 133637,
+              "seconds": 0.8387874669861048,
+              "sha256": "55c4e297cdb9d7cd3d6f7373f970beae8b520d71f3a3217d2d3f58836d4b7701",
+              "mean": 91.42447289361702,
+              "p10": 90.395959,
+              "frames": 47
+            },
+            "q28": {
+              "bytes": 67014,
+              "seconds": 0.8703413989860564,
+              "sha256": "5c667a7ba0d83a4d489292e621f2968ab619f80418b5b687a56a54ad8c41c952",
+              "mean": 85.43108721276596,
+              "p10": 83.787773,
+              "frames": 47
+            }
+          }
+        },
+        {
+          "start_seconds": 50.68333333333334,
+          "frames": 47,
+          "modes": {
+            "vbr": {
+              "bytes": 841140,
+              "seconds": 0.8741536990273744,
+              "sha256": "7c3fae5a827ce3baf39d53c4c460ad0872baa9de532008ca40f2440bf6a34266",
+              "mean": 96.14017831914893,
+              "p10": 94.976203,
+              "frames": 47
+            },
+            "q18": {
+              "bytes": 273268,
+              "seconds": 0.8389199739322066,
+              "sha256": "645734c103a5cefb2fcf6797d893f83e41b05bce854aba6d5a74a10eeef0df0f",
+              "mean": 94.96585189361703,
+              "p10": 94.702122,
+              "frames": 47
+            },
+            "q23": {
+              "bytes": 101927,
+              "seconds": 0.8264143678825349,
+              "sha256": "20bbc60d4e4f4d79d9384e54feba3976d9c750d6214062ded110ad3bdb10823a",
+              "mean": 91.86539019148935,
+              "p10": 91.468022,
+              "frames": 47
+            },
+            "q28": {
+              "bytes": 49303,
+              "seconds": 0.8344632550142705,
+              "sha256": "f4def2f4dbc393acc5b2b1e46c9b0fee29e7e033aeb16e570ed957d6601760ec",
+              "mean": 85.56325138297872,
+              "p10": 85.007928,
+              "frames": 47
+            }
+          }
+        }
+      ],
+      "sample_decision": {
+        "q18": {
+          "accepted": false,
+          "reasons": [
+            "window_0:mean",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.43306464114690113,
+          "encode_time_ratio": 0.973610800870023
+        },
+        "q23": {
+          "accepted": false,
+          "reasons": [
+            "window_0:floor",
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:floor",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.7470278077276806,
+          "encode_time_ratio": 0.9283343161222773
+        },
+        "q28": {
+          "accepted": false,
+          "reasons": [
+            "window_0:floor",
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:floor",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.8684159557618566,
+          "encode_time_ratio": 0.939519316039761
+        }
+      },
+      "chosen": "vbr",
+      "holdout": {
+        "start_seconds": 17,
+        "duration_seconds": 12,
+        "modes": {
+          "vbr": {
+            "bytes": 5896170,
+            "seconds": 4.7115651201456785,
+            "sha256": "846a9c09878fa4a0ba80cc7bbe0caf0c659dfa1b199785f2f9a554a6b6efef90",
+            "mean": 95.94143705226482,
+            "p10": 95.061352,
+            "frames": 287
+          }
+        }
+      },
+      "source_stat_stable": true
+    },
+    {
+      "identity": "real-sdr-2",
+      "excerpt_sha256": "77d03d1b30f73074a30b5b5349188560c3a76bbc4cb31bf431f5169e3f2bf3df",
+      "excerpt_bytes": 245227233,
+      "offset_seconds": 120,
+      "requested_excerpt_seconds": 60,
+      "source_probe": {
+        "codec_name": "h264",
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "field_order": "progressive",
+        "sample_aspect_ratio": "1:1",
+        "avg_frame_rate": "24/1"
+      },
+      "windows": [
+        {
+          "start_seconds": 9.097166666666666,
+          "frames": 48,
+          "modes": {
+            "vbr": {
+              "bytes": 1087841,
+              "seconds": 1.0778605549130589,
+              "sha256": "bee02ab477e2bde4420ee7b98a28ddb97701d97b851447a923c5033f9c57b2d7",
+              "mean": 90.48706079166668,
+              "p10": 86.651578,
+              "frames": 48
+            },
+            "q18": {
+              "bytes": 1913081,
+              "seconds": 1.178045934997499,
+              "sha256": "1bde1b8cc11c05f34082c524b1623e749f48cd216aa2d5e249d6f42358016810",
+              "mean": 93.50370279166667,
+              "p10": 91.579767,
+              "frames": 48
+            },
+            "q23": {
+              "bytes": 410009,
+              "seconds": 1.0321715069003403,
+              "sha256": "1043ccc1454e86f924a21b6466cfbf75c7fb61e73ea9edfe60388f3e188cf2d2",
+              "mean": 87.43919470833333,
+              "p10": 83.949352,
+              "frames": 48
+            },
+            "q28": {
+              "bytes": 143470,
+              "seconds": 0.9859174119774252,
+              "sha256": "9507ea7909d67fe56498775c253e647d33e5aed1b679b00ee9d34cfc650b303e",
+              "mean": 76.93591804166667,
+              "p10": 70.076673,
+              "frames": 48
+            }
+          }
+        },
+        {
+          "start_seconds": 29.2915,
+          "frames": 48,
+          "modes": {
+            "vbr": {
+              "bytes": 997284,
+              "seconds": 1.1744469851255417,
+              "sha256": "a21d8f7eb5ff166b188c4efc5141dc165e8ae2c739053a69e13c4f6976103d0e",
+              "mean": 92.33346593750001,
+              "p10": 87.631052,
+              "frames": 48
+            },
+            "q18": {
+              "bytes": 1878277,
+              "seconds": 1.2498718940187246,
+              "sha256": "eb7adb8fc35d2e6355e7b00cd12596bcd9237e25162655ca35ab28a9eef897fb",
+              "mean": 96.64451110416667,
+              "p10": 91.322845,
+              "frames": 48
+            },
+            "q23": {
+              "bytes": 724072,
+              "seconds": 1.179116018814966,
+              "sha256": "19b583ff6998368f7a25ebb16033cf0a6a27eab2c0211917bdf8e1fee78f85de",
+              "mean": 90.98710089583334,
+              "p10": 85.941294,
+              "frames": 48
+            },
+            "q28": {
+              "bytes": 338987,
+              "seconds": 1.1335037611424923,
+              "sha256": "dd6db7eed26717ab228b99c1a5da6ced88a5d144f273863314b2cb948b87b86d",
+              "mean": 80.0319975,
+              "p10": 74.472708,
+              "frames": 48
+            }
+          }
+        },
+        {
+          "start_seconds": 49.485833333333325,
+          "frames": 48,
+          "modes": {
+            "vbr": {
+              "bytes": 960751,
+              "seconds": 1.0650739469565451,
+              "sha256": "1f70b5f8cd01fe86c072f0f8da42268352a49c124896049ff3bb22a7f096a83c",
+              "mean": 94.16075124999999,
+              "p10": 91.837146,
+              "frames": 48
+            },
+            "q18": {
+              "bytes": 1291468,
+              "seconds": 1.0922117361333221,
+              "sha256": "472150b145259ca5aff949acdb4e01aba740531d6c6eb828f19ea96e59f27992",
+              "mean": 95.661083625,
+              "p10": 93.061629,
+              "frames": 48
+            },
+            "q23": {
+              "bytes": 333480,
+              "seconds": 1.05415182095021,
+              "sha256": "64f6968abc2b281655b7f34fa15e2c9a77d5bb0f9fce4535ece9729659ab75c1",
+              "mean": 89.7547200625,
+              "p10": 86.789071,
+              "frames": 48
+            },
+            "q28": {
+              "bytes": 145370,
+              "seconds": 1.0082807769067585,
+              "sha256": "19d9369f9e236a3023a47679b1aef7e056848b2f0a0573e3fe6f51445195982f",
+              "mean": 79.70185641666667,
+              "p10": 76.030273,
+              "frames": 48
+            }
+          }
+        }
+      ],
+      "sample_decision": {
+        "q18": {
+          "accepted": false,
+          "reasons": [
+            "bytes"
+          ],
+          "byte_savings": -0.668756705788417,
+          "encode_time_ratio": 1.0611169016735689
+        },
+        "q23": {
+          "accepted": false,
+          "reasons": [
+            "window_0:floor",
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:floor",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.5181809765072511,
+          "encode_time_ratio": 0.9843424277451196
+        },
+        "q28": {
+          "accepted": false,
+          "reasons": [
+            "window_0:floor",
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:floor",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.7938763757946811,
+          "encode_time_ratio": 0.9428225129632951
+        }
+      },
+      "chosen": "vbr",
+      "holdout": {
+        "start_seconds": 17,
+        "duration_seconds": 12,
+        "modes": {
+          "vbr": {
+            "bytes": 6440325,
+            "seconds": 5.858885989990085,
+            "sha256": "e95f5cc21faff5f21784ed6a2d270f0803bc42159ddcd7628c6b7bac497a03b2",
+            "mean": 93.54655425347222,
+            "p10": 87.946624,
+            "frames": 288
+          }
+        }
+      },
+      "source_stat_stable": true
+    },
+    {
+      "identity": "real-sdr-3",
+      "excerpt_sha256": "9c956710938f488f9ab6856c17d879d8dd66c9345c8f705ada7510705d38bdf3",
+      "excerpt_bytes": 86327916,
+      "offset_seconds": 120,
+      "requested_excerpt_seconds": 60,
+      "source_probe": {
+        "codec_name": "h264",
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "field_order": "progressive",
+        "sample_aspect_ratio": "1:1",
+        "avg_frame_rate": "30000/1001"
+      },
+      "windows": [
+        {
+          "start_seconds": 9.204666666666666,
+          "frames": 59,
+          "modes": {
+            "vbr": {
+              "bytes": 939478,
+              "seconds": 1.1520978480111808,
+              "sha256": "6a933f45952b7b1d70e24e69c7c503ae8959619e9ec3b166ff02b72683a9b96e",
+              "mean": 98.82290122033898,
+              "p10": 97.636397,
+              "frames": 59
+            },
+            "q18": {
+              "bytes": 569369,
+              "seconds": 1.085954749956727,
+              "sha256": "fbb01d163c027137592552479b797f9f1bd1155d556b95720f3218605eef8a98",
+              "mean": 97.71184816949153,
+              "p10": 95.898964,
+              "frames": 59
+            },
+            "q23": {
+              "bytes": 208611,
+              "seconds": 1.0693577039055526,
+              "sha256": "1fcb8b27c6074de897400a2922f1a563e9a365f89861dd13c614f68775757c7c",
+              "mean": 92.62060416949153,
+              "p10": 90.511822,
+              "frames": 59
+            },
+            "q28": {
+              "bytes": 104619,
+              "seconds": 1.0570945530198514,
+              "sha256": "30d4487dd71ebc60cb4d8757e6afdaac46166d9c23e50a91681aa854c1f2db15",
+              "mean": 82.79744383050848,
+              "p10": 80.164229,
+              "frames": 59
+            }
+          }
+        },
+        {
+          "start_seconds": 29.614,
+          "frames": 59,
+          "modes": {
+            "vbr": {
+              "bytes": 926712,
+              "seconds": 1.1522517269477248,
+              "sha256": "a0cfcc57c5c2c05ec115891de5103df8c7ba615ae6916cd7678573bb16300b9a",
+              "mean": 93.9033366101695,
+              "p10": 91.089253,
+              "frames": 59
+            },
+            "q18": {
+              "bytes": 617874,
+              "seconds": 1.1027340390719473,
+              "sha256": "2b8951f294427de39f447796b7cdb82981c8cc35a82ea1e7329c5fde61c1f0e8",
+              "mean": 92.99500923728813,
+              "p10": 91.563028,
+              "frames": 59
+            },
+            "q23": {
+              "bytes": 209076,
+              "seconds": 1.0447493370156735,
+              "sha256": "a3df6f255f3ca9fa16a856a9d19a24c6ee76a0d98de9f6ae290d9add61f528f0",
+              "mean": 87.46354962711864,
+              "p10": 85.296847,
+              "frames": 59
+            },
+            "q28": {
+              "bytes": 84473,
+              "seconds": 1.0168353768531233,
+              "sha256": "c6bee2348c10a38aa743c1d57eca72a79241209381be58dda473daf0d2ec0cb9",
+              "mean": 78.01743083050847,
+              "p10": 75.040621,
+              "frames": 59
+            }
+          }
+        },
+        {
+          "start_seconds": 50.02333333333333,
+          "frames": 59,
+          "modes": {
+            "vbr": {
+              "bytes": 870094,
+              "seconds": 1.055225963005796,
+              "sha256": "022fa9b894198618aa7771c8c17394ba734cbfa7bf5906d3229050aff9529fa1",
+              "mean": 93.71525928813558,
+              "p10": 91.304986,
+              "frames": 59
+            },
+            "q18": {
+              "bytes": 583606,
+              "seconds": 1.0493680909276009,
+              "sha256": "0c08c0d3ee4b8532510319f36b5e7ad102c855016f072636659d1ddaa3e8ca63",
+              "mean": 92.74517830508474,
+              "p10": 91.519545,
+              "frames": 59
+            },
+            "q23": {
+              "bytes": 201943,
+              "seconds": 1.005821282044053,
+              "sha256": "3c223e19aae86bbbe368c20181d81fca6b60147ad0c35256411bd6e579dc510e",
+              "mean": 87.29842662711864,
+              "p10": 85.542082,
+              "frames": 59
+            },
+            "q28": {
+              "bytes": 83374,
+              "seconds": 1.0248217938933522,
+              "sha256": "29d80ee78866ccff59065edc684b8cf86593063d2381789e2c5c34b0d0e5efcf",
+              "mean": 77.92226101694916,
+              "p10": 75.352755,
+              "frames": 59
+            }
+          }
+        }
+      ],
+      "sample_decision": {
+        "q18": {
+          "accepted": false,
+          "reasons": [
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_2:floor",
+            "window_2:mean"
+          ],
+          "byte_savings": 0.35282704573063317,
+          "encode_time_ratio": 0.9638291633466158
+        },
+        "q23": {
+          "accepted": false,
+          "reasons": [
+            "window_0:floor",
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:floor",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.7735505525011293,
+          "encode_time_ratio": 0.9286674128051886
+        },
+        "q28": {
+          "accepted": false,
+          "reasons": [
+            "window_0:floor",
+            "window_0:mean",
+            "window_0:p10",
+            "window_1:floor",
+            "window_1:mean",
+            "window_1:p10",
+            "window_2:floor",
+            "window_2:mean",
+            "window_2:p10"
+          ],
+          "byte_savings": 0.9004248097054253,
+          "encode_time_ratio": 0.9223640572295668
+        }
+      },
+      "chosen": "vbr",
+      "holdout": {
+        "start_seconds": 17,
+        "duration_seconds": 12,
+        "modes": {
+          "vbr": {
+            "bytes": 6064644,
+            "seconds": 5.950125894974917,
+            "sha256": "c9ac849444c2d01fed216e06999847c40841a0b9ffa3b7cc45ae8c827d7b0cfb",
+            "mean": 95.5349941281337,
+            "p10": 93.986393,
+            "frames": 359
+          }
+        }
+      },
+      "source_stat_stable": true
+    }
+  ],
+  "cleanup": {
+    "container_removed": true,
+    "private_media_removed": true
+  },
+  "limits": [
+    "60-second copied excerpts, not whole-film guarantee",
+    "isolated current shipping encoder/scorer; no durable cache/offline owner invocation",
+    "single encode timing per recipe; not fleet throughput",
+    "no private media exported"
+  ],
+  "image": "sha256:e7f036e7d1c40d407f20f178c68e857b79f1828b62c921236272a24c2c303cec",
+  "tools": {
+    "encoder": "ffmpeg version 8.1.3-Jellyfin Copyright (c) 2000-2026 the FFmpeg developers",
+    "probe": "ffprobe version 8.1.3-Jellyfin Copyright (c) 2007-2026 the FFmpeg developers",
+    "scorer": "ffmpeg version 8.1.3 Copyright (c) 2000-2026 the FFmpeg developers"
+  },
+  "recipes": {
+    "vbr": [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-b:v",
+      "4000k",
+      "-maxrate",
+      "6000k",
+      "-bufsize",
+      "8000k",
+      "-profile:v",
+      "high",
+      "-threads",
+      "2"
+    ],
+    "q18": [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "18",
+      "-maxrate",
+      "6000k",
+      "-bufsize",
+      "8000k",
+      "-profile:v",
+      "high",
+      "-threads",
+      "2"
+    ],
+    "q23": [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-maxrate",
+      "6000k",
+      "-bufsize",
+      "8000k",
+      "-profile:v",
+      "high",
+      "-threads",
+      "2"
+    ],
+    "q28": [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "28",
+      "-maxrate",
+      "6000k",
+      "-bufsize",
+      "8000k",
+      "-profile:v",
+      "high",
+      "-threads",
+      "2"
+    ]
+  },
+  "status": "measured"
+}

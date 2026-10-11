@@ -49,6 +49,7 @@ pub(super) fn master_playlist(
         context,
         MasterRungs::active(),
         MasterShape::default(),
+        None,
     )
 }
 
@@ -98,7 +99,7 @@ pub(super) fn master_playlist_diagnostic(
         },
         _ => MasterShape::default(),
     };
-    master_playlist_with_shape(file, selected, context, MasterRungs::active(), shape)
+    master_playlist_with_shape(file, selected, context, MasterRungs::active(), shape, None)
 }
 
 #[cfg(test)]
@@ -108,43 +109,28 @@ pub(super) fn master_playlist_with(
     context: &crate::transcode::HlsContext,
     rungs: MasterRungs,
 ) -> String {
-    master_playlist_with_shape(file, selected, context, rungs, MasterShape::default())
+    master_playlist_with_shape(file, selected, context, rungs, MasterShape::default(), None)
 }
 
-fn master_playlist_with_shape(
+fn native_subtitle_media(
     file: &MediaFile,
     selected: Option<i64>,
-    context: &crate::transcode::HlsContext,
     rungs: MasterRungs,
-    shape: MasterShape,
+    admitted: Option<&std::collections::BTreeSet<u16>>,
 ) -> String {
     let native: Vec<(usize, &SubtitleStream)> = file
         .subtitle_streams
         .iter()
         .enumerate()
-        .filter(|(_, track)| is_native_text_subtitle(&track.codec))
+        .filter(|(index, track)| {
+            is_native_text_subtitle(&track.codec)
+                && admitted
+                    .is_none_or(|set| u16::try_from(*index).is_ok_and(|index| set.contains(&index)))
+        })
         .collect();
     let names = unique_subtitle_names(&native);
-    // Copy/remux sessions can contain open GOPs, so the video rendition does
-    // not promise independently decodable segments. The master must not make
-    // that stronger claim on its behalf: AVPlayer acts on it at a resume
-    // boundary and can reject an otherwise playable copied HEVC/DV stream.
-    // SUPPLEMENTAL-CODECS was introduced at HLS compatibility version 10.
-    // Advertising it from a version-7 master makes AVPlayer reject the
-    // otherwise valid Profile 8.1/8.4 rendition during item preparation, and
-    // the Apple client then takes its final H.264/SDR compatibility fallback.
-    // Keep ordinary masters at version 7; only the enhanced-codec declaration
-    // needs the newer contract.
-    let compatibility_version = if shape.codecs && context.supplemental_codecs.is_some() {
-        10
-    } else {
-        7
-    };
-    let mut out = format!("#EXTM3U\n#EXT-X-VERSION:{compatibility_version}\n");
+    let mut out = String::new();
     for (ordinal, (index, track)) in native.iter().enumerate() {
-        if !shape.subtitles {
-            break;
-        }
         // The query describes this player's selection. No selected index is
         // an explicit Off, not permission to resurrect a foreign-language
         // container default behind the client's back.
@@ -192,6 +178,80 @@ fn master_playlist_with_shape(
             if forced { "YES" } else { "NO" },
             characteristics,
         ));
+    }
+    out
+}
+
+/// Preserve every verified video/audio declaration and attach only the common
+/// native text group. Source bitrate/raster never replace family media facts.
+pub(super) fn continuous_master_with_subtitles(
+    bytes: Vec<u8>,
+    file: &MediaFile,
+    selected: Option<i64>,
+) -> Result<Vec<u8>, String> {
+    let subtitles = native_subtitle_media(file, selected, MasterRungs::active(), None);
+    if subtitles.is_empty() {
+        return Ok(bytes);
+    }
+    let master =
+        String::from_utf8(bytes).map_err(|_| "continuous master is not UTF-8".to_owned())?;
+    let mut out = String::new();
+    let mut inserted = false;
+    for line in master.lines() {
+        if line.starts_with("#EXT-X-STREAM-INF:") {
+            if !inserted {
+                out.push_str(&subtitles);
+                inserted = true;
+            }
+            out.push_str(line);
+            out.push_str(",SUBTITLES=\"subs\"\n");
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !inserted {
+        return Err("continuous master has no video variants".into());
+    }
+    Ok(out.into_bytes())
+}
+
+fn master_playlist_with_shape(
+    file: &MediaFile,
+    selected: Option<i64>,
+    context: &crate::transcode::HlsContext,
+    rungs: MasterRungs,
+    shape: MasterShape,
+    admitted: Option<&std::collections::BTreeSet<u16>>,
+) -> String {
+    let native: Vec<(usize, &SubtitleStream)> = file
+        .subtitle_streams
+        .iter()
+        .enumerate()
+        .filter(|(index, track)| {
+            is_native_text_subtitle(&track.codec)
+                && admitted
+                    .is_none_or(|set| u16::try_from(*index).is_ok_and(|index| set.contains(&index)))
+        })
+        .collect();
+    // Copy/remux sessions can contain open GOPs, so the video rendition does
+    // not promise independently decodable segments. The master must not make
+    // that stronger claim on its behalf: AVPlayer acts on it at a resume
+    // boundary and can reject an otherwise playable copied HEVC/DV stream.
+    // SUPPLEMENTAL-CODECS was introduced at HLS compatibility version 10.
+    // Advertising it from a version-7 master makes AVPlayer reject the
+    // otherwise valid Profile 8.1/8.4 rendition during item preparation, and
+    // the Apple client then takes its final H.264/SDR compatibility fallback.
+    // Keep ordinary masters at version 7; only the enhanced-codec declaration
+    // needs the newer contract.
+    let compatibility_version = if shape.codecs && context.supplemental_codecs.is_some() {
+        10
+    } else {
+        7
+    };
+    let mut out = format!("#EXTM3U\n#EXT-X-VERSION:{compatibility_version}\n");
+    if shape.subtitles {
+        out.push_str(&native_subtitle_media(file, selected, rungs, admitted));
     }
     let bandwidth = file.bitrate.unwrap_or(25_000_000).max(128_000);
     let (peak, average) = context
@@ -246,6 +306,22 @@ fn master_playlist_with_shape(
                 ));
             }
         }
+    } else if shape.codecs {
+        // SDR (S-10). Before S-10 this branch did not exist and SDR variants
+        // carried no CODECS at all — the shape AVPlayer, Media3 and hls.js
+        // were qualified against. AVPlayer filters variants on CODECS before
+        // it fetches a byte, so a wrong string silently removes the rung.
+        // Printing therefore needs both complete frozen component facts and
+        // the session's frozen `playback.sdr_master_codecs` choice (Settings
+        // → Developer, default off), read once when the session was created.
+        // The HDR branch above is untouched by that switch.
+        if let Some(codecs) = context
+            .codec_facts
+            .as_ref()
+            .and_then(crate::transcode::FrozenHlsCodecFacts::sdr_master_codecs)
+        {
+            out.push_str(&format!(",CODECS=\"{}\"", quoted(&codecs)));
+        }
     }
     // Unconditional. None of these variants carries a caption track, and
     // Apple's authoring rules say a variant with no captions must say so.
@@ -272,6 +348,7 @@ fn master_playlist_with_shape(
 #[derive(Debug, Clone, PartialEq)]
 struct SubtitleWindow {
     sequence: u64,
+    discontinuities: u64,
     start_seconds: f64,
     end_seconds: f64,
     duration: f64,
@@ -281,6 +358,7 @@ struct SubtitleWindow {
 struct SubtitleTimeline {
     target_duration: u64,
     media_sequence: u64,
+    discontinuity_sequence: Option<u64>,
     playlist_type: Option<String>,
     endlist: bool,
     segments: Vec<SubtitleWindow>,
@@ -290,6 +368,8 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
     let text = String::from_utf8_lossy(video_playlist);
     let mut target_duration = 1;
     let mut media_sequence = 0;
+    let mut discontinuity_sequence = None;
+    let mut discontinuities = 0;
     let mut playlist_type = None;
     let mut pending_duration = None;
     let mut durations = Vec::new();
@@ -299,6 +379,10 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
             target_duration = value.parse().unwrap_or(1).max(1);
         } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
             media_sequence = value.parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+            discontinuity_sequence = value.parse().ok();
+        } else if line == "#EXT-X-DISCONTINUITY" {
+            discontinuities += 1;
         } else if let Some(value) = line.strip_prefix("#EXT-X-PLAYLIST-TYPE:") {
             playlist_type = Some(value.to_owned());
         } else if let Some(value) = line.strip_prefix("#EXTINF:") {
@@ -311,7 +395,8 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
             endlist = true;
         } else if !line.is_empty() && !line.starts_with('#') {
             if let Some(duration) = pending_duration.take().filter(|value| *value > 0.0) {
-                durations.push(duration);
+                durations.push((duration, discontinuities));
+                discontinuities = 0;
             }
         }
     }
@@ -320,10 +405,11 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
     let segments = durations
         .into_iter()
         .enumerate()
-        .map(|(ordinal, duration)| {
+        .map(|(ordinal, (duration, discontinuities))| {
             let end_seconds = start_seconds + duration;
             let window = SubtitleWindow {
                 sequence: media_sequence + ordinal as u64,
+                discontinuities,
                 start_seconds,
                 end_seconds,
                 duration,
@@ -335,6 +421,7 @@ fn subtitle_timeline(video_playlist: &[u8]) -> SubtitleTimeline {
     SubtitleTimeline {
         target_duration,
         media_sequence,
+        discontinuity_sequence,
         playlist_type,
         endlist,
         segments,
@@ -347,10 +434,18 @@ pub(super) fn subtitle_media_playlist(video_playlist: &[u8]) -> String {
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n",
         timeline.target_duration, timeline.media_sequence
     );
+    if let Some(sequence) = timeline.discontinuity_sequence {
+        out.push_str(&format!("#EXT-X-DISCONTINUITY-SEQUENCE:{sequence}\n"));
+    }
     if let Some(kind) = &timeline.playlist_type {
         out.push_str(&format!("#EXT-X-PLAYLIST-TYPE:{kind}\n"));
     }
     for window in &timeline.segments {
+        // Renditions synchronize by discontinuity epoch as well as time. A
+        // takeover or pruned boundary must remain identical to the video.
+        for _ in 0..window.discontinuities {
+            out.push_str("#EXT-X-DISCONTINUITY\n");
+        }
         out.push_str(&format!(
             "#EXTINF:{:.6},\nseg{:05}.vtt\n",
             window.duration, window.sequence
@@ -465,4 +560,53 @@ pub(super) fn slice_webvtt(
     let mut out = shifted.join("\n\n");
     out.push_str("\n\n");
     out.into_bytes()
+}
+
+/// Pure projection for already admitted Source artifacts; no authority or
+/// extraction is minted here. Local callers retain their original track set.
+pub(crate) fn source_native_master(
+    file: &MediaFile,
+    selected: Option<i64>,
+    context: &crate::transcode::HlsContext,
+    admitted: &std::collections::BTreeSet<u16>,
+) -> Vec<u8> {
+    master_playlist_with_shape(
+        file,
+        selected,
+        context,
+        MasterRungs::active(),
+        MasterShape::default(),
+        Some(admitted),
+    )
+    .into_bytes()
+}
+pub(crate) fn source_native_playlist(video: &[u8]) -> Vec<u8> {
+    subtitle_media_playlist(video).into_bytes()
+}
+pub(crate) fn source_native_segment(
+    video: &[u8],
+    track: &[u8],
+    sequence: u64,
+    origin: f64,
+) -> Option<Vec<u8>> {
+    if !origin.is_finite() || origin < 0.0 {
+        return None;
+    }
+    let timeline = subtitle_timeline(video);
+    let window = timeline
+        .segments
+        .iter()
+        .find(|window| window.sequence == sequence)?;
+    if !window.start_seconds.is_finite()
+        || !window.end_seconds.is_finite()
+        || window.end_seconds <= window.start_seconds
+    {
+        return None;
+    }
+    Some(slice_webvtt(
+        track,
+        origin,
+        window.start_seconds,
+        window.end_seconds,
+    ))
 }

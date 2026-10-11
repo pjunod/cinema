@@ -104,6 +104,13 @@ class LiveTvPlayer private constructor(context: Context) {
     private var heartbeat: Job? = null
     private var guideRefresh: Job? = null
     private var channelChange: Job? = null
+    private val remoteChannels = tv.plurx.app.remote.RemoteChannelAdmission()
+    internal val remoteOwnerToken = java.util.UUID.randomUUID().toString()
+    internal fun cancelRemoteChannelGesture() { remoteChannels.retire() }
+    internal suspend fun admitRemoteChannel(channel: LiveTvChannel, permitted: () -> Boolean): tv.plurx.app.remote.RemoteOutcome = remoteChannels.run(LiveTvInputPolicy.CHANNEL_COALESCE_MS, permitted) {
+        if (!permitted() || api == null || lease == null || !channel.watchable || mutableState.value.channels.none { it == channel }) false
+        else { watch(channel, remoteInvocation = true); true }
+    }
     private var tuneJob: Job? = null
     private var displayModeActivity: Activity? = null
     private var displayModeMatcher: DisplayModeMatcher? = null
@@ -184,7 +191,8 @@ class LiveTvPlayer private constructor(context: Context) {
         }
     }
 
-    fun watch(channel: LiveTvChannel, compatibilityRetry: Boolean = false) {
+    fun watch(channel: LiveTvChannel, compatibilityRetry: Boolean = false, remoteInvocation: Boolean = false) {
+        if (!remoteInvocation) cancelRemoteChannelGesture()
         if (!channel.watchable) return
         val api = api ?: return
         val lease = lease ?: return
@@ -499,6 +507,14 @@ class LiveTvPlayer private constructor(context: Context) {
         watch(channel)
     }
 
+    fun requestRemotePlaying(requested: Boolean): Boolean {
+        val output = player ?: return false
+        if (!mutableState.value.playing || mutableState.value.busy) return false
+        if (requested) output.play() else output.pause()
+        mutableState.value = mutableState.value.copy(paused = !requested)
+        return true
+    }
+
     fun togglePause() {
         val output = player ?: return
         val paused = output.playWhenReady
@@ -641,6 +657,7 @@ class LiveTvPlayer private constructor(context: Context) {
      * cancel rather than queue, so a channel-surf ends in exactly one start.
      */
     fun requestChannel(channel: LiveTvChannel) {
+        cancelRemoteChannelGesture()
         channelChange?.cancel()
         channelChange = scope.launch {
             delay(LiveTvInputPolicy.CHANNEL_COALESCE_MS)
@@ -683,6 +700,10 @@ class LiveTvPlayer private constructor(context: Context) {
 
     fun airing(channel: LiveTvChannel, now: Long = System.currentTimeMillis() / 1000): LiveTvAiring =
         LiveTvGuideReducer.airing(mutableState.value.guide, channel.id, now)
+
+    /** The station's logo address from the guide, or null for the callsign. */
+    fun stationLogo(channel: LiveTvChannel): String? =
+        LiveTvGuideReducer.stationLogoUrl(mutableState.value.guide, channel.id)
 
     /** Drop observations at 20 minutes or the programme that owned them, whichever ends first. */
     fun expireSourceFormats(now: Long) {

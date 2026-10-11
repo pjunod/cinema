@@ -118,9 +118,17 @@ test("the VOD mode writes one compact JSON artifact and no JUnit sidecar", async
         caps: { vcodec: "h264", acodec: "aac", hdr: 0 },
         native_hls: false,
       }),
-      api: async (_base, route) => route.startsWith("/system/logs")
-        ? [{ ts_ms: playbackRequestAt + 150, level: "INFO", message: "vod session attached" }]
-        : { version: "contract" },
+      // The lab counts VOD attachments from the durable lifecycle stream
+      // (83678cb4d), not the bounded console ring.
+      api: async (_base, route) => {
+        if (route.startsWith("/system/playback-events")) {
+          return [{ event: "session_start", encoder: "vod", file_id: 7,
+            at_unix_ms: playbackRequestAt + 150, extra: '{"presentation":"vod"}' }];
+        }
+        return route.startsWith("/system/logs")
+          ? [{ ts_ms: playbackRequestAt + 150, level: "INFO", message: "vod session attached" }]
+          : { version: "contract" };
+      },
       runOneCase: async (_driver, _server, _manifest, _fixture, testCase) => {
         playbackRequestAt = Date.now();
         return {

@@ -68,8 +68,8 @@ const PLAY_OPEN_GATE=createPlaybackOpenGate();
 // Network preparation has one absolute lifetime, separate from presentation.
 // A moving predecessor cannot extend it. Cancellation/timeout settles even a
 // transport that ignores abort, and its eventual session result is released.
-function beginPlaybackPreparation(isCurrent){
-  beginPlaybackPreparation.active?.cancel();
+function beginPlaybackPreparation(isCurrent,{background=false}={}){
+  if(!background) beginPlaybackPreparation.active?.cancel();
   const controller=new AbortController(), began=performance.now();
   let abandoned=false, rejectPending=null;
   const cancelled=()=>Object.assign(new Error("Playback preparation superseded."),{name:"AbortError"});
@@ -120,7 +120,7 @@ function beginPlaybackPreparation(isCurrent){
       }finally{clearTimeout(timer);rejectPending=null;}
     }
   };
-  beginPlaybackPreparation.active=owner;
+  if(!background) beginPlaybackPreparation.active=owner;
   return owner;
 }
 // Set by a caller that is about to re-enter play() for a reason play()
@@ -164,52 +164,86 @@ function playbackContext(){
     // measures min(link speed, encode speed) — which is exactly why a stall
     // needs the server's own `speed` reading beside it to say which one ran out.
     bandwidth:(p.hls&&p.hls.bandwidthEstimate)?Math.round(p.hls.bandwidthEstimate/1000):null,
-    // Whether this machine is decoding in hardware. `powerEfficient` is the
-    // browser's own word for it, and it is the difference between two failures
-    // that look identical from every other number here: a full buffer with
-    // late frames because the link is fine and the GPU is doing the work, and
-    // a full buffer with late frames because a CPU is software-decoding 4K.
-    // Nothing else in the beacon can tell those apart, and asking the operator
-    // which machine the browser is on has not worked.
-    decode_hw:p.decodeInfo?p.decodeInfo.hw:null,
-    decode_smooth:p.decodeInfo?p.decodeInfo.smooth:null,
+    // MediaCapabilities predicts support/efficiency; it cannot identify the
+    // active platform decoder. Keep the legacy hardware identity unknown.
+    decode_hw:null,
+    decode_supported:currentDecodePrediction(p)?.supported??null,
+    decode_smooth:currentDecodePrediction(p)?.smooth??null,
+    decode_power_efficient:currentDecodePrediction(p)?.powerEfficient??null,
   };
 }
-// Ask the browser what it will do with this stream, before it does it.
-//
-// mediaCapabilities is the only API that answers "will this be hardware
-// decoded" — `smooth` and `powerEfficient` are computed from the real codec,
-// resolution, framerate and bitrate rather than from a codec string alone, so
-// it distinguishes 1080p HEVC (fine nearly everywhere) from 4K HEVC at 69 Mb/s
-// (fine almost nowhere without a GPU path). Best-effort: a browser without it,
-// or one that throws on an odd configuration, leaves the field null rather
-// than blocking playback on a diagnostic.
+// A diagnostic query requires an evidenced output tuple. SourceSummary carries
+// codec names, not an RFC 6381 profile/level string or a video-track bitrate;
+// using its original codec for a transcode (or inventing a ladder entry) probes
+// a different stream. Until progressive/native HLS exposes equivalent facts,
+// its prediction is unavailable. HLS representation attributes are declarations,
+// not proof of the active hardware decoder.
+function decodePredictionTuple(p){
+  const hls=p&&p.hls;
+  const index=hls&&hls.currentLevel;
+  const level=hls&&hls.levels&&hls.levels[index];
+  if(!level) return null;
+  const codec=String(level.videoCodec||"");
+  if(!/^(?:avc[13]\.[0-9a-f]{6}|(?:hvc1|hev1|av01|vp09|dvh1|dvhe)\.[a-z0-9.]+)$/i.test(codec)) return null;
+  const width=Number(level.width),height=Number(level.height);
+  const bitrate=Number(level.bitrate);
+  const framerate=Number(level.attrs&&level.attrs["FRAME-RATE"]);
+  if(![width,height,bitrate,framerate].every(value=>Number.isFinite(value)&&value>0)) return null;
+  const video={contentType:`video/mp4; codecs="${codec}"`,width,height,bitrate,framerate};
+  return {config:{type:"media-source",video},
+    key:JSON.stringify([index,codec,width,height,bitrate,framerate]),
+    provenance:"HLS representation declaration"};
+}
+function currentDecodePrediction(p){
+  const tuple=decodePredictionTuple(p);
+  if(!playbackOwnsAttachedMedia(p)||!p.decodeInfo||
+      p.decodeInfo.attachment!==p.mediaAttachment||!tuple||p.decodeInfo.key!==tuple.key){
+    if(p) p.decodeInfo=null;
+    return null;
+  }
+  return p.decodeInfo;
+}
+function decodePredictionLabel(p){
+  const prediction=currentDecodePrediction(p);
+  if(!prediction) return "Unknown · MediaCapabilities prediction unavailable";
+  const word=value=>value===null?"unknown":value?"yes":"no";
+  return `Active decoder unknown · MediaCapabilities prediction: supported ${word(prediction.supported)} · smooth ${word(prediction.smooth)} · power efficient ${word(prediction.powerEfficient)} · ${prediction.provenance}`;
+}
+// Existing media events refresh diagnostics, never control or poll playback.
+// Every request has a generation and tuple fence in addition to attachment
+// ownership so an earlier representation's answer cannot become current.
 async function probeDecode(){
   const p=PLAYER; if(!playbackOwnsAttachedMedia(p)) return;
   const attachment=p.mediaAttachment;
-  const src=p.source||{};
-  // Same ladder the transport choice uses, for the same reason: `codec[0]` is
-  // what gets asked about, and on a 10-bit source the honest question is the
-  // Main10 one. Asking a Main (8-bit) string about a Main10 file would have
-  // this diagnostic report a decoder that is not the one doing the work.
-  const codec=MSE_VIDEO[mseCodecKey(src.video_codec, src.bit_depth)];
-  if(!codec || !navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) return;
-  const v=document.getElementById("video");
-  const cfg={
-    type:p.hls?"media-source":"file",
-    video:{
-      contentType:`video/mp4; codecs="${codec[0]}"`,
-      width:(v&&v.videoWidth)||src.width||1920,
-      height:(v&&v.videoHeight)||src.height||1080,
-      bitrate:Math.max(1, src.bitrate||5000000),
-      framerate:24,
-    },
-  };
+  const hls=p.hls;
+  if(hls&&(p.decodeProbeOwner?.hls!==hls||p.decodeProbeOwner?.attachment!==attachment)){
+    p.decodeProbeOwner={hls,attachment};
+    const refresh=()=>{if(playbackOwnsAttachedMedia(p)&&p.mediaAttachment===attachment&&p.hls===hls) probeDecode();};
+    for(const event of [Hls.Events.FRAG_CHANGED,Hls.Events.LEVEL_SWITCHED,Hls.Events.LEVEL_LOADED]){
+      if(event) hls.on(event,refresh);
+    }
+  }
+  const tuple=decodePredictionTuple(p);
+  if(tuple&&currentDecodePrediction(p)) return;
+  if(tuple&&p.decodeProbePending?.attachment===attachment&&p.decodeProbePending.key===tuple.key) return;
+  const generation=(p.decodeProbeGeneration||0)+1;
+  p.decodeProbeGeneration=generation;
+  p.decodeInfo=null;
+  const mc=navigator.mediaCapabilities;
+  if(!tuple||!mc||typeof mc.decodingInfo!=="function") return;
+  p.decodeProbePending={attachment,key:tuple.key,generation};
   try{
-    const r=await navigator.mediaCapabilities.decodingInfo(cfg);
-    if(playbackOwnsAttachedMedia(p)&&p.mediaAttachment===attachment)
-      p.decodeInfo={supported:!!r.supported, smooth:!!r.smooth, hw:!!r.powerEfficient};
+    const r=await mc.decodingInfo(tuple.config);
+    const current=decodePredictionTuple(p);
+    if(playbackOwnsAttachedMedia(p)&&p.mediaAttachment===attachment&&p.hls===hls&&
+        p.decodeProbeGeneration===generation&&current&&current.key===tuple.key){
+      const nullable=value=>typeof value==="boolean"?value:null;
+      p.decodeInfo={supported:nullable(r&&r.supported),smooth:nullable(r&&r.smooth),
+        powerEfficient:nullable(r&&r.powerEfficient),attachment,key:tuple.key,
+        provenance:tuple.provenance};
+    }
   }catch(e){}
+  finally{if(p.decodeProbePending?.generation===generation) p.decodeProbePending=null;}
 }
 function reportTtff(){
   const p=PLAYER; if(!playbackOwnsAttachedMedia(p)||!p.playStartedAt) return;
@@ -313,6 +347,7 @@ function endWait(resumed){
   const reportedMs=Number(p.waitReportedMs)||0;
   const reportedDetail=p.waitReportedDetail||"persistent";
   p.waitAt=null; p.waitStartedRunway=null; p.waitNudgedAt=null; p.waitReported=false;
+  if(p.abr) p.abr.controlStallVerdict=null;
   p.waitReportedMs=null; p.waitReportedDetail=null;
   if(reported){
     // persistentWait already reported this stall, while it was still frozen,
@@ -485,6 +520,7 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       control_trigger:controlTrigger,wait_started_runway:startedRunway,
       current_runway:currentRunway});
   }
+  if(p.abr) p.abr.controlStallVerdict=null;
   if(verdict&&verdict.type==="terminal"){
     // Ruling D1: the verdict is armed, not executed. Everything this player
     // had buffered is already spent — that is what a persistent wait means —
@@ -504,6 +540,11 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       title:verdictText,detail:"Your place is saved.",
       actions:playbackStallActions(p,"stall-terminal")});
     return;
+  }
+  if(kind==="presentation"&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS
+    &&verdict&&["hold","retry_resource"].includes(verdict.type)&&p.abr){
+    p.abr.controlStallVerdict={waitAt:began,atMs:performance.now(),
+      untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
   }
   if(kind==="presentation"&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
     const remaining=CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs;
@@ -534,8 +575,9 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       // viewer's information. A client that only waited would leave a viewer
       // eight seconds into a frozen picture with no UI and no bound, forever.
       // The reopen is what a hold suppresses; the explanation is what it earns.
-      if(p.abr) p.abr.stallVerdictUntilMs=began+CONTROL_STALL_DEFER_DEADLINE_MS;
       p.stallDeferrals=(p.stallDeferrals||0)+1;
+      if(p.abr) p.abr.controlStallVerdict={waitAt:began,
+        atMs:performance.now(),untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
       clientLog({level:"info",event:"stall_recovery",detail:"deferred:hold",
         message:`server holds this stall (${verdict.reason}) — reopen deferred`,
         control_trigger:controlTrigger});
@@ -555,13 +597,14 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
      &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
-    if(p.abr) p.abr.stallVerdictUntilMs=began+CONTROL_STALL_DEFER_DEADLINE_MS;
     // Production stopped for something that may not recur, and named when to
     // look again. Pace to it rather than reopening — but bounded, because a
     // server that keeps saying "soon" is not distinguishable, from here, from
     // one that is never going to be ready, and today's path is better than an
     // unbounded wait.
     p.stallDeferrals=(p.stallDeferrals||0)+1;
+    if(p.abr) p.abr.controlStallVerdict={waitAt:began,
+      atMs:performance.now(),untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
     const again=Math.min(Math.max(verdict.after_ms,CONTROL_MIN_EXCHANGE_MS),PERSISTENT_STALL_MS);
     clientLog({level:"info",event:"stall_recovery",detail:"deferred:retry_resource",
       message:`server paces this stall (${verdict.reason}) — waiting ${(again/1000).toFixed(1)}s`+
@@ -743,10 +786,25 @@ function fmtAgo(unix){ if(!unix) return ""; const s=Math.max(0,Math.floor(Date.n
 function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 // Artwork with a graceful fallback: initials on a tinted card when there's
 // no poster (so a seasons grid never shows blank rectangles).
-function artHtml(it, cls){
+function gridPosterSource(it){
+  const src=it.poster;
+  if(it.kind==='photo'||typeof src!=='string'||!Array.isArray(it.poster_sizes)
+      ||!it.poster_sizes.includes('w300')
+      ||!it.poster_sizes.every(size=>['w300','w500','w780'].includes(size))) return src;
+  // Only the advertised poster endpoint opts in. Keep explicit size choices,
+  // revision/query identity and non-poster artwork unchanged.
+  if(!/^\/api\/v1\/images\/[^/?#]+(?:\?[^#]*)?(?:#.*)?$/.test(src)) return src;
+  const hashAt=src.indexOf('#');
+  const address=hashAt<0?src:src.slice(0,hashAt);
+  const fragment=hashAt<0?'':src.slice(hashAt);
+  const queryAt=address.indexOf('?');
+  if(queryAt>=0&&new URLSearchParams(address.slice(queryAt+1)).has('size')) return src;
+  return address+(queryAt<0?'?':'&')+'size=w300'+fragment;
+}
+function artHtml(it, cls, gridPoster=false){
   // A photo whose thumbnail hasn't been generated yet still has itself to
   // show — the endpoint falls back to the original.
-  const src=it.poster||it.backdrop||(it.kind==='photo'?`/api/v1/items/${it.id}/photo?size=thumb`:null);
+  const src=(gridPoster?gridPosterSource(it):it.poster)||it.backdrop||(it.kind==='photo'?`/api/v1/items/${it.id}/photo?size=thumb`:null);
   // `decoding="async"` keeps a grid of posters off the main thread's critical
   // path: the browser may decode each image whenever it likes instead of
   // blocking the paint that reveals the card. It is advisory and understood

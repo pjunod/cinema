@@ -29,6 +29,38 @@ struct User: Codable {
     var isAdmin: Bool?
 }
 
+/// `GET /api/v1/features`: which optional areas an administrator has switched
+/// on, readable by any signed-in user (the switches themselves live behind the
+/// admin-only `/settings`). The client only uses it to decide which top-level
+/// navigation entries to show. A key an older server does not send decodes as
+/// `true`, so a server that predates a switch never hides anything.
+struct ServerFeatures: Codable, Equatable {
+    var liveTv: Bool
+    var recordings: Bool
+    var sharedLibraries: Bool
+    var libraryChannels: Bool
+
+    static let all = ServerFeatures(liveTv: true, recordings: true, sharedLibraries: true, libraryChannels: true)
+
+    init(liveTv: Bool, recordings: Bool, sharedLibraries: Bool, libraryChannels: Bool) {
+        self.liveTv = liveTv
+        self.recordings = recordings
+        self.sharedLibraries = sharedLibraries
+        self.libraryChannels = libraryChannels
+    }
+
+    // Decoded with `.convertFromSnakeCase`: `live_tv` → `liveTv`, etc.
+    private enum CodingKeys: String, CodingKey { case liveTv, recordings, sharedLibraries, libraryChannels }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        liveTv = try values.decodeIfPresent(Bool.self, forKey: .liveTv) ?? true
+        recordings = try values.decodeIfPresent(Bool.self, forKey: .recordings) ?? true
+        sharedLibraries = try values.decodeIfPresent(Bool.self, forKey: .sharedLibraries) ?? true
+        libraryChannels = try values.decodeIfPresent(Bool.self, forKey: .libraryChannels) ?? true
+    }
+}
+
 struct LoginResponse: Codable {
     let token: String
     let user: User
@@ -792,6 +824,32 @@ func manualCatalogHeights(_ candidates: [QualityCandidate]) -> [Int] {
         .map(\.targetHeight)).sorted(by: >)
 }
 
+/// HTTP-only cost provenance. It is advisory and never worker authority.
+struct MeasuredCandidateOutput: Codable {
+    let candidateId: String
+    let recipeDigest: [UInt8]
+    let route: String
+    let artifactId: String
+    let outputIdentity: String
+    let qualification: String
+    let averageBps: UInt64
+    let peakBps: UInt64
+    func matches(_ candidate: QualityCandidate) -> Bool {
+        candidate.hasValidIdentity && candidateId == candidate.id
+            && recipeDigest == candidate.recipeDigest && route == candidate.route
+            && UUID(uuidString: artifactId) != nil
+            && outputIdentity.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+            && qualification == "complete_full_mux_rfc8216_v1"
+            && averageBps > 0 && peakBps >= averageBps
+    }
+}
+
+func measuredCandidatePeak(_ candidate: QualityCandidate, outputs: [MeasuredCandidateOutput]?) -> UInt64? {
+    guard let outputs, outputs.count <= 64 else { return nil }
+    let matched = outputs.filter { $0.matches(candidate) }
+    return matched.count == 1 ? matched.first?.peakBps : nil
+}
+
 struct QualityRung: Codable, Identifiable {
     var id: Int { height }
     let height: Int
@@ -854,6 +912,7 @@ struct Decision: Codable {
     var declaredOffsetMs: Int?
     var ladder: [QualityRung]?
     var qualityCandidates: [QualityCandidate]?
+    var measuredCandidateOutputs: [MeasuredCandidateOutput]?
     var qualityCandidateId: String?
     var displayAwareAutoProtocol: String?
     /// The dynamic range of the bytes this delivery plan would put on the wire
@@ -878,7 +937,48 @@ struct Decision: Codable {
     var deliveredDolbyVisionProfile: Int?
 }
 
+struct EffectiveProcessingReport: Equatable, Codable {
+    var generation: String
+    var hdr10Enhanced: Bool
+    var felContributed: Bool
+    var appliedOperations: [String]
+
+    func matches(generation active: String?, delivered: String?) -> Bool {
+        hdr10Enhanced && delivered == "hdr10" && active == generation
+            && UUID(uuidString: generation) != nil
+            && !appliedOperations.isEmpty && appliedOperations.count <= 16
+            && appliedOperations.allSatisfy { !$0.isEmpty && $0.count <= 64 }
+    }
+
+    var detail: String {
+        let names = ["PolynomialReshape": "RPU polynomial mapping", "MmrReshape": "RPU MMR mapping",
+                     "RpuColorConversion": "RPU color conversion", "TargetMapping": "target mapping",
+                     "CreativeTrimApplication": "creative trims"]
+        let metadata = appliedOperations.compactMap { names[$0] }.joined(separator: ", ")
+        return "Dolby Vision–enhanced HDR10 · FEL used: \(felContributed ? "yes" : "no")"
+            + (metadata.isEmpty ? "" : " · Applied: \(metadata)")
+    }
+
+    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, felContributed, appliedOperations }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
+        hdr10Enhanced = ((try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == true)
+            && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
+        felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
+        appliedOperations = (try? values?.decode([String].self, forKey: .appliedOperations)) ?? []
+    }
+
+    init(generation: String, hdr10Enhanced: Bool, felContributed: Bool, appliedOperations: [String]) {
+        self.generation = generation
+        self.hdr10Enhanced = hdr10Enhanced
+        self.felContributed = felContributed
+        self.appliedOperations = appliedOperations
+    }
+}
+
 struct HlsStart: Codable {
+    var effectiveProcessing: EffectiveProcessingReport?
     let sessionId: String
     let playlistUrl: String
     var durationMs: Int?
@@ -890,6 +990,7 @@ struct HlsStart: Codable {
     var vod: Bool?
     var ladder: [QualityRung]?
     var qualityCandidates: [QualityCandidate]?
+    var measuredCandidateOutputs: [MeasuredCandidateOutput]?
     var qualityCandidateId: String?
     var displayAwareAutoProtocol: String?
     /// The normalized output height this session actually received — for a
@@ -941,6 +1042,7 @@ struct PlaybackSessionStatus: Codable {
     var speed: Double?
     var recentSpeed: Double?
     var outTimeMs: Int?
+    var playlistReady: Bool?
     var progressIdleMs: Int?
     var startupState: String?
     var startupRemainingMs: Int?

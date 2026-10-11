@@ -1,0 +1,90 @@
+[
+  {
+    "title": "animation",
+    "reference_filter": "trim=start=0,fps=30:start_time=0,scale=852:480,format=yuv420p,tpad=stop_mode=clone:stop_duration=65,trim=end_frame=1906,setpts=PTS-STARTPTS",
+    "reference_frames": 1906,
+    "reference_sha256": "691584038cfa3ac32e435770e7d092011b13b233ce9be7a297d40415994edf32",
+    "modes": {
+      "0": {
+        "mean": 96.45932547219307,
+        "p10": 95.225078,
+        "frames": 1906,
+        "media_bytes": 16535673,
+        "first10": [
+          92.555129,
+          92.600977,
+          92.600977,
+          100.0,
+          100.0,
+          100.0,
+          100.0,
+          100.0,
+          100.0,
+          99.166506
+        ]
+      },
+      "2": {
+        "mean": 96.59490850209863,
+        "p10": 95.315473,
+        "frames": 1906,
+        "media_bytes": 16668144,
+        "first10": [
+          92.539333,
+          92.53436,
+          92.526652,
+          100.0,
+          100.0,
+          100.0,
+          100.0,
+          100.0,
+          100.0,
+          98.737151
+        ]
+      }
+    }
+  },
+  {
+    "title": "live-action",
+    "reference_filter": "trim=start=0,fps=24:start_time=0,scale=1150:480,format=yuv420p,tpad=stop_mode=clone:stop_duration=65,trim=end_frame=1453,setpts=PTS-STARTPTS",
+    "reference_frames": 1453,
+    "reference_sha256": "5e18c9eea6046376af3aa98fb9ab3da31d8888babe2ab21920f70aed580dab3d",
+    "modes": {
+      "0": {
+        "mean": 97.03758234273917,
+        "p10": 94.887169,
+        "frames": 1453,
+        "media_bytes": 16731419,
+        "first10": [
+          93.168608,
+          93.170566,
+          91.787533,
+          92.242791,
+          92.634103,
+          91.872867,
+          95.478169,
+          95.424995,
+          94.380387,
+          94.537812
+        ]
+      },
+      "2": {
+        "mean": 97.00063630626289,
+        "p10": 94.515445,
+        "frames": 1453,
+        "media_bytes": 16698343,
+        "first10": [
+          93.358054,
+          92.107767,
+          90.856869,
+          93.479052,
+          92.393823,
+          90.759249,
+          93.395952,
+          91.297839,
+          91.364609,
+          92.897685
+        ]
+      }
+    }
+  }
+]

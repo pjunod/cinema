@@ -197,6 +197,14 @@ test("Activity detail response keeps the shared header indicator current", () =>
   assert.equal(working.at(-1), true);
   assert.equal(activity.style.display, "flex");
   assert.match(activity.innerHTML, /Scanning library/);
+  detail.scans[0].status.phase="queued";
+  harness.paintActivity(harness.detailActivitySummary(detail, []));
+  assert.match(activity.innerHTML, /Library work queued/);
+  assert.doesNotMatch(activity.innerHTML, /Scanning library/);
+  detail.scans[0].status.phase="enriching";
+  harness.paintActivity(harness.detailActivitySummary(detail, []));
+  assert.match(activity.innerHTML, /Fetching metadata/);
+  assert.doesNotMatch(activity.innerHTML, /Scanning library/);
   assert.match(shippedSource("paintActivityBody"), /paintActivity\(detailActivitySummary\(d,dels,recording\)\)/);
 
   harness.paintActivity([]);
@@ -851,11 +859,12 @@ test("Settings loads only the active tab manifest", () => {
     metadata: { required: ["settings"], secondary: ["libs", "developerReadiness"] },
     playback: { required: ["settings"], secondary: ["developerReadiness"] },
     livetv: { required: ["settings"], secondary: ["developerReadiness"] },
-    analysis: { required: ["settings", "analysis"], secondary: [] },
+    analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
-    cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness"] },
+    cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
+    sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
     developer: { required: ["settings"], secondary: ["developerReadiness"] },
   });
@@ -1062,8 +1071,12 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   const poll = shippedSource("pollDvFileActions");
   assert.match(poll, /results\.some\(Boolean\)[\s\S]*armDvFilePoll[\s\S]*clearInterval\(PAGE_TIMER\)/,
     "the item timer stops after the first all-terminal snapshot");
+  // f632af81d moved the model out of loadItem so a successor episode can be
+  // prepared without side effects; the binding lives where the model is built.
   const loadItem = shippedSource("loadItem");
-  assert.match(loadItem, /f\.library_id=it\.library_id/,
+  assert.match(loadItem, /page=itemPageModel\(id,d,libs\)/,
+    "item detail builds its page through the shared model");
+  assert.match(shippedSource("itemPageModel"), /f\.library_id=it\.library_id/,
     "item detail binds its already-loaded library id to every file action");
   const queueLibrary = shippedSource("convertDvLibrary");
   assert.match(queueLibrary, /result\.saturated/,
@@ -1645,7 +1658,7 @@ test("Settings drops a node-local scan error superseded by replicated success", 
 
   const statusText = new Function(
     "currentScanStatus", "esc", "fmtAgo",
-    `${shippedSource("statusText")}; return statusText;`,
+    `${shippedTopLevelSource("statusText")}; return statusText;`,
   )(currentScanStatus, (value) => String(value), () => "now");
   assert.equal(statusText({running:true,phase:"queued"}), "Queued · waiting for a worker");
   assert.equal(statusText({running:true,phase:"queued",error:"Library root unavailable"}), "Queued · waiting for a worker — Library root unavailable");
@@ -1669,18 +1682,23 @@ test("Settings executes exact required and secondary waves for every tab", async
     metadata:{required:["/settings"],secondary:["/libraries","/developer/readiness"]},
     playback:{required:["/settings"],secondary:["/developer/readiness"]},
     livetv:{required:["/settings"],secondary:["/developer/readiness"]},
-    analysis:{required:["/settings","/analysis/summary"],secondary:[]},
+    analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
-    cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","cluster-log"]},
+    // The cluster settings cards fill their own mount when /settings lands; the
+    // health board never waits for it.
+    cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},
     integrations:{required:["/settings","/trakt/status"],secondary:[]},
     // The switches paint from the settings snapshot; the advisory prerequisite
     // readings arrive behind them because one of them asks membership for the
     // local applied roster.
     developer:{required:["/settings"],secondary:["/developer/readiness"]},
+    standalone:{tab:"cluster",clustered:false,required:[],secondary:[]},
+    sqlite:{tab:"cluster",legacy:true,roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
   };
-  for(const [tab,expected] of Object.entries(cases)){
+  for(const [caseName,expected] of Object.entries(cases)){
+    const tab=expected.tab||caseName;
     const requests=[], phases=[], logReleases=[];
     const api=(url)=>new Promise((resolve,reject)=>requests.push({url,resolve,reject}));
     const SETTINGS_ENDPOINTS=new Function("api",`${endpointDeclaration[0]};return SETTINGS_ENDPOINTS;`)(api);
@@ -1693,6 +1711,9 @@ test("Settings executes exact required and secondary waves for every tab", async
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
          SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
          DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
+       const SERVER={cluster_enabled:${expected.legacy?"undefined":expected.clustered!==false}};
+       ${shippedSource("settingsClusterEnabled")};
+       ${shippedSource("settingsManifest")};
        ${shippedSource("isSettingsRoute")};
        ${shippedSource("settingsCurrent")};
        ${shippedSource("cacheSettings")};
@@ -1711,7 +1732,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     assert.deepEqual(requests.map(request=>request.url),expected.required,`${tab} required wave`);
     for(const request of requests.slice()) request.resolve(
       request.url==="/settings"?{}:request.url==="/trakt/status"?{}:
-        request.url==="/system"?{}:request.url==="/cluster/nodes"?{nodes:[]}:[],
+        request.url==="/system"?{}:request.url==="/cluster/nodes"?(expected.roster||{nodes:[]}):[],
     );
     await nextTurn();
     assert.ok(phases.includes("render"),`${tab} renders successfully after required data`);
@@ -1745,6 +1766,8 @@ test("Settings cannot paint an old tab after a tab switch", async () => {
     `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
        SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
      ${shippedSource("settingsCurrent")};${shippedSource("cacheSettings")};${shippedSource("cacheTrakt")};
+     const SERVER={cluster_enabled:true};
+     ${shippedSource("settingsClusterEnabled")};${shippedSource("settingsManifest")};
      ${shippedSource("loadSettingsKey")};${shippedSource("loadSettingsTab")};
      return {load:()=>loadSettingsTab(1,"libraries"),switchAway:()=>{PAGE_RENDER_GENERATION=2;}};`,
   )(
@@ -1839,6 +1862,8 @@ test("local sign-out clears every protected page cache before rendering auth", (
      // clearLocalSession drops them, so they are stubbed as observable state
      // rather than as no-ops.
      function clearLibraryChannelDraft(){LIBRARY_CHANNEL_DRAFT=null;}
+     let SHARING_SECRET="secret";
+     function sharingRetire(){SHARING_SECRET=null;}
      const LIBRARY_CHANNEL_TUNE={stop(){LIBRARY_CHANNEL_TUNING=false;}};
      async function stopLiveTv(){}
      function paintDvrReminder(){}
@@ -1852,7 +1877,7 @@ test("local sign-out clears every protected page cache before rendering auth", (
      let REPORTER_TOKEN="token";
      function refreshClientErrorReporterAuth(){REPORTER_TOKEN=TOKEN;}
      ${shippedSource("clearLocalSession")};
-     return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,REPORTER_TOKEN,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
+     return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,REPORTER_TOKEN,SHARING_SECRET,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
        SETTINGS_DATA,loaded:SETTINGS_LOADED.size,loads:SETTINGS_LOADS.size,LOGS_RUN,CLUSTER_LOGS_RUN,
        CLUSTER_TOKEN,CLUSTER_REFUSAL,CLUSTER_LOADED,CLUSTER_LEAVING,rendered,DVR_REMINDER_TIMER,
        due:DVR_DUE.length,LIBRARY_CHANNEL_DRAFT,LIBRARY_CHANNEL_TUNING,
@@ -1861,7 +1886,7 @@ test("local sign-out clears every protected page cache before rendering auth", (
   harness.logout();
   // The due-reminder overlay is a protected page cache like any other: it
   // names what somebody is about to watch, and its timer outlives every route.
-  assert.deepEqual(harness.state(),{TOKEN:null,ME:null,REPORTER_TOKEN:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
+  assert.deepEqual(harness.state(),{TOKEN:null,ME:null,REPORTER_TOKEN:null,SHARING_SECRET:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
     ACTIVITY_SNAPSHOT:null,SETTINGS_DATA:{},loaded:0,loads:0,LOGS_RUN:null,CLUSTER_LOGS_RUN:null,
     CLUSTER_TOKEN:null,CLUSTER_REFUSAL:null,CLUSTER_LOADED:false,CLUSTER_LEAVING:false,rendered:1,
     DVR_REMINDER_TIMER:null,due:0,LIBRARY_CHANNEL_DRAFT:null,LIBRARY_CHANNEL_TUNING:false,main:""});

@@ -281,22 +281,71 @@ impl TranscodeManager {
                 .num_setting(keys::HLS_SCRATCH_MAX_BYTES, HLS_SCRATCH_MAX_BYTES_DEFAULT)
                 .await,
         };
+        self.publish_ahead_limits(limits);
+        limits
+    }
+
+    /// The same bounds from settings a caller already read, by the same
+    /// rules. A rolling start reads them in its one planning snapshot.
+    pub(super) fn ahead_limits_from(
+        settings: &std::collections::BTreeMap<String, String>,
+    ) -> AheadLimits {
+        AheadLimits {
+            max_secs: Self::num_from(
+                settings,
+                keys::HLS_AHEAD_MAX_SECS,
+                HLS_AHEAD_MAX_SECS_DEFAULT,
+            ),
+            max_bytes: Self::num_from(
+                settings,
+                keys::HLS_AHEAD_MAX_BYTES,
+                HLS_AHEAD_MAX_BYTES_DEFAULT,
+            ),
+            global_max_bytes: Self::num_from(
+                settings,
+                keys::HLS_SCRATCH_MAX_BYTES,
+                HLS_SCRATCH_MAX_BYTES_DEFAULT,
+            ),
+        }
+    }
+
+    /// Make `limits` the current snapshot and the ledger's cap. Called by the
+    /// 2 s refresh and by a rolling start with its fresher read, so the two
+    /// never disagree for longer than one refresh.
+    pub(super) fn publish_ahead_limits(&self, limits: AheadLimits) {
         // Two refreshers racing both read the same rows; last write wins and
         // they agree to within the TTL anyway.
         *self.cached_limits.write().expect("limits lock") = Some((Instant::now(), limits));
         self.scratch_cap.store(limits.global_max_bytes, Relaxed);
-        limits
+        // A raised cap authorises writes the last headroom sample did not
+        // count; retention refuses until the next sample. The fence pairs
+        // with `RetainedHeadroom::record_against`: a sample racing this raise
+        // either reads the new cap or has its stored cap seen by this note.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        self.scratch_ledger
+            .headroom()
+            .note_cap(limits.global_max_bytes);
     }
 
     /// Reserve the largest configured live working set before a producer can
     /// create bytes.  This is deliberately an admission decision rather than
     /// a later flow-control observation: the latter cannot make a disk ceiling
     /// hard when several starts race through an empty pre-playlist directory.
+    #[cfg(test)]
     pub(super) async fn reserve_rolling_scratch(
         &self,
         initial: RollingScratchSizing,
     ) -> Result<crate::scratch_ledger::ScratchPermit, String> {
         let limits = self.ahead_limits().await;
+        self.reserve_rolling_scratch_with(initial, limits)
+    }
+
+    /// [`Self::reserve_rolling_scratch`] under limits the caller read.
+    pub(super) fn reserve_rolling_scratch_with(
+        &self,
+        initial: RollingScratchSizing,
+        limits: AheadLimits,
+    ) -> Result<crate::scratch_ledger::ScratchPermit, String> {
         // The ledger's own critical section is the linearization point, so
         // there is no separate admission gate to hold across this settings
         // read: two starts racing an empty directory still cannot both spend

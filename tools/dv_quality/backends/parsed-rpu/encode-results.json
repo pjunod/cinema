@@ -1,0 +1,25 @@
+{
+  "scope": "synthetic encoding mechanics only",
+  "qualified": false,
+  "frames": 4,
+  "input_rgb48_sha256": "cb8c75ab3fff4ddf4cafe10f95f2df484902dc80bbb9ed3056050ae108786faf",
+  "encoded_sha256": "d97da4228ff54c987dc500e0573b5c2822cc8c5b8b89f571cd86707c33e77a92",
+  "ffprobe_sha256": "9c2259c1e257a4b5078f4d113edbfaeeec47e445f06f1e1ecd8149ea7025ec55",
+  "sample_recipe": {
+    "chroma_location": "center",
+    "filter": "point"
+  },
+  "mastering_metadata_provenance": "synthetic BT2020 target10000/.005nits, not source RPU L6",
+  "stream": {
+    "width": 64,
+    "height": 64,
+    "pix_fmt": "yuv420p10le",
+    "color_range": "tv",
+    "color_space": "bt2020nc",
+    "color_primaries": "bt2020",
+    "color_transfer": "smpte2084",
+    "chroma_location": "center",
+    "profile": "Main 10",
+    "r_frame_rate": "24/1"
+  }
+}

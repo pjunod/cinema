@@ -26,12 +26,25 @@ pub(super) fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: 
     )
 }
 
+/// One ffmpeg stderr line of a rolling transcode. Informational lines (libva's
+/// start-up banner, review 76, P3-1) are debug detail; everything else is a
+/// warning, as before.
 pub(super) fn log_ffmpeg_stderr(session_id: &str, encoder: &str, line: &str) {
+    let informational = crate::ffmpeg::is_informational_diagnostic(line);
     let line = session_log_text(&crate::scratch_put::redact(line), session_id);
-    tracing::warn!(
-        target: "plurxd::transcode",
-        session = %session_log_id(session_id),
-        encoder,
-        "transcode ffmpeg: {line}"
-    );
+    if informational {
+        tracing::debug!(
+            target: "plurxd::transcode",
+            session = %session_log_id(session_id),
+            encoder,
+            "transcode ffmpeg: {line}"
+        );
+    } else {
+        tracing::warn!(
+            target: "plurxd::transcode",
+            session = %session_log_id(session_id),
+            encoder,
+            "transcode ffmpeg: {line}"
+        );
+    }
 }

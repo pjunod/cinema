@@ -7,7 +7,7 @@ checks = ["rust-gate", "rust-gate-ci"]
 reason = """
 A session start awaited a subtitle sidecar through an unbounded join, so a
 cold burn sidecar on a large source spent the whole 50 s START_DEADLINE and
-then answered a codeless 503 no client retries. Measured on m6 2026-09-21:
+then answered a codeless 503 no client retries. Measured on lab6 2026-09-21:
 file 5208 is a 79.5 GB remux and extracting one PGS track read all of it,
 402 s, to publish 18,866 bytes.
 

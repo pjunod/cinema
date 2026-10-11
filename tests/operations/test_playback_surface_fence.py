@@ -308,14 +308,45 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         # here, and the reviewer's question is "why does the player publish two
         # surfaces?".
         source = (ROOT / "clients/apple/Sources/PlayerController.swift").read_text(encoding="utf-8")
-        published = sorted(set(re.findall(r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source)))
+        # The file holds two controllers. Each one's published surface is
+        # pinned separately, so a field added to either is a visible diff.
+        shared_start = source.index("final class SharedPlayerController")
+        published = sorted(set(re.findall(
+            r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source[:shared_start])))
+        shared = sorted(set(re.findall(
+            r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source[shared_start:])))
+        # The Shared player owns its own fixed state and never reaches Local
+        # recovery. Whether its `failure` text should render through the one
+        # PlaybackSurfaceModel instead is an open question for its lane.
+        # `busy`, `playing` and `plan` drive its server-accepted controls;
+        # `notice` is a refused control or change, never a playback fault.
+        # `preparing` only lets a viewer action interrupt a prepared change
+        # that has not reached its switch; it draws no surface.
+        self.assertEqual(shared, ["busy", "failure", "notice", "plan", "playback", "playing", "preparing", "starting", "statusSummary"])
         self.assertEqual(published, [
             "currentMs", "decision", "deliveredDolbyVisionProfile", "deliveredRange",
+            # Not surfaces: the accepted processing report behind the HDR10-E
+            # media badge and the playback generation it belongs to (#968).
+            # They feed media facts only, carry no fault prose, and recovery
+            # only ever clears them.
+            "effectiveProcessing", "effectiveProcessingGeneration",
             "encoder", "finished", "isChangingStream", "isPlaying", "isVOD",
             "knownDurationMs", "lastTTFFMs", "pgsOverlayStatus", "pgsOverlayWindow",
-            "playbackControlSummary", "preparedFallbackInterruptionMs",
+            "playbackControlSummary",
+            # Not surfaces: the AVPlayer the view's layer draws, and the warm
+            # prepared player whose own layer is staged beside it for inline
+            # promotion (commit 11ad88cc1). Both are pictures, never fault prose;
+            # the promotion swaps which player is `player`, so it is published
+            # rather than `let`.
+            "player",
+            "preparedFallbackInterruptionMs",
+            # Not a second surface: whether the Quality menu offers Retry and
+            # Apply with restart after a failed manual change. The failure's
+            # sentence is raised through `showPlaybackNotice`, i.e. the one
+            # surface; this flag only chooses menu rows.
+            "qualityChangeRetained",
             "selectedAudio", "selectedHeight", "selectedQualityIsOriginal",
-            "selectedSubtitle", "sessionStatus", "surface",
+            "selectedSubtitle", "sessionStatus", "stagedSurfacePlayer", "surface",
             # Not a second surface: the live wait sentence the view draws
             # INSIDE the one surface, for a wait only (#444). It raises,
             # retires and routes nothing; `PlaybackWaitPresentation.detail`

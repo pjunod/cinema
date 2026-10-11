@@ -32,6 +32,37 @@ final class PlaybackControlTransportTests: XCTestCase {
         XCTAssertEqual(value.retryAfterMs, 4_000)
     }
 
+    private func headerFailure(_ header: String, _ body: String = #"{"code":"serving_fenced","message":"this node has lost quorum serving authority"}"#) -> ControlTransportError {
+        let response = HTTPURLResponse(
+            url: URL(string: "https://media.example/api/v1/hls/session-1/control")!,
+            statusCode: 503, httpVersion: "HTTP/1.1", headerFields: ["rEtRy-AfTeR": header]
+        )!
+        return PlaybackControlTransport.failure(response: response, body: Data(body.utf8))
+    }
+
+    func testHeaderOnlyServingFenceCarriesTheServersDelay() {
+        let value = headerFailure("1")
+        XCTAssertEqual(value.status, 503)
+        XCTAssertEqual(value.code, "serving_fenced")
+        XCTAssertEqual(value.retryAfterMs, 1_000)
+        XCTAssertEqual(headerFailure(" 1 ", "not json").retryAfterMs, 1_000)
+    }
+
+    func testHeaderAndBodyCannotShortenEitherValidDelay() {
+        XCTAssertEqual(headerFailure("1", #"{"retry_after_ms":4000}"#).retryAfterMs, 4_000)
+        XCTAssertEqual(headerFailure("4", #"{"retry_after_ms":1000}"#).retryAfterMs, 4_000)
+        XCTAssertEqual(headerFailure("1", #"{"retry_after_ms":999999}"#).retryAfterMs, 1_000)
+    }
+
+    func testMalformedOrOverBudgetHeadersPreserveTheLegacyBody() {
+        for header in ["", "-1", "+1", "1.5", "soon", "61", "9999999999999999999999"] {
+            XCTAssertNil(headerFailure(header).retryAfterMs, "header was \(header)")
+            XCTAssertEqual(headerFailure(header, #"{"retry_after_ms":4000}"#).retryAfterMs, 4_000)
+        }
+        XCTAssertEqual(headerFailure("60").retryAfterMs, 60_000)
+        XCTAssertEqual(headerFailure("0").retryAfterMs, 0)
+    }
+
     func testAnInvalidFieldIsCarriedThrough() {
         let value = failure(
             400,
@@ -70,6 +101,7 @@ final class PlaybackControlTransportTests: XCTestCase {
         XCTAssertEqual(failure(425, #"{"code":"owner_transition"}"#).code, "owner_transition")
         XCTAssertEqual(failure(429, #"{"code":"control_rate_limited"}"#).code, "control_rate_limited")
         XCTAssertEqual(failure(503, #"{"code":"control_unavailable"}"#).code, "control_unavailable")
+        XCTAssertEqual(failure(503, #"{"code":"serving_fenced"}"#).code, "serving_fenced")
         XCTAssertEqual(failure(409, #"{"code":"owner_changed"}"#).code, "owner_changed")
         XCTAssertEqual(failure(409, #"{"code":"stale_control"}"#).code, "stale_control")
         XCTAssertEqual(failure(410, #"{"code":"session_ended"}"#).code, "session_ended")

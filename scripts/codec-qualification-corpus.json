@@ -1,0 +1,440 @@
+{
+  "version": 1,
+  "purpose": "codec_qualification",
+  "scope": "Metadata association plan only. Historical source identities are not current availability, decoded-grade, reference fidelity, captured-session or qualification evidence.",
+  "fixtures": [
+    {
+      "identity": "s11-1080p-h264",
+      "generator": "1080p-h264",
+      "class": "baseline",
+      "dynamic_range": "sdr",
+      "filename": "1080p-h264.mkv",
+      "source": {
+        "state": "historical",
+        "identity": "h264-70s-ad613aea",
+        "sha256": "ad613aea680e3908571b8d9f5d1129a050c7a28b685c1cb9616ede01c8e7922c",
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Separately acquired synthetic bytes; not the generator's default45s identity or current availability."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": "ad613aea680e3908571b8d9f5d1129a050c7a28b685c1cb9616ede01c8e7922c",
+          "sha256": "ad613aea680e3908571b8d9f5d1129a050c7a28b685c1cb9616ede01c8e7922c",
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-1080p-animation",
+      "generator": "1080p-animation",
+      "class": "animation",
+      "dynamic_range": "sdr",
+      "filename": "1080p-animation.mkv",
+      "source": {
+        "state": "unmeasured",
+        "identity": "1080p-animation-unmeasured",
+        "sha256": null,
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Existing generator; no source hash inferred from a recipe or historical title."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": null,
+          "sha256": null,
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-720p-web",
+      "generator": "720p-web",
+      "class": "baseline",
+      "dynamic_range": "sdr",
+      "filename": "720p-web.mkv",
+      "source": {
+        "state": "unmeasured",
+        "identity": "720p-web-unmeasured",
+        "sha256": null,
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Existing generator; no source hash inferred from a recipe or historical title."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": null,
+          "sha256": null,
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-4k-hevc-sdr",
+      "generator": "4k-hevc-sdr",
+      "class": "baseline",
+      "dynamic_range": "sdr",
+      "filename": "4k-hevc-sdr.mkv",
+      "source": {
+        "state": "historical",
+        "identity": "sdr4k-70s-bounded-shortest1",
+        "sha256": "673e5095c2217552733c81426adf371e0a8427a94d15c5c459470a96d31d6e20",
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Separately acquired synthetic bytes; not the generator's default45s identity or current availability."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": "673e5095c2217552733c81426adf371e0a8427a94d15c5c459470a96d31d6e20",
+          "sha256": "673e5095c2217552733c81426adf371e0a8427a94d15c5c459470a96d31d6e20",
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-4k-hdr10",
+      "generator": "4k-hdr10",
+      "class": "hdr10",
+      "dynamic_range": "hdr10",
+      "filename": "4k-hdr10.mkv",
+      "source": {
+        "state": "historical",
+        "identity": "pq4k-70s-bounded-filter1-3g",
+        "sha256": "9b9135ef50bc9e03ea8f5a4cd5519801f0e5e6351ca3f54ddb13ebe6940c647d",
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Separately acquired synthetic bytes; not the generator's default45s identity or current availability."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "independent-pq-to-sdr",
+          "state": "unmeasured",
+          "parent_source_sha256": "9b9135ef50bc9e03ea8f5a4cd5519801f0e5e6351ca3f54ddb13ebe6940c647d",
+          "sha256": null,
+          "receipt": null,
+          "reason": "No matched independently graded BT709 reference/retained grade receipt for these source bytes."
+        },
+        {
+          "output_grade": "hdr10",
+          "domain": "pq-code-values",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": "9b9135ef50bc9e03ea8f5a4cd5519801f0e5e6351ca3f54ddb13ebe6940c647d",
+          "sha256": "9b9135ef50bc9e03ea8f5a4cd5519801f0e5e6351ca3f54ddb13ebe6940c647d",
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-4k-hlg",
+      "generator": "4k-hlg",
+      "class": "hlg",
+      "dynamic_range": "hlg",
+      "filename": "4k-hlg.mkv",
+      "source": {
+        "state": "unmeasured",
+        "identity": "4k-hlg-unmeasured",
+        "sha256": null,
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Existing generator; no source hash inferred from a recipe or historical title."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "unsupported",
+          "kind": "unavailable",
+          "state": "unmeasured",
+          "parent_source_sha256": null,
+          "sha256": null,
+          "receipt": null,
+          "reason": "Existing PQ scorer refuses HLG and unreshaped DV; independent reference lineage remains unmeasured."
+        },
+        {
+          "output_grade": "hdr10",
+          "domain": "unsupported",
+          "kind": "unavailable",
+          "state": "unmeasured",
+          "parent_source_sha256": null,
+          "sha256": null,
+          "receipt": null,
+          "reason": "Existing PQ scorer refuses HLG and unreshaped DV; independent reference lineage remains unmeasured."
+        }
+      ]
+    },
+    {
+      "identity": "s11-sparse-gop",
+      "generator": "sparse-gop",
+      "class": "long-gop",
+      "dynamic_range": "sdr",
+      "filename": "sparse-gop.mkv",
+      "source": {
+        "state": "unmeasured",
+        "identity": "sparse-gop-unmeasured",
+        "sha256": null,
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Existing generator; no source hash inferred from a recipe or historical title."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": null,
+          "sha256": null,
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-grainy",
+      "generator": "grainy",
+      "class": "grain",
+      "dynamic_range": "sdr",
+      "filename": "grainy.mkv",
+      "source": {
+        "state": "historical",
+        "identity": "grain-70s-df310256",
+        "sha256": "df310256db516c37559f76f0e5f3945609b5c2824b1c548912731de1f49e65e1",
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Separately acquired synthetic bytes; not the generator's default45s identity or current availability."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": "df310256db516c37559f76f0e5f3945609b5c2824b1c548912731de1f49e65e1",
+          "sha256": "df310256db516c37559f76f0e5f3945609b5c2824b1c548912731de1f49e65e1",
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-dark-gradient",
+      "generator": "dark-gradient",
+      "class": "dark-gradient",
+      "dynamic_range": "sdr",
+      "filename": "dark-gradient.mkv",
+      "source": {
+        "state": "unmeasured",
+        "identity": "dark-gradient-unmeasured",
+        "sha256": null,
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Existing generator; no source hash inferred from a recipe or historical title."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": null,
+          "sha256": null,
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-sport",
+      "generator": "sport",
+      "class": "sport",
+      "dynamic_range": "sdr",
+      "filename": "sport.mkv",
+      "source": {
+        "state": "unmeasured",
+        "identity": "sport-unmeasured",
+        "sha256": null,
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Existing generator; no source hash inferred from a recipe or historical title."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": null,
+          "sha256": null,
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-dark-gradient-10bit",
+      "generator": "dark-gradient-10bit",
+      "class": "dark-gradient",
+      "dynamic_range": "sdr",
+      "filename": "dark-gradient-10bit.mkv",
+      "source": {
+        "state": "historical",
+        "identity": "gradient10bit-45s-setparams",
+        "sha256": "853c3087e1fd650df536196123b6b0d8430526935b6c973bb2b545b5130c7249",
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Corrected45s ten-bit gradient bytes; metadata verified historically, not current availability or picture/fidelity acceptance."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": "853c3087e1fd650df536196123b6b0d8430526935b6c973bb2b545b5130c7249",
+          "sha256": "853c3087e1fd650df536196123b6b0d8430526935b6c973bb2b545b5130c7249",
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-burn-pgs",
+      "generator": "burn-pgs",
+      "class": "burn",
+      "dynamic_range": "sdr",
+      "filename": "burn-pgs.mkv",
+      "source": {
+        "state": "unmeasured",
+        "identity": "burn-pgs-unmeasured",
+        "sha256": null,
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Existing generator; no source hash inferred from a recipe or historical title."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "sdr-bt709-vmaf",
+          "kind": "same-source",
+          "state": "unmeasured",
+          "parent_source_sha256": null,
+          "sha256": null,
+          "receipt": null,
+          "reason": "Historical hash association is not decoded grade, matched captured output, model execution or quality acceptance."
+        }
+      ]
+    },
+    {
+      "identity": "s11-dv-p5",
+      "generator": "dv-p5",
+      "class": "dv",
+      "dynamic_range": "dv-p5",
+      "filename": "dv-p5.mkv",
+      "source": {
+        "state": "historical",
+        "identity": "genuine-p5-requested45s-actual45-208s",
+        "sha256": "7b8b1efbe6172783824b9dd3fff542473db7c9fe46faceff1c10e9f4b46fdbed",
+        "evidence": "docs/streaming/CODEC-AND-GPU-QUALIFICATION.md",
+        "scope": "Acquired genuine P5/RPUs, not independently reshaped or graded; parent full-source hash unknown."
+      },
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 20
+      },
+      "rung": 1080,
+      "references": [
+        {
+          "output_grade": "sdr",
+          "domain": "unsupported",
+          "kind": "unavailable",
+          "state": "unmeasured",
+          "parent_source_sha256": "7b8b1efbe6172783824b9dd3fff542473db7c9fe46faceff1c10e9f4b46fdbed",
+          "sha256": null,
+          "receipt": null,
+          "reason": "Existing PQ scorer refuses HLG and unreshaped DV; independent reference lineage remains unmeasured."
+        },
+        {
+          "output_grade": "hdr10",
+          "domain": "unsupported",
+          "kind": "unavailable",
+          "state": "unmeasured",
+          "parent_source_sha256": "7b8b1efbe6172783824b9dd3fff542473db7c9fe46faceff1c10e9f4b46fdbed",
+          "sha256": null,
+          "receipt": null,
+          "reason": "Existing PQ scorer refuses HLG and unreshaped DV; independent reference lineage remains unmeasured."
+        }
+      ]
+    }
+  ]
+}

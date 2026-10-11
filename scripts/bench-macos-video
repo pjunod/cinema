@@ -1,0 +1,750 @@
+#!/usr/bin/env python3
+"""Offline macOS video experiment; all executable paths and graphs are explicit.
+
+Receipts and raw logs contain local paths: retain them outside the source tree.
+An inventory does not execute a processing graph. A successful encode does not
+approve color, Dolby metadata propagation, hardware use or visual quality.
+"""
+
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import re
+import resource
+import signal
+import statistics
+import subprocess
+import sys
+import time
+import uuid
+
+
+SCHEMA_VERSION = 1
+MAX_LOG_BYTES = 16 * 1024 * 1024
+DEFAULT_FILTERS = ("scale_vt", "tonemap_videotoolbox", "tonemapx", "zscale",
+                   "subtitles", "overlay", "hwdownload", "format")
+PROOF_FIELDS = ("hardware_decode", "input_frame_format", "output_frame_format",
+                "renderer_metadata", "frame_pts_association", "double_dolby_processing")
+P5_TUPLES = (("software", "tonemapx"), ("videotoolbox", "tonemapx"),
+             ("software", "metal"), ("videotoolbox", "metal"))
+
+
+class Cancelled(Exception):
+    def __init__(self, command):
+        self.command = command
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def load_json(path):
+    return json.loads(Path(path).read_text())
+
+
+def executable_path(value):
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError("Executable paths must be absolute; shell PATH is not daemon evidence")
+    path = path.resolve(strict=True)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError(f"Not an executable file: {path}")
+    return str(path)
+
+
+def terminate_group(child):
+    """Terminate descendants as well as the direct child, then always reap."""
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    # The parent may exit while a descendant ignores TERM.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.wait()
+
+
+def run_child(argv, log_dir, timeout=30, max_log_bytes=MAX_LOG_BYTES):
+    """One bounded argv child; no shell, inherited stdin or unattended workers.
+
+    CPU usage is the delta of waited-for children: this harness runs children
+    serially. The value cannot be reused for concurrent jobs without a per-PID
+    collector. macOS ru_maxrss is bytes; other Unix systems report KiB.
+    """
+    if timeout <= 0 or max_log_bytes <= 0:
+        raise ValueError("Child bounds must be positive")
+    directory = Path(log_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    key = uuid.uuid4().hex
+    stdout_path, stderr_path = directory / f"{key}.stdout", directory / f"{key}.stderr"
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    start = time.monotonic()
+    samples, pending, position, progress = [], "", 0, {}
+    reason = None
+    child = None
+    with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+        try:
+            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out,
+                                     stderr=err, shell=False, start_new_session=True)
+            while child.poll() is None:
+                now = time.monotonic()
+                if now - start > timeout:
+                    reason = "timeout"
+                    break
+                if stdout_path.stat().st_size + stderr_path.stat().st_size > max_log_bytes:
+                    reason = "log_limit"
+                    break
+                with stdout_path.open("rb") as reader:
+                    reader.seek(position)
+                    data = reader.read(max_log_bytes + 1)
+                    position = reader.tell()
+                pending += data.decode("utf-8", errors="replace")
+                lines = pending.split("\n")
+                pending = lines.pop()
+                for line in lines:
+                    if "=" not in line:
+                        continue
+                    name, value = line.strip().split("=", 1)
+                    progress[name] = value
+                    if name == "progress":
+                        samples.append({"elapsed_seconds": now - start, **progress})
+                        progress = {}
+                time.sleep(0.05)
+            if reason:
+                terminate_group(child)
+            else:
+                child.wait()
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if stdout_path.stat().st_size + stderr_path.stat().st_size > max_log_bytes:
+                    reason = "log_limit"
+        except KeyboardInterrupt:
+            reason = "cancelled"
+            if child:
+                terminate_group(child)
+        except OSError as error:
+            reason = f"spawn_error: {error}"
+        finally:
+            if child and child.poll() is None:
+                terminate_group(child)
+    # Limit retained data even if a fast writer exits between polling intervals.
+    remaining = max_log_bytes
+    for path in (stderr_path, stdout_path):
+        if path.stat().st_size > remaining:
+            with path.open("r+b") as stream:
+                stream.truncate(remaining)
+        remaining -= path.stat().st_size
+    elapsed = time.monotonic() - start
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    stdout = stdout_path.read_bytes()[:max_log_bytes].decode("utf-8", errors="replace")
+    stderr = stderr_path.read_bytes()[:max_log_bytes].decode("utf-8", errors="replace")
+    status = "skipped" if reason == "cancelled" else "failed" if reason else (
+        "successful" if child and child.returncode == 0 else "failed")
+    if not reason and status == "failed":
+        reason = "nonzero_exit"
+    result = {
+        "argv": list(argv), "result": status, "reason": reason,
+        "returncode": child.returncode if child else None,
+        "wall_seconds": elapsed,
+        "cpu_seconds": (after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime),
+        "raw_stdout": str(stdout_path), "raw_stderr": str(stderr_path),
+        "stdout": stdout, "stderr": stderr, "progress_samples": samples,
+        "peak_rss_bytes": None,
+        "peak_rss_reason": "RUSAGE_CHILDREN peak is cumulative; per-child RSS collector absent",
+    }
+    if reason == "cancelled":
+        raise Cancelled(retained_command(result))
+    return result
+
+
+def retained_command(command):
+    return {key: value for key, value in command.items() if key not in ("stdout", "stderr")}
+
+
+def table_names(text, kind):
+    """Read only exact name rows, never explanatory prose or banner substrings."""
+    names = set()
+    if kind == "filters":
+        # FFmpeg 8 uses two filter flags; older Jellyfin builds use three.
+        pattern = r"^\s*[A-Z.]{2,3}\s+([A-Za-z0-9_]+)\s+[AVN|]+->[AVN|]+\s+.+$"
+    elif kind in ("encoders", "decoders"):
+        pattern = r"^\s*[A-Z.]{3,6}\s+([A-Za-z0-9_]+)\s+.+$"
+    elif kind in ("muxers", "demuxers"):
+        pattern = r"^\s*[DE. ]{1,3}\s+([A-Za-z0-9_,]+)\s+.+$"
+    else:
+        # BSFs have no flags; FFmpeg explicitly opens this list with a heading.
+        if "Bitstream filters:" not in text:
+            return names
+        text = text.split("Bitstream filters:", 1)[1]
+        pattern = r"^\s*([A-Za-z0-9_]+)\s*$"
+    for line in text.splitlines():
+        match = re.match(pattern, line)
+        if match and match.group(1) != "=":
+            names.update(match.group(1).split(","))
+    return names
+
+
+def filter_help(name, command, listed):
+    text = command["stdout"] + "\n" + command["stderr"]
+    heading = re.search(r"^Filter " + re.escape(name) + r"\s*$", text, re.MULTILINE)
+    absent = re.search(r"Unknown filter|not recognized|not found", text, re.IGNORECASE)
+    available = command["result"] == "successful" and listed and bool(heading) and not absent
+    options = sorted(set(re.findall(r"^\s+([A-Za-z0-9_]+)\s+<[^>]+>", text, re.MULTILINE)))
+    return {"result": "available" if available else "unavailable",
+            "listed": listed, "help_heading_matched": bool(heading),
+            "options": options if available else [], "command": retained_command(command)}
+
+
+def inventory(ffmpeg, ffprobe, log_dir, filters=DEFAULT_FILTERS, provenance=None, context=None):
+    ffmpeg, ffprobe = executable_path(ffmpeg), executable_path(ffprobe)
+    receipt = {"schema_version": SCHEMA_VERSION, "kind": "inventory", "result": "inventory",
+               "harness_sha256": sha256(__file__),
+               "host": {"os": platform.system(), "os_release": platform.release(),
+                        "arch": platform.machine(), "model": None, "os_build": None,
+                        "power_mode": None, "thermal_state": None, "service_context": context},
+               "implementation": {"provenance": provenance, "executables": {}},
+               "capabilities": {}, "limitations": [
+                   "Filter listings/help prove syntax availability only; graph execution is separate",
+                   "Runtime child environment is inherited from this invocation; service equivalence requires operator evidence",
+                   "GPU use, energy, copy bytes and daemon delivery are not measured by inventory"]}
+    for kind, path in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
+        command = run_child([path, "-version"], log_dir)
+        text = command["stdout"] + command["stderr"]
+        receipt["implementation"]["executables"][kind] = {
+            "path": path, "sha256": sha256(path), "version_line": text.splitlines()[0] if text else None,
+            "version_output": text, "command": retained_command(command)}
+    build = run_child([ffmpeg, "-hide_banner", "-buildconf"], log_dir)
+    receipt["implementation"]["build_options"] = build["stdout"] + build["stderr"]
+    receipt["implementation"]["build_command"] = retained_command(build)
+    for kind in ("filters", "decoders", "encoders", "bsfs", "muxers", "demuxers"):
+        command = run_child([ffmpeg, "-hide_banner", "-" + kind], log_dir)
+        names = sorted(table_names(command["stdout"] + command["stderr"], kind))
+        receipt["capabilities"][kind] = {"names": names, "command": retained_command(command)}
+    receipt["capabilities"]["filter_help"] = {}
+    for name in sorted(set(filters)):
+        command = run_child([ffmpeg, "-hide_banner", "-h", "filter=" + name], log_dir)
+        receipt["capabilities"]["filter_help"][name] = filter_help(
+            name, command, name in receipt["capabilities"]["filters"]["names"])
+    ac4 = run_child([ffmpeg, "-hide_banner", "-h", "decoder=ac4"], log_dir)
+    receipt["capabilities"]["ac4_help"] = {
+        "listed": "ac4" in receipt["capabilities"]["decoders"]["names"],
+        "command": retained_command(ac4), "text": ac4["stdout"] + ac4["stderr"]}
+    receipt["implementation"]["linked_libraries"] = {"result": "unmeasured", "libraries": []}
+    if platform.system() == "Darwin":
+        for label, argv in (("os_build", ["/usr/bin/sw_vers", "-buildVersion"]),
+                            ("model", ["/usr/sbin/sysctl", "-n", "hw.model"]),
+                            ("soc", ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"]),
+                            ("ram_bytes", ["/usr/sbin/sysctl", "-n", "hw.memsize"]),
+                            ("translated", ["/usr/sbin/sysctl", "-n", "sysctl.proc_translated"])):
+            command = run_child(argv, log_dir)
+            receipt["host"][label] = {"result": command["result"],
+                                      "value": command["stdout"].strip() or None,
+                                      "command": retained_command(command)}
+        libraries = []
+        for path in (ffmpeg, ffprobe):
+            command = run_child(["/usr/bin/otool", "-L", path], log_dir)
+            for line in command["stdout"].splitlines()[1:]:
+                library = line.strip().split(" (", 1)[0]
+                digest = sha256(library) if Path(library).is_file() else None
+                libraries.append({"owner": path, "path": library, "sha256": digest,
+                                  "identity": line.strip(), "reason": None if digest else
+                                  "dyld shared-cache or unresolved loader-relative path"})
+            receipt["implementation"]["executables"]["ffmpeg" if path == ffmpeg else "ffprobe"]["link_command"] = retained_command(command)
+        receipt["implementation"]["linked_libraries"] = {
+            "result": "observed" if libraries else "unavailable", "libraries": libraries,
+            "digest": hashlib.sha256(json.dumps(libraries, sort_keys=True).encode()).hexdigest()}
+    return receipt
+
+
+def validate_graphs(document):
+    if document.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("Graphs require schema_version 1")
+    graphs = document.get("graphs", [])
+    identifiers = set()
+    for graph in graphs:
+        name = graph.get("id", "")
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name) or name in identifiers:
+            raise ValueError("Graph identifiers must be unique safe names")
+        identifiers.add(name)
+        for key in ("decoder_argv", "encoder_argv", "output_args"):
+            if key not in graph or not isinstance(graph[key], list) or not all(
+                    isinstance(value, str) for value in graph[key]):
+                raise ValueError(f"{name}: {key} must be an argv string array")
+        if not isinstance(graph.get("filter_chain"), str):
+            raise ValueError(f"{name}: filter_chain is an explicit string")
+        if not re.fullmatch(r"[a-z0-9]+", graph.get("output_extension", "")):
+            raise ValueError(f"{name}: output_extension required")
+        if not graph.get("classes") or not graph.get("output_expected"):
+            raise ValueError(f"{name}: input classes and output expectations required")
+        # Input/output ownership, finite duration and progress belong to the harness.
+        forbidden = {"-i", "-y", "-n", "-t", "-to", "-progress", "-vf", "-filter_complex",
+                     "-filter_script", "-filter_complex_script", "-filter:v"}
+        tokens = graph["decoder_argv"] + graph["encoder_argv"] + graph["output_args"]
+        if any(value in forbidden for value in tokens):
+            raise ValueError(f"{name}: use filter_chain; graph cannot replace input/output/run bounds")
+    return graphs
+
+
+def graph_unavailable(graph, capabilities):
+    reasons = []
+    requirements = graph.get("requires", {})
+    for kind in ("filters", "encoders", "decoders", "bsfs", "muxers", "demuxers"):
+        for name in requirements.get(kind, []):
+            if name not in capabilities[kind]["names"]:
+                reasons.append(f"missing {kind}: {name}")
+    for name, options in requirements.get("filter_options", {}).items():
+        help_row = capabilities["filter_help"].get(name, {})
+        if help_row.get("result") != "available":
+            reasons.append(f"filter help unavailable: {name}")
+        for option in options:
+            if option not in help_row.get("options", []):
+                reasons.append(f"missing filter option: {name}.{option}")
+    return reasons
+
+
+def normalize_fixture(fixture, manifest_path):
+    row = dict(fixture)
+    row["id"] = fixture.get("id", fixture.get("identity"))
+    filename = fixture.get("path", fixture.get("filename"))
+    row["path"] = str((Path(manifest_path).parent / filename).resolve()) if filename else None
+    row["sha256"] = fixture.get("sha256", fixture.get("reference_sha256"))
+    row["duration_seconds"] = fixture.get("duration_seconds", fixture.get("seconds"))
+    row["class"] = fixture.get("class")
+    if not row["id"] or not re.fullmatch(r"[a-zA-Z0-9_-]+", row["id"]):
+        raise ValueError("Fixture identifiers must be safe names")
+    return row
+
+
+def probe_media(ffprobe, path, log_dir, timeout, duration=None):
+    argv = [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_streams",
+            "-show_format", "-show_frames", "-show_entries",
+            "stream:format=duration:frame=best_effort_timestamp_time,pkt_duration_time,width,height,pix_fmt,color_range,color_space,color_primaries,color_transfer,side_data_list"]
+    if duration:
+        argv += ["-read_intervals", "%+" + str(duration)]
+    command = run_child(argv + ["-of", "json", str(path)], log_dir, timeout)
+    observation = {"result": command["result"], "command": retained_command(command)}
+    if command["result"] != "successful":
+        return observation
+    try:
+        data = json.loads(command["stdout"])
+    except ValueError:
+        observation.update(result="failed", reason="invalid ffprobe JSON")
+        return observation
+    frames = data.get("frames", [])
+    timestamps = []
+    for frame in frames:
+        try:
+            value = float(frame["best_effort_timestamp_time"])
+            if math.isfinite(value):
+                timestamps.append(value)
+        except (KeyError, ValueError, TypeError):
+            pass
+    observation.update(streams=data.get("streams", []), format=data.get("format", {}),
+                       frame_count=len(frames), timestamp_count=len(timestamps),
+                       timestamps_monotonic=bool(timestamps) and all(
+                           b > a for a, b in zip(timestamps, timestamps[1:])),
+                       first_pts=timestamps[0] if timestamps else None,
+                       last_pts=timestamps[-1] if timestamps else None,
+                       decoded_timestamps_seconds=timestamps,
+                       frame_formats=sorted({frame.get("pix_fmt") for frame in frames if frame.get("pix_fmt")}),
+                       frame_dimensions=sorted({(frame.get("width"), frame.get("height"))
+                                                for frame in frames if frame.get("width") and frame.get("height")}),
+                       frame_color_tags=[dict(zip(("color_primaries", "color_transfer", "color_space", "color_range"), tags))
+                                         for tags in sorted({tuple(frame.get(key, "unreported") for key in
+                                             ("color_primaries", "color_transfer", "color_space", "color_range")) for frame in frames})],
+                       side_data_types=sorted({item.get("side_data_type", "unknown") for frame in frames
+                                              for item in frame.get("side_data_list", [])}))
+    return observation
+
+
+def check_output(observation, expected):
+    if observation.get("result") != "successful":
+        return {"result": "failed", "reasons": ["output decode/probe failed"]}
+    streams = observation.get("streams", [])
+    if not streams or not observation.get("frame_count"):
+        return {"result": "failed", "reasons": ["no decoded video frames"]}
+    reasons = []
+    for name, value in expected.items():
+        if name == "forbidden_side_data":
+            for item in value:
+                if item in observation.get("side_data_types", []):
+                    reasons.append(f"stale side data: {item}")
+        else:
+            actual = observation.get(name) if name in ("frame_count", "timestamp_count") else streams[0].get(name)
+            if actual != value:
+                reasons.append(f"{name}: expected {value!r}, observed {actual!r}")
+    if not observation.get("timestamps_monotonic"):
+        reasons.append("missing or non-monotonic decoded timestamps")
+    if "width" in expected and "height" in expected:
+        dimensions = observation.get("frame_dimensions", [])
+        if dimensions and any(tuple(size) != (expected["width"], expected["height"]) for size in dimensions):
+            reasons.append("decoded frame geometry differs from expected geometry")
+    return {"result": "failed" if reasons else "successful", "reasons": reasons,
+            "limitations": ["Decoded stream/frame checks are not visual approval or renderer-boundary metadata proof"]}
+
+
+def finite_positive(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) and number > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def check_timestamps(observation, expected):
+    if not expected:
+        return {"result": "unmeasured", "reason": "No explicit timestamp reference"}
+    timestamps = observation.get("decoded_timestamps_seconds", [])
+    start, step = expected["start_seconds"], expected["step_seconds"]
+    tolerance = expected.get("absolute_tolerance_seconds", 0)
+    errors = [abs(value - (start + index * step)) for index, value in enumerate(timestamps)]
+    return {"result": "successful" if errors and max(errors) <= tolerance else "failed",
+            "max_absolute_error_seconds": max(errors) if errors else None, "tolerance_seconds": tolerance}
+
+
+def progress_media_seconds(command):
+    values = []
+    for line in command["stdout"].splitlines():
+        if line.startswith("out_time_us="):
+            try:
+                value = float(line.split("=", 1)[1]) / 1_000_000
+                if math.isfinite(value) and value >= 0:
+                    values.append(value)
+            except ValueError:
+                pass
+    return max(values) if values else None
+
+
+def steady_windows(samples):
+    result, origin = [], None
+    for sample in samples:
+        try:
+            current = (float(sample["elapsed_seconds"]), float(sample["out_time_us"]) / 1_000_000)
+        except (KeyError, ValueError):
+            continue
+        if origin is None:
+            origin = current
+        if current[0] - origin[0] >= 5:
+            result.append({"wall_start_seconds": origin[0], "wall_end_seconds": current[0],
+                           "throughput_x": (current[1] - origin[1]) / (current[0] - origin[0])})
+            origin = current
+    return result
+
+
+def schedule_pairs(baseline, candidate, repetitions):
+    # First-use means first execution in THIS invocation, never cold file/shader cache.
+    yield (0, "first_use_process", [baseline, candidate])
+    for repetition in range(1, repetitions + 1):
+        yield (repetition, "warm_process", [baseline, candidate] if repetition % 2 else [candidate, baseline])
+
+
+def empty_proof(graph):
+    return {name: {"result": "unmeasured", "reason": "requires retained instrumentation/inspection",
+                   "operator_declaration": graph.get("proof", {}).get(name)} for name in PROOF_FIELDS}
+
+
+def run_graph(graph, fixture, ffmpeg, ffprobe, directory, duration, timeout, repetition, cache, pair):
+    output = directory / f"{fixture['id']}-{graph['id']}-{cache}-{repetition}.{graph['output_extension']}"
+    argv = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "verbose", "-stats_period", "1",
+            *graph["decoder_argv"], "-i", fixture["path"], "-map", "0:v:0", "-an", "-sn", "-dn",
+            "-t", str(duration)]
+    if graph["filter_chain"]:
+        argv += ["-vf", graph["filter_chain"]]
+    argv += [*graph["encoder_argv"], *graph["output_args"], "-progress", "pipe:1", str(output)]
+    command = run_child(argv, directory / "raw", timeout)
+    media_seconds = progress_media_seconds(command)
+    successful = command["result"] == "successful" and media_seconds and media_seconds > 0
+    row = {"schema_version": SCHEMA_VERSION, "kind": "graph_run", "pair_id": pair,
+           "input": {key: value for key, value in fixture.items() if key != "path"},
+           "treatment": graph, "output": str(output), "command": retained_command(command),
+           "result": command["result"], "reason": command["reason"],
+           "proof": empty_proof(graph), "visual_verdict": {"result": "unmeasured", "reviewer": None},
+           "measurement": {"repetition": repetition, "cache_condition": cache,
+                           "cache_limit": "fresh child; OS file/driver/shader cache not purged or known",
+                           "sustained_sample": bool(media_seconds and media_seconds >= 60),
+                           "media_seconds": media_seconds, "wall_seconds": command["wall_seconds"],
+                           "throughput_x": media_seconds / command["wall_seconds"] if successful else None,
+                           "cpu_seconds_per_media_second": command["cpu_seconds"] / media_seconds if successful else None,
+                           "steady_windows": steady_windows(command["progress_samples"]),
+                           "joules_per_media_minute": None, "copy_bytes_measured": None,
+                           "peak_rss_bytes": None,
+                           "unmeasured": {"energy": "external meter/powermetrics collector absent",
+                                          "copy_bytes": "mapping/copy instrumentation absent",
+                                          "peak_rss": command["peak_rss_reason"],
+                                          "startup": "offline encode has no daemon/client event origins"}},
+           "limitations": ["Offline video-only experiment; no audio, daemon startup, HLS or client qualification",
+                           "Observed benefit cannot establish visual correctness or copy attribution"]}
+    if not media_seconds or media_seconds < 60:
+        row["limitations"].append("Short smoke sample; not sustained performance evidence")
+    if successful:
+        row["output_sha256"] = sha256(output)
+        row["output_observations"] = probe_media(ffprobe, output, directory / "raw", timeout)
+        fixture_expectations = next((item for item in fixture.get("output_expectations", [])
+                                     if item.get("graph_id") == graph["id"]), {})
+        expected = {**graph["output_expected"], **fixture_expectations.get("expected", {})}
+        if fixture_expectations.get("forbidden_side_data"):
+            expected["forbidden_side_data"] = fixture_expectations["forbidden_side_data"]
+        row["output_contract"] = check_output(row["output_observations"], expected)
+        row["timestamp_contract"] = check_timestamps(row["output_observations"], fixture_expectations.get("timestamps"))
+        row["pixel_observations"] = {"result": "unmeasured", "reason": "External decoded pixel observer required",
+                                     "fixture_expectations": fixture_expectations.get("pixels")}
+        decoded_seconds = finite_positive(row["output_observations"].get("format", {}).get("duration"))
+        if decoded_seconds:
+            row["measurement"].update(media_seconds=decoded_seconds, media_duration_origin="ffprobe output container duration",
+                                      throughput_x=decoded_seconds / command["wall_seconds"],
+                                      cpu_seconds_per_media_second=command["cpu_seconds"] / decoded_seconds,
+                                      sustained_sample=decoded_seconds >= 60)
+        if row["output_contract"]["result"] != "successful" or row["timestamp_contract"]["result"] == "failed":
+            row.update(result="failed", reason="output_contract_failed")
+    elif command["result"] == "successful":
+        row.update(result="failed", reason="no_positive_media_progress")
+    return row
+
+
+def summarize(runs, baseline, candidate):
+    paired = {}
+    for row in runs:
+        if row.get("measurement", {}).get("cache_condition") == "warm_process":
+            paired.setdefault(row["pair_id"], {})[row["treatment"]["id"]] = row
+    throughput_ratios, cpu_ratios = [], []
+    failures = []
+    for pair, rows in paired.items():
+        if any(name not in rows or rows[name]["result"] != "successful" for name in (baseline, candidate)):
+            failures.append(pair)
+            continue
+        a, b = rows[baseline]["measurement"], rows[candidate]["measurement"]
+        if a["throughput_x"] and b["throughput_x"]:
+            throughput_ratios.append(b["throughput_x"] / a["throughput_x"])
+        if a["cpu_seconds_per_media_second"] and b["cpu_seconds_per_media_second"] is not None:
+            cpu_ratios.append(b["cpu_seconds_per_media_second"] / a["cpu_seconds_per_media_second"])
+    return {"result": "measured" if throughput_ratios else "unmeasured",
+            "complete_warm_pairs": len(throughput_ratios), "failed_or_missing_pairs": failures,
+            "median_throughput_change_percent": (statistics.median(throughput_ratios) - 1) * 100 if throughput_ratios else None,
+            "median_cpu_reduction_percent": (1 - statistics.median(cpu_ratios)) * 100 if cpu_ratios else None,
+            "pairs_with_higher_throughput": sum(ratio > 1 for ratio in throughput_ratios),
+            "pairs_with_lower_cpu": sum(ratio < 1 for ratio in cpu_ratios),
+            "sustained_pairs": sum(all(row.get("measurement", {}).get("sustained_sample", False)
+                                       for row in rows.values()) for rows in paired.values()
+                                   if baseline in rows and candidate in rows),
+            "visual_approval": "unmeasured", "promotion": "unmeasured",
+            "limitations": ["Paired offline measurements only; missing/failed pairs remain visible",
+                            "Short samples report wiring/observations only; sustained_pairs=0 provides no sustained benefit evidence",
+                            "No acceptance or runtime selection gate is inferred from this summary",
+                            "Cold/file/shader-cache and warm-process rows are not pooled"]}
+
+
+def fixture_summaries(runs, baseline, candidate):
+    return {name: summarize([row for row in runs if row["input"]["id"] == name], baseline, candidate)
+            for name in sorted({row["input"]["id"] for row in runs})}
+
+
+def p5_matrix(graphs, fixtures, runs):
+    fixtures_p5 = [row for row in fixtures if row["class"] in ("dv_p5", "p5", "dolby_vision_p5")]
+    result = []
+    for decoder, renderer in P5_TUPLES:
+        matching = [graph for graph in graphs if graph.get("decode") == decoder and graph.get("renderer") == renderer]
+        matching_runs = [row for row in runs if row["treatment"]["id"] in {graph["id"] for graph in matching}
+                         and row["input"]["class"] in ("dv_p5", "p5", "dolby_vision_p5")]
+        statuses = [row["result"] for row in matching_runs]
+        state = "unavailable" if not fixtures_p5 or not matching else "unmeasured" if not matching_runs else (
+            "failed" if "failed" in statuses else "unavailable" if "unavailable" in statuses else "observed")
+        result.append({"decode": decoder, "renderer": renderer, "result": state,
+                       "reason": "P5 fixture absent" if not fixtures_p5 else "explicit graph absent" if not matching else None,
+                       "graphs": [graph["id"] for graph in matching],
+                       "run_results": [row["result"] for row in matching_runs],
+                       "metadata_proof": "unmeasured", "hardware_use_proof": "unmeasured",
+                       "limitations": ["RPU-positive pixels, renderer-boundary metadata/PTS association, seek/reordering and double processing require independent proof"]})
+    return result
+
+
+def experiment(args):
+    ffmpeg, ffprobe = executable_path(args.ffmpeg), executable_path(args.ffprobe)
+    directory = Path(args.output_dir).resolve()
+    if directory.exists() and any(directory.iterdir()):
+        raise ValueError("Use a new/empty output directory; retained experiments are not overwritten")
+    directory.mkdir(parents=True, exist_ok=True)
+    graphs = validate_graphs(load_json(args.graphs))
+    by_id = {row["id"]: row for row in graphs}
+    if args.baseline not in by_id or args.candidate not in by_id or args.baseline == args.candidate:
+        raise ValueError("Select two distinct graph IDs from the manifest")
+    corpus = load_json(args.corpus)
+    if corpus.get("schema_version", corpus.get("version")) != SCHEMA_VERSION:
+        raise ValueError("Corpus requires schema_version/version 1")
+    fixtures = [normalize_fixture(row, args.corpus) for row in corpus.get("fixtures", [])]
+    if len({row["id"] for row in fixtures}) != len(fixtures):
+        raise ValueError("Duplicate fixture identifiers")
+    filters = set(DEFAULT_FILTERS)
+    for graph in graphs:
+        filters.update(graph.get("requires", {}).get("filters", []))
+        filters.update(graph.get("requires", {}).get("filter_options", {}))
+    inv = inventory(ffmpeg, ffprobe, directory / "raw", filters,
+                    load_json(args.provenance) if args.provenance else None,
+                    load_json(args.service_context) if args.service_context else None)
+    write_json(directory / "inventory.json", inv)
+    receipt = {"schema_version": SCHEMA_VERSION, "kind": "experiment", "source_commit": args.source_commit,
+               "harness_sha256": sha256(__file__),
+               "inventory": "inventory.json", "graphs": graphs, "corpus_sha256": sha256(args.corpus),
+               "graph_manifest_sha256": sha256(args.graphs), "runs": [], "result": "unmeasured",
+               "limitations": ["No production playback/visual qualification; M0 incumbent feature matrix remains independent"]}
+    if not args.source_commit:
+        receipt["limitations"].append("Source commit unrecorded; exact-tree experiment identity unavailable")
+    receipt["comparison"] = {
+        "same_executable": True,
+        "matched_graph_fields": [name for name in ("decoder_argv", "encoder_argv", "output_args", "output_expected")
+                                 if by_id[args.baseline].get(name) == by_id[args.candidate].get(name)],
+        "different_graph_fields": [name for name in ("decoder_argv", "filter_chain", "encoder_argv", "output_args", "output_expected")
+                                   if by_id[args.baseline].get(name) != by_id[args.candidate].get(name)],
+        "baseline_origin": by_id[args.baseline].get("origin", "operator_supplied_unverified"),
+        "attribution": "Complete graph treatment; processing/copy attribution requires controlled variants and instrumentation"}
+    write_json(directory / "receipt.json", receipt)
+    for fixture in fixtures:
+        if args.fixture and fixture["id"] not in args.fixture:
+            continue
+        fixture_reason = None
+        if fixture.get("available") is False or not fixture["path"] or not Path(fixture["path"]).is_file():
+            fixture_reason = fixture.get("missing_reason", "input unavailable")
+        elif not fixture.get("sha256"):
+            fixture_reason = "input hash absent; reproducible identity unavailable"
+        elif sha256(fixture["path"]) != fixture["sha256"]:
+            fixture_reason = "input hash mismatch"
+        if not fixture_reason:
+            # The pinned fixture contract describes the full compressed source,
+            # even when an experiment deliberately encodes only a short trim.
+            fixture["input_observations"] = probe_media(ffprobe, fixture["path"], directory / "raw", args.timeout)
+            if fixture["input_observations"]["result"] != "successful":
+                fixture_reason = "input decode/probe failed"
+            elif fixture.get("expected"):
+                fixture["input_contract"] = check_output(fixture["input_observations"], fixture["expected"])
+                if fixture["input_contract"]["result"] != "successful":
+                    fixture_reason = "input contract failed"
+        for repetition, cache, order in schedule_pairs(args.baseline, args.candidate, args.repetitions):
+            pair = f"{fixture['id']}:{cache}:{repetition}"
+            for name in order:
+                graph = by_id[name]
+                reasons = graph_unavailable(graph, inv["capabilities"])
+                if fixture["class"] not in graph["classes"]:
+                    reasons.append("input class unsupported by explicit graph")
+                if fixture_reason or reasons:
+                    row = {"kind": "graph_run", "pair_id": pair, "input": {key: value for key, value in fixture.items() if key != "path"},
+                           "treatment": graph, "measurement": {"repetition": repetition, "cache_condition": cache},
+                           "result": "failed" if fixture_reason == "input hash mismatch" else "unavailable",
+                           "reason": fixture_reason or "; ".join(reasons), "proof": empty_proof(graph)}
+                else:
+                    row = run_graph(graph, fixture, ffmpeg, ffprobe, directory, args.duration, args.timeout,
+                                    repetition, cache, pair)
+                receipt["runs"].append(row)
+                receipt["summary"] = fixture_summaries(receipt["runs"], args.baseline, args.candidate)
+                receipt["p5_four_way"] = p5_matrix(graphs, fixtures, receipt["runs"])
+                write_json(directory / "receipt.json", receipt)
+                if row.get("reason") == "cancelled":
+                    receipt["result"] = "skipped"
+                    write_json(directory / "receipt.json", receipt)
+                    return receipt
+    receipt["summary"] = fixture_summaries(receipt["runs"], args.baseline, args.candidate)
+    receipt["p5_four_way"] = p5_matrix(graphs, fixtures, receipt["runs"])
+    statuses = [row["result"] for row in receipt["runs"]]
+    receipt["result"] = "failed" if "failed" in statuses else "unavailable" if "unavailable" in statuses else "successful" if statuses else "unmeasured"
+    write_json(directory / "receipt.json", receipt)
+    return receipt
+
+
+def parser():
+    root = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = root.add_subparsers(dest="command", required=True)
+    inv = sub.add_parser("inventory", help="Read-only explicit daemon executable inventory; no graph runs")
+    run = sub.add_parser("run", help="Run explicit A/B graph manifests serially; manager coordinates hardware load")
+    schema = sub.add_parser("schema", help="Print manifest schema examples; no executable or measurement")
+    schema.add_argument("kind", choices=("corpus", "graphs"))
+    for command in (inv, run):
+        command.add_argument("--ffmpeg", required=True, help="Absolute daemon FFmpeg path; no PATH substitution")
+        command.add_argument("--ffprobe", required=True, help="Absolute daemon FFprobe path")
+        command.add_argument("--provenance", help="Private JSON source tag/patch/SDK/deployment build provenance")
+        command.add_argument("--service-context", help="Private sanitized JSON launch/session/environment provenance")
+    inv.add_argument("--output", required=True, help="Private JSON inventory receipt path")
+    inv.add_argument("--filter", action="append", default=[], help="Additional exact filter help to inventory")
+    run.add_argument("--corpus", required=True, help="Version-1 hash-pinned corpus JSON")
+    run.add_argument("--graphs", required=True, help="Version-1 explicit graph JSON; no guessed tone-map syntax")
+    run.add_argument("--baseline", required=True)
+    run.add_argument("--candidate", required=True)
+    run.add_argument("--output-dir", required=True, help="New private receipt/media/raw-log directory")
+    run.add_argument("--fixture", action="append", help="Limit fixture IDs, repeatable")
+    run.add_argument("--duration", type=float, default=60, help="Media seconds per run; short smoke rows are not sustained proof")
+    run.add_argument("--repetitions", type=int, default=5, help="Warm pairs in addition to one first-use process pair")
+    run.add_argument("--timeout", type=float, default=300, help="Maximum seconds per child, including output decode")
+    run.add_argument("--source-commit", help="Exact experiment source SHA supplied by manager")
+    return root
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    try:
+        if args.command == "schema":
+            examples = {
+                "corpus": {"schema_version": 1, "fixtures": [{"id": "sdr-example", "path": "clip.mkv",
+                           "sha256": "REPLACE_WITH_OBSERVED_SHA256", "class": "sdr", "duration_seconds": 60,
+                           "role": "sustained", "available": True, "provenance": {"license": "record source/license"},
+                           "expected": {"width": 1920, "height": 1080}}]},
+                "graphs": {"schema_version": 1, "graphs": [{"id": "replace-with-confirmed-graph",
+                           "classes": ["sdr"], "origin": "operator_supplied_unverified",
+                           "decoder_argv": [], "filter_chain": "REPLACE_WITH_EXECUTED_FILTER_TEXT",
+                           "encoder_argv": [], "output_args": [], "output_extension": "mkv",
+                           "requires": {"filters": [], "encoders": [], "filter_options": {}},
+                           "output_expected": {"width": 1280, "height": 720},
+                           "limitations": ["Schema example only; not an executable or verified graph"]}]}}
+            print(json.dumps(examples[args.kind], indent=2))
+            return 0
+        if args.command == "inventory":
+            output = Path(args.output).resolve()
+            receipt = inventory(args.ffmpeg, args.ffprobe, output.parent / "raw",
+                                (*DEFAULT_FILTERS, *args.filter),
+                                load_json(args.provenance) if args.provenance else None,
+                                load_json(args.service_context) if args.service_context else None)
+            write_json(output, receipt)
+            print(json.dumps({"result": receipt["result"], "receipt": str(output)}))
+            return 0
+        if args.duration <= 0 or args.repetitions < 0 or args.timeout <= 0:
+            raise ValueError("Duration/timeout must be positive; repetitions nonnegative")
+        if args.source_commit and not re.fullmatch(r"[a-fA-F0-9]{40}", args.source_commit):
+            raise ValueError("Source commit must be a full 40-character SHA")
+        receipt = experiment(args)
+        print(json.dumps({"result": receipt["result"], "summary": receipt["summary"],
+                          "receipt": str(Path(args.output_dir).resolve() / "receipt.json")}))
+        return 1 if receipt["result"] == "failed" else 130 if receipt["result"] == "skipped" else 0
+    except Cancelled as error:
+        path = Path(args.output) if args.command == "inventory" else Path(args.output_dir) / "receipt.json"
+        receipt = load_json(path) if path.is_file() else {"schema_version": SCHEMA_VERSION, "kind": args.command}
+        receipt.update(result="skipped", reason="cancelled", cancelled_command=error.command)
+        write_json(path, receipt)
+        print(json.dumps({"result": "skipped", "reason": "cancelled", "receipt": str(path)}))
+        return 130
+    except (ValueError, OSError, KeyError) as error:
+        print(f"bench-macos-video: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

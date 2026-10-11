@@ -62,6 +62,12 @@ pub(crate) trait HlsRouteHooks: std::any::Any + Send + Sync {
     /// A status request for `session` resolved to a local owner and is about
     /// to query its actor.
     fn status_local_lookup(&self, session: &str);
+    /// A link-evidence claim has validated its source and its source fence,
+    /// before it rechecks a staged observation and reads the final route.
+    fn after_link_source_validated(&self) -> HookFuture<'_>;
+    /// A link-evidence claim for a staged successor has read its final
+    /// route, before it judges that route.
+    fn after_staged_link_route_read(&self) -> HookFuture<'_>;
 }
 
 /// What production installs: every point is already ready, no fault fires,
@@ -120,6 +126,14 @@ impl HlsRouteHooks for NoopHlsRouteHooks {
     }
 
     fn status_local_lookup(&self, _: &str) {}
+
+    fn after_link_source_validated(&self) -> HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_staged_link_route_read(&self) -> HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
 }
 
 /// The route group's slot as [`AppState`] holds it: empty, so it reads
@@ -176,6 +190,8 @@ pub(crate) struct HlsRouteTestHooks {
     release_tombstone_pauses: Keyed<Arc<crate::seam_hooks::AsyncPause>>,
     release_errors: KeySet,
     status_lookup_observers: Keyed<Arc<std::sync::atomic::AtomicUsize>>,
+    link_source_validated: crate::seam_hooks::PauseSlot,
+    staged_link_route_read: crate::seam_hooks::PauseSlot,
 }
 
 #[cfg(test)]
@@ -304,6 +320,14 @@ impl HlsRouteHooks for HlsRouteTestHooks {
         if let Some(observer) = locked(&self.status_lookup_observers).get(session) {
             observer.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    fn after_link_source_validated(&self) -> HookFuture<'_> {
+        self.link_source_validated.hold()
+    }
+
+    fn after_staged_link_route_read(&self) -> HookFuture<'_> {
+        self.staged_link_route_read.hold()
     }
 }
 
@@ -518,4 +542,26 @@ pub(super) fn observe_status_lookups(
     locked(&hls_route_test_hooks(state).status_lookup_observers)
         .insert(session.to_owned(), Arc::clone(&lookups));
     lookups
+}
+
+/// Hold the next link-evidence claim on `state` after it validates its
+/// source, before it rechecks a staged observation and reads the final route.
+#[cfg(test)]
+pub(super) fn pause_link_claim_after_source_validation(
+    state: &AppState,
+) -> Arc<crate::seam_hooks::AsyncPause> {
+    hls_route_test_hooks(state)
+        .link_source_validated
+        .arm("intake after source validation")
+}
+
+/// Hold the next staged link-evidence claim on `state` after it reads its
+/// final route, before it judges it.
+#[cfg(test)]
+pub(super) fn pause_staged_link_route_result(
+    state: &AppState,
+) -> Arc<crate::seam_hooks::AsyncPause> {
+    hls_route_test_hooks(state)
+        .staged_link_route_read
+        .arm("staged final route result")
 }

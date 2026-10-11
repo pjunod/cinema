@@ -197,14 +197,40 @@ function catalogFocusSearch(e){
 // the difference is what a screen reader announces.
 function catalogTabsHtml(active, homeOn){
   const on=b=>b?' class="px-tab on" aria-current="page"':' class="px-tab"';
+  // A switched-off section is not a tab (featureVisible()); the bar is a flex
+  // row, so the remaining tabs simply widen.
+  const tab=(id,icon,label)=>featureVisible(id)
+    ?`\n    <a href="#/${id}" data-tab="${id}"${on(active===id)}>${catalogIcon(icon)}<span>${label}</span></a>`:"";
   return `<nav class="px-tabs" aria-label="Sections">
-    <a href="#/" data-tab="home"${on(homeOn)}>${catalogIcon("home")}<span>Home</span></a>
-    <a href="#/library-channels" data-tab="library-channels"${on(active==="library-channels")}>${catalogIcon("film")}<span>Channels</span></a>
-    <a href="#/recordings" data-tab="recordings"${on(active==="recordings")}>${catalogIcon("act")}<span>Recordings</span></a>
+    <a href="#/" data-tab="home"${on(homeOn)}>${catalogIcon("home")}<span>Home</span></a>${tab("library-channels","film","Channels")}${tab("recordings","act","Recordings")}
     <button type="button" data-tab="libs" class="px-tab" aria-expanded="false" aria-controls="pxnav" onclick="catalogToggleLibs(event)">${catalogIcon("stack")}<span>Libraries</span></button>
-    <button type="button" data-tab="search" class="px-tab" onclick="catalogFocusSearch(event)">${catalogIcon("search")}<span>Search</span></button>
+    <button type="button" data-tab="search" class="px-tab" onclick="catalogFocusSearch(event)">${catalogIcon("search")}<span>Search</span></button>${tab("shared","stack","Shared")}
     <a href="#/activity" data-tab="activity"${on(active==="activity")}>${catalogIcon("act")}<span>Activity</span></a>
   </nav>`;
+}
+// The sidebar's "Main" list. Same filter as the tab bar beneath it, so the two
+// copies of the section list never disagree about what exists.
+function catalogMainNavHtml(active, homeOn){
+  const link=(on,href,icon,label)=>`\n           <a href="${href}" class="${on?"on":""}"${on?' aria-current="page"':""}>${catalogIcon(icon)}<span class="px-lbl">${label}</span></a>`;
+  const section=(id,icon,label)=>featureVisible(id)?link(active===id,"#/"+id,icon,label):"";
+  return link(homeOn,"#/","home","Home")+section("live-tv","tv","Live TV")+section("recordings","act","Recordings")
+    +section("library-channels","film","Library channels")+section("shared","stack","Shared libraries")+"\n         ";
+}
+// Home means the home page, not "any route that called layoutChrome('home')".
+function catalogHomeOn(active){
+  const hash=location.hash||"#/";
+  return active==="home" && (hash==="#/"||hash==="#"||hash==="");
+}
+// An enable switch flipped in Settings: repaint the sidebar list and the tab
+// bar in place. The tab bar is replaced whole, so an open Libraries sheet
+// would lose its aria-expanded — the sheet covers the Settings card, though,
+// so no save can happen with it open.
+function catalogNavChanged(active){
+  const homeOn=catalogHomeOn(active);
+  const main=document.querySelector('#pxnav .px-nav[aria-label="Main"]');
+  if(main) main.innerHTML=catalogMainNavHtml(active, homeOn);
+  const tabs=document.querySelector("#pxshell > .px-tabs");
+  if(tabs) tabs.outerHTML=catalogTabsHtml(active, homeOn);
 }
 
 // ---- chrome ---------------------------------------------------------------
@@ -217,12 +243,11 @@ function catalogTabsHtml(active, homeOn){
 // change to any of those menus lands in both layouts at once.
 function catalogChrome(active, inner){
   const searchFocus=captureSearchFocus();
-  const hash=location.hash||"#/";
   // Library, category and search routes all call layoutChrome("home", …), so
   // `active==="home"` alone would light Home up while the user is looking at a
   // library that has its own row two lines below it. In a sidebar that lists
   // the libraries, Home means the home page.
-  const homeOn = active==="home" && (hash==="#/"||hash==="#"||hash==="");
+  const homeOn = catalogHomeOn(active);
   // Settings appears for admins only, and nowhere else in the shell — the
   // acceptance list checks a non-admin sees no Settings anywhere in the
   // sidebar. (The account popover applies the same test to its own entry.)
@@ -239,16 +264,11 @@ function catalogChrome(active, inner){
      <aside class="px-side">
        <div class="px-head">
          <div class="px-brand"><a href="#/" class="logo">${APP_NAME}</a></div>
-         <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
+         <input class="search" id="q" type="search" name="q" autocomplete="off" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
        </div>
        <div class="px-scroll" id="pxnav">
          <button class="ghost sm px-sheetx" type="button" aria-label="Close libraries" onclick="catalogToggleLibs(event)">✕</button>
-         <nav class="px-nav" aria-label="Main">
-           <a href="#/" class="${homeOn?"on":""}"${homeOn?' aria-current="page"':""}>${catalogIcon("home")}<span class="px-lbl">Home</span></a>
-           <a href="#/live-tv" class="${active==="live-tv"?"on":""}"${active==="live-tv"?' aria-current="page"':""}>${catalogIcon("tv")}<span class="px-lbl">Live TV</span></a>
-           <a href="#/recordings" class="${active==="recordings"?"on":""}"${active==="recordings"?' aria-current="page"':""}>${catalogIcon("act")}<span class="px-lbl">Recordings</span></a>
-           <a href="#/library-channels" class="${active==="library-channels"?"on":""}"${active==="library-channels"?' aria-current="page"':""}>${catalogIcon("film")}<span class="px-lbl">Library channels</span></a>
-         </nav>
+         <nav class="px-nav" aria-label="Main">${catalogMainNavHtml(active, homeOn)}</nav>
          <div id="pxlibs"></div>
          <div class="px-sec">Manage</div>
          <nav class="px-nav" aria-label="Manage">
@@ -283,7 +303,7 @@ function catalogChrome(active, inner){
   // with the real thing a moment later.
   catalogFillNav();
   const q=document.getElementById("q");
-  let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  wireSearchInput(q);
   restoreSearchFocus(searchFocus);
   catalogWireOnce();
   pollActivity();
@@ -464,7 +484,6 @@ function catalogLibsChanged(){
 // ready.
 const CATALOG_WHY_COLLECTIONS="Collections don’t exist on the server yet — there is nothing behind this tab to list. It arrives when the server learns what a collection is.";
 const CATALOG_WHY_CATEGORIES="Categories needs genre data — coming with the metadata milestone.";
-const CATALOG_WHY_LIST="List view needs the codec, HDR, audio and size columns, and the library response doesn’t carry them yet — coming with the browse-data milestone. Asking for them per row would be one request per item, so it stays off until the list itself carries them.";
 
 // A control that is visibly, announcedly and structurally not ready.
 //  - a <span>, so it is not focusable and not an action: there is nothing to
@@ -488,12 +507,7 @@ function catalogLibraryShell(m){
       ${catalogSoon("px-ltab","Collections",CATALOG_WHY_COLLECTIONS)}
       ${catalogSoon("px-ltab","Categories",CATALOG_WHY_CATEGORIES)}
     </nav>`;
-  // Grid is not a button either: it is the only view, so it is a state, not a
-  // choice. Making it pressable would promise a toggle that has one position.
-  const view=`<span class="px-view" role="group" aria-label="View">
-      <span class="px-vt on" aria-current="true"><span aria-hidden="true">▦</span> Grid</span>
-      ${catalogSoon("px-vt","☰ List",CATALOG_WHY_LIST)}
-    </span>`;
+  const view=libraryViewToggle();
   // The selects are classic's, verbatim, including the onchange strings: they
   // are behaviour, and a layout that retypes them is a layout that can get
   // them subtly wrong. The wrapper keeps the shipped `libbar` class because
@@ -507,9 +521,7 @@ function catalogLibraryShell(m){
       <span class="lbl" style="margin-left:8px">Show</span>
       <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
         ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select>
-      <span class="lbl" style="margin-left:8px">Per page</span>
-      <select aria-label="Per page" onchange="setPerPage(this.value);libGoPage(0)">
-        ${LIB_SIZES.map(n=>libOpt(String(n),String(n),String(LIB_PER))).join("")}${libOpt("all","All",String(LIB_PER))}</select>
+      ${libraryPageSize()}
     </div>
     <span class="muted" id="libcount"></span></div>`;
   const head=pageHead([{href:"#/",label:"Home"},{label:m.title}],m.title);
@@ -668,3 +680,4 @@ LAYOUTS.catalog.views.item = catalogItemBody;
 LAYOUTS.catalog.views.library = {shell:catalogLibraryShell};
 LAYOUTS.catalog.stickyFloor = catalogStickyFloor;
 LAYOUTS.catalog.libsChanged = catalogLibsChanged;
+LAYOUTS.catalog.navChanged = catalogNavChanged;

@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Original CC0 terminal-NAL controls, preserving every source sample timestamp.
+
+Append legal EOS/EOB after the final current-AU RPU. The independent missing-RPU
+control deletes that RPU; it never substitutes cached Dolby state. No media
+executable is launched. Inputs are the exact retained strict P5 fresh source.
+"""
+from pathlib import Path
+import argparse
+import hashlib
+import json
+import struct
+
+SOURCE_SHA256 = "d86402326c3ef3b88c455ac089c8b94aa27fcbade48eb349499043f54ba5d062"
+
+
+def boxes(data):
+    offset = 0
+    while offset < len(data):
+        size, kind = struct.unpack_from(">I4s", data, offset)
+        if size < 8 or offset + size > len(data):
+            raise ValueError("unsupported MP4 box layout")
+        yield kind, data[offset + 8:offset + size]
+        offset += size
+
+
+CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl"}
+
+
+def tables(data):
+    result = {}
+    def walk(data):
+        for kind, payload in boxes(data):
+            if kind in CONTAINERS:
+                walk(payload)
+            elif kind in {b"stsz", b"stco", b"stsc"}:
+                if kind in result:
+                    raise ValueError("multiple video tracks are unsupported")
+                result[kind] = payload
+    walk(data)
+    return result
+
+
+def terminal_cases(data):
+    if len(data) > 64 * 1024 or hashlib.sha256(data).hexdigest() != SOURCE_SHA256:
+        raise ValueError("input must be the exact hash-bound strict P5 fresh source")
+    table = tables(data)
+    uniform, count = struct.unpack_from(">II", table[b"stsz"], 4)
+    if uniform or count != 24 or struct.unpack_from(">IIII", table[b"stsc"], 4) != (1, 1, 24, 1):
+        raise ValueError("unexpected sample layout")
+    sizes = list(struct.unpack_from(">24I", table[b"stsz"], 12))
+    original = list(boxes(data))
+    media = next(payload for kind, payload in original if kind == b"mdat")
+    kinds = [kind for kind, _ in original]
+    if sum(sizes) != len(media) or kinds.index(b"mdat") > kinds.index(b"moov"):
+        raise ValueError("media must be contiguous and precede its moov")
+
+    def nals(sample):
+        units = []
+        offset = 0
+        while offset < len(sample):
+            size = struct.unpack_from(">I", sample, offset)[0]
+            offset += 4
+            if size < 2 or offset + size > len(sample):
+                raise ValueError("invalid length-prefixed NAL")
+            units.append(sample[offset:offset + size])
+            offset += size
+        return units
+
+    final = nals(media[sum(sizes[:-1]):])
+    if (final[-1][0] >> 1) & 63 != 62:
+        raise ValueError("source final access unit must end with its current RPU")
+
+    def image(final_units):
+        changed = b"".join(struct.pack(">I", len(unit)) + unit for unit in final_units)
+        new_sizes = sizes[:-1] + [len(changed)]
+        def rebuild(data):
+            output = bytearray()
+            for kind, payload in boxes(data):
+                if kind in CONTAINERS:
+                    payload = rebuild(payload)
+                elif kind == b"stsz":
+                    payload = payload[:12] + struct.pack(">24I", *new_sizes)
+                elif kind == b"mdat":
+                    payload = payload[:sum(sizes[:-1])] + changed
+                output.extend(struct.pack(">I4s", len(payload) + 8, kind) + payload)
+            return bytes(output)
+        return rebuild(data)
+
+    # Layer zero, temporal_id_plus1 one, and valid rbsp_trailing_bits. Only
+    # the final AU receives terminators, avoiding an intermediate sequence
+    # reset that would confound the RPU extraction contract.
+    eos = bytes([36 << 1, 1, 128])
+    eob = bytes([37 << 1, 1, 128])
+    return {"eos": image(final + [eos]), "eob": image(final + [eob]),
+            "eos_eob": image(final + [eos, eob]),
+            "true_missing": image(final[:-1] + [eos, eob])}
+
+
+def materialize(source, output):
+    if not source.is_absolute() or source.is_symlink() or not source.is_file():
+        raise ValueError("explicit regular retained source required")
+    if not output.is_absolute() or output.exists():
+        raise ValueError("new explicit output directory required")
+    cases = terminal_cases(source.read_bytes())
+    output.mkdir(parents=True)
+    rows = []
+    for name, data in cases.items():
+        path = "strict_p5_terminal_" + name + ".mp4"
+        (output / path).write_bytes(data)
+        rows.append({"id": "terminal_" + name, "path": path,
+                     "sha256": hashlib.sha256(data).hexdigest(), "byte_length": len(data),
+                     "negative_max_frames": 21 if name == "true_missing" else None,
+                     "seek_seconds": 0})
+    manifest = {"schema_version": 1, "license": "CC0-1.0", "source_sha256": SOURCE_SHA256,
+                "source_shape": [320, 180], "frame_count": 24, "frame_rate": [12, 1],
+                "operation": "final AU only; preserve stsd/stts/ctts/stss and original preceding samples",
+                "cases": rows}
+    (output / "terminal-nals.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args()
+    print(json.dumps(materialize(args.source, args.output), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

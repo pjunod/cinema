@@ -76,6 +76,7 @@ fun DvrCellActions(
     onStop: (String) -> Unit,
     onForgetReminder: (String) -> Unit,
     modifier: Modifier = Modifier,
+    watchModifier: Modifier = Modifier,
 ) {
     val type = LiveTvTypography.current()
     val airing = programme.start <= now && now < programme.end
@@ -93,6 +94,7 @@ fun DvrCellActions(
             // reads "Remind me" both want the same thing, and one reminder per
             // airing is what the server stores whichever they press.
             TvTextButton(
+                modifier = watchModifier,
                 onClick = if (airing) onWatch else onRemind,
                 enabled = channel.watchable || !airing,
                 compact = true,

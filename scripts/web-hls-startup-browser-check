@@ -89,6 +89,15 @@ class FixtureServer(ThreadingHTTPServer):
         self.session_creates = 0
         self.client_logs = []
         self.lock = threading.Lock()
+        self.log_arrived = threading.Condition(self.lock)
+
+    def wait_for_log(self, event, timeout):
+        """Wait for actual fixture receipt; playback logs are fire-and-forget."""
+        with self.log_arrived:
+            return self.log_arrived.wait_for(
+                lambda: any(row.get("event") == event for row in self.client_logs),
+                timeout=timeout,
+            )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -150,6 +159,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.client_logs.append(json.loads(body))
                 except json.JSONDecodeError:
                     self.server.client_logs.append({"event": "invalid"})
+                self.server.log_arrived.notify_all()
         self.reply(204)
 
 
@@ -249,6 +259,12 @@ def run_case(browser, server, *, block_worker):
             arg=local_seek_target,
             timeout=TIMEOUT_MS,
         )
+        # The player intentionally does not await its telemetry fetch. A
+        # fixed delay can observe a correct seek before the POST reaches this
+        # server, especially on a loaded runner. Require the actual log receipt
+        # before taking the evidence snapshot; retain the no-new-session check.
+        if not server.wait_for_log("seek_local", TIMEOUT_MS / 1000):
+            raise AssertionError("local seek log did not reach the fixture before its deadline")
         page.wait_for_timeout(250)
         result = page.evaluate("""() => ({
           position:document.getElementById('video').currentTime,

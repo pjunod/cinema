@@ -87,6 +87,8 @@ impl Client {
             tx_shutdown: Some(tx_shutdown),
             stream_shutdown: watch::channel(false).0,
             background_handles: std::sync::Mutex::new(Vec::new()),
+            startup_listeners: std::sync::Mutex::new(None),
+            startup_drain: tokio::sync::Mutex::new(()),
             #[cfg(feature = "listen_notify_local")]
             app_start: chrono::Utc::now().timestamp_micros(),
             #[cfg(feature = "listen_notify_local")]
@@ -248,6 +250,8 @@ impl Client {
             tx_shutdown: None,
             stream_shutdown,
             background_handles: std::sync::Mutex::new(background_handles),
+            startup_listeners: std::sync::Mutex::new(None),
+            startup_drain: tokio::sync::Mutex::new(()),
             #[cfg(feature = "listen_notify_local")]
             app_start: chrono::Utc::now().timestamp_micros(),
             #[cfg(feature = "listen_notify_local")]

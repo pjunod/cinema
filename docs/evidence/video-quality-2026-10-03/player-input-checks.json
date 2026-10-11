@@ -1,0 +1,59 @@
+[
+  {
+    "command": [
+      "node",
+      "tests/playback/player-input-contract.test.js"
+    ],
+    "exit": 0,
+    "log": "player-input-contract.test.js.log"
+  },
+  {
+    "command": [
+      "node",
+      "tests/playback/web-policy.test.js"
+    ],
+    "exit": 1,
+    "log": "web-policy.test.js.log"
+  },
+  {
+    "command": [
+      "node",
+      "tests/playback/web-control.test.js"
+    ],
+    "exit": 1,
+    "log": "web-control.test.js.log"
+  },
+  {
+    "command": [
+      "node",
+      "--test",
+      "tests/web/seek-telemetry.test.js"
+    ],
+    "exit": 0,
+    "log": "seek-telemetry.test.js.log"
+  },
+  {
+    "command": [
+      "node",
+      "tests/web/player-dom.test.js"
+    ],
+    "exit": 0,
+    "log": "player-dom.test.js.log"
+  },
+  {
+    "command": [
+      "node",
+      "tests/web/read-after.test.js"
+    ],
+    "exit": 0,
+    "log": "read-after.test.js.log"
+  },
+  {
+    "command": [
+      "node",
+      "tests/web/live-tv.test.js"
+    ],
+    "exit": 0,
+    "log": "live-tv.test.js.log"
+  }
+]

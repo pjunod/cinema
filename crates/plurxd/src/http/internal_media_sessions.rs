@@ -170,20 +170,32 @@ pub(crate) async fn start(
         .ok()
         .filter(RemoteStartRequest::is_valid)
         .ok_or(StatusCode::BAD_REQUEST)?;
+    // Until the shared ownership store and grant admission are installed,
+    // reject a forwarded sharing principal before resource allocation.
+    let user_id = request
+        .principal
+        .local_user_id()
+        .ok_or(StatusCode::FORBIDDEN)?;
     if !state.media_pool.remote_placement_ready(&state).await {
         return Err(StatusCode::SERVICE_UNAVAILABLE.into());
     }
     let user = state
         .store
-        .get_user(request.user_id)
+        .get_user(user_id)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
     state
         .transcode
-        .restore_candidate_context(&mut request)
+        .restore_candidate_context_with_deadline(&mut request, start_deadline)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|error| {
+            if error.is_incompatible() {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        })?;
     let negotiated_ownership = remote_start_ownership_v1(&headers);
     // The worker publication and its activation-confirmation watcher are one
     // owned operation. If the peer disconnects after ffmpeg starts, dropping
@@ -193,8 +205,12 @@ pub(crate) async fn start(
         let _restart_admission = restart_admission;
         let started = start_state
             .transcode
-            .create_cluster_session(
-                &request.request,
+            .create_cluster_session_for_receiver(
+                (
+                    &request.request,
+                    request.retained_output_receiver,
+                    request.retained_output.as_ref(),
+                ),
                 // A relayed worker start carries no epoch: `RemoteStartRequest`
                 // is the recipe the owning node sends, and the epoch is not on
                 // it. Adding one is a change to a relayed type and therefore a
@@ -212,7 +228,7 @@ pub(crate) async fn start(
                 // the least-loaded path and absent on the most-loaded one.
                 // Owed until the epoch reaches this recipe.
                 &crate::transcode::SessionRecoveryIdentity {
-                    user_id: request.user_id,
+                    principal: request.principal.clone(),
                     incarnation_id: request.incarnation_id.clone(),
                     recovery_epoch: String::new(),
                 },
@@ -236,7 +252,7 @@ pub(crate) async fn start(
                 start_state.node_id.clone(),
                 request.incarnation_id.clone(),
                 info.session_id.clone(),
-                request.user_id,
+                request.principal.clone(),
                 request.incarnation_id.clone(),
                 Some(replacement),
             )
@@ -246,7 +262,7 @@ pub(crate) async fn start(
                 start_state.node_id.clone(),
                 request.incarnation_id.clone(),
                 info.session_id.clone(),
-                request.user_id,
+                request.principal.clone(),
                 request.incarnation_id.clone(),
                 Some(replacement),
             )
@@ -373,7 +389,14 @@ pub(crate) async fn start(
             }
         })?;
     let status = remote_start_success_status(&headers, created);
-    Ok((status, Json(response)).into_response())
+    let processed_header = response.processed_dv_header();
+    let mut output = (status, Json(response)).into_response();
+    if let Some(value) =
+        processed_header.and_then(|value| axum::http::HeaderValue::from_str(&value).ok())
+    {
+        output.headers_mut().insert("x-plurx-dv-processing", value);
+    }
+    Ok(output)
 }
 
 pub(crate) async fn activate(
@@ -484,11 +507,20 @@ pub(crate) async fn prepare(
     if let Err(status) = authorize(&state, &headers, PREPARE_PATH, &body).await {
         return status.into_response();
     }
+    prepare_authorized(state, body).await
+}
+
+/// Exact peer authentication stays at ingress; this owner operation rechecks
+/// the reserved durable route and seals private capture before its 204 receipt.
+pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response {
     let Some(request) = serde_json::from_slice::<RemotePrepareRequest>(&body)
         .ok()
         .filter(RemotePrepareRequest::is_valid)
     else {
         return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(user_id) = request.principal.local_user_id() else {
+        return StatusCode::FORBIDDEN.into_response();
     };
     let route = match state
         .store
@@ -498,7 +530,7 @@ pub(crate) async fn prepare(
         Ok(Some(route))
             if route.incarnation_id == request.incarnation_id
                 && route.session_id == request.session_id
-                && route.user_id == request.user_id
+                && route.principal == request.principal
                 && route.owner_node_id == state.node_id
                 && route.owner_epoch == request.expected_owner_epoch
                 && route.state == "active"
@@ -516,7 +548,7 @@ pub(crate) async fn prepare(
         .filter(RemoteStartRequest::is_valid)
         .filter(|recipe| {
             recipe.incarnation_id == request.incarnation_id
-                && recipe.user_id == request.user_id
+                && recipe.principal == request.principal
                 && recipe.request.request_id.as_deref() == Some(request.incarnation_id.as_str())
         })
     else {
@@ -557,15 +589,19 @@ pub(crate) async fn prepare(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
+    let owner = crate::transcode::PreparedVodOwner {
+        node_id: state.node_id.clone(),
+        source_authority: Some(std::sync::Arc::new(state.clone())),
+    };
     if state
         .transcode
-        .vod_resurrect_before(
+        .vod_prepare_first_before(
             &route.recipe_json,
             &request.session_id,
-            request.user_id,
+            user_id,
+            owner,
             adoption,
             deadline.into(),
-            true,
         )
         .await
         && authority.is_current(admitted_generation)
@@ -735,7 +771,10 @@ pub(crate) async fn relay(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let authorization = if matches!(&request.resource, RelayResource::Delete) {
+    let authorization = if matches!(
+        &request.resource,
+        RelayResource::Delete | RelayResource::PassivePresence { .. }
+    ) {
         authorize(&state, &headers, RELAY_PATH, &body).await
     } else {
         authorize_read(&state, &headers, RELAY_PATH, &body).await
@@ -755,7 +794,7 @@ pub(crate) async fn relay(
     let request_deadline = now + budget;
     let media_resource = !matches!(
         &request.resource,
-        RelayResource::Status | RelayResource::Delete
+        RelayResource::Status | RelayResource::Delete | RelayResource::PassivePresence { .. }
     );
     let resolution = if media_resource {
         state
@@ -825,6 +864,46 @@ fn post_classification_route_rejection(
     // classification is still a takeover/settlement transition, never a
     // durable terminal fact. 409 makes ingress reclassify.
     (route.lease_expires_at_ms <= now_unix_ms).then_some(StatusCode::CONFLICT)
+}
+
+/// Cancellation discovery and mutation use the same exact-write peer auth as
+/// ordinary control, in a separate envelope unknown to legacy parsers.
+pub(crate) async fn quality_control(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, super::hls::QUALITY_CONTROL_PATH, &body).await
+    {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<super::hls::QualityControlRelayRequest>(&body)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !request.request.valid() || request.expected_owner_node_id != state.node_id {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(budget) =
+        crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match tokio::time::timeout(
+        budget,
+        super::hls::quality_control_routed(
+            &state,
+            &request.session_id,
+            request.request,
+            Some(&request.expected_owner_node_id),
+            request.deadline_unix_ms,
+        ),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 /// Exact-write-authenticated control relay. The envelope repeats the durable
@@ -1037,6 +1116,37 @@ pub(crate) async fn control_authorized(
     super::hls::control_local(&state, &route, request.control, request.deadline_unix_ms).await
 }
 
+pub(crate) async fn quality_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, super::hls::QUALITY_SCHEDULE_PATH, &body).await
+    {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<super::hls::QualityScheduleRelayRequest>(&body)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !request.request.valid() || request.expected_owner_node_id != state.node_id {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    super::hls::quality_schedule_admitted(
+        state,
+        request.session_id,
+        request.request,
+        Some(request.expected_owner_node_id),
+        request.deadline_unix_ms,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) fn output_capture_test_state() -> AppState {
+    super::tests::test_app_with_state().1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1053,7 +1163,7 @@ mod tests {
         state
             .store
             .claim_media_session_request(
-                user_id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
                 incarnation_id,
                 &fingerprint,
                 "relay-player",
@@ -1066,7 +1176,7 @@ mod tests {
         assert!(state
             .store
             .assign_media_session_request_owner(
-                user_id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
                 incarnation_id,
                 incarnation_id,
                 &state.node_id,
@@ -1079,7 +1189,7 @@ mod tests {
             expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
-            user_id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
             playback_id: "relay-player".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -1115,10 +1225,13 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            effective_processing: None,
+            delivered_audio: None,
             quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.to_owned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -1332,10 +1445,13 @@ mod tests {
         state
             .store
             .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                quality_cancellation_key: None,
                 expected_desired_revision: None,
                 incarnation_id: successor_incarnation.clone(),
                 session_id: successor_session.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: user.id,
+                },
                 playback_id: "relay-player".to_owned(),
                 expected_predecessor_incarnation_id: incarnation_id.clone(),
                 expected_predecessor_owner_node_id: state.node_id.clone(),
@@ -1391,6 +1507,7 @@ mod tests {
                 producer_decision: None,
                 hold_reason: None,
                 subtitle_readiness: None,
+                subtitle_revision: None,
                 preparation: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,
@@ -1426,7 +1543,7 @@ mod tests {
         state
             .store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 "relay-player",
                 &plurx_core::domain::MediaSessionPreparationCommitRequest {
                     expected_desired_revision: None,
@@ -1581,7 +1698,7 @@ mod tests {
             recovery_epoch: String::new(),
             incarnation_id: uuid::Uuid::new_v4().to_string(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "relay-expiry".to_owned(),
             request_fingerprint: "a".repeat(64),
             owner_node_id: "node-a".to_owned(),

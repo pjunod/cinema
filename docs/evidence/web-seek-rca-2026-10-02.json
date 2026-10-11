@@ -1,0 +1,1133 @@
+{
+  "observed_date_local": "2026-10-02",
+  "timezone": "America/New_York",
+  "deployed_commit": "4fa50b79e4b3b196797a9b7a1a7a4abd2184ea43",
+  "hls_version": "1.6.16",
+  "safari_version": "27.0.1",
+  "source_hashes": {
+    "crates/plurxd/src/web/hls.min.js": "442f599c34f103c3355b375a23bdff560592d7117d09a8c847242ea3de2d40e0",
+    "crates/plurxd/src/web/player/transport.js": "1dd7cf8678d7d4c3dd62a3d7b1a7e986d427510a1b877116a6a9b118a76517e3"
+  },
+  "events": [
+    {
+      "utc": "2026-10-03T02:47:19.671023776Z",
+      "event": "seek_route",
+      "file_id": 5208,
+      "trace": {
+        "id": "a3:1",
+        "session": "ed2d9517-2693-4e63-81b4-a1556ad317fc",
+        "target_ms": 5078741,
+        "element_ms": 4541474,
+        "origin_ms": 4535643,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            4535643,
+            4573399
+          ]
+        ],
+        "seekable_ms": [
+          [
+            4535643,
+            4539527
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:47:29.063776065Z",
+      "event": "seek_resumed",
+      "file_id": 5208,
+      "trace": {
+        "id": "a3:1",
+        "session": "ed2d9517-2693-4e63-81b4-a1556ad317fc",
+        "target_ms": 5078741,
+        "element_ms": 4541474,
+        "origin_ms": 4535643,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            4535643,
+            4573399
+          ]
+        ],
+        "seekable_ms": [
+          [
+            4535643,
+            4539527
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable",
+        "landing_ms": 5078857,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 9382
+    },
+    {
+      "utc": "2026-10-03T02:47:32.132459162Z",
+      "event": "seek_route",
+      "file_id": 5208,
+      "trace": {
+        "id": "a4:2",
+        "session": "e18f93d4-63df-46ad-904e-790420708c17",
+        "target_ms": 3219508,
+        "element_ms": 5081828,
+        "origin_ms": 5078741,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            5078741,
+            5100054
+          ]
+        ],
+        "seekable_ms": [
+          [
+            5078741,
+            5090551
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:47:41.666707802Z",
+      "event": "seek_resumed",
+      "file_id": 5208,
+      "trace": {
+        "id": "a4:2",
+        "session": "e18f93d4-63df-46ad-904e-790420708c17",
+        "target_ms": 3219508,
+        "element_ms": 5081828,
+        "origin_ms": 5078741,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            5078741,
+            5100054
+          ]
+        ],
+        "seekable_ms": [
+          [
+            5078741,
+            5090551
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable",
+        "landing_ms": 3219617,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 9567
+    },
+    {
+      "utc": "2026-10-03T02:47:49.175434059Z",
+      "event": "seek_route",
+      "file_id": 5208,
+      "trace": {
+        "id": "a5:3",
+        "session": "490a5e02-595d-4779-8788-ffdace9e35c2",
+        "target_ms": 3255778,
+        "element_ms": 3227139,
+        "origin_ms": 3219508,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            3219508,
+            3270408
+          ]
+        ],
+        "seekable_ms": [
+          [
+            3219508,
+            3228607
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:47:56.043779459Z",
+      "event": "seek_resumed",
+      "file_id": 5208,
+      "trace": {
+        "id": "a5:3",
+        "session": "490a5e02-595d-4779-8788-ffdace9e35c2",
+        "target_ms": 3255778,
+        "element_ms": 3227139,
+        "origin_ms": 3219508,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            3219508,
+            3270408
+          ]
+        ],
+        "seekable_ms": [
+          [
+            3219508,
+            3228607
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable",
+        "landing_ms": 3255882,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 6861
+    },
+    {
+      "utc": "2026-10-03T02:48:00.591111978Z",
+      "event": "seek_route",
+      "file_id": 5208,
+      "trace": {
+        "id": "a6:4",
+        "session": "f5070334-d512-4168-a03c-d9af4478154e",
+        "target_ms": 3289045,
+        "element_ms": 3260430,
+        "origin_ms": 3255778,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            3255778,
+            3292953
+          ]
+        ],
+        "seekable_ms": [
+          [
+            3255778,
+            3266670
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:48:07.157403760Z",
+      "event": "seek_resumed",
+      "file_id": 5208,
+      "trace": {
+        "id": "a6:4",
+        "session": "f5070334-d512-4168-a03c-d9af4478154e",
+        "target_ms": 3289045,
+        "element_ms": 3260430,
+        "origin_ms": 3255778,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            3255778,
+            3292953
+          ]
+        ],
+        "seekable_ms": [
+          [
+            3255778,
+            3266670
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable",
+        "landing_ms": 3289148,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 6567
+    },
+    {
+      "utc": "2026-10-03T02:48:10.484461119Z",
+      "event": "seek_route",
+      "file_id": 5208,
+      "trace": {
+        "id": "a7:5",
+        "session": "70d344b8-f39f-43e8-86d7-7b332271660b",
+        "target_ms": 3301154,
+        "element_ms": 3292479,
+        "origin_ms": 3289045,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            3289045,
+            3314238
+          ]
+        ],
+        "seekable_ms": [
+          [
+            3289045,
+            3302939
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "buffered"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:48:10.696810067Z",
+      "event": "seek_resumed",
+      "file_id": 5208,
+      "trace": {
+        "id": "a7:5",
+        "session": "70d344b8-f39f-43e8-86d7-7b332271660b",
+        "target_ms": 3301154,
+        "element_ms": 3292479,
+        "origin_ms": 3289045,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            3289045,
+            3314238
+          ]
+        ],
+        "seekable_ms": [
+          [
+            3289045,
+            3302939
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "buffered",
+        "landing_ms": 3301258,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 201
+    },
+    {
+      "utc": "2026-10-03T02:48:14.139987362Z",
+      "event": "seek_route",
+      "file_id": 5208,
+      "trace": {
+        "id": "a7:6",
+        "session": "70d344b8-f39f-43e8-86d7-7b332271660b",
+        "target_ms": 3313223,
+        "element_ms": 3304637,
+        "origin_ms": 3289045,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            3289045,
+            3350942
+          ]
+        ],
+        "seekable_ms": [
+          [
+            3289045,
+            3302939
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:48:21.045625840Z",
+      "event": "seek_resumed",
+      "file_id": 5208,
+      "trace": {
+        "id": "a7:6",
+        "session": "70d344b8-f39f-43e8-86d7-7b332271660b",
+        "target_ms": 3313223,
+        "element_ms": 3304637,
+        "origin_ms": 3289045,
+        "path": "native_hls",
+        "mode": "rolling",
+        "buffered_ms": [
+          [
+            3289045,
+            3350942
+          ]
+        ],
+        "seekable_ms": [
+          [
+            3289045,
+            3302939
+          ]
+        ],
+        "published_ms": null,
+        "target_duration_ms": null,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "reopen",
+        "reason": "outside_seekable",
+        "landing_ms": 3313350,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 6908
+    },
+    {
+      "utc": "2026-10-03T02:48:45.305407352Z",
+      "event": "seek_route",
+      "file_id": 3040,
+      "trace": {
+        "id": "a9:1",
+        "session": "256893d7-ebac-4830-8945-b17567f25f87",
+        "target_ms": 890530,
+        "element_ms": 881848,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            868960,
+            911098
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:48:45.441492853Z",
+      "event": "seek_resumed",
+      "file_id": 3040,
+      "trace": {
+        "id": "a9:1",
+        "session": "256893d7-ebac-4830-8945-b17567f25f87",
+        "target_ms": 890530,
+        "element_ms": 881848,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            868960,
+            911098
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod",
+        "landing_ms": 890543,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 151
+    },
+    {
+      "utc": "2026-10-03T02:48:47.992207738Z",
+      "event": "seek_route",
+      "file_id": 3040,
+      "trace": {
+        "id": "a9:2",
+        "session": "256893d7-ebac-4830-8945-b17567f25f87",
+        "target_ms": 921792,
+        "element_ms": 893091,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            878920,
+            911098
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:48:59.517287968Z",
+      "event": "seek_resumed",
+      "file_id": 3040,
+      "trace": {
+        "id": "a9:2",
+        "session": "256893d7-ebac-4830-8945-b17567f25f87",
+        "target_ms": 921792,
+        "element_ms": 893091,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            878920,
+            911098
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod",
+        "landing_ms": 921893,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 11510
+    },
+    {
+      "utc": "2026-10-03T02:49:04.020870327Z",
+      "event": "seek_route",
+      "file_id": 3040,
+      "trace": {
+        "id": "a10:7",
+        "session": "c38980fb-1976-4d69-8e1b-950b95078016",
+        "target_ms": 955126,
+        "element_ms": 926414,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            917200,
+            955301
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:49:04.108974850Z",
+      "event": "seek_abandoned",
+      "file_id": 3040,
+      "trace": {
+        "id": "a10:7",
+        "session": "c38980fb-1976-4d69-8e1b-950b95078016",
+        "target_ms": 955126,
+        "element_ms": 926414,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            917200,
+            955301
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod",
+        "landing_ms": null,
+        "outcome": "seek_abandoned"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:49:05.027680991Z",
+      "event": "seek_route",
+      "file_id": 3040,
+      "trace": {
+        "id": "a10:8",
+        "session": "c38980fb-1976-4d69-8e1b-950b95078016",
+        "target_ms": 1045552,
+        "element_ms": 955792,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            940840,
+            981093
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:49:05.332825250Z",
+      "event": "seek_resumed",
+      "file_id": 3040,
+      "trace": {
+        "id": "a10:8",
+        "session": "c38980fb-1976-4d69-8e1b-950b95078016",
+        "target_ms": 1045552,
+        "element_ms": 955792,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            940840,
+            981093
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod",
+        "landing_ms": 1045572,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 335
+    },
+    {
+      "utc": "2026-10-03T02:49:09.753281550Z",
+      "event": "seek_route",
+      "file_id": 3040,
+      "trace": {
+        "id": "a10:9",
+        "session": "c38980fb-1976-4d69-8e1b-950b95078016",
+        "target_ms": 1198106,
+        "element_ms": 1049989,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            1042280,
+            1077136
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod"
+      }
+    },
+    {
+      "utc": "2026-10-03T02:49:18.464239267Z",
+      "event": "seek_abandoned",
+      "file_id": 3040,
+      "trace": {
+        "id": "a10:9",
+        "session": "c38980fb-1976-4d69-8e1b-950b95078016",
+        "target_ms": 1198106,
+        "element_ms": 1049989,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            1042280,
+            1077136
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod",
+        "landing_ms": null,
+        "outcome": "seek_abandoned"
+      }
+    },
+    {
+      "utc": "2026-10-03T03:02:10.349248719Z",
+      "event": "seek_route",
+      "file_id": 3040,
+      "trace": {
+        "id": "a11:11",
+        "session": "f5506588-001e-491e-9809-7d9949625de9",
+        "target_ms": 1301119,
+        "element_ms": 1272349,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            1250200,
+            1286330
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod"
+      }
+    },
+    {
+      "utc": "2026-10-03T03:02:21.751325460Z",
+      "event": "seek_resumed",
+      "file_id": 3040,
+      "trace": {
+        "id": "a11:11",
+        "session": "f5506588-001e-491e-9809-7d9949625de9",
+        "target_ms": 1301119,
+        "element_ms": 1272349,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            1250200,
+            1286330
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod",
+        "landing_ms": 1301257,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 11401
+    },
+    {
+      "utc": "2026-10-03T03:04:20.219575165Z",
+      "event": "seek_route",
+      "file_id": 3040,
+      "trace": {
+        "id": "a12:13",
+        "session": "ee4772ab-a06d-4ba8-84ba-df4c80cb2b32",
+        "target_ms": 1448386,
+        "element_ms": 1419727,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            1398440,
+            1437220
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod"
+      }
+    },
+    {
+      "utc": "2026-10-03T03:04:22.060580890Z",
+      "event": "seek_resumed",
+      "file_id": 3040,
+      "trace": {
+        "id": "a12:13",
+        "session": "ee4772ab-a06d-4ba8-84ba-df4c80cb2b32",
+        "target_ms": 1448386,
+        "element_ms": 1419727,
+        "origin_ms": 0,
+        "path": "hlsjs",
+        "mode": "vod",
+        "buffered_ms": [
+          [
+            1398440,
+            1437220
+          ]
+        ],
+        "seekable_ms": [
+          [
+            0,
+            3509920
+          ]
+        ],
+        "published_ms": [
+          0,
+          3509920
+        ],
+        "target_duration_ms": 16000,
+        "produced_end_ms": null,
+        "demand_sequence": null,
+        "demand_age_ms": null,
+        "route": "local",
+        "reason": "vod",
+        "landing_ms": 1448404,
+        "outcome": "seek_resumed"
+      },
+      "dispatch_to_present_ms": 1813
+    }
+  ],
+  "runtime_fields": [
+    "epoch_ms",
+    "current_time_s",
+    "seeking",
+    "hls_state",
+    "loading_enabled",
+    "buffering_enabled",
+    "media_source_class",
+    "media_source_streaming",
+    "fragment_sn",
+    "next_load_position_s",
+    "buffered_ranges_s"
+  ],
+  "controlled_baseline": [
+    [
+      1790996514692,
+      1256.743009287,
+      false,
+      "IDLE",
+      true,
+      false,
+      "ManagedMediaSource",
+      false,
+      134,
+      1286.3200000000004,
+      [
+        [
+          1232.48,
+          1286.3301666666666
+        ]
+      ]
+    ],
+    [
+      1790996530387,
+      1301.119421746,
+      true,
+      "IDLE",
+      true,
+      false,
+      "ManagedMediaSource",
+      false,
+      134,
+      1286.3200000000004,
+      [
+        [
+          1250.2,
+          1286.3301666666666
+        ]
+      ]
+    ],
+    [
+      1790996541402,
+      0,
+      false,
+      "FRAG_LOADING",
+      true,
+      true,
+      "ManagedMediaSource",
+      true,
+      136,
+      1303.4800000000002,
+      []
+    ],
+    [
+      1790996542014,
+      1301.572227722,
+      false,
+      "IDLE",
+      true,
+      false,
+      "ManagedMediaSource",
+      false,
+      140,
+      1333.1200000000001,
+      [
+        [
+          1295.76,
+          1333.1345
+        ]
+      ]
+    ]
+  ],
+  "intervention": {
+    "action": "one hls.resumeBuffering() call 2500ms after nudge(30); no source/config/server changes",
+    "session_id": "ee4772ab-a06d-4ba8-84ba-df4c80cb2b32",
+    "before": [
+      1790996661331,
+      1448.385981097,
+      true,
+      "IDLE",
+      true,
+      false,
+      "ManagedMediaSource",
+      false,
+      151,
+      1437.2000000000003,
+      [
+        [
+          1398.44,
+          1437.2201666666667
+        ]
+      ]
+    ],
+    "after_600_ms": [
+      1790996661931,
+      1448.3859811,
+      false,
+      "FRAG_LOADING",
+      true,
+      true,
+      "ManagedMediaSource",
+      false,
+      155,
+      1471.8000000000002,
+      [
+        [
+          1443.96,
+          1465.0818333333334
+        ]
+      ]
+    ],
+    "later": [
+      1790996718611,
+      1505.033381583,
+      false,
+      "IDLE",
+      true,
+      true,
+      "ManagedMediaSource",
+      false,
+      165,
+      1577.92,
+      [
+        [
+          1490.88,
+          1577.9351666666666
+        ]
+      ]
+    ]
+  },
+  "original_frozen_state": {
+    "time_s": 1198.105523201,
+    "seeking": true,
+    "paused": true,
+    "ready_state": 4,
+    "buffered_ranges_s": [
+      [
+        1042.28,
+        1077.1355
+      ]
+    ],
+    "localVodPresented": true,
+    "localVodSeekFallbackPending": false,
+    "controlPresentedFrames": 405,
+    "seek_frame_floor": 405,
+    "controlHasFrameCallbacks": true,
+    "server_ready_anchor_ms": 1198106,
+    "server_ready_end_ms": 1388480,
+    "server_waiting_requests": 0
+  },
+  "limits": [
+    "Runtime samples transcribed from Safari Web Inspector; no raw credentials or URLs retained.",
+    "Controlled baseline samples every200ms; transition selection only.",
+    "Intervention includes deliberate2500ms delay and is not a latency benchmark.",
+    "Original frozen snapshot is post-exhaustion; STOPPED/paused describe recovery consequence, not initial loader state.",
+    "Safari 27 regression family corroborated upstream; no local Safari installation/update history collected and exact installed WebKit revision unverified."
+  ],
+  "upstream_review": {
+    "purpose": "Source-only verification of Opus findings; no application upgrade",
+    "npm_archive_sha256": {
+      "1.6.16": "d282339fed09a0987d55b49b41430a67d021861c24d33722e75e5ca2e5179c77",
+      "1.6.19": "a35046767c8dff431fb02b565451d1214378ffc48928355f3622d4702ec2aca0"
+    },
+    "changed_source_files": [
+      "config.ts",
+      "controller/base-playlist-controller.ts",
+      "controller/base-stream-controller.ts",
+      "controller/buffer-controller.ts",
+      "remux/mp4-remuxer.ts",
+      "utils/level-helper.ts"
+    ],
+    "extended_replay": "Old frames advance across a tick before execution: forward false presentation cancels fallback; backward retains fallback. Timer duration and frequency not measured."
+  }
+}

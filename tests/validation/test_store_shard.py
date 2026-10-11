@@ -10,8 +10,10 @@ from validation.store_shard import (
     ALGORITHM,
     StoreShardError,
     assigned_tests,
+    TEST_THREAD_STACK_BYTES,
     record_preexecution_failure,
     run_shard,
+    test_environment,
     validate_receipts,
 )
 
@@ -62,6 +64,9 @@ class StoreShardCase(unittest.TestCase):
             "selected = sorted(name for name in INVENTORY if name in arguments)\n"
             "with COUNTER.open('a', encoding='utf-8') as target:\n"
             "    target.write(json.dumps(arguments) + '\\n')\n"
+            "import os\n"
+            "with COUNTER.with_suffix('.stack').open('a', encoding='utf-8') as target:\n"
+            "    target.write(os.environ.get('RUST_MIN_STACK', '') + '\\n')\n"
             "print(f'running {len(selected)} tests')\n"
             "for name in selected:\n"
             "    outcome = 'ignored' if name in IGNORED else 'ok'\n"
@@ -129,6 +134,26 @@ class StoreShardCase(unittest.TestCase):
                     [record["name"] for record in receipts[index]["completed"]],  # type: ignore[index]
                     assigned,
                 )
+
+    def test_the_store_binary_runs_its_test_threads_on_8_mib_stacks(self):
+        # A debug build overflows libtest's 2 MiB default in the replicated
+        # migration loop and aborts the whole shard; `make cluster-store-check`
+        # runs the same binary at 8 MiB.
+        with tempfile.TemporaryDirectory() as directory:
+            _receipts, counter = self.successful_receipts(Path(directory))
+            stacks = counter.with_suffix(".stack").read_text(encoding="utf-8").split()
+            self.assertEqual(stacks, [str(8 * 1024 * 1024)] * 2)
+        self.assertEqual(TEST_THREAD_STACK_BYTES, 8388608)
+        self.assertEqual(test_environment({})["RUST_MIN_STACK"], "8388608")
+        self.assertEqual(
+            test_environment({"RUST_MIN_STACK": "1048576"})["RUST_MIN_STACK"], "8388608"
+        )
+        self.assertEqual(
+            test_environment({"RUST_MIN_STACK": "16777216", "KEEP": "1"}),
+            {"RUST_MIN_STACK": "16777216", "KEEP": "1"},
+        )
+        makefile = (Path(__file__).resolve().parents[2] / "Makefile").read_text(encoding="utf-8")
+        self.assertIn(f"RUST_MIN_STACK={TEST_THREAD_STACK_BYTES} $(CARGO) test", makefile)
 
     def test_validator_rejects_wrong_tree_binary_overlap_and_missing_completion(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,42 +1,4 @@
 "use strict";
-function setPreparedHandoff(on){
-  setPreparedHandoffEnabled(!!on);
-  // Honest about when: the capability is read on every exchange and the server
-  // keeps the newest document it was sent, so this reaches it on the next
-  // exchange of whatever is playing — not at the next stream.
-  toast(on
-    ?"This browser now offers prepared handoff — from the next control exchange"
-    :"Prepared handoff switched off for this browser");
-}
-
-async function saveClusterBackup(btn){
-  const err=document.getElementById("backup-settings-error"); if(err)err.textContent="";
-  if(btn)btn.disabled=true;
-  try{
-    cacheSettings(await api("/settings",{method:"PUT",body:{
-      backup_destination:document.getElementById("backup-destination").value,
-      backup_schedule_utc:document.getElementById("backup-schedule").value,
-      backup_keep:Number(document.getElementById("backup-keep").value)
-    }}));
-    toast("Cluster backup settings saved"); if(btn)setCardSaved(btn);
-  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
-}
-
-function clusterBackupCard(settings,readiness){
-  const enabled=!!String(settings.backup_destination||"").trim();
-  return setCard(`${cardHead("Portable cluster backup","Build a consistent, checksummed archive from a voter snapshot.",`<span class="pill${enabled?" ok":""}">${enabled?"scheduled":"destination empty"}</span>`)}
-      <label class="setfield"><span>Destination</span><input id="backup-destination" value="${esc(settings.backup_destination||"")}" placeholder="/mnt/nas/plurx-backups"></label>
-      <div class="setgrid"><label class="setfield"><span>Daily UTC time</span><input id="backup-schedule" value="${esc(settings.backup_schedule_utc||"02:30")}" placeholder="02:30"></label>
-      <label class="setfield"><span>Artefacts to keep</span><input id="backup-keep" type="number" min="1" max="365" value="${Number(settings.backup_keep)||14}"></label></div>
-      <div class="hint"><b>The destination controls scheduling directly.</b> Empty means no scheduled run. The checks below are advisory and never prevent saving or invoking a backup.</div>
-      <details class="setdetails" open><summary>Readiness</summary><div class="setdetails-body">
-      ${devReq(readiness,"cluster_backup","destination","Existing absolute destination","The daemon must be able to write the configured directory.")}
-      ${devReq(readiness,"cluster_backup","off_node_and_space","Off-node storage and free space","Use a different failure domain and retain at least two image sizes of free space.")}
-      ${devReq(readiness,"cluster_backup","recent_success","Recent successful archive","A nightly backup is healthy when the last verified publish is less than 26 hours old.")}
-      <p class="devcheck-note">Restore first onto an isolated instance. A file that has never been restored is not recovery evidence.</p></div></details>
-      ${devGraduation("K-01's arm64 container-smoke leg (amd64 passed in run 3205) and its M5 loss drills (node and NAS loss, a physical restore, measured RPO and RTO) are recorded.","backup scheduling moves to Settings → Cluster beside restore guidance, as a permanent setting.")}<div class="err" id="backup-settings-error" role="alert"></div>${setCardFoot("saveClusterBackup")}`);
-}
-
 // A readiness status is evidence, not authority. The daemon can report facts
 // it can observe on this node; the controls remain available regardless of
 // the answer, including when the reading itself is unavailable.
@@ -98,52 +60,86 @@ function devStaticReq(title,status,detail,tone){
 function devGraduation(waitingOn,then){
   return `<p class="devcheck-note devgrad"><b>Leaves Developer when:</b> ${waitingOn} <b>Then:</b> ${then}</p>`;
 }
-function clusterTransportRecoveryCard(readiness){
-  return setCard(`${cardHead("Transport recovery","Automatic recovery for interrupted cluster transfers. No enable switch is required.",`<span class="pill ok">automatic</span>`)}
-      <details class="setdetails"><summary>Deployment guidance and readiness</summary><div class="setdetails-body">
-      <p class="hint"><b>Safe use is a deployment decision, not a code gate.</b> Keep a ready voter majority, deploy one node at a time, and expose the cluster API only on the trusted cluster network.</p>
-      ${devReq(readiness,"cluster_transport_recovery","recovery_budgets","Recovery budgets","Keep chunk, whole-transfer, final-install, startup, and container-health allowances aligned. Defaults are 30 s, 1,200 s, and 120 s; measured state size may require a longer final-install allowance.")}
-      ${devReq(readiness,"cluster_transport_recovery","cluster_api_advertised","Authenticated diagnostics","Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet.")}
-      ${devReq(readiness,"cluster_transport_recovery","cache_revocation_capability","Cache revocation","Every member of the exact committed configuration must prove the capability in its current heartbeat before cache-only recovery authorization opens.")}
-      ${devReq(readiness,"cluster_transport_recovery","recovery_receipt","Recovery receipt","Qualify the real-TLS 3 MiB transport matrix, acknowledged writes, and twenty learner plus twenty voter recovery cycles before fleet rollout.")}
-      <p class="devcheck-note">Use the supported one-node-at-a-time deployment when these checks are acceptable. Readiness is advisory; transport recovery remains automatic on clustered nodes.</p>
-      </div></details>`);
+function macosVideoProcessingCard(settings,readiness){
+  const enabled=!!settings.macos_video_processing_enabled;
+  return setCard(`${cardHead("Mac video processing","Use independently available Mac scaling, HDR/HLG conversion, subtitle burns, deinterlacing, strict Dolby Vision and Live TV processing in new sessions.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
+    ${togRow("pmacosvideo","Use Mac video processing","Applied to new sessions. Unsupported sources retain their existing processing.",enabled)}
+    <div class="hint">The saved choice is always accepted. Runtime compatibility and qualification below are advisory. Dependency checks require a working /usr/bin/otool (Apple Command Line Tools may be needed on a clean Mac), Apple system-only dependencies for both FFmpeg tools, and no DYLD override.</div>
+    ${devReq(readiness,"macos_video_processing","effective_encoder","Effective VideoToolbox encoder","Uses the existing Hardware acceleration selection. Auto can choose Software from its encode benchmark; these switches preserve that choice. Select VideoToolbox there when wanted.")}
+    ${devReq(readiness,"macos_video_processing","sdr_scale","Progressive SDR scaling","This worker checks a small embedded 8-bit and 10-bit source corpus.")}
+    ${devReq(readiness,"macos_video_processing","hdr10_metal","HDR10 to SDR processing","HDR10 is resized at 10-bit precision before mapping to SDR; each source grade has its own compatibility observation.")}
+    ${devReq(readiness,"macos_video_processing","hlg_metal","HLG to SDR processing","HLG has a separate analytical reference-white and rendering check.")}
+    ${devReq(readiness,"macos_video_processing","subtitle_burns","SDR, HDR10 and HLG subtitle burns","Text and bitmap cues use their independently checked composition graphs.")}
+    ${devReq(readiness,"macos_video_processing","deinterlace","SDR frame and field deinterlacing","TFF/BFF moving-field controls verify native SDR deinterlacing and frame or field cadence. HDR interlaced sources keep the existing processing path.")}
+    ${devReq(readiness,"macos_video_processing","dolby_vision","Strict Dolby Vision profile 5","Software/VideoToolbox decode and CPU/Metal renderers have separate metadata and fail-closed observations.")}
+    ${devReq(readiness,"macos_video_processing","live_upload","Live TV software decode and native processing","Known SDR sources use explicit upload, optional native deinterlacing and scaling; Live TV keeps H264 output.")}
+    ${devReq(readiness,"macos_video_processing","delivery_qualification","Visual and streaming qualification","Runtime smoke checks do not approve visual quality, startup, concurrency, a sustained soak or physical clients. Normalized VOD still requires supported source facts and decoder/encoder ceilings for each source.")}
+    <div class="row"><button class="ghost sm" onclick="reprobeMacosVideoProcessing(this)">Check compatibility again</button></div>
+    ${devGraduation("SDR, HDR10, HLG, subtitle burns, moving-field deinterlacing, strict Dolby Vision and Live TV pass their applicable visual and daemon delivery checks; rolling HLS and encoded VOD pass seek/resume, cancellation and recovery, cache and cluster revalidation; visual checks on a named display and target Mac/client startup, concurrency and soak evidence are recorded.","the permanent switch moves to Playback → Advanced server delivery, preserving the saved choice.")}
+    <div class="err" id="macos-video-error" role="alert"></div>${setCardFoot("saveMacosVideoProcessing")}`,{id:"macos-video-card"});
 }
 
-function liveTvDeinterlaceCard(settings){
-  const selected=settings.live_tv_deinterlace_output==="frame"?"frame":"field";
-  return setCard(`${cardHead("Live TV deinterlace cadence","Choose whether software deinterlacing preserves frame cadence or emits one frame per field.",`<span class="pill">${selected==="field"?"Field rate":"Frame rate"}</span>`)}
-      <label for="ltdeint">Output cadence</label>
-      <select id="ltdeint"><option value="field"${selected==="field"?" selected":""}>Field rate (smoother motion)</option><option value="frame"${selected==="frame"?" selected":""}>Frame rate (lower bitrate)</option></select>
-      <details class="setdetails" open><summary>Prerequisites and current status</summary><div class="setdetails-body">
-      ${devStaticReq("Current selection",selected==="field"?"field rate":"frame rate","Applied to subsequent Live TV sessions that require software deinterlacing.","ok")}
-      ${devStaticReq("Source identification","required","The tuner probe must report one of tt, bb, tb or bt. Unknown and future tokens remain unknown and do not opt into deinterlacing.","")}
-      ${devStaticReq("Encoder readiness","not measured on this node","Field rate asks the software H.264 path to sustain up to 59.94 fps. Check the live FFmpeg log and playback stability on the target device.","warn")}
-      <p class="devcheck-note">Advisory only. Readiness never disables this choice and this setting never gates Live TV enablement. If the player can copy an interlaced source, no deinterlace filter is inserted.</p>
-      </div></details>${devGraduation("S-08's M5 media1 qualification (QSV/VAAPI idet, signalstats and wall time at field rate) is recorded.","the cadence choice moves to Settings → Live TV as a permanent option.")}<div class="err" id="ltdeinterr" role="alert"></div>
-      ${setCardFoot("saveLiveTvDeinterlace")}`);
-}
-
-async function saveLiveTvDeinterlace(btn){
-  const err=document.getElementById("ltdeinterr");if(err)err.textContent="";btn.disabled=true;
+async function saveMacosVideoProcessing(btn){
+  const err=document.getElementById("macos-video-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
   try{
-    const output=document.getElementById("ltdeint").value;
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{live_tv_deinterlace_output:output}}));
-    const card=btn.closest(".setcard");if(card)card.outerHTML=liveTvDeinterlaceCard(saved);
-    toast("Live TV deinterlace cadence saved");
-  }catch(e){if(err)err.textContent=e.message||String(e);btn.disabled=false;}
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{macos_video_processing_enabled:!!/** @type {HTMLInputElement} */ (document.getElementById("pmacosvideo")).checked}}));
+    const card=btn?.closest(".setcard");if(card)card.outerHTML=macosVideoProcessingCard(saved,DEVELOPER_READINESS);
+    toast("Mac video processing saved; applies to new sessions");
+  }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
 }
 
+function macosHevcOutputCard(settings,readiness){
+  const enabled=!!settings.macos_hevc_output_enabled;
+  return setCard(`${cardHead("Mac HEVC output","Allow new sessions to negotiate independently supported SDR HEVC or HDR10 Main10 output.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
+    ${togRow("pmacoshevc","Use Mac HEVC output","Applies to new sessions when the client and output presentation support the promised format.",enabled)}
+    <div class="hint">The saved choice is always accepted. The processing switch and the HEVC output switch are separate preferences.</div>
+    ${devReq(readiness,"macos_hevc_output","hevc_effective_encoder","Effective VideoToolbox encoder","Uses the existing Hardware acceleration selection. Auto can choose Software from its encode benchmark; these switches preserve that choice. Select VideoToolbox there when wanted.")}
+    ${devReq(readiness,"macos_hevc_output","hevc_sdr","Negotiated SDR HEVC","This worker checks the complete SDR HEVC encoding graph independently.")}
+    ${devReq(readiness,"macos_hevc_output","hevc_hdr10","Negotiated HDR10 Main10 HEVC","HDR10 output preserves 10-bit pixels, BT.2020/PQ signaling and effective static HDR metadata. This does not authorize Dolby passthrough.")}
+    ${devReq(readiness,"macos_hevc_output","hevc_delivery_qualification","Client and HDR presentation qualification","Produced segments, negotiation, seek/resume, fallback and HDR presentation require independent client and display evidence.")}
+    ${devGraduation("SDR HEVC and HDR10 Main10 produced segments, client negotiation, seek/resume and grade-preserving fallback pass; HDR signaling and static metadata are checked on a named HDR display and supported target clients.","the permanent HEVC output switch moves to Playback → Advanced server delivery, preserving the saved choice.")}
+    <div class="err" id="macos-hevc-error" role="alert"></div>${setCardFoot("saveMacosHevcOutput")}`,{id:"macos-hevc-card"});
+}
+
+async function saveMacosHevcOutput(btn){
+  const err=document.getElementById("macos-hevc-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{macos_hevc_output_enabled:!!document.getElementById("pmacoshevc").checked}}));
+    const card=btn?.closest(".setcard");if(card)card.outerHTML=macosHevcOutputCard(saved,DEVELOPER_READINESS);
+    toast("Mac HEVC output saved; applies to new sessions");
+  }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
+}
+
+async function reprobeMacosVideoProcessing(btn){
+  const err=document.getElementById("macos-video-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    await api("/developer/macos-video-processing/reprobe",{method:"POST",body:{}});
+    applyDeveloperReadiness(await api("/developer/readiness"));
+    toast("Compatibility check requested; refresh Settings for its result");
+  }catch(error){if(err)err.textContent=error.message||String(error);}
+  finally{if(btn)btn.disabled=false;}
+}
 // F-1: the same replicated switch, moved to Developer. Every readiness row is
 // an observation or a dated qualification receipt; none is read on save or by
 // the player. Enabling remains an operator choice even when rows are red.
-function displayAwareAutoCard(settings){
+// D6: Auto moves quality up only on link evidence, and the server accepts link
+// receipts only while network priors are on, only on the node that owns the
+// session, and only for a client with an IPv4 network identity. The rows say
+// so; none of them changes what Save does.
+function displayAwareAutoCard(settings,readiness){
   const enabled=!!settings.playback_display_aware_auto;
   return setCard(`${cardHead("Fit Auto to display","Choose a useful sustainable encode size for the fitted picture.",`<span class="pill" id="daqstate">${enabled?"Enabled":"Disabled"}</span>`)}
       ${togRow("pdisplayauto","Fit Auto to display","Compatible smooth originals remain preferred. When encoding is needed, use the active render area with at most 10% enlargement. Manual quality stays selectable.",enabled)}
       <div class="hint">This saved choice is authoritative. Readiness is advisory and never disables this switch or rejects Save.</div>
+      ${devReq(readiness,"display_aware_auto","auto_abr","Adaptive Auto quality","Fit Auto to display chooses the starting rung. Changing rungs during playback is Adaptive Auto quality's switch; turning off one does not stop the other.")}
+      ${devReq(readiness,"display_aware_auto","network_priors","Network priors","Without priors Auto can only move down: it never upgrades, and a link stall retries the same quality. Producer and decoder recovery still work. The Network priors card below is its switch.")}
+      ${devReq(readiness,"display_aware_auto","local_session_owner","Sessions owned by the serving node","Only the node that owns a session accepts its link receipts, so a session placed on a peer gets none.")}
+      ${devReq(readiness,"display_aware_auto","ipv4_client","Clients on IPv4","Network identity is an IPv4 /24. A client on IPv6 with no forwarded IPv4 address gets no network identity and so never gets link evidence.")}
       ${devStaticReq("Combined source and runtime qualification","pending","Display-aware candidates, source-grade worker proofs and physical client recovery traces are being built and qualified together.","warn")}
-      ${devGraduation("the combined display-aware Auto effort passes source-grade, device and runtime qualification on its exact candidate.","this control graduates to Playback if a permanent toggle remains useful, otherwise fitting Auto becomes the default.")}
+      ${devGraduation("the combined display-aware Auto effort passes source-grade, device and runtime qualification on its exact candidate, and D6 (link evidence only with network priors on, only on the owning node, only for IPv4 clients) is fixed or accepted.","this control graduates to Playback if a permanent toggle remains useful, otherwise fitting Auto becomes the default.")}
       <div class="err" id="daqerr" role="alert"></div>${setCardFoot("saveDisplayAwareAuto")}`);
 }
 
@@ -162,6 +158,27 @@ async function saveDisplayAwareAuto(btn){
     const state=document.getElementById("daqstate");if(state)state.textContent=saved.playback_display_aware_auto?"Enabled":"Disabled";
     toast("Display Auto saved");if(btn)setCardSaved(btn);
   }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
+}
+
+// `playback.network_priors`, which had no Settings control before this card.
+// Display-aware Auto needs it to move up (D6). Off by default.
+function networkPriorsCard(settings,readiness){
+  const enabled=!!settings.playback_network_priors;
+  return setCard(`${cardHead("Network priors","Remember how each network has played, and let Auto use it.",enabled?`<span class="pill ok">on</span>`:`<span class="pill">off</span>`)}
+    ${togRow("network-priors","Use network priors","Stores playback history per user, client and IPv4 /24 network on each node: a conservative throughput estimate and the lowest rung that starved. Turning it on also changes Auto's starting (cold-start) rung on a network with history, and lets link receipts through so Fit Auto to display can upgrade.",enabled)}
+    ${devReq(readiness,"network_priors","priors_history","What turning it on stores","History is node-local and kept for 30 days. Nothing new is recorded while this is off.")}
+    ${devReq(readiness,"network_priors","priors_cold_start","What it changes for Auto's starting rung","With history, Auto starts below a rung that starved on that network or at the highest peak-safe rung; with none, it keeps today's start.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("Fit Auto to display graduates and D6 is fixed or accepted, with a fleet run showing priors improving cold starts without upgrading into stalls.","Paul chooses: the switch moves to Settings → Playback beside Auto quality, or priors become how Auto works and the switch is removed.")}
+    <div class="err" id="network-priors-error" role="alert"></div>${setCardFoot("saveNetworkPriors")}`,{id:"network-priors-card"});
+}
+async function saveNetworkPriors(btn){
+  const err=document.getElementById("network-priors-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_network_priors:!!(/** @type {HTMLInputElement} */(document.getElementById("network-priors"))).checked}}));
+    const card=document.getElementById("network-priors-card");if(card)card.outerHTML=networkPriorsCard(saved,DEVELOPER_READINESS);
+    toast("Network priors saved");
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
 
 function autoQualityCard(settings){
@@ -205,24 +222,6 @@ async function saveAutoQuality(btn){
   }catch(e){if(err) err.textContent=e.message||String(e); if(btn) btn.disabled=false;}
 }
 
-function preparedQualityCard(settings,readiness){
-  return setCard(`${cardHead("Quality switching","Prepare the next stream before replacing the one you are watching.",`<span class="pill" id="pqhstate">${settings.prepared_quality_handoff?"Enabled":"Disabled"}</span>`)}
-      ${togRow("pqh",`Prepare quality changes <span class="pill warn">experimental</span>`,`Uses a second player and temporary server capacity to reduce interruptions. Applies after saving to the next eligible quality change.`,settings.prepared_quality_handoff)}
-      <div class="hint">Still experimental. This saved switch is authoritative; readiness is advisory and never overrides your choice. The browser-specific capability control is below.</div>
-      <details class="setdetails"><summary>Readiness and device qualification</summary><div class="setdetails-body">
-      <p class="hint">These readings describe this server. Missing evidence does not disable the setting.</p>
-      <h3 class="devcheck-group">Server readiness</h3>
-      ${devStaticReq("Control protocol",settings.playback_control_protocol_v1?"met":"not met","Enable protocol advertisement in Playback → Advanced server delivery for new sessions. An existing session without the control block cannot prepare a replacement.",settings.playback_control_protocol_v1?"ok":"warn")}
-      ${devReq(readiness,"prepared_quality_handoff","server_preparation_is_real","Server preparation","The server must reserve capacity, warm the unpublished replacement, and release both the worker and capacity slot on cancellation.")}
-      ${devStaticReq("Throughput measurement","supported","Client and server reporting exists. This is implementation support, not proof that a particular session has enough measured throughput.","")}
-      <h3 class="devcheck-group">Device qualification</h3>
-      ${devReq(readiness,"prepared_quality_handoff","client_two_player_handoff","Client handoff","Apple, Android, and web contain the adapter. Physical-device evidence must still demonstrate aligned playback and a visible first frame.")}
-      ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","Fleet observation","Consecutive physical-client handoffs, stable memory, and measured fallback interruption improve confidence; they do not unlock or block the switch.")}
-      <p class="devcheck-note">Missing qualification does not disable the feature or override the saved choice. A failed preparation falls back to reopening the stream.</p>
-      </div></details>
-${devGraduation("the quality-switch continuity build finishes (M2-Android, M1-web, M3) and the physical-client fleet receipt is recorded.","the switch moves to Settings → Playback as a permanent on/off.")}      <div class="err" id="pqherr" role="alert"></div>
-      ${setCardFoot("savePreparedQuality")}`);
-}
 function systemAttentionHtml(sys){
   const storage=sys.storage||{}, mounts=(storage.mounts||[]).filter(m=>m.read_bps==null||m.cache_suspect);
   const messages=mounts.map(m=>`<p><b>${esc((m.roots||[]).join(', ')||'Storage location')}</b><br>${esc(m.note||'No current read measurement is available.')} ${storage.measured_at?`<span class="muted">Observed ${fmtAgo(storage.measured_at)}.</span>`:''}</p>`);
@@ -239,308 +238,179 @@ function toggleMobileSearch(){
   if(open)document.getElementById('q')?.focus();
 }
 
-// Advisory rows about the last directed quality change, inside the card that
-// already exists. Paul's standing rule: features are not gated in code, so
-// nothing here is read by anything that decides anything -- it is a window
-// onto state the player keeps regardless.
-//
-// Empty when there is no player and no history, which is what the settings
-// page looks like at rest. The rows appear only once there is something true
-// to say about a change that actually happened.
-function directedChangeDeveloperRows(){
-  const p=PLAYER;
-  if(!p) return "";
-  const change=p.directedChange;
-  const outcome=change&&change.outcome;
-  const said={committed:"committed",declined:"declined",timed_out:"timed out",
-    failed:"fell back",superseded:"superseded"}[outcome]||null;
-  const outcomeText=!change ? "no directed change yet"
-    : said==null ? "waiting for an offer"
-    : outcome==="committed"&&Number.isFinite(change.detail)
-      ? `committed ${Math.round(change.detail)} ms` : said;
-  const preparation=p.controlLastPreparation||"not reported";
-  const requested=p.autoRequestedHeight>0?`${Math.round(p.autoRequestedHeight)}p`:"none";
-  const delivered=p.autoHeight>0?`${Math.round(p.autoHeight)}p`:"unknown";
-  if(!change&&!p.controlLastPreparation&&!(p.autoRequestedHeight>0)&&!(p.autoHeight>0))
-    return "";
-  return `<details class="setdetails"><summary>Last quality change</summary><div class="setdetails-body">
-    ${devStaticReq("Outcome",esc(outcomeText),
-      "What became of the most recent directed quality change in this player.")}
-    ${devStaticReq("Server preparation",esc(String(preparation)),
-      "The server's own last word on staging a successor for this session. An absent value means a relay peer that does not evaluate it, which is never a refusal.")}
-    ${devStaticReq("Auto rung",`${esc(requested)} &rarr; ${esc(delivered)}`,
-      "Requested by this browser's automatic controller, then delivered by the server. They are deliberately separate readings.")}
-    <p class="devcheck-note">Advisory only. Nothing on these rows enables, disables or blocks a quality change.</p>
-    </div></details>${preparedSwitchDeveloperRows(p)}`;
+function cinemaSharingCard(settings,readiness){
+  return setCard(`${cardHead("Cinema shared libraries","Invite another Cinema to selected libraries through your private Tailscale connection.",'<span class="pill">Qualification pending</span>')}
+    ${togRow("cinema-sharing-enabled","Enable shared libraries","The saved switch applies to this Cinema. Readiness observations never prevent saving.",!!settings.sharing_enabled)}
+    ${devReq(readiness,"cinema_sharing","source_activation","Current Source activation","Source activation is pending during the rolling upgrade. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Readiness never changes your saved choice.")}
+    ${devReq(readiness,"cinema_sharing","listener","Private sharing listener","A separate TLS listener serves only scoped peer requests inside this process or container. Listening here does not prove the host private network path is configured.")}
+    ${devReq(readiness,"cinema_sharing","tls","Node certificate and pin","Keep the node key and verify the invitation pin through your trusted channel.")}
+    ${devReq(readiness,"cinema_sharing","endpoints","Configured private Sharing endpoints","Before creating an invitation, configure this Cinema’s private addresses and verified certificate pins in <a href=\"#/settings/sharing\">Settings → Sharing</a>. Saved endpoints do not prove connectivity.")}
+    ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Each serving host needs Tailscale installed and signed in, private TCP Serve forwarding from port 32443 to the internal TLS listener on 32444, a working Docker-to-host path, qualified egress and recipient access policy. A container cannot infer host installation or remote reachability; unverified means host setup must be checked.")}
+    ${devReq(readiness,"cinema_sharing","qualification","Catalogue and client qualification","Shared catalogue and playback are implemented; private network, cluster recovery and device qualification remain in progress.")}
+    ${devGraduation("S3–S8 shared catalogue, playback, private history and device qualification are complete.","sharing controls move to Settings → Sharing after S8 evidence and promotion.")}<div class="err" id="cinema-sharing-error" role="alert"></div>${setCardFoot("saveCinemaSharing")}`,{id:"cinema-sharing-settings"});
 }
-
-// M3's rows, and the one measurement this client does not take.
-//
-// The first three are what the last prepared commit in this player measured.
-// The enable section below them says what an audible-seam probe would need and
-// whether each condition is met -- and every answer is "no", which is why the
-// probe is not built. It is advisory in the strict sense: there is no switch
-// here, nothing reads these back, and the prepared handoff is unaffected by
-// every word of it.
-function preparedSwitchDeveloperRows(p){
-  if(!p||!p.switchCommit) return "";
-  const ledger=preparedSwitchLedger(p);
-  return `<details class="setdetails"><summary>Measuring the last switch</summary><div class="setdetails-body">
-    ${devStaticReq("Frames at the switch",esc(String(ledger.frames)),
-      "Dropped frames on the predecessor over the two seconds before the commit plus the successor over the two seconds after, and how much of that window was sampled.")}
-    ${devStaticReq("Tap to new quality",esc(String(ledger.visible)),
-      "From the viewer's tap to the successor's first frame. Reported, never judged.")}
-    ${devStaticReq("Audio at the switch",esc(String(ledger.audio)),"")}
-    <p class="devcheck-note">An audible-seam probe would need all three of the following. None of them hold, so it is not built \u2014 and this section blocks nothing, because there is nothing here to enable.</p>
-    ${preparedSwitchAudioEnable().map(([title,detail,met])=>
-      devStaticReq(esc(title),met?"Met":"Not met",esc(detail),met?"ok":"")).join("")}
-    <p class="devcheck-note">Advisory only. Instrumentation never gates a quality change, and an unmeasurable row is never read as a failure.</p>
-    </div></details>`;
-}
-
-function seekScratchReservationsCard(){
-  // The transport of the session that is actually open, which means asking
-  // with the same `hevcCopy` the create asked with -- it is exactly the bit
-  // that flips Safari's answer, so hardcoding it false would report hls.js
-  // for an HEVC copy session the server has correctly put in the
-  // conservative class. No player open means no session and no class.
-  let transport=null;
-  let playing=false;
+async function saveCinemaSharing(btn){
+  const err=document.getElementById("cinema-sharing-error");if(err)err.textContent="";btn.disabled=true;
   try{
-    const p=typeof PLAYER!=="undefined"?PLAYER:null;
-    playing=!!(p&&p.sessionId);
-    if(playing&&typeof plannedHlsTransport==="function"){
-      const codec=String((p.source&&p.source.video_codec)||"").toLowerCase();
-      transport=plannedHlsTransport(!!p.copyHls&&["hevc","h265","hevc10"].includes(codec));
-    }
-  }catch(e){}
-  const shortGrace=transport==="hlsjs";
-  return setCard(`${cardHead("Seek scratch accounting",
-      "One charge per stream, released when its bytes are gone. What repeated seeks are allowed to cost.",
-      `<span class="pill ok">automatic</span>`)}
-      <div class="hint">No switch here. Every row is an observation about this build or this browser; none of them enables, disables or hides anything, and none of them changes what the server charges.</div>
-      <details class="setdetails" open><summary>Requirements and readiness</summary><div class="setdetails-body">
-      <h3 class="devcheck-group">Accounting</h3>
-      ${devStaticReq("One charge per stream","met",
-        "Admission, growth, retirement and release all settle in one ledger, so a stream moving between the live and retired registries is counted once. The figures behind a refusal &mdash; charged, requested, configured &mdash; are in the server log beside it.","ok")}
-      ${devStaticReq("Writers settle before capacity is returned","met",
-        "The copy reader registers before it is spawned, so retirement waits for the segment it is still writing instead of measuring around it. A writer that outlives the wait keeps the whole producer charge and says why.","ok")}
-      ${devStaticReq("A full budget is a temporary refusal","met",
-        "Exhausted scratch answers 503 with a retryable notice beside the picture. The stream you are watching keeps playing, and the destination you asked for is kept for Try again.","ok")}
-      <h3 class="devcheck-group">Shorter retention after you close a stream</h3>
-      ${devStaticReq("This session's transport",
-        transport===null?"no stream open":transport==="hlsjs"?"hls.js":"native HLS",
-        transport===null
-          ? "This is a property of a stream, not of a browser: it depends on the title's codec as well as on this browser, so there is nothing to report until something is playing. Open a title and come back."
-          : "The web player destroys its hls.js instance before it releases the session, so the server may drop that stream's retired objects one segment later instead of a whole playlist later. Native HLS has no bounded retry tail and keeps the original promise.",
-        shortGrace?"ok":"")}
-      ${devStaticReq("Apple and unknown clients","original grace",
-        "Apple releases the session before it replaces the item, so the old item still exists while the release runs, and no finite AVFoundation retry bound has been established. Those sessions keep the full promise &mdash; missing information never shortens one.","")}
-      ${devStaticReq("Reads already in flight","protected",
-        "A response that has already been accepted keeps its object open and charged until it finishes, whatever the deadline says. A new read after the deadline gets the ordinary gone answer.","ok")}
-      <h3 class="devcheck-group">More than three streams at once</h3>
-      ${devStaticReq("Copy and remux output","enforced write boundary",
-        "Every object the native copy writer publishes &mdash; the initialization segment, each media segment, each playlist rewrite &mdash; is authorized before it exists, so these sessions start with a startup allowance and grow under a real bound instead of reserving the whole per-session ceiling up front.","ok")}
-      ${devStaticReq("Transcoded output","enforced write boundary",
-        "FFmpeg's HLS muxer uploads every object to a loopback endpoint in this server (<code>-method PUT</code>) instead of writing the file itself. Each piece is authorized against the scratch budget before it is written, so a transcode starts with a startup allowance and grows. A refusal stops reading the upload and marks the stream starved, and the flow controller suspends FFmpeg until the budget frees.","ok")}
-      ${devStaticReq("Legacy copy writer and retries","enforced write boundary",
-        "A copy the segmenter cannot cut, a cluster takeover, and the legacy retry a segmenter session keeps in reserve all use FFmpeg's muxer too. They upload through the same endpoint, each attempt on its own lane, so a replaced attempt can never overwrite its successor's objects.","ok")}
-      ${devStaticReq("FFmpeg can write HLS over HTTP","met in the published image",
-        "The endpoint needs the engine's <code>http</code> output protocol, which both engines in the published image include. A custom build without network protocols fails every transcode and every copy that uses FFmpeg's muxer, with &ldquo;Protocol not found&rdquo; in the server log. Nothing checks this ahead of time.","ok")}
-      ${devStaticReq("Windows","same boundary, not yet run natively",
-        "The endpoint is loopback TCP and ordinary file writes, with nothing platform-specific in it. It is built for Windows, but no native runtime receipt exists yet.","")}
-      <p class="devcheck-note">Advisory only. Capacity, authorization and retention rules are unchanged by anything on this card; the global scratch ceiling is still the one on <a href="#/settings/playback">Playback</a>.</p>
-      </div></details>${devGraduation("the seek-scratch physical acceptance in its status page (Safari, Apple and Android rapid-seek passes) is recorded.","this card is removed. The behaviour has no switch; the scratch ceiling stays in Playback.")}`);
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{sharing_enabled:/** @type {HTMLInputElement} */(document.getElementById("cinema-sharing-enabled")).checked}}));
+    const card=document.getElementById("cinema-sharing-settings");if(card)card.outerHTML=cinemaSharingCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
-function liveTvEnableCard(settings){
-  queueMicrotask(()=>{const mount=document.getElementById("dev-live-tv-readiness");if(mount)refreshLiveTvEnableReadiness(mount);});
-  return setCard(`${cardHead("Enable Live TV","Allow eligible servers to use the network tuner.",`<span class="pill">${settings.live_tv_enabled?"enabled":"off"}</span>`)}
-    ${togRow("dev-live-tv-enable","Enable Live TV","This saved choice is authoritative. Readiness observations never disable the control.",!!settings.live_tv_enabled)}
-    <p class="hint">For safe operation, upgrade cluster servers, keep their clocks synchronized, and keep a ready voter majority. At least one server needs tuner connectivity and writable scratch. DVR workers need writable recording storage; matching paths alone do not prove shared storage.</p>
-    <div id="dev-live-tv-readiness" aria-live="polite">Checking current prerequisites…</div>
-    <p class="hint">A lost worker can leave a physical tuner connection behind temporarily. Other free tuners remain available. DRM remains unsupported.</p>
-    ${devGraduation("the Live TV plans' outstanding fleet prompts are recorded: L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) prompts, and L-03's capacity offer and caption-positive pass.","the switch moves to Settings → Live TV as a permanent on/off.")}<div id="dev-live-tv-error" class="err" role="alert"></div>${setCardFoot("saveLiveTvEnable")}`);
+// Complete-output preparation queued by VOD starts. Three-valued, so it has
+// its own selector rather than a readiness `setting` (the switch walk PUTs
+// booleans). Off by default: one play must not start a whole-title encode.
+function outputPreparationCard(settings,readiness){
+  const mode=["off","copy","copy_and_encoded"].includes(settings.vod_output_preparation)?settings.vod_output_preparation:"off";
+  const opt=(v,label)=>`<option value="${v}"${mode===v?" selected":""}>${label}</option>`;
+  return setCard(`${cardHead("Complete-output preparation","Prepare a reusable copy or encode of a title after a VOD play.",mode==="off"?`<span class="pill">off</span>`:`<span class="pill warn">${esc(mode)}</span>`)}
+    <label class="tog" for="vod-output-preparation"><span>What a VOD start may queue<small>Off queues nothing. Copy queues remux preparation. Copy and encoded also queues a whole-title background encode. Turning a kind off cancels its queued jobs within a minute.</small></span><select id="vod-output-preparation">${opt("off","Off")}${opt("copy","Copy")}${opt("copy_and_encoded","Copy and encoded")}</select></label>
+    ${devReq(readiness,"output_preparation","output_budget","A retained-output budget","Preparations publish into the retained registry, bounded by the cache budget (unset is 50 GB).")}
+    ${devReq(readiness,"output_preparation","output_jobs","Queued and running preparation","Every job is in Settings → Jobs, filtered by kind, with a Cancel.")}
+    ${devReq(readiness,"output_preparation","output_node_idle","This node's background encoder is idle","A claimed preparation yields to foreground and offline work.")}
+    ${devReq(readiness,"output_preparation","output_stop","What Stop in Activity does","Stop cancels the preparation running on the node that answers; the next play of the title may queue it again.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("copy and encoded preparation each have a qualified fleet run: jobs drain on every node, Stop cancels, and the retained registry stays inside its budget.","Paul chooses: the selector moves to Settings → Playback beside the cache budget, or preparation becomes how plurx works and the selector is removed.")}
+    <div class="err" id="vod-output-preparation-error" role="alert"></div>${setCardFoot("saveOutputPreparation")}`,{id:"vod-output-preparation-card"});
 }
-async function refreshLiveTvEnableReadiness(mount){
+async function saveOutputPreparation(btn){
+  const err=document.getElementById("vod-output-preparation-error");if(err)err.textContent="";btn.disabled=true;
   try{
-    const r=await api("/live-tv/readiness",{signal:AbortSignal.timeout(40000)});
-    if(!mount.isConnected)return;
-    mount.innerHTML=`<ul>${r.checks.map(c=>`<li><strong>${c.ready?"Met":"Not met"}:</strong> ${esc(c.message)}</li>`).join("")}</ul><p class="hint">Advisory only. Unknown or unmet requirements do not prevent enabling.</p>`;
-  }catch(e){if(mount.isConnected)mount.textContent=`Readiness unavailable: ${e.message}. You can still enable Live TV.`;}
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_output_preparation:/** @type {HTMLSelectElement} */(document.getElementById("vod-output-preparation")).value}}));
+    const card=document.getElementById("vod-output-preparation-card");if(card)card.outerHTML=outputPreparationCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
-async function saveLiveTvEnable(button){
-  const err=document.getElementById("dev-live-tv-error");if(err)err.textContent="";
+// Retaining a rolling session's complete output as a reusable artifact. The
+// links pin disk the scratch ledger stops counting, so the rows below are the
+// free-space headroom and what this node holds.
+function rollingRetentionCard(settings,readiness){
+  const enabled=!!settings.vod_rolling_retention;
+  return setCard(`${cardHead("Rolling output retention","Keep a fully watched rolling session's segments as a reusable artifact.",enabled?`<span class="pill warn">on</span>`:`<span class="pill">off</span>`)}
+    ${togRow("vod-rolling-retention","Retain rolling output","Hard-links each segment into the retained namespace while the session plays. Only a title played from the start to its verified end publishes. Activity lists each retained output on this node with a Stop.",enabled)}
+    ${devReq(readiness,"rolling_retention","retention_same_filesystem","Session scratch and the retained namespace share a filesystem","Hard links need one filesystem; on another device a collection is refused before it reserves anything. Windows keeps retention off.")}
+    ${devReq(readiness,"rolling_retention","retention_budget","A retained-output budget","Bounded by the cache budget (unset is 50 GB).")}
+    ${devReq(readiness,"rolling_retention","retention_headroom","Free space beyond everything scratch may write","Sampled every 30 seconds. Below a 1 GiB reserve, every unpublished collection is abandoned.")}
+    ${devReq(readiness,"rolling_retention","retention_live_bytes","What retention holds on this node","Collecting, retained and releasing artifacts.")}
+    ${devReq(readiness,"rolling_retention","retention_cleanup_pending","Nothing waiting on the collector","Orphans from a crash and released artifacts are deleted in bounded slices each tick.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("a qualified fleet run shows retention staying inside its headroom on every node and released artifacts deleted within a tick.","Paul chooses: the switch moves to Settings → Playback beside the cache budget, or it is removed if retention becomes how plurx works.")}
+    <div class="err" id="vod-rolling-retention-error" role="alert"></div>${setCardFoot("saveRollingRetention")}`,{id:"vod-rolling-retention-card"});
+}
+async function saveRollingRetention(btn){
+  const err=document.getElementById("vod-rolling-retention-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_rolling_retention:/** @type {HTMLInputElement} */(document.getElementById("vod-rolling-retention")).checked}}));
+    const card=document.getElementById("vod-rolling-retention-card");if(card)card.outerHTML=rollingRetentionCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function cinemaRemoteCard(settings,readiness){
+  return setCard(`${cardHead("Cinema remote control","Pair a phone or tablet with one active Cinema screen.",'<span class="pill">Qualification pending</span>')}
+    ${togRow("cinema-remote-control","Enable companion remotes","Only explicitly approved same-account devices can control a screen. Turning this off ends network remote sessions.",!!settings.cinema_remote_control)}
+    ${devReq(readiness,"cinema_remote_control","clients","Receiver and companion qualification","Server support does not prove client or physical remote acceptance. Saving your choice always succeeds.")}
+    ${devGraduation("receiver, companion and physical remote acceptance are recorded for the composed candidate.","this switch moves to Settings → Playback as a permanent network remote preference.")}
+    <div class="err" id="cinema-remote-error" role="alert"></div>${setCardFoot("saveCinemaRemote")}`);
+}
+async function saveCinemaRemote(button){
+  const err=document.getElementById("cinema-remote-error");if(err)err.textContent="";
   if(button)button.disabled=true;
   try{
-    const saved=await api("/settings",{method:"PUT",body:{live_tv_config_generation:SETTINGS.live_tv_config_generation,
-      live_tv_enabled:/** @type {HTMLInputElement} */ (document.getElementById("dev-live-tv-enable")).checked},signal:AbortSignal.timeout(45000)});
-    cacheSettings(saved);toast("Live TV enablement saved");if(button)setCardSaved(button);
-  }catch(e){if(err&&err.isConnected)err.textContent=e.message;if(button&&button.isConnected)button.disabled=false;}
+    cacheSettings(await api("/settings",{method:"PUT",body:{cinema_remote_control:/** @type {HTMLInputElement} */(document.getElementById("cinema-remote-control")).checked}}));
+    toast("Companion remote preference saved");if(button)setCardSaved(button);
+  }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
 }
-function clusterPlacementCard(settings){
-  const ready=!!settings.cluster_media_pool_ready;
-  return setCard(`${cardHead("Cluster media placement","Place new streams on compatible workers with spare capacity.",'<span class="pill">Cluster</span>')}
-    ${togRow("cluster-placement-enabled","Enable remote media placement","Existing sessions keep their owner; new sessions can use another worker.",!!settings.cluster_media_pool_enabled)}
-    ${togRow("cluster-takeover-enabled","Enable session takeover","Allow compatible expired sessions to acquire a new owner when remote placement is enabled.",!!settings.cluster_session_takeover_enabled)}
-    ${devStaticReq("Peer protocol observations",ready?"met":"not fully met","Compatible reachable peers are considered individually. A stale or older peer never disables the other workers.",ready?"ok":"")}
-    ${devStaticReq("Worker resources","checked for each start","A selected worker needs the requested codecs, readable source, writable scratch space and an available hardware or CPU reservation.","")}
-    <p class="hint">Requirements are advisory and never prevent saving. Unknown performance measurements affect ranking only. Streams continue through their existing ingress proxy, so ingress bandwidth is still used.</p>
-    ${devGraduation("the media-pool plan's physical-device corpus and its takeover budget (CLUSTER-MEDIA-POOL-PLAN §8.8 and §8.9) are measured.","both switches move to Settings → Cluster as permanent on/off controls.")}<div class="err" id="cluster-placement-error" role="alert"></div>${setCardFoot("saveClusterPlacement")}`,{id:"cluster-placement-settings"});
+
+function cinemaRemoteInvitationsCard(settings,readiness){
+  return setCard(`${cardHead("Cinema background invitations","Let opted-in phones receive an invitation when their Cinema screen becomes available.",'<span class="pill">Qualification pending</span>')}
+    ${togRow("cinema-remote-invitations","Enable background invitations","Requires companion remotes and explicit consent on each paired phone. This choice does not change either preference.",!!settings.cinema_remote_invitations)}
+    ${devReq(readiness,"cinema_remote_invitations","broker","Notification delivery provider","Configure the broker and provider separately. Missing configuration never prevents saving this choice.")}
+    ${devReq(readiness,"cinema_remote_invitations","consent","Paired phone consent","Each same-account phone must explicitly opt in to invitations for its approved screen.")}
+    ${devReq(readiness,"cinema_remote_invitations","delivery","Physical notification and tap acceptance","Native background delivery and opening the correct screen require platform and device qualification.")}
+    ${devGraduation("provider delivery and native background notification/tap acceptance are recorded.","this permanent preference moves to Settings → Playback.")}
+    <div class="err" id="cinema-invitations-error" role="alert"></div>${setCardFoot("saveCinemaRemoteInvitations")}`);
 }
-async function saveClusterPlacement(btn){
-  const err=document.getElementById("cluster-placement-error");if(err)err.textContent="";btn.disabled=true;
+async function saveCinemaRemoteInvitations(button){
+  const err=document.getElementById("cinema-invitations-error");if(err)err.textContent="";
+  if(button)button.disabled=true;
   try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
-      cluster_media_pool_enabled:/** @type {HTMLInputElement} */(document.getElementById("cluster-placement-enabled")).checked,
-      cluster_session_takeover_enabled:/** @type {HTMLInputElement} */(document.getElementById("cluster-takeover-enabled")).checked
-    }}));
-    const card=document.getElementById("cluster-placement-settings");if(card)card.outerHTML=clusterPlacementCard(saved);
-  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+    cacheSettings(await api("/settings",{method:"PUT",body:{cinema_remote_invitations:/** @type {HTMLInputElement} */(document.getElementById("cinema-remote-invitations")).checked}}));
+    toast("Background invitation preference saved");if(button)setCardSaved(button);
+  }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
 }
-function boundedCatalogueCard(settings,readiness){
-  return setCard(`${cardHead("Local catalogue reads","Use each replica for browsing when its current consistency proof permits it.",'<span class="pill">Cluster reads</span>')}
-    ${togRow("bounded-catalogue-reads","Enable local catalogue reads","Falls back to authority when a replica is stale or a watch-write position is unknown.",settings.bounded_replica_reads!==false)}
-    ${devReq(readiness,"bounded_catalogue_reads","replica_proof","Fresh replica proof","The current term, quorum watermark and apply lag are checked for each read. Saving this preference does not require a readiness result.")}
-    ${devReq(readiness,"bounded_catalogue_reads","watch_floor","Watch state consistency","The web client carries its latest acknowledged watch-write position across nodes for 60 seconds. Other clients retain authority reads until they implement the same echo.")}
-    ${devGraduation("K-04's §5.1 lab readout and rolling-upgrade check are recorded. The web read-after echo and the on-by-default preference already shipped (5ba02212f).","Paul chooses: the switch moves to Settings → Cluster, or it is removed because every replica simply serves browsing this way.")}<div class="err" id="bounded-catalogue-error" role="alert"></div>${setCardFoot("saveBoundedCatalogueReads")}`,{id:"bounded-catalogue-settings"});
-}
-async function saveBoundedCatalogueReads(btn){
-  const err=document.getElementById("bounded-catalogue-error");if(err)err.textContent="";btn.disabled=true;
-  try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{bounded_replica_reads:/** @type {HTMLInputElement} */(document.getElementById("bounded-catalogue-reads")).checked}}));
-    const card=document.getElementById("bounded-catalogue-settings");if(card)card.outerHTML=boundedCatalogueCard(saved,DEVELOPER_READINESS);
-  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
-}
+
 function developerPanel(settings,readiness){
+  // Only features that are not yet fully active or fully tested wait here,
+  // each saying what it waits on (devGraduation). Everything that graduated
+  // lives in its own section; the links below are the way back to them.
+  const clustered=settingsClusterEnabled();
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
-    <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
-    <a href="#/settings/playback"><strong>Playback <span aria-hidden="true">↗</span></strong><span>Defaults, streaming and compatibility</span></a>
-    <a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health and recovery</span></a>
+    <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>On/off, tuner, guide, recording and library channels</span></a>
+    <a href="#/settings/playback"><strong>Playback <span aria-hidden="true">↗</span></strong><span>Defaults, quality switching, subtitles and delivery</span></a>
+    ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
-  const browser=setCard(`${cardHead("Second player in this browser","Advertise this browser's ability to prepare a replacement stream.",`<span class="pill acc">this browser</span>`)}
-      ${togRow("pdp","Allow a second player","Uses additional device memory and decoder capacity. Saved automatically in this browser; the next reporter exchange sends the change.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
-      <div class="hint">A failed preparation falls back to reopening the stream. Prepare quality changes above must also be enabled on the server.</div>${devGraduation("prepared quality handoff graduates.","this browser permission moves with it to Settings → Playback.")}
-      ${directedChangeDeveloperRows()}`,{local:true});
-  return `${setHead("Developer","Experimental features still awaiting device qualification.")}
+  return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
       ${destinations}
-      <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
-      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}
-      <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
-      <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
-      <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
-      <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
+      <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
+      <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
-      <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence.</p></div>${displayAwareAutoCard(settings)}
-      <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
-      <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
-      <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}
-      <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep tracks during indexing and share verified tracks across the cluster.</p></div>${subtitlePlaybackRangesCard(readiness)}${subtitleStoredSourcesCard(settings,readiness)}${subtitleClusterSourcesCard(settings,readiness)}${subtitleBackfillCard(settings,readiness)}`;
+      <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
+      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}
+      <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
+      <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
+      <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
+      <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
+      <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
+      <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
+      <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}
+      <div class="setsection" id="enable-subtitle-transcription"><h2>Generate subtitles</h2><p>Optional local transcription for media without suitable captions.</p></div>${subtitleTranscriptionCard()}`;
 }
-// Refusing a subtitle segment whose extraction failed.
-//
-// A not-ready subtitle segment is answered with a valid but empty WebVTT
-// body. While the sidecar is warming that is true. Once the extraction has
-// failed it is a lie, and players keep the bytes in memory whatever
-// `no-store` says — so the viewer is left with a track that is selected,
-// silent, and never going to fill in.
-//
-// The switch is the enable path and the rows below never gate it. They are
-// all `unobservable` on purpose: whether an engine keeps playing video
-// through a subtitle 503 is a measurement on an Apple TV, an Android device
-// and a browser, not something this server can read about itself.
-function subtitleNotReadyCard(s,readiness){
-  const enabled=!!s.subtitle_not_ready_503;
-  const state=enabled
-    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
-    : `<span class="pill">disabled</span>`;
-  return setCard(`${cardHead("Refuse a subtitle segment that failed","Answer 503 with Retry-After when a subtitle track's extraction has failed, instead of an empty subtitle segment the player keeps.",state)}
-      ${togRow("sub503",`Refuse instead of serving an empty subtitle segment <span class="pill warn">experimental</span>`,`Applies immediately to new segment requests. This checkbox is authoritative: an unobserved engine never turns it back off.`,enabled)}
-      <div class="hint"><b>This checkbox is the enable path.</b> The observations below are advisory only. Only a <i>failed</i> extraction is refused; a track that is still warming keeps its empty segment and the client's readiness retry, because "not yet" and "not going to" are different answers.</div>
-      <details class="setdetails" open><summary>What to confirm before enabling</summary><div class="setdetails-body">
-      ${devReq(readiness,"subtitle_not_ready_503","avplayer_survives_subtitle_refusal","AVPlayer keeps the picture","Apple TV and iPad. AVPlayer allows a subtitle segment about two seconds and blocks the muxed video while it waits, so this is the refusal with a picture riding on it. Play a title whose subtitle extraction fails and confirm the video continues.")}
-      ${devReq(readiness,"subtitle_not_ready_503","media3_survives_subtitle_refusal","Media3 keeps the picture","Android. Confirm a refused subtitle rendition surfaces as a text-track problem and not a fatal source error that stops playback.")}
-      ${devReq(readiness,"subtitle_not_ready_503","hlsjs_survives_subtitle_refusal","hls.js keeps the picture","Any browser. Confirm the bundled hls.js treats a 503 with Retry-After on a subtitle rendition as recoverable rather than escalating to a fatal network error.")}
-      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. These are device measurements; this server cannot take them for you, which is why all three read "not observable" rather than showing a tick nobody earned.</p>
-      </div></details>
-      ${devGraduation("the subtitle-reliability physical verification shows AVPlayer, Media3 and hls.js keep the picture through a refused subtitle segment.","the toggle is removed and refusing a failed extraction becomes the default, keeping an operator's explicit choice.")}<div class="err" id="sub503err" role="alert"></div>
-      ${setCardFoot("saveSubtitleNotReady")}`,{id:"sub503card"});
+function subtitleTranscriptionCard(){
+  return setCard(`${cardHead("Generate subtitles offline","Create machine-generated captions locally with whisper.cpp.")}
+      <p>Runs as background work. You can follow progress and stop queued or running transcription in Activity.</p>
+      <button class="sm" onclick="openSubtitleTranscription(this)">Configure transcription</button>
+      <div id="subtitle-transcription-form"></div>
+      ${devGraduation("real transcription, cancellation, source replacement and generated-caption playback are qualified on the supported workers and clients.","the permanent controls move to Settings → Maintenance.")}`);
 }
-function pgsOverlayCard(s,readiness){
-  const enabled=!!s.pgs_overlay;
-  const state=enabled
-    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
-    : `<span class="pill">disabled</span>`;
-  return setCard(`${cardHead("Serve PGS subtitles as an overlay","Give capable clients a bitmap subtitle overlay while keeping the video in its original grade.",state)}
-      ${togRow("pgsoverlay",`Serve PGS subtitles as an overlay <span class="pill warn">experimental</span>`,`Applies immediately to new playback requests on every node. Only clients that advertise pgs-v1 receive an overlay.`,enabled)}
-      <div class="hint"><b>This checkbox is the enable path.</b> Physical playback and seek checks are required before leaving it on. If they fail, turn it off here; no restart is needed.</div>
-      <details class="setdetails" open><summary>Readiness and device qualification</summary><div class="setdetails-body">
-      ${devReq(readiness,"pgs_overlay","clients_render_overlays","A client renders pgs-v1","A served manifest proves a client requested an overlay, not that it drew the cues correctly.")}
-      ${devReq(readiness,"pgs_overlay","overlay_acceptance","Physical-client acceptance","Confirm cue timing, placement and seeking on Android and Apple hardware while video remains HDR or Dolby Vision.")}
-      <p class="devcheck-note">These observations are advisory. The saved switch remains authoritative.</p>
-      </div></details>
-      ${devGraduation("the Apple PGS overlay acceptance and the Android cue timing, placement and seek checks on HDR and Dolby Vision video are recorded.","the switch moves to Settings → Playback as a permanent on/off.")}<div class="err" id="pgsoverlayerr" role="alert"></div>
-      ${setCardFoot("savePgsOverlay")}`,{id:"pgsoverlaycard"});
+function subtitleTranscriptionForm(settings){
+  const readiness=settings.readiness||{};
+  return `<label><input id="st-enabled" type="checkbox"${settings.enabled?" checked":""}> Enable offline subtitle generation</label>
+      <p class="hint">Applies to new requests. Stop existing work in Activity. The checks below are advisory and never change your saved choice.</p>
+      <label for="st-command">whisper.cpp executable on the worker</label><input id="st-command" autocomplete="off" value="${esc(settings.command||"whisper-cli")}">
+      <label for="st-model">Local model file on the worker</label><input id="st-model" autocomplete="off" value="${esc(settings.model_path||"")}">
+      <label for="st-language">Spoken language code</label><input id="st-language" maxlength="12" value="${esc(settings.language||"en")}">
+      <label for="st-interval">Check for missing subtitles every (minutes; 0 for manual requests only)</label><input id="st-interval" type="number" min="0" max="10080" step="1" value="${esc(String(settings.interval_mins||0))}">
+      <p class="hint">Audio and captions stay on your servers. Models must already be installed. Captions are labelled as machine-generated and may contain mistakes.</p>
+      <div role="status"><b>Worker readiness:</b> ${readiness.ready?"Ready":"Not ready"}. ${esc(readiness.reason||"")}</div>
+      <ul><li>Executable: ${readiness.command_available?"available":"not found"}</li><li>Model: ${readiness.model_available?"available":"not found"}</li></ul>
+      <button class="sm" onclick="saveSubtitleTranscription(this)">Save</button><div id="st-status" role="status" aria-live="polite"></div>`;
 }
-// Stored PGS tracks.
-//
-// Both halves of the subtitle-source store, behind one switch: the
-// fragment-index pass keeps every PGS track it reads, and the overlay and the
-// burn path read a kept track instead of demuxing the whole source again. On
-// by default. Off stops the pass keeping tracks and makes both paths ignore
-// what is stored, which is how a wrong stored artifact is taken out of service
-// without a redeploy. The startup self-test and cache probes are advisory
-// readings for the operator; they never override the saved switch.
-function subtitlePlaybackRangesCard(readiness){
-  return setCard(`${cardHead("Parallel playback subtitle ranges","Prepare text near the playhead while peers prepare the next ranges.",`<span class="pill">automatic</span>`)}
-      <p>For indexed Matroska text subtitles, this node prepares the current range and up to two reachable peers prepare the next ranges. Peer requests and responses are authenticated, and each completed range is served from this node's subtitle cache.</p>
-      <div class="hint">Keep the subtitle cache on local storage. If peers are unavailable or refuse work, current local extraction and the existing playback fallback continue. PGS and styled subtitle burns still need complete tracks.</div>
-      ${devReq(readiness,"subtitle_cluster_sources","reachable_peer","A media peer is reachable","This live directory reading is advisory; each range request still verifies its peer and source. It does not prove a successful range exchange.")}
-      <p class="devcheck-note">Playback ranges are automatic. The switches below control durable stored tracks and their extraction queue; they do not enable or disable these temporary playback ranges.</p>${devGraduation("K-09's fleet evidence shows a successful peer range exchange.","this card is removed. Playback ranges have no switch.")}`);
+async function openSubtitleTranscription(button){
+  const panel=document.getElementById("subtitle-transcription-form");
+  if(!panel)return;
+  if(button)button.disabled=true;
+  try{
+    const settings=await api("/subtitle-transcription");
+    if(panel.isConnected)panel.innerHTML=subtitleTranscriptionForm(settings);
+  }catch(error){if(panel.isConnected)panel.textContent=error.message||"Could not load transcription settings.";}
+  finally{if(button&&button.isConnected)button.disabled=false;}
 }
-function subtitleStoredSourcesCard(s,readiness){
-  const enabled=s.subtitle_stored_sources!==false;
-  const state=enabled
-    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
-    : `<span class="pill">disabled</span>`;
-  return setCard(`${cardHead("Keep and read stored PGS tracks","Keep each PGS track while a file is indexed, and serve the PGS overlay and burned PGS subtitles from it instead of reading the whole source again.",state)}
-      ${togRow("subsrc",`Use stored PGS tracks <span class="pill">preview</span>`,`Applies immediately to the next index pass, new overlay preparations and burned sessions. This checkbox is authoritative: nothing below turns it on or off.`,enabled)}
-      <div class="hint"><b>This checkbox is the enable path.</b> Off stops the index pass keeping tracks and makes both consumers ignore the store and read the source as they always have.</div>
-      <details class="setdetails" open><summary>What it needs</summary><div class="setdetails-body">
-      ${devReq(readiness,"subtitle_stored_sources","stored_source_producer","Something fills the store","The fragment-index pass keeps each PGS track as it reads the file, with the tracks attempted and their verdicts since this process started.")}
-      ${devReq(readiness,"subtitle_stored_sources","stored_source_self_test","The startup self-test passed","At startup the configured ffmpeg runs the index argv with the tee over a tiny synthetic file with one corrupted track. Review its result before relying on stored tracks.")}
-      ${devReq(readiness,"subtitle_stored_sources","stored_source_local_cache","The cache is on a local filesystem","A stage on NFS, SMB or FUSE could stall the demuxer shared with the index pass.")}
-      ${devReq(readiness,"subtitle_stored_sources","stored_source_free_space","The cache has room for the stage","Keep at least 1 GiB or 2% free, whichever is larger; stages share the index cache disk.")}
-      ${devReq(readiness,"subtitle_stored_sources","stored_source_lookups","Lookups answered from the store","How many overlay and burn lookups this process served from a stored track, answered as having no cues, or passed through to extraction.")}
-      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
-      </div></details>
-      ${devGraduation("K-09's fleet and device evidence for stored tracks is recorded.","the switch moves to Settings → Maintenance beside the stored subtitle tracks, as the permanent way to take a bad stored track out of service.")}<div class="err" id="subsrcerr" role="alert"></div>
-      ${setCardFoot("saveSubtitleStoredSources")}`,{id:"subsrccard"});
+async function saveSubtitleTranscription(button){
+  const panel=document.getElementById("subtitle-transcription-form"),status=document.getElementById("st-status");
+  if(!panel||!status)return;
+  const input=id=>/** @type {HTMLInputElement} */ (document.getElementById(id));
+  const interval=Number(input("st-interval").value);
+  if(!Number.isInteger(interval)||interval<0||interval>10080){status.textContent="Choose a whole number of minutes from 0 to 10080.";return;}
+  const body={enabled:input("st-enabled").checked,
+    command:input("st-command").value.trim(),
+    model_path:input("st-model").value.trim(),
+    language:input("st-language").value.trim(),interval_mins:interval};
+  if(button)button.disabled=true;
+  status.textContent="Saving…";
+  try{
+    const saved=await api("/subtitle-transcription",{method:"PUT",body});
+    if(panel.isConnected){panel.innerHTML=subtitleTranscriptionForm(saved);document.getElementById("st-status").textContent="Saved. Worker readiness does not change this choice.";}
+  }catch(error){if(status.isConnected)status.textContent=error.message||"Could not save transcription settings.";}
+  finally{if(button&&button.isConnected)button.disabled=false;}
 }
-function subtitleClusterSourcesCard(s,readiness){
-  const enabled=!!s.subtitle_cluster_sources;
-  return setCard(`${cardHead("Share stored subtitle tracks","Join one cluster extraction and copy a verified track from a peer.",`<span class="pill${enabled?" ok":""}">${enabled?"enabled":"off"}</span>`)}
-      ${togRow("subcluster",`Use cluster subtitle sources <span class="pill">preview</span>`,`Applies to new subtitle flights. Your saved choice controls use; the checks below only advise.`,enabled)}
-      <details class="setdetails" open><summary>What to confirm before enabling</summary><div class="setdetails-body">
-      ${devReq(readiness,"subtitle_cluster_sources","analysis_queue","Analysis queue is enabled","The cluster analysis queue must be available for cold sources.")}
-      ${devReq(readiness,"subtitle_cluster_sources","schema_v47","All voters support schema 47","Deploy schema 47 on every voter before enqueuing the subtitle-source component.")}
-      ${devReq(readiness,"subtitle_cluster_sources","reachable_peer","A media peer is reachable","A holder can serve verified tracks over the authenticated private media route.")}
-      ${devReq(readiness,"subtitle_cluster_sources","local_cache","The subtitle store is local","Keep staging and stored tracks on a local filesystem.")}
-      ${devReq(readiness,"subtitle_cluster_sources","free_space","The store has room","Leave capacity for stored tracks and a publish stage.")}
-      <p class="devcheck-note">Advisory only. These observations never disable the switch or override your saved choice.</p>
-      </div></details>${devGraduation("K-09's fleet evidence shows schema 47 on every voter and verified peer copies.","Paul chooses: the switch moves to Settings → Cluster, or it is removed and cluster sources become the default.")}<div class="err" id="subclustererr" role="alert"></div>${setCardFoot("saveSubtitleClusterSources")}`,{id:"subclustercard"});
-}
-function subtitleBackfillCard(s,readiness){
-  const enabled=!!s.subtitle_backfill;
-  return setCard(`${cardHead("Backfill subtitle tracks","Use otherwise idle analysis capacity to prepare uncovered subtitle tracks.",`<span class="pill${enabled?" ok":""}">${enabled?"enabled":"off"}</span>`)}
-      ${togRow("subbackfill",`Backfill uncovered tracks <span class="pill">preview</span>`,`Enqueues at most eight files per discovery pass while workers are idle.`,enabled)}
-      <details class="setdetails" open><summary>Current work and readiness</summary><div class="setdetails-body">
-      ${devReq(readiness,"subtitle_backfill","backfill_lease","Exclusive backfill lease","One node holds the cluster lease during each pass; no holder between passes is normal.")}
-      ${devReq(readiness,"subtitle_backfill","backfill_enqueued","Files enqueued here","Count of files this process has added to the analysis queue since startup.")}
-      ${devReq(readiness,"subtitle_backfill","backfill_remaining","Eligible files remaining","Files with an uncovered eligible subtitle ordinal, excluding active and cooling requests.")}
-      ${devReq(readiness,"subtitle_backfill","backfill_bytes","Estimated source bytes","Source sizes for those eligible files; actual output is much smaller.")}
-      <p class="devcheck-note">Advisory only. The switch remains available regardless of the reported status.</p>
-      </div></details>${devGraduation("K-09's fleet evidence shows backfill passes completing under the cluster lease.","the switch moves to Settings → Analysis beside the queue it feeds, as a permanent on/off.")}<div class="err" id="subbackfillerr" role="alert"></div>${setCardFoot("saveSubtitleBackfill")}`,{id:"subbackfillcard"});
-}
+
 function hevcCopyCard(settings){
   const enabled=!!settings.hevc_unverified_copy;
   const trace=settings.hevc_header_trace_available;
@@ -560,9 +430,140 @@ async function saveHevcCopy(btn){
   const err=document.getElementById("hevc-copy-error"); if(err)err.textContent="";
   if(btn)btn.disabled=true;
   try{
-    const saved=await api("/settings",{method:"PUT",body:{hevc_unverified_copy:!!document.getElementById("hevc-unverified").checked}});
+    const saved=await api("/settings",{method:"PUT",body:{hevc_unverified_copy:!!(/** @type {HTMLInputElement} */ (document.getElementById("hevc-unverified"))).checked}});
     cacheSettings(saved);
     const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
     toast("HEVC copy preference saved");
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+function jellyfinCompatibilityCard(settings,readiness){
+  const on=!!settings.jellyfin_compatibility_enabled;
+  const connection=new URL("/jellyfin",window.location.href).href;
+  const host=window.location.hostname;
+  return setCard(`${cardHead("Jellyfin client compatibility","Connect the tested Infuse and Jellyfin Android TV clients to this server.",`<span class="pill${on?" ok":""}">${on?"enabled":"off"}</span>`)}
+    <label class="checkrow"><input type="checkbox" id="jellyfin-compatibility-enabled" ${on?"checked":""}><span>Allow Jellyfin clients</span></label>
+    <p class="hint">In the client, enter just this server's address: <code>${esc(host)}</code>. Jellyfin clients add their standard port (8096) themselves. If the readiness row below says that port is not reachable, use <code>${esc(connection)}</code>, which always works. Sign in with a Plurx account.</p>
+    <p class="hint">Library posters and backdrops are served without sign-in while this is on: anyone who has an artwork link can read that image. A direct-play link for one title chosen after sign-in also works without a login header; it expires within 24 hours and stops working when playback stops or the login is revoked. Everything else requires sign-in.</p>
+    <details class="setdetails" open><summary>Readiness</summary><div class="setdetails-body">
+    ${devReq(readiness,"jellyfin_compatibility","client_qualification","Pinned clients qualified","The complete browsing, playback, track and recovery matrix must pass on the frozen candidate.")}
+    ${devReq(readiness,"jellyfin_compatibility","standard_port","Reachable by host alone","Jellyfin clients given only a host connect to port 8096 at the server root.")}
+    <p class="devcheck-note">Readiness is advisory. Your saved choice controls the connection surface.</p></div></details>
+    ${devGraduation("J6 records the pinned Infuse and Android TV flows, source/profile refusals, identity and watch fences, cluster behavior and native regressions on the frozen candidate.","the permanent compatibility switch moves to Settings → Integrations beside connection settings.")}
+    <div class="err" id="jellyfin-compatibility-error" role="alert"></div>${setCardFoot("saveJellyfinCompatibility")}`,{id:"jellyfin-compatibility-settings"});
+}
+async function saveJellyfinCompatibility(btn){
+  const err=document.getElementById("jellyfin-compatibility-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{jellyfin_compatibility_enabled:(/** @type {HTMLInputElement} */ (document.getElementById("jellyfin-compatibility-enabled"))).checked}}));
+    toast("Jellyfin compatibility saved");if(btn)setCardSaved(btn);
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+function dolbyVisionHdrProcessingCard(settings,readiness){
+  return setCard(`${cardHead("Dolby Vision for HDR output","Use supported Dolby Vision picture information when delivering HDR.","")}
+    ${togRow("dv-hdr-processing","Process Dolby Vision for HDR output","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
+    <p class="hint">New playback attempts supported Dolby Vision processing when the worker has the required tools and resources. Unsupported sources or processing failures use compatible playback. Native Dolby Vision and required color conversion are preserved. Readiness never prevents saving. A running movie is unchanged.</p>
+    ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_backend_reference","Qualified backend and reference","Validate HDR output against an independent reference.")}
+    ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_encoder_matrix","Production encoder matrix","Test processing with the encoders used by playback workers.")}
+    ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_bitrate_quality","Quality at delivery bitrates","Compare picture quality at delivery bitrates.")}
+    ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_physical_playback","Physical playback validation","Test HDR display output, startup, seeking, fallback and sustained playback on supported devices.")}
+    ${devGraduation("the HDR backend/reference proof, production encoder matrix, bitrate quality results and physical playback validation are recorded.","this permanent preference moves independently to Settings → Playback.")}
+    <div class="err" id="dv-hdr-processing-error" role="alert"></div>${setCardFoot("saveDolbyVisionHdrProcessing")}`,{id:"dv-hdr-processing-card"});
+}
+async function saveDolbyVisionHdrProcessing(btn){
+  const card=document.getElementById("dv-hdr-processing-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-hdr-processing-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_hdr_processing:(/** @type {HTMLInputElement} */ (document.getElementById("dv-hdr-processing"))).checked}}));
+    if(!card||document.getElementById("dv-hdr-processing-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=dolbyVisionHdrProcessingCard(saved,DEVELOPER_READINESS);
+    toast("Dolby Vision HDR preference saved; applies to new playback decisions");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+function dolbyVisionFelReencodeCard(settings,readiness){
+  return setCard(`${cardHead("FEL preservation for Profile 8.1","Use the enhancement layer when making a new Profile 8.1 picture.","")}
+    ${togRow("dv-fel-reencode","Preserve FEL when converting to Profile 8.1","Default off. Dolby Vision conversion must also be allowed.",!!settings.dolby_vision_fel_reencode)}
+    <p class="hint">This preference never enables conversion by itself. New playback attempts FEL reconstruction for supported Profile 7 sources when the worker has the required tools and resources. Unsupported sources or processing failures keep the existing permitted conversion fallback. Native Dolby Vision is preserved. Readiness never prevents saving. A running movie is unchanged.</p>
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_backend_reference","Qualified backend and reference","Independently validate the reconstructed picture and converted output, including HDR10 compatibility.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_encoder_matrix","Production encoder matrix","Test reconstruction and conversion with the encoders used by playback workers.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_bitrate_quality","Quality at delivery bitrates","Compare picture quality at delivery bitrates with the existing conversion.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_physical_playback","Physical playback validation","Test Profile 8.1 output, startup, seeking, fallback and sustained playback on supported Dolby Vision devices.")}
+    ${devGraduation("the FEL/P8.1 backend/reference proof, production encoder matrix, bitrate quality results and physical playback validation are recorded.","this permanent preference moves independently to Settings → Playback.")}
+    <div class="err" id="dv-fel-reencode-error" role="alert"></div>${setCardFoot("saveDolbyVisionFelReencode")}`,{id:"dv-fel-reencode-card"});
+}
+async function saveDolbyVisionFelReencode(btn){
+  const card=document.getElementById("dv-fel-reencode-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-fel-reencode-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_fel_reencode:(/** @type {HTMLInputElement} */ (document.getElementById("dv-fel-reencode"))).checked}}));
+    if(!card||document.getElementById("dv-fel-reencode-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=dolbyVisionFelReencodeCard(saved,DEVELOPER_READINESS);
+    toast("FEL preservation preference saved; applies to new playback decisions");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+function contentEncodingCard(settings){
+  const ready=settings.content_encoding_scorer_ready;
+  const applicability=settings.content_encoding_applicability||{};
+  const selected=String(applicability.selected_encoder||"not reported");
+  const override=applicability.explicit_rate_control;
+  return setCard(`${cardHead("Measured per-title encoding","Idle producers compare three short SDR samples before choosing a quality recipe.","")}
+    ${togRow("content-encoding","Enable content-aware encoding","Applies measured choices to cached outputs and subsequent offline requests. Explicit rate-control overrides are preserved.",!!settings.content_aware_encoding)}
+    ${devStaticReq("VMAF scorer on this node",ready===true?"met":ready===false?"not available":"not checked yet","The container includes a separate static libvmaf scorer with the vmaf_v0.6.1 model. Native installs use their configured FFmpeg. The first background analysis checks automatically; missing scoring retains the normal recipe.",ready===false?"warn":"")}
+    ${devStaticReq("Current encoder",esc(selected),"Only software x264 jobs use these measured choices. Hardware jobs retain their existing recipe.",selected==="software"?"":"warn")}
+    ${devStaticReq("Operator rate control",override===true?"explicit override retained":override===false?"automatic policy":"not reported","An explicit bitrate or quality setting takes precedence. Content-aware encoding never changes your saved rate-control choice.",override===true?"warn":"")}
+    ${devStaticReq("Software quality mode",applicability.software_quality_supported===true?"available":applicability.software_quality_supported===false?"not available":"not reported","Uses the node’s already-published encoder capability result. Saving this preference never runs a new probe.",applicability.software_quality_supported===false?"warn":"")}
+    ${devStaticReq("Current scope","SDR software x264","Tagged BT.709, progressive square-pixel video without burned subtitles. Three two-second samples, the producer’s admitted thread count (at most six), and a three-minute budget. Every sample must preserve mean and lower-tail VMAF, with at least 10% byte savings.","")}
+    <div class="hint">The first offline package keeps its accepted recipe and prepares evidence for later requests. Sampling is not a whole-title quality guarantee. These observations never prevent saving the switch.</div>
+    ${devGraduation("representative real-title quality and cost evidence is recorded across supported sources and deployment FFmpeg builds.","the preference moves to Settings → Playback if a permanent switch remains useful.")}
+    <div class="err" id="content-encoding-error" role="alert"></div>${setCardFoot("saveContentEncoding")}`,{id:"content-encoding-card"});
+}
+async function saveContentEncoding(btn){
+  const err=document.getElementById("content-encoding-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{content_aware_encoding:(/** @type {HTMLInputElement} */ (document.getElementById("content-encoding"))).checked}}));
+    const card=document.getElementById("content-encoding-card");if(card)card.outerHTML=contentEncodingCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function vodReorderCard(settings){
+  return setCard(`${cardHead("Reordered VOD frames","Allow two B-frames in software x264 VOD encodes.","")}
+    ${togRow("vod-reorder","Enable reordered VOD frames","Saves the requested recipe directly. Other encoders retain their existing frame order.",Number(settings.vod_reorder_frames)===2)}
+    ${devStaticReq("Supported encoder","software x264","Hardware encoder qualification is separate. Reordered frames require both decode and presentation timestamps in the VOD fragments.","")}
+    ${devStaticReq("Physical-client qualification","pending","Browser and native-client presentation continuity and measured compression receipts remain to be recorded.","warn")}
+    ${devGraduation("the software x264 compression and client presentation matrix is recorded.","the switch is removed if reordered frames become the normal VOD recipe, otherwise it moves to Playback.")}
+    <div class="err" id="vod-reorder-error" role="alert"></div>${setCardFoot("saveVodReorder")}`,{id:"vod-reorder-card"});
+}
+async function saveVodReorder(btn){
+  const err=document.getElementById("vod-reorder-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_reorder_frames:(/** @type {HTMLInputElement} */ (document.getElementById("vod-reorder"))).checked?2:0}}));
+    const card=document.getElementById("vod-reorder-card");if(card)card.outerHTML=vodReorderCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+// S-10: CODECS on SDR HLS master variants. AVPlayer filters variants on
+// CODECS before it fetches a byte, so a string it dislikes silently removes a
+// rung, and no device has re-qualified the SDR string. Off is the pre-S-10
+// master every client already plays. The readiness row is advice: it never
+// disables the checkbox or refuses the save.
+function sdrMasterCodecsCard(settings,readiness){
+  const on=!!settings.playback_sdr_master_codecs;
+  return setCard(`${cardHead("CODECS on SDR master playlists","Name the exact H.264 and audio codecs on SDR HLS masters, as HDR masters already do.",`<span class="pill${on?" warn":""}">${on?"Enabled":"Off"}</span>`)}
+    ${togRow("sdr-master-codecs","Print CODECS on SDR variants","Fixed when a playback session is created: a running session keeps the master it started with, and only a session rebuilt after an owner takeover or VOD resurrection reads the current value. Only complete codec facts are printed, and HDR and Dolby Vision masters are unchanged either way.",on)}
+    <details class="setdetails" open><summary>Readiness — advisory only</summary><div class="setdetails-body">
+    ${devReq(readiness,"sdr_master_codecs","sdr_codecs_device_requalification","Apple TV and iPhone device check","With CODECS printed, every SDR variant must still be offered and play on tvOS and iOS. A player that rejects the string drops the variant before requesting it, so this server cannot observe the failure.")}
+    <p class="devcheck-note">Advisory only. The switch remains available and its save is never refused.</p>
+    </div></details>${devGraduation("the Apple TV and iPhone device check confirms every SDR variant is still offered.","the default becomes on and this switch is removed.")}<div class="err" id="sdr-codecs-error" role="alert"></div>${setCardFoot("saveSdrMasterCodecs")}`,{id:"sdr-codecs-card"});
+}
+async function saveSdrMasterCodecs(btn){
+  const err=document.getElementById("sdr-codecs-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_sdr_master_codecs:(/** @type {HTMLInputElement} */ (document.getElementById("sdr-master-codecs"))).checked}}));
+    const card=document.getElementById("sdr-codecs-card");if(card)card.outerHTML=sdrMasterCodecsCard(saved,DEVELOPER_READINESS);
+    toast("SDR master CODECS preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }

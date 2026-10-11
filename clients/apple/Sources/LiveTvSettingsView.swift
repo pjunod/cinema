@@ -2,49 +2,59 @@ import SwiftUI
 
 /// Every server Live TV card the Apple clients draw, and which settings screen
 /// owns it. Paul's Developer rule (AGENTS.md, SETTINGS-NAVIGATION-AND-DEVELOPER-
-/// STATUS): Developer is a waiting room, not a home. The web moved the tuner,
-/// guide, recording and Library channel cards to Settings → Live TV; these
-/// clients follow it, in the web's order.
+/// STATUS): Developer is a waiting room, not a home. The web moved the Live TV
+/// enable switch and the tuner, guide, recording and Library channel cards to
+/// Settings → Live TV; these clients follow it, in the web's order. Bounded
+/// pause/resume and prepared quality handoff graduated to Settings → Playback.
 enum LiveTvSettingsPlacement {
-    static let liveTvSettings = ["HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"]
+    static let liveTvSettings = ["Enable Live TV", "HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"]
     static let developer = [
-        "Bounded pause/resume · advisory enablement",
-        "Prepared quality handoff · advisory enablement",
-        "Enable Live TV · advisory enablement",
+        "Cinema remotes · advisory enablement",
+        "Screen invitations · advisory readiness",
     ]
-
-    /// The web's `devGraduation` line for the Enable Live TV card, word for word.
-    static let enableLiveTvGraduation =
-        "Leaves Developer when: the Live TV plans' outstanding fleet prompts are recorded: "
-        + "L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) prompts, and "
-        + "L-03's capacity offer and caption-positive pass. "
-        + "Then: the switch moves to Settings → Live TV as a permanent on/off."
-    static let boundedResumeGraduation =
-        "Leaves Developer when: the matched fresh-open and pause/resume trials on one physical Apple TV "
-        + "(APPLE-PAUSE-RESUME-STATUS) are recorded. "
-        + "Then: Paul chooses: the switch moves to Settings → Playback as a permanent on/off, "
-        + "or it is removed and bounded resume is simply on."
-    static let preparedHandoffGraduation =
-        "Leaves Developer when: prepared quality handoff graduates (the quality-switch continuity "
-        + "build finishes M2-Android, M1-web and M3). Then: this device's switch moves with it to "
-        + "Settings → Playback."
 }
 
-/// Settings → Live TV: the tuner, the programme guide, recording and Library
-/// channels. These used to sit in Developer; the Live TV enable switch itself
-/// still waits there. Always present. The server enforces administrator access
-/// and the saved generation; every readiness row here is advisory.
+/// Settings → Live TV: the Live TV enable switch, the tuner, the programme
+/// guide, recording and Library channels. These used to sit in Developer; the
+/// enable switch comes first, with its advisory prerequisites beside it. Always
+/// present. The server enforces administrator access and the saved generation;
+/// every readiness row here is advisory.
 struct LiveTvSettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @StateObject private var admin = LiveTvAdminModel(surface: .liveTvSettings)
+    @StateObject private var admin = LiveTvAdminModel()
 
     var body: some View {
         Form {
+            Section("Enable Live TV") {
+                Text("Watch unprotected antenna channels from one network tuner. No special build is needed.")
+                Text("Before enabling: finish the HDHomeRun channel scan and reserve a stable private IPv4 address. Keep cluster servers upgraded and their clocks synchronized.")
+                Text("At least one eligible server needs network access to the tuner and writable scratch space. Viewers and recordings share channel transports. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
+                Text("ATSC 3.0 can require HEVC and AC-4 decoders your FFmpeg lacks. DRM, rewind, and captions are not supported. Unprotected channels can be scheduled or recorded manually. Readiness tests the output graph, not every broadcast codec, and never gates either switch.")
+                if let saved = admin.saved {
+                    Label(saved.liveTvEnabled ? "Live TV is enabled" : "Live TV is disabled", systemImage: "info.circle")
+                    Button(saved.liveTvEnabled ? "Disable Live TV and drain sessions" : "Enable Live TV") {
+                        admin.write(.enabled(!saved.liveTvEnabled))
+                    }.disabled(admin.busy)
+                }
+                // The prerequisites as the server last observed them, every row
+                // it sent in the order it sent them — the web card's
+                // `/live-tv/readiness` read. Advisory: no row reaches the button.
+                if let prerequisites = admin.prerequisites {
+                    ForEach(prerequisites.checks) { check in
+                        Label("\(check.ready ? "Met" : "Not met"): \(check.message)",
+                              systemImage: check.ready ? "checkmark.circle" : "exclamationmark.triangle")
+                    }
+                    Text("Advisory only. Unknown or unmet requirements do not prevent enabling.").font(.caption)
+                } else if let error = admin.prerequisitesError {
+                    Text("Readiness unavailable: \(error). You can still enable Live TV.").font(.caption)
+                }
+                Button("Refresh Live TV prerequisites") { Task { await admin.loadPrerequisites() } }
+            }
             Section("HDHomeRun Live TV") {
                 Text("One network device shared by eligible cluster servers. Viewers and recordings on the same channel share one tuner stream; a session stays on its selected server and the tuner itself belongs to the cluster.")
             }
-            if let saved = admin.saved {
-                Section(saved.liveTvEnabled ? "Live TV is enabled" : "Live TV is disabled") {
+            if admin.saved != nil {
+                Section("Tuner configuration") {
                     TextField("Tuner private IPv4", text: $admin.ipv4)
                         .disabled(admin.busy)
                     Picker("Maximum channel streams", selection: $admin.sessions) {
@@ -63,7 +73,7 @@ struct LiveTvSettingsView: View {
                                                sessions: admin.sessions, height: 720, maxHeight: admin.height))
                     }.disabled(admin.busy || !admin.dirty)
                     Button("Check saved configuration") { admin.checkReadiness() }.disabled(admin.busy || admin.dirty)
-                    Text("Saving preserves enablement and ends streams using the previous configuration. The Live TV on/off switch is in Settings → Developer → Enable Live TV.").font(.caption)
+                    Text("Saving preserves enablement and ends streams using the previous configuration. The Live TV on/off switch is under Enable Live TV at the top of this screen.").font(.caption)
                 }
             }
             if let readiness = admin.readiness {

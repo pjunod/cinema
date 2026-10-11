@@ -149,14 +149,14 @@
     "native_errors": 0,
     "fatal_hls_errors": 0,
     "receipt_sha256": "58b7a6a0e5c6676cb43df1cdd03ea3f9b7cb1e6fa8f17f61167a27929ef23448",
-    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/plurx-fast-start-hlsjs-continuity-20261002.json",
+    "raw_receipt": "~/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/plurx-fast-start-hlsjs-continuity-20261002.json",
     "passes_generated_30min_check": true,
     "served_script_hashes": "not captured for this completed run; actual shipped HLS loader/config was executed, daemon actor/scratch were not",
     "qualification_limit": "generated AVC/AAC, local transfer, 1x playback; not live HEVC/DV or fleet qualification"
   },
   "pull_request": {
     "number": 711,
-    "url": "http://192.168.4.7:3000/noirr/plurx/pulls/711",
+    "url": "http://forge.lan:3000/noirr/plurx/pulls/711",
     "draft": true
   },
   "native_measurement_note": "Record both first composited frame and advancing playback: Safari may render an initial frame while waiting for more media.",
@@ -309,7 +309,7 @@
     "native_errors": 0,
     "classification_errors": 0,
     "receipt_sha256": "893fd4967cbf5c494511504281c66235de4e142b2b30f3d9c1113a1c257b5aa4",
-    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/native-qualification-20261002.json",
+    "raw_receipt": "~/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/native-qualification-20261002.json",
     "passes_generated_30min_continuity": true,
     "captured_at_utc": "2026-10-02T07:09:19.532790+00:00",
     "limits": "Generated AVC/AAC at local transfer and 1x; daemon actor/flow/scratch, live HEVC/DV, source resume and physical TV classes are not qualified. One waiting bounce occurs before 0.5s advancing progress and is retained separately.",
@@ -443,7 +443,7 @@
     "elapsed_ms": 102252,
     "waits_after_progress": [],
     "errors": [],
-    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/native-conservative-post-review-smoke.json",
+    "raw_receipt": "~/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/native-conservative-post-review-smoke.json",
     "scope_limit": "The page initially labels continuity-start as a 30-minute observation; this run was deliberately ended earlier and is only a bounded smoke. Server models availability; daemon actor/flow/scratch and physical/live source are not exercised.",
     "last_advancing_sample_s": 88.73158249999767,
     "raw_receipt_sha256": "0ace4610e127b87e230cd9c954176f963201e5cbcc22e0100d08bb02c80e155c"

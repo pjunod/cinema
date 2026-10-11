@@ -96,8 +96,17 @@ function liveTvOutputChannels(){
     return LIVE_TV_AUDIO_CONTEXT.destination.maxChannelCount;
   }catch(e){ return 2; }
 }
+// The caption formats the player this page attaches decodes; the owner
+// advertises only those services. hls.js renders CEA-608 alone: it has no 708
+// decoder and maps SERVICE1 onto the text track it made for CC1, so a 708
+// service advertised to it is a phantom second entry that takes CC1's label.
+// Safari's native HLS, the fallback below hls.js, decodes both. The same test
+// as the attach in live-tv-controls.js (`Hls` is the global hls.min.js sets).
+function liveTvCaptionDecoders(){
+  return typeof Hls!=="undefined"&&Hls&&Hls.isSupported()?["cea608"]:["cea608","cea708"];
+}
 function liveTvPlaybackEnvelope(compatibility=null){
-  const caps=currentCapsDocument();
+  const caps={...currentCapsDocument(),caption_decoders:liveTvCaptionDecoders()};
   const aacChannels=liveTvAacChannelCeiling(liveTvOutputChannels());
   const audio=(caps.audio||[]).filter(codec=>["aac","ac3","eac3"].includes(codec));
   const formats=[{container:"mpegts",video:"h264",audio:"aac"}];
@@ -432,6 +441,51 @@ function liveTvCaptionTracks(){
 function liveTvCaptionTrackLabel(track,index){
   return track.label||track.language||`${track.kind==="captions"?"Caption":"Subtitle"} ${index+1}`;
 }
+// The viewer's last Live TV caption pick, kept in this browser: "off", or the
+// label and language of the track picked. hls.js creates the captions track
+// only when the first cue arrives, and hidden — it ignores the manifest's
+// DEFAULT/AUTOSELECT — so every channel and every reattach came up without
+// the captions the viewer had turned on.
+function liveTvSavedCaption(){
+  try{
+    const saved=JSON.parse(localStorage.getItem("plurx_live_tv_captions")||"null");
+    return saved==="off"||(saved&&typeof saved.label==="string")?saved:null;
+  }catch(e){ return null; }
+}
+function liveTvSaveCaption(track){
+  try{
+    localStorage.setItem("plurx_live_tv_captions",JSON.stringify(
+      track?{label:track.label||"",language:track.language||""}:"off"));
+  }catch(e){}
+}
+// A track that appears while nothing is showing takes the saved pick: the
+// same label, or failing that the same language. No pick, or "off", leaves
+// the player's own default (hidden) alone.
+function liveTvApplySavedCaption(tracks){
+  if(tracks.some(({track})=>track.mode==="showing")) return;
+  const saved=liveTvSavedCaption();
+  if(!saved||saved==="off") return;
+  const match=tracks.find(({track})=>track.label===saved.label&&track.language===saved.language)
+    ||tracks.find(({track})=>saved.language&&track.language===saved.language);
+  if(match) match.track.mode="showing";
+}
+// The saved pick is offered once per track per attach, when the track is
+// added, and never on a mode change: captions turned off any other way (the
+// native CC menu in iOS Safari fullscreen) fire the same `change` with
+// nothing showing, and re-applying the pick there would turn them straight
+// back on. hls.js reuses a track left by an earlier attach and announces it
+// with an `addtrack` it dispatches on the media element, so each attach
+// starts with nothing offered (`liveTvCaptionsAttaching`).
+let LIVE_TV_CAPTIONS_OFFERED=new WeakSet();
+function liveTvCaptionsAttaching(){ LIVE_TV_CAPTIONS_OFFERED=new WeakSet(); }
+function liveTvCaptionTrackAdded(event){
+  const track=event&&event.track;
+  if(track&&(track.kind==="captions"||track.kind==="subtitles")&&!LIVE_TV_CAPTIONS_OFFERED.has(track)){
+    LIVE_TV_CAPTIONS_OFFERED.add(track);
+    liveTvApplySavedCaption(liveTvCaptionTracks());
+  }
+  liveTvRefreshCaptionControls();
+}
 function liveTvRefreshCaptionControls(){
   const tracks=liveTvCaptionTracks();
   const signature=JSON.stringify(tracks.map(({track,index})=>[index,track.kind,track.label,track.language]));
@@ -458,6 +512,7 @@ function liveTvSelectCaption(value){
   const selected=value==="off"?null:tracks.find(({index})=>String(index)===value);
   if(value!=="off"&&!selected) return;
   for(const {track} of tracks) track.mode=selected&&track===selected.track?"showing":"disabled";
+  liveTvSaveCaption(selected?selected.track:null);
   liveTvRefreshCaptionControls();
 }
 let LIVE_TV_STATS_TIMER=null;
@@ -584,6 +639,18 @@ function liveTvOverlayTechnical(channel,status){
     .map((value,index)=>Number.isFinite(value)?`${["strength","quality","symbol"][index]} ${value}%`:null).filter(Boolean).join(" · "):"";
   return [source,rf].filter(Boolean).join(" · ");
 }
+function liveTvStationLogoUrl(channel){
+  // The rule is the shared guide contract's, not this page's: every client
+  // answers it from tests/playback/live-tv-guide-cases.json `station_logo`.
+  return PlurxLiveTv.stationLogoUrl(LIVE_TV.guide,channel?.id);
+}
+function liveTvStationLogo(channel){
+  const url=liveTvStationLogoUrl(channel);
+  // Keep the callsign visible until decoding succeeds, including offline or
+  // broken artwork. The adjacent station name supplies the accessible label.
+  return `<span class="lt-chip" aria-hidden="true"><span class="lt-chip-fallback">${esc(channel.guide_name)}</span>${url?
+    `<img src="${esc(url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onload="this.parentElement.classList.add('has-logo')" onerror="this.remove()">`:""}</span>`;
+}
 function liveTvRowMarkup(channel,selectedId){
   const view=PlurxLiveTv.channelView(channel);
   const at=liveTvProgramme(channel.id);
@@ -598,7 +665,7 @@ function liveTvRowMarkup(channel,selectedId){
     :'<span class="prog muted">No programme information</span>';
   return `<button type="button" class="${classes.join(" ")}" role="option" aria-selected="${channel.id===selectedId}"
       data-channel="${esc(channel.id)}" onclick="liveTvSelect('${esc(channel.id)}')"${view.disabled?' disabled':''}>
-    <span class="lt-chip">${esc(channel.guide_name.slice(0,5))}</span>
+    ${liveTvStationLogo(channel)}
     <span><b>${esc(channel.guide_number)} · ${esc(channel.guide_name)}</b>${liveTvFormatBadges(channel)}${line}</span>
     <span>${channel.favorite?'<span class="lt-star" title="Favorite">★</span>':""}${view.disabled?" 🔒":""}${liveTvMarks(channel.id,at.now,true)}</span>
   </button>`;
@@ -610,8 +677,8 @@ function liveTvToolbar(){
   const conflicts=LIVE_TV_DVR.schedule?LIVE_TV_DVR.schedule.conflicts||0:0;
   return `<div class="lt-head">
     <div class="lt-switch" role="group" aria-label="Live TV layout">
-      <button type="button" aria-pressed="${!recs&&view==="list"}" onclick="liveTvSetView('list')">≡ List</button>
-      <button type="button" aria-pressed="${!recs&&view==="grid"}" onclick="liveTvSetView('grid')">▦ Grid</button>
+      <button type="button" aria-pressed="${!recs&&view==="list"}" data-remote-live-view="list" onclick="liveTvSetView('list')">≡ List</button>
+      <button type="button" aria-pressed="${!recs&&view==="grid"}" data-remote-live-view="grid" onclick="liveTvSetView('grid')">▦ Grid</button>
     </div>
     <div class="lt-switch" role="group" aria-label="Recordings">
       <button type="button" aria-pressed="${recs==="library"}" onclick="liveTvSetRecordingsTab('library')">Library</button>
@@ -620,8 +687,8 @@ function liveTvToolbar(){
     </div>
     <span class="muted">${counts}${tuners}</span>
     <div class="lt-switch" role="group" aria-label="Channel filter">
-      <button type="button" aria-pressed="${liveTvFilter()==="all"}" onclick="liveTvSetFilter('all')">All</button>
-      <button type="button" aria-pressed="${liveTvFilter()==="favorites"}" onclick="liveTvSetFilter('favorites')">Favorites</button>
+      <button type="button" aria-pressed="${liveTvFilter()==="all"}" data-remote-live-filter="all" onclick="liveTvSetFilter('all')">All</button>
+      <button type="button" aria-pressed="${liveTvFilter()==="favorites"}" data-remote-live-filter="favorites" onclick="liveTvSetFilter('favorites')">Favorites</button>
     </div>
     <label class="tog" for="lt-hideprot" style="border:0;padding:0;gap:8px"><span>Hide protected</span>
       <input type="checkbox" id="lt-hideprot"${liveTvHideProtected()?" checked":""} onchange="liveTvSetHideProtected(this.checked)"></label>
@@ -651,7 +718,7 @@ function liveTvNowBar(channel){
     <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
-    <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
+    <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
     <button type="button" id="live-tv-info" data-live-info-opener onclick="openLiveTvStats()" ${transport.hidden?"disabled":""}>Playback info</button>
     <div class="lt-nowtech" data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
   </div>`;
@@ -665,7 +732,7 @@ function liveTvShowInfo(channel){
   return `<aside class="lt-showinfo" aria-label="Current programme details">
     <span class="eyebrow">On now</span>
     <h2>${row?esc(row.title):esc(channel.guide_name)}</h2>
-    <div class="meta">${esc(channel.guide_number)} · ${esc(channel.guide_name)} · ${time}${episode?"<br>"+esc(episode):""}</div>
+    <div class="lt-station-meta">${liveTvStationLogo(channel)}<div class="meta">${esc(channel.guide_number)} · ${esc(channel.guide_name)}<br>${time}${episode?"<br>"+esc(episode):""}</div></div>
     <div data-dvr-live-context>${liveTvRecordingContext(channel,row)}</div>
     <p class="synopsis">${row&&row.synopsis?esc(row.synopsis):"No programme description is available."}</p>
     <div data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
@@ -774,12 +841,12 @@ function liveTvGridMarkup(visible,selected){
     }).join("");
     const marker=ends===null?"":`<div class="lt-cell ends" style="left:${((ends-window.start)/slot)*px}px;width:150px">Guide data ends ${esc(liveTvClock(ends))}</div>`;
     return `<div class="lt-grow">
-      <div class="lt-gname"><span class="lt-chip">${esc(row.channel.guide_name.slice(0,5))}</span>
-        <span class="lt-gmeta"><span>${esc(row.channel.guide_number)}${row.channel.favorite?' <span class="lt-star">★</span>':""}</span>${liveTvFormatBadges(row.channel)}</span></div>
+      <div class="lt-gname">${liveTvStationLogo(row.channel)}
+        <span class="lt-gmeta"><span>${esc(row.channel.guide_number)}${row.channel.favorite?' <span class="lt-star">★</span>':""}</span><span class="lt-gcallsign" title="${esc(row.channel.guide_name)}">${esc(row.channel.guide_name)}</span>${liveTvFormatBadges(row.channel)}</span></div>
       <div class="lt-gcells" style="width:${layout.totalWidth}px">${cells}${marker}</div>
     </div>`;
   }).join("");
-  const nowLine=layout.nowX===null?"":`<div class="lt-now" style="left:${180+layout.nowX}px"></div>`;
+  const nowLine=layout.nowX===null?"":`<div class="lt-now" style="left:calc(var(--lt-channel-width) + ${layout.nowX}px)"></div>`;
   return `<div class="lt-split">
     ${liveTvStageMarkup(selected,false)}
     <div>
@@ -913,8 +980,19 @@ function liveTvPopover(row,channelId){
     ${row.synopsis?`<p>${esc(row.synopsis)}</p>`:""}
     ${row.filters&&row.filters.length?`<div class="pills">${row.filters.map(f=>`<span class="pill">${esc(f)}</span>`).join("")}</div>`:""}
     ${liveTvPopoverActions(row,channelId)}
-    <div class="row"><button class="ghost sm" onclick="liveTvPopover(null)">Close</button></div>`;
+    <div class="row"><button class="ghost sm" data-remote-guide-close onclick="liveTvPopover(null)">Close</button></div>`;
   pop.hidden=false;
+  const guide=LIVE_TV.guide,serial=LIVE_TV.serial,close=()=>liveTvPopover(null),closeButton=pop.querySelector("[data-remote-guide-close]");
+  const entries=[{id:"guide:close",element:closeButton,label:"Close programme",activate:()=>{close();return "applied";}}];
+  const now=liveTvNowSeconds();
+  if(row.start<=now&&now<row.end&&channel&&!PlurxLiveTv.channelView(channel).disabled){
+    const watch=pop.querySelector(".lt-acts button");
+    if(watch)entries.push({id:`guide:watch:${channelId}:${row.start}`,element:watch,label:"Watch "+channel.guide_name,activate:()=>{
+      const current=liveTvNowSeconds();if(!(row.start<=current&&current<row.end)||!LIVE_TV.channels.includes(channel)||PlurxLiveTv.channelView(channel).disabled)return "unavailable";
+      close();liveTvSelect(channelId);return "applied";
+    }});
+  }
+  cinemaRemoteOwnPresentation(pop,"live-tv",()=>LIVE_TV.guide===guide&&LIVE_TV.serial===serial,close,entries);
   // Watch is the first button, so focusing it keeps the old one-Enter path to
   // tuning: Enter on a cell, Enter again to watch.
   const first=pop.querySelector("button");
@@ -936,7 +1014,7 @@ function liveTvPaint(){
       <span class="grow"><b>${at.now?esc(at.now.title):esc(channel.guide_name)}</b> · ${esc(channel.guide_number)}</span>
       <button type="button" onclick="location.hash='#/live-tv'" title="Back to Live TV" aria-label="Back to Live TV">↩</button>
       ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture" aria-label="Picture-in-picture in the dock">⧉</button>':""}
-      <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop from the dock">■</button>`:"";
+      <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop from the dock">■</button>`:"";
   }
   const overlay=document.getElementById("live-tv-overlay");
   if(!overlay||host.dataset.mode!=="full") return;
@@ -955,9 +1033,9 @@ function liveTvPaint(){
       <div class="lth-acts">
         <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
         ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()">PiP</button>':""}
-        <button type="button" onclick="liveTvGuideSheet()">Guide</button>
+        <button type="button" data-remote-live-guide onclick="liveTvGuideSheet()">Guide</button>
         <button type="button" data-live-info-opener onclick="openLiveTvStats()">Playback info</button>
-        <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
+        <button type="button" data-remote-live-stop onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
         <button type="button" onclick="exitLiveTvPresentation()">Exit</button>
       </div>
     </div>
@@ -969,7 +1047,7 @@ function liveTvPaint(){
         const entryPct=entryAt.progress===null?0:Math.round(entryAt.progress*100);
         const on=channel&&entry.id===channel.id;
         return `<button type="button" class="lth-card${on?" on":""}${LIVE_TV.preview===entry.id&&!on?" prev":""}"
-          onclick="liveTvSelect('${esc(entry.id)}')"><b>${esc(entry.guide_number)} ${esc(entry.guide_name)}</b>
+          data-channel="${esc(entry.id)}" onclick="liveTvSelect('${esc(entry.id)}')"><b>${esc(entry.guide_number)} ${esc(entry.guide_name)}</b>
           <small>${entryAt.now?esc(entryAt.now.title):"—"}</small>
           <span class="lth-bar" style="margin:6px 0 0"><i style="width:${entryPct}%"></i></span></button>`;
       }).join("")}</div>
@@ -992,7 +1070,7 @@ function liveTvStrip(visible,channel){
 }
 function liveTvGuideSheet(){
   const sheet=document.getElementById("live-tv-sheet"); if(!sheet) return;
-  if(!sheet.hidden){ sheet.hidden=true; return; }
+  if(!sheet.hidden){ sheet.hidden=true; CinemaRemote.invalidate("guide_closed"); return; }
   const visible=liveTvVisible(), now=liveTvNowSeconds();
   sheet.innerHTML=`<h2 class="section" style="color:#fff">On now</h2>
     ${visible.map(channel=>{
@@ -1000,10 +1078,21 @@ function liveTvGuideSheet(){
       return `<div style="display:flex;gap:12px;padding:8px 0;border-top:1px solid rgba(255,255,255,.14)">
         <b style="width:110px;flex:none">${esc(channel.guide_number)} ${esc(channel.guide_name)}</b>
         <span style="flex:1">${at.now?esc(at.now.title):"—"}</span>
-        <span style="opacity:.7">${at.now?esc(liveTvClock(at.now.end)):""}</span></div>`;
+        <span style="opacity:.7">${at.now?esc(liveTvClock(at.now.end)):""}</span>
+        <button type="button" data-remote-sheet-channel="${esc(channel.id)}"${PlurxLiveTv.channelView(channel).disabled?" disabled":""}>Watch</button></div>`;
     }).join("")}
-    <p style="opacity:.7;margin-top:14px">Press G or Escape to close. ${esc(liveTvClock(now))}</p>`;
-  sheet.hidden=false;
+    <button type="button" data-remote-sheet-close>Close guide</button><p style="opacity:.7;margin-top:14px">Press G or Escape to close. ${esc(liveTvClock(now))}</p>`;
+  const opener=/** @type {HTMLElement|null} */(document.activeElement),serial=LIVE_TV.serial;
+  const close=()=>{sheet.hidden=true;CinemaRemote.invalidate("guide_closed");if(opener?.isConnected)opener.focus({preventScroll:true});else document.getElementById("live-tv-transport")?.focus();};
+  const closeButton=/** @type {HTMLButtonElement} */(sheet.querySelector("[data-remote-sheet-close]"));closeButton.onclick=close;
+  const entries=[{id:"guide:close",element:closeButton,label:"Close guide",activate:()=>{close();return "applied";}}];
+  for(const button of /** @type {NodeListOf<HTMLButtonElement>} */(sheet.querySelectorAll("[data-remote-sheet-channel]"))){
+    const channel=visible.find(value=>String(value.id)===button.dataset.remoteSheetChannel);
+    const activate=()=>{if(!LIVE_TV.channels.includes(channel)||PlurxLiveTv.channelView(channel).disabled)return "unavailable";close();liveTvSelect(channel.id);return "applied";};
+    button.onclick=activate;entries.push({id:"guide:channel:"+channel.id,element:button,label:"Watch "+channel.guide_name,activate});
+  }
+  sheet.hidden=false;closeButton.focus();
+  cinemaRemoteOwnPresentation(sheet,"live-tv",()=>LIVE_TV.serial===serial,close,entries);
 }
 // live-tv-input-adapter:begin
 // Live TV owns the channel keys while its host is fullscreen or focused. The
@@ -1184,7 +1273,9 @@ function liveTvWireHost(){
     video.addEventListener("leavepictureinpicture",()=>liveTvPaint());
     video.addEventListener("enterpictureinpicture",()=>liveTvPaint());
     video.addEventListener("loadedmetadata",liveTvRefreshCaptionControls);
-    video.textTracks?.addEventListener?.("addtrack",liveTvRefreshCaptionControls);
+    video.textTracks?.addEventListener?.("addtrack",liveTvCaptionTrackAdded);
+    // hls.js announces a reused captions track on the element itself.
+    video.addEventListener("addtrack",liveTvCaptionTrackAdded);
     video.textTracks?.addEventListener?.("removetrack",liveTvRefreshCaptionControls);
     video.textTracks?.addEventListener?.("change",liveTvRefreshCaptionControls);
     liveTvRefreshCaptionControls();

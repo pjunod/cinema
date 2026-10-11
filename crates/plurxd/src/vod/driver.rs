@@ -156,6 +156,27 @@ pub(super) fn notify_new_vod_live_wait(
     }
 }
 
+pub(super) async fn request_registered_driver_retirement(
+    shared: &Shared,
+    rendition: &Rendition,
+    generation: &crate::prodrun::ProducerRegistration,
+) -> std::io::Result<()> {
+    if rendition
+        .slot
+        .request_registered_retirement(generation)
+        .await?
+    {
+        record_performed_step(
+            shared,
+            rendition,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        );
+    }
+    Ok(())
+}
+
 pub(super) async fn perform_driver_step(
     shared: &Shared,
     rendition: &Rendition,
@@ -200,8 +221,8 @@ async fn report_permit_wait(
             hardware_limit = refusal.hardware_limit,
             software_used = refusal.pool.software_used,
             software_budget = refusal.software_budget,
-            wants_hardware = encoding.resources.hardware_slot,
-            wants_threads = encoding.resources.cpu_threads,
+            wants_hardware = encoding.resources().hardware_slot,
+            wants_threads = encoding.resources().cpu_threads,
             live_waiters = refusal.pool.live_waiting,
             background_holds_permit = refusal.pool.background_active,
             reservations = refusal.pool.reservations,
@@ -319,7 +340,7 @@ async fn request_predecessor_handoff(
     if !encoding.fits_after_release(&released.resources) {
         return Err("would_not_fit");
     }
-    let fresh = predecessor.request_handoff(&incarnation, successor, encoding.resources);
+    let fresh = predecessor.request_handoff(&incarnation, successor, encoding.resources());
     predecessor.kick();
     Ok((predecessor.key.clone(), fresh))
 }
@@ -436,16 +457,37 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         }
         let belief = rendition.slot.belief().await;
         let handoff = bound_handoff(shared, rendition).await;
+        let preparation = rendition.preparation();
+        let preparation_live = match preparation.as_ref() {
+            Some(preparation) => preparation.live(rendition).await && handoff.is_none(),
+            None => false,
+        };
+        if let Some(preparation) = preparation.as_ref() {
+            // Reuse this driver's admission poll for the finite worker's
+            // observation; no second scheduler or synthetic viewer demand.
+            preparation.progress.notify_waiters();
+        }
+        if preparation.is_some() && !preparation_live {
+            rendition.revoke_preparation();
+        }
+        let epoch = rendition.gen_epoch.load(Relaxed);
+        if super::copy_preparation::fence_cancelled_epoch(shared, rendition, epoch).await {
+            return;
+        }
         // Reader windows may require asynchronous state reads. Take that
         // snapshot before the manifest lock so cached GET publication never
         // waits behind policy or admission I/O.
         let windows = eviction_windows(shared, rendition).await;
-        let mut manifest = rendition.manifest.lock().await;
+        let manifest = rendition.manifest.lock().await;
         let (demands, prewarm_ledgers) = {
             let readers = rendition.readers.lock().await;
+            if !readers.is_empty() {
+                rendition.revoke_preparation();
+            }
             let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
             let ledgers = readers
                 .values()
+                .filter(|reader| !reader.authority_only)
                 .map(|reader| Arc::clone(&reader.marker_prewarm))
                 .collect::<Vec<_>>();
             (demands, ledgers)
@@ -468,8 +510,15 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 ),
             },
         };
-        let decision =
+        let mut decision =
             decide_with_marker_prewarm(&manifest, &demands, position, &windows, &prewarm_ledgers);
+        // An explicit leased background obligation is not a viewer/frontier.
+        // It uses the same producer slot only while no reader has acquired it.
+        if preparation_live && rendition.preparation().is_some() && demands.is_empty() {
+            decision.action = manifest
+                .next_gap(0)
+                .map_or(Action::Idle, |next| Action::Produce { next });
+        }
         // Record only this pass's decision. A later non-capacity decision
         // clears the reason, so the status cannot outlive the condition that
         // produced it.
@@ -507,6 +556,15 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 }
             );
         if matches!(step, Step::Start { .. } | Step::Restart { .. }) && prepared_permit.is_none() {
+            if rendition.key.starts_with("source-") {
+                prepared_permit = rendition.source_owners.take_initial_permit();
+                if prepared_permit.is_some() {
+                    // Fresh actual Source admission preceded blocked activation.
+                    // Re-evaluate belief/demand before consuming this permit.
+                    drop(manifest);
+                    continue;
+                }
+            }
             if let Some(encoding) = &rendition.recipe.encoding {
                 // The old child may own this pool's only permit. Retire it before
                 // admission, but never hold the manifest over process or Store I/O:
@@ -540,7 +598,27 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     return;
                 }
                 let was_waiting = encoding.has_live_wait();
-                prepared_permit = encoding.try_permit().await;
+                if let Some(preparation) = rendition.preparation() {
+                    if !preparation.live(rendition).await {
+                        rendition.revoke_preparation();
+                        return;
+                    }
+                    prepared_permit = encoding.try_background_permit().await;
+                    if prepared_permit.is_none() {
+                        return;
+                    }
+                    continue;
+                }
+                prepared_permit = match rendition.retained_admission.current() {
+                    Some(reservation) => {
+                        // A parent's admitted delivery obligation survives an
+                        // idle worker or a later cold seek. Borrow its exact
+                        // credit instead of competing for a second allocation.
+                        encoding.cancel_wait();
+                        Some(reservation)
+                    }
+                    None => encoding.try_permit().await,
+                };
                 notify_new_vod_live_wait(shared, encoding, was_waiting, prepared_permit.is_some());
                 if prepared_permit.is_none() {
                     report_permit_wait(shared, rendition, encoding).await;
@@ -551,6 +629,36 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 // seek/cancellation/publication may have changed it while waiting.
                 // Re-read producer belief and current admitted/accepted demand.
                 continue;
+            } else if rendition.key.starts_with("source-") {
+                // The actual Source actor reserves first-start capacity before
+                // activation. Later generations reacquire the same real pool;
+                // the spawn path separately obtains fresh Source authority.
+                drop(manifest);
+                if matches!(step, Step::Restart { .. }) {
+                    rendition.gen_epoch.fetch_add(1, Relaxed);
+                    clear_marker_prewarm_dispatch(rendition);
+                    if perform_driver_step(shared, rendition, step).await.is_err() {
+                        return;
+                    }
+                }
+                prepared_permit = rendition.source_owners.take_initial_permit();
+                if prepared_permit.is_none() {
+                    let Some(admissions) = rendition.source_owners.copy_admissions() else {
+                        return;
+                    };
+                    if let crate::vodencode::SourceCopyPermitRead::Admitted(permit) =
+                        crate::vodencode::EncodePermit::try_source_copy(
+                            &admissions,
+                            shared.store.as_ref(),
+                        )
+                        .await
+                    {
+                        prepared_permit = Some(permit);
+                    } else {
+                        return;
+                    }
+                }
+                continue;
             }
         }
         if fence_marker_prewarm_before_room(rendition, belief, step) {
@@ -560,6 +668,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             let terminate = Step::Terminate {
                 why: Termination::IndefiniteHold,
             };
+            // Retirement joins the actual output writer. Its final trailer
+            // must acquire this manifest before it can settle the reaper.
+            drop(manifest);
             match perform_driver_step(shared, rendition, terminate).await {
                 Ok(_) => {}
                 Err(error) => {
@@ -579,6 +690,10 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         match step {
             Step::Nothing => {}
             Step::Stop | Step::Resume => {
+                // Even signaling may first join an already-retiring worker.
+                // The slot serializes/checks the actual current process; the
+                // manifest must remain available to its output writer.
+                drop(manifest);
                 // TODO(m3-wire): session progress clock — the manager's motion
                 // clock replaces this no-op touch when it attaches.
                 match perform_driver_step(shared, rendition, step).await {
@@ -598,6 +713,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     .as_ref()
                     .filter(|_| yielding_for_handoff)
                     .map(reserve_for_successor);
+                // Epoch and handoff decisions are committed above, as for
+                // Start/Restart. Join only after releasing the publication lock.
+                drop(manifest);
                 match perform_driver_step(shared, rendition, step).await {
                     Ok(_) => {}
                     Err(error) => {
@@ -616,6 +734,12 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 drop(manifest);
                 match perform_driver_step(shared, rendition, step).await {
                     Ok(Performed::NeedsSpawn { at }) => {
+                        if rendition.preparation().is_some() {
+                            rendition.preparation_epoch.store(
+                                rendition.gen_epoch.load(Relaxed).saturating_add(1),
+                                Release,
+                            );
+                        }
                         spawn_generation(shared, rendition, at, prepared_permit.take()).await;
                     }
                     Ok(Performed::Done) => {}
@@ -629,13 +753,63 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 }
             }
             Step::MakeRoom { wanted } => {
-                match rendition
-                    .dir
-                    .make_room(&mut manifest, &windows, wanted)
+                // Continuous schedule writers must own this same exact-key gate
+                // through verification and durable reservation. Query outside
+                // the manifest lock so cached GETs can drain during Store I/O.
+                drop(manifest);
+                let _dependency_guard = shared
+                    .rendition_build_gate(&rendition.key)
+                    .lock_owned()
+                    .await;
+                let intervals = match shared
+                    .store
+                    .quality_reserved_intervals(&rendition.key)
                     .await
                 {
+                    Ok(intervals) => intervals,
+                    Err(error) => {
+                        tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
+                            %error, "retaining media because continuous dependencies are unknown");
+                        drop(_dependency_guard);
+                        rendition.gen_epoch.fetch_add(1, Relaxed);
+                        let _ = perform_driver_step(
+                            shared,
+                            rendition,
+                            Step::Terminate {
+                                why: Termination::IndefiniteHold,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let mut windows = windows;
+                let Ok(dependencies) = continuous_dependency_windows(&rendition.plan, &intervals)
+                else {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
+                        "retaining media because a continuous dependency does not match the immutable plan");
+                    drop(_dependency_guard);
+                    rendition.gen_epoch.fetch_add(1, Relaxed);
+                    let _ = perform_driver_step(
+                        shared,
+                        rendition,
+                        Step::Terminate {
+                            why: Termination::IndefiniteHold,
+                        },
+                    )
+                    .await;
+                    return;
+                };
+                windows.extend(dependencies);
+                let mut manifest = rendition.manifest.lock().await;
+                let sweep = rendition
+                    .dir
+                    .make_room(&mut manifest, &windows, wanted)
+                    .await;
+                drop(_dependency_guard);
+                match sweep {
                     Ok(freed) => {
-                        sub_saturating(&shared.working_set, freed.bytes);
+                        rendition.free_unadmitted(shared, freed.bytes);
                         if let Some(error) = freed.error {
                             tracing::warn!(
                                 target: "plurxd::vodserve",
@@ -699,7 +873,15 @@ pub(super) fn playback_demands(
     readers: &HashMap<String, Reader>,
     manifest: &Manifest,
 ) -> Vec<Demand> {
-    let blocked = pool.demands(&rendition.key);
+    let blocked = pool
+        .demands(&rendition.key)
+        .into_iter()
+        .filter(|request| {
+            !readers
+                .get(&request.session)
+                .is_some_and(|reader| reader.authority_only)
+        })
+        .collect::<Vec<_>>();
     let mut nearest = HashMap::new();
     let mut oldest = HashMap::new();
     for request in &blocked {
@@ -716,10 +898,16 @@ pub(super) fn playback_demands(
             .or_insert(request.arrival_order);
         *first = (*first).min(request.arrival_order);
         if let Some(reader) = readers.get(&request.session).filter(|reader| {
-            reader.control_sequence.is_some()
-                && reader_window(reader, rendition.seconds_per_segment).covers(request.index)
+            let mut window = reader_window(reader, rendition.seconds_per_segment);
+            if let Some(frontier) = reader.preparation_frontier {
+                window.playhead = frontier;
+                window.frontier = frontier.saturating_add(1);
+            }
+            (reader.control_sequence.is_some() || reader.preparation_frontier.is_some())
+                && window.covers(request.index)
         }) {
-            let distance = request.index.abs_diff(reader.frontier);
+            let frontier = reader.preparation_frontier.unwrap_or(reader.frontier);
+            let distance = request.index.abs_diff(frontier);
             let closest = nearest.entry(&request.session).or_insert(distance);
             *closest = (*closest).min(distance);
         }
@@ -732,23 +920,57 @@ pub(super) fn playback_demands(
             demand.foreground = match (readers.get(&blocked.session), nearest.get(&blocked.session))
             {
                 (Some(reader), Some(nearest)) => {
-                    blocked.index.abs_diff(reader.frontier) == *nearest
+                    blocked
+                        .index
+                        .abs_diff(reader.preparation_frontier.unwrap_or(reader.frontier))
+                        == *nearest
                 }
+                (Some(reader), None) if reader.preparation_frontier.is_some() => false,
                 _ => oldest.get(&blocked.session) == Some(&blocked.arrival_order),
             };
+            demand.bounded_preparation = demand.foreground
+                && readers
+                    .get(&blocked.session)
+                    .is_some_and(|reader| reader.preparation_frontier.is_some());
             demand
         })
         .collect::<Vec<_>>();
     demands.extend(
         readers
             .values()
-            .map(|reader| Demand::idle_at(reader.frontier)),
+            .filter(|reader| !reader.authority_only)
+            .map(|reader| match reader.preparation_frontier {
+                Some(frontier) => {
+                    // Admission records an actual bounded Prepare request,
+                    // which is already waiting for these bytes. Publish its
+                    // demand before waking the producer: registering the
+                    // later segment wait must not leave a stale GET in charge.
+                    // This ranks work within the reader, without changing its
+                    // speculative capacity or another viewer's arrival order.
+                    let mut demand = Demand::waiting_on(frontier);
+                    demand.foreground = true;
+                    demand.bounded_preparation = true;
+                    demand
+                }
+                None => Demand::idle_at(reader.frontier),
+            }),
     );
     demands
 }
 
 pub(super) async fn eviction_windows(shared: &Shared, rendition: &Rendition) -> Vec<ReaderWindow> {
     let mut windows = rendition.reader_windows().await;
+    if let Some(preparation) = rendition.preparation() {
+        if preparation.live(rendition).await {
+            // A real reservation pin, not a fabricated playback reader.
+            windows.push(ReaderWindow {
+                back: 0,
+                playhead: 0,
+                frontier: rendition.plan.len().saturating_sub(1) as u32,
+                ahead: 0,
+            });
+        }
+    }
     windows.extend(
         shared
             .pool
@@ -762,4 +984,37 @@ pub(super) async fn eviction_windows(shared: &Shared, rendition: &Rendition) -> 
             }),
     );
     windows
+}
+
+/// Every dependency must name whole immutable plan entries on the exact clock.
+/// A corrupt projection is a retention refusal, never permission to evict.
+pub(super) fn continuous_dependency_windows(
+    plan: &SegmentPlan,
+    intervals: &[plurx_core::playback::continuous_quality::QualityInterval],
+) -> Result<Vec<ReaderWindow>, ()> {
+    intervals
+        .iter()
+        .map(|interval| {
+            if !interval.valid() || interval.timescale != plan.timescale {
+                return Err(());
+            }
+            let first = plan
+                .entries
+                .binary_search_by_key(&interval.from_tick, |entry| entry.start_ticks)
+                .map_err(|_| ())?;
+            let last = plan
+                .entries
+                .partition_point(|entry| entry.end_ticks() < interval.through_tick);
+            let end = plan.entries.get(last).ok_or(())?;
+            if end.end_ticks() != interval.through_tick || first > last {
+                return Err(());
+            }
+            Ok(ReaderWindow {
+                back: 0,
+                playhead: plan.entries[first].index,
+                frontier: end.index,
+                ahead: 0,
+            })
+        })
+        .collect()
 }

@@ -35,6 +35,7 @@ import tv.plurx.app.data.ViewerPreferences
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.Decision
 import tv.plurx.app.data.DiscoveredServer
+import tv.plurx.app.data.Features
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.Hubs
 import tv.plurx.app.data.Item
@@ -42,6 +43,12 @@ import tv.plurx.app.data.ItemDetail
 import tv.plurx.app.data.Library
 import tv.plurx.app.data.LoginReq
 import tv.plurx.app.data.Net
+import tv.plurx.app.data.PlaybackFileContext
+import tv.plurx.app.data.SharedPlaybackReference
+import tv.plurx.app.data.SharedPlaybackPlan
+import tv.plurx.app.data.SharedLibraryClient
+import tv.plurx.app.data.SharedDecisionClient
+import tv.plurx.app.data.SharedPlaybackSubject
 import tv.plurx.app.data.PlurxApi
 import tv.plurx.app.data.parseRefusal
 import tv.plurx.app.player.PlaybackClientLog
@@ -129,6 +136,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _preferences = MutableStateFlow(ViewerPreferences())
     val preferences: StateFlow<ViewerPreferences> = _preferences.asStateFlow()
+
+    /**
+     * Which optional sections the server has switched on (`GET features`).
+     * Starts all-on and is refreshed with every [loadHome], so an admin's
+     * change shows up on pull-to-refresh, Refresh, or the next return home.
+     * A failed fetch keeps the last answer rather than hiding or revealing
+     * anything on a transport blip.
+     */
+    private val _features = MutableStateFlow(Features())
+    val features: StateFlow<Features> = _features.asStateFlow()
     val offlineRecords = OfflineDownloads.records
     val offlineBookRecords = OfflineBooks.records
 
@@ -154,6 +171,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** One dashboard load at a time — a refresh replaces the one in flight. */
     private var homeJob: Job? = null
+    private var featuresJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -328,6 +346,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 username = resp.user.username
                 settings.saveSession(origin, resp.token, resp.user.username, resp.user.id)
                 _phase.value = Phase.Ready
+                // An expired saved login did not pass through connect, so its
+                // capability bootstrap is empty. Refresh after first paint;
+                // an unavailable server must not hold Home on the login screen.
+                viewModelScope.launch { backfillServerIdentity() }
                 // Now, not at connect: the ingress list is signed-in only.
                 refreshClusterIngress()
                 loadHome()
@@ -353,6 +375,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * refresh leaves the previous content up with an error beside it.
      */
     fun loadHome() {
+        loadFeatures()
         homeJob?.cancel()
         _home.value = _home.value.copy(loading = true, error = null)
         homeJob = viewModelScope.launch {
@@ -393,6 +416,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Refresh [features] beside the dashboard. Separate from [homeJob] so a
+     * failed shelf load cannot cancel it and a failed features call cannot
+     * fail the dashboard; any failure (older server, 404, transport) keeps
+     * the last value.
+     */
+    private fun loadFeatures() {
+        featuresJob?.cancel()
+        featuresJob = viewModelScope.launch {
+            catchingUnlessCancelled { api().features() }
+                .onSuccess { _features.value = it }
+        }
+    }
+
+    /**
      * The server signed this device out for sitting unused past its idle
      * window. Land on the login screen with its sentence rather than leave a
      * "HTTP 401" on Home; the saved token is dead, so it goes with it.
@@ -405,6 +442,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         currentUser = null
         currentUserId = null
         _home.value = HomeState()
+        _features.value = Features()
         _authError.value = message
         _phase.value = Phase.NeedLogin
     }
@@ -455,6 +493,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     currentUser = null
                     currentUserId = null
                     _home.value = HomeState()
+                    _features.value = Features()
                     _authError.value = if (confirmed) {
                         "Sign-out was confirmed by the server."
                     } else {
@@ -494,6 +533,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         currentUserId = null
         serverInstanceId = null
         _home.value = HomeState()
+        _features.value = Features()
         viewModelScope.launch { settings.clearServer() }
         _phase.value = Phase.NeedServer
     }
@@ -507,6 +547,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setTheme(theme: ThemeId) = updatePreferences { copy(theme = theme) }
 
     fun setAppearance(appearance: Appearance) = updatePreferences { copy(appearance = appearance) }
+
+    fun setLibraryPresentation(value: tv.plurx.app.data.LibraryPresentation) = updatePreferences { copy(libraryPresentation = value) }
 
     fun setPosterSize(size: PosterSize) = updatePreferences { copy(posterSize = size) }
 
@@ -524,7 +566,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setPlaybackInfoMode(mode: String) = updatePreferences { copy(playbackInfoMode = mode) }
 
     /**
-     * Settings → Developer → "Prepared replacement".
+     * Settings → Playback → "Prepared replacement".
      *
      * The switch is never gated on the requirements shown beside it: they are
      * measurements, and an operator who can read them is better placed than a
@@ -749,12 +791,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---- Suspend loaders used by individual screens --------------------------
 
     /**
-     * Walk a library's pages, handing each one over as it arrives.
+     * Walk every page of one library in the server's order, handing each page
+     * over as it arrives.
      *
-     * The grid used to wait for every page of a thousand-item library behind a
-     * spinner; it now paints the first page after one round trip and fills in
-     * behind. Sorting is the client's job (`sortMerged`), so the server sort is
-     * fixed and a sort change never re-fetches.
+     * No screen calls this any more. The library grid pages on demand through
+     * [LibraryPager] (built by [libraryPager]): it sends the grid's own sort to
+     * the server, merges the server-sorted cursors by the DTO's `sort_title`,
+     * and a sort change builds a new pager that re-fetches. `sortMerged` no
+     * longer exists. The whole-walk path for a server without `sort_title` is
+     * `LibraryPager.loadLegacyWholeCollection`, not this function.
+     * NATIVE-LIBRARY-PAGING §6 deletes that legacy walk one release after the
+     * 5.1 server; this function should go with it.
      */
     suspend fun libraryPages(id: Long, sort: String = "title", onPage: (List<Item>) -> Unit) {
         var offset = 0
@@ -788,7 +835,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         quality: PlaybackQuality = _preferences.value.playbackQuality,
         presentationTarget: PresentationTarget? = null,
         audioOffsetMs: Long = 0,
+        fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId),
+        linkReceipt: String? = null,
     ): PlaybackDecision {
+        fileContext.localId(fileId)
         val measured = Caps.snapshot(getApplication<Application>())
         val snapshot = measured.copy(document = measured.document.copy(
             display = measured.document.display.copy(
@@ -802,10 +852,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             preplayQueryParams(tracks) + if (Session.displayAwareAuto && Session.displayAwareAutoProtocol == "route-v1")
                 mapOf("audio_offset_ms" to audioOffsetMs.toString()) else emptyMap()
         val decision = try {
-            api().decisionV2(fileId, request, DecisionCapsReq(snapshot.document))
+            api().decisionV2ForContext(fileContext, request, DecisionCapsReq(snapshot.document), validLinkReceipt(linkReceipt))
         } catch (error: HttpException) {
-            if (!shouldFallBackToLegacyDecision(error.code())) throw error
-            api().decision(fileId, snapshot.legacyQuery + request)
+            if (!shouldFallBackToLegacyDecision(error.code(), snapshot.document)) throw error
+            api().decisionForContext(fileContext, snapshot.legacyQuery + request)
         }
         return PlaybackDecision(decision, snapshot)
     }
@@ -882,12 +932,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart {
+    private fun validLinkReceipt(receipt: String?): String? = receipt?.takeIf {
+        Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(it)
+    }
+
+    /** A Shared Start from fresh B details. A null [fileId] takes the first
+     * launchable file of those details (the next episode); either way the
+     * context, decision and playback id are new, never inherited. */
+    internal suspend fun prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String?, permitted: () -> Boolean = { true }): SharedPlaybackPlan {
+        check(permitted())
+        val catalogue = SharedLibraryClient.create()
+        val detail = catalogue.detail(reference); catalogue.requireCurrent(); check(permitted())
+        val chosen = fileId ?: detail.files.firstOrNull { it.file_base != null }?.file_id
+        require(detail.delivery_status == "available" && chosen != null && detail.files.any { it.file_id == chosen && it.file_base != null }) { "Playback is unavailable for this Shared title." }
+        val fileId: String = chosen
+        val context = PlaybackFileContext.authenticatedDetail(reference, fileId)
+        require(context.lifecycleGeneration == detail.lifecycle_generation)
+        val selection = tv.plurx.app.data.SharedSelection(_preferences.value.playbackQuality)
+        check(permitted())
+        val result = SharedDecisionClient.create().decision(context, getApplication<Application>(), selection.decisionQuery())
+        check(permitted())
+        val position = detail.watch?.let { if (it.watched) 0 else it.position_ms } ?: 0
+        val subject = SharedPlaybackSubject(context, detail.item.title, position, detail.watch?.sequence ?: 0)
+        // Direct play when the Source's decision says these caps take the file
+        // as it is; Copy or encoded HLS otherwise.
+        return tv.plurx.app.data.sharedPlaybackPlan(subject, result, selection, java.util.UUID.randomUUID().toString(),
+            java.util.UUID.randomUUID().toString(), allowDirect = true)
+    }
+
+    /**
+     * Shared next episode: Source order resolved through B's viewer routes, then
+     * a fresh authorized Start of it. Null when the series has no next episode.
+     */
+    internal suspend fun prepareNextSharedEpisode(current: SharedPlaybackReference, permitted: () -> Boolean = { true }): Pair<SharedPlaybackReference, SharedPlaybackPlan>? {
+        val catalogue = SharedLibraryClient.create()
+        check(permitted())
+        val next = catalogue.nextEpisode(current) ?: return null
+        check(permitted())
+        catalogue.requireCurrent()
+        return next to prepareSharedPlayback(next, null, permitted)
+    }
+
+    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId), linkReceipt: String? = null): HlsStart {
+        fileContext.localId(fileId)
         requireNotNull(body.caps) {
             "Playback session is missing its decision capabilities."
         }
         val started = try {
-            api().createHlsSession(fileId, body)
+            api().createHlsSessionForContext(fileContext, body, validLinkReceipt(linkReceipt))
         } catch (error: HttpException) {
             // The surface adapter (PLAYBACK-SURFACE-CONTRACT.md §3.5): a
             // refusal the server explained reaches the presenter as its own
@@ -1002,17 +1094,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun backfillServerIdentity() {
-        val info = catchingUnlessCancelled { api().server() }.getOrNull() ?: return
-        serverName = info.name
-        if (serverInstanceId != info.instance_id) invalidateLibraryPager()
-        serverInstanceId = info.instance_id
-        Session.displayModeMatch = info.display_mode_match
-        Session.displayAwareAuto = info.playback_display_aware_auto
-        Session.autoAbr = info.playback_auto_abr
-        Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
-        Session.decoderCompactionContract = info.decoder_compaction_contract
-        settings.saveServerIdentity(origin, info.instance_id)
-        refreshClusterIngress()
+        val expectedOrigin = origin
+        refreshAuthenticatedServerInfo(
+            authorization = Session::playbackAuthorization,
+            fetch = { api().server() },
+            apply = { info ->
+                serverName = info.name
+                if (serverInstanceId != info.instance_id) invalidateLibraryPager()
+                serverInstanceId = info.instance_id
+                Session.displayModeMatch = info.display_mode_match
+                Session.displayAwareAuto = info.playback_display_aware_auto
+                Session.autoAbr = info.playback_auto_abr
+                Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
+                Session.decoderCompactionContract = info.decoder_compaction_contract
+                settings.saveServerIdentity(expectedOrigin, info.instance_id, expectedOrigin = expectedOrigin)
+                refreshClusterIngress()
+            },
+        )
     }
 
     /**
@@ -1040,6 +1138,20 @@ internal fun acceptHlsSessionPresentation(started: HlsStart): HlsStart = started
 private const val LAUNCH_VALIDATION_TIMEOUT_MS = 12_000L
 
 private data class RecoveredServer(val origin: String, val info: Server)
+
+/** Apply a capability response only to the authenticated profile that fetched it. */
+internal suspend fun refreshAuthenticatedServerInfo(
+    authorization: () -> Session.PlaybackAuthorization,
+    fetch: suspend () -> Server,
+    apply: suspend (Server) -> Unit,
+): Boolean {
+    val owner = authorization()
+    if (owner.token == null) return false
+    val info = catchingUnlessCancelled { fetch() }.getOrNull() ?: return false
+    if (authorization() != owner) return false
+    apply(info)
+    return true
+}
 
 internal sealed interface SavedSessionValidation<out T> {
     data class Authenticated<T>(val user: T) : SavedSessionValidation<T>

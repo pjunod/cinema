@@ -1,0 +1,278 @@
+{
+  "source": "1088d7529401297bddced74bfa11c166457468d8",
+  "binary_sha256": "eb9b1db7f0f7ed750eff09efc9f79d8fd8192502afee36eac112b64ac7c8b9e0",
+  "completed_transition_cells": 16,
+  "boundary_checks": [
+    {
+      "name": "end_of_series_no_successor_no_repeated_metadata",
+      "result": "passed",
+      "state": {
+        "state": true,
+        "page": false
+      },
+      "extra_metadata_reads": 0
+    },
+    {
+      "name": "autoplay_off_does_not_prepare",
+      "result": "passed",
+      "state": {
+        "state": false,
+        "enabled": false
+      },
+      "requests": [
+        {
+          "path": "/api/v1/activity",
+          "method": "GET",
+          "bytes": 2
+        },
+        {
+          "path": "/api/v1/client-log",
+          "method": "POST",
+          "bytes": 125
+        }
+      ]
+    },
+    {
+      "name": "navigation_close_cancels_inflight_preparation",
+      "result": "failed",
+      "before": {
+        "state": true,
+        "page": false
+      },
+      "after": {
+        "active": false,
+        "prepared": true,
+        "ready": false,
+        "session": null,
+        "watch": false
+      },
+      "post_cancel_starts": []
+    }
+  ],
+  "groups": [
+    {
+      "cross_season": false,
+      "metadata_delay_ms": 0,
+      "mode": "unprepared",
+      "n": 3,
+      "gap_ms": [
+        148.60000000000036,
+        148.3000000000029,
+        149.5
+      ],
+      "median_gap_ms": 148.60000000000036,
+      "median_trigger_to_frame_ms": 65.20000000298023,
+      "media_bytes": [
+        3220242,
+        3220242,
+        3220242
+      ],
+      "metadata_get_bytes": [
+        11869,
+        23820,
+        14500
+      ],
+      "rss_after_bytes": [
+        289062912,
+        268320768,
+        205701120
+      ],
+      "new_stalls": [
+        0,
+        0,
+        0
+      ],
+      "media_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "cross_season": false,
+      "metadata_delay_ms": 0,
+      "mode": "prepared",
+      "n": 3,
+      "gap_ms": [
+        118.70000000000073,
+        113.79999999999563,
+        148.10000000000582
+      ],
+      "median_gap_ms": 118.70000000000073,
+      "median_trigger_to_frame_ms": 56.80600001192215,
+      "media_bytes": [
+        3220242,
+        3220242,
+        3220242
+      ],
+      "metadata_get_bytes": [
+        23821,
+        33135,
+        23818
+      ],
+      "rss_after_bytes": [
+        276873216,
+        283000832,
+        221184000
+      ],
+      "new_stalls": [
+        0,
+        0,
+        0
+      ],
+      "media_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "cross_season": false,
+      "metadata_delay_ms": 80,
+      "mode": "unprepared",
+      "n": 3,
+      "gap_ms": [
+        384.6000000000058,
+        392,
+        389
+      ],
+      "median_gap_ms": 389,
+      "median_trigger_to_frame_ms": 299.5460000000021,
+      "media_bytes": [
+        3220242,
+        3220242,
+        3220242
+      ],
+      "metadata_get_bytes": [
+        23820,
+        23817,
+        14500
+      ],
+      "rss_after_bytes": [
+        244678656,
+        281427968,
+        300548096
+      ],
+      "new_stalls": [
+        0,
+        0,
+        0
+      ],
+      "media_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "cross_season": false,
+      "metadata_delay_ms": 80,
+      "mode": "prepared",
+      "n": 3,
+      "gap_ms": [
+        123.5,
+        125.59999999999127,
+        129.89999999999418
+      ],
+      "median_gap_ms": 125.59999999999127,
+      "median_trigger_to_frame_ms": 40.45400000894733,
+      "media_bytes": [
+        3220242,
+        3220242,
+        3220242
+      ],
+      "metadata_get_bytes": [
+        23818,
+        33139,
+        23817
+      ],
+      "rss_after_bytes": [
+        253362176,
+        259178496,
+        316735488
+      ],
+      "new_stalls": [
+        0,
+        0,
+        0
+      ],
+      "media_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "cross_season": true,
+      "metadata_delay_ms": 80,
+      "mode": "unprepared",
+      "n": 2,
+      "gap_ms": [
+        549.6999999999825,
+        556.6000000000058
+      ],
+      "median_gap_ms": 553.1499999999942,
+      "median_trigger_to_frame_ms": 478.11400000298454,
+      "media_bytes": [
+        1610121,
+        3220242
+      ],
+      "metadata_get_bytes": [
+        24373,
+        22541
+      ],
+      "rss_after_bytes": [
+        331366400,
+        439910400
+      ],
+      "new_stalls": [
+        0,
+        0
+      ],
+      "media_errors": [
+        [],
+        []
+      ]
+    },
+    {
+      "cross_season": true,
+      "metadata_delay_ms": 80,
+      "mode": "prepared",
+      "n": 2,
+      "gap_ms": [
+        130.09999999997672,
+        134.5
+      ],
+      "median_gap_ms": 132.29999999998836,
+      "median_trigger_to_frame_ms": 48.08400000745314,
+      "media_bytes": [
+        3220242,
+        3220242
+      ],
+      "metadata_get_bytes": [
+        22543,
+        27654
+      ],
+      "rss_after_bytes": [
+        483917824,
+        439861248
+      ],
+      "new_stalls": [
+        0,
+        0
+      ],
+      "media_errors": [
+        [],
+        []
+      ]
+    }
+  ],
+  "analysis_notes": [
+    "Natural-ended observation through current web/daemon, requestVideoFrameCallback compositor submission rather than physical panel proof.",
+    "Raw receipt media_bytes omitted /direct path; totals below recomputed from preserved per-request bytes.",
+    "Raw embedded ps command names were truncated; companion shared-host-census records full executable basename; load_average endpoints are valid.",
+    "All groups share browser cache and host load; not idle fleet capacity.",
+    "Metadata bytes include additional future successor preparation for 12-second fixtures; shown as overhead, not zero cost.",
+    "Production source-parser identity timed out in the debug binary; its detached WASM compiler remained active during part of the episode matrix. Direct-play metadata path and callback deltas remain observed, but daemon RSS/CPU cannot establish preparation resource neutrality from this matrix."
+  ]
+}

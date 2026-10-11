@@ -1,0 +1,143 @@
+{
+  "source_commit": "bd24f27679faf68bf8815915b488a3e7ac2e7461",
+  "run_id": 3993,
+  "ui_index": 3972,
+  "job_id": 41502,
+  "job_result": "failure",
+  "log_sha256": "49d9cfd6dab12701045fc92713ed20717f20f56399903eeed2ac5c0ffb1d68bb",
+  "log": "rust-41502.log.gz",
+  "suites": [
+    {
+      "suite": "Running unittests src/lib.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/plurx_compat_plex-1c27c096e8855f83)",
+      "summary": "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running tests/cluster_discovery.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/cluster_discovery-20f1a86c01631380)",
+      "summary": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running unittests src/lib.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/plurx_core-85c67efd842f591c)",
+      "summary": "test result: ok. 1407 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 746.94s",
+      "passed": 1407,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "suite": "Running tests/audiobook_artwork.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/audiobook_artwork-079a85bf46425791)",
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running tests/decoder_selection.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/decoder_selection-6279955e3fa52c5d)",
+      "summary": "test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "passed": 63,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running tests/hiqlite_tls_provider.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/hiqlite_tls_provider-924a319a05a3ee6f)",
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running tests/rustls_single_provider.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/rustls_single_provider-bc51eda963915b55)",
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running tests/store_contract.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/store_contract-b183a846085a92d7)",
+      "summary": "test result: FAILED. 190 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 495.67s",
+      "passed": 190,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "suite": "Running unittests src/lib.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/plurx_pgs-09d97963cab2d4a1)",
+      "summary": "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running unittests src/bin/pgs-feasibility.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/pgs_feasibility-a03f987fb1e45370)",
+      "summary": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running tests/parser_prerequisites.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/parser_prerequisites-65ea5cf5f884390f)",
+      "summary": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running tests/stable_input_identity.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/stable_input_identity-2ab8a31ad7488691)",
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Running unittests src/main.rs (.runner-tool-cache/plurx-ci/cargo/rogg16-plurx/rust-1.97.1/main-fast-rust/target/debug/deps/plurxd-b531a82e4bee5e6c)",
+      "summary": "test result: FAILED. 3159 passed; 7 failed; 16 ignored; 0 measured; 0 filtered out; finished in 710.77s",
+      "passed": 3159,
+      "failed": 7,
+      "ignored": 16
+    },
+    {
+      "suite": "Doc-tests plurx_compat_plex",
+      "summary": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Doc-tests plurx_core",
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "suite": "Doc-tests plurx_pgs",
+      "summary": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "totals": {
+    "passed": 4863,
+    "failed": 8,
+    "ignored": 17
+  },
+  "failed_tests": [
+    "contract_inventory_matches_every_store_method",
+    "ffmpeg::tests::a_content_encoding_report_is_not_a_source_change_for_the_same_reporter",
+    "state::tests::artwork_retry_pass_is_single_flight",
+    "state::tests::due_jobs_continue_while_artwork_retry_is_in_flight",
+    "state::tests::schedule_loop_dispatches_a_due_library_scan",
+    "state::tests::three_cluster_ticks_run_one_provider_pass",
+    "transcode::tests::vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_plans",
+    "vodserve::tests::encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid"
+  ],
+  "compile_checks": "passed make effort-rust-check and make hiqlite-vendor-clippy",
+  "lint": "passed make lint",
+  "unit_command": "make unit -> cargo test --workspace --exclude plurx-cluster-check --no-fail-fast",
+  "restart_checks": "not executed: make unit stopped after workspace test failure",
+  "rerun_policy": "Keep all successful checks; selectively repair/retry failures and execute only previously unrun restart checks."
+}
