@@ -2550,11 +2550,11 @@ async fn first_preparation_output_seal_is_exact_and_idempotent_on_every_backend(
                 .unwrap_or_else(|error| panic!("{backend}: moved read: {error}")),
             "{backend}: a read under another owner epoch is not sealed"
         );
-        let mut expired = complete.clone();
-        expired.predecessor_owner_epoch = complete.predecessor_owner_epoch + 1;
+        let mut other_predecessor = complete.clone();
+        other_predecessor.predecessor_owner_epoch = complete.predecessor_owner_epoch + 1;
         assert!(
             !store
-                .prepared_output_sealed(&expired)
+                .prepared_output_sealed(&other_predecessor)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: predecessor read: {error}")),
             "{backend}: a read fenced on another predecessor epoch is not sealed"

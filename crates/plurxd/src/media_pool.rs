@@ -1933,11 +1933,10 @@ pub(crate) async fn prepared_vod_owner(
     let deadline = deadline.min(create_stage_deadline(QUALITY_CATALOG_DEADLINE));
     let result = local_quality_catalog(state, &query, deadline, Some(&catalog.binding)).await;
     if result.causes.contains(&CatalogCause::LocalDeadline) {
-        // The successor then encodes instead of reusing a complete cache;
-        // name the stage bound that made it so.
+        // The successor then encodes instead of reusing a complete cache.
         tracing::debug!(
             candidate = ?id,
-            "prepared-owner catalog missed its create-stage bound; the successor encodes"
+            "prepared-owner catalog ran out of time (create stage or prime budget); the successor encodes"
         );
     }
     if result.complete && !result.authority_refused {
