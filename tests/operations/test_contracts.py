@@ -962,7 +962,14 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIsNotNone(runtime_stage)
         assert runtime_stage is not None
-        self.assertEqual(runtime_stage.start(), stages[-1].start())
+        # The default build target (no --target, as compose builds it) must be
+        # the shipped runtime: either the runtime stage itself is last, or the
+        # last stage is a bare `FROM runtime AS <alias>` that adds nothing.
+        if runtime_stage.start() != stages[-1].start():
+            self.assertRegex(
+                stages[-1].group(0), r"(?i)^[ \t]*from[ \t]+runtime[ \t]+as[ \t]+\S+[ \t]*$"
+            )
+            self.assertEqual(dockerfile[stages[-1].end() :].strip(), "")
         runtime = dockerfile[runtime_stage.end() :]
         self.assertIn('ARG PLURX_BUILD_SHA=""', runtime)
         self.assertIn(
@@ -1265,10 +1272,12 @@ assert.equal(context.ACT_TIMER, null);
         # `FROM runtime-assets AS runtime` names an earlier stage of this same
         # file, which has no registry reference to pin.
         stages = {stage for _, stage in registry_bases}
+        # `scratch` is Docker's reserved empty base; it names no image and has
+        # no digest to pin.
         unpinned = [
             (ref, stage)
             for ref, stage in registry_bases
-            if ref not in stages and "@sha256:" not in ref
+            if ref not in stages and ref != "scratch" and "@sha256:" not in ref
         ]
         self.assertEqual(unpinned, [], "a base image is not pinned by digest")
         self.assertIn(

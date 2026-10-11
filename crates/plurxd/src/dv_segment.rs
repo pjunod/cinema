@@ -1744,6 +1744,7 @@ mod tests {
                     execution.start_seconds + 2.0,
                     &fd(3),
                     &fd(4),
+                    plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
                 )
                 .expect("actual builder");
                 assert!(check_streaming_clock(&args, true).is_ok(), "{args:?}");

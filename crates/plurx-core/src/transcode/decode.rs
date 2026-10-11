@@ -1918,6 +1918,7 @@ pub struct DecodePolicySnapshot {
     policy_revision: u32,
     artifact_qualification: ArtifactQualification,
     macos_processing: Option<MacosProcessingContext>,
+    linux_dolby: Option<super::LinuxDolbyContext>,
 }
 
 impl DecodePolicySnapshot {
@@ -1937,6 +1938,7 @@ impl DecodePolicySnapshot {
             policy_revision: LEGACY_DECODE_POLICY_REVISION,
             artifact_qualification: ArtifactQualification::Unqualified,
             macos_processing: None,
+            linux_dolby: None,
         }
     }
 
@@ -1975,6 +1977,16 @@ impl DecodePolicySnapshot {
     pub fn with_macos_processing(mut self, context: MacosProcessingContext) -> Self {
         self.macos_processing = Some(context);
         self
+    }
+
+    #[must_use]
+    pub fn with_linux_dolby(mut self, context: super::LinuxDolbyContext) -> Self {
+        self.linux_dolby = Some(context);
+        self
+    }
+
+    pub fn linux_dolby(&self) -> Option<&super::LinuxDolbyContext> {
+        self.linux_dolby.as_ref()
     }
 
     pub fn macos_processing(&self) -> Option<&MacosProcessingContext> {
@@ -2611,6 +2623,20 @@ impl ResolvedTranscode {
         self.macos_processing_identity.as_ref()
     }
 
+    /// Selected processing and strict recovery must launch the frozen binary.
+    /// Ordinary plans retain their existing executable selection behavior.
+    pub fn captured_processing_ffmpeg_sha256(&self) -> Option<&str> {
+        self.options
+            .strict_dolby
+            .as_ref()
+            .map(super::StrictDolbyPolicy::ffmpeg_sha256)
+            .or_else(|| {
+                self.macos_processing_identity
+                    .as_ref()
+                    .map(MacosProcessingIdentity::ffmpeg_sha256)
+            })
+    }
+
     pub fn macos_processing_selection(&self) -> Option<MacosProcessingSelection> {
         self.macos_processing_selection
     }
@@ -3054,6 +3080,14 @@ impl ResolvedTranscode {
         if let Some(identity) = &self.macos_processing_identity {
             feed("macos_processing_v1", identity.digest().as_bytes());
         }
+        if let Some(super::StrictDolbyImplementation::LinuxVaapi(identity)) = self
+            .options
+            .strict_dolby
+            .as_ref()
+            .map(super::StrictDolbyPolicy::implementation)
+        {
+            feed("strict_dolby_linux_vaapi_v1", identity.digest().as_bytes());
+        }
         if let Some(policy) = self.output_metadata_policy {
             // A scoped signaling correction rotates only the affected output
             // routes. Existing SDR and HDR-preserving recipes retain identity.
@@ -3174,6 +3208,28 @@ pub fn resolve_transcode(
     validate_media_options(&options)?;
     if options.strict_dolby.is_some() && !options.pipeline.requires_strict_dovi() {
         options.pipeline = Pipeline::DoviStrictTonemapx;
+    }
+
+    let linux_strict_decoder =
+        select_linux_strict_p5(policy, facts, &options, request, restrictions);
+    if options
+        .strict_dolby
+        .as_ref()
+        .is_some_and(|strict| strict.linux_identity().is_some())
+        && linux_strict_decoder.is_none()
+    {
+        return Err(PlanError::IncompatibleRenderer);
+    }
+    if linux_strict_decoder.is_some() {
+        options.pipeline = Pipeline::DoviStrictTonemapx;
+        if options.strict_dolby.is_none() {
+            options.strict_dolby = Some(super::StrictDolbyPolicy::new_linux(
+                policy
+                    .linux_dolby()
+                    .expect("selected Linux strict graph has captured context")
+                    .clone(),
+            ));
+        }
     }
 
     let mut macos_processing_selection = policy
@@ -3354,7 +3410,24 @@ pub fn resolve_transcode(
         reason = DecodeReason::CompatibilityExclusion;
     }
 
-    if !pipeline_accepts_decode(options.pipeline, preferred) {
+    if let Some(decoder) = linux_strict_decoder {
+        preferred = decoder;
+        reason = if policy.force_software_decode() {
+            DecodeReason::OperatorSoftwareOverride
+        } else if restrictions.required.is_some() {
+            DecodeReason::ContinuationRestriction
+        } else {
+            DecodeReason::MeasuredPreference
+        };
+    }
+    if !pipeline_accepts_decode(options.pipeline, preferred)
+        && !(preferred == DecodeBackend::Vaapi
+            && options.pipeline == Pipeline::DoviStrictTonemapx
+            && options
+                .strict_dolby
+                .as_ref()
+                .is_some_and(|strict| strict.linux_identity().is_some()))
+    {
         if preferred == DecodeBackend::Software {
             options.pipeline = grade_preserving_software_renderer(options.pipeline)?;
         } else {
@@ -3427,6 +3500,19 @@ pub fn resolve_transcode(
             }
         }
     };
+
+    if options
+        .strict_dolby
+        .as_ref()
+        .is_some_and(|strict| strict.linux_identity().is_some())
+        && !options
+            .strict_dolby
+            .as_ref()
+            .and_then(|strict| strict.linux_observed_context())
+            .is_some_and(|context| context.permits_source(backend, request.encoder, facts))
+    {
+        return Err(PlanError::IncompatibleRenderer);
+    }
 
     // `None` means the inventory did not name an implementation, so the
     // command names none either and FFmpeg selects its default. The digest
@@ -3531,6 +3617,24 @@ pub fn resolve_transcode(
     } else {
         effective_output_geometry(facts, requested_max_height)
     };
+    if options
+        .strict_dolby
+        .as_ref()
+        .is_some_and(|strict| strict.linux_identity().is_some())
+    {
+        let (width, height) =
+            effective_geometry.ok_or(PlanError::InvalidFact("output_geometry"))?;
+        if !options
+            .strict_dolby
+            .as_ref()
+            .and_then(|strict| strict.linux_observed_context())
+            .is_some_and(|context| {
+                context.permits_output(backend, request.encoder, facts, width, height)
+            })
+        {
+            return Err(PlanError::IncompatibleRenderer);
+        }
+    }
     if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50 {
         let (width, height) =
             effective_geometry.ok_or(PlanError::InvalidFact("output_geometry"))?;
@@ -3627,20 +3731,21 @@ pub fn resolve_transcode(
         macos_processing_selection = Some(MacosProcessingSelection::CapabilityFallback);
     }
     let macos_processing_identity = if let Some(strict) = &options.strict_dolby {
-        Some(strict.identity().clone())
+        strict.macos_identity().cloned()
     } else if matches!(
         options.pipeline,
         Pipeline::VtScaleSdr | Pipeline::VtToneMapMetal | Pipeline::VtScaleHdr10
     ) || (request.encoder == Encoder::VideoToolbox
         && codec_contract.codec == super::VideoCodec::Hevc)
     {
-        Some(
-            policy
-                .macos_processing()
-                .expect("selected Mac graph has context")
-                .identity()
-                .clone(),
-        )
+        let context = policy
+            .macos_processing()
+            .expect("selected Mac graph has context");
+        Some(if subtitle_rendering == SubtitleRendering::TextBurn {
+            context.text_identity().clone()
+        } else {
+            context.identity().clone()
+        })
     } else {
         if macos_processing_selection == Some(MacosProcessingSelection::Selected) {
             macos_processing_selection = Some(MacosProcessingSelection::CapabilityFallback);
@@ -3719,6 +3824,32 @@ fn authorize_strict_p5(
     options: &TranscodeMediaOptions,
     encoder: Encoder,
 ) -> Result<(), PlanError> {
+    if let Some(identity) = options
+        .strict_dolby
+        .as_ref()
+        .and_then(super::StrictDolbyPolicy::linux_identity)
+    {
+        // A pending reprobe publishes no observation. The plan's captured
+        // context then authorizes it, exactly as `select_linux_strict_p5`
+        // admits it; a current report with another identity still refuses.
+        let authorized = match policy.linux_dolby() {
+            Some(current) => current.identity() == identity,
+            None => options
+                .strict_dolby
+                .as_ref()
+                .and_then(super::StrictDolbyPolicy::linux_observed_context)
+                .is_some_and(|captured| captured.identity() == identity),
+        };
+        if !authorized
+            || options.pipeline != Pipeline::DoviStrictTonemapx
+            || !strict_p5_source(facts)
+            || options.subtitle_burn.is_some()
+            || options.output_codec == Some(super::VideoCodec::Hevc)
+        {
+            return Err(PlanError::IncompatibleRenderer);
+        }
+        return Ok(());
+    }
     let context = policy
         .macos_processing()
         .ok_or(PlanError::IncompatibleRenderer)?;
@@ -3736,11 +3867,62 @@ fn authorize_strict_p5(
         || options
             .strict_dolby
             .as_ref()
-            .is_some_and(|strict| strict.identity() != context.identity())
+            .is_some_and(|strict| strict.macos_identity() != Some(context.identity()))
     {
         return Err(PlanError::IncompatibleRenderer);
     }
     Ok(())
+}
+
+fn select_linux_strict_p5(
+    policy: &DecodePolicySnapshot,
+    facts: &DecodeFacts,
+    options: &TranscodeMediaOptions,
+    request: &TranscodeRequest,
+    restrictions: &AttemptRestrictions,
+) -> Option<DecodeBackend> {
+    let captured = options
+        .strict_dolby
+        .as_ref()
+        .and_then(|strict| strict.linux_observed_context());
+    let context = captured.or_else(|| policy.linux_dolby())?;
+    // Pending reprobe has no new observation. A positively different current
+    // identity still refuses recovery; launch fences independently validate
+    // the captured objects rather than reacquiring the report's package.
+    if captured.is_some()
+        && policy
+            .linux_dolby()
+            .is_some_and(|current| current.identity() != context.identity())
+    {
+        return None;
+    }
+    if !strict_p5_source(facts)
+        || !matches!(
+            options.pipeline,
+            Pipeline::DoviTonemapx | Pipeline::DoviStrictTonemapx
+        )
+        || options.subtitle_burn.is_some()
+        || options.output_codec == Some(super::VideoCodec::Hevc)
+        || request.rate_profile.is_some()
+        || options
+            .strict_dolby
+            .as_ref()
+            .is_some_and(|strict| strict.linux_identity() != Some(context.identity()))
+    {
+        return None;
+    }
+    let (width, height) =
+        effective_output_geometry(facts, u32::try_from(options.target_height).ok()?)?;
+    [DecodeBackend::Vaapi, DecodeBackend::Software]
+        .into_iter()
+        .find(|backend| {
+            restrictions.permits(*backend)
+                && restrictions
+                    .required
+                    .is_none_or(|required| required == *backend)
+                && (!policy.force_software_decode() || *backend == DecodeBackend::Software)
+                && context.permits_output(*backend, request.encoder, facts, width, height)
+        })
 }
 
 fn select_strict_p5_pipeline(
@@ -3928,7 +4110,6 @@ fn select_macos_processing(
                 && request.normalized_geometry
                 && options.pipeline.output_grade() == OutputGrade::Sdr
                 && options.output_codec != Some(super::VideoCodec::Hevc)
-                && options.subtitle_burn.is_none()
                 && facts.scan_type() == ScanType::Progressive
                 && matches!(
                     facts.dynamic_range_class(),

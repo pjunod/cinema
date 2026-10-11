@@ -1,7 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** implementation complete; ready for merge handoff · **Updated:** 2026-10-08 · **Owner:** managing agent with
-three GPT-6.1 Sol builders · **Integration:** `effort/macos-video-completion`.
+**Status:** Mac follow-ups qualified; AMD raw and normal-API strict-P5 qualified; Intel pending approval; combined review/landing in progress · **Updated:** 2026-10-10 · **Owner:** Claude (continuing the managed effort after the 2026-10-09 session ended) · **Integration:** `effort/video-processing-followups`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -11,6 +10,644 @@ A plan or compiled change is not hardware qualification. The
 measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
+
+**Checkpoint 2026-10-10.** The previous session ended on quota with the
+probe-raster correction, three documentation edits and the AMD rerun
+uncommitted on the workstation. That workstation's temporary directory was
+cleared before recovery, so everything was rebuilt from the pushed branch
+`862fc208` and the evidence retained on the AMD node. Since then:
+
+- **Probe raster** (`876800ed`). Encoded tiny probes keep the 320×180 corpus
+  raster on every backend; AMD's 160×96 encoder refusal is gone.
+- **AMD raw graphs.** The raw collector passes all 32 strict controls, with
+  production untouched ([§42](MACOS-VIDEO-PROCESSING-EVIDENCE.md#42-shipping-linux-image-and-amd-raw-strict-p5-qualification--2026-100910)).
+- **Current `main` merged** (`911a1704`), including one semantic conflict in
+  the DV runtime's held probe.
+- **Daemon probe.** The daemon's own probe exposed two further root causes:
+  the progress meter spliced into the observer's log records (`e4033409`),
+  and refusals that gave no reasons (`15075896`).
+- **Encoder pairing.** The normal-API run then exposed a 64×64 Dolby Vision
+  encoder-pairing proof that pinned DV to x264 on AMD (`c862c6a9`).
+- **Normal-API delivery passes** on the shipping image with VA-API hardware
+  P5 decode and VA-API encode
+  ([§43](MACOS-VIDEO-PROCESSING-EVIDENCE.md#43-daemon-probe-and-normal-api-strict-p5-delivery-on-the-shipping-image--2026-10-10)).
+- **Second merge and contract repairs.** Current `main` (`865a1ae93`) was
+  merged again. Local operations and validation suites then exposed contracts
+  the effort had never run:
+  - a substring runtime-stage match in the release renderer (`10c6f7f6`);
+  - Dockerfile contracts not updated for the audited stages;
+  - an undocumented admin route;
+  - an unreviewed ownership census.
+
+  All are repaired, and both suites pass.
+
+- **Combined adversarial review done.** All three major and five minor
+  findings are addressed
+  ([§44](MACOS-VIDEO-PROCESSING-EVIDENCE.md#44-combined-adversarial-review-and-its-dispositions--2026-10-10)).
+- **Third merge** (`1d3765776`, main #979/#981). The only conflict was the
+  producer-ownership ledger, where both reviewed histories add together.
+  Main changed prepared-output reuse, not decoder selection, so the
+  frozen-candidate hardware evidence still describes the tree.
+- **Fourth merge** (`05bf60381`, main #982/#983). Main moved during the first
+  fast-lane run, so the promotion gate refused the stale base. The ledger
+  histories add again; main's DV pixel-proof change leaves the corrected
+  encoder-pairing proof in place.
+
+Remaining work, in order:
+
+1. Run the fast lane once on PR #980 (rerunning only failures), then merge.
+2. Clean up.
+
+Intel qualification waits for the owner's explicit approval to copy the
+observer image to the Intel node. It stays open and is not inferred from
+AMD; each node's own probe decides availability. On 2026-10-10 the user
+directed this session to own the fast lane and merge, superseding the
+earlier merge-coordinator hand-off.
+
+On 2026-10-08 the user explicitly promoted GPU subtitle compositing,
+non-Mac Profile 5 hardware decoding and the caption-bearing file-VOD
+VideoToolbox failure into active implementation. These are now required
+work, not conditional follow-ups. The accepted PR #904 source is an ancestor
+of Batch03's main landing `1088d7529401297bddced74bfa11c166457468d8`.
+This separate effort began at reviewed combined source
+`b8461f30f5ae6f69c32ec671a81f3d1aedb4f219`. Integration commit
+`c10f16f009a723c4fb579ead278bec8d233d283f` also incorporates main
+`e7a973887cff09af9307d39508045c1be9a20e70` without conflicts. Its exact
+merged tree passes pinned all-target compilation and the normal tracked hook.
+
+| Follow-up | Sol 6.1 owner | State | Remaining evidence |
+|---|---|---|---|
+| F1 GPU subtitle compositing | Native builder | All eight raw graph comparisons, merged `c10f16f0` text API and one complete performance campaign pass; wall time is 13.02–31.14% lower and child CPU/frame 49.90–81.73% lower | Preserve exact evidence through combined review and landing |
+| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | AMD raw graphs pass 32/32. On the shipping image, the corrected daemon's own probe admits the package, and normal-API delivery runs the strict graph with VA-API decode and encode. Fixed on the way: the probe raster, the progress-meter splice, refusal attribution and the 64×64 DV encoder-pairing proof | Intel window (transfer approval pending) |
+| F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on `2139fa9c`; the merged `c10f16f0` MPEG-2 case also passes unchanged caption/picture assertions and clean shutdown | Preserve evidence through combined review/landing; broader DVR and client presentation remain separate |
+
+Builders use separate owned clones. Native owns `0004`, compositor/planner
+integration and shared package helpers; Dolby owns `0003`, caption delivery
+and the shared finite-VOD source-clock repair;
+Routes owns Linux runtime/strict context and shared pipeline integration.
+Dolby also owns the Linux SDK, shipping assembly and sealed-parser packaging.
+The manager owns this ledger and serializes shared file/compiler ownership.
+Accepted earlier packages and evidence remain read-only. The pinned Rust
+1.97.1 native and Linux compiler lanes each have one job and an explicit
+owner; independent lanes run concurrently with the isolated SDK build.
+Unit execution and main landing remain with the designated merge coordinator.
+F1 and file-VOD F3 are qualified for the combined final review. F2 acceptance
+is active. No final review or landing is claimed yet.
+
+**Latest checkpoint:** the producer/parser build evidence uses
+`354bd87e5f4356ae677bc16c67672985dd58f261`; subsequent packaging repairs
+retain those exact compiled inputs and their original build authority.
+The `e9fdc02a` font-identity repair passes pinned Rust 1.97.1 all-target compilation
+and the normal commit hook (catalog, formatting, Clippy and 86 embedded
+JavaScript checks). The repaired release build and focused ordinary-API
+qualification both pass. Exact-source Linux check and Clippy also pass in
+a 192.074-second phase. Subsequent changes repair build packaging and integrate current main. The
+merged tree passes all-target compilation in 320.513 seconds. The first
+bounded phase expires during the commit hook; a warm hook-only continuation
+passes in 67.421 seconds without replaying the successful check. Its new
+Mac release passes in 1736.431 seconds, with matching executable/debug symbols.
+Its text and original MPEG-2 API checks pass in 72.754 and 41.669 seconds.
+The complete eight-workload timing campaign then passes in 126.545 seconds;
+see [evidence §40–41](MACOS-VIDEO-PROCESSING-EVIDENCE.md#40-merged-mac-release-and-focused-ordinary-api-delivery).
+Exact-source
+Linux check and Clippy pass in a 413.866-second phase. See
+[evidence §39](MACOS-VIDEO-PROCESSING-EVIDENCE.md#39-exact-merged-source-compilation).
+No unit suite has run; final review has not started.
+
+The earlier `2139fa9c` release continuation finishes in 1,991.254 seconds,
+with executable and matching arm64 debug symbols captured within 1,992.202
+seconds. Its owned process group is absent. That signed bundle passes all
+eight complete subtitle graph comparisons, normal text API delivery, and
+all three caption file-VOD cases. The evidence archive records the exact
+bundle and original failures; it does not qualify the later Rust repair.
+
+The first text API attempt selected CPU processing with
+`runtime_probe_failed`. A measurement-wrapper assertion had restored the
+build prefix before its child finished, exposing 44 inactive Fontconfig
+rules. All 23 loaded rules and 394 consumed font/rule object versions were
+unchanged. Hashing the full listing nevertheless changed the font identity.
+The corrected wrapper settles its child before restoration; ordinary text
+API delivery then passes in 70.911 seconds with matching startup and Source
+font digests, native graph selection, and cue/control/parser/shutdown checks.
+
+The committed application repair hashes only ordered active configuration
+rows under a new identity domain. It retains font, tool and active-file
+checks. Its focused release qualification passes in 86.630 seconds:
+inactive rules change from zero to 44, a fresh Source profile retains the
+startup digest, and native GPU text delivery passes all 25 cue and lifecycle
+assertions. Performance was still open at that checkpoint: four admissions declined competing
+processes before starting any timing child. The fourth found active Rust
+and Swift compilers, warning-level pressure and 16.34 GB reclaimable memory.
+These refusals establish contention; they do not establish memory
+exhaustion. A fifth campaign later stops on new foreign build activity and
+is retained as unqualified. The sixth completes all eight workloads under
+the unchanged guard; only its 48 timed children enter the final medians.
+
+The earlier `2cd6000b3` Mac release completed in 1,590.286 seconds with its
+owned process group fully reaped. Matching executable and debug symbols are
+preserved. The initial capture rejected Cargo's debug-symbol symlink; a
+separate capture verified its contained regular target and matching UUID.
+That capture correction does not change the successful compiler result.
+Warning-level pressure did not abort the build; final source changes still
+require the new release. Linux check and Clippy passes on earlier sources
+are retained as historical evidence, not substituted for current inputs.
+
+The SDK generator has passed the genuine FreeType metadata target and
+Vulkan-Headers export consumed by Vulkan-Loader. Its next missing input was
+Fontconfig's `gperf` bootstrap program. The committed repair supplies an
+authenticated Bookworm binary, copyright and source offer through the
+private tool owner. After a recorded raw-lock versus staged-record refusal,
+`4481f8e9` normalizes the comparison without weakening archive, module or
+license checks. The full actual SDK generator now passes in 92.66 seconds.
+Producer preparation passes. Configuration exposed a missing link-time
+search path for dependencies of SDK shared libraries; the repair adds
+verified SDK `rpath-link` paths while preserving deployment RPATH and all
+features. The next configure attempt passes that dependency search and the
+affected Chromaprint, FDK, Fontconfig and FreeType probes. It then identifies
+a missing Fribidi public header generated by the authentic upstream Ninja
+target. A bounded preprocessing pass covers all 38 enabled public-header
+groups and identifies 36 passes and two failures. Fribidi is a confirmed
+missing upstream-generated output. The initial Opus diagnostic omitted the
+producer's `--define-prefix`; the focused production query also fails and
+establishes incorrect multiarch prefix resolution. The source repair
+generates Fribidi's declared header and projects unchanged authenticated
+Debian metadata to the standard prefix-relative lookup depth. All 30 source
+metadata files have the required `/usr` prefix and no destination collisions;
+their original paths and source associations remain recorded. Fresh
+generation now passes on `829bf9a9` in 91.92 seconds, producing all 514
+declared outputs. The two repaired Fribidi/Opus preprocessing checks also
+pass against the actual generated SDK. Full producer configuration passes
+those dependency stages, then reveals that uppercase `PKG_CONFIG` does not
+select FFmpeg's lower-case configure tool variable. The repair supplies
+verified GCC/G++ and the intended pkg-config command through configure's
+actual command-line options in `e815c4b8`. The next configure attempt passes
+those tool and metadata stages, then fails because the temporary container
+lacks `libnuma.so.1`. Auditing all 14 system-library providers finds exactly
+three missing base packages: `libnuma1`, `libelf1` and `libpng16-16`. The
+shipping Docker stage inherits these through the pinned Jellyfin runtime
+package; they belong to the container base, not new SDK roles. Their exact
+binary packages and source offers are verified against the pinned Debian
+snapshot. The isolated installation passes in 3.023 seconds, changes only
+those three package rows and resolves the recursive/versioned closure of
+197 ELF objects. The SDK remains unchanged. The next configure passes x265,
+then exposes a separate development dependency: ZVBI metadata links `-lpng`,
+but the SDK does not yet include the authentic `libpng-dev` linker alias.
+The combined audit covers 85 metadata files and 68 link names. The repair
+adds the pinned authentic development package to the existing Docker compiler
+base, with no SDK role or output change. Its isolated installation passes
+and the next configure passes those dependency probes. It then identifies a
+missing `clang` executable in the diagnostic container. The shipping Docker
+compiler stage already declares Clang. After a complete inventory audit,
+27 authenticated packages restore the declared compiler base; versioned
+package dependencies, Perl's API provider, exact package deltas and six
+tool identities pass verification. Configuration then passes in 16.692
+seconds with all 57 official options and the complete patch set retained.
+The full compile uses normal Make output within the existing 8 MiB log
+bound; forced verbose commands are unnecessary because actual configuration
+and command evidence are retained separately. Runtime base parity
+and SDK development closure are separate requirements.
+The full producer compiles successfully in a 475-second phase on `354bd87e`,
+with all features retained and no OOM under the fixed container limits.
+Installation also passes. The matching sealed parser passes in 170.238
+seconds: it is static, enables AC-4, and uses the same source and patch set.
+The retained build records and all four actual log hashes are independently
+verified in [evidence §37](MACOS-VIDEO-PROCESSING-EVIDENCE.md#37-full-bookworm-producer-and-matching-static-parser-build).
+Final package auditing is checking the actual redistributed static system
+libraries and their source records. The amd64 parser packaging path now
+automatically verifies the installed static archives against authenticated
+Debian members and retains their matching source offers. A supplement mode
+can attach those records to the existing compiled parser without changing
+its binary or original build recipe. Its 22 public inputs are size/hash
+verified, and the actual offline supplement and explicit verification pass.
+The first assembly then fails before ELF audit because a recursive copy
+follows SDK scratch-tree aliases: some point to deliberately unbuilt library
+outputs and others to host build tools. The repair copies regular provenance
+bytes and records all original link members/targets as hash-bound metadata.
+It neither invents libraries nor copies host tools through those aliases.
+Assembly retains the original compilation recipe and all three verified
+build logs, while identifying its corrected packaging recipe separately.
+The failed package remains preserved. Corrected assembly passes, then
+the complete ELF audit finds a missing system provider in the diagnostic
+container. A consolidated parity audit identifies 23 absent runtime-base
+packages: 17 authenticated inputs already retained by the SDK and six new
+public packages with their source offers. The isolated installation passes
+in a seven-second phase with exactly those 23 additions, no changes to
+previously installed packages, and an unchanged SDK. Its first attempt
+failed before installation because the private driver omitted system
+administration directories from PATH; the corrected standard PATH resolves
+that cause. The complete existing ELF audit then passes in 7.797 seconds
+on a byte-verified package copy, covering 121 runtime objects. Its capsule
+is `c2a07f88dcdbcfab086256711108a8860bacb8e619814b210a64bed9c7bc8695`.
+The original assembled package remains unchanged. The producer and parser
+builds are retained. The authentic shipping runtime image then builds and
+verifies all 125 package/executable/capsule hashes. Of 43 system providers,
+42 match the diagnostic base; the shipping snapshot has an older Expat
+package. Its 28 required symbol references and libc requirements pass, and
+the installed FFmpeg starts and lists filters successfully. The separate
+Python-only observer image retains the original shipping layers, every
+original package version and all 168 original provider/executable bytes.
+Hardware/API qualification remains pending. No global
+installation or network fallback substitutes for dependencies.
+
+Final Linux hardware acceptance also requires an actual amd64 daemon;
+ARM Linux type/lint checks alone cannot supply that executable. A warm
+build-cache candidate and bounded build are prepared. Automatic approval
+review rejected transferring the committed-source archive to the build
+node. The refreshed merged-source packet is about 55.1 MB. Review also
+rejected the separate 0.2 MB Dockerfile/media-helper context needed to build
+the authentic shipping runtime image. The user then explicitly approved
+both transfers to the build node. Both exact transfers pass hash checks.
+The shipping runtime-image build completes under two CPUs, 2 GiB memory
+and no swap. The daemon wrapper first rejects a synthetic unused systemd
+slice, then proves that the default Docker builder ignores its requested
+process limits. Direct container execution fixes resource ownership; an
+empty private mountpoint and a separately installed public Rust 1.97.1
+toolchain complete the environment. None of those refused attempts compiles
+the daemon. The actual pinned release compiler then exceeds its 8 GiB limit
+during optimization. A 12 GiB retry reuses completed compilation with the
+same release settings and passed in 1143.461 seconds (`plurxd` SHA-256
+`aaa439561af09a0dbc7e2ae1d96252f1e9aff6baaa70266fde922e7d017018ef`). The completed package audit and Mac
+qualification are retained. AMD qualification can proceed under fresh
+privileged device/activity/production-epoch checks; no repository rule
+requires another chat to grant permission. Intel staging separately awaits
+explicit approval after automatic review rejects the additional image
+transfer destination. No Intel transfer or GPU workload has begun. Performance measurements, shipping Linux runtime qualification,
+final adversarial review and merge handoff remain outstanding.
+The designated merge coordinator owns unit execution and main landing.
+
+**Complete subtitle graphs:** all eight frozen SDR/PQ, text/bitmap and
+resolution workloads now pass, with zero CPU/GPU pixel difference, equal
+120-frame timestamps and exact expected blank frames. Text cases were not
+replayed after passing. The bitmap diagnostic independently observed equal-
+timestamp heartbeat/display events; the pinned one-frame-next scheduling rule
+makes frames 7–18 active for the frozen 24 fps fixture. The source-derived
+oracle reassesses retained per-frame evidence and applies only to that bound
+fixture/rate. Both original oracle failures remain preserved. A combined
+ledger binds the separate executions to identical package, font, source,
+cue and plan identities; it does not pretend they were one run. Performance
+measurements remain pending a quiet window.
+
+**Integrated source:** `84ad32b51` prepares pinned Linux sources and generic
+strict Dolby patches; `622c1ee42` repairs caption SEI parsing; `a9e0f2c98`
+binds strict processing to typed Mac/Linux provenance. The latter preserves
+existing Mac identity bytes and adds Linux executable, source, linked-library,
+driver and kernel/device bindings. It grants no Linux route by itself. Normal
+compile/lint hooks pass; regression sources are retained for final validation.
+
+**GPU subtitles:** the predeclared oracle requires at most two code values
+of difference from complete native-scale/CPU-burn output, and byte identity
+in cue-free frames. A colored BGRA flattening approach failed with maximum
+luma/chroma error 4/11 and 263 chroma samples above tolerance. An affine
+foreground/coverage approach passed two layers across 256 backgrounds but
+failed ten translucent layers with maximum error 7 and 5,258 samples above
+tolerance. Both negatives remain recorded; tolerance was not relaxed.
+
+The replacement preserves ordered libass masks/colors, FFDraw integer
+rounding, shaping/fonts and the input frame clock. A typed refcounted command
+payload travels on a secondary frame clone; it never reads main video pixels
+or modifies shared pixel-buffer attachments. The existing overlay owner
+executes the ordered GPU composition with one writer per chroma sample.
+Its first actual hardware comparison passes: all 24 frames of ten overlapping
+translucent colored text layers are byte-identical to the CPU reference on
+both planes, with exact PTS. Input is 320×180 and output 160×90. This is
+correctness evidence, not a performance or full lifecycle result.
+
+A subsequent no-cue control exposed inconsistent hardware-frame pool
+ownership: a cloned blank main frame did not belong to the overlay's declared
+output pool. The repair makes active output allocation and blank clones share
+the captured main pool, retaining download validation. Error teardown then
+exposed the context's missing first-field `AVClass` slot; cleanup must not
+interpret that class pointer as an owned device reference. The repaired animated control now passes all 24 frames with exact pixels and
+PTS, including blank→active→blank. Its first attempt exposed a separate
+clock mismatch: rounded milliseconds differed from incumbent libass's
+truncation every third frame. Both paths now share the existing conversion;
+tolerance remains unchanged. Candidate FFmpeg is
+`1657bda3830d667ad3d4cbdb57422117f3b31da297633f1d632c37e4ff2f2a2b`.
+Colored bitmap subtitles then exposed a last-row/column chroma-alpha
+mismatch (maximum error 15, luma exact). Matching the incumbent CPU boundary
+arithmetic repairs it without relaxing tolerance. The repaired 24-frame
+colored/odd case is byte-identical, and additional top-left odd-position,
+final-column and final-row controls pass. Candidate is
+`71fcb4d4bc88ffae930bf2611e6e7de3cbe623e889fec6efe854a63d621c71ba`.
+Bounded native-child seek, EOF and SIGINT controls pass frame/PTS comparison
+and cleanup. They do not establish normal-daemon cancellation or source-position
+cue correctness: input seeking resets timestamps for both CPU and GPU text
+rendering, so a matched result may still display the wrong source cue. Normal
+API confirmation and a shared timing-owner repair, if reproduced, remain
+required before seek acceptance. Production-graph checks remain open. Generic BGRA overlay
+behavior is outside the new ASS/YUVA modes and has no new qualification claim.
+
+**Caption-preserving hardware encode:** the repaired baseline binary is
+`9c9e91054999531e7543f603ca4d4a6db32a6399f92f9b283b245ae0d104c3ea`.
+All seven direct controls pass on public reordered HEVC/AC-4 and original
+MPEG-2/A53 inputs. Default H.264 VideoToolbox encoding preserves 48 caption
+records and their normalized presentation timestamps; caption-off and
+caption-free controls contain none; copy/remux retains all 48. Decoded image
+planes are byte-identical with forwarding on/off. HEVC encoding still yields
+zero A53 records, a separately recorded pre-existing limitation. The first normal API run on the coherent new package delivered 120 video/audio
+frames and 120 caption-bearing frames, but failed the stricter source-payload
+comparison. Almost all records contained padding; only two 608 tuples and three
+valid 708 tuples remained. That exposed the shared finite-VOD clock defect:
+the captured producer command fed source PTS near 66,272 seconds into
+`fps` starting at zero. A bounded reproduction consumes two source frames
+while producing 17 scheduled observations with the same picture checksum.
+The integrated repair normalizes the held source clock while preserving A/V
+offsets and already-normalized subtitle sidecars. Direct controls match an
+independently normalized reference in all 17 video observations and 144 audio
+frames, including a seek and a 175 ms operator audio adjustment. Corrected
+normal-API delivery now passes the three cases detailed below.
+The initial command observer missed descriptor-based input; its corrected
+capture supplied the decisive graph evidence. Bounded shutdown required forced termination; no owned child
+remains, and that debug failure stays recorded separately from the release
+lifecycle result below. The
+[caption record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) explains the root cause.
+
+**Intel hardware P5:** deployed Jellyfin lacks the strict options, so private
+source-built diagnostics were required. The first Intel attempt failed before
+decode because pinned Jellyfin libva searches its canonical driver directory
+and renamed environment variable; ordinary libva overrides do not apply.
+A read-only canonical driver binding corrected that experiment configuration.
+A changed production epoch and a stale transfer-file preflight were separately
+refused before GPU access and remain recorded.
+
+The corrected Intel window passes all 28 controls: twelve software and twelve
+VAAPI strict metadata/render/loss/seek/terminal-NAL cases, plus four raw output
+comparisons. Fresh and variable-metadata hardware/software output is exactly
+equal. Selected opaque VAAPI frames, mandatory hardware download, current
+frame Dolby state and independent colored-patch bounds are observed. The
+window is closed and all owned GPU work reaped. These 320×180→160×90 controls
+use an Ubuntu diagnostic binary, not the production Debian package; they do
+not qualify production encoder graphs, 4K, AMD, CUDA, D3D or performance.
+
+The first AMD window was returned unused when admission found production
+FFmpeg. A later shipping-build CPU window was also returned unused because
+unrelated compiler/container jobs were active. The coordinator retains CI
+priority; no alternative host is authorized. Source integration continued during that refusal. A subsequent finite
+Bookworm SDK/bootstrap lease completed with exit zero and its owned container
+stopped: GCC 12.2, glibc 2.36, all 100 official source patches plus the strict
+patch, and exact original FFmpeg/driver hashes are retained. No C compilation
+or GPU access occurred. The next public-header stage is prepared but remains
+unused: the coordinator has held further shared-host work while current-batch
+blockers are cleared, and the warm Linux compiler lane remains reserved.
+A newly observed foreign candidate has not been attributed; no alternate host
+or second cold build is authorized. Local source work continues. Whole-image transfer was
+rejected by automatic approval; the successful diagnostic used only an
+explicit binary/public-dependency/original-fixture allowlist. No deployed
+service, package or host driver was changed.
+
+The rebuilt common Mac package must retain verified archive-backed source
+offers as well as Git-backed dependencies. The helper change is integrated as `8287f734c`: future builds bind every
+archive role to its exact transformed recipe/helper, while historical builds
+retain their actual source tree and executed transformation/log closure.
+The original 54-role audit accounts for 43 changes, and a fresh preparation
+verifies 69 recipe bindings. `9211fc71f` tightens generated-file allowances
+to exact audited hashes; command text alone must not bless arbitrary changed
+source. No fabricated Git metadata or stale provenance substitutes for the
+actual compiled source. The normal API text-burn check found a provider mismatch before it could
+prove seek timing: Mac libass's automatic provider is CoreText, but the
+existing font environment freezes and verifies Fontconfig. The request
+correctly refuses an unproven font environment. Native now owns an explicit
+provider option shared by CPU and GPU rendering and the freeze probe; Plurx
+will select supported Fontconfig under its existing authority and bind that
+choice to the recipe. Standalone automatic provider selection remains
+unchanged. No trace check is bypassed and no second font authority is added.
+The explicit-provider candidate compiles and passes the same-provider
+24-frame animation/PTS comparison; actual libass logs show Fontconfig and
+the same selected face. An unsupported-provider negative refuses cleanly.
+The app projection/freeze changes still need the newly built daemon's normal
+API proof and actual source-position seek checks.
+
+The GPU/projection/provider foundation is committed as `1098374bb`, with
+conditional package-help validation in `27ab44d8f`. The latter applies to
+prepared `0004` builds and preserves official baseline packaging mode. Exact
+all-target compilation and normal hooks pass; unit execution remains deferred.
+A private daemon and coherent FFmpeg package now exist for source-bound API
+checks. They are not yet a clean-install-qualified release.
+
+Clean-install inspection found two actual font dependencies that the current
+host could conceal: `fc-list`/`fc-conflist` are found through host `PATH`, and
+the static Fontconfig default configuration points into the build prefix.
+Native packaged the pinned tools and relocatable configuration through
+the existing tool resolver and font authority. Explicit configuration overrides
+and non-Mac behavior stay supported. No global install, Homebrew dependency
+or retained temporary prefix may substitute for the repair. Qualification must
+exercise the package with the owned build prefix unavailable. Caption-only
+API checks can proceed independently because they do not use text rendering.
+The font-authority repair `ae9996b1e` is integrated: exact all-target
+compilation and normal hooks pass, and a prefix-hidden/system-PATH CPU control
+can query fonts and render. It binds font identity only to text plans and uses
+the existing held Source environment. The source-clock and shared package-helper union `874a5efd4` is integrated
+with reporter/origin identity, per-input normalization and existing engine
+publication fences. All-target compilation and normal hooks pass; corrected
+caption API qualification passes as recorded below. The mechanism evidence is retained in
+[evidence §29](MACOS-VIDEO-PROCESSING-EVIDENCE.md#29-required-follow-up-mechanisms--2026-10-08).
+
+The combined source `1f1545456` passes the normal pinned-toolchain hook and
+produces the private qualification daemon. The assembled native package now
+contains the exact font tools, 23 relocatable configuration rules and nine
+font provenance files; its manifest is
+`74e300dd743ff74d92c29908cce567859fc5f009785a3b9f4af83efc356446d7`.
+Assembly validation is not normal-API acceptance. This first daemon was a debug
+qualification build; the later release daemon and matching symbols are recorded
+below with their separate lifecycle evidence.
+
+Linux runtime preparation now includes an original 3840×2160, 24 fps,
+24-frame P5 fixture and its missing-metadata negative. Generation and bounded
+source validation pass. Neither this corpus nor the earlier small Intel
+diagnostic grants a production graph or size/rate envelope; exact shipping
+package and device-bound observations remain required.
+
+The Linux runtime source draft now connects two-phase library/device discovery,
+a retained execution binding, subsequent complete-graph qualification, bounded
+size/rate observations, and the existing resolver/startup/admin owner. Active
+plans retain their qualified context through a temporarily pending reprobe;
+positive identity changes and live object changes still refuse execution.
+Loader policy files and source-bound runtime objects are included in the
+binding. Thirteen regression references resolve statically. This draft has
+not passed Linux type checking or hardware execution and advertises no new
+available route on that basis.
+
+The SDK staging helper `5a056cd81` retains immutable source, recipe, configure,
+license and official-package member identities. It explicitly reports that
+generated headers/package metadata and link readiness are still absent.
+Dolby now owns completing that SDK preparation while Native concentrates on
+Mac delivery; Routes retains the Linux runtime. Docker FFmpeg and
+sealed-parser packaging now share Dolby’s shipping ownership. Actual upstream generation and the unchanged full FFmpeg
+configure/link closure are required before a shipping SDK claim.
+
+The completed static preparation now verifies 57 source roles (25 private
+dependency sources and 32 distributed Bookworm roles), 194 actual sysroot
+members and 100 unchanged official ELF imports. All 57 official configure
+tokens remain intact. The helper retains 511 expected project-generated
+output selectors, but has not generated them or claimed link readiness.
+Actual Bookworm generation and full linking await their resource window.
+
+A subsequent transitive `pkg-config` audit finds additional development
+metadata behind GnuTLS, OpenMPT and Blu-ray dependencies. The matching public
+Bookworm packages and source offers are being added. The earlier 57-role
+result establishes direct configured-role coverage and retained input
+integrity, not a completed transitive build closure. The old generation
+admission is therefore historical; execution requires freshly staged inputs
+bound to the completed helper and an updated resource grant.
+
+Fresh static preparation now covers 72 roles, 330 sysroot members and 51
+authenticated package-namespace aliases. The declared transitive `Requires`
+coverage has no missing roles; actual generated metadata and link closure
+remain unproven. Preflight also identifies a real tool-version mismatch:
+pinned Fontconfig requires Meson at least 1.6.1, while the retained Bookworm
+bootstrap has 1.0.1. A private pinned Meson 1.12.1 provider is now prepared
+without global installation; its isolated launcher and retained source tree
+have static identity evidence, but Meson has not run. Further concrete
+prerequisites bring the source lock to 75 roles. Static staging now passes
+for all 75 after correcting authenticated Debian source-format handling. The
+first actual Bookworm generator attempt stopped after 21.60 seconds because
+the FFTW recipe omitted its upstream metadata target. The source repair invokes
+`make fftw3f.pc` after float configure; it does not manufacture the file or
+weaken missing-output checks. Fresh static staging passes in 6.59 seconds.
+The corrected committed-source retry verifies all 6,596 input files and
+passes FFTW's actual upstream metadata target. It then stops after 21.91
+seconds because FreeType's archive lacks its required pinned `dlg` submodule.
+The source repair supplies six required submodules from exact parent gitlinks
+and replaces eleven unusable repository download URLs with verified canonical
+archives of the same pinned commits. Their normalized source trees match the
+retained originals, including executable bits and symlink targets. Fresh
+static staging and actual generation of the repaired inputs remain pending.
+The container is stopped and its lease released. Actual generation must complete before producer configure/link,
+parser and shipping qualification. [Evidence §33](MACOS-VIDEO-PROCESSING-EVIDENCE.md#33-linux-sdk-generation-and-release-integration--2026-10-08)
+records the failure, authentic rule and current input identity.
+
+Shipping source `6cdd3755f780bfef215ebd09e190ada2504d3ef1` now connects
+ordinary amd64 `make docker` to the audited package output through a named
+BuildKit context. Installation uses a temporary Python stage and root access;
+the final image restores `USER plurx`, excludes the installer tools, and retains
+build ref, SHA and source-epoch arguments. ARM and existing default/CI targets
+retain their incumbent paths. The real package is still a build prerequisite:
+no producer image, link closure or hardware route is qualified by this source
+integration alone. Combined commit `070ac8814` integrates the Linux runtime
+and shipping source, preserving the same captured engine and font authority.
+Its portable source check and corrected normal hook passed without unit tests.
+
+The local build seam did not cover published images or CI smoke images: both
+used a separate runtime-assets/renderer path. The current shipping candidate
+adds one reusable Bookworm package-export stage and connects both paths to
+its audited output. Media-asset publication does not compile daemon Rust;
+ARM retains its incumbent path. This is source integration, not a claim that
+the package or final image has built successfully.
+
+
+Corrected normal API caption delivery now passes on the signed debug package:
+public HEVC retains 120 due 608 and 66 valid 708 records across 120 frames;
+original MPEG-2 retains all 48 caption records; the caption-free control has
+none. The MPEG-2 initial oracle failure and narrowly modeled `fps`/608 FIFO
+startup assignment remain recorded in [evidence §30](MACOS-VIDEO-PROCESSING-EVIDENCE.md#30-caption-bearing-normal-api-delivery--2026-10-08).
+All three debug shutdowns still exceed the settlement bound. Owned stack
+samples identify unfinished startup WebAssembly compilation, not a stuck
+VideoToolbox producer. The first release-build window expired at 600 seconds
+during optimization, without a source error; its exact unfinished crate was
+not recorded. Its partial cache and failure receipt are retained. The
+separately leased 1,800-second exact-source retry passed in 792.69 seconds,
+using pinned Rust 1.97.1 and two jobs. The release daemon and matching symbols
+are retained, and the compiler lease is released.
+
+The signed release bundle uses the same FFmpeg, FFprobe and sealed-parser
+bytes as the caption delivery matrix. Its first prefix-hidden CPU subtitle
+API run passes the independent source-cue oracle across 49 frames, has no
+startup parser identity warning and shuts down with exit zero. The overall
+case remains failed because its resume request used `play`, whereas protocol
+v1 requires `active`. The first hold request had already passed. The driver
+is corrected against the current protocol without changing application
+behavior; GPU text and bitmap delivery and complete control checks remain.
+This release lifecycle result is separate from the three caption payload
+matrices and does not replace their retained debug shutdown failures.
+
+The next normal local API text case exposed a production ordering error:
+the runtime report has matching available text/bitmap observations, but
+selection receives a font digest only from shared-source evidence. Local
+playback captures the same encoded engine later, after resolution, so its
+GPU text path cannot qualify. The repair moves that existing capture before
+resolution and keeps the same engine through publication. It adds no font
+authority, diagnostic override or probe. The failed selection receipt is
+retained; bitmap qualification can proceed on the unchanged release while
+the text repair is implemented and compiled.
+
+The narrow repair `b7d21934b` is integrated by manager commit
+`c0691d5ffdf34d1dc06e83089c970a1c3d89f46a`: the same captured engine
+supplies font identity to both fresh-fact and held-fact resolution, then
+remains retained for encoding. Its focused regression source covers matching,
+absent and mismatched font identities. Pinned all-target compilation and the
+normal hook pass; no unit tests ran. Updated release API acceptance is next.
+
+The bitmap API case selects the actual GPU graph and a nonzero producer
+trim of two seconds. Its source-time oracle fails on the last cue frame:
+the cue is visible at 3.333–3.666 seconds but absent at 3.750, while the
+source clear packet is at 3.771. Parser initialization and shutdown pass.
+The builder is tracing the normalized sidecar, decoded display/clear events
+and frame scheduling against the incumbent CPU graph before deciding whether
+the defect is in scheduling or in the oracle. The failed receipt remains
+unchanged; a graph selection alone is not subtitle acceptance.
+
+The incumbent CPU bitmap graph has the same last-frame result. Exact source
+and normalized sidecar timestamps retain the 21 ms video offset. Tracing the
+pinned frame scheduler shows its secondary clear event rescaled to the main
+1/12 time base with nearest rounding. A separate oracle reassessment must
+derive both onset and clear-event ordering; CPU/GPU equality alone cannot
+justify changing the independent timing expectation.
+
+That trace now establishes both boundaries: the blank heartbeat immediately
+before the active subtitle and the active event quantize to the same tick,
+and the scheduler emits the main frame on the first tie. The separate
+deterministic reassessment passes all 25 retained CPU and GPU frames; the
+original failures remain. A corrected-driver GPU bitmap run then passes
+all 25 frames, hold/resume/seek-back request acceptance, DELETE 204, parser
+initialization and shutdown zero. This does not claim rendered seek-back or
+client presentation. [Evidence §32](MACOS-VIDEO-PROCESSING-EVIDENCE.md#32-gpu-bitmap-api-delivery-and-local-text-authority--2026-10-08)
+records the exact scheduling model, artifacts and limits.
+
+The merge coordinator has frozen its current batch. This effort's new
+features will be handed off for the next batch after implementation and the
+single final adversarial review; the coordinator retains final test and
+landing ownership.
+
+The coordinator admitted two sequential, bounded native commit hooks. The
+manager integration `c0691d5ff` passed in 186 seconds and shipping source
+`6cdd3755f` passed in 172 seconds; both compiler leases are released. Linux
+runtime changes were combined in `070ac8814`: source compilation passed in
+263.84 seconds; a catalog-only hook failure was corrected without changing
+Rust or replaying that check, and the normal hook passed in 319.05 seconds.
+The bounded phase used 583.66 seconds in total and released its target. The
+first Bookworm generator phase also settled and released its container. GPU,
+Linux-specific compilation and native release windows remain separately
+controlled; no unit tests ran in these builder hooks.
+
+The coordinator has returned a separate earlier-batch HEVC publication
+failure for priority repair. Its hvcC parser discards `array_completeness`
+and accepts presence-only VPS/SPS/PPS arrays where `hvc1` requires complete
+ones. The narrow repair preserves the distinct `hev1`/`dvhe` contract and
+is published as [PR #938](http://forge.lan:3000/noirr/plurx/pulls/938),
+head `21af407bdacdbde1a39682d9d11bff1a75045182`. Its one adversarial review
+found no actionable issues. Pinned all-target compilation and the normal
+commit hook passed on the preceding base; the reviewed patch and both full
+modified files remain byte-identical after the requested base port. The
+coordinator has the exact committed source archive and six focused regression
+IDs for Linux qualification. All six focused controls subsequently passed
+with the coordinator, which is combining the earlier-batch blocking repairs
+under the existing PR. No units ran in the builder, and the native compiler
+target is released. This earlier-batch repair is separate from
+the follow-up candidate and does not count as its final review.
+
+The temporary Metal compiler component is tracked for exact
+removal during final cleanup. Direct experimental binaries are immutable
+snapshots, not assembled production packages.
+
+The accepted-batch fixture-license repair is separately complete. Sol commit
+`c56c1d04` updates a stale generator constant to the authentic expanded CC0
+license without changing media, manifests or quality checks. Independent
+review accepted it; the coordinator reran only the affected case, passing
+8/8 in 0.369 seconds. This effort retains identical reviewed blobs in
+`4f5fee3f0`. The temporary repair clone was removed after import and lease
+release; its review and cleanup receipts remain retained.
+
+### Prior contribution retained for the merge coordinator
 
 The initial SDR/HDR10 implementation is built and independently reviewed.
 PR #870 was composed into coordinator PR #882 and landed on `main` as
@@ -45,8 +682,8 @@ memory/energy/copy instrumentation. The initial soak driver used a stale
 control sequence; its failure is retained, and only the corrected soak was
 repeated.
 
-No further production building is assigned. The designated merge session
-owns the final fast lane and main landing of PR #904. No unit suite ran in
+The designated merge session owns the final fast lane and main landing of
+PR #904. The newly assigned F1–F3 work above proceeds separately. No unit suite ran in
 this effort. Broad physical-client, calibrated-display, deployment, fleet
 upgrade and other-host qualification remains explicitly open; the Developer
 switches retain their advisory graduation status. This is not an all-device

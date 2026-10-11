@@ -15,8 +15,9 @@ use plurx_core::transcode::{
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 use plurx_core::transcode::{
-    MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
-    MacosProcessingIdentity, MacosProcessingSelection,
+    LinuxDolbyContext, LinuxDolbyIdentity, LinuxDolbyObservation, MacosProcessingAvailability,
+    MacosProcessingContext, MacosProcessingGraph, MacosProcessingIdentity,
+    MacosProcessingSelection, Rational,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -4403,6 +4404,15 @@ fn macos_burn_graphs_require_independent_observation_and_process_before_composit
                 subtitle_index: 0,
                 bitmap,
             });
+            let unobserved = resolve_with_options(
+                Encoder::VideoToolbox,
+                media.clone(),
+                &input,
+                &caps,
+                macos_policy(macos_context(true, MacosProcessingAvailability::Available)),
+            )
+            .expect("unobserved burn retains incumbent compositor");
+            assert_eq!(unobserved.options().pipeline, Pipeline::Cpu);
             let context = macos_context(true, MacosProcessingAvailability::Available)
                 .with_graph(graph, MacosProcessingAvailability::Available);
             let plan = resolve_with_options(
@@ -4439,25 +4449,38 @@ fn macos_burn_graphs_require_independent_observation_and_process_before_composit
             let args = hls_args(&plan, &execution);
             let graph = args
                 .windows(2)
-                .find(|pair| pair[0] == if bitmap { "-filter_complex" } else { "-vf" })
+                .find(|pair| pair[0] == "-filter_complex")
                 .expect("shared compositor graph")[1]
                 .as_str();
-            assert!(
-                graph.find("scale_vt=") < graph.find("hwdownload,format=nv12"),
-                "{graph}"
-            );
+            let compositor = if bitmap {
+                "overlay_videotoolbox=bitmap=1"
+            } else {
+                "overlay_videotoolbox=ass=1"
+            };
+            assert!(graph.find("scale_vt=") < graph.find(compositor), "{graph}");
             if hdr {
                 assert!(
-                    graph.find("tonemap_videotoolbox=") < graph.find("hwdownload,format=nv12"),
+                    graph.find("tonemap_videotoolbox=") < graph.find(compositor),
                     "{graph}"
                 );
             }
-            assert!(
-                graph.find("hwdownload,format=nv12")
-                    < graph.find(if bitmap { "overlay=" } else { "subtitles=" }),
-                "{graph}"
-            );
-            assert_eq!(graph.matches("hwdownload").count(), 1);
+            assert!(graph.contains(compositor), "{graph}");
+            assert_eq!(graph.matches("hwdownload").count(), 0, "{graph}");
+            if bitmap {
+                assert!(
+                    graph.contains("scale=1920:1080,format=yuva420p[sburn]"),
+                    "{graph}"
+                );
+            } else {
+                assert!(
+                    graph.contains("subtitles_vt_images='/fixture/active.ass'"),
+                    "{graph}"
+                );
+                assert!(graph.contains("split[vburn][sclock]"), "{graph}");
+                if cfg!(target_os = "macos") {
+                    assert!(graph.contains(":font_provider=fontconfig"), "{graph}");
+                }
+            }
             assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
         }
     }
@@ -4982,6 +5005,72 @@ fn macos_normalized_1440_pq_retains_sdr_avc_geometry_and_cadence() {
 }
 
 #[test]
+fn macos_normalized_burn_keeps_captured_canvas_cadence_and_gpu_compositor() {
+    use plurx_core::transcode::AutoQualityRateProfile;
+    for hdr in [false, true] {
+        for bitmap in [false, true] {
+            let input = facts(macos_stream(hdr));
+            let graph = match (hdr, bitmap) {
+                (false, false) => MacosProcessingGraph::SdrTextBurn,
+                (false, true) => MacosProcessingGraph::SdrBitmapBurn,
+                (true, false) => MacosProcessingGraph::Hdr10TextBurn,
+                (true, true) => MacosProcessingGraph::Hdr10BitmapBurn,
+            };
+            let context = macos_context(true, MacosProcessingAvailability::Available)
+                .with_graph(graph, MacosProcessingAvailability::Available);
+            let mut media = options(Pipeline::Cpu);
+            media.target_height = 1440;
+            media.video_bitrate_kbps = 12_000;
+            media.subtitle_burn = Some(SubtitleBurn {
+                subtitle_index: 2,
+                bitmap,
+            });
+            let request = TranscodeRequest::new(Encoder::VideoToolbox, media)
+                .with_auto_quality_rate_profile(AutoQualityRateProfile::H264Sdr1440P30V1);
+            let plan = resolve_transcode(
+                &request,
+                &input,
+                &unqualified_software_capabilities("hevc"),
+                &macos_policy(context),
+                &AttemptRestrictions::none(),
+            )
+            .expect("observed normalized burn");
+            assert!(plan.macos_processing_identity().is_some());
+            assert_eq!(plan.output_contract().effective_width(), Some(2560));
+            assert_eq!(plan.output_contract().effective_height(), Some(1440));
+            assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+            assert_eq!(plan.output_contract().output_profile(), Some("high"));
+            let source = execution_file("/fixture/burn.mkv");
+            let execution_options = execution_options();
+            let execution = TranscodeExecution::from_options(
+                &source,
+                &execution_options,
+                Pacing::unpaced(),
+                "/fixture/out",
+            )
+            .expect("execution");
+            let args = hls_args(&plan, &execution);
+            let graph = &args[args
+                .iter()
+                .position(|arg| arg == "-filter_complex")
+                .expect("normalized burn complex filter")
+                + 1];
+            assert!(graph.starts_with("[0:0]fps=24/1,"), "{graph}");
+            assert!(graph.contains(",setsar=1"), "{graph}");
+            assert!(!graph.contains("hwdownload"), "{graph}");
+            assert!(
+                graph.contains(if bitmap {
+                    "[0:s:2]scale=2560:1440,format=yuva420p"
+                } else {
+                    "subtitles_vt_images='/fixture/burn.mkv':si=2"
+                }),
+                "{graph}"
+            );
+        }
+    }
+}
+
+#[test]
 fn macos_hdr_interlaced_retains_incumbent_when_vt_cannot_decode_high10_fields() {
     let caps = unqualified_software_capabilities("hevc");
     let policy = macos_policy(macos_context(true, MacosProcessingAvailability::Available));
@@ -5061,4 +5150,305 @@ fn authorized_strict_p5_survives_rpu_only_renderer_guard_without_admitting_gener
             "unqualified P{profile} must not inherit strict P5"
         );
     }
+}
+
+fn linux_strict_context(driver_digest: char) -> LinuxDolbyContext {
+    linux_strict_context_for_encoder(driver_digest, Encoder::Software)
+}
+
+fn linux_strict_context_for_encoder(driver_digest: char, encoder: Encoder) -> LinuxDolbyContext {
+    let identity = LinuxDolbyIdentity::new(
+        "f".repeat(64),
+        "2".repeat(64),
+        "3".repeat(64),
+        "4".repeat(64),
+        driver_digest.to_string().repeat(64),
+        "6".repeat(64),
+        "/dev/dri/renderD128".to_owned(),
+    )
+    .expect("complete Linux package and physical environment");
+    let observations = [DecodeBackend::Vaapi, DecodeBackend::Software]
+        .into_iter()
+        .map(|decoder| {
+            LinuxDolbyObservation::new(
+                decoder,
+                encoder,
+                3840,
+                2160,
+                1920,
+                1080,
+                Rational::new(24, 1).expect("observed cadence"),
+            )
+            .expect("observed complete graph")
+        })
+        .collect();
+    LinuxDolbyContext::new(identity, observations)
+}
+
+#[test]
+fn linux_strict_qsv_encoder_is_derived_from_the_observed_decode_device() {
+    let input = macos_p5_facts(macos_p5_stream());
+    let caps = capabilities(vec![exact_capability(
+        DecodeBackend::Vaapi,
+        &input,
+        Pipeline::DoviStrictTonemapx,
+        Encoder::Qsv,
+        SubtitleRendering::None,
+        CapabilityStatus::Operational,
+    )]);
+    let plan = resolve(
+        Encoder::Qsv,
+        Pipeline::DoviTonemapx,
+        &input,
+        &caps,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+            .with_linux_dolby(linux_strict_context_for_encoder('5', Encoder::Qsv)),
+    )
+    .expect("observed QSV encoder and VAAPI decoder tuple");
+    let source = execution_file("/fixture/p5.mp4");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let args = hls_args(&plan, &execution);
+    for pair in [
+        ["-init_hw_device", "vaapi=plurx_dovi_va:/dev/dri/renderD128"],
+        ["-init_hw_device", "qsv=plurx_dovi_qsv@plurx_dovi_va"],
+        ["-filter_hw_device", "plurx_dovi_qsv"],
+        ["-hwaccel_device", "/dev/dri/renderD128"],
+    ] {
+        assert!(
+            args.windows(2).any(|args| args == pair),
+            "missing retained device projection: {pair:?}"
+        );
+    }
+    assert!(!args.iter().any(|arg| arg == "qsv=hw"));
+    let filter = &args[args.iter().position(|arg| arg == "-vf").expect("filter") + 1];
+    assert!(filter.starts_with("hwdownload,format=p010le,setparams=colorspace=unknown,"));
+    assert!(filter.contains("apply_dovi=1:require_dovi=1"));
+    assert!(filter.ends_with("hwupload=extra_hw_frames=64,format=qsv"));
+}
+
+#[test]
+fn linux_strict_p5_selects_native_vaapi_without_lifting_other_dolby_software_routes() {
+    let input = macos_p5_facts(macos_p5_stream());
+    let caps = capabilities(vec![exact_capability(
+        DecodeBackend::Vaapi,
+        &input,
+        Pipeline::DoviStrictTonemapx,
+        Encoder::Software,
+        SubtitleRendering::None,
+        CapabilityStatus::Operational,
+    )]);
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+        .with_linux_dolby(linux_strict_context('5'));
+    let plan = resolve(
+        Encoder::Software,
+        Pipeline::DoviTonemapx,
+        &input,
+        &caps,
+        policy.clone(),
+    )
+    .expect("exact observed Profile5 route");
+    assert_eq!(plan.decode().backend(), DecodeBackend::Vaapi);
+    assert_eq!(plan.options().pipeline, Pipeline::DoviStrictTonemapx);
+    assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    assert!(plan.macos_processing_identity().is_none());
+    assert_eq!(
+        plan.captured_processing_ffmpeg_sha256(),
+        Some("f".repeat(64).as_str())
+    );
+    let source = execution_file("/fixture/p5.mp4");
+    let execution = TranscodeExecution::from_options(
+        &source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let args = hls_args(&plan, &execution);
+    for pair in [
+        ["-hwaccel", "vaapi"],
+        ["-hwaccel_output_format", "vaapi"],
+        ["-hwaccel_device", "/dev/dri/renderD128"],
+        ["-strict_dovi", "1"],
+        ["-err_detect", "explode"],
+        ["-c:v", "hevc"],
+    ] {
+        assert!(args.windows(2).any(|args| args == pair));
+    }
+    assert!(args.iter().any(|arg| arg == "-xerror"));
+    assert!(!args.iter().any(|arg| arg == "+require_hardware"));
+    let filter = &args[args.iter().position(|arg| arg == "-vf").expect("filter") + 1];
+    assert!(filter
+        .starts_with("hwdownload,format=p010le,setparams=colorspace=unknown,format=yuv420p10le,"));
+    assert!(filter.contains("apply_dovi=1:require_dovi=1"));
+    for profile in [7, 8] {
+        let mut stream = macos_p5_stream();
+        stream["side_data_list"][0]["dv_profile"] = json!(profile);
+        let other = macos_p5_facts(stream);
+        let incumbent = resolve(
+            Encoder::Software,
+            Pipeline::DoviTonemapx,
+            &other,
+            &caps,
+            policy.clone(),
+        )
+        .expect("other Dolby profiles retain incumbent software path");
+        assert_eq!(incumbent.decode().backend(), DecodeBackend::Software);
+        assert!(incumbent.options().strict_dolby.is_none());
+    }
+}
+
+#[test]
+fn linux_strict_p5_recovery_retains_package_and_rejects_changed_driver_or_unobserved_envelope() {
+    let input = macos_p5_facts(macos_p5_stream());
+    let caps = capabilities(vec![exact_capability(
+        DecodeBackend::Vaapi,
+        &input,
+        Pipeline::DoviStrictTonemapx,
+        Encoder::Software,
+        SubtitleRendering::None,
+        CapabilityStatus::Operational,
+    )]);
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+        .with_linux_dolby(linux_strict_context('5'));
+    let initial = resolve(
+        Encoder::Software,
+        Pipeline::DoviTonemapx,
+        &input,
+        &caps,
+        policy.clone(),
+    )
+    .expect("observed strict hardware route");
+    let mut media = initial.options().clone();
+    media.pipeline = Pipeline::Cpu;
+    let request = TranscodeRequest::new(Encoder::Software, media);
+    let recovered = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::requiring(DecodeBackend::Software),
+    )
+    .expect("observed grade-preserving strict software recovery");
+    assert_eq!(recovered.decode().backend(), DecodeBackend::Software);
+    assert_eq!(recovered.options().pipeline, Pipeline::DoviStrictTonemapx);
+    assert_eq!(
+        recovered.options().strict_dolby,
+        initial.options().strict_dolby
+    );
+    assert_eq!(
+        recovered.captured_processing_ffmpeg_sha256(),
+        initial.captured_processing_ffmpeg_sha256()
+    );
+    let pending_reprobe = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+    let retained = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &pending_reprobe,
+        &AttemptRestrictions::requiring(DecodeBackend::Software),
+    )
+    .expect("pending admin reprobe must not erase the active plan's observed software recovery");
+    assert_eq!(
+        retained.options().strict_dolby,
+        initial.options().strict_dolby
+    );
+    assert_eq!(retained.decode().backend(), DecodeBackend::Software);
+    let new_admission = resolve(
+        Encoder::Software,
+        Pipeline::DoviTonemapx,
+        &input,
+        &caps,
+        pending_reprobe,
+    )
+    .expect("ordinary incumbent admission remains independent of a pending hardware observation");
+    assert!(
+        new_admission.options().strict_dolby.is_none(),
+        "only captured active plans may retain prior qualification"
+    );
+    let changed = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+        .with_linux_dolby(linux_strict_context('7'));
+    assert_eq!(
+        resolve_transcode(
+            &request,
+            &input,
+            &caps,
+            &changed,
+            &AttemptRestrictions::requiring(DecodeBackend::Software)
+        ),
+        Err(PlanError::IncompatibleRenderer)
+    );
+    let mut faster = macos_p5_stream();
+    faster["avg_frame_rate"] = json!("60/1");
+    faster["r_frame_rate"] = json!("60/1");
+    assert!(resolve_transcode(
+        &request,
+        &facts(faster),
+        &caps,
+        &policy,
+        &AttemptRestrictions::requiring(DecodeBackend::Software)
+    )
+    .is_err());
+    let mut too_large_media = request.options().clone();
+    too_large_media.target_height = 2160;
+    let too_large = TranscodeRequest::new(Encoder::Software, too_large_media);
+    assert!(resolve_transcode(
+        &too_large,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::requiring(DecodeBackend::Software)
+    )
+    .is_err());
+}
+
+#[test]
+fn macos_text_font_binding_changes_only_text_output_identity() {
+    let input = facts(macos_stream(false));
+    let caps = unqualified_software_capabilities("hevc");
+    let base = macos_identity("test-build");
+    let mut text_digests = Vec::new();
+    let mut bitmap_digests = Vec::new();
+    let mut plain_digests = Vec::new();
+    for font in ["a", "b"] {
+        let context = macos_context(true, MacosProcessingAvailability::Available)
+            .with_text_identity(base.clone().with_text_fonts(font.repeat(64)))
+            .with_graph(
+                MacosProcessingGraph::SdrTextBurn,
+                MacosProcessingAvailability::Available,
+            )
+            .with_graph(
+                MacosProcessingGraph::SdrBitmapBurn,
+                MacosProcessingAvailability::Available,
+            );
+        for burn in [None, Some(false), Some(true)] {
+            let mut media = options(Pipeline::Cpu);
+            media.subtitle_burn = burn.map(|bitmap| SubtitleBurn {
+                subtitle_index: 0,
+                bitmap,
+            });
+            let plan = resolve_with_options(
+                Encoder::VideoToolbox,
+                media,
+                &input,
+                &caps,
+                macos_policy(context.clone()),
+            )
+            .expect("observed complete native graph");
+            let digest = plan.plan_digest();
+            match burn {
+                None => plain_digests.push(digest),
+                Some(false) => text_digests.push(digest),
+                Some(true) => bitmap_digests.push(digest),
+            }
+        }
+    }
+    assert_ne!(text_digests[0], text_digests[1]);
+    assert_eq!(bitmap_digests[0], bitmap_digests[1]);
+    assert_eq!(plain_digests[0], plain_digests[1]);
 }
