@@ -50,6 +50,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **A server that is still starting says so.** Between binding its port and
+  finishing startup, the server answered every request with an empty `404`.
+  That window is ~20 s on a standalone install and longer on a cluster node
+  catching up. A browser saw a blank page, `/readyz` said "not found", and a
+  client probing `/api/v1/server` could conclude there was no server there. It
+  now answers `503 server_starting` with `Retry-After`, and browsers get a page
+  that reloads itself once the server is up.
 - **Station logos on the Apple and Android Live TV guides.** The web guide
   has drawn HDHomeRun's station artwork since 2026-10-03; the Apple TV, iOS
   and Android guides still showed only callsigns, because the rule that picks

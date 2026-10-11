@@ -300,6 +300,16 @@ perfectly valid request can 503 on one node and succeed on its neighbour.
 `learner_route_ineligible` carries no `Retry-After` on purpose: the refusal is
 a role, not a transient.
 
+**Before the router exists.** The listener is bound before the store is
+selected, so a joining learner can answer clock observation. Until startup
+hands the socket to the application, every other route answers `503
+server_starting` with `Retry-After: 2` and `Cache-Control: no-store`. This
+window is seconds on a standalone server and can last as long as a snapshot
+transfer on a cluster node. A request whose `Accept` names `text/html` gets a
+small page that says the server is starting and reloads itself, so a browser
+tab opened during startup lands in the app without a manual refresh.
+`/readyz` is answered the same way: not ready, rather than not found.
+
 **The maintenance allowlist** keeps enough surface alive to administer the
 node and to drain capabilities already issued: `/healthz`, `/readyz`,
 `/metrics`, `/`, the web assets, `GET`/`POST` of `/api/v1/auth/login` and
