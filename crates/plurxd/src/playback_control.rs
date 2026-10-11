@@ -8758,7 +8758,7 @@ impl RollingExecutorObservation {
     fn queue_decision(&self) {
         let _ = self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (!matches!(state, 3 | 4 | 7)).then_some(5)
             });
     }
@@ -8766,14 +8766,14 @@ impl RollingExecutorObservation {
     fn acknowledge(&self) {
         let _ = self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (!matches!(state, 3 | 4 | 7)).then_some(6)
             });
     }
 
     fn begin_observing(&self) -> bool {
         self.state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (!matches!(state, 3 | 4 | 7)).then_some(2)
             })
             .is_ok()
@@ -8788,7 +8788,7 @@ impl RollingExecutorObservation {
     fn settle_terminal(&self) {
         let _ = self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (state != 4).then_some(3)
             });
     }
@@ -8796,14 +8796,14 @@ impl RollingExecutorObservation {
     fn settle_lost(&self) {
         let _ = self
             .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (!matches!(state, 3 | 4 | 7)).then_some(4)
             });
     }
 
     fn settle_expected(&self) -> bool {
         self.state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (!matches!(state, 3 | 4 | 7)).then_some(7)
             })
             .is_ok()

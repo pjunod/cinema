@@ -82,7 +82,10 @@ test('worker unavailable fallback preserves provenance and attachment cancellati
  owner.close();await checked;
 });
 test('a stuck worker fails its own jobs and the next job uses a fresh worker',async()=>{
- const env=environment(index=>index===0),owner=env.context.continuousMediaVerifier({deadlineMs:50});
+ // The one deadline bounds both jobs, and the second one pays a fresh worker
+ // thread's start-up. At 50 ms that start-up alone missed it on a loaded
+ // runner (2 of 8 local runs); the stuck worker still fails by the deadline.
+ const env=environment(index=>index===0),owner=env.context.continuousMediaVerifier({deadlineMs:1000});
  const payload=new Uint8Array([1,2,3]);
  await assert.rejects(owner.digest(payload),/verification deadline/);
  assert.equal(env.workers.length,1);assert.ok(env.workers[0].terminated);

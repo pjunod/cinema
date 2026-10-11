@@ -15,6 +15,14 @@ bump may break compatibility and a **patch** bump never does.
   Android and Apple navigation only while their Settings switch is on. Any
   signed-in client reads the four switches from the new `GET /api/v1/features`;
   the pages stay reachable by link and show their own off state.
+- **GitHub release downloads.** Each release tag, mirrored to the public
+  GitHub repository, builds and publishes a GitHub release carrying `.deb`
+  and `.rpm` server packages for x86_64 and arm64 (the `plurxd` systemd
+  service under its own `plurx` user; Debian 12+, Ubuntu 24.04+, Fedora,
+  RHEL 9+), a universal macOS archive that installs with `./install`, the
+  Windows x64 archive, and `SHA256SUMS`. Every artifact is installed or run
+  on its target system before the release is published. See
+  docs/RELEASING.md "GitHub release downloads".
 - **Jellyfin client compatibility (experimental, off by default).** Settings →
   Developer → *Allow Jellyfin clients* opens a Jellyfin facade, reachable by
   the server's address alone on Jellyfin's standard port 8096 or at
@@ -69,6 +77,13 @@ bump may break compatibility and a **patch** bump never does.
   it can. That also clears what earlier removals left behind. A scan that
   started before an edit no longer records the old paths' root identity, which
   had made every later scan refuse cleanup as a mount mismatch.
+- **A server that is still starting says so.** Between binding its port and
+  finishing startup, the server answered every request with an empty `404`.
+  That window is ~20 s on a standalone install and longer on a cluster node
+  catching up. A browser saw a blank page, `/readyz` said "not found", and a
+  client probing `/api/v1/server` could conclude there was no server there. It
+  now answers `503 server_starting` with `Retry-After`, and browsers get a page
+  that reloads itself once the server is up.
 - **Station logos on the Apple and Android Live TV guides.** The web guide
   has drawn HDHomeRun's station artwork since 2026-10-03; the Apple TV, iOS
   and Android guides still showed only callsigns, because the rule that picks

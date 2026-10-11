@@ -1,6 +1,14 @@
 name: Windows MSVC cross-build
 description: Compile the Windows server with the repository-pinned cargo-xwin lane
 
+inputs:
+  compile-workspace:
+    description: >-
+      "false" installs the pinned target and cargo-xwin driver only, for a
+      caller that builds just what it ships (the GitHub release workflow)
+    required: false
+    default: "true"
+
 runs:
   using: composite
   steps:
@@ -37,6 +45,7 @@ runs:
           echo "$tool_dir" >> "$GITHUB_PATH"
         fi
     - name: Build the Windows workspace
+      if: inputs.compile-workspace != 'false'
       shell: bash
       env:
         AWS_LC_SYS_NO_ASM: "1"

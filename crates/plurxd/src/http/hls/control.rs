@@ -1234,7 +1234,7 @@ pub(super) struct TerminalCommitFaults {
 impl TerminalCommitFaults {
     fn consume(counter: &std::sync::atomic::AtomicUsize) -> bool {
         counter
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
                 |remaining| remaining.checked_sub(1),

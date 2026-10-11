@@ -12,6 +12,8 @@
 #   deploy/install <auto|linux|macos|windows|docker|binary> [options]
 #
 #   --binary PATH   install this prebuilt plurxd instead of building one
+#                   (a release archive's own plurxd, beside this script, is
+#                   used without it)
 #   --prefix DIR    where the binary goes (default: /usr/local, or the
 #                   Homebrew prefix on macOS); the service unit follows it
 #   --ffmpeg-archive PATH
@@ -38,7 +40,7 @@ uninstall=0
 dry_run=0
 
 usage() {
-  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 say() { printf '%s\n' "install: $*"; }
@@ -168,21 +170,71 @@ detect_platform() {
 
 # ---- shared steps ----------------------------------------------------------
 
-# The binary this install ships: --binary as given, or a release build of
-# this checkout. `--locked` matches the Dockerfile and the release workflow,
-# so every install path builds the same stamped server.
+# The binary this install ships: --binary as given; else the plurxd a release
+# archive carries beside this script (the macOS archive is the script, the
+# agent template and that binary); else a release build of this checkout.
+# `--locked` matches the Dockerfile and the release workflow, so every install
+# path builds the same stamped server.
 resolve_binary() {
+  if [ -z "$binary" ] && [ -f "$here/plurxd" ]; then
+    binary=$here/plurxd
+    say "installing the plurxd shipped beside this script"
+  fi
   if [ -n "$binary" ]; then
     [ -f "$binary" ] || die "no such file: $binary"
     [ -x "$binary" ] || die "not executable: $binary"
     case $binary in /*) ;; *) binary=$PWD/$binary ;; esac
     return
   fi
-  command -v cargo >/dev/null 2>&1 \
-    || die "cargo is not on PATH; install the Rust toolchain from rust-toolchain.toml, or pass --binary <prebuilt plurxd>"
   claim_for_user "${CARGO_TARGET_DIR:-$root/target}" "${CARGO_HOME:-$HOME/.cargo}/registry" "${CARGO_HOME:-$HOME/.cargo}/git"
-  say "building plurxd (release, --locked) in $root"
-  (cd "$root" && run cargo build --locked --release -p plurxd)
+  # Build with the toolchain rust-toolchain.toml pins. A rustup `cargo`
+  # honours that file on its own, but a cargo from anywhere else (Homebrew's
+  # `rust` formula, a distro package) ignores it and compiles with whatever
+  # release it is. And `rustup run` alone is not enough: it starts the pinned
+  # cargo without putting that toolchain first on PATH, so cargo still runs
+  # the first `rustc` it finds -- Homebrew's, on a Mac that has both. So when
+  # rustup is present, build with the pinned toolchain's own bin directory
+  # first on PATH and its rustc named outright.
+  local toolchain_file channel rustup_bin toolchain_rustc toolchain_bin path_rustc
+  toolchain_file=$root/rust-toolchain.toml
+  channel=
+  if [ -f "$toolchain_file" ]; then
+    channel=$(sed -n "s/^[[:space:]]*channel[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$toolchain_file" | head -n 1)
+  fi
+  rustup_bin=$(command -v rustup 2>/dev/null || true)
+  if [ -z "$rustup_bin" ] && [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/rustup" ]; then
+    rustup_bin=${CARGO_HOME:-$HOME/.cargo}/bin/rustup
+  fi
+  if [ -n "$rustup_bin" ]; then
+    [ -n "$channel" ] || die "rustup is installed but $toolchain_file names no channel, so the pinned toolchain is unknown"
+    say "building plurxd (release, --locked, Rust $channel) in $root"
+    if [ "$dry_run" = 1 ]; then
+      say "would install Rust $channel through $rustup_bin first if it is missing"
+      toolchain_bin="<bin directory of: rustup which --toolchain $channel rustc>"
+    else
+      # Already installed is the common case: no download, no rustup
+      # self-update, and an offline reinstall keeps working.
+      if ! toolchain_rustc=$(RUSTUP_AUTO_INSTALL=0 "$rustup_bin" which --toolchain "$channel" rustc 2>/dev/null); then
+        run "$rustup_bin" toolchain install "$channel" --profile minimal --no-self-update
+        toolchain_rustc=$(RUSTUP_AUTO_INSTALL=0 "$rustup_bin" which --toolchain "$channel" rustc) \
+          || die "rustup installed Rust $channel but cannot locate its rustc"
+      fi
+      toolchain_bin=$(dirname -- "$toolchain_rustc")
+      # Advisory only: the install is correct either way, but every other
+      # cargo or make invocation on this machine still takes PATH's rustc.
+      path_rustc=$(command -v rustc 2>/dev/null || true)
+      case $path_rustc in
+        ''|"$(dirname -- "$rustup_bin")/rustc"|"$toolchain_bin/rustc") ;;
+        *) say "note: $path_rustc comes before rustup on PATH, so plain cargo and make builds use it rather than Rust $channel (Homebrew: brew uninstall rust)" ;;
+      esac
+    fi
+    (cd "$root" && run env PATH="$toolchain_bin:$PATH" RUSTC="$toolchain_bin/rustc" cargo build --locked --release -p plurxd)
+  else
+    command -v cargo >/dev/null 2>&1 \
+      || die "cargo is not on PATH; install the Rust toolchain from rust-toolchain.toml, or pass --binary <prebuilt plurxd>"
+    say "building plurxd (release, --locked) in $root"
+    (cd "$root" && run cargo build --locked --release -p plurxd)
+  fi
   binary=${CARGO_TARGET_DIR:-$root/target}/release/plurxd
   [ "$dry_run" = 1 ] || [ -x "$binary" ] || die "build produced no $binary"
 }
@@ -262,6 +314,12 @@ install_binary_to() {
   local dir=$1
   run_for_dir "$dir" install -d "$dir"
   run_for_dir "$dir" install -m 0755 "$binary" "$dir/plurxd"
+  # A browser-downloaded release archive passes its quarantine flag on to the
+  # binary it unpacks, and Gatekeeper then refuses to let launchd run it --
+  # the same reason the Jellyfin FFmpeg tools are cleared below.
+  if [ "$mode" = macos ] && command -v xattr >/dev/null 2>&1; then
+    run_for_dir "$dir" xattr -d com.apple.quarantine "$dir/plurxd" 2>/dev/null || true
+  fi
   say "installed $dir/plurxd"
 }
 

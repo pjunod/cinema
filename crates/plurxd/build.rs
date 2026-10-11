@@ -67,6 +67,12 @@ fn embed_windows_manifest() {
     .join("plurxd.manifest");
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rustc-link-arg-bin=plurxd=/MANIFEST:EMBED");
+    // plurxd.manifest carries its own requestedExecutionLevel. Left to its
+    // default, the linker generates a UAC block too and merges the two; lld-link
+    // rewrote the result into namespace-prefixed trustInfo that Windows' loader
+    // rejects, so plurxd.exe could not start. The source file is the whole
+    // manifest; validation/release_manifest.py holds packaging to that.
+    println!("cargo:rustc-link-arg-bin=plurxd=/MANIFESTUAC:NO");
     println!(
         "cargo:rustc-link-arg-bin=plurxd=/MANIFESTINPUT:{}",
         manifest.display()
