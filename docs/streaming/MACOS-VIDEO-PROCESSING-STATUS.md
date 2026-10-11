@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups landed (PR #993); AMD and Intel strict-P5 qualified; Intel fixes in review on `effort/linux-p5-intel-qualification` · **Updated:** 2026-10-11 · **Owner:** Claude · **Integration:** `effort/linux-p5-intel-qualification`.
+**Status:** Mac follow-ups in `main` (PR #993); AMD and Intel strict-P5 qualified; Intel fixes open on `effort/linux-p5-intel-qualification` · **Updated:** 2026-10-11 · **Owner:** Claude · **Integration:** `effort/linux-p5-intel-qualification`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is

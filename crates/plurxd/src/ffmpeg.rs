@@ -4549,9 +4549,11 @@ mod tests {
     #[test]
     fn qsv_main10_probes_take_their_graph_from_the_proof_builder() {
         let source = include_str!("ffmpeg.rs");
+        // Spelled with concat! so this guard does not add a second copy of
+        // the inventory's exact source anchors for these probes.
         for probe in [
-            "pub async fn has_hdr10_passthrough_qsv(",
-            "pub async fn has_dovi_passthrough_with(",
+            concat!("pub async fn ", "has_hdr10_passthrough_qsv("),
+            concat!("pub async fn ", "has_dovi_passthrough_with("),
         ] {
             let start = source.find(probe).expect("probe is defined");
             let body = &source[start..];
