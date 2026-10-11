@@ -36,6 +36,8 @@ pub(crate) struct Hub {
     pub(crate) approve_pause: TestPause,
     #[cfg(test)]
     pub(crate) delivery_pause: TestPause,
+    #[cfg(test)]
+    pub(crate) authority_phase_delay_ms: std::sync::atomic::AtomicU64,
 }
 impl Default for Hub {
     fn default() -> Self {
@@ -48,6 +50,8 @@ impl Default for Hub {
             approve_pause: TestPause::default(),
             #[cfg(test)]
             delivery_pause: TestPause::default(),
+            #[cfg(test)]
+            authority_phase_delay_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -156,6 +160,13 @@ fn bump(s: &mut Session) -> Result<(), ApiError> {
     Ok(())
 }
 fn record_owner_outcome(s: &mut Session, command: &Command, outcome: Outcome) {
+    if outcome == Outcome::Expired {
+        tracing::info!(
+            sequence = command.sequence,
+            source = "owner_queue",
+            "cinema remote command expired"
+        );
+    }
     if s.results.len() == 64 {
         s.results.pop_front();
     }
@@ -333,6 +344,12 @@ impl Hub {
         state: &AppState,
         dispatch: &Dispatch,
     ) -> Result<RemoteReceiver, ApiError> {
+        #[cfg(test)]
+        tokio::time::sleep(Duration::from_millis(
+            self.authority_phase_delay_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ))
+        .await;
         let target = dispatch
             .request
             .target()
@@ -349,59 +366,66 @@ impl Hub {
         if receiver.user_id != dispatch.user_id {
             return Err(fail(403, "unauthorized"));
         }
-        let user = authenticate_token_digest(state, receiver_digest.clone(), TokenAudience::Native)
-            .await?;
-        if user.id != dispatch.user_id {
+        let receiver_authority = state.store.remote_authority(
+            &receiver.id,
+            dispatch.user_id,
+            RemoteProof::Receiver {
+                secret_hash: receiver_hash,
+            },
+        );
+        let caller_authority = async {
+            if dispatch.request.receiver_side() {
+                if receiver_digest != dispatch.token_digest {
+                    return Err(fail(403, "unauthorized"));
+                }
+                let hash = dispatch
+                    .proof
+                    .receiver_hash
+                    .clone()
+                    .ok_or_else(|| fail(401, "unauthorized"))?;
+                state
+                    .store
+                    .remote_authority(
+                        &receiver.id,
+                        dispatch.user_id,
+                        RemoteProof::Receiver { secret_hash: hash },
+                    )
+                    .await?
+                    .ok_or_else(|| fail(403, "unauthorized"))?;
+            } else if let Some(grant) = dispatch.request.grant_id() {
+                let hash = dispatch
+                    .proof
+                    .grant_hash
+                    .clone()
+                    .ok_or_else(|| fail(401, "unauthorized"))?;
+                state
+                    .store
+                    .remote_authority(
+                        &receiver.id,
+                        dispatch.user_id,
+                        RemoteProof::Grant {
+                            grant_id: grant.to_string(),
+                            secret_hash: hash,
+                        },
+                    )
+                    .await?
+                    .ok_or_else(|| fail(403, "unauthorized"))?;
+            }
+            Ok::<_, ApiError>(())
+        };
+        // The verified dispatch user identifies both proof reads. A revoked
+        // receiver login still rejects first; no result is accepted or cached
+        // until all independent current-authority reads have completed.
+        let (user, receiver_authority, caller_authority) = tokio::join!(
+            authenticate_token_digest(state, receiver_digest.clone(), TokenAudience::Native),
+            receiver_authority,
+            caller_authority,
+        );
+        if user?.id != dispatch.user_id {
             return Err(fail(403, "unauthorized"));
         }
-        state
-            .store
-            .remote_authority(
-                &receiver.id,
-                user.id,
-                RemoteProof::Receiver {
-                    secret_hash: receiver_hash,
-                },
-            )
-            .await?
-            .ok_or_else(|| fail(403, "unauthorized"))?;
-        if dispatch.request.receiver_side() {
-            if receiver_digest != dispatch.token_digest {
-                return Err(fail(403, "unauthorized"));
-            }
-            let hash = dispatch
-                .proof
-                .receiver_hash
-                .clone()
-                .ok_or_else(|| fail(401, "unauthorized"))?;
-            state
-                .store
-                .remote_authority(
-                    &receiver.id,
-                    dispatch.user_id,
-                    RemoteProof::Receiver { secret_hash: hash },
-                )
-                .await?
-                .ok_or_else(|| fail(403, "unauthorized"))?;
-        } else if let Some(grant) = dispatch.request.grant_id() {
-            let hash = dispatch
-                .proof
-                .grant_hash
-                .clone()
-                .ok_or_else(|| fail(401, "unauthorized"))?;
-            state
-                .store
-                .remote_authority(
-                    &receiver.id,
-                    dispatch.user_id,
-                    RemoteProof::Grant {
-                        grant_id: grant.to_string(),
-                        secret_hash: hash,
-                    },
-                )
-                .await?
-                .ok_or_else(|| fail(403, "unauthorized"))?;
-        }
+        receiver_authority?.ok_or_else(|| fail(403, "unauthorized"))?;
+        caller_authority?;
         Ok(receiver)
     }
     async fn refresh_authority(
@@ -409,6 +433,12 @@ impl Hub {
         state: &AppState,
         target: &plurx_core::remote_control::Target,
     ) -> Result<(), ApiError> {
+        #[cfg(test)]
+        tokio::time::sleep(Duration::from_millis(
+            self.authority_phase_delay_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ))
+        .await;
         let lease = {
             let mut sessions = self.lock()?;
             let s = Self::session(&mut sessions, target)?;
@@ -424,20 +454,20 @@ impl Hub {
             })
         };
         if let Some((rid, user, epoch, gid, digest, hash)) = lease {
-            let login = authenticate_token_digest(state, digest, TokenAudience::Native).await;
+            // Login validity and the grant proof are independent fresh reads.
+            let (login, authority) = tokio::join!(
+                authenticate_token_digest(state, digest, TokenAudience::Native),
+                state.store.remote_authority(
+                    &rid,
+                    user,
+                    RemoteProof::Grant {
+                        grant_id: gid.to_string(),
+                        secret_hash: hash,
+                    }
+                ),
+            );
             let valid = match login {
-                Ok(u) if u.id == user => state
-                    .store
-                    .remote_authority(
-                        &rid,
-                        user,
-                        RemoteProof::Grant {
-                            grant_id: gid.to_string(),
-                            secret_hash: hash,
-                        },
-                    )
-                    .await?
-                    .is_some(),
+                Ok(u) if u.id == user => authority?.is_some(),
                 _ => false,
             };
             if !valid {
@@ -633,15 +663,20 @@ impl Hub {
                 return Err(fail(503, "unavailable"));
             }
             if dispatch.request.target().is_some() {
-                self.authorize_session(state, &dispatch).await?;
-                self.refresh_authority(
-                    state,
-                    dispatch
-                        .request
-                        .target()
-                        .ok_or_else(|| fail(400, "invalid"))?,
-                )
-                .await?;
+                // Both phases read current authority independently. Await both
+                // before delivery, without serializing their quorum latency.
+                let (session, lease) = tokio::join!(
+                    self.authorize_session(state, &dispatch),
+                    self.refresh_authority(
+                        state,
+                        dispatch
+                            .request
+                            .target()
+                            .ok_or_else(|| fail(400, "invalid"))?,
+                    ),
+                );
+                session?;
+                lease?;
             }
             self.deliver(state, &dispatch).await?;
             self.expire()?;
@@ -1090,6 +1125,13 @@ impl Hub {
                     }) {
                         if s.results.len() == 64 {
                             s.results.pop_front();
+                        }
+                        if ack.outcome == Outcome::Expired {
+                            tracing::info!(
+                                sequence = ack.sequence,
+                                source = "receiver_guard",
+                                "cinema remote command expired"
+                            );
                         }
                         s.results.push_back((*ack, Instant::now()));
                     }

@@ -806,3 +806,73 @@ async fn remote_normalized_presence_budget_preserves_full_ack_state_reply() {
         64
     );
 }
+
+#[tokio::test]
+async fn remote_independent_authority_latency_does_not_expire_fresh_delivery() {
+    let f = fixture().await;
+    let (gid, secret, epoch) = paired(&f).await;
+    let input = command(&f, &gid, &epoch, 1);
+    assert_eq!(
+        call(
+            &f.app,
+            &f.phone,
+            "POST",
+            "commands",
+            input.clone(),
+            Some(("x-cinema-grant-secret", &secret))
+        )
+        .await
+        .0,
+        202
+    );
+    // Both fresh authority phases may spend 275 ms reaching quorum. Each
+    // fits the unchanged 500 ms queue budget, but their serial sum does not.
+    f.state
+        .remote
+        .authority_phase_delay_ms
+        .store(275, Ordering::Relaxed);
+    let (status, response) = poll(&f, 0, 0, 0).await;
+    assert_eq!(status, 200);
+    assert_eq!(response["commands"], json!([input]));
+}
+
+#[tokio::test]
+async fn remote_parallel_authority_keeps_the_queue_expiry_limit() {
+    let f = fixture().await;
+    let (gid, secret, epoch) = paired(&f).await;
+    assert_eq!(
+        call(
+            &f.app,
+            &f.phone,
+            "POST",
+            "commands",
+            command(&f, &gid, &epoch, 1),
+            Some(("x-cinema-grant-secret", &secret))
+        )
+        .await
+        .0,
+        202
+    );
+    f.state
+        .remote
+        .authority_phase_delay_ms
+        .store(550, Ordering::Relaxed);
+    let (status, response) = poll(&f, 0, 0, 0).await;
+    assert_eq!(status, 200);
+    assert_eq!(response["commands"], json!([]));
+    f.state
+        .remote
+        .authority_phase_delay_ms
+        .store(0, Ordering::Relaxed);
+    let (_, response) = call(
+        &f.app,
+        &f.phone,
+        "POST",
+        "state",
+        json!({"version":"cinema.remote.v1",
+        "target":f.target,"grant_id":gid,"after_revision":0,"wait_ms":0}),
+        Some(("x-cinema-grant-secret", &secret)),
+    )
+    .await;
+    assert_eq!(response["outcomes"][0]["outcome"], "expired");
+}
