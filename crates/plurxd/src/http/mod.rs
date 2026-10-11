@@ -27,6 +27,7 @@ pub(crate) mod file_grants;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
 pub(crate) mod images;
+pub(crate) mod index_coverage;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_auth_revocation;
 pub(crate) mod internal_clock;
@@ -332,6 +333,7 @@ fn http_route_group(path: &str) -> usize {
         "/api/v1/items/{id}"
         | "/api/v1/files/{id}/subtitles/search"
         | "/api/v1/files/{id}/subtitles/download"
+        | "/api/v1/files/{id}/subtitles/transcribe"
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
         | "/api/v1/items/{id}/reanalyze"
@@ -343,6 +345,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/timeline-annotations/{kind}"
         | "/api/v1/dv-conversions"
         | "/api/v1/analysis/summary"
+        | "/api/v1/analysis/coverage"
         | "/api/v1/analysis/jobs"
         | "/api/v1/analysis/jobs/{id}"
         | "/api/v1/analysis/jobs/{id}/retry"
@@ -493,9 +496,11 @@ fn http_route_group(path: &str) -> usize {
         "/"
         | "/api/v1/server"
         | "/api/v1/settings"
+        | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
         | "/api/v1/developer/macos-video-processing/reprobe"
+        | "/api/v1/system/video-processing/reprobe"
         | "/api/v1/scan"
         | "/api/v1/scan/status"
         | "/api/v1/scan/requests/{id}"
@@ -1597,6 +1602,10 @@ pub fn router(state: AppState) -> Router {
         .route("/dv-conversions", get(dv_disk::status))
         .route("/files/{id}/preparation", get(preparation::status))
         .route("/analysis/summary", get(analysis::summary))
+        .route(
+            "/analysis/coverage",
+            get(index_coverage::status).post(index_coverage::start),
+        )
         .route("/analysis/jobs", get(analysis::jobs))
         .route("/analysis/jobs/{id}", get(analysis::job))
         .route("/hubs", get(browse::hubs))
