@@ -67,16 +67,18 @@ function harness(answer) {
       "function logout(){}",
       "function fetch(url,init){sent.push({url,init});return Promise.resolve(answer);}",
       "function toast(message){toasts.push(message);}",
-      "function transcoderCard(){return '';}",
+      "function esc(s){return String(s??'');}",
+      shippedSource("toneMapHtml"),
+      shippedSource("transcoderCard"),
       "const document={getElementById:(id)=>elements[id]||null};",
-      "const SETTINGS_DATA={sys:{node_id:'node-a',transcoder_optimization:{}}};",
+      "const SETTINGS_DATA={sys:{node_id:'node-a',hwaccel_pref:'qsv',hwaccel_requested:'qsv',encoders:{qsv:true},transcoder_optimization:{}}};",
       apiPrelude() + shippedSource("api"),
       shippedSource("optimizeNodeTranscoder"),
       shippedSource("saveNodeHwaccel"),
-      "return {optimizeNodeTranscoder, saveNodeHwaccel, SETTINGS_DATA};",
+      "return {api, optimizeNodeTranscoder, saveNodeHwaccel, SETTINGS_DATA};",
     ].join("\n"),
   )({ parseStreamFailure: () => null }, answer, sent, toasts, elements);
-  return { ...buttons, sent, toasts, status };
+  return { ...buttons, sent, toasts, status, card };
 }
 
 test("optimize posts node_id as an object", async () => {
@@ -90,6 +92,10 @@ test("optimize posts node_id as an object", async () => {
   assert.deepEqual(h.toasts, [], "a started benchmark raises no error toast");
   assert.equal(h.SETTINGS_DATA.sys.transcoder_optimization.running, true);
   assert.equal(button.disabled, true, "the button stays disabled while it runs");
+  // The success path re-renders the real card in its running state; the
+  // select it restores the draft into is still there, and the button says so.
+  assert.match(h.card.outerHTML, /<select id="node-hwaccel" data-node-id="node-a">/);
+  assert.match(h.card.outerHTML, /disabled>Optimizing…<\/button>/);
 });
 
 test("save puts node_id and preference as an object", async () => {
@@ -112,5 +118,30 @@ test("a real optimize refusal reaches the card in the server's words", async () 
   const button = { disabled: false };
   await h.optimizeNodeTranscoder(button);
   assert.deepEqual(h.toasts, ["A transcoder benchmark is already running."]);
+  assert.equal(button.disabled, false);
+});
+
+test("api refuses a pre-serialized body before sending anything", async () => {
+  const h = harness(reply(200, {}));
+  for (const body of ['{"node_id":"node-a"}', new String("{}")]) {
+    await assert.rejects(
+      h.api("/system/transcoder", { method: "POST", body }),
+      (error) => error instanceof TypeError && /not a JSON string/.test(error.message),
+    );
+  }
+  assert.equal(h.sent.length, 0, "nothing reached the wire");
+});
+
+test("a refusal with no JSON sentence still names its status", async () => {
+  const plain = {
+    status: 422,
+    ok: false,
+    headers: { get: () => null },
+    text: () => Promise.resolve("Failed to deserialize the JSON body into the target type"),
+  };
+  const h = harness(plain);
+  const button = { disabled: false };
+  await h.optimizeNodeTranscoder(button);
+  assert.deepEqual(h.toasts, ["request failed (HTTP 422)"]);
   assert.equal(button.disabled, false);
 });
