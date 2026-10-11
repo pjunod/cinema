@@ -386,6 +386,59 @@ pub async fn first_frame_luminance(
     Ok(frame_luminance_from(&document))
 }
 
+/// What the first frame says about a catalogued file whose stream document
+/// left its transfer to the bitstream: the HDR columns a scan of the same
+/// bytes would now write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameDynamicRange {
+    pub hdr: String,
+    pub hdr_format: Option<String>,
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+    pub luminance_source: String,
+}
+
+/// Whether a retained stream document is one the scanner would now ask its
+/// first frame about (see `transfer_left_to_bitstream`). The fleet backfill's
+/// eligibility, so it reads exactly the rows a fresh scan would.
+pub fn stored_document_leaves_transfer_to_bitstream(probe_json: &str) -> bool {
+    serde_json::from_str::<Value>(probe_json)
+        .is_ok_and(|document| transfer_left_to_bitstream(&document, &parse_probe_json(&document)))
+}
+
+/// Classify a retained stream document with its file's first frame, by the
+/// scanner's own rules. `None` when the document is not eligible or the frame
+/// says the stream is not HDR — the row stays SDR.
+pub fn classify_frame_dynamic_range(probe_json: &str, frame: &Value) -> Option<FrameDynamicRange> {
+    let document = serde_json::from_str::<Value>(probe_json).ok()?;
+    let mut result = parse_probe_json(&document);
+    if !transfer_left_to_bitstream(&document, &result) {
+        return None;
+    }
+    apply_frame_dynamic_range(&mut result, &document, frame);
+    let hdr = result.hdr.take()?;
+    if result.luminance_source.as_deref() == Some("none") {
+        apply_frame_luminance(&mut result, frame);
+    }
+    Some(FrameDynamicRange {
+        hdr,
+        hdr_format: result.hdr_format,
+        max_cll: result.max_cll,
+        max_fall: result.max_fall,
+        mastering_max_luminance: result.mastering_max_luminance,
+        luminance_source: result.luminance_source.unwrap_or_else(|| "none".to_owned()),
+    })
+}
+
+/// The scanner's bounded first-frame read (one frame, one thread, 30 s /
+/// 256 KiB, background class) for a file already in the catalog, as the raw
+/// ffprobe document for [`classify_frame_dynamic_range`]. `Err` means the
+/// read did not happen or ffprobe refused the file.
+pub async fn first_frame_document(path: &Path, purpose: &'static str) -> Result<Value, ProbeError> {
+    probe_first_frame(path, Some(1), purpose).await
+}
+
 fn frame_luminance_from(document: &Value) -> Option<FrameLuminance> {
     let mut observed = ProbeResult::default();
     apply_frame_luminance(&mut observed, document);
@@ -1479,6 +1532,37 @@ pub(crate) mod tests {
             assert_eq!(result.hdr_format, None, "{frame_transfer}");
             assert_eq!(result.luminance_source, None, "{frame_transfer}");
         }
+    }
+
+    #[test]
+    fn a_catalogued_document_is_reclassified_by_the_scanners_rules() {
+        let pq = serde_json::to_string(&vui_only_stream(Some("unknown"), None)).expect("json");
+        assert!(stored_document_leaves_transfer_to_bitstream(&pq));
+        let frame = first_frame(
+            "smpte2084",
+            json!([{"side_data_type": "Content light level metadata",
+                    "max_content": 1000, "max_average": 400}]),
+        );
+        assert_eq!(
+            classify_frame_dynamic_range(&pq, &frame),
+            Some(FrameDynamicRange {
+                hdr: "hdr10".to_owned(),
+                hdr_format: Some("HDR10".to_owned()),
+                max_cll: Some(1000),
+                max_fall: Some(400),
+                mastering_max_luminance: None,
+                luminance_source: "frame".to_owned(),
+            })
+        );
+        assert_eq!(
+            classify_frame_dynamic_range(&pq, &first_frame("bt709", json!([]))),
+            None,
+            "a frame that says SDR leaves the row SDR"
+        );
+        let signalled = serde_json::to_string(&vui_only_stream(Some("bt709"), None)).expect("json");
+        assert!(!stored_document_leaves_transfer_to_bitstream(&signalled));
+        assert_eq!(classify_frame_dynamic_range(&signalled, &frame), None);
+        assert!(!stored_document_leaves_transfer_to_bitstream("not json"));
     }
 
     #[test]

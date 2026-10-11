@@ -464,6 +464,8 @@ const MEDIA_METHODS: &[&str] = &[
     "set_file_luminance",
     "files_without_luminance_facts",
     "set_file_frame_luminance",
+    "files_with_unsignalled_transfer",
+    "set_file_frame_dynamic_range",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "playback_planning_snapshot",
@@ -19337,7 +19339,14 @@ fn contract_inventory_matches_every_store_method() {
     // +9 -> 475: continuous quality's ledger, reservation, family-binding and
     // cancellation-receipt methods on `MediaSessionStore`, listed in
     // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
-    assert_eq!(declared.len(), 478, "review the Store method count");
+    // 478 -> 480 for the unsignalled-transfer re-probe on `MediaStore`:
+    // `files_with_unsignalled_transfer` lists SDR rows whose stored document
+    // could leave HDR to the bitstream, and `set_file_frame_dynamic_range`
+    // records the first frame's classification fenced to that snapshot and to
+    // the row still being SDR. Both are named in `MEDIA_METHODS` and covered
+    // on both backends by `unsignalled_transfer_candidates_and_writes_are_exactly_fenced`.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 480, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -20556,6 +20565,172 @@ async fn frame_luminance_candidates_and_writes_are_exactly_fenced() {
                 .collect::<Vec<_>>(),
             vec![second],
             "{backend}: an observed row leaves the candidate set"
+        );
+    })
+    .await;
+}
+
+/// The unsignalled-transfer re-probe lists SDR rows that could carry HDR in
+/// the bitstream, walks them by id, and its write lands only on the exact
+/// snapshot it listed while that row is still SDR.
+#[tokio::test]
+async fn unsignalled_transfer_candidates_and_writes_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Unsignalled transfer".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/unsignalled".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Unsignalled fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        let seed = |path: &'static str,
+                    hdr: Option<&'static str>,
+                    bit_depth: Option<i64>,
+                    primaries: &'static str| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .upsert_file(
+                        item,
+                        path,
+                        10,
+                        20,
+                        &ProbeResult {
+                            hdr: hdr.map(str::to_owned),
+                            bit_depth,
+                            raw_json: Some(format!(
+                                r#"{{"streams":[{{"codec_type":"video","color_primaries":"{primaries}"}}],"p":"{path}"}}"#
+                            )),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: file {path}: {error}"))
+            }
+        };
+        let first = seed("/unsignalled/a.mkv", None, Some(10), "unknown").await;
+        seed("/unsignalled/b.mkv", Some("hdr10"), Some(10), "bt2020").await;
+        seed("/unsignalled/c.mkv", None, Some(8), "bt709").await;
+        let second = seed("/unsignalled/d.mkv", None, Some(8), "bt2020").await;
+
+        let page = store
+            .files_with_unsignalled_transfer(0, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert_eq!(
+            page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![first],
+            "{backend}: bounded, ascending"
+        );
+        let after = store
+            .files_with_unsignalled_transfer(first, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: next page: {error}"));
+        assert_eq!(
+            after.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: only SDR rows that are deep or BT.2020, strictly after the cursor"
+        );
+
+        let observed = plurx_core::scan::probe::FrameDynamicRange {
+            hdr: "hdr10".into(),
+            hdr_format: Some("HDR10".into()),
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            mastering_max_luminance: Some(1000),
+            luminance_source: "frame".into(),
+        };
+        let candidate = page.into_iter().next().expect("candidate");
+        let mut stale_mtime = candidate.clone();
+        stale_mtime.mtime += 1;
+        let mut stale_size = candidate.clone();
+        stale_size.size += 1;
+        let mut stale_path = candidate.clone();
+        stale_path.path = "/unsignalled/elsewhere.mkv".into();
+        let mut stale_probe = candidate.clone();
+        stale_probe.probe_json = r#"{"streams":[],"p":"rescanned"}"#.into();
+        for (field, stale) in [
+            ("mtime", stale_mtime),
+            ("size", stale_size),
+            ("path", stale_path),
+            ("probe_json", stale_probe),
+        ] {
+            assert!(
+                !store
+                    .set_file_frame_dynamic_range(&stale, &observed)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: stale {field}: {error}")),
+                "{backend}: a snapshot differing only in {field} is refused"
+            );
+            assert_eq!(
+                store
+                    .get_file(first)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                    .expect("stored file")
+                    .hdr,
+                None,
+                "{backend}: a refused {field} write left the row alone"
+            );
+        }
+        assert!(store
+            .set_file_frame_dynamic_range(&candidate, &observed)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: write: {error}")));
+        let stored = store
+            .get_file(first)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .expect("stored file");
+        assert_eq!(
+            (
+                stored.hdr.as_deref(),
+                stored.hdr_format.as_deref(),
+                stored.max_cll,
+                stored.max_fall,
+                stored.mastering_max_luminance,
+                stored.luminance_source.as_deref()
+            ),
+            (
+                Some("hdr10"),
+                Some("HDR10"),
+                Some(1000),
+                Some(400),
+                Some(1000),
+                Some("frame")
+            )
+        );
+        assert!(
+            !store
+                .set_file_frame_dynamic_range(&candidate, &observed)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: repeated write: {error}")),
+            "{backend}: a row no longer SDR refuses a repeated write"
+        );
+        assert_eq!(
+            store
+                .files_with_unsignalled_transfer(0, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: final page: {error}"))
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: a reclassified row leaves the candidate set"
         );
     })
     .await;

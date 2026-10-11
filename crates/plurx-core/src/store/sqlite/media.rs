@@ -2170,6 +2170,65 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn files_with_unsignalled_transfer(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        self.with_conn(move |conn| {
+            let rows = conn
+                .prepare(
+                    "SELECT id, path, size, mtime, probe_json FROM files
+                      WHERE hdr IS NULL AND probe_json IS NOT NULL AND id > ?1
+                        AND (bit_depth >= 10 OR instr(probe_json, '\"bt2020\"') > 0)
+                      ORDER BY id LIMIT ?2",
+                )?
+                .query_map(params![after_id, limit.max(0)], |row| {
+                    Ok(MissingVideoCodecTag {
+                        id: row.get(0)?,
+                        path: row.get(1)?,
+                        size: row.get(2)?,
+                        mtime: row.get(3)?,
+                        probe_json: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn set_file_frame_dynamic_range(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        observed: &crate::scan::probe::FrameDynamicRange,
+    ) -> Result<bool, StoreError> {
+        let candidate = candidate.clone();
+        let observed = observed.clone();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE files SET hdr = ?1, hdr_format = ?2, max_cll = ?3, max_fall = ?4,
+                                  mastering_max_luminance = ?5, luminance_source = ?6
+                  WHERE id = ?7 AND path = ?8 AND size = ?9 AND mtime = ?10
+                    AND probe_json = ?11 AND hdr IS NULL",
+                params![
+                    observed.hdr,
+                    observed.hdr_format,
+                    observed.max_cll,
+                    observed.max_fall,
+                    observed.mastering_max_luminance,
+                    observed.luminance_source,
+                    candidate.id,
+                    candidate.path,
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json
+                ],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn set_file_frame_luminance(
         &self,
         candidate: &MissingVideoCodecTag,

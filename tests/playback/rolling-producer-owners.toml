@@ -2898,7 +2898,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # tests spawn settings_observer_loop and cancel then await it; vod/tests/
 # chunk_03.rs and vodencode_tests.rs each spawn one parked serve_segment GET
 # that the test awaits inside a 5 s timeout after advancing paused time.
-expected_occurrences = 935
+# F4 fleet repair: +1 production, the unsignalled-transfer re-probe spawned
+# from the per-tick maintenance block beside the luminance frame walk. Like
+# it, a leased catalogue job (`catalogue:unsignalled-transfer`) that walks a
+# node-local cursor, runs its bounded frame reads through the scanner's
+# owned child and releases the lease before it returns; it owns no producer
+# and no timer.
+expected_occurrences = 936
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
