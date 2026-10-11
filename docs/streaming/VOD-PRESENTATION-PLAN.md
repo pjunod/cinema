@@ -262,10 +262,13 @@ stable time inside the bytes):
   candidate (three equal counts are ordinary in black, static or slide
   content), the producer reads on and every fragment it has seen must match,
   until one candidate is left or the landing buffer reaches one segment's
-  byte ceiling. Two outcomes are a typed producer failure plus an index
-  invalidation, not a silent drift: a sequence matching **nowhere** at or
-  before the target, and one still matching in **two** places when the
-  reading stops. That is what keeps D4's promise
+  byte ceiling. The discard to the target then runs on past whatever the
+  buffer held, and every fragment read until the first segment is cut must
+  weigh what its index row says. Three outcomes are a typed producer failure
+  plus an index invalidation, not a silent drift: a sequence matching
+  **nowhere** at or before the target, one still matching in **two** places
+  when the reading stops, and a landing a later fragment **contradicts**.
+  That is what keeps D4's promise
   that an ffmpeg upgrade which re-fragments differently fails loudly —
   different fragmentation means different output byte counts, so the sequence
   misses rather than misaligning.

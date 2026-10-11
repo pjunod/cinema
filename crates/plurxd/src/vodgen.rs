@@ -188,6 +188,8 @@ where
         landing: Vec::new(),
         landing_bytes: 0,
         observed: Vec::new(),
+        discard_remaining: 0,
+        verify_row: None,
         segmenter: None,
         produced_through: None,
         warned_memory: false,
@@ -274,6 +276,16 @@ struct GenerationRun<'a, S> {
     /// quantity [`match_landing`] compares (its tests say so: index
     /// `video_bytes`, never the wire length).
     observed: Vec<u32>,
+    /// Video-carrying fragments still to drop before the target entry
+    /// begins. The landing can sit further before the target than the
+    /// buffer that decided it reaches, so the discard outlives the buffer.
+    discard_remaining: usize,
+    /// The index row the next video-carrying fragment must weigh, from the
+    /// landing until the first segment is cut. A landing is a claim about
+    /// where the stream is; every fragment read before the first publication
+    /// is evidence for or against it, and the first that disagrees is the
+    /// typed landing failure instead of a segment of the wrong film.
+    verify_row: Option<usize>,
     segmenter: Option<Segmenter>,
     produced_through: Option<u32>,
     warned_memory: bool,
@@ -421,7 +433,7 @@ impl<S: Sink> GenerationRun<'_, S> {
         }
         let fragment = fragment;
         if self.segmenter.is_some() {
-            self.push_to_segmenter(fragment).await?;
+            self.feed_landed(fragment).await?;
         } else {
             if self.served.is_none() {
                 return Err(Outcome::Failed(Failure::Stream(
@@ -602,6 +614,7 @@ impl<S: Sink> GenerationRun<'_, S> {
             )));
         };
         let entry_start_ticks = entry.start_ticks;
+        let mut landed = None;
         let discards = if let Some(index) = &self.generation.index {
             let Some(target) = entry_row(index, entry) else {
                 return Err(landing_failed(format!(
@@ -620,6 +633,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                 }
                 Err(error) => return Err(landing_failed(error.to_string())),
             };
+            landed = Some(row);
             target - row
         } else {
             if self
@@ -677,18 +691,49 @@ impl<S: Sink> GenerationRun<'_, S> {
         // Drop the first `discards` video-carrying fragments — the index
         // counts fragments of the video-only pipe, so a fragment without
         // video (a leading audio-only flush) does not count against the
-        // discard — and feed everything after them onward.
-        let mut to_drop = discards;
+        // discard — and feed everything after them onward. The count runs on
+        // past the buffer into the fragments still to come, and every one of
+        // them is checked against the index until the first cut.
+        self.discard_remaining = discards;
+        self.verify_row = landed;
         let buffered = std::mem::take(&mut self.landing);
         self.landing_bytes = 0;
         for fragment in buffered {
-            if to_drop > 0 {
-                if self.video_bytes_of(&fragment).is_some() {
-                    to_drop -= 1;
-                }
-                continue;
+            self.feed_landed(fragment).await?;
+        }
+        Ok(())
+    }
+
+    /// One fragment after the landing: verify it against the index while the
+    /// landing is still unproven by a publication, drop it while the discard
+    /// to the target entry is unfinished, and otherwise cut it.
+    async fn feed_landed(&mut self, fragment: Fragment) -> Result<(), Outcome> {
+        let video_bytes = self.video_bytes_of(&fragment);
+        if let (Some(bytes), Some(row)) = (video_bytes, self.verify_row) {
+            let expected = self
+                .generation
+                .index
+                .as_ref()
+                .and_then(|index| index.rows.get(row))
+                .map(|row| row.video_bytes);
+            if expected != Some(bytes) {
+                return Err(landing_failed(format!(
+                    "the landing did not hold: the fragment placed at index \
+                     row {row} weighs {bytes} video bytes and the index says \
+                     {expected:?}"
+                )));
             }
-            self.push_to_segmenter(fragment).await?;
+            self.verify_row = Some(row + 1);
+        }
+        if self.discard_remaining > 0 {
+            if video_bytes.is_some() {
+                self.discard_remaining -= 1;
+            }
+            return Ok(());
+        }
+        self.push_to_segmenter(fragment).await?;
+        if self.produced_through.is_some() {
+            self.verify_row = None;
         }
         Ok(())
     }
@@ -2084,6 +2129,77 @@ mod tests {
             writes.first().map(|(entry, _)| *entry),
             Some(start_entry),
             "the landing at row 4 must discard forward to entry {start_entry}"
+        );
+    }
+
+    /// The first video entry whose row is further from row 0 than a landing
+    /// window, so a generation fed from the top of the film lands more
+    /// fragments before its target than the buffer that decided the landing.
+    fn an_entry_past_the_landing_window(film: &Film) -> u32 {
+        film.plan
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == PlanEntryKind::Video)
+            .find(|entry| entry_row(&film.index, entry).is_some_and(|row| row > LANDING_WINDOW))
+            .map(|entry| entry.index)
+            .expect("the fixture needs a video entry past the landing window")
+    }
+
+    /// Review of F1 (2026-10-11): `engage` dropped only the discards its
+    /// three-fragment buffer held. A landing further back than that threw the
+    /// rest of the count away and published the fragments in front of the
+    /// target under the target's index — the wrong film, silently.
+    #[tokio::test]
+    async fn a_landing_further_back_than_its_buffer_discards_all_the_way_to_its_entry() {
+        let film = film().await;
+        let full = MemSink::default();
+        let outcome = run(&film.feed[..], generation(&film, 0), &full, "full").await;
+        assert!(matches!(outcome, Outcome::Ran { .. }), "{outcome:?}");
+        let full = full.taken();
+
+        let start_entry = an_entry_past_the_landing_window(&film);
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..], generation(&film, start_entry), &sink, "far").await;
+        assert!(matches!(outcome, Outcome::Ran { .. }), "{outcome:?}");
+        let writes = sink.taken();
+        assert_eq!(writes.first().map(|(entry, _)| *entry), Some(start_entry));
+        let payload = video_payload_len(&film, start_entry);
+        assert!(payload > 0);
+        let of_full = mdat_payload(&full[start_entry as usize].1);
+        let of_far = mdat_payload(&writes[0].1);
+        assert!(of_full.len() >= payload && of_far.len() >= payload);
+        assert_eq!(
+            of_far[..payload],
+            of_full[..payload],
+            "entry {start_entry} must carry its own video, not the fragments in front of it"
+        );
+    }
+
+    /// A landing that the next fragments contradict is a coincidence, not a
+    /// landing: rows 0..3 still weigh what the generation emits, row 3 no
+    /// longer does. This is also the shape of a true landing past the target
+    /// with a three-fragment coincidence before it.
+    #[tokio::test]
+    async fn a_landing_its_later_fragments_contradict_fails_typed() {
+        let mut film = film().await;
+        let start_entry = an_entry_past_the_landing_window(&film);
+        let row = &mut film.index.rows[LANDING_WINDOW];
+        row.video_bytes = row.video_bytes.wrapping_add(1);
+        let sink = MemSink::default();
+        let outcome = run(
+            &film.feed[..],
+            generation(&film, start_entry),
+            &sink,
+            "liar",
+        )
+        .await;
+        let Outcome::Failed(Failure::Landing(why)) = &outcome else {
+            panic!("a contradicted landing must fail typed: {outcome:?}");
+        };
+        assert!(why.contains("did not hold"), "{why}");
+        assert!(
+            sink.taken().is_empty(),
+            "nothing of the wrong film is published"
         );
     }
 
