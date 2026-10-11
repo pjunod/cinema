@@ -71,7 +71,10 @@ class AutoDecisionGateTest {
         // The attachment presented 480p; the control plane still names the
         // 720p rung the continuous session started on.
         assertEquals("480", autoCandidateAfterEffectiveSelection("480", "720", continuousMember = true))
-        assertEquals("720", autoCandidateAfterEffectiveSelection("480", "720", continuousMember = false))
+        assertEquals("480", autoCandidateAfterEffectiveSelection("480", "720", continuousMember = true, onScreen = "480"))
+        // A lost presentation report left 480p; the frame on screen is 720p.
+        assertEquals("720", autoCandidateAfterEffectiveSelection("480", "720", continuousMember = true, onScreen = "720"))
+        assertEquals("720", autoCandidateAfterEffectiveSelection("480", "720", continuousMember = false, onScreen = "480"))
         assertEquals(null, autoCandidateAfterEffectiveSelection("480", null, continuousMember = false))
     }
 }

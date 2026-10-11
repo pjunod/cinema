@@ -3297,8 +3297,10 @@ class Controller internal constructor(
                 onAcknowledged = ::acknowledgementDelivered,
                 onEffectiveSelection = { effective ->
                     if (tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1")
-                        autoActiveCandidateId = autoCandidateAfterEffectiveSelection(autoActiveCandidateId,
-                            effective.candidateId, liveContinuous()?.hasMember(effective.candidateId) == true)
+                        autoActiveCandidateId = liveContinuous().let { family ->
+                            autoCandidateAfterEffectiveSelection(autoActiveCandidateId, effective.candidateId,
+                                family?.hasMember(effective.candidateId) == true, family?.onScreenCandidateId())
+                        }
                 },
                 onGaveUp = ::controlReportingGaveUp,
             )
@@ -6209,14 +6211,17 @@ internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForM
  * The control plane's effective selection names the session recipe's
  * candidate. A continuous family changes rung inside that one session, so for
  * a family member the server keeps naming the rung the session started on
- * while the attachment presents another. The attachment's presented rung
- * ([continuousQualityPresented]) is then the only authority on what Auto is
- * executing. Taking the server's id put Auto back on the rung it had just
- * left: every exchange re-armed link pressure and re-requested the rung
- * already playing, about every fifteen seconds.
+ * while the attachment presents another. What is on screen is then the
+ * authority on what Auto is executing: the rung whose frame the attachment
+ * observes ([onScreen]), else the last reported presentation ([current]).
+ * Taking the server's id put Auto back on the rung it had just left: every
+ * exchange re-armed link pressure and re-requested the rung already playing,
+ * about every fifteen seconds. Reading the frame, rather than keeping
+ * [current] alone, also corrects an id a lost presentation report left stale.
  */
-internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean): String? =
-    if (continuousMember) current else effective
+internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean,
+    onScreen: String? = null): String? =
+    if (continuousMember) onScreen ?: current else effective
 
 /** A directed change still owes the viewer an outcome. A settled change —
  * committed, retained, reopened or superseded — is history, not a change in
