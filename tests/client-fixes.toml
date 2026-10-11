@@ -6161,7 +6161,7 @@ test_anchor = "continuousAutoCostsAreTheDeclaredLinkRateNotThePublicationCeiling
 id = "android.continuous-presented-rung-over-session-candidate"
 commits = ["52f63b8bb8a3e5924ffeb2f540ba5286e4f07b9a"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean): String? ="
+source_anchor = "internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean,"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
 test_anchor = "aContinuousMemberKeepsThePresentedRungOverTheSessionCandidate"
 
