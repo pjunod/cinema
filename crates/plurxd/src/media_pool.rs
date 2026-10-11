@@ -1808,6 +1808,12 @@ pub(crate) async fn prepared_vod_owner(
     if let Some(decoder) = remote.decoder_caps.as_ref() {
         query.caps.video = decoder.device_caps().video;
     }
+    // `deadline` is the whole prime's (up to 45 s): it must also cover the
+    // attachment this lookup only advises. The lookup itself is the same
+    // eligible-source catalog an ordinary create bounds as one 2 s stage, so
+    // it gets that stage's bound; a miss is the conservative cache miss above
+    // and leaves the rest of the prime budget to the attachment.
+    let deadline = deadline.min(create_stage_deadline(QUALITY_CATALOG_DEADLINE));
     let result = local_quality_catalog(state, &query, deadline, Some(&catalog.binding)).await;
     if result.complete && !result.authority_refused {
         return result.candidates.into_iter().find(|entry| {

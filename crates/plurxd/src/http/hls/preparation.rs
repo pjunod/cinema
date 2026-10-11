@@ -1741,7 +1741,7 @@ pub(super) async fn process_preparation_candidate(
 /// side is unprotected.
 const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_MS as i64 + 30_000;
 pub(super) const PREPARATION_STORE_BUDGET: Duration = Duration::from_secs(5);
-const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
+pub(super) const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 
 /// M6 §3.4 — stage the successor the decision just admitted.
 ///
