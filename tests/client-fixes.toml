@@ -6191,3 +6191,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"
 source_anchor = "GmsBarcodeScanning.getClient(context, options).startScan()"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/ConnectScreenStartupTest.kt"
 test_anchor = "connectionScreenOpensWithoutStartingQrScanner"
+
+[[fixes]]
+id = "android.continuous-change-cancelled-before-owner-settles"
+commits = ["8a05e59b63f5fe4a421273305874a221b6a027da"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousReservations.kt"
+source_anchor = "unreached.getAndSet(null)?.let { return@withLock it }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousReservationsTest.kt"
+test_anchor = "aChangeCancelledWhileWaitingForTheOwnerIsReportedRetained"
