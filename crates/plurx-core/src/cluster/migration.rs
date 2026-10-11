@@ -3093,8 +3093,26 @@ async fn open_active_store_with_key(
             write_activation_marker(&active, &marker)?;
             sync_directory(&active)?;
         }
+        activation_admission
+            .revalidate()
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        ensure_activated_source_record(&config.storage.data_dir, &marker)?;
+        // The real membership constructor and clock observation establish
+        // the exact admitted SQL identity without publishing a purpose master.
+        // Both initial activation and reopen census only after that barrier.
+        let credential_key = open_active_credential_key(config, &concrete_store, &identity).await?;
+        if activation_master.is_some_and(|expected| {
+            expected.sharing_purpose_master_fingerprint()
+                != credential_key.sharing_purpose_master_fingerprint()
+        }) {
+            return Err(crate::sharing::invalid());
+        }
+        // Last, after every step the startup activation deadline bounds: a
+        // snapshot of a large restored image can take longer than that
+        // deadline, and its own budget is sized to the image below.
         if read_readdress_record(&config.storage.data_dir)?.is_some() {
-            materialize_join_snapshot(&client, &identity.node_id, "sole-voter readdress").await?;
+            materialize_join_snapshot(&client, &active, &identity.node_id, "sole-voter readdress")
+                .await?;
         } else if super::membership::restored_image_lacks_join_snapshot(&client)
             .await
             .map_err(|error| {
@@ -3120,7 +3138,7 @@ async fn open_active_store_with_key(
                 .count()
                 == 1;
             if sole_member {
-                materialize_join_snapshot(&client, &identity.node_id, "restore").await?;
+                materialize_join_snapshot(&client, &active, &identity.node_id, "restore").await?;
             } else {
                 tracing::warn!(
                     node_id = %identity.node_id,
@@ -3130,20 +3148,6 @@ async fn open_active_store_with_key(
                      backup` against the leader, then replace each affected member"
                 );
             }
-        }
-        activation_admission
-            .revalidate()
-            .map_err(|error| StoreError::Database(error.to_string()))?;
-        ensure_activated_source_record(&config.storage.data_dir, &marker)?;
-        // The real membership constructor and clock observation establish
-        // the exact admitted SQL identity without publishing a purpose master.
-        // Both initial activation and reopen census only after that barrier.
-        let credential_key = open_active_credential_key(config, &concrete_store, &identity).await?;
-        if activation_master.is_some_and(|expected| {
-            expected.sharing_purpose_master_fingerprint()
-                != credential_key.sharing_purpose_master_fingerprint()
-        }) {
-            return Err(crate::sharing::invalid());
         }
         Ok(SelectedStore {
             store,
@@ -3180,9 +3184,18 @@ async fn open_active_store_with_key(
 /// *and* the log beneath it is purged, which is the point at which a joiner
 /// starting from nothing is sent the image. A crash after publication is
 /// idempotent: the next boot observes both and finishes without rebuilding.
+///
+/// Building that snapshot copies the whole image, and may first wait for
+/// disk space, so the generic 45 s health budget does not bound it (a slow
+/// build would fail every boot, and every restart would trigger another).
+/// The build ends on its own outcome: a failed build is reported at once, and
+/// a completed one gets [`SNAPSHOT_CATCHUP_GRACE`] for publication and purge.
+/// [`join_snapshot_budget`] is only the backstop for a build that never
+/// reports, sized to the image. Progress is logged every ten seconds.
 #[cfg(feature = "hiqlite-store")]
 async fn materialize_join_snapshot(
     client: &Client,
+    active: &Path,
     node_id: &str,
     cause: &'static str,
 ) -> Result<(), StoreError> {
@@ -3202,12 +3215,31 @@ async fn materialize_join_snapshot(
     ) {
         return Ok(());
     }
+    let image = active
+        .join("state_machine")
+        .join("db")
+        .join(HIQLITE_DATABASE_FILENAME);
+    let image_bytes = std::fs::metadata(&image).map_or(0, |metadata| metadata.len());
+    let builds = client.local_db_snapshot_metrics().map_err(|error| {
+        StoreError::Database(format!("reading snapshot build metrics: {error}"))
+    })?;
+    let before = builds.snapshot();
+    let started = tokio::time::Instant::now();
+    let backstop = started + join_snapshot_budget(image_bytes);
     let target = client.trigger_db_snapshot().await.map_err(|error| {
         StoreError::Database(format!(
             "anchoring and triggering the {cause} snapshot for node {node_id}: {error}"
         ))
     })?;
-    let deadline = tokio::time::Instant::now() + HIQLITE_HEALTH_TIMEOUT;
+    tracing::info!(
+        node_id,
+        snapshot_index = target,
+        image_bytes,
+        cause,
+        "building the state-machine snapshot a joining node needs; readiness waits for it"
+    );
+    let mut built_at = None;
+    let mut next_log = started + Duration::from_secs(10);
     loop {
         let metrics = client.metrics_db().await.map_err(|error| {
             StoreError::Database(format!(
@@ -3223,18 +3255,75 @@ async fn materialize_join_snapshot(
                 node_id,
                 snapshot_index = target,
                 cause,
+                elapsed_ms = started.elapsed().as_millis() as u64,
                 "published transferable state-machine snapshot"
             );
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        let outcome = builds.snapshot();
+        if outcome.build_error.count > before.build_error.count {
+            return Err(StoreError::Database(format!(
+                "voter {node_id} failed to build the state-machine snapshot at index {target} \
+                 after {cause} ({image_bytes} byte image)"
+            )));
+        }
+        if built_at.is_none() && outcome.build_ok.count > before.build_ok.count {
+            built_at = Some(now);
+        }
+        let expired = match built_at {
+            Some(built_at) => now >= built_at + SNAPSHOT_CATCHUP_GRACE,
+            None => now >= backstop,
+        };
+        if expired {
             return Err(StoreError::Database(format!(
                 "voter {node_id} did not publish a transferable state-machine snapshot at index \
-                 {target} after {cause} within {HIQLITE_HEALTH_TIMEOUT:?}"
+                 {target} after {cause} within {:?} ({image_bytes} byte image; build {})",
+                started.elapsed(),
+                if built_at.is_some() {
+                    "completed"
+                } else {
+                    "never reported"
+                },
             )));
+        }
+        if now >= next_log {
+            tracing::info!(
+                node_id,
+                snapshot_index = target,
+                cause,
+                image_bytes,
+                elapsed_s = started.elapsed().as_secs(),
+                built = built_at.is_some(),
+                storage_deferrals = outcome
+                    .storage_deferrals_total
+                    .saturating_sub(before.storage_deferrals_total),
+                required_storage_bytes = outcome.required_storage_bytes,
+                "still waiting for the transferable state-machine snapshot; readiness waits for it"
+            );
+            next_log = now + Duration::from_secs(10);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// The slowest snapshot copy rate the backstop allows for, below any disk
+/// that would hold a voter's image.
+#[cfg(feature = "hiqlite-store")]
+const JOIN_SNAPSHOT_MIN_COPY_BYTES_PER_SECOND: u64 = 8 * 1024 * 1024;
+/// How long the snapshot builder waits for storage before it fails the build
+/// (Hiqlite's `snapshot_storage_deferral`, which Plurx leaves at its default).
+#[cfg(feature = "hiqlite-store")]
+const JOIN_SNAPSHOT_STORAGE_DEFERRAL: Duration = Duration::from_secs(600);
+
+/// Backstop for a join snapshot build that never reports an outcome: the
+/// storage wait, a copy of the whole image at a slow disk's rate, and the
+/// publication grace.
+#[cfg(feature = "hiqlite-store")]
+fn join_snapshot_budget(image_bytes: u64) -> Duration {
+    JOIN_SNAPSHOT_STORAGE_DEFERRAL
+        + Duration::from_secs(image_bytes / JOIN_SNAPSHOT_MIN_COPY_BYTES_PER_SECOND)
+        + SNAPSHOT_CATCHUP_GRACE
 }
 
 /// Resolve the key against the authoritative replicated rows on every reopen.
@@ -6943,6 +7032,44 @@ mod tests {
     /// Raft log. Clearing the recovery record before snapshot publication
     /// would make the next learner start from an empty database while still
     /// reporting an applied membership index.
+    /// The join snapshot of a restored (or readdressed) image copies the whole
+    /// image and may wait for disk space first. It runs after every step the
+    /// startup activation deadline bounds, so no revalidation of that deadline
+    /// follows it, and its own backstop exceeds the generic health budget and
+    /// grows with the image.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn join_snapshot_runs_outside_the_startup_deadline_on_an_image_sized_budget() {
+        let source = include_str!("migration.rs");
+        let open = source
+            .split_once("async fn open_active_store_with_key")
+            .expect("active store open")
+            .1
+            .split_once("/// Resolve the key")
+            .expect("active store boundary")
+            .0;
+        let census = open
+            .find("open_active_credential_key(")
+            .expect("credential census");
+        let snapshot = open
+            .find("materialize_join_snapshot(&client")
+            .expect("join snapshot");
+        assert!(
+            snapshot > census,
+            "the join snapshot must follow the census"
+        );
+        assert!(
+            !open[snapshot..].contains(".revalidate()"),
+            "nothing after the join snapshot may spend the startup deadline"
+        );
+        assert!(join_snapshot_budget(0) > HIQLITE_HEALTH_TIMEOUT);
+        let gib = 1024 * 1024 * 1024;
+        assert!(
+            join_snapshot_budget(20 * gib)
+                >= join_snapshot_budget(0) + Duration::from_secs(20 * gib / (8 * 1024 * 1024))
+        );
+    }
+
     #[cfg(feature = "hiqlite-store")]
     #[test]
     fn readdress_completion_waits_for_a_transferable_database_snapshot() {
