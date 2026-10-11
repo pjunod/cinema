@@ -43,6 +43,15 @@ pub const AHEAD_HORIZON_SECONDS: u32 = 180;
 /// useful burst while preserving the original 180-second entry line.
 pub const AHEAD_RESUME_SECONDS: u32 = 90;
 
+/// How far past [`AHEAD_RESUME_SECONDS`] a running encoder's lead must reach
+/// before it gives its permit to a queued live start.
+///
+/// The hysteresis that keeps an early yield from churning. A yielded producer
+/// re-admits at the low-water mark, so without the margin it would be
+/// yieldable again one segment after it resumed; with it, every early yield
+/// is paid for by at least this much film produced since the last restart.
+pub const AHEAD_YIELD_MARGIN_SECONDS: u32 = 30;
+
 /// Beyond this, restarting the pipeline at the demanded boundary beats letting
 /// it read forward. Under it, a copy pipe running at several times realtime
 /// closes the gap faster than a process can start.
@@ -190,6 +199,19 @@ pub struct Position {
     /// [`WorkingSet::held`]: an ahead stop must not lower the disk-pressure
     /// entry line, and the latch survives a process yielded to a live waiter.
     pub ahead_held: bool,
+    /// A new viewer's live start is queued for capacity the encoder permit
+    /// this producer holds would satisfy.
+    ///
+    /// Viewers come first and speculative ahead-fill is the lowest-priority
+    /// work on the node, so while such a start waits, a running producer whose
+    /// lead is past [`AHEAD_RESUME_SECONDS`] plus [`AHEAD_YIELD_MARGIN_SECONDS`]
+    /// reaches its ahead hold now rather than at the horizon, and
+    /// `prodexec::yield_step` turns that stop into a yield. Its reader keeps
+    /// the lead it has; the latch then re-admits it at the low-water mark like
+    /// any yielded producer. False for a producer that holds no permit, for a
+    /// waiter the release would not admit, and for another yielded
+    /// producer's re-admission — those wait for the horizon, as before.
+    pub permit_wanted: bool,
     /// The node's working set, across every rendition — not this one's.
     ///
     /// A producer inside its ahead horizon can still be the one filling the
@@ -295,6 +317,16 @@ pub fn decide(
     let horizon = position.horizon_segments(AHEAD_HORIZON_SECONDS);
     let resume = position.horizon_segments(AHEAD_RESUME_SECONDS);
     let reposition = position.horizon_segments(REPOSITION_GAP_SECONDS);
+    // The line above which an ahead-fill producer stops short of the
+    // horizon: the low-water mark once latched, the low-water mark plus the
+    // yield margin while a new start wants this permit.
+    let early_line = if position.ahead_held {
+        Some(resume)
+    } else if position.permit_wanted {
+        Some(resume.saturating_add(position.horizon_segments(AHEAD_YIELD_MARGIN_SECONDS)))
+    } else {
+        None
+    };
 
     // Owed right now: the segments open requests are waiting on and the store
     // does not have. An index off the end of the plan is dropped rather than
@@ -403,31 +435,20 @@ pub fn decide(
         // on how far past the furthest demand the producer has already run —
         // and not at all on the working set, which this producer is not adding
         // to.
-        return stop(
-            position.produced_through,
-            furthest,
-            horizon,
-            resume,
-            position.ahead_held,
-        );
+        return stop(position.produced_through, furthest, horizon, early_line);
     };
 
     // A gap beyond the ahead horizon is not owed yet — that is what the
     // horizon means. Suspend rather than run to the end of a two-hour film for
     // a reader who has watched four minutes.
     if gap > furthest.saturating_add(horizon)
-        || (position.ahead_held
-            && position
+        || early_line.is_some_and(|line| {
+            position
                 .produced_through
-                .is_some_and(|through| through > furthest.saturating_add(resume)))
+                .is_some_and(|through| through > furthest.saturating_add(line))
+        })
     {
-        return stop(
-            position.produced_through,
-            furthest,
-            horizon,
-            resume,
-            position.ahead_held,
-        );
+        return stop(position.produced_through, furthest, horizon, early_line);
     }
 
     // There is real ahead-fill to do and no room to do it in. Nobody is
@@ -507,19 +528,18 @@ fn serve_blocked(manifest: &Manifest, owed: &[u32], position: Position, repositi
     }
 }
 
-/// Suspend if the producer has run past the ahead horizon, idle if it simply
-/// has nothing to do.
+/// Suspend if the producer has run past the ahead horizon — or past the
+/// earlier line, when one applies — idle if it simply has nothing to do.
 fn stop(
     produced_through: Option<u32>,
     furthest: u32,
     horizon: u32,
-    resume: u32,
-    ahead_held: bool,
+    early_line: Option<u32>,
 ) -> Action {
     match produced_through {
         Some(through)
             if through >= furthest.saturating_add(horizon)
-                || (ahead_held && through > furthest.saturating_add(resume)) =>
+                || early_line.is_some_and(|line| through > furthest.saturating_add(line)) =>
         {
             Action::Suspend {
                 produced_through: through,
@@ -581,6 +601,7 @@ mod tests {
             positioned_at: through.map(|_| 0),
             seconds_per_segment: 7.0,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         }
     }
@@ -870,6 +891,84 @@ mod tests {
                 Position {
                     ahead_held: true,
                     ..position(Some(25))
+                },
+                &[]
+            ),
+            Action::Reposition { to: 1 }
+        );
+    }
+
+    /// Lab F5 (2026-10-11): on a node whose budget fits one encode, a live
+    /// start waited for the running producer's whole session, because a
+    /// running producer only stops at the horizon. With a new start queued
+    /// for its permit it stops at the low-water mark plus the yield margin.
+    #[test]
+    fn a_queued_live_start_brings_the_ahead_hold_down_to_the_yield_line() {
+        // 7 s segments: low-water 13, margin 5, so the yield line is 18 and
+        // the horizon 26.
+        let mut manifest = manifest(80);
+        for index in 0..=19 {
+            manifest.materialize(index, 1_000, 0);
+        }
+        assert_eq!(
+            decide(&manifest, &[demand(0)], position(Some(19)), &[]),
+            Action::Produce { next: 20 },
+            "nobody waiting: the producer runs on towards the horizon"
+        );
+        assert!(matches!(
+            decide(
+                &manifest,
+                &[demand(0)],
+                Position {
+                    permit_wanted: true,
+                    ..position(Some(19))
+                },
+                &[]
+            ),
+            Action::Suspend {
+                produced_through: 19,
+                reason: Hold::Ahead { .. },
+            }
+        ));
+    }
+
+    /// The hysteresis: a producer re-admitted at the low-water mark is not
+    /// yieldable again until it has rebuilt the margin, so two viewers on one
+    /// encoder cannot hand the permit back and forth a segment at a time.
+    #[test]
+    fn a_queued_live_start_waits_for_the_margin_and_never_takes_the_runway() {
+        for through in [13, 14, 18] {
+            let mut manifest = manifest(80);
+            for index in 0..=through {
+                manifest.materialize(index, 1_000, 0);
+            }
+            assert_eq!(
+                decide(
+                    &manifest,
+                    &[demand(0)],
+                    Position {
+                        permit_wanted: true,
+                        ..position(Some(through))
+                    },
+                    &[]
+                ),
+                Action::Produce { next: through + 1 },
+                "a lead of {through} is inside the margin"
+            );
+        }
+        // And a blocked request outranks it, as it outranks every hold.
+        let mut manifest = manifest(80);
+        for index in 0..=18 {
+            manifest.materialize(index, 1_000, 0);
+        }
+        manifest.evict(1);
+        assert_eq!(
+            decide(
+                &manifest,
+                &[waiting(1)],
+                Position {
+                    permit_wanted: true,
+                    ..position(Some(18))
                 },
                 &[]
             ),
@@ -1300,6 +1399,7 @@ mod tests {
             positioned_at: Some(0),
             seconds_per_segment: 2.0,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         let long = Position {
@@ -1307,6 +1407,7 @@ mod tests {
             positioned_at: Some(0),
             seconds_per_segment: 7.0,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(short.horizon_segments(AHEAD_HORIZON_SECONDS), 90);
@@ -1322,6 +1423,7 @@ mod tests {
             positioned_at: Some(0),
             seconds_per_segment: 0.0,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         assert!(broken.horizon_segments(AHEAD_HORIZON_SECONDS) >= 1);

@@ -7052,6 +7052,22 @@ test("severe route pressure skips intermediate rungs despite voluntary budget",(
   assert.equal(result.emergency,true);
 });
 
+test("link pressure takes the cheapest costed rung when no lower rung fits the link",()=>{
+  const f=routeQualityFixture();
+  const decide=candidates=>policy.decideCandidateTransition({state:{},
+    sample:{...f.sample,cause:"link",stalled:true,runway_ms:1000,transfer:{...f.transfer,bytes:1000000}},
+    candidates,currentId:f.high.id,target:f.target,aspect:16/9});
+  // 8 Mb/s fits neither 1440p (18.16) nor 1080p (12): holding 2160p (30)
+  // keeps the largest deficit, so the cheapest costed rung is taken.
+  const result=decide([f.low,f.middle,f.high]);
+  assert.equal(result.candidate.id,f.low.id);
+  assert.equal(result.emergency,true);
+  assert.equal(decide([{...f.low,peak_bps:null,average_bps:null},f.high]).candidate,null,
+    "an uncosted rung is never chosen for a link cause");
+  assert.equal(decide([{...f.low,peak_bps:31000000,average_bps:31000000},f.high]).candidate,null,
+    "a lower rung that costs more than the current one is no recovery");
+});
+
 test("mild route pressure survives ordinary HLS refills but only moves while draining",()=>{
   const f=routeQualityFixture();
   const args={state:{previousRunwayMs:61000},candidates:[f.low,f.middle,f.high],
@@ -7116,7 +7132,10 @@ test("cold original recovery can try an unproved compatible lower route within m
   assert.equal(result.candidate.id,low.id);
   assert.equal(result.transition,"recover");
   assert.equal(result.candidate.sustainable,false);
-  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate,null);
+  // With the fitting rung undecodable, 1440p (18.16 Mb/s) does not fit the
+  // 14 Mb/s link but is far cheaper than the 50 Mb/s original that is
+  // stalling: the smaller deficit beats holding.
+  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate.id,middle.id);
   assert.equal(policy.decideCandidateTransition({...args,sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
   assert.equal(policy.decideCandidateTransition({...args,candidates:[low,middle,{...f.original,grade:"hdr10"}],
     sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);

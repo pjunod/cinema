@@ -602,11 +602,20 @@ fn validate_continuous_media_plan(
 
 /// Server-owned delivery budgets for one immutable rendition, including its
 /// container overhead. An average is optional while a JIT film is incomplete.
+///
+/// `peak_bps` is the per-object publication ceiling: an object over it is
+/// refused, never served. It bounds one short object's worst case, so it is
+/// several times the rate the rendition actually needs over a link.
+/// `sustained_bps` is that rate: the encoder's configured rate cap (its VBV
+/// maxrate), the figure the candidate catalog already advertises for an
+/// encode route. Link decisions compare a measured link
+/// against it; publication enforcement never reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VodRenditionBandwidth {
     pub rendition_id: String,
     pub peak_bps: u64,
     pub average_bps: Option<u64>,
+    pub sustained_bps: Option<u64>,
 }
 impl VodRenditionBandwidth {
     fn valid(&self) -> bool {
@@ -614,6 +623,9 @@ impl VodRenditionBandwidth {
             && self
                 .average_bps
                 .is_none_or(|average| average > 0 && average <= self.peak_bps)
+            && self
+                .sustained_bps
+                .is_none_or(|sustained| sustained > 0 && sustained <= self.peak_bps)
     }
 }
 
@@ -2608,17 +2620,20 @@ mod tests {
                 rendition_id: low.rendition_id.clone(),
                 peak_bps: 4_000_000,
                 average_bps: Some(3_000_000),
+                sustained_bps: None,
             },
             VodRenditionBandwidth {
                 rendition_id: high.rendition_id.clone(),
                 peak_bps: 8_000_000,
                 average_bps: Some(6_000_000),
+                sustained_bps: None,
             },
         ];
         let audio_budget = VodRenditionBandwidth {
             rendition_id: soundtrack.rendition_id.clone(),
             peak_bps: 192_000,
             average_bps: Some(160_000),
+            sustained_bps: None,
         };
         let master = paired
             .master_playlist(&budgets, Some(&audio_budget))

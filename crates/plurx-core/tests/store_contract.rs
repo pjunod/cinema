@@ -269,6 +269,9 @@ const SETTINGS_METHODS: &[&str] = &[
     "get_setting_pair",
     "get_settings",
     "settings_snapshot",
+    // The replica-local read the idle observers use to decide whether a
+    // consistent read is owed; `local_setting_hint_reads_this_replicas_copy`.
+    "local_setting_hint",
     "put_setting",
     "put_setting_if_absent",
     "put_setting_if_absent_if_artwork_repair_current",
@@ -465,6 +468,8 @@ const MEDIA_METHODS: &[&str] = &[
     "set_file_luminance",
     "files_without_luminance_facts",
     "set_file_frame_luminance",
+    "files_with_unsignalled_transfer",
+    "set_file_frame_dynamic_range",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "playback_planning_snapshot",
@@ -567,6 +572,10 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    // Covered on both backends by
+    // `background_jobs_transcription_publication_is_atomic_namespaced_and_stop_fenced`
+    // (store_contract/background_jobs.rs).
+    "publish_transcription_job",
     "publish_copy_output_job",
     "publish_encoded_output_job",
     "media_preparation_history",
@@ -740,6 +749,8 @@ const COORDINATION_METHODS: &[&str] = &[
     "lease_expiry_hint",
 ];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    // `first_preparation_output_seal_is_exact_and_idempotent_on_every_backend`.
+    "seal_prepared_output",
     "observe_candidate_recovery",
     "candidate_recovery_memory",
     "record_desired_selection",
@@ -1994,6 +2005,21 @@ async fn confirm_media_activation(
 }
 
 /// Establish one current session for a playback, and return its activation.
+/// Both takeover switches on. The expiry inventory reads them in its own
+/// statement and answers `Disabled` while either is off.
+async fn enable_session_takeover(store: &dyn Store, backend: &str) {
+    store
+        .put_settings(&[
+            (plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED, "1"),
+            (
+                plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                "1",
+            ),
+        ])
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: enable session takeover: {error}"));
+}
+
 async fn current_media_session(
     store: &dyn Store,
     user_id: i64,
@@ -2324,6 +2350,217 @@ async fn a_newer_ask_reconciles_against_a_commit_that_landed_first() {
             // the newer ask, nothing else in the suite would notice.
             "{backend}: the viewer's current ask is not discarded because a \
              commit landed before it"
+        );
+    })
+    .await;
+}
+
+/// `local_setting_hint` is this replica's copy of one setting, read without
+/// consensus. A follower may lag a save, so the replicated backend is asked
+/// until it converges; SQLite's one database answers at once. An absent key
+/// is `None`, and the hint never invents a value the authority does not hold.
+#[tokio::test]
+async fn local_setting_hint_reads_this_replicas_copy() {
+    async fn converges(store: &dyn Store, key: &str, expected: Option<&str>, backend: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let hint = store
+                .local_setting_hint(key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: hint {key}: {error}"));
+            if hint.as_deref() == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{backend}: the local hint for {key} stayed {hint:?}, expected {expected:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    for_each_backend(|store, backend| async move {
+        let key = "contract.local_setting_hint";
+        assert_eq!(
+            store
+                .local_setting_hint(key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: absent hint: {error}")),
+            None,
+            "{backend}: an absent key has no hint"
+        );
+        store
+            .put_setting(key, "first")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first write: {error}"));
+        converges(store.as_ref(), key, Some("first"), backend).await;
+        store
+            .put_setting(key, "second")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second write: {error}"));
+        converges(store.as_ref(), key, Some("second"), backend).await;
+        assert_eq!(
+            store
+                .get_setting(key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: authority read: {error}"))
+                .as_deref(),
+            Some("second"),
+            "{backend}: the hint agrees with the authority once converged"
+        );
+        assert_eq!(
+            store
+                .local_setting_hint("contract.local_setting_hint.other")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: other hint: {error}")),
+            None,
+            "{backend}: one key's value is not another's hint"
+        );
+    })
+    .await;
+}
+
+/// The first private output choice of a reserved successor is sealed exactly
+/// once: the pending marker becomes complete with the receipt in the recipe, an
+/// identical replay succeeds without changing it, a different receipt is
+/// refused without touching either session, and a seal that does not carry
+/// the pending marker is invalid rather than a capture.
+#[tokio::test]
+async fn first_preparation_output_seal_is_exact_and_idempotent_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("prepared-output-seal", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-prepared-output-seal";
+        let predecessor = "11111111-1111-4111-8111-111111111401";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "11111111-1111-4111-8111-111111111402",
+            backend,
+        )
+        .await;
+        let mut staged = staged_preparation(
+            user.id,
+            playback,
+            "11111111-1111-4111-8111-111111111403",
+            "11111111-1111-4111-8111-111111111404",
+            predecessor,
+        );
+        staged.recipe_json =
+            r#"{"retained_output_receiver":1,"request":{"presentation":"vod"}}"#.to_owned();
+        staged.response_json =
+            r#"{"prepared_output_capture_pending":true,"height":720}"#.to_owned();
+        store
+            .prepare_media_session(&staged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the successor reserves"));
+        let before_predecessor = store
+            .media_session_route_by_incarnation(predecessor)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read predecessor: {error}"));
+        let receipt = serde_json::json!({
+            "artifact_id": "22222222-2222-4222-8222-222222222401",
+            "output_identity": "ab".repeat(32),
+            "average_bps": 8000,
+            "peak_bps": 12000
+        });
+        let seal = plurx_core::store::PreparedOutputSeal {
+            incarnation_id: staged.incarnation_id.clone(),
+            session_id: staged.session_id.clone(),
+            user_id: user.id,
+            playback_id: playback.to_owned(),
+            owner_node_id: "staged-node".to_owned(),
+            owner_epoch: 1,
+            expected_recipe_json: staged.recipe_json.clone(),
+            expected_response_json: staged.response_json.clone(),
+            predecessor_incarnation_id: predecessor.to_owned(),
+            predecessor_owner_node_id: "staged-node".to_owned(),
+            predecessor_owner_epoch: 1,
+            deadline_ms: staged.deadline_ms,
+            now_ms: staged.now_ms + 1,
+            already_complete: false,
+            retained_output: Some(receipt.clone()),
+        };
+        assert!(
+            store
+                .seal_prepared_output(&seal)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: first seal: {error}")),
+            "{backend}: the first seal lands"
+        );
+        let sealed = store
+            .media_session_route_by_incarnation(&staged.incarnation_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read sealed: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: sealed route"));
+        let recipe: serde_json::Value =
+            serde_json::from_str(&sealed.recipe_json).expect("sealed recipe");
+        assert_eq!(
+            recipe["retained_output"], receipt,
+            "{backend}: receipt sealed"
+        );
+        assert_eq!(
+            recipe["request"]["presentation"], "vod",
+            "{backend}: recipe kept"
+        );
+        let response: serde_json::Value =
+            serde_json::from_str(&sealed.response_json).expect("sealed response");
+        assert_eq!(
+            response["prepared_output_capture_complete"], true,
+            "{backend}"
+        );
+        assert!(
+            response.get("prepared_output_capture_pending").is_none(),
+            "{backend}: the pending marker is consumed"
+        );
+        assert_eq!(response["height"], 720, "{backend}: response kept");
+
+        assert!(
+            store
+                .seal_prepared_output(&seal)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay: {error}")),
+            "{backend}: the identical seal replays"
+        );
+        let mut changed = seal.clone();
+        changed.retained_output = Some(serde_json::json!({
+            "artifact_id": "22222222-2222-4222-8222-222222222402",
+            "output_identity": "cd".repeat(32),
+            "average_bps": 9000,
+            "peak_bps": 13000
+        }));
+        assert!(
+            !store
+                .seal_prepared_output(&changed)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: changed seal: {error}")),
+            "{backend}: a different receipt is refused"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&staged.incarnation_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reread: {error}")),
+            Some(sealed),
+            "{backend}: replay and refusal left the sealed successor unchanged"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(predecessor)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reread predecessor: {error}")),
+            before_predecessor,
+            "{backend}: sealing never touches the predecessor"
+        );
+        let mut unmarked = seal.clone();
+        unmarked.expected_response_json = "{}".to_owned();
+        assert!(
+            store.seal_prepared_output(&unmarked).await.is_err(),
+            "{backend}: a seal without the pending marker cannot authorize capture"
         );
     })
     .await;
@@ -3998,6 +4235,7 @@ async fn hiqlite_media_session_rejoin_classifies_a_post_proposal_abort() {
 #[tokio::test]
 async fn media_session_commit_advances_the_exact_expected_pointer_once() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let user = store
             .create_user("staged-commit-user", "hash", false)
             .await
@@ -4125,6 +4363,8 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
                 .expired_media_sessions(1_000_000, None, 16)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: takeover inventory: {error}"))
+                .into_expired()
+                .expect("both takeover switches are on")
                 .iter()
                 .all(|route| route.incarnation_id != predecessor),
             "{backend}: a draining predecessor is not work to inherit"
@@ -5367,6 +5607,7 @@ async fn media_session_maintenance_reaps_an_abandoned_preparation() {
 #[tokio::test]
 async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let user = store
             .create_user("activation-settle-user", "hash", false)
             .await
@@ -5469,6 +5710,8 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .expired_media_sessions(300, None, 16)
             .await
             .unwrap_or_else(|error| panic!("{backend}: list blocked takeover inventory: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on")
             .is_empty());
         assert!(store
             .claim_media_session_takeover(&MediaSessionTakeover {
@@ -5860,6 +6103,8 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                 .expired_media_sessions(401, None, 16)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: list finite takeover: {error}"))
+                .into_expired()
+                .expect("both takeover switches are on")
                 .iter()
                 .filter(|route| route.incarnation_id == finite_incarnation)
                 .count(),
@@ -6490,6 +6735,7 @@ async fn monotone_lease_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn media_session_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let first_user = store
             .create_user("session-user-a", "hash", false)
             .await
@@ -7411,7 +7657,9 @@ async fn media_session_contract_runs_through_dyn_store() {
         let expired = store
             .expired_media_sessions(399, None, 64)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on");
         let expired_b = expired
             .iter()
             .find(|route| route.session_id == session_b)
@@ -7754,6 +8002,7 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
 #[tokio::test]
 async fn ending_a_taken_over_session_acts_on_the_current_owner() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let user = store
             .create_user("takeover-end-user", "hash", false)
             .await
@@ -7922,6 +8171,8 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
                 .expired_media_sessions(4_000, None, 64)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: post-end inventory: {error}"))
+                .into_expired()
+                .expect("both takeover switches are on")
                 .iter()
                 .all(|route| route.incarnation_id != incarnation),
             "{backend}: an ended incarnation is not offered for takeover"
@@ -7948,6 +8199,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
 #[tokio::test]
 async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_page() {
     for_each_backend(|store, backend| async move {
+        enable_session_takeover(store.as_ref(), backend).await;
         let user = store
             .create_user("session-expiry-cursor-user", "hash", false)
             .await
@@ -7988,7 +8240,9 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
         let first = store
             .expired_media_sessions(1_000, None, 16)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: first cursor page: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: first cursor page: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on");
         assert_eq!(first.len(), 16, "{backend}");
         let second = store
             .expired_media_sessions(
@@ -7997,7 +8251,9 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
                 16,
             )
             .await
-            .unwrap_or_else(|error| panic!("{backend}: second cursor page: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: second cursor page: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on");
         assert_eq!(second.len(), 16, "{backend}");
         let third = store
             .expired_media_sessions(
@@ -8006,7 +8262,9 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
                 16,
             )
             .await
-            .unwrap_or_else(|error| panic!("{backend}: third cursor page: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: third cursor page: {error}"))
+            .into_expired()
+            .expect("both takeover switches are on");
         assert_eq!(third.len(), 1, "{backend}");
 
         let routes = first
@@ -8030,6 +8288,116 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
                     < (pair[1].lease_expires_at_ms, pair[1].incarnation_id.as_str())
             }),
             "{backend}: pages preserve the documented keyset ordering"
+        );
+    })
+    .await;
+}
+
+/// A node's own view of the takeover switches lags a disable saved on another
+/// node until its replica applies the save. The inventory reads both switches
+/// in its own statement, so while either is off it answers `Disabled` however
+/// many routes have expired: a caller still holding an "on" gets nothing to
+/// contest, and no route moves.
+#[tokio::test]
+async fn the_takeover_inventory_is_refused_while_either_switch_is_off() {
+    use plurx_core::domain::TakeoverInventory;
+    use plurx_core::store::keys::{CLUSTER_MEDIA_POOL_ENABLED, CLUSTER_SESSION_TAKEOVER_ENABLED};
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("takeover-switch-gate-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create gate user: {error}"));
+        let incarnation_id = uuid::Uuid::from_u128(0x6000).to_string();
+        let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
+            expected_desired_revision: None,
+            incarnation_id: incarnation_id.clone(),
+            session_id: uuid::Uuid::from_u128(0x6001).to_string(),
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
+            playback_id: "takeover-switch-gate".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "e".repeat(64),
+            owner_node_id: "gate-owner".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 100,
+            lease_expires_at_ms: 200,
+        };
+        store
+            .activate_media_session(&activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed gate route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: gate route must activate"));
+        confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        let inventory = || async {
+            store
+                .expired_media_sessions(1_000, None, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: takeover inventory: {error}"))
+        };
+
+        assert_eq!(
+            inventory().await,
+            TakeoverInventory::Disabled,
+            "{backend}: neither saved"
+        );
+        for (key, value) in [
+            (CLUSTER_MEDIA_POOL_ENABLED, "1"),
+            (CLUSTER_SESSION_TAKEOVER_ENABLED, "0"),
+        ] {
+            store
+                .put_setting(key, value)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: save {key}: {error}"));
+            assert_eq!(
+                inventory().await,
+                TakeoverInventory::Disabled,
+                "{backend}: {key}={value} leaves takeover off"
+            );
+        }
+        store
+            .put_setting(CLUSTER_SESSION_TAKEOVER_ENABLED, "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enable takeover: {error}"));
+        let listed = inventory()
+            .await
+            .into_expired()
+            .unwrap_or_else(|| panic!("{backend}: both switches on"));
+        assert_eq!(
+            listed
+                .iter()
+                .map(|route| route.incarnation_id.as_str())
+                .collect::<Vec<_>>(),
+            [incarnation_id.as_str()],
+            "{backend}: the expired route is listed once both are on"
+        );
+
+        // A disable saved after an "on" was proved: whatever the caller
+        // still holds, the authority refuses the page.
+        store
+            .put_setting(CLUSTER_MEDIA_POOL_ENABLED, "0")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: disable media pool: {error}"));
+        assert_eq!(
+            inventory().await,
+            TakeoverInventory::Disabled,
+            "{backend}: disabled again"
+        );
+        let route = store
+            .media_session_route_by_incarnation(&incarnation_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read gate route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: gate route exists"));
+        assert_eq!(
+            (route.owner_node_id.as_str(), route.owner_epoch),
+            ("gate-owner", listed[0].owner_epoch),
+            "{backend}: no route moved"
         );
     })
     .await;
@@ -19225,7 +19593,21 @@ fn contract_inventory_matches_every_store_method() {
     // +9 -> 475: continuous quality's ledger, reservation, family-binding and
     // cancellation-receipt methods on `MediaSessionStore`, listed in
     // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
-    assert_eq!(declared.len(), 480, "review the Store method count");
+    // Main reached 480 independently; the two blocks below add 5 -> 485.
+    // +2 for the unsignalled-transfer re-probe on `MediaStore`:
+    // `files_with_unsignalled_transfer` lists SDR rows whose stored document
+    // could leave HDR to the bitstream, and `set_file_frame_dynamic_range`
+    // records the first frame's classification fenced to that snapshot and to
+    // the row still being SDR. Both are named in `MEDIA_METHODS` and covered
+    // on both backends by `unsignalled_transfer_candidates_and_writes_are_exactly_fenced`.
+    // No new trait or supertrait of `Store`.
+    // +3: three methods that landed without an inventory entry are now
+    // listed with the scenarios that cover them on both backends:
+    // `local_setting_hint` (3d87c8966) in `SETTINGS_METHODS`,
+    // `publish_transcription_job` (6fae0a350) in `BACKGROUND_JOB_METHODS` and
+    // `seal_prepared_output` (265bc560a) in `MEDIA_SESSION_METHODS`.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 485, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -20444,6 +20826,172 @@ async fn frame_luminance_candidates_and_writes_are_exactly_fenced() {
                 .collect::<Vec<_>>(),
             vec![second],
             "{backend}: an observed row leaves the candidate set"
+        );
+    })
+    .await;
+}
+
+/// The unsignalled-transfer re-probe lists SDR rows that could carry HDR in
+/// the bitstream, walks them by id, and its write lands only on the exact
+/// snapshot it listed while that row is still SDR.
+#[tokio::test]
+async fn unsignalled_transfer_candidates_and_writes_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Unsignalled transfer".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/unsignalled".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Unsignalled fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        let seed = |path: &'static str,
+                    hdr: Option<&'static str>,
+                    bit_depth: Option<i64>,
+                    primaries: &'static str| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .upsert_file(
+                        item,
+                        path,
+                        10,
+                        20,
+                        &ProbeResult {
+                            hdr: hdr.map(str::to_owned),
+                            bit_depth,
+                            raw_json: Some(format!(
+                                r#"{{"streams":[{{"codec_type":"video","color_primaries":"{primaries}"}}],"p":"{path}"}}"#
+                            )),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: file {path}: {error}"))
+            }
+        };
+        let first = seed("/unsignalled/a.mkv", None, Some(10), "unknown").await;
+        seed("/unsignalled/b.mkv", Some("hdr10"), Some(10), "bt2020").await;
+        seed("/unsignalled/c.mkv", None, Some(8), "bt709").await;
+        let second = seed("/unsignalled/d.mkv", None, Some(8), "bt2020").await;
+
+        let page = store
+            .files_with_unsignalled_transfer(0, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert_eq!(
+            page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![first],
+            "{backend}: bounded, ascending"
+        );
+        let after = store
+            .files_with_unsignalled_transfer(first, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: next page: {error}"));
+        assert_eq!(
+            after.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: only SDR rows that are deep or BT.2020, strictly after the cursor"
+        );
+
+        let observed = plurx_core::scan::probe::FrameDynamicRange {
+            hdr: "hdr10".into(),
+            hdr_format: Some("HDR10".into()),
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            mastering_max_luminance: Some(1000),
+            luminance_source: "frame".into(),
+        };
+        let candidate = page.into_iter().next().expect("candidate");
+        let mut stale_mtime = candidate.clone();
+        stale_mtime.mtime += 1;
+        let mut stale_size = candidate.clone();
+        stale_size.size += 1;
+        let mut stale_path = candidate.clone();
+        stale_path.path = "/unsignalled/elsewhere.mkv".into();
+        let mut stale_probe = candidate.clone();
+        stale_probe.probe_json = r#"{"streams":[],"p":"rescanned"}"#.into();
+        for (field, stale) in [
+            ("mtime", stale_mtime),
+            ("size", stale_size),
+            ("path", stale_path),
+            ("probe_json", stale_probe),
+        ] {
+            assert!(
+                !store
+                    .set_file_frame_dynamic_range(&stale, &observed)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: stale {field}: {error}")),
+                "{backend}: a snapshot differing only in {field} is refused"
+            );
+            assert_eq!(
+                store
+                    .get_file(first)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                    .expect("stored file")
+                    .hdr,
+                None,
+                "{backend}: a refused {field} write left the row alone"
+            );
+        }
+        assert!(store
+            .set_file_frame_dynamic_range(&candidate, &observed)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: write: {error}")));
+        let stored = store
+            .get_file(first)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .expect("stored file");
+        assert_eq!(
+            (
+                stored.hdr.as_deref(),
+                stored.hdr_format.as_deref(),
+                stored.max_cll,
+                stored.max_fall,
+                stored.mastering_max_luminance,
+                stored.luminance_source.as_deref()
+            ),
+            (
+                Some("hdr10"),
+                Some("HDR10"),
+                Some(1000),
+                Some(400),
+                Some(1000),
+                Some("frame")
+            )
+        );
+        assert!(
+            !store
+                .set_file_frame_dynamic_range(&candidate, &observed)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: repeated write: {error}")),
+            "{backend}: a row no longer SDR refuses a repeated write"
+        );
+        assert_eq!(
+            store
+                .files_with_unsignalled_transfer(0, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: final page: {error}"))
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: a reclassified row leaves the candidate set"
         );
     })
     .await;

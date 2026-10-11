@@ -1,4 +1,4 @@
-//! Production writers against the candidate layout, before schema installation.
+//! Production writers against the admitted Local and installed Source layouts.
 use super::*;
 use plurx_core::playback_principal::PlaybackPrincipal;
 use plurx_core::store::media_session_principal_rebuild_schema;
@@ -21,18 +21,43 @@ async fn request_rows(client: &Client, sql: &str) -> Vec<String> {
 async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_principal_replay() {
     let _case = HIQLITE_CASE.lock().await;
     for rebuilt in [false, true] {
-        let cluster = ContractCluster::start().await;
-        let store = open_contract_hiqlite_store(&cluster).await;
-        let client = Client::remote(
-            cluster.addresses.clone(),
-            true,
-            true,
-            CONTRACT_API_SECRET.to_owned(),
-            false,
-            None,
-        )
-        .await
-        .expect("fixture client");
+        let installed_root = tempfile::tempdir().expect("installed Source fixture root");
+        let (_cluster, selected_owner, store, client) = if rebuilt {
+            install_contract_crypto_provider();
+            drop(
+                SqliteStore::open(&installed_root.path().join("plurx.db")).expect("Source SQLite"),
+            );
+            let config = one_voter_config(installed_root.path());
+            let mut selected = startup_observer::select_applied_singleton(&config)
+                .await
+                .expect("actual applied Source singleton");
+            assert!(!selected
+                .prepare_source_schema_before_serving()
+                .await
+                .expect("disabled Source startup preserves Local layout"));
+            let client = selected.local_client().expect("actual singleton client");
+            let store = HiqliteAuthStore::open(
+                client.clone(),
+                &installed_root.path().join("contract-client-telemetry.db"),
+            )
+            .await
+            .expect("verified Local predecessor store");
+            (None, Some(selected), store, client)
+        } else {
+            let cluster = ContractCluster::start().await;
+            let store = open_contract_hiqlite_store(&cluster).await;
+            let client = Client::remote(
+                cluster.addresses.clone(),
+                true,
+                true,
+                CONTRACT_API_SECRET.to_owned(),
+                false,
+                None,
+            )
+            .await
+            .expect("fixture client");
+            (Some(cluster), None, store, client)
+        };
         for result in client
             .batch(include_str!("../fixtures/session-principal-local.sql"))
             .await
@@ -41,19 +66,23 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
             result.expect("seed local rows");
         }
         if rebuilt {
-            let statements: Vec<(String, hiqlite::Params)> =
-                media_session_principal_rebuild_schema()
-                    .split("-- next statement\n")
-                    .map(|sql| {
-                        (
-                            sql.trim().trim_end_matches(';').to_owned(),
-                            hiqlite::params!(),
-                        )
-                    })
-                    .collect();
-            for result in client.txn(statements).await.expect("candidate transaction") {
-                result.expect("candidate rebuild");
-            }
+            let selected = selected_owner
+                .as_ref()
+                .expect("actual installed fixture owner");
+            selected
+                .store
+                .put_setting("sharing_enabled", "true")
+                .await
+                .expect("explicit Source activation choice");
+            let membership = selected.membership_manager();
+            membership
+                .coordinate_purpose_keys()
+                .await
+                .expect("actual purpose-key factory");
+            assert!(membership
+                .coordinate_source_schema_live()
+                .await
+                .expect("actual Source installer preserves active Local ownership"));
             for result in client
                 .batch(include_str!("../fixtures/session-principal-sharing.sql"))
                 .await
@@ -71,10 +100,22 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
                 owned.is_empty(),
                 "Shared actors are outside the Local lease loop"
             );
+            store
+                .put_settings(&[
+                    (plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED, "1"),
+                    (
+                        plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                        "1",
+                    ),
+                ])
+                .await
+                .expect("enable session takeover");
             let expired = store
                 .expired_media_sessions(9001, None, 10)
                 .await
-                .expect("shared takeover inventory");
+                .expect("shared takeover inventory")
+                .into_expired()
+                .expect("both takeover switches are on");
             assert_eq!(expired.len(), 2);
             for lease in &expired {
                 assert!(matches!(lease.principal, PlaybackPrincipal::Sharing { .. }));
@@ -423,6 +464,12 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
             assert_eq!(request_rows(&client, "SELECT state AS value FROM media_session_requests WHERE owner_key='local:1' AND request_id='runtime-request'").await, ["failed"]);
         }
         drop(store);
+        if let Some(selected) = selected_owner {
+            selected
+                .shutdown()
+                .await
+                .expect("settle Source fixture owner");
+        }
     }
 }
 

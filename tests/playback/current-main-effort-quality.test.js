@@ -281,7 +281,10 @@ test("continuous family upgrades use the enforced family budget and the family's
   const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
   const begin=source.indexOf("function candidateTransferOriginCurrent(");
   const end=source.indexOf("\nasync function ",begin+1);
-  const context=vm.createContext({URL,location:{href:"http://server/"},PlaybackPolicy:policy}); vm.runInContext(source.slice(begin,end),context);
+  const context=vm.createContext({URL,location:{href:"http://server/"},PlaybackPolicy:policy});
+  // The family cost reader lives beside the family shape, as in the page.
+  vm.runInContext(fs.readFileSync("crates/plurxd/src/web/player/continuous-quality.js","utf8"),context);
+  vm.runInContext(source.slice(begin,end),context);
   const low={id:"1".repeat(32),recipe_digest:Array(32).fill(1),route:"encode"};
   const high={id:"2".repeat(32),recipe_digest:Array(32).fill(2),route:"encode"};
   const other={id:"3".repeat(32),recipe_digest:Array(32).fill(3),route:"encode"};

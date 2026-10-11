@@ -70,6 +70,19 @@ const MAX_VERSION_BYTES: usize = 64 * 1024;
 /// number rather than either branch's.
 const PROBE_SCHEMA_VERSION: u32 = 4;
 const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a bound probe identity is trusted on its `fstat` tuples alone
+/// (DECODE-FACTS-GATE-AND-FALLBACK §3.3, M3).
+///
+/// Within one interval a validation compares the seven-field tuple of the
+/// held descriptor, of the path and of the snapshot (and, on Linux, the
+/// snapshot's seals); any difference forces the full content hash before the
+/// verdict. Past it, the next validation hashes all three regardless. Facts
+/// are unaffected — they come from the sealed image and the key names its
+/// digest. What this trades is refusal latency: a replacement the tuple
+/// cannot show (a root-level actor who also rewinds `ctime`, outside this
+/// trust model) is refused within one interval rather than at the next
+/// lookup. A constant, not a setting.
+const PROBE_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const IDET_MEDIA_SECONDS: u8 = 10;
@@ -836,6 +849,32 @@ struct ProbeFileIdentity {
     content_digest: String,
 }
 
+impl ProbeFileIdentity {
+    /// The seven `fstat` fields, without the content digest. An in-place write
+    /// moves `ctime` (an unprivileged writer cannot set it back) and a
+    /// replacement moves `inode`, so equal tuples are what lets a validation
+    /// skip the hash within one [`PROBE_REVALIDATION_INTERVAL`].
+    fn same_tuple(&self, other: &Self) -> bool {
+        (
+            self.bytes,
+            self.modified_seconds,
+            self.modified_nanoseconds,
+            self.changed_seconds,
+            self.changed_nanoseconds,
+            self.device,
+            self.inode,
+        ) == (
+            other.bytes,
+            other.modified_seconds,
+            other.modified_nanoseconds,
+            other.changed_seconds,
+            other.changed_nanoseconds,
+            other.device,
+            other.inode,
+        )
+    }
+}
+
 /// Startup-bound parser identity. Linux executes an operator-trusted,
 /// self-contained ELF from a sealed anonymous descriptor and prevents later
 /// exec. macOS interprets no native parser: a package companion is compiled
@@ -855,6 +894,13 @@ pub(crate) struct DecodeProbeIdentity {
     file: ProbeFileIdentity,
     snapshot_file: ProbeFileIdentity,
     launch_mode: ProbeLaunchMode,
+    /// When the held descriptor, the path and the snapshot were last proved
+    /// by content; `None` makes the next validation hash. Shared by clones:
+    /// it is a fact about the bound objects, not about one holder.
+    content_verified_at: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Content verifications `validate_current` has run (discovery's own
+    /// hashes are not counted).
+    content_verifications: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -906,6 +952,7 @@ impl DecodeProbeIdentity {
         bin: &str,
         launch_mode: ProbeLaunchMode,
     ) -> Result<Self, DecodeFactError> {
+        let discovery_started = std::time::Instant::now();
         // Unit fixtures are executable scripts and exercise many independent
         // startup identities in parallel. Serialize their full discovery so
         // host scheduler load cannot consume a production-scale version
@@ -1004,6 +1051,8 @@ impl DecodeProbeIdentity {
             file: before,
             snapshot_file,
             launch_mode,
+            content_verified_at: Arc::new(std::sync::Mutex::new(Some(discovery_started))),
+            content_verifications: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -1019,12 +1068,63 @@ impl DecodeProbeIdentity {
         &self.build_digest
     }
 
+    /// Prove the bound probe objects are still the ones discovered.
+    ///
+    /// Within one [`PROBE_REVALIDATION_INTERVAL`] of the last content proof
+    /// this is three `fstat`s (and the snapshot's seals): every VOD start
+    /// validates two or three times under the process-wide `probe_gate`, and
+    /// three full-content SHA-256s of a static FFprobe each time are what made
+    /// concurrent starts queue behind one another. Any tuple difference, or
+    /// an elapsed interval, takes the full content path before the verdict.
     async fn validate_current(
         &self,
         budget: Duration,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<(), DecodeFactError> {
         let started = std::time::Instant::now();
+        if !self.content_verification_due() {
+            let held = Arc::clone(&self.executable_file);
+            let snapshot = self
+                .executable_snapshot
+                .as_file()
+                .try_clone()
+                .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+            let path = self.executable.clone();
+            let (held, snapshot, current) =
+                run_bounded_identity_task(budget, cancelled, move || {
+                    Ok((
+                        probe_file_tuple_from_file(&held)?,
+                        snapshot_tuple_from_file(&snapshot)?,
+                        probe_path_tuple(&path)?,
+                    ))
+                })
+                .await?;
+            if held.same_tuple(&self.file)
+                && current.same_tuple(&self.file)
+                && snapshot.is_some_and(|snapshot| snapshot.same_tuple(&self.snapshot_file))
+            {
+                return Ok(());
+            }
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        self.validate_content(remaining, cancelled).await
+    }
+
+    fn content_verification_due(&self) -> bool {
+        self.content_verified_at
+            .lock()
+            .map(|verified| verified.is_none_or(|at| at.elapsed() >= PROBE_REVALIDATION_INTERVAL))
+            .unwrap_or(true)
+    }
+
+    /// The full check: all three objects hashed and compared with discovery.
+    async fn validate_content(
+        &self,
+        budget: Duration,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<(), DecodeFactError> {
+        let started = std::time::Instant::now();
+        self.content_verifications.fetch_add(1, Ordering::Relaxed);
         let held =
             held_probe_file_identity_within(Arc::clone(&self.executable_file), budget, cancelled)
                 .await?;
@@ -1044,10 +1144,25 @@ impl DecodeProbeIdentity {
         let current =
             path_probe_file_identity_within(self.executable.clone(), remaining, cancelled).await?;
         if held == self.file && current == self.file && snapshot == self.snapshot_file {
+            if let Ok(mut verified) = self.content_verified_at.lock() {
+                *verified = Some(started);
+            }
             Ok(())
         } else {
             Err(DecodeFactError::ProbeChanged)
         }
+    }
+}
+
+#[cfg(test)]
+impl DecodeProbeIdentity {
+    fn content_verifications(&self) -> u64 {
+        self.content_verifications.load(Ordering::Relaxed)
+    }
+
+    /// Stand in for [`PROBE_REVALIDATION_INTERVAL`] elapsing.
+    fn expire_content_verification(&self) {
+        *self.content_verified_at.lock().expect("verification clock") = None;
     }
 }
 
@@ -2992,6 +3107,11 @@ fn copy_executable(
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))
 }
 
+/// The seals that make the Linux snapshot immutable for the process lifetime.
+#[cfg(target_os = "linux")]
+const LINUX_SNAPSHOT_SEALS: libc::c_int =
+    libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+
 #[cfg(target_os = "linux")]
 fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -3012,8 +3132,7 @@ fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, Dec
     copy_executable(source, &mut file)?;
     file.set_permissions(std::fs::Permissions::from_mode(0o500))
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } == -1 {
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, LINUX_SNAPSHOT_SEALS) } == -1 {
         return Err(DecodeFactError::ProbeIdentity(
             std::io::Error::last_os_error().to_string(),
         ));
@@ -3126,6 +3245,61 @@ fn snapshot_execution_path(snapshot: &ExecutableSnapshot) -> PathBuf {
 #[cfg(windows)]
 fn snapshot_execution_path(snapshot: &ExecutableSnapshot) -> PathBuf {
     snapshot.path().to_owned()
+}
+
+/// The `fstat` tuple of an open probe object, with no content digest.
+#[cfg(unix)]
+fn probe_file_tuple_from_file(file: &std::fs::File) -> Result<ProbeFileIdentity, DecodeFactError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file
+        .metadata()
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    Ok(ProbeFileIdentity {
+        bytes: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        content_digest: String::new(),
+    })
+}
+
+#[cfg(unix)]
+fn probe_path_tuple(path: &Path) -> Result<ProbeFileIdentity, DecodeFactError> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    probe_file_tuple_from_file(&file)
+}
+
+/// The snapshot's tuple, or `None` when its seals are not the ones it was
+/// created with (which sends the caller to the content check).
+#[cfg(target_os = "linux")]
+fn snapshot_tuple_from_file(
+    file: &std::fs::File,
+) -> Result<Option<ProbeFileIdentity>, DecodeFactError> {
+    use std::os::fd::AsRawFd;
+
+    let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+    if seals == -1 {
+        return Err(DecodeFactError::ProbeIdentity(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    if seals & LINUX_SNAPSHOT_SEALS != LINUX_SNAPSHOT_SEALS {
+        return Ok(None);
+    }
+    probe_file_tuple_from_file(file).map(Some)
+}
+
+/// Elsewhere the snapshot is an owned copy, checked like the other objects.
+#[cfg(not(target_os = "linux"))]
+fn snapshot_tuple_from_file(
+    file: &std::fs::File,
+) -> Result<Option<ProbeFileIdentity>, DecodeFactError> {
+    probe_file_tuple_from_file(file).map(Some)
 }
 
 #[cfg(unix)]
@@ -3256,6 +3430,37 @@ async fn held_probe_file_identity_within(
         probe_file_identity_from_file(&file)
     })
     .await
+}
+
+#[cfg(windows)]
+fn probe_file_tuple_from_file(file: &std::fs::File) -> Result<ProbeFileIdentity, DecodeFactError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    let held = plurx_core::fs_secure::std_file_identity(file)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    let (modified_seconds, modified_nanoseconds) = system_time_parts(
+        metadata
+            .modified()
+            .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?,
+    );
+    Ok(ProbeFileIdentity {
+        bytes: held.size,
+        modified_seconds,
+        modified_nanoseconds,
+        changed_seconds: held.changed_seconds,
+        changed_nanoseconds: held.changed_nanoseconds,
+        device: held.device,
+        inode: held.inode ^ held.inode_high.rotate_left(1),
+        content_digest: String::new(),
+    })
+}
+
+#[cfg(windows)]
+fn probe_path_tuple(path: &Path) -> Result<ProbeFileIdentity, DecodeFactError> {
+    let file = plurx_core::fs_secure::open_read_nofollow_blocking(path)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    probe_file_tuple_from_file(&file)
 }
 
 #[cfg(windows)]
@@ -7235,6 +7440,146 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
                 )
                 .await,
             Err(DecodeFactError::ProbeChanged)
+        );
+    }
+
+    fn generation_probe_fixture(root: &std::path::Path) -> std::path::PathBuf {
+        let probe = root.join("ffprobe-generation");
+        executable(
+            &probe,
+            r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version generation'; exit 0; fi
+echo probe >> "$PLURX_TEST_PROBE_PATH.calls"
+printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","field_order":"progressive","color_transfer":"bt709","disposition":{"attached_pic":0}}],"format":{"format_name":"matroska"}}'
+"###,
+        );
+        probe
+    }
+
+    /// S-13, lab 2026-10-11: each encoded-VOD start verifies its held source
+    /// (`probe_source_document`, a fresh collection by design) and then
+    /// refines its decoder plan from that document; three full-content
+    /// SHA-256s of the bound FFprobe per validation, under the process-wide
+    /// gate, put 117-162 ms of gate wait on concurrent warm starts. Within a
+    /// validation generation neither start may hash the probe at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn warm_starts_within_a_generation_hash_no_probe_content() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = generation_probe_fixture(root.path());
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("identity");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"warm source").expect("media");
+        let handle = Arc::new(std::fs::File::open(&media).expect("source"));
+        let cache = DecodeFactCache::new();
+        let start = || async {
+            let prepared = cache
+                .probe_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    ProbeStreamSelection::LegacyVideoOrdinal(0),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("fresh source verification");
+            cache
+                .refine_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    prepared,
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("decoder refinement")
+        };
+        let hits = |cache: &DecodeFactCache| {
+            cache.metrics().lookups[DecodeFactLookupResult::Hit.index()].load(Ordering::Relaxed)
+        };
+        start().await;
+        let hits_after_first = hits(&cache);
+        start().await;
+        assert_eq!(
+            hits(&cache),
+            hits_after_first + 1,
+            "the second start's refinement is a cache hit"
+        );
+        assert_eq!(
+            identity.content_verifications(),
+            0,
+            "two warm starts inside one generation hashed the probe"
+        );
+        assert_eq!(
+            std::fs::read_to_string(probe.with_extension("calls"))
+                .expect("launches")
+                .lines()
+                .count(),
+            2,
+            "one verification child per start, none for the refinement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generation_boundary_forces_a_content_hash() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = generation_probe_fixture(root.path());
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("identity");
+        identity
+            .validate_current(PROBE_DEADLINE, None)
+            .await
+            .expect("tuple-only validation");
+        assert_eq!(identity.content_verifications(), 0);
+        identity.expire_content_verification();
+        identity
+            .validate_current(PROBE_DEADLINE, None)
+            .await
+            .expect("content validation at the boundary");
+        assert_eq!(identity.content_verifications(), 1);
+        // A clone shares the generation it just renewed.
+        identity
+            .clone()
+            .validate_current(PROBE_DEADLINE, None)
+            .await
+            .expect("tuple-only validation after renewal");
+        assert_eq!(identity.content_verifications(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_size_in_place_mutation_is_caught_within_one_lookup() {
+        use std::os::unix::fs::FileExt;
+
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = generation_probe_fixture(root.path());
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("identity");
+        let length = std::fs::metadata(&probe).expect("probe metadata").len();
+        // Overwrite one byte of the trailing newline through a separate
+        // descriptor: same length, same inode, new content and ctime.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&probe)
+            .expect("separate writer")
+            .write_at(b" ", length - 1)
+            .expect("same-size write");
+        assert_eq!(std::fs::metadata(&probe).expect("after").len(), length);
+        assert_eq!(
+            identity.validate_current(PROBE_DEADLINE, None).await,
+            Err(DecodeFactError::ProbeChanged)
+        );
+        assert_eq!(
+            identity.content_verifications(),
+            1,
+            "the tuple difference forced the content hash before the verdict"
         );
     }
 

@@ -208,8 +208,8 @@ pub struct Observed {
 
 impl Observed {
     /// Whether the child runs at or below its class's policy. `None` when
-    /// the child could not be read (it has already exited, or this platform
-    /// applies no policy).
+    /// the child could not be read (it has already exited, reaped or not, or
+    /// this platform applies no policy).
     pub fn applied(&self, policy: ChildPolicy) -> Option<bool> {
         if cfg!(target_os = "linux") {
             let (nice, class, level, oom) = (
@@ -357,7 +357,7 @@ pub(crate) fn register(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .entry((work.class, work.purpose))
         .or_default() += 1;
-    if observe(pid).applied(work.class.policy()) == Some(false) {
+    if unapplied_at_spawn(pid, work.class) {
         UNAPPLIED[work.class.index()].fetch_add(1, Ordering::Relaxed);
     }
     let program = std::path::Path::new(program)
@@ -381,6 +381,13 @@ pub(crate) fn register(
     registry.next += 1;
     registry.entries.insert(key, entry);
     Some(Registration { key })
+}
+
+/// Whether [`register`] counts a just-started child as unapplied: its
+/// kernel-reported priority read back above its class's policy. A child that
+/// cannot be observed, such as one that has already exited, is not.
+fn unapplied_at_spawn(pid: u32, class: ChildClass) -> bool {
+    observe(pid).applied(class.policy()) == Some(false)
 }
 
 /// Every child the launcher started that its owner still holds, oldest
@@ -589,38 +596,62 @@ mod linux {
     }
 
     pub(super) fn observe(pid: u32) -> Observed {
-        let nice = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| parse_stat_nice(&stat));
-        let oom_score_adj = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
-            .ok()
-            .and_then(|text| text.trim().parse().ok());
-        let (io_class, io_level) = match libc::pid_t::try_from(pid) {
+        let ioprio = libc::pid_t::try_from(pid).ok().and_then(|pid| {
             // SAFETY: plain syscall reading another process's I/O priority.
-            Ok(pid) => {
-                match unsafe { libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, pid) } {
-                    value if value < 0 => (None, None),
-                    value => {
-                        let value = value as libc::c_int;
-                        let class = match value >> IOPRIO_CLASS_SHIFT {
-                            0 => "none",
-                            1 => "realtime",
-                            2 => "best_effort",
-                            3 => "idle",
-                            _ => "unknown",
-                        };
-                        (Some(class), u8::try_from(value & 0x7).ok())
-                    }
-                }
+            let value = unsafe { libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, pid) };
+            libc::c_int::try_from(value)
+                .ok()
+                .filter(|value| *value >= 0)
+        });
+        let oom_score_adj = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj")).ok();
+        // Read last: a child still running here was running when its I/O
+        // priority was read, and an unreaped child's pid cannot be reused in
+        // between.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+        classify(stat.as_deref(), oom_score_adj.as_deref(), ioprio)
+    }
+
+    /// The kernel's readings for one pid, or nothing when the process has
+    /// gone or already exited. An exited child its owner has not reaped yet
+    /// (state `Z`, or `X` while it is torn down) still reports its nice and
+    /// `oom_score_adj`, but its I/O context is released, so `ioprio_get`
+    /// answers class 0 (`none`): read as a live child, every short-lived
+    /// child that exits before it is observed would look unapplied.
+    pub(super) fn classify(
+        stat: Option<&str>,
+        oom_score_adj: Option<&str>,
+        ioprio: Option<libc::c_int>,
+    ) -> Observed {
+        let Some(stat) = stat.filter(|stat| {
+            parse_stat_state(stat).is_some_and(|state| !matches!(state, 'Z' | 'X' | 'x'))
+        }) else {
+            return Observed::default();
+        };
+        let (io_class, io_level) = match ioprio {
+            Some(value) => {
+                let class = match value >> IOPRIO_CLASS_SHIFT {
+                    0 => "none",
+                    1 => "realtime",
+                    2 => "best_effort",
+                    3 => "idle",
+                    _ => "unknown",
+                };
+                (Some(class), u8::try_from(value & 0x7).ok())
             }
-            Err(_) => (None, None),
+            None => (None, None),
         };
         Observed {
-            nice,
+            nice: parse_stat_nice(stat),
             io_class,
             io_level,
-            oom_score_adj,
+            oom_score_adj: oom_score_adj.and_then(|text| text.trim().parse().ok()),
         }
+    }
+
+    /// Field 3 of `/proc/<pid>/stat`, the one-letter process state.
+    pub(super) fn parse_stat_state(stat: &str) -> Option<char> {
+        let (_, rest) = stat.rsplit_once(')')?;
+        rest.split_whitespace().next()?.chars().next()
     }
 
     /// Field 19 of `/proc/<pid>/stat`. The command name (field 2) is
@@ -1031,6 +1062,65 @@ mod tests {
         assert_eq!(linux::OomBytes::new(800).as_bytes(), b"800\n");
         assert_eq!(linux::OomBytes::new(-1000).as_bytes(), b"-1000\n");
         assert_eq!(linux::ioprio_value(7), (2 << 13) | 7);
+    }
+
+    /// P-02: an exited, unreaped child reads nice 15 and `oom_score_adj` 800
+    /// but I/O class `none`. That is a child the kernel can no longer
+    /// describe, not one running above its policy.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_child_awaiting_its_reaper_is_unobservable_not_unapplied() {
+        let policy = ChildClass::Background.policy();
+        let stat = |state: &str| {
+            format!(
+                "4242 (find) {state} 1 4242 4242 0 -1 4194560 1 0 0 0 0 0 0 0 30 {} 1 0 5",
+                policy.nice
+            )
+        };
+        let oom = format!("{}\n", policy.oom_score_adj);
+        let best_effort = Some(linux::ioprio_value(policy.io_level));
+        let running = linux::classify(Some(&stat("S")), Some(&oom), best_effort);
+        assert_eq!(running.applied(policy), Some(true), "{running:?}");
+        for state in ["Z", "X"] {
+            let exited = linux::classify(Some(&stat(state)), Some(&oom), Some(0));
+            assert_eq!(exited, Observed::default(), "state {state}");
+            assert_eq!(exited.applied(policy), None, "state {state}");
+        }
+        assert_eq!(linux::classify(None, None, None), Observed::default());
+        let unapplied = linux::classify(Some(&stat("R")), Some(&oom), Some(0));
+        assert_eq!(unapplied.applied(policy), Some(false), "{unapplied:?}");
+    }
+
+    /// P-02 on a real child: one that has already exited when it is
+    /// registered is listed, never counted as unapplied.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_that_exits_before_it_is_registered_is_not_counted_unapplied() {
+        let work = ChildWork::background("exited before registration test");
+        let mut command = std::process::Command::new("true");
+        apply_policy(&mut command, work.class.policy());
+        let mut child = command.spawn().expect("spawn");
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| linux::parse_stat_state(&stat))
+            != Some('Z')
+        {
+            assert!(std::time::Instant::now() < deadline, "child never exited");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The verdict `register` counts by, asserted for this child alone:
+        // the per-class counter is process-wide, and a background child
+        // spawned by a concurrent test could move it.
+        assert!(
+            !unapplied_at_spawn(pid, work.class),
+            "an exited child is unobservable, not unapplied"
+        );
+        let registration = register(Some(pid), std::ffi::OsStr::new("true"), work);
+        assert!(registration.is_some(), "and it is still listed");
+        drop(registration);
+        assert!(child.wait().expect("reap").success());
     }
 
     /// The read-back behind every caller's choice of class (review of #518,

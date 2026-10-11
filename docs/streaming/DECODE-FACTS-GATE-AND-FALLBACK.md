@@ -139,6 +139,8 @@ second hash or child start (`run_bounded_identity_task_on`, `:2520-2562`).
 A **warm hit** therefore pays: the gate wait behind any in-flight miss's
 steps 2–8, then three hashes of executable-sized inputs (the shipped
 static ffprobe is tens of MB), then one fstat — before touching the map.
+(Since M3 was built on 2026-10-11, steps 2 and 7 are three `fstat` tuples and
+the snapshot's seals within a validation generation; see §5.4.)
 
 `validate_current` (`:464-495`):
 
@@ -519,6 +521,27 @@ evidence; nothing else in this plan changes. (Restated 2026-10-02 after
 review 76, P2-2: the first text called the trade "trusting cached facts
 without validating the probe's identity", which misstates §3.3.)
 
+**Opened and built, 2026-10-11 (owned lab S-13).** The premise of the
+2026-10-02 decision changed on 2026-10-03. `133be1706` ("share sealed source
+probe with VOD decoder planning") moved each encoded-VOD start's fresh source
+verification out of an ungated `held_source_probe_json` child and into
+`probe_source_document`, a decode-fact collection under `probe_gate` that
+validates the probe twice. Since then every warm start records one
+`miss_collected` (the verification, which is a fresh observation by design and
+never cache-satisfied) as well as the refinement's hit, and holds the gate for
+two full validations, the collection and then the hit's third validation. Under
+three concurrent encoded-VOD starts the 10-11 lab measured hit `gate_wait`
+means of 117–162 ms: 14–15 % of an 815–853 ms warm fresh-encode start. §3.3 is
+built as written: `PROBE_REVALIDATION_INTERVAL = 30 s`; within an interval a
+validation is three `fstat` tuples plus the snapshot's seals; any tuple
+difference, or an elapsed interval, runs the three content hashes before the
+verdict. New tests: `warm_starts_within_a_generation_hash_no_probe_content`,
+`generation_boundary_forces_a_content_hash` and
+`same_size_in_place_mutation_is_caught_within_one_lookup`. The §2.5 tests are
+unchanged. The verification lookup still counts as `miss_collected`, because it
+is a collection. M4 stays closed until a repeat of the S-13 measurement shows
+hit `gate_wait` still above the bar.
+
 ### 5.5 M4 — warm-hit admission (conditional on M0 and M3)
 
 Opens only if, after M3, `gate_wait` p95 on hits still exceeds the M3
@@ -679,6 +702,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-11 | claude-opus-5-5 | https://claude.ai/code/session_0158MVmDzgMccTLGCMdYLHXA | M3 built | branch `claude/arch-scan` | Opened by the 10-11 lab's S-13 reading (hit `gate_wait` 14–15 % of a warm fresh-encode start under three concurrent starts), whose cause is `133be1706` putting fresh source verification under `probe_gate` (§5.4). Generation-scoped validation per §3.3 with the three tests named there; the §2.5 tests stay green. Needs: the S-13 three-concurrent-start measurement repeated on the deployed build. |
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M0/M1 owned-lab evidence; M3 decision | branch `opus/encoder-lab-evidence` (evidence-only docs) | Owned lab on lab3 (not media1), bound static ffprobe 8.1.3 (16 697 800 B). M0 PASS: all five phases and all three results observed; warm-hit `identity_validation` median 30.1 ms, hit `gate_wait` p50 0.68 ms / p95 38 ms over the run. M1 PASS: touch, chmod, no change gave `probe_changed` 0→1→2→3 and `refused` with exactly one WARN, latched until restart. M3 not opened (§5.4): 30 ms is 3.5 % of the 861 ms fresh-encode warm start (25 % of a 118 ms cached-segment start, recorded, not deciding); decision for Paul to review. M4 premise: hits queue 34–44 ms behind each other with no miss present (§5.5). Plan text corrected: bound ffprobe path (§5.1, §5.6), M1 instructions (§5.2), §6 prompt regex, logs and address. Phases and runs in §5.7. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M1 warning/latch coverage continuation | [draft #637](http://forge.lan:3000/noirr/plurx/pulls/637), `codex/s13-probe-warning-coverage` | Based on effort `86aca9863` after S09 #636. `probe_changed_warns_once_per_process_and_counts_every_fallback` exercises the existing actual fallback seam in a fresh test process: one real WARN across two managers, three DEBUG fallbacks, per-manager counters 2/1 and `CatalogRow` plans. WARN→DEBUG fails severity; a latch that never stores true fails warning count (3 versus 1). Production `manager/plan.rs` restored byte-identically (SHA-256 `0b431e6ffbce4cf90c795fc8985ba4ed23b559da11dcb1ccc03189b1b9784fb2`); no production seam/reset. Owned child has a 30-second bound, kill/reap on failure and explicit completed-assertions proof. Final restored-source test PASS (0.17 s); docs-index 4, canonical field and normal Rust 1.97.1 hook PASS (catalog 2573, fmt, workspace/all-target Clippy, 70 JS). No review or merge. Lab2 ffprobe mutation, production-static-binary media1 cold/warm latency and conditional M3/M4 remain unproved. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | [#424](http://forge.lan:3000/noirr/plurx/pulls/424) | Claimed `plan/S-13` for one whole-plan draft PR. Rust 1.97.1 compiler loop established; M3/M4 remain closed until M0 fleet evidence opens them. |

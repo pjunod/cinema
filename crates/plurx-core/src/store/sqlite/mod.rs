@@ -2535,11 +2535,12 @@ impl SettingsStore for SqliteStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hiqlite-store"))]
 pub(crate) use sessions::census_local_principal_fragment;
 
+// SQLite-only: the migration chain fixtures depend on nothing replicated, and
+// SQLite-backend tests call them in builds without `hiqlite-store`.
 #[cfg(test)]
-#[cfg(feature = "hiqlite-store")]
 impl SqliteStore {
     pub(crate) fn apply_next_migration_for_test(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;

@@ -9812,3 +9812,87 @@ recovery accounts for the partial node log. #844 was closed without
 deleting any evidence. The same branch landed as #979, so every unit runs
 once on the final code.
 
+### 10.305 Auto link cost, the held failing rung, and Android TV acceptance (2026-10-10)
+
+**Firefox on the frozen tree.** The Firefox 20-change campaign on
+`4a6388f4b` failed one limit: quality-cycle video-gap p95 166.28 ms
+against 100 ms. 13 of 15 manual gaps were 83.8–84.1 ms (two frame
+intervals). The outliers were changes 1 (116.5 ms) and 3 (166.3 ms), both
+early 720p→1080p requests. Each gap lay about three seconds after the
+request, while the successor was being encoded on the same host as the
+browser, not at the switch. The run had no stalls, hitches or backward
+steps, and 6 and 3 dropped frames on those two changes. Host load averaged
+4.9 on 16 cores. The co-location cause is a hypothesis: the next Firefox
+run against `main` samples per-process CPU at preparation start to confirm
+or refute it. No limit is relaxed.
+
+**Android TV series on `main` `a86517f43`.** The capability-probe build ran
+on a Google TV Streamer against an owned lab behind a shaping proxy at
+60 / 3 Mb/s stages. 15 of 15 manual continuous switches passed. Auto then
+held 720p at 3 Mb/s for five minutes and rebuffered every few seconds. A
+debug-only diagnostic logged on every tick:
+`link=3026945 cost=17799734 severe=true pressure=true
+eligible=480:9799734,720:17799734`.
+
+**Root cause 1: the cost was the publication ceiling.** A continuous family
+rendition declared only `continuous_peak_bps`: 3× the encoder target plus a
+two-object burst over the shortest segment. That is a per-object ceiling
+enforced on publication, about 4× the rate a rung needs. Web and Android
+bound it as the rung's Auto cost (10.158, 10.160). Downgrades therefore
+found no fitting rung below about 10 Mb/s. Upgrades needed 32 Mb/s for 720p
+and 61 Mb/s for 1080p.
+
+**Root cause 2: recovery held the failing rung.** Under link pressure every
+client's recovery admitted only a lower rung whose cost fitted the link.
+When none did, it returned nothing, and Auto kept the rung the link had
+just proved it could not carry.
+
+**Root cause 3: the qualification moved with the costs.** The browser
+qualification derived its low link stage from the bound costs, inside the
+window where a 1080p→720p step fits them. That is why the Chrome campaigns
+passed with a 4× cost error.
+
+**Fixes (#985).**
+- The family a client reads declares `sustained_bps`: the video VBV cap
+  (`vbv_maxrate_bps`, now shared by the encode arguments, the catalog's
+  advertised encode peak and the Auto rate profile) and the soundtrack's
+  configured rate. The durable family descriptor is unchanged; its bytes are
+  re-bound exactly and parsed by older nodes during a rolling deploy.
+- Web and Android cost a rung by video plus audio `sustained_bps`, and fall
+  back to the ceiling when the server omits it.
+- Recovery takes the cheapest costed lower rung when none fits the link,
+  provided it costs less than the current rung. An uncosted rung is never
+  chosen for a link cause.
+- The qualification runs at fixed 100 / 10 / 25 Mb/s links and requires the
+  declared rates. 25 Mb/s carries 1080p with the 1.8× margin only when 1080p
+  is costed by the rate it needs.
+
+**Hardware then exposed two more Android defects.**
+- *Auto re-requested the rung already playing.* After Auto stepped to 480p,
+  every control exchange put Auto's rung back on 720p. The server's
+  effective selection names the continuous session's starting rung, not the
+  presented member. Auto re-requested 480p about every fifteen seconds. For a
+  family member, Auto now takes the rung whose frame the attachment observes
+  on screen, then the last reported presentation.
+- *Auto never climbed back.* The Android and Apple upgrade picker returned
+  nothing when no affordable rung covers the display. A 480p/720p family on a
+  1080p display therefore never climbed back from 480p, even at 60 Mb/s. It
+  now takes the largest affordable rung, as the web selector does.
+
+**Android TV acceptance on the branch.** The capability-probe build of the
+branch, plus the debug-only diagnostic, ran against a fresh lab:
+- 15 of 15 manual continuous switches passed.
+- Auto went from 480p to 720p at 60 Mb/s.
+- Five applied cliffs passed: down to 480p in 18, 18 and 20 s at 3 Mb/s, and
+  up to 720p in 124 and 120 s at 60 Mb/s. The upgrade wait is the post-cliff
+  evidence window.
+- No buffering surfaced after startup, and no presentation repeated.
+
+**Preserved, not explained.** One earlier attempt ran while another
+session's Rust build loaded the lab host to about 12. A manual 720p change
+took the prepared-successor path instead of the continuous one. The server
+resurrected a session from its durable route and replaced it 1.5 s later.
+The successor then failed with a player error (2004), and the change was
+retained. The client log for that window had rotated away. The run directory
+and server log are kept, and the case stays open.
+

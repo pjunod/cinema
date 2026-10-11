@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-10, plurx has 357 routes declared by the ordinary listener's
+As of 2026-10-11, plurx has 358 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -22,7 +22,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 357 routes across the registered routers.
+plurx has 358 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -1829,8 +1829,13 @@ no-store`, at most 32 KiB, relayed to the owner like a playlist: `{version: 1,
 family_id, mode, master, video[], audio}`. `mode` is `autonomous_reserved` or
 `controlled`. Each video row names its `candidate_id`, `rendition_id`,
 `init_id`, actual `width`/`height`/`codec`, `timescale`, `frame_ticks`,
-`segment_ticks`, `peak_bps` and relative `playlist`; `audio` names the shared
-rendition the same way. Every value comes from the init-verified family, never
+`segment_ticks`, `peak_bps`, `sustained_bps` and relative `playlist`; `audio`
+names the shared rendition the same way. `peak_bps` is the per-object
+publication ceiling (an object over it is refused); `sustained_bps` is the rate
+the rendition needs from a link (the encoder's VBV cap, or the soundtrack's
+configured rate), which clients cost Auto by. `sustained_bps` is in the served
+bytes only, never in the durable family descriptor, and a client treats it as
+optional. Every value comes from the init-verified family, never
 from scanner metadata. An ordinary session answers 404; an ended or lost owner
 answers the §9.2 410s.
 

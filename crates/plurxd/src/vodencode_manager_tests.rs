@@ -1234,6 +1234,13 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
             .continuous_peak_bps(&plan)
             .expect("container-inclusive ceiling");
         assert!(peak > 0);
+        let sustained = encoding
+            .continuous_sustained_bps()
+            .expect("the rate a link must carry");
+        assert!(
+            sustained > 0 && sustained < peak,
+            "a declared link rate never exceeds the publication ceiling"
+        );
         for (index, entry) in plan.entries.iter().enumerate() {
             let bound = u64::try_from(
                 u128::from(peak) * u128::from(entry.duration_ticks)
@@ -1250,6 +1257,17 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
             );
         }
     }
+    assert_eq!(
+        video.continuous_sustained_bps(),
+        Some(plurx_core::transcode::vbv_maxrate_bps(
+            video.options.video_bitrate_kbps
+        )),
+        "video costs its VBV cap, as the catalog advertises the encode route"
+    );
+    assert_eq!(
+        audio.continuous_sustained_bps(),
+        Some(u64::from(audio.options.audio_bitrate_kbps) * 1000)
+    );
     request
         .continuous_media
         .as_mut()

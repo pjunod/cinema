@@ -3593,6 +3593,86 @@ impl MediaStore for HiqliteAuthStore {
             .collect())
     }
 
+    async fn files_with_unsignalled_transfer(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        #[derive(Debug)]
+        struct CandidateRow {
+            id: i64,
+            path: String,
+            size: i64,
+            mtime: i64,
+            probe_json: String,
+        }
+        impl From<&mut Row<'_>> for CandidateRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    id: row.get("id"),
+                    path: row.get("path"),
+                    size: row.get("size"),
+                    mtime: row.get("mtime"),
+                    probe_json: row.get("probe_json"),
+                }
+            }
+        }
+        // The walk's cursor passes ids for good, so a page read from a
+        // lagging replica could skip a committed SDR row forever.
+        Ok(self
+            .client()
+            // authority: the cursor never revisits an id it has passed.
+            .query_consistent_map::<CandidateRow, _>(
+                "SELECT id, path, size, mtime, probe_json FROM files \
+                  WHERE hdr IS NULL AND probe_json IS NOT NULL AND id > $1 \
+                    AND (bit_depth >= 10 OR instr(probe_json, '\"bt2020\"') > 0) \
+                  ORDER BY id LIMIT $2",
+                params!(after_id, limit.max(0)),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| MissingVideoCodecTag {
+                id: row.id,
+                path: row.path,
+                size: row.size,
+                mtime: row.mtime,
+                probe_json: row.probe_json,
+            })
+            .collect())
+    }
+
+    async fn set_file_frame_dynamic_range(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        observed: &crate::scan::probe::FrameDynamicRange,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files SET hdr = $1, hdr_format = $2, max_cll = $3, max_fall = $4, \
+                  mastering_max_luminance = $5, luminance_source = $6 \
+                  WHERE id = $7 AND path = $8 AND size = $9 AND mtime = $10 \
+                    AND probe_json = $11 AND hdr IS NULL",
+                params!(
+                    observed.hdr.as_str(),
+                    observed.hdr_format.as_deref(),
+                    observed.max_cll,
+                    observed.max_fall,
+                    observed.mastering_max_luminance,
+                    observed.luminance_source.as_str(),
+                    candidate.id,
+                    candidate.path.as_str(),
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json.as_str()
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
     async fn set_file_frame_luminance(
         &self,
         candidate: &MissingVideoCodecTag,
