@@ -1541,6 +1541,13 @@ pub(crate) struct RemotePrepareRequest {
     pub session_id: String,
     pub principal: plurx_core::playback_principal::PlaybackPrincipal,
     pub expected_owner_epoch: i64,
+    /// The predecessor owner epoch the preparation was admitted under. The
+    /// peer seals capture against exactly this epoch, so a predecessor
+    /// takeover after staging fails the peer's seal instead of the origin's
+    /// later one. Sent only to a peer advertising `prepared_output_capture`
+    /// (the wire refuses unknown fields); absent, the peer fences on the
+    /// predecessor's current epoch as before.
+    pub expected_predecessor_owner_epoch: Option<i64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1553,6 +1560,8 @@ struct RemotePrepareRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<i64>,
     pub expected_owner_epoch: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_predecessor_owner_epoch: Option<i64>,
 }
 impl TryFrom<RemotePrepareRequestWire> for RemotePrepareRequest {
     type Error = &'static str;
@@ -1564,6 +1573,7 @@ impl TryFrom<RemotePrepareRequestWire> for RemotePrepareRequest {
             incarnation_id: wire.incarnation_id,
             session_id: wire.session_id,
             expected_owner_epoch: wire.expected_owner_epoch,
+            expected_predecessor_owner_epoch: wire.expected_predecessor_owner_epoch,
         })
     }
 }
@@ -1582,6 +1592,7 @@ impl From<RemotePrepareRequest> for RemotePrepareRequestWire {
             incarnation_id: request.incarnation_id,
             session_id: request.session_id,
             expected_owner_epoch: request.expected_owner_epoch,
+            expected_predecessor_owner_epoch: request.expected_predecessor_owner_epoch,
         }
     }
 }
@@ -1593,6 +1604,9 @@ impl RemotePrepareRequest {
             && uuid::Uuid::parse_str(&self.session_id).is_ok()
             && self.principal.valid_admission_shape()
             && self.expected_owner_epoch == 1
+            && self
+                .expected_predecessor_owner_epoch
+                .is_none_or(|epoch| epoch > 0)
     }
 }
 
@@ -7253,6 +7267,7 @@ mod tests {
             session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
             principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             expected_owner_epoch: 1,
+            expected_predecessor_owner_epoch: None,
         }
     }
 
@@ -7270,6 +7285,23 @@ mod tests {
         let mut wrong_epoch = request.clone();
         wrong_epoch.expected_owner_epoch = 2;
         assert!(!wrong_epoch.is_valid());
+
+        // The admitted predecessor epoch is additive: omitted when unknown so
+        // an older peer's strict wire still parses the request, carried
+        // exactly when sent, and never a non-positive fence.
+        let mut fenced = request.clone();
+        fenced.expected_predecessor_owner_epoch = Some(3);
+        assert!(fenced.is_valid());
+        let fenced_wire = serde_json::to_value(&fenced).expect("fenced prepare JSON");
+        assert_eq!(fenced_wire["expected_predecessor_owner_epoch"], 3);
+        let decoded: RemotePrepareRequest =
+            serde_json::from_value(fenced_wire).expect("fenced prepare request");
+        assert_eq!(decoded.expected_predecessor_owner_epoch, Some(3));
+        fenced.expected_predecessor_owner_epoch = Some(0);
+        assert!(!fenced.is_valid());
+        let legacy: RemotePrepareRequest =
+            serde_json::from_value(value.clone()).expect("an older origin's request");
+        assert_eq!(legacy.expected_predecessor_owner_epoch, None);
 
         let mut extended = value;
         extended

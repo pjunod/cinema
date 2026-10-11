@@ -933,6 +933,13 @@ impl ServingFence {
         }
     }
 
+    /// Hold the planned-outage state so every `accepting_new_media` read
+    /// waits behind it: a deterministic slow admission read for tests.
+    #[cfg(test)]
+    pub(crate) async fn hold_planned_outage_reads_for_test(&self) -> impl Sized + '_ {
+        self.restart_drain.state.lock().await
+    }
+
     #[cfg(test)]
     pub(crate) async fn validation_set_ready(&self, ready: bool) {
         self.quorum_managed.store(true, Ordering::Release);

@@ -2017,6 +2017,50 @@ async fn staging_source(fixture: &HlsDeliveryFixture) -> plurx_core::domain::Med
         .expect("the fixture has a source")
 }
 
+/// A remote successor owner is asked to capture only when it says it can.
+///
+/// A peer built before first-preparation capture still advertises retained
+/// receipts, accepts PREPARE and primes a full uncaptured attachment, which
+/// `prepared_prime_is_ready` then refuses because the row is still pending.
+/// Stamping capture for it spends the whole prime for nothing on every
+/// routed change during a rolling upgrade.
+#[tokio::test]
+async fn a_peer_without_prepared_capture_is_primed_without_a_capture_reservation() {
+    use crate::transcode::Presentation;
+    let state = resolver_state();
+    let local = state.node_id.clone();
+    assert!(
+        successor_owner_captures_output(&state, &local, Presentation::Vod, true).await,
+        "this node seals its own capture"
+    );
+    assert!(!successor_owner_captures_output(&state, &local, Presentation::Vod, false).await);
+    assert!(!successor_owner_captures_output(&state, &local, Presentation::Live, true).await);
+    assert!(
+        !successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await,
+        "an owner with no advertisement is an older peer"
+    );
+    let mut older = crate::media_pool::local_snapshot(&state).await;
+    older.node_id = "worker".to_owned();
+    older.retained_output_receipts = true;
+    older.prepared_output_capture = false;
+    let mut wire = serde_json::to_value(&older).expect("snapshot");
+    wire.as_object_mut()
+        .expect("snapshot object")
+        .remove("prepared_output_capture");
+    let older: crate::media_pool::MediaNodeSnapshot =
+        serde_json::from_value(wire).expect("a pre-capture advertisement still parses");
+    state.media_pool.cache_snapshot_for_test(older.clone()).await;
+    assert!(state.media_pool.retained_output_receiver("worker").await);
+    assert!(
+        !successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await,
+        "retained receipts predate capture and do not imply it"
+    );
+    let mut current = older;
+    current.prepared_output_capture = true;
+    state.media_pool.cache_snapshot_for_test(current).await;
+    assert!(successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await);
+}
+
 fn staged_predecessor_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
     RemoteStartRequest {
         retained_output: None,

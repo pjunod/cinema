@@ -949,6 +949,7 @@ async function stallDiagnose(){
     resource_class:hlsStartup?"hls_startup":"playback_source",
     attachment_id:p.mediaAttachment&&p.mediaAttachment.id,
     manifest_loaded:!!(episode&&['loaded','parsed'].includes(episode.manifestState)),
+    level_loaded:!!(episode&&episode.levelState==='loaded'),
     media_loaded:!!(episode&&episode.mediaLoaded),
     decoder_failed:!!(episode&&episode.decoderFailed),presenting:false,
     request_count:episode?episode.dispatches:null,
