@@ -296,7 +296,11 @@ made-up URL and prevents the fork from being declared fully tracked.
   the same last-applied boundary. Builds serialize with install/publication;
   shutdown joins an outstanding copy. The focused `snapshot_cut_tests` and
   builder generation/blank regressions pin concurrent apply, membership,
-  failure and checkpoint behavior. Target-local storage admission runs
+  failure and checkpoint behavior. `Client::trigger_local_db_snapshot` asks
+  any member, leader or follower, to cut that snapshot at its own applied
+  boundary without proposing an entry, so Plurx's portable backup can anchor
+  its cut through the forwarding `WriteAck` write (row 21) on whichever voter
+  holds the backup lease. Target-local storage admission runs
   before the writer request with a size-based floor, ten-second retries and
   a ten-minute maximum (then existing error semantics), exposed through
   passive fixed-label metrics. This changes no replicated enum ordinal,
@@ -305,7 +309,7 @@ made-up URL and prevents the fork from being declared fully tracked.
   `src/store/state_machine/sqlite/snapshot_builder.rs`,
   `src/store/state_machine/sqlite/state_machine.rs`,
   `src/snapshot_admission.rs`, `src/config.rs`, `src/config_toml.rs`,
-  `src/store/mod.rs`.
+  `src/store/mod.rs`, `src/client/mgmt.rs`.
 - K-06 clock-skew admission (`docs/cluster/CLOCK-SKEW-GUARD-DESIGN.md`,
   `docs/cluster/CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md`) binds Plurx's
   node-local guard at the vendored Raft proposal boundary without Hiqlite

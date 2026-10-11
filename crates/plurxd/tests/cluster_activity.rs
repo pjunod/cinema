@@ -1,4 +1,6 @@
-//! Real-daemon proof for clustered activity aggregation.
+//! Real-daemon proof for clustered activity aggregation, and for the one
+//! other two-voter property a single process cannot show: a portable backup
+//! built on the follower.
 //!
 //! This belongs to `make cluster-check`: the ordinary handler regressions can
 //! prove response shaping, but only separate daemons can prove that node A's
@@ -1232,4 +1234,172 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
 
     drop(node_b);
     drop(node_a);
+}
+
+fn two_voter_config(
+    http: u16,
+    data: &Path,
+    raft: u16,
+    api: u16,
+    join_token_file: Option<&Path>,
+) -> String {
+    let mut config = format!(
+        "[server]\nbind = \"127.0.0.1:{http}\"\n\
+         [storage]\ndata_dir = \"{}\"\n\
+         [cluster]\nraft_bind = \"127.0.0.1:{raft}\"\n\
+         api_bind = \"127.0.0.1:{api}\"\n\
+         advertise_host = \"127.0.0.1\"\n\
+         artwork_url = \"http://127.0.0.1:{http}\"\n",
+        toml_path(data),
+    );
+    match join_token_file {
+        Some(token_file) => config.push_str(&format!(
+            "join_token_file = \"{}\"\n",
+            toml_path(token_file)
+        )),
+        None => config.push_str(&format!("join_url = \"http://127.0.0.1:{http}\"\n")),
+    }
+    config
+}
+
+/// CLUSTER-DRILLS-2026-10-11 F1: the `backup:cluster` lease can land on any
+/// voter, and a follower cannot propose the leader-only `RTT` entry that
+/// anchored the cut. A backup requested on the follower must build there,
+/// and its cut must cover a write the leader committed before the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_builds_the_portable_cluster_backup() {
+    let root = canonical_tempdir();
+    let mut reserved = reserved_ports(6);
+    let [a_http, a_raft, a_api, b_http, b_raft, b_api] =
+        std::array::from_fn(|index| reserved[index].port);
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("test client");
+
+    let a_data = root.path().join("node-a");
+    std::fs::create_dir_all(&a_data).expect("node A data");
+    drop(SqliteStore::open(&a_data.join("plurx.db")).expect("legacy SQLite source"));
+    let a_config = root.path().join("node-a.toml");
+    std::fs::write(
+        &a_config,
+        two_voter_config(a_http, &a_data, a_raft, a_api, None),
+    )
+    .expect("node A config");
+    for port in &mut reserved[..3] {
+        port.release();
+    }
+    let mut node_a = Daemon::spawn(&a_config, root.path().join("node-a.log"), "plurx-node-a");
+    wait_ready(&client, &mut node_a, a_http).await;
+    let a_base = format!("http://127.0.0.1:{a_http}");
+    let setup = client
+        .post(format!("{a_base}/api/v1/setup"))
+        .json(&json!({"username":"owner","password":"cluster-proof-password"}))
+        .send()
+        .await
+        .expect("setup request");
+    assert_eq!(setup.status(), StatusCode::OK);
+    let token = setup.json::<Value>().await.expect("setup JSON")["token"]
+        .as_str()
+        .expect("setup token")
+        .to_owned();
+    let issued = client
+        .post(format!("{a_base}/api/v1/cluster/join-tokens"))
+        .bearer_auth(&token)
+        .json(&json!({"expires_in_seconds":600}))
+        .send()
+        .await
+        .expect("issue join token");
+    assert_eq!(issued.status(), StatusCode::OK);
+    let join_token = issued.json::<Value>().await.expect("join-token JSON")["token"]
+        .as_str()
+        .expect("join token")
+        .to_owned();
+
+    let b_data = root.path().join("node-b");
+    std::fs::create_dir_all(&b_data).expect("node B data");
+    let join_file = root.path().join("node-b.join");
+    std::fs::write(&join_file, format!("{join_token}\n")).expect("write join token");
+    std::fs::set_permissions(&join_file, Permissions::from_mode(0o600))
+        .expect("protect join token");
+    let b_config = root.path().join("node-b.toml");
+    std::fs::write(
+        &b_config,
+        two_voter_config(b_http, &b_data, b_raft, b_api, Some(&join_file)),
+    )
+    .expect("node B config");
+    for port in &mut reserved[3..] {
+        port.release();
+    }
+    let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"), "plurx-node-b");
+    wait_ready(&client, &mut node_b, b_http).await;
+    let b_base = format!("http://127.0.0.1:{b_http}");
+    let roster = wait_for_two_voters(&client, &mut node_a, &a_base, &token).await;
+    let local_node = roster["local_node_id"].as_str().expect("local node id");
+    let nodes = roster["nodes"].as_array().expect("node rows");
+    let leader = nodes
+        .iter()
+        .find(|node| node["is_leader"].as_bool() == Some(true))
+        .and_then(|node| node["node_id"].as_str())
+        .expect("a leader");
+    let follower = nodes
+        .iter()
+        .filter_map(|node| node["node_id"].as_str())
+        .find(|node_id| *node_id != leader)
+        .expect("a follower")
+        .to_owned();
+    let (leader_base, follower_base) = if leader == local_node {
+        (a_base.as_str(), b_base.as_str())
+    } else {
+        (b_base.as_str(), a_base.as_str())
+    };
+
+    // A write the leader commits before the backup is requested.
+    let media = root.path().join("media");
+    std::fs::create_dir_all(&media).expect("media directory");
+    let library = client
+        .post(format!("{leader_base}/api/v1/libraries"))
+        .bearer_auth(&token)
+        .json(&json!({"name":"Backup cut proof","kind":"movies","paths":[media.to_string_lossy()]}))
+        .send()
+        .await
+        .expect("create library on the leader");
+    assert_eq!(library.status(), StatusCode::OK);
+
+    let destination = root.path().join("backups");
+    std::fs::create_dir_all(&destination).expect("backup destination");
+    let response = client
+        .post(format!("{follower_base}/api/v1/cluster/backups"))
+        .bearer_auth(&token)
+        .json(&json!({"output": destination.to_string_lossy()}))
+        .send()
+        .await
+        .expect("request a backup on the follower");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    node_a.assert_running("after the follower backup");
+    node_b.assert_running("after the follower backup");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the follower refused to build a backup: {body}\nnode A: {}\nnode B: {}",
+        node_a.diagnostics(),
+        node_b.diagnostics()
+    );
+    let body: Value = serde_json::from_str(&body).expect("backup JSON");
+    assert_eq!(body["status"], "ok", "{body}");
+    let manifest = &body["manifest"];
+    assert_eq!(manifest["node_id"].as_str(), Some(follower.as_str()));
+    assert!(manifest["raft_cut"]["index"]
+        .as_u64()
+        .is_some_and(|index| index > 0));
+    assert_eq!(
+        manifest["table_counts"]["libraries"].as_u64(),
+        Some(1),
+        "the follower's cut misses the library the leader committed first: {manifest}"
+    );
+    assert!(body["path"]
+        .as_str()
+        .is_some_and(|path| Path::new(path).is_dir()));
 }

@@ -208,9 +208,15 @@ Build sequence, run by the node holding the `backup:cluster` job lease:
 1. Refuse unless `may_run_cluster_jobs()` and this node's
    `apply_lag_entries == 0` from the passive Raft metrics (a lagging image
    is a worse RPO than waiting one tick).
-2. `applied = local_client.trigger_db_snapshot().await?`.
-3. Poll `metrics_db().snapshot` until `last_log_id.index >= applied`
-   (bounded by `snapshot_transfer_timeout` + `SNAPSHOT_CATCHUP_GRACE`).
+2. Anchor the cut: `applied` is the log index of one no-op write sent
+   through the forwarding write path (`execute_acked`), which the leader
+   commits whichever voter holds the lease. `trigger_db_snapshot`'s `RTT`
+   anchor is leader-only, so a follower holding the lease could not build
+   (CLUSTER-DRILLS-2026-10-11 F1).
+3. Wait until this replica has applied through `applied`, trigger only its
+   own snapshot (`trigger_local_db_snapshot`), and poll
+   `metrics_db().snapshot` until `last_log_id.index >= applied`. Every step
+   spends the one original budget.
 4. Read `snapshots/current`, **open the named file immediately** and copy
    from the open descriptor — `snapshots_cleanup` may unlink a superseded
    snapshot while the copy runs; an open fd survives that on Linux.
