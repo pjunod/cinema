@@ -527,6 +527,17 @@ integration alone. Combined commit `070ac8814` integrates the Linux runtime
 and shipping source, preserving the same captured engine and font authority.
 Its portable source check and corrected normal hook passed without unit tests.
 
+As of `fix(build): make docker builds the runtime on amd64 without a Dolby
+package` (2026-10-11), the package is an input to `make docker`, not a
+prerequisite. Without `PLURX_LINUX_DOLBY_PACKAGE` both architectures build the
+`runtime` stage, the same image `make docker-up` builds; with it, amd64 installs
+the package through `--step docker-build`, which no longer runs under the 600 s
+package-phase deadline. The prerequisite had made `make docker` fail on every
+amd64 node, because no node can produce a package yet: on an amd64 node at `fb4397c44` the
+`linux-dolby-package-export` producer stops at its first download, where the
+`fc` (fontconfig) role's URL is the repository page rather than an archive and
+cannot match its pinned digest.
+
 The local build seam did not cover published images or CI smoke images: both
 used a separate runtime-assets/renderer path. The current shipping candidate
 adds one reusable Bookworm package-export stage and connects both paths to

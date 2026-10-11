@@ -3297,7 +3297,10 @@ class Controller internal constructor(
                 onAcknowledged = ::acknowledgementDelivered,
                 onEffectiveSelection = { effective ->
                     if (tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1")
-                        autoActiveCandidateId = effective.candidateId
+                        autoActiveCandidateId = liveContinuous().let { family ->
+                            autoCandidateAfterEffectiveSelection(autoActiveCandidateId, effective.candidateId,
+                                family?.hasMember(effective.candidateId) == true, family?.onScreenCandidateId())
+                        }
                 },
                 onGaveUp = ::controlReportingGaveUp,
             )
@@ -3637,7 +3640,7 @@ class Controller internal constructor(
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
         val next = autoRecoveryCandidate(policyCatalog, current, autoDecoderRejected,
-            link.takeIf { severe || mild }) ?: return
+            link.takeIf { severe || mild }, currentCost = downsideCost) ?: return
         if (!producer) {
             val incumbent = player
             val incumbentSession = sessionId ?: return
@@ -3792,7 +3795,7 @@ class Controller internal constructor(
         val chosen = if (pressure) {
             autoUpgradeSinceMs = null
             autoRecoveryCandidate(eligible, current, autoDecoderRejected,
-                link.takeIf { severe || autoMildSamples >= 2 })
+                link.takeIf { severe || autoMildSamples >= 2 }, currentCost = downsideCost)
         } else {
             val fitting = eligible.filter { candidate -> link?.let { bps ->
                 candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } ?: autoCatalog.firstOrNull {
@@ -5912,20 +5915,37 @@ interface PlanLike {
     val deliveredDolbyVisionProfile: Int?
 }
 
+/**
+ * The lower rung a recovery moves to. Under link pressure the link has already
+ * proved it cannot carry [current]: the largest lower rung whose cost fits
+ * [linkCeiling] is the answer. When none fits, the cheapest costed lower rung
+ * is the smallest deficit, provided it costs less than [current]
+ * ([currentCost]); otherwise holding is no worse. An uncosted rung is never
+ * chosen for link pressure.
+ */
 internal fun autoRecoveryCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
     current: tv.plurx.app.data.QualityCandidate, rejected: Set<String>, linkCeiling: Double? = null,
-    decoderRecovery: Boolean = false): tv.plurx.app.data.QualityCandidate? =
-    candidates.filter { it.hasValidIdentity && it.decoder_compatible && it.id !in rejected &&
+    decoderRecovery: Boolean = false, currentCost: Double? = null): tv.plurx.app.data.QualityCandidate? {
+    val lower = candidates.filter { it.hasValidIdentity && it.decoder_compatible && it.id !in rejected &&
         (decoderRecovery || it.route != "encode" || it.grade == current.grade) &&
-        it.width.toLong() * it.height < current.width.toLong() * current.height &&
-        (linkCeiling == null || it.peak_bps?.let { peak -> peak > 0 && peak <= linkCeiling } == true)
-    }.maxByOrNull { it.width.toLong() * it.height }
+        it.width.toLong() * it.height < current.width.toLong() * current.height }
+    if (linkCeiling == null) return lower.maxByOrNull { it.width.toLong() * it.height }
+    val costed = lower.filter { (it.peak_bps ?: 0L) > 0L }
+    return costed.filter { it.peak_bps!! <= linkCeiling }.maxByOrNull { it.width.toLong() * it.height }
+        ?: costed.minByOrNull { it.peak_bps!! }?.takeIf { cheapest -> currentCost == null || cheapest.peak_bps!! < currentCost }
+}
 
+/**
+ * The smallest affordable rung that covers the display; when none covers it,
+ * the largest affordable rung is the closest. Returning nothing there (as
+ * this did, unlike the web selector) left a 480p/720p family on a 1080p
+ * display unable to climb back from 480p after any downgrade.
+ */
 internal fun autoPreferredDisplayCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
     neededWidth: Double, neededHeight: Double): tv.plurx.app.data.QualityCandidate? =
     candidates.firstOrNull { it.route != "encode" } ?: candidates.filter {
         autoDisplayFits(it.width, it.height, neededWidth, neededHeight)
-    }.minByOrNull { it.width.toLong() * it.height }
+    }.minByOrNull { it.width.toLong() * it.height } ?: candidates.maxByOrNull { it.width.toLong() * it.height }
 
 internal fun autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight: Double): Boolean =
     width > 0 && height > 0 && width.toDouble() * 11 >= neededWidth * 10 &&
@@ -6186,6 +6206,22 @@ internal data class AutoTickState(
 
 /** Auto owns quality only while Auto is the quality that executes. */
 internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto
+
+/**
+ * The control plane's effective selection names the session recipe's
+ * candidate. A continuous family changes rung inside that one session, so for
+ * a family member the server keeps naming the rung the session started on
+ * while the attachment presents another. What is on screen is then the
+ * authority on what Auto is executing: the rung whose frame the attachment
+ * observes ([onScreen]), else the last reported presentation ([current]).
+ * Taking the server's id put Auto back on the rung it had just left: every
+ * exchange re-armed link pressure and re-requested the rung already playing,
+ * about every fifteen seconds. Reading the frame, rather than keeping
+ * [current] alone, also corrects an id a lost presentation report left stale.
+ */
+internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean,
+    onScreen: String? = null): String? =
+    if (continuousMember) onScreen ?: current else effective
 
 /** A directed change still owes the viewer an outcome. A settled change —
  * committed, retained, reopened or superseded — is history, not a change in

@@ -412,5 +412,6 @@ COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpe
 COPY --from=linux-dolby-install /usr/local/lib/plurx/ffprobe /usr/local/lib/plurx/ffprobe
 USER plurx
 
-# Preserve the incumbent default Docker target; make docker explicitly selects amd64 shipping.
+# Preserve the incumbent default Docker target. make docker selects
+# runtime-dolby-amd64 only when PLURX_LINUX_DOLBY_PACKAGE is supplied on amd64.
 FROM runtime AS default-runtime

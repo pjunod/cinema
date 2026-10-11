@@ -388,6 +388,33 @@ test('controlled HLS errors preserve Plurx quality authority',()=>{
 });
 
 
+test('continuous Auto costs are the declared link rate, not the publication ceiling',()=>{
+ const context=vm.createContext({});
+ vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),context);
+ const row=(digit,height)=>({id:digit.repeat(32),recipe_digest:Array(32).fill(0),route:'encode',
+  width:height===480?854:1280,height,target_height:height,peak_bps:null,decoder_compatible:true,sustainable:true});
+ const raw=[row('1',480),row('2',720)];
+ // The hardware run's family: per-object ceilings about four times each
+ // rung's encoder cap.
+ const family={video:[{candidate_id:raw[0].id,peak_bps:9281590,sustained_bps:3000000},
+  {candidate_id:raw[1].id,peak_bps:17281590,sustained_bps:6000000}],
+  audio:{peak_bps:518144,sustained_bps:128000}};
+ assert.deepEqual(context.continuousQualityBoundCatalog(raw,family).map(row=>row.peak_bps),[3128000,6128000]);
+ const legacy={video:family.video.map(({sustained_bps,...rest})=>rest),audio:{peak_bps:518144}};
+ assert.deepEqual(context.continuousQualityBoundCatalog(raw,legacy).map(row=>row.peak_bps),[9799734,17799734]);
+ const shape=(video,audio)=>({version:1,mode:'controlled',family_id:'a'.repeat(64),master:'master.m3u8',
+  video:raw.map((candidate,index)=>({candidate_id:candidate.id,rendition_id:String(index+1).repeat(64),
+   init_id:'c'.repeat(64),codec:'avc1.640032',width:candidate.width,height:candidate.height,timescale:24,
+   frame_ticks:1,segment_ticks:48,peak_bps:1000000,...video,playlist:`video/${String(index+1).repeat(64)}/index.m3u8`})),
+  audio:{rendition_id:'d'.repeat(64),init_id:'e'.repeat(64),codec:'mp4a.40.2',timescale:48000,channels:2,
+   peak_bps:400000,...audio,playlist:`audio/${'d'.repeat(64)}/index.m3u8`}});
+ assert.equal(context.continuousQualityFamily(shape({},{})),true);
+ assert.equal(context.continuousQualityFamily(shape({sustained_bps:250000},{sustained_bps:128000})),true);
+ assert.equal(context.continuousQualityFamily(shape({sustained_bps:1000001},{sustained_bps:128000})),false);
+ assert.equal(context.continuousQualityFamily(shape({sustained_bps:250000},{sustained_bps:400001})),false);
+ assert.equal(context.continuousQualityFamily(shape({sustained_bps:0},{})),false);
+});
+
 test('continuous Auto selection uses bound video and shared audio delivery budgets',()=>{
  const context=vm.createContext({});
  vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),context);

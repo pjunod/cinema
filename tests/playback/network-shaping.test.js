@@ -2812,25 +2812,21 @@ test("VOD readiness waits for the exact file built by an indexing pass", () => {
   }, 42), false);
 });
 
-test("actual Auto pressure uses measured peaks and refuses an unsafe two-rung interval", () => {
+test("actual Auto pressure uses the profile's own links, never rates derived from the costs", () => {
   const qualification = require("../../scripts/continuous-quality-qualification");
-  const catalog = [{route: "encode", height: 720, peak_bps: 6160000},
-    {route: "encode", height: 1080, peak_bps: 12160000},
+  const catalog = [{route: "encode", height: 720, peak_bps: 6128000},
+    {route: "encode", height: 1080, peak_bps: 12128000},
     {route: "copy", height: 1080, peak_bps: 999999999}];
   const profile = qualification.autoLinkProfile(catalog);
-  assert.equal(profile.stages.length, 5);
-  assert.equal(profile.stages[0], profile.stages[2]);
-  assert.equal(profile.stages[2], profile.stages[4]);
-  assert.equal(profile.stages[1], profile.stages[3]);
-  assert.ok(profile.stages[1] * 1000 >= profile.low_floor_bps);
-  assert.ok(profile.stages[1] * 1000 < profile.low_ceiling_bps);
-  assert.throws(() => qualification.autoLinkProfile([]), /safe pressure interval/);
+  assert.deepEqual(profile.stages, [100000, 10000, 25000, 10000, 25000]);
+  // A 4x cost error moves no stage; it is refused, because 1080p could then
+  // never recover on the 25 Mb/s link.
+  assert.throws(() => qualification.autoLinkProfile(catalog.map(row =>
+    ({...row, peak_bps: row.peak_bps * 4}))), /upgrade margin/);
+  assert.throws(() => qualification.autoLinkProfile([]), /two costed encoded rungs/);
   assert.throws(() => qualification.autoLinkProfile([
     {route: "encode", height: 720, peak_bps: 1000000},
-    {route: "encode", height: 1080, peak_bps: 1548000}]), /shaper rate resolution/);
-  assert.throws(() => qualification.autoLinkProfile([
-    {route: "encode", height: 720, peak_bps: 9000000},
-    {route: "encode", height: 1080, peak_bps: 10000000}]), /safe pressure interval/);
+    {route: "encode", height: 1080, peak_bps: 1548000}]), /applies no pressure/);
 });
 
 test("encoded-only qualification does not wait for an impossible copy fragment index", () => {
