@@ -5383,6 +5383,7 @@ fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
         probe_json: Some("{\"streams\":[]}".to_owned()),
         settings: Default::default(),
         generation: 1,
+        item_title: None,
     };
     let original = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
     snapshot.probe_json = Some("{\"streams\":[{\"codec_name\":\"hevc\"}]}".to_owned());

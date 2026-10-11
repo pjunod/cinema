@@ -2308,16 +2308,25 @@ impl TranscodeManager {
                 "VOD session creation is disabled on this server",
             ));
         };
-        let mut file = match revalidated {
-            Some(snapshot) if snapshot.file.id == req.file_id => snapshot.file.clone(),
-            _ => self
-                .store
-                .get_file(req.file_id)
-                .await
-                .map_err(|error| {
-                    start_infrastructure_error(format!("reading the source file: {error}"))
-                })?
-                .ok_or_else(|| "the file no longer exists".to_owned())?,
+        // The source row and, from the same statement, its item's title (the
+        // session's attribution): the dispatch revalidation's read on a
+        // candidate route, otherwise one snapshot read with no settings keys
+        // where `get_file` used to be.
+        let (mut file, source_item_title) = match revalidated {
+            Some(snapshot) if snapshot.file.id == req.file_id => {
+                (snapshot.file.clone(), snapshot.item_title.clone())
+            }
+            _ => {
+                let snapshot = self
+                    .store
+                    .playback_planning_snapshot(req.file_id, &[])
+                    .await
+                    .map_err(|error| {
+                        start_infrastructure_error(format!("reading the source file: {error}"))
+                    })?
+                    .ok_or_else(|| "the file no longer exists".to_owned())?;
+                (snapshot.file, snapshot.item_title)
+            }
         };
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
@@ -2423,14 +2432,7 @@ impl TranscodeManager {
                 .await?;
         }
         let session_id = uuid::Uuid::new_v4().to_string();
-        let item_title = self
-            .store
-            .get_item(file.item_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|item| item.title)
-            .unwrap_or_else(|| format!("#{}", file.item_id));
+        let item_title = source_item_title.unwrap_or_else(|| format!("#{}", file.item_id));
         let attribution = crate::vodserve::VodAttribution {
             user_name,
             item_title: &item_title,

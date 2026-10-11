@@ -19411,6 +19411,17 @@ async fn playback_planning_snapshot_retains_one_source_and_settings_revision() {
         );
         assert_eq!(before.settings["playback.fixture"], "before", "{backend}");
         assert_eq!(before.settings["transcode.fixture"], "encoder", "{backend}");
+        // The item title rides in the same statement, for session starts
+        // that would otherwise read the item for attribution alone.
+        assert_eq!(before.item_title.as_deref(), Some("planning"), "{backend}");
+        let bare = store
+            .playback_planning_snapshot(file, &[])
+            .await
+            .expect("keyless snapshot")
+            .expect("known source");
+        assert!(bare.settings.is_empty(), "{backend}: no keys, no settings");
+        assert_eq!(bare.file.id, file, "{backend}");
+        assert_eq!(bare.item_title.as_deref(), Some("planning"), "{backend}");
         store
             .put_setting("jobs.fixture", "history")
             .await

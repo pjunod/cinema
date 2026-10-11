@@ -463,6 +463,7 @@ struct PlanningSnapshotRow {
     probe_json: Option<String>,
     generation: i64,
     settings: String,
+    item_title: Option<String>,
 }
 impl From<&mut Row<'_>> for PlanningSnapshotRow {
     fn from(row: &mut Row<'_>) -> Self {
@@ -471,6 +472,7 @@ impl From<&mut Row<'_>> for PlanningSnapshotRow {
             probe_json: row.get("planning_probe"),
             generation: row.get("planning_generation"),
             settings: row.get("planning_settings"),
+            item_title: row.get("planning_item_title"),
         }
     }
 }
@@ -3105,7 +3107,8 @@ impl MediaStore for HiqliteAuthStore {
         .query_consistent_map::<PlanningSnapshotRow, _>(
             format!("WITH input AS (SELECT $1 AS file_id, $2 AS keys) SELECT {FILE_COLS}, probe_json AS planning_probe, \
                 (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
-                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings \
+                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings, \
+                (SELECT title FROM items WHERE items.id = files.item_id) AS planning_item_title \
                 FROM files WHERE id = (SELECT file_id FROM input)"), params!(file_id, keys),
         ).await.map_err(database_error)?;
         rows.into_iter()
@@ -3117,6 +3120,7 @@ impl MediaStore for HiqliteAuthStore {
                     generation: row.generation,
                     settings: serde_json::from_str(&row.settings)
                         .map_err(|error| StoreError::Database(error.to_string()))?,
+                    item_title: row.item_title,
                 })
             })
             .transpose()

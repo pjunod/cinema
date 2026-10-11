@@ -1848,13 +1848,15 @@ impl MediaStore for SqliteStore {
         self.with_read(move |conn| {
             conn.query_row(&format!("SELECT {FILE_COLS}, probe_json AS planning_probe, \
                 (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
-                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each(?2))) AS planning_settings \
+                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each(?2))) AS planning_settings, \
+                (SELECT title FROM items WHERE items.id = files.item_id) AS planning_item_title \
                 FROM files WHERE id = ?1"), params![file_id, keys], |row| {
                 let encoded: String = row.get("planning_settings")?;
                 let settings = serde_json::from_str(&encoded).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
                 Ok(crate::store::PlaybackPlanningSnapshot { file: file_from_row(row)?,
                     probe_json: row.get("planning_probe")?, settings,
-                    generation: row.get("planning_generation")? })
+                    generation: row.get("planning_generation")?,
+                    item_title: row.get("planning_item_title")? })
             }).optional().map_err(StoreError::from)
         }).await
     }

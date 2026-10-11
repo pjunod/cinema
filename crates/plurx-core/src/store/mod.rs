@@ -1803,6 +1803,11 @@ pub struct PlaybackPlanningSnapshot {
     pub probe_json: Option<String>,
     pub settings: BTreeMap<String, String>,
     pub generation: i64,
+    /// The file's item title, sub-selected in the same statement, so a
+    /// session start that names its item for attribution needs no
+    /// `get_item` read. Not a planning input: `PlanningBinding` does not
+    /// hash it. `None` when the item row is gone.
+    pub item_title: Option<String>,
 }
 
 /// All playback/transcode keys invalidate planning. Triggers cover every write
