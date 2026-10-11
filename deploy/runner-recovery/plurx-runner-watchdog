@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Recover explicitly managed local runner VMs without undoing maintenance."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import time
+
+GIB = 1024**3
+
+
+def command(*args):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr.strip()}")
+    return result.stdout
+
+
+def available_memory():
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) * 1024
+    raise RuntimeError("MemAvailable missing; refusing a blind VM start")
+
+
+def recover(config, state, *, execute=command, memory=available_memory, now=None, host=None, persist=lambda state: None):
+    now = int(time.time()) if now is None else now
+    host = socket.gethostname().split(".")[0] if host is None else host
+    project = config.get("project", "github-runners")
+    reserve = config.get("reserve_gib", 4) * GIB
+    instances = {i["name"]: i for i in json.loads(execute("incus", "list", "--project", project, "--format", "json"))}
+    receipt = {"finished": now, "host": host, "recovered": [], "errors": [], "deferred": []}
+    attempts = state.setdefault("attempts", {})
+    admission = None
+    # MemAvailable includes pages QEMU has not committed yet. Reserve the
+    # unused part of every running local guest, including on later passes.
+    def boot_headroom():
+        nonlocal admission
+        if admission is None:
+            unused = 0
+            for other in instances.values():
+                if other.get("location") != host or other["status"] == "Stopped":
+                    continue
+                allocation = other["expanded_config"].get("limits.memory", "")
+                if not re.fullmatch(r"[1-9][0-9]*GiB", allocation):
+                    raise RuntimeError("cannot account for local VM allocation")
+                committed = 0
+                if other["status"] == "Running":
+                    name = other["name"]
+                    if not re.fullmatch(r"gha-[a-z0-9-]+", name):
+                        raise RuntimeError("invalid local VM identity")
+                    usage = json.loads(execute("incus", "query", f"/1.0/instances/{name}/state?project={project}"))["memory"]["usage"]
+                    if not isinstance(usage, int) or usage < 0:
+                        raise RuntimeError("cannot account for local VM memory usage")
+                    committed = usage
+                unused += max(0, int(allocation[:-3]) * GIB - committed)
+            admission = memory() - unused
+        # A later reading may be lower; never enlarge this pass's budget.
+        return min(admission, memory())
+    for managed in config["runners"]:
+        name, unit = managed["vm"], managed["unit"]
+        if not re.fullmatch(r"gha-[a-z0-9-]+", name) or not re.fullmatch(r"forgejo-runner-gha-[a-z0-9-]+\.service", unit):
+            raise ValueError("invalid managed runner identity")
+        instance = instances.get(name)
+        if not instance or instance.get("location") != host:
+            receipt["errors"].append(f"{name}: missing or on another host")
+            continue
+        if instance["expanded_config"].get("boot.autostart") == "false":
+            receipt["deferred"].append(f"{name}: maintenance")
+            continue
+        # Inventory drift must not turn an 8 GiB admission check into a boot
+        # of a larger VM. Reconcile configuration instead of guessing units.
+        allocation = instance["expanded_config"].get("limits.memory")
+        if allocation != f"{managed['memory_gib']}GiB":
+            receipt["errors"].append(f"{name}: memory allocation differs from recovery budget")
+            continue
+        try:
+            if instance["status"] == "Stopped":
+                history = [t for t in attempts.get(name, []) if now - t < 3600]
+                attempts[name] = history
+                if history and (now - history[-1] < 600 or len(history) >= 3):
+                    receipt["deferred"].append(f"{name}: restart backoff")
+                    continue
+                # Boot only when the full configured allocation leaves host headroom.
+                if boot_headroom() < (managed["memory_gib"] * GIB + reserve):
+                    receipt["deferred"].append(f"{name}: insufficient host memory")
+                    continue
+                admission -= managed["memory_gib"] * GIB
+                history.append(now)
+                # Retain the attempt before an external command: a timeout or
+                # killed watchdog must not reset the OOM retry budget.
+                persist(state)
+                execute("incus", "start", "--project", project, name)
+                receipt["recovered"].append(f"{name}: VM started")
+            elif instance["status"] != "Running":
+                receipt["deferred"].append(f"{name}: {instance['status']}")
+                continue
+            prefix = ("incus", "exec", "--project", project, name, "--")
+            # Never restart an active or draining runner: it may own a live job.
+            status = execute(*prefix, "systemctl", "show", unit, "-p", "ActiveState", "--value").strip()
+            if status in {"inactive", "failed"}:
+                execute(*prefix, "systemctl", "start", unit)
+                receipt["recovered"].append(f"{name}: daemon started")
+        except (RuntimeError, subprocess.TimeoutExpired, KeyError, ValueError) as error:
+            receipt["errors"].append(f"{name}: {error}")
+    state["last_run"] = receipt
+    return receipt
+
+
+def save_state(path, state):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, indent=2) + "\n")
+    os.replace(temporary, path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="/etc/plurx-ci/runner-vms.json")
+    parser.add_argument("--state", default="/var/lib/plurx-runner-watchdog/state.json")
+    args = parser.parse_args()
+    path = Path(args.state)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # systemd serializes passes; atomic writes preserve restart history on failure.
+    state = json.loads(path.read_text()) if path.exists() else {}
+    receipt = recover(json.loads(Path(args.config).read_text()), state, persist=lambda value: save_state(path, value))
+    save_state(path, state)
+    print(json.dumps(receipt), flush=True)
+    return int(bool(receipt["errors"]))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

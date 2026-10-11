@@ -77,6 +77,19 @@ grant in authoritative storage before delivery. Preserve the request token
 digest for this check; a cached user ID cannot survive token revocation. Revocation prevents subsequent admitted delivery;
 it cannot undo an action already applied to a screen.
 
+Independent session and active-lease authority reads run concurrently on each
+owner pass, and independent login/proof reads within those phases also run
+concurrently. All results must pass before delivery; no proof is cached across
+poll wakeups. Serial quorum round trips otherwise consume the 500 ms owner
+queue budget even when each independent phase fits it. Delivery still performs
+its separate fresh controller-login and grant checks after admission.
+
+An expired-command log names `source=owner_queue` for an undelivered command
+or `source=receiver_guard` for the receiver's acknowledgement. It contains the
+sequence and reason, never bearer, secret, credit, title or screen content.
+The receiver's 1,000/3,000 ms credits and the 500 ms owner queue limit remain
+unchanged; a genuinely stalled authority phase still expires the command.
+
 `may_run_cluster_jobs()` permits multiple committed voters. It is NOT a
 leader guard. Do not use it for this directory. Use local serving and
 maintenance admission, including explicit learner-route classification.
