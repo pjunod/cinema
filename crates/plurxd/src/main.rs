@@ -2008,13 +2008,13 @@ const STARTUP_PENDING_HTML: &str = concat!(
 /// Retry-After is the truthful answer, and it carries the typed code every
 /// client already dispatches on.
 async fn startup_pending(headers: axum::http::HeaderMap) -> axum::response::Response {
-    use axum::http::{header, HeaderValue, StatusCode};
+    use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
     let browser = headers
         .get(header::ACCEPT)
         .and_then(|accept| accept.to_str().ok())
         .is_some_and(|accept| accept.contains("text/html"));
-    let mut response = if browser {
+    let response = if browser {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -2030,6 +2030,27 @@ async fn startup_pending(headers: axum::http::HeaderMap) -> axum::response::Resp
         }
         .into_response()
     };
+    startup_pending_headers(response)
+}
+
+/// `/readyz` keeps its own contract while pending: plain text, 503, and a
+/// one-word reason (API.md §22.1), so status tables that print the body show
+/// `starting` rather than a JSON object.
+async fn startup_pending_readyz() -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    startup_pending_headers(
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "starting\n",
+        )
+            .into_response(),
+    )
+}
+
+fn startup_pending_headers(mut response: axum::response::Response) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
     let headers = response.headers_mut();
     headers.insert(
         header::RETRY_AFTER,
@@ -2071,6 +2092,7 @@ impl StartupClockObserver for StartupObservationHttp {
                     http::internal_clock::PATH,
                     axum::routing::get(http::internal_clock::observation_snapshot),
                 )
+                .route("/readyz", axum::routing::get(startup_pending_readyz))
                 .with_state(http::internal_clock::ObservationContext {
                     membership: membership.clone(),
                     node_id,
@@ -4990,7 +5012,7 @@ mod startup_tests {
             .await
             .expect("pending socket");
         let app = owner.router.read().expect("router").clone();
-        for path in ["/readyz", "/api/v1/server", "/web/index.html"] {
+        for path in ["/api/v1/server", "/healthz", "/web/index.html"] {
             let response = tower::ServiceExt::oneshot(
                 app.clone(),
                 Request::get(path)
@@ -5012,6 +5034,20 @@ mod startup_tests {
             let json: serde_json::Value = serde_json::from_slice(&body).expect("typed JSON");
             assert_eq!(json["code"], "server_starting", "{path}");
         }
+        let ready = tower::ServiceExt::oneshot(
+            app.clone(),
+            Request::get("/readyz")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("infallible");
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ready.headers()[header::RETRY_AFTER], "2");
+        let body = axum::body::to_bytes(ready.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"starting\n", "readyz keeps its one-word reason");
         let page = tower::ServiceExt::oneshot(
             app,
             Request::get("/")
@@ -5022,6 +5058,12 @@ mod startup_tests {
         .await
         .expect("infallible");
         assert_eq!(page.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(page.headers()[header::RETRY_AFTER], "2");
+        assert_eq!(
+            page.headers()[header::CACHE_CONTROL],
+            "no-store",
+            "the starting page must never be cached as the app shell"
+        );
         assert!(page.headers()[header::CONTENT_TYPE]
             .to_str()
             .expect("type")
