@@ -6194,9 +6194,9 @@ test_anchor = "connectionScreenOpensWithoutStartingQrScanner"
 
 [[fixes]]
 id = "android.continuous-change-cancelled-before-owner-settles"
-commits = ["8a05e59b63f5fe4a421273305874a221b6a027da"]
+commits = ["8a05e59b63f5fe4a421273305874a221b6a027da", "fa8a599f63c303d326ad4b7ca73ea3fdaf4c624e"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousReservations.kt"
-source_anchor = "unreached.getAndSet(null)?.let { return@withLock it }"
+source_anchor = "unreached.keys.firstNotNullOfOrNull { unreached.remove(it) }?.let { return@withLock it }"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousReservationsTest.kt"
 test_anchor = "aChangeCancelledWhileWaitingForTheOwnerIsReportedRetained"
 
