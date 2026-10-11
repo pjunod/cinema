@@ -21,6 +21,30 @@ fn ffprobe_bin() -> String {
     crate::process::media_tool_bin("ffprobe", std::env::var("PLURX_FFPROBE").ok())
 }
 
+/// Whether this node's FFprobe runs at all: a fresh `-version`, never
+/// answered from a cache. The frame walks ask it after a page in which every
+/// read was refused, to tell refusals that are verdicts on those files from a
+/// reader that cannot read anything.
+pub async fn self_check() -> bool {
+    match crate::process::bounded::output(
+        ffprobe_bin(),
+        &["-version"],
+        REPORTER_PROBE_TIMEOUT,
+        REPORTER_PROBE_MAX_BYTES as usize,
+        crate::process::ChildWork::background("ffprobe self-check"),
+    )
+    .await
+    {
+        Ok(output) => {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| !line.trim().is_empty())
+        }
+        Err(_) => false,
+    }
+}
+
 /// Exact parser/reporter identity used by portable leaf work.
 ///
 /// The version names what a probe *concludes*, not only which FFprobe ran:

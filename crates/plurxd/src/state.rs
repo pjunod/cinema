@@ -887,6 +887,50 @@ const UNSIGNALLED_TRANSFER_PURPOSE: &str =
 /// Frame reads one tick of that walk may start: each opens and decodes media.
 const UNSIGNALLED_TRANSFER_READS_PER_TICK: usize = 16;
 
+/// Where a first-frame walk's cursor ends after a page whose every attempted
+/// read was refused.
+///
+/// One refusal is a statement about one file. Several with no read beside
+/// them could be a statement about the reader, so ffprobe is asked its own
+/// self-check. If it passes, the refusals are verdicts on those files — a
+/// corrupt title, a truncated download — and the cursor moves past them, so
+/// a library whose last rows are unreadable still completes its walk instead
+/// of re-reading them every tick. If it fails, the problem is this node's,
+/// and the cursor holds at the row before the first refusal, keeping every
+/// advance the page earned on its own facts before it.
+async fn settle_refused_page<G, GFut>(
+    walk: &'static str,
+    tally: &FrameBackfillTally,
+    walked: i64,
+    before_first_refusal: i64,
+    self_check: G,
+) -> i64
+where
+    G: FnOnce() -> GFut,
+    GFut: std::future::Future<Output = bool>,
+{
+    if tally.refused <= 1 || tally.read() > 0 {
+        return walked;
+    }
+    if self_check().await {
+        tracing::warn!(
+            walk,
+            refused = tally.refused,
+            "every frame read in this page was refused and ffprobe passes its self-check; \
+             those files keep their stored facts and the walk moves past them"
+        );
+        walked
+    } else {
+        tracing::warn!(
+            walk,
+            refused = tally.refused,
+            "every frame read in this page was refused and ffprobe fails its own self-check; \
+             holding the cursor until it passes"
+        );
+        before_first_refusal
+    }
+}
+
 fn stored_luminance(probe_json: &str) -> plurx_core::domain::ProbeResult {
     serde_json::from_str::<serde_json::Value>(probe_json)
         .ok()
@@ -7104,10 +7148,16 @@ impl JobManager {
     /// that never had a frame read at all: those the stored-document walk
     /// classified from a retained stream document.
     async fn backfill_frame_luminance(self: Arc<Self>) {
-        self.backfill_frame_luminance_with(|path| async move {
-            plurx_core::scan::probe::first_frame_luminance(&path, "catalogue luminance backfill")
+        self.backfill_frame_luminance_with(
+            |path| async move {
+                plurx_core::scan::probe::first_frame_luminance(
+                    &path,
+                    "catalogue luminance backfill",
+                )
                 .await
-        })
+            },
+            plurx_core::scan::probe::self_check,
+        )
         .await;
     }
 
@@ -7135,19 +7185,20 @@ impl JobManager {
     /// - frame carries none: stays `none`, cursor moves on;
     /// - ffprobe refused the file (a [`plurx_core::error::ProbeError::is_file_verdict`]): stays
     ///   `none`, cursor moves on — a new probe document is what earns it
-    ///   another read (open question 2 of the tone-map plan). But a page in
+    ///   another read (open question 2 of the tone-map plan). A page in
     ///   which more than one read was attempted and every one was refused
-    ///   stops without advancing: one refusal is a statement about one file,
-    ///   several with no successful read beside them are a statement about
-    ///   the reader;
+    ///   asks ffprobe's own self-check (see [`settle_refused_page`]): if it
+    ///   passes, the refusals are verdicts on those files and the cursor moves
+    ///   past them; only a failing self-check holds the cursor, at the first
+    ///   refused row;
     /// - ffprobe could not run or did not finish (not a verdict): stop;
     /// - the store write fails: stop.
     ///
     /// The `done` stamp therefore follows a walk in which every row passed
-    /// was skipped on its own facts, read, or refused by a reader that read
-    /// other files successfully — the rows it leaves `none` are the ones a
+    /// was skipped on its own facts, read, or refused by a reader that
+    /// passed its own self-check — the rows it leaves `none` are the ones a
     /// frame read cannot improve until their file changes.
-    async fn backfill_frame_luminance_with<F, Fut>(&self, read_frame: F)
+    async fn backfill_frame_luminance_with<F, Fut, G, GFut>(&self, read_frame: F, self_check: G)
     where
         F: Fn(PathBuf) -> Fut,
         Fut: std::future::Future<
@@ -7156,6 +7207,8 @@ impl JobManager {
                 plurx_core::error::ProbeError,
             >,
         >,
+        G: FnOnce() -> GFut,
+        GFut: std::future::Future<Output = bool>,
     {
         const FRAME_READS_PER_TICK: i64 = 16;
         // Rows become `none` through the stored-document walk; starting
@@ -7241,6 +7294,7 @@ impl JobManager {
 
         let mut walked = cursor;
         let mut tally = FrameBackfillTally::default();
+        let mut before_first_refusal = None;
         for candidate in page {
             if lost.is_cancelled() {
                 break;
@@ -7311,6 +7365,7 @@ impl JobManager {
                 Ok(None) => tally.absent += 1,
                 Err(error) if error.is_file_verdict() => {
                     tally.refused += 1;
+                    before_first_refusal.get_or_insert(walked);
                     tracing::warn!(
                         file_id = candidate.id,
                         %error,
@@ -7328,14 +7383,14 @@ impl JobManager {
             }
             walked = candidate.id;
         }
-        if tally.refused > 1 && tally.read() == 0 {
-            tracing::warn!(
-                refused = tally.refused,
-                "luminance frame backfill: every frame read in this page was refused; \
-                 not advancing until a read succeeds"
-            );
-            walked = cursor;
-        }
+        walked = settle_refused_page(
+            "luminance frame backfill",
+            &tally,
+            walked,
+            before_first_refusal.unwrap_or(cursor),
+            self_check,
+        )
+        .await;
         if walked > cursor {
             if let Err(error) = self
                 .store
@@ -7377,9 +7432,14 @@ impl JobManager {
         let Some(digest) = plurx_core::scan::probe::pipeline_digest().await else {
             return;
         };
-        self.backfill_unsignalled_transfer_with(&digest, |path| async move {
-            plurx_core::scan::probe::first_frame_document(&path, UNSIGNALLED_TRANSFER_PURPOSE).await
-        })
+        self.backfill_unsignalled_transfer_with(
+            &digest,
+            |path| async move {
+                plurx_core::scan::probe::first_frame_document(&path, UNSIGNALLED_TRANSFER_PURPOSE)
+                    .await
+            },
+            plurx_core::scan::probe::self_check,
+        )
         .await;
     }
 
@@ -7390,17 +7450,24 @@ impl JobManager {
     /// cluster lease (`catalogue:unsignalled-transfer`) so one node walks; at
     /// most [`UNSIGNALLED_TRANSFER_READS_PER_TICK`] reads per tick; the cursor
     /// moves past a row only on evidence about that row (ineligible document,
-    /// changed or vanished file, a frame read, or one refusal beside reads
-    /// that worked) and stops where this node cannot read (library root
-    /// unavailable, ffprobe could not run or finish, a store write failed).
+    /// changed or vanished file, a frame read, or a refusal by an ffprobe that
+    /// passes its own self-check) and stops where this node cannot read
+    /// (library root unavailable, ffprobe could not run or finish or fails its
+    /// self-check, a store write failed).
     /// A frame that says PQ or HLG writes the HDR columns fenced to the exact
     /// row snapshot and to the row still being SDR; any other frame leaves
     /// the row as it is. The completion stamp holds the digest it completed
     /// for, so another classification version or FFprobe build walks again.
-    async fn backfill_unsignalled_transfer_with<F, Fut>(&self, digest: &str, read_frame: F)
-    where
+    async fn backfill_unsignalled_transfer_with<F, Fut, G, GFut>(
+        &self,
+        digest: &str,
+        read_frame: F,
+        self_check: G,
+    ) where
         F: Fn(PathBuf) -> Fut,
         Fut: std::future::Future<Output = Result<serde_json::Value, plurx_core::error::ProbeError>>,
+        G: FnOnce() -> GFut,
+        GFut: std::future::Future<Output = bool>,
     {
         const PAGE: i64 = 256;
         match self
@@ -7479,6 +7546,7 @@ impl JobManager {
 
         let mut walked = cursor;
         let mut tally = FrameBackfillTally::default();
+        let mut before_first_refusal = None;
         let mut reads = 0usize;
         for candidate in page {
             if lost.is_cancelled() || reads >= UNSIGNALLED_TRANSFER_READS_PER_TICK {
@@ -7556,6 +7624,7 @@ impl JobManager {
                 }
                 Err(error) if error.is_file_verdict() => {
                     tally.refused += 1;
+                    before_first_refusal.get_or_insert(walked);
                     tracing::warn!(
                         file_id = candidate.id,
                         %error,
@@ -7573,14 +7642,14 @@ impl JobManager {
             }
             walked = candidate.id;
         }
-        if tally.refused > 1 && tally.read() == 0 {
-            tracing::warn!(
-                refused = tally.refused,
-                "unsignalled-transfer re-probe: every frame read in this page was refused; \
-                 not advancing until a read succeeds"
-            );
-            walked = cursor;
-        }
+        walked = settle_refused_page(
+            "unsignalled-transfer re-probe",
+            &tally,
+            walked,
+            before_first_refusal.unwrap_or(cursor),
+            self_check,
+        )
+        .await;
         if walked > cursor {
             if let Err(error) = self
                 .store
@@ -11808,7 +11877,24 @@ mod tests {
                 >,
             >,
         {
-            self.jobs.backfill_frame_luminance_with(read_frame).await;
+            self.jobs
+                .backfill_frame_luminance_with(read_frame, || std::future::ready(true))
+                .await;
+        }
+
+        async fn run_with_self_check<F, Fut>(&self, read_frame: F, self_check: bool)
+        where
+            F: Fn(PathBuf) -> Fut,
+            Fut: std::future::Future<
+                Output = Result<
+                    Option<plurx_core::scan::probe::FrameLuminance>,
+                    plurx_core::error::ProbeError,
+                >,
+            >,
+        {
+            self.jobs
+                .backfill_frame_luminance_with(read_frame, || std::future::ready(self_check))
+                .await;
         }
 
         async fn cursor(&self) -> Option<String> {
@@ -11883,7 +11969,25 @@ mod tests {
             >,
         {
             self.jobs
-                .backfill_unsignalled_transfer_with(digest, read_frame)
+                .backfill_unsignalled_transfer_with(digest, read_frame, || std::future::ready(true))
+                .await;
+        }
+
+        async fn run_unsignalled_with_self_check<F, Fut>(
+            &self,
+            digest: &str,
+            read_frame: F,
+            self_check: bool,
+        ) where
+            F: Fn(PathBuf) -> Fut,
+            Fut: std::future::Future<
+                Output = Result<serde_json::Value, plurx_core::error::ProbeError>,
+            >,
+        {
+            self.jobs
+                .backfill_unsignalled_transfer_with(digest, read_frame, || {
+                    std::future::ready(self_check)
+                })
                 .await;
         }
 
@@ -12057,11 +12161,13 @@ mod tests {
             "Transient stops the page"
         );
         let refuse_all = |path: PathBuf| async move { Err(refusal(&path)) };
-        fixture.run_unsignalled("digest", refuse_all).await;
+        fixture
+            .run_unsignalled_with_self_check("digest", refuse_all, false)
+            .await;
         assert_eq!(
             fixture.unsignalled_cursor().await,
             None,
-            "an all-refused page is a statement about the reader"
+            "an all-refused page holds while ffprobe fails its self-check"
         );
         // An unmounted share holds the cursor without a read.
         let parked = fixture.root.with_extension("parked");
@@ -12082,6 +12188,88 @@ mod tests {
         );
         assert_eq!(fixture.unsignalled_cursor().await, None);
         assert_eq!(fixture.unsignalled_done().await, None);
+    }
+
+    /// Review finding on the frame walks: a page whose only reads were
+    /// refusals of corrupt files reset the cursor every tick, so two corrupt
+    /// files at the end of a library were re-read every 60 s and the walk
+    /// never stamped done. With ffprobe passing its self-check the refusals
+    /// are verdicts on those files and the walk completes.
+    #[tokio::test]
+    async fn frame_luminance_backfill_completes_past_a_page_of_corrupt_files() {
+        let fixture = LuminanceFixture::new().await;
+        fixture.document_walk_done().await;
+        let (_, sdr) = fixture.row("sdr.mkv", None, None, "bt709").await;
+        let (_, first) = fixture
+            .row("corrupt-a.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (second_id, second) = fixture
+            .row("corrupt-b.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let refuse_all = {
+            let reads = Arc::clone(&reads);
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path.clone());
+                let answer = Err(refusal(&path));
+                async move { answer }
+            }
+        };
+        fixture.run(&refuse_all).await;
+        assert_eq!(fixture.cursor().await, Some(second_id.to_string()));
+        fixture.run(&refuse_all).await;
+        assert!(fixture.done().await, "the walk completes");
+        fixture.run(&refuse_all).await;
+        assert_eq!(
+            *reads.lock().expect("reads"),
+            vec![first, second],
+            "each corrupt file is read once, never again"
+        );
+        assert!(!reads.lock().expect("reads").contains(&sdr));
+    }
+
+    #[tokio::test]
+    async fn unsignalled_transfer_backfill_completes_past_a_page_of_corrupt_files() {
+        let fixture = LuminanceFixture::new().await;
+        let (ineligible_id, _) = fixture
+            .stream_row("signalled.mkv", "hevc", 10, Some("bt709"), None)
+            .await;
+        let (_, first) = fixture
+            .stream_row("corrupt-a.mkv", "hevc", 10, Some("unknown"), None)
+            .await;
+        let (second_id, second) = fixture
+            .stream_row("corrupt-b.mkv", "hevc", 10, Some("unknown"), None)
+            .await;
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let refuse_all = {
+            let reads = Arc::clone(&reads);
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path.clone());
+                let answer = Err(refusal(&path));
+                async move { answer }
+            }
+        };
+        // A node-wide refusal holds at the row before the first refused
+        // read, keeping the ineligible row's advance.
+        fixture
+            .run_unsignalled_with_self_check("digest", &refuse_all, false)
+            .await;
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            Some(format!("digest:{ineligible_id}"))
+        );
+        assert_eq!(fixture.unsignalled_done().await, None);
+        // Once ffprobe passes its self-check the refusals are verdicts.
+        reads.lock().expect("reads").clear();
+        fixture.run_unsignalled("digest", &refuse_all).await;
+        assert_eq!(
+            fixture.unsignalled_cursor().await,
+            Some(format!("digest:{second_id}"))
+        );
+        fixture.run_unsignalled("digest", &refuse_all).await;
+        assert_eq!(fixture.unsignalled_done().await.as_deref(), Some("digest"));
+        fixture.run_unsignalled("digest", &refuse_all).await;
+        assert_eq!(*reads.lock().expect("reads"), vec![first, second]);
     }
 
     fn frame(max_cll: i64) -> plurx_core::scan::probe::FrameLuminance {
@@ -12297,8 +12485,12 @@ mod tests {
         // Every read in a page refused, with more than one attempted, is a
         // statement about the reader, not about those files.
         let refuse_all = |path: PathBuf| async move { Err(refusal(&path)) };
-        fixture.run(refuse_all).await;
-        assert_eq!(fixture.cursor().await, None, "an all-refused page holds");
+        fixture.run_with_self_check(refuse_all, false).await;
+        assert_eq!(
+            fixture.cursor().await,
+            None,
+            "an all-refused page holds while ffprobe fails its self-check"
+        );
         assert!(!fixture.done().await);
 
         // One refusal beside a successful read is a statement about one file.
