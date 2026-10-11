@@ -12,6 +12,8 @@
 #   deploy/install <auto|linux|macos|windows|docker|binary> [options]
 #
 #   --binary PATH   install this prebuilt plurxd instead of building one
+#                   (a release archive's own plurxd, beside this script, is
+#                   used without it)
 #   --prefix DIR    where the binary goes (default: /usr/local, or the
 #                   Homebrew prefix on macOS); the service unit follows it
 #   --ffmpeg-archive PATH
@@ -38,7 +40,7 @@ uninstall=0
 dry_run=0
 
 usage() {
-  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 say() { printf '%s\n' "install: $*"; }
@@ -168,10 +170,16 @@ detect_platform() {
 
 # ---- shared steps ----------------------------------------------------------
 
-# The binary this install ships: --binary as given, or a release build of
-# this checkout. `--locked` matches the Dockerfile and the release workflow,
-# so every install path builds the same stamped server.
+# The binary this install ships: --binary as given; else the plurxd a release
+# archive carries beside this script (the macOS archive is the script, the
+# agent template and that binary); else a release build of this checkout.
+# `--locked` matches the Dockerfile and the release workflow, so every install
+# path builds the same stamped server.
 resolve_binary() {
+  if [ -z "$binary" ] && [ -f "$here/plurxd" ]; then
+    binary=$here/plurxd
+    say "installing the plurxd shipped beside this script"
+  fi
   if [ -n "$binary" ]; then
     [ -f "$binary" ] || die "no such file: $binary"
     [ -x "$binary" ] || die "not executable: $binary"
@@ -306,6 +314,12 @@ install_binary_to() {
   local dir=$1
   run_for_dir "$dir" install -d "$dir"
   run_for_dir "$dir" install -m 0755 "$binary" "$dir/plurxd"
+  # A browser-downloaded release archive passes its quarantine flag on to the
+  # binary it unpacks, and Gatekeeper then refuses to let launchd run it --
+  # the same reason the Jellyfin FFmpeg tools are cleared below.
+  if [ "$mode" = macos ] && command -v xattr >/dev/null 2>&1; then
+    run_for_dir "$dir" xattr -d com.apple.quarantine "$dir/plurxd" 2>/dev/null || true
+  fi
   say "installed $dir/plurxd"
 }
 
