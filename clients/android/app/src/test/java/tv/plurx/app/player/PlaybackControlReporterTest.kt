@@ -2470,7 +2470,8 @@ class SeekDeferredBehindSwitchTest {
         // An abandon settles a switched successor as failed with no settle or
         // rollback after it, so nothing would ever drain a held seek: it is
         // cleared before the failure is published, never left behind.
-        val abandon = source.substringAfter("private fun abandonPreparedReplacement(failed: Boolean) {")
+        val abandon = source.substringAfter("private fun abandonPreparedReplacement(")
+            .substringAfter(") {")
             .substringBefore("\n    }\n")
         val switched = abandon.substringAfter("if (preparedLedger.isSwitched) {").substringBefore("return")
         assertTrue(switched.contains("seekDeferredBehindSwitch.clear()"))
