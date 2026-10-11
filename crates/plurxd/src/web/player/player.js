@@ -585,7 +585,7 @@ function diagnoseHlsStartup(player){
     detail:'The native playlists were ready, but no presentation progress was observed. The decoder cause is not known.'};
   // A parsed master names no segments. hls.js requests fragments only from a
   // loaded level playlist, so missing media is not the cause until it loads.
-  if(episode&&episode.transport!=='native'&&episode.levelState!=='loaded'){
+  if(episode&&episode.transport!=='native'&&!episode.mediaLoaded&&episode.levelState!=='loaded'){
     const status=episode.levelState==='failed'&&failure&&failure.status;
     return {title:'The video playlist could not be loaded.',
       detail:episode.levelState==='failed'&&failure&&failure.message?failure.message:
