@@ -4513,7 +4513,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # #978: +1, test-only. The prepared-owner catalog regression in chunk_06.rs
 # bounds its own wait with one tokio::time::timeout, so a regression to the
 # 45 s prime deadline fails instead of hanging.
-expected_occurrences = 1730
+# Scan reports an unreachable provider (bcf68266f): +2, test-only, in
+# state::tests::a_scan_with_tmdb_unreachable_reports_it_once_in_its_problems:
+# one 30 s timeout around a 10 ms poll for the scan status to stop running,
+# both awaited in place. No production timer.
+expected_occurrences = 1732
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
