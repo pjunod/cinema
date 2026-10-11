@@ -13,7 +13,7 @@ function harness(api){
   return new Function("api",`
     let AUTH_GENERATION=1,ANALYSIS_COVERAGE;
     const ANALYSIS_COVERAGE_POLL_MS=0;
-    const location={hash:"#/analysis"},ANALYSIS_SNAPSHOT={node_hostnames:{n1:"nynuc"}};
+    const location={hash:"#/analysis"},ANALYSIS_SNAPSHOT={node_hostnames:{n1:"node-one"}};
     const paintAnalysis=()=>{};
     ${["esc","fmtBytes","analysisNodeDetail","nodeLabel","repaintAnalysisReconciliation","analysisCoverageClassLabel","analysisCoverageHtml","resetAnalysisCoverage","followAnalysisCoverage","toggleAnalysisCoverage","measureAnalysisCoverage"].map(shipped).join("\n")}
     resetAnalysisCoverage();
@@ -49,7 +49,7 @@ test("Measure starts a background run, follows its progress, then renders every 
   assert.match(html,/SDR<\/td><td>2<\/td>/);
   assert.match(html,/All<\/td><td>5<\/td>/);
   assert.match(html,/3 \/ 6/);
-  assert.match(html,/nynuc/);
+  assert.match(html,/node-one/);
   assert.match(html,/Unobserved files did not answer/);
   assert.match(html,/Measure again/);
 });
