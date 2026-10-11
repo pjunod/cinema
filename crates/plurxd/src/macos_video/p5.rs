@@ -2,11 +2,19 @@
 use super::*;
 use plurx_core::transcode::{EffectiveRateControl, Encoder, OutputGrade, Pipeline, VideoCodec};
 
-pub(super) const MANIFEST: &[u8] = include_bytes!("../../fixtures/macos-processing/strict-p5.json");
+pub(crate) const MANIFEST: &[u8] = include_bytes!("../../fixtures/macos-processing/strict-p5.json");
+/// The strict corpus raster, the manifest's `source_shape`. An encoded probe
+/// that downscales below it inherits each encoder's minimum frame size: AMD
+/// VA-API aligns 160x90 to 160x96 and refuses anything under 128 rows, which
+/// reads as "no Dolby support" when the decoder worked. Encoded positive
+/// probes therefore keep this raster, and the delivered pixels are projected
+/// to the independent 160x90 color oracle before they are compared.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const SOURCE_RASTER: (u32, u32) = (320, 180);
 macro_rules! media {
     ($($name:literal),+ $(,)?) => { &[$(($name, include_bytes!(concat!("../../fixtures/macos-processing/strict_p5_", $name, ".mp4")) as &[u8])),+] };
 }
-pub(super) const MEDIA: &[(&str, &[u8])] = media!(
+pub(crate) const MEDIA: &[(&str, &[u8])] = media!(
     "fresh",
     "variable",
     "missing_first",
@@ -107,7 +115,7 @@ pub(super) fn add_work(
     Ok(())
 }
 
-fn observe_negative(
+pub(crate) fn observe_negative(
     status: std::process::ExitStatus,
     stdout: &[u8],
     stderr: &[u8],
@@ -173,29 +181,73 @@ struct SelectedFrameMetadata {
     signature: Option<(u64, u64)>,
 }
 
-fn observe_selected_metadata(
+pub(crate) fn observe_selected_metadata(
     stderr: &[u8],
     pipeline: Pipeline,
     variable: bool,
 ) -> Result<(), ProbeReason> {
-    let fail = ProbeReason::OutputContractFailed;
-    let text = std::str::from_utf8(stderr).map_err(|_| fail)?;
-    let reference: Value =
-        serde_json::from_slice(MANIFEST).map_err(|_| ProbeReason::InvalidEmbeddedCorpus)?;
     let expected_format = if matches!(pipeline, Pipeline::DoviMetal | Pipeline::VtDoviMetal) {
         "videotoolbox_vld"
     } else {
         "yuv420p10le"
     };
+    observe_selected_layout_metadata(stderr, variable, expected_format, "plurx_p5_contract")
+}
+
+/// Pure observations shared by selected decoder graphs. The caller must put
+/// this named metadata-only observer at the actual layout being asserted;
+/// opaque hardware frames are never normalized to a software-format claim.
+pub(crate) fn observe_selected_layout_metadata(
+    stderr: &[u8],
+    variable: bool,
+    expected_format: &str,
+    observer: &str,
+) -> Result<(), ProbeReason> {
+    observe_selected_metadata_shape(stderr, variable, expected_format, observer, false)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn observe_selected_4k_metadata(
+    stderr: &[u8],
+    expected_format: &str,
+    observer: &str,
+) -> Result<(), ProbeReason> {
+    observe_selected_metadata_shape(stderr, false, expected_format, observer, true)
+}
+
+fn observe_selected_metadata_shape(
+    stderr: &[u8],
+    variable: bool,
+    expected_format: &str,
+    observer: &str,
+    uhd24: bool,
+) -> Result<(), ProbeReason> {
+    let fail = ProbeReason::OutputContractFailed;
+    if !matches!(
+        expected_format,
+        "vaapi" | "yuv420p10le" | "videotoolbox_vld"
+    ) || !matches!(observer, "plurx_p5_hardware" | "plurx_p5_contract")
+    {
+        return Err(fail);
+    }
+    let text = std::str::from_utf8(stderr).map_err(|_| fail)?;
+    let reference: Value =
+        serde_json::from_slice(MANIFEST).map_err(|_| ProbeReason::InvalidEmbeddedCorpus)?;
+    let prefix = format!("[showinfo@{observer} @ ");
+    let configuration = if uhd24 {
+        "config in time_base: 1/12288, frame_rate: 24/1"
+    } else {
+        "config in time_base: 1/12288, frame_rate: 12/1"
+    };
+    let pts_step = if uhd24 { 512 } else { 1024 };
+    let fps = if uhd24 { 24.0 } else { 12.0 };
+    let shape = if uhd24 { "3840x2160" } else { "320x180" };
     let mut frames = Vec::<SelectedFrameMetadata>::new();
     let mut configured = false;
-    for line in text
-        .lines()
-        .filter(|line| line.starts_with("[showinfo@plurx_p5_contract @ "))
-    {
+    for line in text.lines().filter(|line| line.starts_with(&prefix)) {
         let body = line.split_once(']').ok_or(fail)?.1.trim();
         if body.starts_with("config in time_base:") {
-            if configured || body != "config in time_base: 1/12288, frame_rate: 12/1" {
+            if configured || body != configuration {
                 return Err(fail);
             }
             configured = true;
@@ -212,12 +264,12 @@ fn observe_selected_metadata(
             if !configured
                 || number != frames.len()
                 || number >= 24
-                || pts != number as u64 * 1024
+                || pts != number as u64 * pts_step
                 || !time.is_finite()
-                || (time - number as f64 / 12.0).abs() > 0.00001
+                || (time - number as f64 / fps).abs() > 0.00001
                 || log_field(body, "fmt:") != Some(expected_format)
                 || log_field(body, "sar:") != Some("1/1")
-                || log_field(body, "s:") != Some("320x180")
+                || log_field(body, "s:") != Some(shape)
                 || log_field(body, "i:") != Some("P")
             {
                 return Err(fail);
@@ -290,7 +342,7 @@ fn observe_selected_metadata(
     Ok(())
 }
 
-fn observe_colors(raw: &[u8]) -> Result<(), ProbeReason> {
+pub(crate) fn observe_colors(raw: &[u8]) -> Result<(), ProbeReason> {
     let fail = ProbeReason::OutputContractFailed;
     if raw.len() != 24 * 160 * 90 * 3 / 2 {
         return Err(fail);
@@ -345,7 +397,20 @@ fn observe_colors(raw: &[u8]) -> Result<(), ProbeReason> {
     Ok(())
 }
 
-fn observe(document: &Value, raw: &[u8]) -> Result<(), ProbeReason> {
+pub(crate) fn observe(document: &Value, raw: &[u8]) -> Result<(), ProbeReason> {
+    observe_encoded(document, raw, (160, 90))
+}
+
+/// [`observe`] for a stream encoded at `encoded`. The stream and every frame
+/// must report exactly that raster; `raw` is always the delivered picture
+/// decoded and projected to the 160x90 oracle, so the timing, gray-ramp,
+/// neutral-chroma and color-interpretation checks are the same for every
+/// encoded raster.
+pub(crate) fn observe_encoded(
+    document: &Value,
+    raw: &[u8],
+    encoded: (u32, u32),
+) -> Result<(), ProbeReason> {
     let fail = ProbeReason::OutputContractFailed;
     let stream = &document["streams"][0];
     let frames = document["frames"].as_array().ok_or(fail)?;
@@ -367,7 +432,7 @@ fn observe(document: &Value, raw: &[u8]) -> Result<(), ProbeReason> {
         }
     }
     for frame in std::iter::once(stream).chain(frames) {
-        if frame["width"] != 160 || frame["height"] != 90 {
+        if frame["width"] != encoded.0 || frame["height"] != encoded.1 {
             return Err(fail);
         }
         for (key, expected) in [
@@ -425,7 +490,7 @@ fn observe(document: &Value, raw: &[u8]) -> Result<(), ProbeReason> {
     observe_colors(raw)
 }
 
-fn observe_source_pixels(raw: &[u8]) -> Result<(), ProbeReason> {
+pub(crate) fn observe_source_pixels(raw: &[u8]) -> Result<(), ProbeReason> {
     let fail = ProbeReason::OutputContractFailed;
     let reference: Value =
         serde_json::from_slice(MANIFEST).map_err(|_| ProbeReason::InvalidEmbeddedCorpus)?;
@@ -455,7 +520,7 @@ fn observe_source_pixels(raw: &[u8]) -> Result<(), ProbeReason> {
     Ok(())
 }
 
-fn observe_source(document: &Value, variable: bool) -> Result<(), ProbeReason> {
+pub(crate) fn observe_source(document: &Value, variable: bool) -> Result<(), ProbeReason> {
     let fail = ProbeReason::OutputContractFailed;
     let frames = document["frames"].as_array().ok_or(fail)?;
     let reference: Value =
@@ -905,6 +970,29 @@ mod tests {
         }).collect()
     }
 
+    #[test]
+    fn a_progress_record_spliced_onto_a_frame_record_hides_that_frame() {
+        // ffmpeg's progress meter ends its records with a bare carriage
+        // return, so with it on the next showinfo record joins a `frame=`
+        // line. The observer reads newline-terminated records, which is why
+        // every strict probe graph runs with `-nostats`.
+        let clean = String::from_utf8(trace_bytes(&selected_trace())).expect("UTF8 trace");
+        assert_eq!(
+            observe_selected_metadata(clean.as_bytes(), Pipeline::VtDoviMetal, true),
+            Ok(())
+        );
+        let spliced = clean.replacen(
+            "[showinfo@plurx_p5_contract @ 0x1] n: 7 ",
+            "frame=    7 fps=0.0 q=-0.0 size=       1KiB\r[showinfo@plurx_p5_contract @ 0x1] n: 7 ",
+            1,
+        );
+        assert_ne!(spliced, clean);
+        assert_eq!(
+            observe_selected_metadata(spliced.as_bytes(), Pipeline::VtDoviMetal, true),
+            Err(ProbeReason::OutputContractFailed)
+        );
+    }
+
     fn trace_bytes(rows: &[[String; 3]]) -> Vec<u8> {
         let mut log =
             "[showinfo@plurx_p5_contract @ 0x1] config in time_base: 1/12288, frame_rate: 12/1\n"
@@ -915,6 +1003,32 @@ mod tests {
             }
         }
         log.into_bytes()
+    }
+
+    #[test]
+    fn selected_vaapi_metadata_cannot_be_proved_by_downloaded_or_other_observer_frames() {
+        let trace = String::from_utf8(trace_bytes(&selected_trace()))
+            .expect("UTF8 trace")
+            .replace("videotoolbox_vld", "vaapi")
+            .replace("plurx_p5_contract", "plurx_p5_hardware");
+        assert_eq!(
+            observe_selected_layout_metadata(trace.as_bytes(), true, "vaapi", "plurx_p5_hardware"),
+            Ok(())
+        );
+        let downloaded = trace.replace("fmt:vaapi", "fmt:yuv420p10le");
+        assert_eq!(
+            observe_selected_layout_metadata(
+                downloaded.as_bytes(),
+                true,
+                "vaapi",
+                "plurx_p5_hardware"
+            ),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        assert_eq!(
+            observe_selected_layout_metadata(trace.as_bytes(), true, "vaapi", "plurx_p5_contract"),
+            Err(ProbeReason::OutputContractFailed)
+        );
     }
 
     #[test]
@@ -1016,6 +1130,65 @@ mod tests {
             })
             .collect::<Vec<_>>();
         (serde_json::json!({"streams":[stream],"frames":frames}), raw)
+    }
+
+    #[test]
+    fn source_raster_is_the_manifest_source_shape() {
+        let reference: Value = serde_json::from_slice(MANIFEST).expect("valid manifest");
+        assert_eq!(
+            reference["source_shape"],
+            serde_json::json!([SOURCE_RASTER.0, SOURCE_RASTER.1])
+        );
+    }
+
+    #[test]
+    fn encoded_raster_is_checked_exactly_while_pixels_keep_the_oracle_projection() {
+        let (document, raw) = synthetic_observed_output();
+        let reraster = |(width, height): (u32, u32)| {
+            let mut document = document.clone();
+            for key in ["streams", "frames"] {
+                for value in document[key].as_array_mut().expect("observed array") {
+                    value["width"] = serde_json::json!(width);
+                    value["height"] = serde_json::json!(height);
+                }
+            }
+            document
+        };
+        let source = reraster(SOURCE_RASTER);
+        assert_eq!(observe_encoded(&source, &raw, SOURCE_RASTER), Ok(()));
+        // The declared raster is never rewritten to fit: a 160x90 stream is
+        // not a 320x180 one, nor is the hardware-aligned 160x96 a 160x90 one.
+        assert_eq!(
+            observe_encoded(&document, &raw, SOURCE_RASTER),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        assert_eq!(
+            observe_encoded(&reraster((160, 96)), &raw, (160, 90)),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        // The wrapper the macOS graph uses keeps its exact 160x90 contract.
+        assert_eq!(
+            observe(&source, &raw),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        // Pixels still decide: the same corrupt chroma fails at either raster.
+        let mut corrupt = raw.clone();
+        for yy in 32..=34 {
+            for xx in 4..=6 {
+                corrupt[12 * 21600 + 14400 + yy * 80 + xx] = 255;
+            }
+        }
+        assert_eq!(
+            observe_encoded(&source, &corrupt, SOURCE_RASTER),
+            Err(ProbeReason::OutputContractFailed)
+        );
+        // One frame reporting a different raster fails the stream.
+        let mut mixed = source.clone();
+        mixed["frames"][7]["height"] = serde_json::json!(90);
+        assert_eq!(
+            observe_encoded(&mixed, &raw, SOURCE_RASTER),
+            Err(ProbeReason::OutputContractFailed)
+        );
     }
 
     #[test]

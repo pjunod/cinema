@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **Navigation lists only switched-on sections.** Live TV, Recordings,
+  Library channels and Shared libraries appear in the web (all three layouts),
+  Android and Apple navigation only while their Settings switch is on. Any
+  signed-in client reads the four switches from the new `GET /api/v1/features`;
+  the pages stay reachable by link and show their own off state.
 - **GitHub release downloads.** Each release tag, mirrored to the public
   GitHub repository, builds and publishes a GitHub release carrying `.deb`
   and `.rpm` server packages for x86_64 and arm64 (the `plurxd` systemd

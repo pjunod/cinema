@@ -92,8 +92,13 @@ PYTHONPATH="$packaging_root" python3 -m validation.release_artifact create \
   --rustc "$rustc_version" \
   --target "$target" \
   "${artifact_args[@]}"
+media_args=()
+if [[ "$target" == x86_64-unknown-linux-gnu ]] \
+    && grep -qx 'FROM runtime-assets AS runtime-assets-dolby-amd64' "$source_root/Dockerfile"; then
+  media_args+=(--linux-dolby-package)
+fi
 PYTHONPATH="$packaging_root" python3 -m validation.release_dockerfile \
-  "$source_root/Dockerfile" "$source_root/Dockerfile.release"
+  "${media_args[@]}" "$source_root/Dockerfile" "$source_root/Dockerfile.release"
 PYTHONPATH="$packaging_root" python3 -m validation.release_artifact verify \
   --directory "$artifact_root" \
   --git-tree "$git_tree" \
