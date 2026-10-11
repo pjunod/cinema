@@ -202,20 +202,23 @@ class ContinuousReservationsTest {
         holdHigh = true
         val holder = async(start = CoroutineStart.UNDISPATCHED) { reservations.change("c".repeat(64), 48, false, supported, 7) }
         holderEntered.await()
-        // A second change waits behind it and its caller gives up first, the
-        // way the controller's 12 s timeout does. It never reached the owner.
-        val waiting = launch(start = CoroutineStart.UNDISPATCHED) { reservations.change("b".repeat(64), 96, false, supported, 9) }
-        assertTrue(waiting.isActive)
-        waiting.cancelAndJoin()
+        // A directed change and an Auto decision wait behind it and their
+        // callers give up first, the way the controller's 12 s timeouts do.
+        // Neither reached the owner.
+        val directed = launch(start = CoroutineStart.UNDISPATCHED) { reservations.change("b".repeat(64), 96, false, supported, 9) }
+        val automatic = launch(start = CoroutineStart.UNDISPATCHED) { reservations.change("b".repeat(64), 96, true, supported, -3) }
+        assertTrue(directed.isActive && automatic.isActive)
+        directed.cancelAndJoin()
+        automatic.cancelAndJoin()
         holderReleased.complete(Unit)
         assertTrue(holder.await())
         val settled = requests.size
-        // The caller reported that change uncertain and waits for recovery
-        // to settle it. Nothing changed, so it is retained without a request.
-        val retained = reservations.recoverFailedChange()
-        assertEquals(low, retained?.failedRow)
-        assertEquals(9L, retained?.request)
-        assertTrue(requireNotNull(retained).cancelProven)
+        // Each caller reported its change uncertain and waits for recovery to
+        // settle it. Nothing changed, so each is retained without a request,
+        // one per pump pass.
+        val retained = listOf(reservations.recoverFailedChange(), reservations.recoverFailedChange())
+        assertEquals(setOf(9L, -3L), retained.map { requireNotNull(it).request }.toSet())
+        assertTrue(retained.all { it?.failedRow == low && it.cancelProven })
         assertEquals(settled, requests.size)
         assertEquals("c".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
         assertNull(reservations.recoverFailedChange())
