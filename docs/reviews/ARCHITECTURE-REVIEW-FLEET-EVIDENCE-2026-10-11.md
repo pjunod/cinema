@@ -44,7 +44,7 @@ on any node showed an `observation_state{state="unknown"}` series at 1, and
 lab6's container log for 00:41–00:45 UTC has no clock or expiry line. The
 cause is not determined; a link to the end of the rollout is possible and
 unproven. Discontinuities stayed 0 everywhere; authority reads rose 180 per
-node (0.30/s). Lifetime enforced unknown expiry-scan refusals were
+node over the 630 s window (0.29/s). Lifetime enforced unknown expiry-scan refusals were
 media1 355, lab6 25, lab4 0, lab3 0.
 
 Peer `|offset| + uncertainty` at 00:43:21 UTC was at most 0.003 s on every
