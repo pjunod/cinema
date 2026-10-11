@@ -1802,6 +1802,25 @@ fn analysis_rate(
     (throughput_bps, eta_ms)
 }
 
+/// An outcome that is the pass's, not the identity's: the child failed, the
+/// pass ran out of budget, or something transient. A shared pass that ends
+/// this way says nothing about what each identity would do alone.
+fn failed_as_a_pass(outcome: &crate::fragindex::IndexOutcome) -> bool {
+    use plurx_core::content_analysis::IndexFailureCode;
+    matches!(outcome, crate::fragindex::IndexOutcome::Failed(failure)
+    if failure.transient_allowlisted
+        || matches!(
+            failure.code,
+            IndexFailureCode::IndexProcessFailed | IndexFailureCode::IndexBudgetExceeded
+        ))
+}
+
+/// [`failed_as_a_pass`], less the transient: those retry on their own turn.
+fn failed_as_a_shared_pass(outcome: &crate::fragindex::IndexOutcome) -> bool {
+    failed_as_a_pass(outcome)
+        && !matches!(outcome, crate::fragindex::IndexOutcome::Failed(failure) if failure.transient_allowlisted)
+}
+
 fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
@@ -8145,7 +8164,7 @@ impl JobManager {
                         reporter(progress);
                     }
                 });
-            let builds = crate::fragindex::build_riding_shared(
+            let mut builds = crate::fragindex::build_riding_shared(
                 &file,
                 &missing.iter().map(|(video, _)| *video).collect::<Vec<_>>(),
                 &runtime_cache,
@@ -8154,6 +8173,43 @@ impl JobManager {
                 Some(reporter),
             )
             .await;
+            // §5.6 for the local pass: a shared read that failed as a pass —
+            // the child failed or the budget ran out — says nothing about what
+            // each identity does alone, so each of those is read again on its
+            // own now rather than recorded against every identity at once.
+            if missing.len() > 1
+                && builds
+                    .iter()
+                    .any(|build| failed_as_a_shared_pass(&build.outcome))
+            {
+                tracing::info!(
+                    file_id,
+                    identities = missing.len(),
+                    "a shared index read failed as a pass; building its identities one at a time"
+                );
+                for (slot, (video, _)) in missing.iter().enumerate() {
+                    if !builds
+                        .get(slot)
+                        .is_some_and(|build| failed_as_a_shared_pass(&build.outcome))
+                    {
+                        continue;
+                    }
+                    if !transcode.pretranscode_worker_idle() {
+                        // As above: no cursor stamp, the file stays due.
+                        return;
+                    }
+                    attempted += 1;
+                    builds[slot] = crate::fragindex::build_riding(
+                        &file,
+                        *video,
+                        &runtime_cache,
+                        index_file_budget(file.duration_ms),
+                        None,
+                        Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                    )
+                    .await;
+                }
+            }
             for ((_, identity), build) in missing.iter().zip(builds) {
                 let crate::fragindex::IndexBuild {
                     outcome,
@@ -9760,7 +9816,7 @@ impl JobManager {
         // The source is attested now, so every other identity of the file can
         // be queued beside this one, at no further read.
         self.co_resolve_sibling_identities(
-            &request.video_identity,
+            &job.pipeline_sha256,
             &request.target_node_id,
             &file,
             node_id,
@@ -9806,7 +9862,7 @@ impl JobManager {
     #[allow(clippy::too_many_arguments)]
     async fn co_resolve_sibling_identities(
         &self,
-        requested_identity: &str,
+        requested_pipeline: &str,
         target_node_id: &str,
         file: &MediaFile,
         node_id: &str,
@@ -9833,10 +9889,10 @@ impl JobManager {
         };
         let siblings = options
             .into_iter()
-            .filter(|(_, fingerprint)| fingerprint != requested_identity)
             .map(|(video, _)| {
                 crate::fragment_index_cluster::pipeline_digest(file, engine_sha256, video)
             })
+            .filter(|pipeline| pipeline != requested_pipeline)
             .collect::<Vec<_>>();
         if siblings.is_empty() {
             return;
@@ -10648,19 +10704,21 @@ impl JobManager {
             .await;
             return false;
         }
-        let mut builds = builds.into_iter();
-        let Some(lead) = builds.next() else {
-            return false;
-        };
+        let mut builds = builds;
         // Both freshness checks passed: the held source is the object the
         // pass read, and the catalog still describes it. The PGS tracks the
         // pass kept are a statement about exactly that source, whatever
-        // happens to the index publications below. They travel with the lead.
-        if let Some(pending) = lead.ride_along {
+        // happens to the index publications below. They travel with the
+        // pass's first built output.
+        if let Some(pending) = builds.iter_mut().find_map(|build| build.ride_along.take()) {
             // `true`: the `source_still_matches` refusal above has returned
             // already for a source that moved.
             self.settle_ride_along(&file, pending, true).await;
         }
+        let mut builds = builds.into_iter();
+        let Some(lead) = builds.next() else {
+            return false;
+        };
         let built_siblings = siblings
             .into_iter()
             .zip(builds)
@@ -10787,57 +10845,41 @@ impl JobManager {
             crate::fragindex::IndexOutcome,
         )>,
     ) {
-        let built = built
-            .into_iter()
-            .filter(|(_, _, outcome)| match outcome {
-                crate::fragindex::IndexOutcome::Failed(failure) => {
-                    !failure.transient_allowlisted
-                        && failure.code
-                            != plurx_core::content_analysis::IndexFailureCode::IndexProcessFailed
-                }
-                _ => true,
-            })
-            .collect::<Vec<_>>();
-        if built.is_empty() {
+        // A foreground viewer arrived: the siblings keep their own turn.
+        if !transcode.fragment_worker_idle(admission) {
             return;
         }
-        let pipelines = built
-            .iter()
-            .map(|(pipeline, _, _)| pipeline.clone())
+        let built = built
+            .into_iter()
+            .filter(|(_, _, outcome)| !failed_as_a_pass(outcome))
             .collect::<Vec<_>>();
         let excluded = self.excluded_fragment_keys().await;
-        let claimed = match crate::background_jobs::fragment_siblings(
-            Arc::clone(&self.store),
-            Arc::clone(&self.job_authority),
-            node_id,
-            lead,
-            &pipelines,
-            &excluded,
-            &worker.pipeline(),
-            true,
-        )
-        .await
-        {
-            Ok(claimed) => claimed,
-            Err(error) => {
-                tracing::debug!(%error, "claiming sibling fragment builds for publication");
-                return;
-            }
-        };
-        let mut built = built;
         let mut published = 0_usize;
-        for (job, active) in claimed {
-            let Some(active) = active else {
+        // One at a time: each claim takes the background source slot and its
+        // settlement gives it back, so a second claim beside an unsettled
+        // first would be refused and its prebuilt index wasted.
+        for (pipeline, video, outcome) in built {
+            let claimed = match crate::background_jobs::fragment_siblings(
+                Arc::clone(&self.store),
+                Arc::clone(&self.job_authority),
+                node_id,
+                lead,
+                std::slice::from_ref(&pipeline),
+                &excluded,
+                &worker.pipeline(),
+                true,
+            )
+            .await
+            {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    tracing::debug!(%error, "claiming a sibling fragment build for publication");
+                    continue;
+                }
+            };
+            let Some((job, Some(active))) = claimed.into_iter().next() else {
                 continue;
             };
-            let Some(at) = built
-                .iter()
-                .position(|(pipeline, _, _)| *pipeline == job.pipeline_sha256)
-            else {
-                active.finish().await;
-                continue;
-            };
-            let (_, video, outcome) = built.swap_remove(at);
             let fence = active.fence();
             let retry_ms = worker.retry_policy.backoff_ms(
                 &format!("{}:{}", job.cache_key, job.target_node_id),
@@ -10851,11 +10893,19 @@ impl JobManager {
                 .await
                 .ok()
                 .flatten();
-            if !crate::fragment_index_cluster::source_still_matches(
-                &attested.handle,
-                &attested.observation,
-            )
-            .unwrap_or(false)
+            let still_current = self
+                .store
+                .get_file(file.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+            if !still_current
+                || !crate::fragment_index_cluster::source_still_matches(
+                    &attested.handle,
+                    &attested.observation,
+                )
+                .unwrap_or(false)
             {
                 self.yield_fragment_index_job(&fence, &job, "source_changed", clock_ms())
                     .await;
@@ -10902,9 +10952,9 @@ impl JobManager {
             .collect()
     }
 
-    /// §5.6: an identity whose shared pass ended in a process failure builds
-    /// alone next time. Transient failures and the identity's own refusals
-    /// say nothing about sharing, and leave no mark. Keyed by file, source
+    /// §5.6: an identity whose shared pass ended in a process failure or ran
+    /// out of budget builds alone next time. Transient failures and the
+    /// identity's own refusals say nothing about sharing, and leave no mark. Keyed by file, source
     /// digest and pipeline, so a replaced source or a new engine starts clean.
     async fn mark_failed_shared_identity(
         &self,
@@ -10915,12 +10965,7 @@ impl JobManager {
     ) {
         const MARK_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
         const MAX_MARKS: usize = 4_096;
-        let crate::fragindex::IndexOutcome::Failed(failure) = outcome else {
-            return;
-        };
-        if failure.transient_allowlisted
-            || failure.code != plurx_core::content_analysis::IndexFailureCode::IndexProcessFailed
-        {
+        if !failed_as_a_shared_pass(outcome) {
             return;
         }
         let now = clock_ms();
@@ -14183,7 +14228,7 @@ mod tests {
         };
         for _ in 0..2 {
             jobs.co_resolve_sibling_identities(
-                &options[0].1,
+                &crate::fragment_index_cluster::pipeline_digest(&file, &engine, options[0].0),
                 "node-a",
                 &file,
                 "node-a",

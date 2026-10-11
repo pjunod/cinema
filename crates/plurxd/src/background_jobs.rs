@@ -2451,6 +2451,23 @@ mod tests {
             [keys[0][2].0.clone()],
             "only the lead file's asked-for sibling"
         );
+        // While that claim holds the storage domain's background source
+        // slot, the preserved sibling cannot be claimed beside it — the
+        // second slot is the store's for live demand. That is why the worker
+        // claims and settles siblings one at a time.
+        let beside = fragment_siblings(
+            Arc::clone(&store),
+            Arc::clone(&authority),
+            "node-a",
+            &lead,
+            &[keys[0][1].1.clone()],
+            &[],
+            &worker,
+            true,
+        )
+        .await
+        .expect("claim beside");
+        assert!(beside.is_empty(), "a second background reader was admitted");
         // Claimed once: a second walk finds nothing left to take.
         let again = fragment_siblings(
             Arc::clone(&store),

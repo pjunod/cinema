@@ -2682,9 +2682,7 @@ async fn build_with_args_owned(
     // behaviour: its reader closes with the refusal and the child ends early.
     let shared = identities.len() > 1;
     let mut dolby_vision = outputs.into_iter().map(|output| output.dolby_vision);
-    let mut streams: Vec<
-        std::pin::Pin<Box<dyn std::future::Future<Output = IndexOutcome> + Send + '_>>,
-    > = Vec::with_capacity(identities.len());
+    let mut streams: Vec<OutputRead<'_>> = Vec::with_capacity(identities.len());
     streams.push(Box::pin(index_output(
         stdout,
         identities[0].clone(),
@@ -2712,8 +2710,16 @@ async fn build_with_args_owned(
         result = &mut stream => Some(result),
         () = async { match cancel { Some(token) => token.cancelled().await, None => std::future::pending().await } } => None,
     };
+    let mut early = vec![false; identities.len()];
     let (mut outcomes, deadline_fired) = match result {
-        Some(Ok(outcomes)) => (outcomes, false),
+        Some(Ok(answers)) => {
+            let mut outcomes = Vec::with_capacity(answers.len());
+            for (at, (outcome, refused_early)) in answers.into_iter().enumerate() {
+                early[at] = refused_early;
+                outcomes.push(outcome);
+            }
+            (outcomes, false)
+        }
         Some(Err(_)) | None => {
             let rows = observed.lock().map(|value| value.2).unwrap_or_default();
             (
@@ -2750,7 +2756,15 @@ async fn build_with_args_owned(
             if !deadline_fired {
                 // One exit status for every output: a pass that failed did
                 // not build any of them, whatever a stream managed to parse.
-                for outcome in &mut outcomes {
+                // A stream's own refusal stands: it is a statement about the
+                // content, and a reader that refused closes its pipe, which is
+                // itself why ffmpeg exits non-zero.
+                for outcome in outcomes
+                    .iter_mut()
+                    .zip(&early)
+                    .filter(|(outcome, early)| !is_refusal(outcome, **early))
+                    .map(|(outcome, _)| outcome)
+                {
                     *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
                         IndexFailureCode::IndexProcessFailed,
                         format!("index pipe exited with {status}"),
@@ -2768,7 +2782,12 @@ async fn build_with_args_owned(
                         | std::io::ErrorKind::TimedOut
                         | std::io::ErrorKind::WouldBlock
                 );
-                for outcome in &mut outcomes {
+                for outcome in outcomes
+                    .iter_mut()
+                    .zip(&early)
+                    .filter(|(outcome, early)| !is_refusal(outcome, **early))
+                    .map(|(outcome, _)| outcome)
+                {
                     *outcome = IndexOutcome::Failed(Box::new(
                         IndexFailure::new(
                             IndexFailureCode::IndexProcessFailed,
@@ -2788,7 +2807,12 @@ async fn build_with_args_owned(
             // abandoned below.
             let _ = child.wait().await;
             if !deadline_fired {
-                for outcome in &mut outcomes {
+                for outcome in outcomes
+                    .iter_mut()
+                    .zip(&early)
+                    .filter(|(outcome, early)| !is_refusal(outcome, **early))
+                    .map(|(outcome, _)| outcome)
+                {
                     *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
                         IndexFailureCode::IndexProcessFailed,
                         "index pipe did not exit within the five-second grace",
@@ -2874,12 +2898,15 @@ async fn build_with_args_owned(
     // The child has been reaped (a `Built` outcome means it exited 0 within
     // the grace), so no slave can still be flushing; the verdict itself is
     // the caller's, outside this future. The tracks belong to the pass, and
-    // they travel with its lead: kept when the lead built, discarded with
-    // the plan otherwise, and the file's next pass does not ride — a riding
+    // they travel with its first built output: kept when one built,
+    // discarded with the plan otherwise, and the file's next pass does not ride — a riding
     // pass that failed must not be able to fail the same way on every retry.
-    let mut ride_along = match (ride_along, outcomes.first()) {
-        (Some(plan), Some(IndexOutcome::Built(_))) => Some(PendingRideAlong::new(plan, scan)),
-        (Some(plan), _) => {
+    let carrier = outcomes
+        .iter()
+        .position(|outcome| matches!(outcome, IndexOutcome::Built(_)));
+    let mut ride_along = match (ride_along, carrier) {
+        (Some(plan), Some(_)) => Some(PendingRideAlong::new(plan, scan)),
+        (Some(plan), None) => {
             crate::subtitle_ride_along::record_failed_ride(&plan);
             None
         }
@@ -2887,13 +2914,23 @@ async fn build_with_args_owned(
     };
     outcomes
         .into_iter()
-        .map(|outcome| IndexBuild {
+        .enumerate()
+        .map(|(at, outcome)| IndexBuild {
             outcome,
-            ride_along: ride_along.take(),
+            ride_along: if Some(at) == carrier {
+                ride_along.take()
+            } else {
+                None
+            },
             source_unchanged: true,
         })
         .collect()
 }
+
+/// One output's read, boxed so a pass can read stdout and pipe outputs side
+/// by side: the outcome, and whether it was a refusal before the output ended.
+type OutputRead<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = (IndexOutcome, bool)> + Send + 'a>>;
 
 /// One output of an index pass: its index, and — in a shared pass — the rest
 /// of its pipe read and discarded once the index has its answer, so a refused
@@ -2905,7 +2942,7 @@ async fn index_output<R: AsyncRead + Unpin>(
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
     drain: bool,
-) -> IndexOutcome {
+) -> (IndexOutcome, bool) {
     let outcome = index_stream_with_progress(
         &mut reader,
         identity,
@@ -2914,30 +2951,33 @@ async fn index_output<R: AsyncRead + Unpin>(
         progress,
     )
     .await;
+    // Whether the stream answered before its output ended: a refusal of
+    // content the stream saw, not the empty or short output of a child that
+    // failed. Only the former may stand against a failed exit status.
+    let early = !matches!(outcome, IndexOutcome::Built(_)) && {
+        let mut byte = [0_u8; 1];
+        matches!(reader.read(&mut byte).await, Ok(read) if read > 0)
+    };
     if drain {
         let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
     }
-    outcome
+    (outcome, early)
 }
 
-/// The read and write ends of one sibling output's pipe, both close-on-exec.
+/// A stream's own refusal of content it saw before its output ended, which
+/// no exit status overrides: the refusing reader closing its pipe is itself
+/// why a one-identity child exits non-zero.
+fn is_refusal(outcome: &IndexOutcome, early: bool) -> bool {
+    early && matches!(outcome, IndexOutcome::Unsupported(_))
+}
+
+/// The read and write ends of one sibling output's pipe, both close-on-exec
+/// (`std::io::pipe` sets it on every platform, including macOS, which has no
+/// `pipe2`).
 #[cfg(unix)]
 fn sibling_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
-    use std::os::fd::FromRawFd;
-    let mut fds = [0 as libc::c_int; 2];
-    // SAFETY: `pipe2` writes two descriptors into `fds` on success, and each
-    // is owned exactly once below.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: both descriptors were just created by `pipe2` and nothing else
-    // owns them.
-    Ok(unsafe {
-        (
-            std::os::fd::OwnedFd::from_raw_fd(fds[0]),
-            std::os::fd::OwnedFd::from_raw_fd(fds[1]),
-        )
-    })
+    let (reader, writer) = std::io::pipe()?;
+    Ok((reader.into(), writer.into()))
 }
 
 /// The descriptors an index child receives at fixed numbers: the held source
