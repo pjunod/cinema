@@ -1708,6 +1708,8 @@ pub struct JobManager {
     /// The subtitle-source store's own sweep cursor: `f<id>` of the last
     /// directory examined, or empty once a walk has wrapped.
     subtitle_source_sweep_cursor: Mutex<Option<String>>,
+    /// The subtitle sidecar sweep's cursor: the last file id examined.
+    subtitle_sidecar_sweep_cursor: Mutex<Option<i64>>,
     /// Files the last scans added or changed, oldest first, which the
     /// node-local fragment-index pass examines before its round-robin
     /// backlog. Without it a changed title waited for the cursor to wrap the
@@ -3459,6 +3461,7 @@ impl JobManager {
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
             subtitle_source_sweep_cursor: Mutex::new(None),
+            subtitle_sidecar_sweep_cursor: Mutex::new(None),
             fresh_index_files: std::sync::Mutex::new(std::collections::VecDeque::new()),
             subtitle_backfill_enqueued_process: AtomicU64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
@@ -7760,6 +7763,32 @@ impl JobManager {
     /// blobs, and the subtitle cache's LRU never sees this directory. A catalog
     /// read that fails stops the page and keeps the cursor, exactly as the
     /// index sweep does, so the same directories are asked about next tick.
+    /// Remove the extracted subtitle sidecars of files that are gone — a
+    /// deleted library's included. Bounded per tick like the other sweeps.
+    async fn sweep_orphaned_subtitle_sidecars(&self, transcode: &TranscodeManager) {
+        const SIDECAR_SWEEP_PAGE: usize = 512;
+        let cursor = *self.subtitle_sidecar_sweep_cursor.lock().await;
+        match crate::subtitles::sweep_orphaned_sidecars(
+            self.store.as_ref(),
+            transcode.subtitle_cache_dir(),
+            cursor,
+            SIDECAR_SWEEP_PAGE,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                if outcome.removed > 0 {
+                    tracing::info!(
+                        removed = outcome.removed,
+                        "removed the subtitle sidecars of deleted files"
+                    );
+                }
+                *self.subtitle_sidecar_sweep_cursor.lock().await = outcome.next;
+            }
+            Err(error) => tracing::warn!(%error, "sweeping orphaned subtitle sidecars"),
+        }
+    }
+
     async fn sweep_subtitle_sources(&self, transcode: &TranscodeManager) {
         let root = crate::subtitle_source::store_root(transcode.runtime_cache_dir());
         let cursor = self.subtitle_source_sweep_cursor.lock().await.clone();
@@ -7995,6 +8024,7 @@ impl JobManager {
         // non-cluster path: every node reconciles its own store on its own
         // tick, whether or not it holds a discovery slot.
         self.sweep_subtitle_sources(&transcode).await;
+        self.sweep_orphaned_subtitle_sidecars(&transcode).await;
 
         let cluster_cache_enabled =
             match self.store.get_setting(keys::VOD_INDEX_CLUSTER_CACHE).await {
