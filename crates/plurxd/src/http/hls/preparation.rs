@@ -1780,6 +1780,33 @@ pub(super) struct AcceptedAsk {
     pub(super) quality_intent: Option<QualityIntentIdentity>,
 }
 
+/// Whether this successor reserves first-preparation output capture
+/// (`prepared_output_capture_pending`).
+///
+/// Only a primed VOD successor captures, and a remote owner must advertise
+/// that it seals capture. A peer that predates it answers PREPARE with a full
+/// uncaptured attachment; the origin's durable re-check
+/// (`prepared_prime_is_ready`) then refuses the still-pending row, so the
+/// whole prime — up to the 45 s budget of encode work — is spent for nothing,
+/// on every routed change while a rolling upgrade is in progress. Left
+/// unstamped, the same peer primes the ordinary uncaptured attachment the
+/// origin accepts, which is the behaviour before capture existed. This is the
+/// negotiation `media_pool.retained_output_receiver` already does for START.
+pub(super) async fn successor_owner_captures_output(
+    state: &AppState,
+    successor_owner: &str,
+    presentation: crate::transcode::Presentation,
+    prime_worker: bool,
+) -> bool {
+    prime_worker
+        && presentation == crate::transcode::Presentation::Vod
+        && (successor_owner == state.node_id
+            || state
+                .media_pool
+                .prepared_output_capture_receiver(successor_owner)
+                .await)
+}
+
 #[cfg(test)]
 pub(super) async fn stage_prepared_successor(
     state: &AppState,
@@ -2039,7 +2066,14 @@ pub(super) async fn stage_prepared_successor_with_prime(
         Ok(value) => value,
         Err(_) => return,
     };
-    if staged_request.presentation == crate::transcode::Presentation::Vod && prime_worker {
+    if successor_owner_captures_output(
+        state,
+        successor_owner,
+        staged_request.presentation,
+        prime_worker,
+    )
+    .await
+    {
         response_value
             .as_object_mut()
             .expect("StartResponse object")
