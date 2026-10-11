@@ -2917,7 +2917,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # node-local cursor, runs its bounded frame reads through the scanner's
 # owned child and releases the lease before it returns; it owns no producer
 # and no timer.
-expected_occurrences = 938
+# K-04 browse authority bar (50ffc340e): +1 test-only, in
+# http::browse::tests::browse_routes_k04_bar. It spawns the replication
+# monitor's passive metrics sampler, the daemon's own bounded-read proof
+# source, and aborts it before the fixture returns. No production task.
+expected_occurrences = 939
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4486,7 +4490,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the cap, one across it and one long hold, then the shutdown token. Production
 # adds no timer: the follower's existing 10 s interval reads the held answer's
 # age.
-expected_occurrences = 1712
+# K-04 browse authority bar (50ffc340e): +2, test-only, in
+# http::browse::tests::browse_routes_k04_bar: one 10 s timeout around a 50 ms
+# poll for the bounded-read proof, both awaited in place. No production timer.
+expected_occurrences = 1714
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
