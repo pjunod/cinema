@@ -264,6 +264,12 @@ impl WriteGrants {
         self.ledger.writers_fenced(self.key)
     }
 
+    /// Retirement fenced this allocation while the ledger still holds it —
+    /// the session ending, as opposed to an allocation that is simply gone.
+    pub(crate) fn retired(&self) -> bool {
+        self.ledger.retirement_fenced(self.key)
+    }
+
     /// Register one writer against this allocation before it can make a
     /// byte. `None` means retirement already fenced it.
     pub(crate) fn register_writer(&self) -> Option<crate::scratch_ledger::ScratchWriter> {
@@ -335,9 +341,10 @@ impl SessionDir {
     /// fence while the directory still exists. A viewer's DELETE lands
     /// exactly there, so the fence is the same session ending — cancellation,
     /// not a write fault — and a missing file in a live, unfenced directory
-    /// still is one.
+    /// still is one. An allocation the ledger no longer holds is not a
+    /// retirement: only the directory itself going says the session ended.
     async fn torn_down(&self) -> bool {
-        self.grants.as_ref().is_some_and(WriteGrants::fenced)
+        self.grants.as_ref().is_some_and(WriteGrants::retired)
             || session_directory_gone(&self.dir).await
     }
 
@@ -2428,6 +2435,27 @@ mod tests {
             panic!("an unretired starved writer must stay a reader failure: {outcome:?}");
         };
         assert!(reason.contains("rolling_insufficient_capacity"), "{reason}");
+
+        // An allocation the ledger no longer holds, under a live directory:
+        // the writer stops waiting, but nothing says the session ended, so the
+        // failure stays a loud reader failure rather than a quiet cancellation.
+        let dir = crate::test_tempdir().expect("tempdir");
+        let (grants, permit) = starved(false);
+        drop(permit);
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+            Some(grants),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::ReaderFailed { .. }),
+            "a collected allocation under a live directory became cancellation: {outcome:?}"
+        );
     }
 
     /// The pipe arrives in whatever pieces the kernel felt like, and a
