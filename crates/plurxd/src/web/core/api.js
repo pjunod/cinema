@@ -29,6 +29,16 @@ function observeReadAfter(value,request){
     READ_AFTER.expires=performance.now()+60000;
   }
 }
+// `body` is the request's JSON value; api() serializes it. Hand it the
+// object, never a string: a pre-serialized body is encoded a second time, the
+// server receives a JSON string where it expects an object, refuses it with a
+// plain-text 422, and the caller can only say "request failed" — which is what
+// the transcoding backend's Optimize and Save buttons did until the type below
+// made scripts/web-types refuse it.
+/**
+ * @param {string} path
+ * @param {{method?:string, body?:Record<string, unknown>|unknown[]|null, raw?:boolean, signal?:AbortSignal|null, keepSessionOn401?:boolean, linkReceipt?:string|null}} [options]
+ */
 async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false, linkReceipt=null}={}){
   const authGeneration=AUTH_GENERATION;
   const readAfter=readAfterRequest();
