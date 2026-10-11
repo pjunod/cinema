@@ -590,9 +590,11 @@ pub async fn select_daemon_store_observing(
              re-import {}, which is the pre-activation rollback source and would \
              discard every change since. Restore the replicated target from a copy, \
              or delete {} to deliberately accept that rollback and its data loss. To \
-             rejoin a cluster instead (for example one restored from a backup), move \
-             this whole data directory aside and start this node with an empty one \
-             and a fresh join token",
+             rejoin a cluster instead (for example one restored from a backup), stop the \
+             node, create a new empty data directory owned by the service user, copy \
+             plurx.toml and nothing else into it, move the old directory aside as a \
+             retired copy and put the new one at the configured path, write a fresh join \
+             token where join_token_file points, and start the node",
             config.storage.data_dir.display(),
             record.cluster_id,
             active.display(),

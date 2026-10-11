@@ -283,14 +283,19 @@ can replicate with it or be admitted by it, and every old `membership.json`
 names peers that no longer answer with the same secret. That is the
 mechanical fence. The procedural fence is written into the runbook and
 enforced by the restore command's output: before clients are pointed at the
-restored instance, every surviving old node is stopped and its whole data
-directory is moved aside, and it rejoins with an empty data directory and a
-fresh join token like any new node. *(Corrected 2026-10-11, drill F3: this
-said to rename only `hiqlite/` to `hiqlite.retired-<UTC>`. Startup refuses
-that directory — `hiqlite-activated.json` without `hiqlite/` is the
-"already activated, refusing to re-import" case — before it reads
+restored instance, every surviving old node is stopped and rejoins like any
+new node from a new data directory: one created empty and owned by the
+service user, holding only a copy of `plurx.toml`, put at the configured path
+while the old directory is moved aside as a retired copy, with a fresh join
+token where `join_token_file` points (docs/OPERATIONS.md "Backing up and
+restoring an activated cluster" has the six steps). *(Corrected 2026-10-11,
+drill F3: this said to rename only `hiqlite/` to `hiqlite.retired-<UTC>`.
+Startup refuses that directory — `hiqlite-activated.json` without `hiqlite/`
+is the "already activated, refusing to re-import" case — before it reads
 `join_token_file`, and a join refuses a directory that still holds
-`plurx.db`.)* `restore` additionally binds one parameter,
+`plurx.db`. Moving the whole directory aside without carrying `plurx.toml`
+over does not work either: production keeps the configuration inside the
+data directory, and Docker recreates a missing bind source owned by root.)* `restore` additionally binds one parameter,
 `settings.cluster.restore_generation = <built_at_unix_ms>`, into the image
 before activation so the Cluster page can say "restored from
 2026-09-20T02:30Z artefact" and a support bundle can prove which lineage a
@@ -443,8 +448,10 @@ rejoins without any restore step; (2) stop lab1 and lab2, on lab4 with an
 empty /srv/plurx run `plurxd restore --archive <latest> --data-dir
 /srv/plurx --advertise-host 10.42.0.14`, start it, log in with a token that
 existed before the loss, open Home and one title, report DVR schedule count
-and Trakt link status; then stop lab3, move its whole data directory aside,
-issue a join token on lab4 and rejoin lab3 from an empty data directory. Report:
+and Trakt link status; then rejoin lab3 with the six steps in
+docs/OPERATIONS.md (a new empty directory owned by the service user holding
+only a copy of `plurx.toml`, the old one moved aside, a fresh join token from
+lab4). Report:
 DB size, artefact bytes, minutes from restore start to /readyz 200, minutes
 to lab3 voter again, and anything the restore command told you to do that
 you did not expect.
@@ -602,9 +609,11 @@ without Paul's explicit go-ahead in chat for that step):
 D. Production majority loss (DESTRUCTIVE; only with Paul's explicit go-ahead). Stop two
    voters, restore the latest artefact onto the designated first voter's EMPTY data dir
    with its production --advertise-host, start it, `/readyz` 200, then on every other
-   node stop plurxd, move its whole data directory aside, and rejoin from an empty data
-   directory with a fresh join token (docs/OPERATIONS.md "Backing up and restoring an
-   activated cluster").
+   node rejoin with the six steps in docs/OPERATIONS.md "Backing up and restoring an
+   activated cluster": stop plurxd, create a new empty data directory owned by the
+   service user, copy plurx.toml and nothing else into it, move the old directory aside
+   as a retired copy and put the new one at the configured path, write a fresh join
+   token where join_token_file points, and start.
    RTO = restore start to /readyz 200 plus last rejoin as voter. Writes newer than the
    artefact on the survivors are discarded by design (§7 Q4).
 ```

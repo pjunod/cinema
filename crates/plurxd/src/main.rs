@@ -671,10 +671,12 @@ async fn dispatch(
                 .await?;
                 println!("{}", serde_json::to_string_pretty(&report)?);
                 eprintln!(
-                    "restore created a fenced first voter; before directing clients here, stop \
-                     every surviving old member and move its whole data directory aside, then \
-                     rejoin each one by starting it with an empty data directory and a fresh join \
-                     token issued by this voter"
+                    "restore created a fenced first voter; before directing clients here, \
+                     rejoin every surviving old member with a join token issued by this voter: \
+                     stop the node, create a new empty data directory owned by the service user, \
+                     copy plurx.toml and nothing else into it, move the old directory aside as \
+                     a retired copy and put the new one at the configured path, write a fresh \
+                     join token where join_token_file points, and start the node"
                 );
                 Ok(())
             }

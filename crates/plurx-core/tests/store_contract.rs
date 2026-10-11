@@ -19266,11 +19266,15 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
         "refusal must name the file to delete to accept the rollback: {error}"
     );
     // Drill F3 (2026-10-11): the restore runbook renamed only `hiqlite/`,
-    // which lands exactly here. Rejoining a cluster takes the whole directory
-    // aside, and the refusal has to say so.
+    // which lands exactly here. Rejoining a cluster takes a new directory
+    // owned by the service user that carries only the configuration (which
+    // production keeps inside the data directory), and the refusal has to
+    // say so.
     assert!(
-        error.contains("move this whole data directory aside")
-            && error.contains("fresh join token"),
+        error.contains("create a new empty data directory owned by the service user")
+            && error.contains("copy plurx.toml and nothing else into it")
+            && error.contains("move the old directory aside as a retired copy")
+            && error.contains("fresh join token where join_token_file points"),
         "refusal must name the rejoin procedure: {error}"
     );
     assert!(
