@@ -5486,7 +5486,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # prepare_authorized; no process is launched.
 # Acceptance root-cause batch: +2, the `.spawn()` of the same two test-only
 # sleep producers reviewed under method-spawn; no production launch is added.
-expected_occurrences = 745
+# Startup pending fallback: +3 false positives. The pending-socket regression
+# reads `response.status()` on three in-process `oneshot` responses; the
+# fallback itself launches nothing.
+expected_occurrences = 748
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
