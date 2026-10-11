@@ -1450,6 +1450,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_coverage_report_counts_files_by_the_badge_rule() {
+        use super::super::index_coverage::{coverage_class, measure, ClassCoverage, Progress};
         // Two Dolby Vision P7 parts: one with every identity indexed, one
         // with all but the last. The report must call them exactly what
         // their detail badges do, and count identities, not just files.
@@ -1460,22 +1461,63 @@ mod tests {
             .get_file_probe_json(page.files[0].id)
             .await
             .expect("probe");
-        publish(&page, 0, 2, 10).await;
-        publish(&page, 1, usize::MAX, 10).await;
+        publish(&page, 0, usize::MAX, 10).await;
+        publish(&page, 1, 2, 10).await;
+        // Part 0 is on disk; part 1 is not, which is `unavailable` — a stat
+        // that answered — and not `unobserved`.
+        std::fs::write(&page.files[0].path, b"source").expect("part 0 on disk");
 
-        // One measurement at a time per process: the walk is the expensive
-        // part, and two concurrent ones would only double it.
-        super::super::index_coverage::RUNNING.store(true, std::sync::atomic::Ordering::Release);
-        let refused = super::super::index_coverage::measure(&page.state).await;
-        super::super::index_coverage::RUNNING.store(false, std::sync::atomic::Ordering::Release);
-        assert!(matches!(
-            refused,
-            Err(crate::http::error::ApiError::Conflict(_))
-        ));
+        // Neither a book nor a Home library's photo is a title anyone plays
+        // through a copy index, whatever its probe says.
+        let video = plurx_core::domain::ProbeResult {
+            video_codec: Some("h264".into()),
+            duration_ms: Some(1000),
+            ..Default::default()
+        };
+        for (kind, name) in [
+            (LibraryKind::Books, "book.m4b"),
+            (LibraryKind::Home, "IMG_1.jpg"),
+        ] {
+            let library = page
+                .state
+                .store
+                .create_library(&NewLibrary {
+                    name: name.into(),
+                    kind,
+                    paths: vec![page.root.path().join(name)],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = page
+                .state
+                .store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Video,
+                    parent_id: None,
+                    title: name.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            page.state
+                .store
+                .upsert_file(
+                    item,
+                    &page.root.path().join(name).join(name).to_string_lossy(),
+                    1,
+                    1,
+                    &video,
+                )
+                .await
+                .expect("file");
+        }
 
-        let report = super::super::index_coverage::measure(&page.state)
-            .await
-            .expect("coverage");
+        let progress = Progress::default();
+        let report = measure(&page.state, &progress).await.expect("coverage");
         let per_file = crate::fragindex::video_identities(
             &page.files[0],
             raw.as_deref(),
@@ -1490,7 +1532,7 @@ mod tests {
         );
         assert_eq!(
             report.classes["dolby_vision_p7"],
-            super::super::index_coverage::ClassCoverage {
+            ClassCoverage {
                 files: 2,
                 bytes: 2 * 4096,
                 identities: 6,
@@ -1500,22 +1542,37 @@ mod tests {
                 pending: 0,
                 refused: 0,
                 unsupported: 0,
-                unobserved: 2,
+                unavailable: 1,
+                unobserved: 0,
             }
         );
+        // The Home photo was listed (and skipped); the book was never listed.
+        assert_eq!(
+            progress
+                .files_done
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
         let body = detail(&page).await;
-        let mut badges = body["files"]
+        let badges = body["files"]
             .as_array()
             .expect("files")
             .iter()
             .map(|file| file["vod_index_status"].as_str().expect("badge").to_owned())
             .collect::<Vec<_>>();
-        badges.sort();
         assert_eq!(badges, ["indexed", "partial"]);
-        assert!(
-            !super::super::index_coverage::RUNNING.load(std::sync::atomic::Ordering::Acquire),
-            "a finished measurement releases the slot"
+
+        // The class follows the identity rule's own Dolby Vision test.
+        let mut file = page.files[0].clone();
+        assert_eq!(coverage_class(&file), "dolby_vision_p7");
+        file.hdr = None;
+        assert_eq!(
+            coverage_class(&file),
+            "sdr",
+            "a stray profile column is not DV"
         );
+        file.hdr = Some("hdr10plus".into());
+        assert_eq!(coverage_class(&file), "hdr10");
     }
 
     #[tokio::test]

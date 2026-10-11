@@ -2409,7 +2409,8 @@ The preparation status read requires an authenticated viewer; every other route 
 | GET | `/api/v1/files/{id}/preparation` | Read-only per-file preparation facts; authenticated viewers, no work enqueued |
 | POST | `/api/v1/files/{id}/analysis` | Durably requests analysis for one or both components. 202 |
 | GET | `/api/v1/analysis/summary` | Counters plus a queue-health verdict |
-| GET | `/api/v1/analysis/coverage` | Copy-identity index coverage of this node's video libraries, by dynamic-range class; on demand, one at a time per node (409 while one runs) |
+| GET | `/api/v1/analysis/coverage` | This node's index coverage measurement: the one running (progress) and the last result |
+| POST | `/api/v1/analysis/coverage` | Starts a measurement in the background unless one is running. 202 either way; `started` says which |
 | GET | `/api/v1/analysis/jobs` | Keyset history page with server-side filter and search |
 | GET | `/api/v1/analysis/jobs/{id}` | One job's exact durable state and attempt history |
 | DELETE | `/api/v1/analysis/jobs/{id}` | Cooperative cancellation |
@@ -2590,21 +2591,28 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 
 ### 16.6 Index coverage
 
-The queue says what is moving; `GET /analysis/coverage` says how much of the
-library the result already covers. It judges every file in this node's Movies,
-Shows, Home and Recordings libraries by item detail's `vod_index_status` rule —
-`indexed` only when every copy identity a client can ask for has a local exact
-index or a cluster artifact this node's source attestation reaches — and
-counts the answers per class: `sdr`, `hdr10`, `hlg`, `dolby_vision_p5`,
-`dolby_vision_p7`, `dolby_vision_p8`, `dolby_vision_other`.
+The queue says what is moving; coverage says how much of the library the
+result already covers. A measurement judges every file in this node's Movies,
+Shows, Home (photos excluded) and Recordings libraries by item detail's
+`vod_index_status` rule — `indexed` only when every copy identity a client can
+ask for has a local exact index or a cluster artifact this node's source
+attestation reaches — and counts the answers per class: `sdr`, `hdr10`,
+`hlg`, `dolby_vision_p5`, `dolby_vision_p7`, `dolby_vision_p8`,
+`dolby_vision_other`.
 
 Each class carries `files`, `bytes`, `identities`, `identities_indexed`, and
 the per-file states `indexed`, `partial`, `pending`, `refused` and
-`unsupported`. `unobserved` counts files whose source the node could not stat
-within the report's wait; their cluster artifacts were not consulted, as on
-the detail page. The answer is per node and computed on request by walking the
-catalogue, so it is not something to poll: one runs at a time per node, and a
-second answers 409.
+`unsupported`. `unavailable` counts files the node stat'ed and did not find;
+`unobserved` counts files whose stat did not answer in time (the walk waits
+at most two minutes in total for stats, in its own small probe pool, never
+item detail's). Neither has its cluster artifacts consulted, as on the detail
+page.
+
+The walk reads the catalogue and stats every source, so `POST` starts it as
+a background task and `GET` returns `{running, last}`: `running` is
+`{started_at_ms, files_total, files_done}` while one runs, and `last` is the
+previous result (or `{error}`). One runs at a time per node, and the result is
+process-local.
 
 ---
 

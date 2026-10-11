@@ -827,6 +827,9 @@ pub struct AppState {
     /// Advisory, bounded file observations for item detail only. Playback
     /// never consults this cache when deciding whether a source opens.
     pub detail_availability: Arc<crate::availability::AvailabilityCache>,
+    /// The library index coverage measurement: the one running and the last
+    /// result (`/api/v1/analysis/coverage`). Process-local.
+    pub(crate) index_coverage: Arc<crate::http::index_coverage::CoverageRuns>,
     pub starts: Arc<crate::playstart::StartNotifier>,
     /// Finite-playback start attempts and how each ended (C-08 M5 row 4).
     pub start_attempts: Arc<crate::playstart::StartAttempts>,
@@ -1298,6 +1301,7 @@ impl AppState {
             storage: Arc::new(tokio::sync::RwLock::new(Default::default())),
             availability: Arc::new(crate::playstart::AvailabilityCache::new()),
             detail_availability: crate::availability::AvailabilityCache::new(),
+            index_coverage: Arc::default(),
             starts: Arc::new(crate::playstart::StartNotifier::new()),
             start_attempts: Arc::new(crate::playstart::StartAttempts::new()),
             streams: crate::progressive::Streams::new(),

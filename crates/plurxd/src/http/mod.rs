@@ -27,7 +27,7 @@ pub(crate) mod file_grants;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
 pub(crate) mod images;
-mod index_coverage;
+pub(crate) mod index_coverage;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_auth_revocation;
 pub(crate) mod internal_clock;
@@ -1596,7 +1596,10 @@ pub fn router(state: AppState) -> Router {
         .route("/dv-conversions", get(dv_disk::status))
         .route("/files/{id}/preparation", get(preparation::status))
         .route("/analysis/summary", get(analysis::summary))
-        .route("/analysis/coverage", get(index_coverage::coverage))
+        .route(
+            "/analysis/coverage",
+            get(index_coverage::status).post(index_coverage::start),
+        )
         .route("/analysis/jobs", get(analysis::jobs))
         .route("/analysis/jobs/{id}", get(analysis::job))
         .route("/hubs", get(browse::hubs))

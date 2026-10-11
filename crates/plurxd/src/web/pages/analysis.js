@@ -6,7 +6,8 @@
 let ANALYSIS_BUSY=null, ANALYSIS_PENDING=null, ANALYSIS_SUMMARY_BUSY=null, ANALYSIS_SNAPSHOT=null, ANALYSIS_SUMMARY=null, ANALYSIS_ROW_LOOKUP=new Map(), ANALYSIS_SEARCH_TIMER=0;
 let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true,cursors:[""]};
 let ANALYSIS_RECONCILE={open:false,busy:false,reassign:false,rows:[],scanned:0,complete:false,error:"",result:null,names:{}};
-let ANALYSIS_COVERAGE={open:false,busy:false,report:null,error:""};
+let ANALYSIS_COVERAGE={open:false,busy:false,snapshot:null,error:""};
+const ANALYSIS_COVERAGE_POLL_MS=2000;
 async function viewAnalysis(generation=++PAGE_RENDER_GENERATION){
   if(!ME||!ME.is_admin){ location.hash="#/activity"; return; }
   layoutChrome("activity",`<div class="analysis-head"><div><h1>Content analysis</h1>
@@ -419,35 +420,54 @@ function analysisCoverageClassLabel(id){
 function analysisCoverageHtml(){
   const c=ANALYSIS_COVERAGE;
   if(!c.open)return "";
-  const r=c.report, names=(ANALYSIS_SNAPSHOT&&ANALYSIS_SNAPSHOT.node_hostnames)||{};
-  const row=(label,v)=>`<tr><td>${esc(label)}</td><td>${v.files}</td><td>${fmtBytes(v.bytes)}</td><td>${v.indexed}</td><td>${v.partial}</td><td>${v.pending}</td><td>${v.refused}</td><td>${v.unsupported}</td><td>${v.identities_indexed} / ${v.identities}</td><td>${v.unobserved}</td></tr>`;
+  const s=c.snapshot, run=s&&s.running, r=s&&s.last, names=(ANALYSIS_SNAPSHOT&&ANALYSIS_SNAPSHOT.node_hostnames)||{};
+  const row=(label,v)=>`<tr><td>${esc(label)}</td><td>${Number(v.files)||0}</td><td>${esc(fmtBytes(Number(v.bytes)||0))}</td><td>${Number(v.indexed)||0}</td><td>${Number(v.partial)||0}</td><td>${Number(v.pending)||0}</td><td>${Number(v.refused)||0}</td><td>${Number(v.unsupported)||0}</td><td>${Number(v.identities_indexed)||0} / ${Number(v.identities)||0}</td><td>${Number(v.unavailable)||0}</td><td>${Number(v.unobserved)||0}</td></tr>`;
+  const table=r&&r.classes&&r.total?`<p>Measured on ${esc(analysisNodeDetail(names,r.node_id))} in ${(Number(r.elapsed_ms||0)/1000).toFixed(1)} s.</p>
+    <div class="tbl"><table><thead><tr><th>Class</th><th>Files</th><th>Size</th><th>Indexed</th><th>Partial</th><th>Pending</th><th>Refused</th><th>Unsupported</th><th>Identities indexed</th><th>Missing</th><th>Unobserved</th></tr></thead>
+    <tbody>${Object.entries(r.classes).map(([id,v])=>row(analysisCoverageClassLabel(id),v)).join('')}${row("All",r.total)}</tbody></table></div>
+    ${Number(r.total.unobserved)?`<p class="hint">Unobserved files did not answer a disk check in time, so indexes held elsewhere in the cluster were not counted for them.</p>`:''}`:'';
   return `<section class="analysis-causes" aria-label="Index coverage"><h2>Index coverage</h2>
-    <p>How much of this node’s video library plays from an exact index, judged by the same rule as each title’s index badge: indexed only when every copy pipeline a client can ask for has an index this node can serve. Measuring walks the whole catalogue, so it runs only when you ask.</p>
-    <div class="row"><button class="ghost" ${c.busy?'disabled':''} onclick="measureAnalysisCoverage()">${c.busy?'Measuring…':r?'Measure again':'Measure'}</button>
-    <button class="ghost" ${c.busy?'disabled':''} onclick="toggleAnalysisCoverage()">Close</button></div>
+    <p>How much of this node’s video library plays from an exact index, judged by the same rule as each title’s index badge: indexed only when every copy pipeline a client can ask for has an index this node can serve. Measuring walks the whole catalogue in the background, so it runs only when you ask.</p>
+    <div class="row"><button class="ghost" ${c.busy||run?'disabled':''} onclick="measureAnalysisCoverage()">${run?'Measuring…':r?'Measure again':'Measure'}</button>
+    <button class="ghost" onclick="toggleAnalysisCoverage()">Close</button></div>
+    ${run?`<p role="status">Measuring: ${Number(run.files_done)||0} of ${Number(run.files_total)||0} files…</p>`:''}
     ${c.error?`<p role="alert">${esc(c.error)}</p>`:''}
-    ${r?`<p role="status">Measured on ${esc(analysisNodeDetail(names,r.node_id))} in ${(Number(r.elapsed_ms||0)/1000).toFixed(1)} s.</p>
-    <div class="tbl"><table><thead><tr><th>Class</th><th>Files</th><th>Size</th><th>Indexed</th><th>Partial</th><th>Pending</th><th>Refused</th><th>Unsupported</th><th>Identities indexed</th><th>Unobserved</th></tr></thead>
-    <tbody>${Object.entries(r.classes||{}).map(([id,v])=>row(analysisCoverageClassLabel(id),v)).join('')}${row("All",r.total)}</tbody></table></div>
-    ${r.total.unobserved?`<p class="hint">Unobserved files could not be checked on disk in time, so indexes held elsewhere in the cluster were not counted for them.</p>`:''}`:''}
+    ${r&&r.error?`<p role="alert">The last measurement failed: ${esc(r.error)}</p>`:''}
+    ${table}
   </section>`;
 }
-function toggleAnalysisCoverage(){
-  if(ANALYSIS_COVERAGE.busy)return;
-  ANALYSIS_COVERAGE.open=!ANALYSIS_COVERAGE.open;
-  repaintAnalysisReconciliation();
+function resetAnalysisCoverage(){
+  ANALYSIS_COVERAGE={open:false,busy:false,snapshot:null,error:""};
 }
-async function measureAnalysisCoverage(){
-  const c=ANALYSIS_COVERAGE;
+async function followAnalysisCoverage(first){
+  const c=ANALYSIS_COVERAGE,authGeneration=AUTH_GENERATION;
   if(c.busy)return;
-  const authGeneration=AUTH_GENERATION;
+  const current=()=>authGeneration===AUTH_GENERATION&&c===ANALYSIS_COVERAGE;
   c.busy=true;c.error="";repaintAnalysisReconciliation();
   try{
-    const report=await api("/analysis/coverage");
-    if(authGeneration!==AUTH_GENERATION||c!==ANALYSIS_COVERAGE)return;
-    c.report=report;
-  }catch(error){c.error=error.message||"Coverage measurement failed";}
-  finally{c.busy=false;repaintAnalysisReconciliation();}
+    let snapshot=await first();
+    while(current()){
+      c.snapshot=snapshot;repaintAnalysisReconciliation();
+      if(!snapshot||!snapshot.running||!c.open)break;
+      await new Promise(resolve=>setTimeout(resolve,ANALYSIS_COVERAGE_POLL_MS));
+      if(!current()||!c.open)break;
+      snapshot=await api("/analysis/coverage");
+    }
+  }catch(error){
+    if(current()&&!(error&&error.staleAuth))c.error=error.message||"Coverage measurement failed";
+  }finally{
+    c.busy=false;
+    if(current())repaintAnalysisReconciliation();
+  }
+}
+function toggleAnalysisCoverage(){
+  const c=ANALYSIS_COVERAGE;
+  c.open=!c.open;
+  repaintAnalysisReconciliation();
+  if(c.open)return followAnalysisCoverage(()=>api("/analysis/coverage"));
+}
+function measureAnalysisCoverage(){
+  return followAnalysisCoverage(()=>api("/analysis/coverage",{method:"POST",body:{}}));
 }
 function analysisDiagnosticText(row,names){
   const diagnostic=row.index_diagnostic||{};

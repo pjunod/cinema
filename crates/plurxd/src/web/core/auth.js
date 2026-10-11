@@ -17,6 +17,7 @@ function clearLocalSession(expectedGeneration,notice){
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   if(typeof resetActivityWork==="function")resetActivityWork();
   if(typeof resetAnalysisReconciliation==="function")resetAnalysisReconciliation();
+  if(typeof resetAnalysisCoverage==="function")resetAnalysisCoverage();
   ACTIVITY_SNAPSHOT=null; ACTIVITY_DETAIL_BUSY=0;
   Object.assign(ACTIVITY_DVR,{rows:[],next:null,loaded:false,error:null,loading:false,recent:[],attention:[],recentAt:0,recentError:null});
   clearTimeout(DVR_PAGE.historyTimer);Object.assign(DVR_PAGE,{selectedId:null,selected:null,events:[],pendingId:null,historyTimer:null});
