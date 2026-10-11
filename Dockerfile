@@ -114,6 +114,9 @@ ARG JELLYFIN_FFMPEG_VERSION=8.1.3-1-bookworm
 # ffprobe cannot be its trusted input. Build a separate static local-file
 # probe; keep the ordinary Jellyfin probe and hardware encoder intact.
 COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
+COPY scripts/sealed-parser-dependency-offers.py scripts/sealed-parser-dependency-sources.json scripts/prepare-linux-dolby-sdk /usr/local/libexec/
+COPY scripts/prepare-linux-dolby-ffmpeg /usr/local/libexec/prepare-linux-dolby-ffmpeg
+COPY scripts/linux-video-ffmpeg-patches/0001-require-current-dolby-state.patch /usr/local/libexec/linux-video-ffmpeg-patches/0001-require-current-dolby-state.patch
 COPY scripts/build-static-vmaf-scorer /usr/local/libexec/build-static-vmaf-scorer
 # plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS
 # roots are for TMDB/AniList.
@@ -170,16 +173,20 @@ RUN sed -i \
     && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential pkg-config nasm curl ca-certificates xz-utils meson ninja-build xxd \
+        build-essential pkg-config nasm curl ca-certificates xz-utils meson ninja-build xxd python3 patch \
         zlib1g-dev libbz2-dev liblzma-dev \
+    && static_provider_inputs="" \
+    && if [ "$TARGETARCH" = amd64 ]; then static_provider_inputs=/tmp/sealed-parser-provider-inputs; fi \
     && sh /usr/local/libexec/build-static-ffprobe \
-        /usr/local/lib/plurx/ffprobe /usr/share/doc/plurx/ffprobe \
+        /usr/local/lib/plurx/ffprobe /usr/share/doc/plurx/ffprobe $static_provider_inputs \
     && sh /usr/local/libexec/build-static-vmaf-scorer \
         /usr/local/lib/plurx/vmaf-ffmpeg /usr/share/doc/plurx/vmaf-scorer \
-    && apt-get purge -y build-essential pkg-config nasm xz-utils meson ninja-build xxd \
+    && apt-get purge -y build-essential pkg-config nasm xz-utils meson ninja-build xxd python3 patch \
         zlib1g-dev libbz2-dev liblzma-dev \
     && apt-get autoremove -y \
-    && rm /usr/local/libexec/build-static-ffprobe /usr/local/libexec/build-static-vmaf-scorer \
+    && rm /usr/local/libexec/build-static-ffprobe /usr/local/libexec/build-static-vmaf-scorer /usr/local/libexec/prepare-linux-dolby-ffmpeg \
+    && rm /usr/local/libexec/sealed-parser-dependency-offers.py /usr/local/libexec/sealed-parser-dependency-sources.json /usr/local/libexec/prepare-linux-dolby-sdk \
+    && rm -rf /usr/local/libexec/linux-video-ffmpeg-patches /tmp/sealed-parser-provider-inputs \
     && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates mesa-va-drivers libvulkan1 mesa-vulkan-drivers liblcms2-2 libstdc++6 curl \
         "mkvtoolnix=${MKVTOOLNIX_VERSION}" \
@@ -362,3 +369,48 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=25m \
 
 ENTRYPOINT ["plurxd"]
 CMD ["run"]
+
+# Coherent amd64 shipping entrypoint: scripts/build-linux-dolby-ffmpeg
+# --step docker-build --root CHECKOUT --output AUDITED_PACKAGE --image IMAGE.
+# It rechecks actual bytes before passing this context; ARM uses runtime unchanged.
+FROM runtime-assets AS linux-dolby-package-build
+USER root
+ARG TARGETARCH
+RUN test "$TARGETARCH" = amd64 \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        build-essential python3 pkg-config cmake ninja-build nasm patch curl \
+        autoconf automake libtool libtool-bin gettext texinfo git bison flex clang \
+        zlib1g-dev libbz2-dev liblzma-dev libpng-dev=1.6.39-2+deb12u5 \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-linux-dolby-ffmpeg scripts/prepare-linux-dolby-sdk scripts/prepare-linux-dolby-ffmpeg scripts/build-static-ffprobe scripts/linux-video-ffmpeg-sdk-sources.json /opt/plurx-media/scripts/
+COPY scripts/linux-video-ffmpeg-patches /opt/plurx-media/scripts/linux-video-ffmpeg-patches
+RUN python3 /opt/plurx-media/scripts/build-linux-dolby-ffmpeg --step pipeline \
+    --root /work/linux-dolby --jobs 2 --deadline-seconds 600
+FROM scratch AS linux-dolby-package-export
+COPY --from=linux-dolby-package-build /work/linux-dolby/package /package
+
+FROM runtime-assets AS linux-dolby-install
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-linux-dolby-ffmpeg /usr/local/libexec/build-linux-dolby-ffmpeg
+RUN --mount=from=linux-dolby-package,target=/tmp/linux-dolby-package,ro \
+    python3 /usr/local/libexec/build-linux-dolby-ffmpeg --step install-shipping \
+        --root /usr/lib/jellyfin-ffmpeg --output /tmp/linux-dolby-package \
+    && rm /usr/local/libexec/build-linux-dolby-ffmpeg
+
+FROM runtime-assets AS runtime-assets-dolby-amd64
+USER root
+RUN rm -rf /usr/lib/jellyfin-ffmpeg/lib
+COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpeg
+COPY --from=linux-dolby-install /usr/local/lib/plurx/ffprobe /usr/local/lib/plurx/ffprobe
+
+FROM runtime AS runtime-dolby-amd64
+USER root
+RUN rm -rf /usr/lib/jellyfin-ffmpeg/lib
+COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpeg
+COPY --from=linux-dolby-install /usr/local/lib/plurx/ffprobe /usr/local/lib/plurx/ffprobe
+USER plurx
+
+# Preserve the incumbent default Docker target; make docker explicitly selects amd64 shipping.
+FROM runtime AS default-runtime

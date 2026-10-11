@@ -11,6 +11,27 @@ enum HomeTab: Hashable {
     case settings
 }
 
+extension HomeTab {
+    /// The one rule for which tabs exist: Live TV, Recordings and Library
+    /// channels are top-level tabs only while the server has them switched on.
+    /// The screens themselves are not gated — reached any other way, they show
+    /// their own disabled state.
+    func isVisible(_ features: ServerFeatures) -> Bool {
+        switch self {
+        case .liveTv: return features.liveTv
+        case .recordings: return features.recordings
+        case .libraryChannels: return features.libraryChannels
+        case .home, .libraries, .search, .downloads, .settings: return true
+        }
+    }
+
+    /// Where selection lands when the selected tab is not shown: an admin
+    /// switched it off, or a deep link or remote command asked for it.
+    func visibleSelection(_ features: ServerFeatures) -> HomeTab {
+        isVisible(features) ? self : .home
+    }
+}
+
 struct HomeView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
@@ -31,10 +52,28 @@ struct HomeView: View {
         shell
             .onAppear {
                 if !initializedShell { selectedTab = initialTab; initializedShell = true }
+                keepSelectionVisible()
                 remoteNavigation.synchronizeRoute()
             }
-            .onChange(of: remoteNavigation.selectedTab) { _, _ in remoteNavigation.synchronizeRoute() }
+            .onChange(of: remoteNavigation.selectedTab) { _, _ in
+                keepSelectionVisible()
+                remoteNavigation.synchronizeRoute()
+            }
+            .onChange(of: model.features) { _, _ in keepSelectionVisible() }
             .onChange(of: remoteNavigation.paths) { _, _ in remoteNavigation.synchronizeRoute() }
+    }
+
+    /// The single owner of "a hidden tab is never selected", for both shells.
+    private func keepSelectionVisible() {
+        let visible = selectedTab.visibleSelection(model.features)
+        if visible != selectedTab { selectedTab = visible }
+    }
+
+    /// Switches only to a tab that is shown; a request for a hidden one is
+    /// ignored rather than flashed and then snapped back to Home.
+    private func select(_ tab: HomeTab) {
+        guard tab.isVisible(model.features) else { return }
+        selectedTab = tab
     }
 
     @ViewBuilder
@@ -79,18 +118,24 @@ struct HomeView: View {
             .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
             .tag(HomeTab.libraries)
 
-            NavigationStack { LiveTvView(onLeave: { selectedTab = .home }) }
-                .tabItem { Label("Live TV", systemImage: "tv") }
-                .tag(HomeTab.liveTv)
+            if HomeTab.liveTv.isVisible(model.features) {
+                NavigationStack { LiveTvView(onLeave: { selectedTab = .home }) }
+                    .tabItem { Label("Live TV", systemImage: "tv") }
+                    .tag(HomeTab.liveTv)
+            }
 
-            NavigationStack { DvrRecordingsRootView().appDestinations() }
-                .tabItem { Label("Recordings", systemImage: "record.circle") }
-                .badge(dvr.overview?.counts.attention ?? 0)
-                .tag(HomeTab.recordings)
+            if HomeTab.recordings.isVisible(model.features) {
+                NavigationStack { DvrRecordingsRootView().appDestinations() }
+                    .tabItem { Label("Recordings", systemImage: "record.circle") }
+                    .badge(dvr.overview?.counts.attention ?? 0)
+                    .tag(HomeTab.recordings)
+            }
 
-            NavigationStack { LibraryChannelsView().appDestinations() }
-                .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
-                .tag(HomeTab.libraryChannels)
+            if HomeTab.libraryChannels.isVisible(model.features) {
+                NavigationStack { LibraryChannelsView().appDestinations() }
+                    .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
+                    .tag(HomeTab.libraryChannels)
+            }
 
             NavigationStack(path: pathBinding(.search)) {
                 SearchView()
@@ -139,12 +184,12 @@ struct HomeView: View {
             Task { await model.loadHome() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .makeLibraryChannelFromItem)) { _ in
-            selectedTab = .libraryChannels
+            select(.libraryChannels)
         }
         // A reminder's *Watch* action names a channel; Live TV is the only tab
         // that can tune one, and it reads the channel from the same notice.
         .onReceive(NotificationCenter.default.publisher(for: .plurxReminderWatch)) { _ in
-            selectedTab = .liveTv
+            select(.liveTv)
         }
     }
     #else
@@ -158,17 +203,23 @@ struct HomeView: View {
                 .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
                 .tag(HomeTab.libraries)
 
-            LiveTvView(onLeave: { selectedTab = .home })
-                .tabItem { Label("Live TV", systemImage: "tv") }
-                .tag(HomeTab.liveTv)
+            if HomeTab.liveTv.isVisible(model.features) {
+                LiveTvView(onLeave: { selectedTab = .home })
+                    .tabItem { Label("Live TV", systemImage: "tv") }
+                    .tag(HomeTab.liveTv)
+            }
 
-            DvrRecordingsRootView()
-                .tabItem { Label(recordingsTabLabel, systemImage: "record.circle") }
-                .tag(HomeTab.recordings)
+            if HomeTab.recordings.isVisible(model.features) {
+                DvrRecordingsRootView()
+                    .tabItem { Label(recordingsTabLabel, systemImage: "record.circle") }
+                    .tag(HomeTab.recordings)
+            }
 
-            LibraryChannelsView()
-                .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
-                .tag(HomeTab.libraryChannels)
+            if HomeTab.libraryChannels.isVisible(model.features) {
+                LibraryChannelsView()
+                    .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
+                    .tag(HomeTab.libraryChannels)
+            }
 
             SearchView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
@@ -429,7 +480,9 @@ private struct LibrariesDashboard: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
-                SharedLibrariesEntry().padding(.horizontal, screenHPad).padding(.top, 12)
+                if model.features.sharedLibraries {
+                    SharedLibrariesEntry().padding(.horizontal, screenHPad).padding(.top, 12)
+                }
                 if model.homeLoading {
                     ProgressView()
                         .tint(Palette.accent)
@@ -474,6 +527,7 @@ private struct LibrariesDashboard: View {
         }
         .onAppear { updateRemoteOrder() }
         .onChange(of: model.libraryCollections().map(\.id)) { _, _ in updateRemoteOrder() }
+        .onChange(of: model.features.sharedLibraries) { _, _ in updateRemoteOrder() }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         .refreshable { await model.loadHome() }
@@ -486,7 +540,9 @@ private struct LibrariesDashboard: View {
         #else
         let grouping: [String] = []
         #endif
-        remoteNavigation.setOrder(scope: "libraries", keys: grouping + ["libraries:shared"] + model.libraryCollections().map { "collection:" + $0.id }, columns: 1)
+        // A Cinema remote must not be offered an entry that is not on screen.
+        let shared = model.features.sharedLibraries ? ["libraries:shared"] : []
+        remoteNavigation.setOrder(scope: "libraries", keys: grouping + shared + model.libraryCollections().map { "collection:" + $0.id }, columns: 1)
     }
     private func openGrouping() {
         remoteNavigation.openModal(scope: "libraries:grouping", opener: "libraries:grouping") { groupingMenu = false }

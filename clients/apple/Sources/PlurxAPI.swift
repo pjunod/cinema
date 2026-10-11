@@ -329,6 +329,9 @@ struct PlurxAPI {
 
     func login(_ body: LoginRequest) async throws -> LoginResponse { try await post("auth/login", body: body) }
     func me() async throws -> User { try await get("me") }
+    /// Which optional areas (Live TV, Recordings, Shared libraries, Library
+    /// channels) are switched on. Any signed-in user may read it.
+    func features() async throws -> ServerFeatures { try await get("features") }
     func libraries() async throws -> [Library] { try await get("libraries") }
 
     func libraryItems(

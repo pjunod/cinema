@@ -20,9 +20,13 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `162` — Continuous Auto costs rungs by their link
+> Status: **v0.3.0**, build `163` — Continuous Auto costs rungs by their link
 > rate and never holds a rung the link cannot carry (#994); its
 > capability-probe build passed the Android TV series.
+> Build `162` — Home hides the Live TV, Recordings,
+> Library channels and Shared libraries entries (and their remote-navigation
+> stops) while the server has that section switched off (`GET /api/v1/features`);
+> not yet installed on hardware.
 > Build `161` — Developer graduation pass (Enable Live TV
 > is the first card of Settings → Live TV; Prepared replacement is in Playback;
 > the release startup profile status is in About); not yet installed on hardware.

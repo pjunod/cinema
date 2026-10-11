@@ -604,12 +604,17 @@ replacement = "the rate-control refresh schedule remains a named lifecycle timer
 
 [[symbols]]
 id = "all-ffmpeg-process-starts"
-pattern = "\\bspawn_ffmpeg(?:_at)?\\("
+pattern = "\\bspawn_ffmpeg(?:_at(?:_with_env)?)?\\("
+# Video-processing follow-ups: the two initial launches now pass the captured
+# processing environment through spawn_ffmpeg_at_with_env, the same owned
+# executor path; the pattern follows them so they stay in this scan.
 # Review59: preserve the ordinary/fallback wrapper; include its exact-path
 # delegate and definition. The NEW executable fixture is outside this source
 # row's scope; its bounded child lifecycle is counted in the module sentinel.
 # The two initial launches moved to _at, not outside this ownership scan.
-expected_occurrences = 8
+# +2 with the follow-ups: the definition of spawn_ffmpeg_at_with_env and
+# spawn_ffmpeg_at delegating to it (spawn.rs); call sites are unchanged.
+expected_occurrences = 10
 kind = "process_start_scan"
 replacement = "one session executor acquires process capacity and cleanup registration before every rolling spawn"
 
@@ -2898,7 +2903,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # tests spawn settings_observer_loop and cancel then await it; vod/tests/
 # chunk_03.rs and vodencode_tests.rs each spawn one parked serve_segment GET
 # that the test awaits inside a 5 s timeout after advancing paused time.
-expected_occurrences = 935
+# Video-processing follow-ups (reviewed 2026-10-10, +2): one awaited
+# `tokio::task::spawn_blocking` in ffmpeg.rs reads the macOS clock package's
+# bounded provenance bytes and returns them to the caller, and the admin
+# `POST /system/video-processing/reprobe` handler spawns the existing serial
+# compatibility owner (`try_lock`, so at most one generation) bound to the
+# server shutdown token. Neither owns a producer or process.
+# Merge with main 1d3765776: the effort +2 and main #844 +1 add together.
+# Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
+expected_occurrences = 937
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4429,7 +4442,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # session end; the hung-read interval sleep), two in transcode/tests/chunk_05.rs
 # (the first-snapshot poll and its 30 s bound), and one 5 s timeout each in
 # vod/tests/chunk_03.rs and vodencode_tests.rs around the parked GET.
-expected_occurrences = 1691
+# Video-processing follow-ups (reviewed 2026-10-10, +2): the Linux strict
+# probe bounds its fixture preparation with one 5-second `tokio::time::timeout`,
+# and source preparation bounds clock-reporter capture with `timeout_at` on
+# the operation's own deadline. Both are deadlines on awaited work; neither
+# decides producer recovery.
+# Merge with main 1d3765776: the effort +2 and main #844 +2 add together.
+# Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
+expected_occurrences = 1693
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4850,7 +4870,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # DV/subtitle main union; measured by the focused ownership census.
 # Acceptance root-cause batch: +2, the test-only `/bin/sleep 60` producer
 # children reviewed under method-spawn; ProducerSlot reaps both.
-expected_occurrences = 256
+# Video-processing follow-ups (reviewed 2026-10-10, +3): linux_dolby.rs builds
+# the strict probe graph, its reporter query and its delivered-pixel decode.
+# Each runs through bounded_command_*_cancellable under
+# ChildWork::background: bounded time and output, cancelled with the probe,
+# reaped before the result is used. No rolling producer is started.
+# Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
+expected_occurrences = 259
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

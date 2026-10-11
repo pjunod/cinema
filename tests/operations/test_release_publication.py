@@ -115,7 +115,13 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertIn("plurx-cluster-check", image)
         self.assertIn("build-identity", image)
         self.assertIn("GLIBC_$max_glibc; Bookworm provides 2.36", workflow)
-        self.assertIn("target: runtime-assets", image)
+        # amd64 tags carrying the audited Dolby package publish the runtime
+        # that installs it; every other tag publishes the plain runtime.
+        self.assertIn(
+            "target: ${{ steps.media-contract.outputs.dolby_required == 'true' "
+            "&& 'runtime-assets-dolby-amd64' || 'runtime-assets' }}",
+            image,
+        )
         self.assertIn("REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST", image)
         self.assertIn("--runtime-image", image)
         self.assertLess(
@@ -322,6 +328,52 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         for message, refused in refusals.items():
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message.strip()):
                 render(refused)
+
+    def test_runtime_named_with_the_final_stage_prefix_is_not_a_second_runtime(self):
+        source = (
+            "FROM rust:1-bookworm AS build\n"
+            "RUN cargo build --release\n\n"
+            "FROM debian:bookworm-slim AS runtime-assets\n"
+            "RUN true\n\n"
+            "FROM runtime-assets AS runtime\n"
+            "COPY --from=build /plurxd /usr/local/bin/plurxd\n\n"
+            "FROM runtime-assets AS runtime-assets-dolby-amd64\n"
+            "RUN true\n"
+        )
+        from validation.release_dockerfile import _runtime, _split_final_runtime
+
+        assets, final = _split_final_runtime(source)
+        self.assertTrue(final.startswith("\nCOPY --from=build /plurxd"))
+        self.assertNotIn("runtime-assets-dolby-amd64", _runtime(source))
+        with self.assertRaises(ValueError):
+            _split_final_runtime(source + "\nFROM runtime-assets AS runtime\n")
+
+    def test_stage_boundaries_are_whole_from_declarations_in_any_case(self):
+        from validation.release_dockerfile import _runtime
+
+        source = (
+            "FROM debian:bookworm-slim AS runtime-assets\n"
+            "RUN true\n\n"
+            "from runtime-assets as Runtime\n"
+            "COPY --from=build /plurxd /usr/local/bin/plurxd\n\n"
+            "  from runtime-assets AS runtime-assets-dolby-amd64-extra\n"
+            "RUN echo later\n"
+        )
+        runtime = _runtime(source)
+        self.assertIn("COPY --from=build /plurxd", runtime)
+        self.assertNotIn("echo later", runtime)
+        self.assertNotIn("dolby-amd64-extra", runtime)
+
+    def test_named_dolby_package_context_is_accepted_only_in_its_render_mode(self):
+        from validation.release_dockerfile import render
+
+        source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        rendered = render(source, linux_dolby_package=True)
+        self.assertIn("--mount=from=linux-dolby-package,", rendered)
+        self.assertIn("FROM runtime-assets-dolby-amd64 AS runtime", rendered)
+        self.assertNotIn("cargo build", rendered)
+        plain = render(source)
+        self.assertNotIn("linux-dolby-package", plain)
 
     def test_generator_derives_current_two_binary_runtime(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -662,6 +714,42 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             )
             self.assertNotEqual(dirty_tree.returncode, 0)
             self.assertIn("tracked changes", dirty_tree.stderr)
+
+
+
+
+    def test_audited_amd64_release_render_excludes_export_tools_and_keeps_arm_incumbent(self):
+        source = (ROOT / "Dockerfile").read_text()
+        arm = render(source)
+        assert "FROM runtime-assets AS runtime" in arm
+        assert "linux-dolby-package-export" not in arm
+        assert "linux-dolby-install" not in arm
+        amd64 = render(source, linux_dolby_package=True)
+        assert "FROM runtime-assets-dolby-amd64 AS runtime" in amd64
+        assert "--mount=from=linux-dolby-package" in amd64
+        assert "linux-dolby-package-build" not in amd64
+        assert "linux-dolby-package-export" not in amd64
+        assert "cargo build" not in amd64
+        assert "USER plurx" in amd64
+        published = render(source, runtime_image="example.invalid/media@sha256:" + "a" * 64)
+        assert "linux-dolby-install" not in published
+        assert "FROM example.invalid/media@sha256:" in published
+        with unittest.TestCase().assertRaises(ValueError):
+            render(source, runtime_image="example.invalid/media@sha256:" + "a" * 64, linux_dolby_package=True)
+
+
+    def test_publish_and_ci_produce_and_consume_same_audited_media_export(self):
+        publication = WORKFLOW.read_text()
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        for workflow in [publication, ci]:
+            assert "target: linux-dolby-package-export" in workflow
+            assert "outputs: type=local,dest=linux-dolby-export" in workflow
+            assert "linux-dolby-package=./linux-dolby-export/package" in workflow
+        assert "runtime-assets-dolby-amd64" in publication
+        candidate = (ROOT / "scripts/release-package-candidate").read_text()
+        assert '"$target" == x86_64-unknown-linux-gnu' in candidate
+        assert 'media_args+=(--linux-dolby-package)' in candidate
+        assert '"${media_args[@]}"' in candidate
 
 
 if __name__ == "__main__":

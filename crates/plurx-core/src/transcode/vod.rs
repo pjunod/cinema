@@ -5,6 +5,84 @@ use crate::segplan::{PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SEGPLAN_VER
 
 use super::{ResolvedTranscode, TranscodeExecution, BURNED_VIDEO_LABEL};
 
+/// The demuxer's source origin, frozen from the held source operation.
+/// Absence means AV_NOPTS_VALUE, whose pinned producer seek origin is zero;
+/// it is distinct from a reporter explicitly observing zero.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VodSourceClock {
+    ReportedOrigin(i64),
+    ProducerDefaultZero,
+}
+
+impl VodSourceClock {
+    pub fn from_probe_start_time(value: Option<&str>) -> Result<Self, &'static str> {
+        let Some(value) = value.filter(|value| *value != "N/A") else {
+            return Ok(Self::ProducerDefaultZero);
+        };
+        if value.len() > 64 {
+            return Err("source origin exceeds its decimal bound");
+        }
+        let (negative, magnitude) = match value.strip_prefix('-') {
+            Some(value) => (true, value),
+            None => (false, value),
+        };
+        let (whole, fraction) = magnitude.split_once('.').unwrap_or((magnitude, ""));
+        if whole.is_empty()
+            || !whole.bytes().all(|b| b.is_ascii_digit())
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err("source origin is not a finite decimal");
+        }
+        let whole = whole
+            .parse::<i128>()
+            .map_err(|_| "source origin overflows")?;
+        let mut micros = whole
+            .checked_mul(1_000_000)
+            .ok_or("source origin overflows")?;
+        let mut scale = 100_000_i128;
+        for byte in fraction.bytes().take(6) {
+            micros = micros
+                .checked_add(i128::from(byte - b'0') * scale)
+                .ok_or("source origin overflows")?;
+            scale /= 10;
+        }
+        if fraction.as_bytes().get(6).is_some_and(|byte| *byte >= b'5') {
+            micros = micros.checked_add(1).ok_or("source origin overflows")?;
+        }
+        if negative {
+            micros = -micros;
+        }
+        let micros = i64::try_from(micros).map_err(|_| "source origin overflows")?;
+        // The input offset is the negation, which must also be representable.
+        micros
+            .checked_neg()
+            .ok_or("source origin offset overflows")?;
+        Ok(Self::ReportedOrigin(micros))
+    }
+
+    pub fn identity(self) -> [u8; 10] {
+        let mut bytes = [0; 10];
+        bytes[0] = 1; // film-origin policy version
+        bytes[1] = u8::from(matches!(self, Self::ReportedOrigin(_)));
+        bytes[2..].copy_from_slice(&self.origin_microseconds().to_le_bytes());
+        bytes
+    }
+
+    fn origin_microseconds(self) -> i64 {
+        match self {
+            Self::ReportedOrigin(value) => value,
+            Self::ProducerDefaultZero => 0,
+        }
+    }
+
+    fn input_offset(self) -> String {
+        let value = -i128::from(self.origin_microseconds());
+        let sign = if value < 0 { "-" } else { "" };
+        let value = value.abs();
+        format!("{sign}{}.{:06}", value / 1_000_000, value % 1_000_000)
+    }
+}
+
 pub const VOD_AUDIO_RATE: u32 = 48_000;
 pub const VOD_AAC_FRAME_SAMPLES: u64 = 1_024;
 /// The sample entry promised by encoded HEVC HLS presentations. The fMP4
@@ -885,6 +963,19 @@ impl VodSharedAudioRecipe {
         execution: &TranscodeExecution,
         duration_seconds: f64,
     ) -> Option<Vec<String>> {
+        self.args_with_source_clock(
+            execution,
+            duration_seconds,
+            VodSourceClock::ReportedOrigin(0),
+        )
+    }
+
+    pub fn args_with_source_clock(
+        &self,
+        execution: &TranscodeExecution,
+        duration_seconds: f64,
+        source_clock: VodSourceClock,
+    ) -> Option<Vec<String>> {
         if !duration_seconds.is_finite()
             || duration_seconds <= execution.start_seconds
             || !execution.start_seconds.is_finite()
@@ -899,6 +990,8 @@ impl VodSharedAudioRecipe {
             "-filter_threads".into(),
             "1".into(),
             "-noaccurate_seek".into(),
+            "-itsoffset".into(),
+            source_clock.input_offset(),
             "-ss".into(),
             format!("{:.9}", clock.seek),
             "-threads".into(),
@@ -975,6 +1068,26 @@ pub fn vod_pipe_args_with_reorder(
     duration_seconds: f64,
     reorder: bool,
 ) -> Vec<String> {
+    vod_pipe_args_with_source_clock(
+        source,
+        plan,
+        execution,
+        grid,
+        duration_seconds,
+        reorder,
+        VodSourceClock::ReportedOrigin(0),
+    )
+}
+
+pub fn vod_pipe_args_with_source_clock(
+    source: &MediaFile,
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
+    grid: VodFrameGrid,
+    duration_seconds: f64,
+    reorder: bool,
+    source_clock: VodSourceClock,
+) -> Vec<String> {
     let media = plan.options();
     let continuous = media.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50;
     let target = execution.start_seconds.max(0.0);
@@ -998,7 +1111,15 @@ pub fn vod_pipe_args_with_reorder(
     // Explicit film-clock trim below owns the accurate landing. Letting the
     // input seek also trim audio can discard a different partial packet on
     // each restart before its sample-clock correction sees the frame.
-    args.splice(0..0, ["-copyts".to_owned(), "-noaccurate_seek".to_owned()]);
+    args.splice(
+        0..0,
+        [
+            "-copyts".to_owned(),
+            "-noaccurate_seek".to_owned(),
+            "-itsoffset".to_owned(),
+            source_clock.input_offset(),
+        ],
+    );
     let has_audio = media.input_has_audio;
     if has_audio {
         let before_map = args
@@ -1012,6 +1133,9 @@ pub fn vod_pipe_args_with_reorder(
         args.splice(
             before_map..before_map,
             [
+                "-itsoffset".into(),
+                source_clock.input_offset(),
+                "-noaccurate_seek".into(),
                 "-ss".into(),
                 format!("{audio_seek:.9}"),
                 "-i".into(),
@@ -1210,6 +1334,10 @@ pub fn vod_pipe_args_with_reorder(
 /// soundtrack lattice and output codec contract. The caller independently
 /// verifies one source picture per output-grid frame before publishing bytes.
 /// No fps, clone padding or source video decoder may alter that association.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reconstructed recipe binds source, output, timing, both descriptors and the held source clock"
+)]
 pub fn vod_reconstructed_pipe_args(
     source: &MediaFile,
     plan: &ResolvedTranscode,
@@ -1218,6 +1346,7 @@ pub fn vod_reconstructed_pipe_args(
     duration_seconds: f64,
     source_fd: &str,
     audio_fd: &str,
+    source_clock: VodSourceClock,
 ) -> Result<Vec<String>, &'static str> {
     let output = plan
         .completed_reconstructed_output(plan.encoder())
@@ -1230,9 +1359,14 @@ pub fn vod_reconstructed_pipe_args(
         duration_seconds,
         source_fd,
         audio_fd,
+        source_clock,
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reconstructed recipe binds source, output, timing, both descriptors and the held source clock"
+)]
 pub fn vod_completed_reconstructed_pipe_args(
     source: &MediaFile,
     output: &super::CompletedReconstructedOutputPlan<'_>,
@@ -1241,6 +1375,7 @@ pub fn vod_completed_reconstructed_pipe_args(
     duration_seconds: f64,
     source_fd: &str,
     audio_fd: &str,
+    source_clock: VodSourceClock,
 ) -> Result<Vec<String>, &'static str> {
     let plan = output.source_plan();
     if !matches!(
@@ -1256,8 +1391,18 @@ pub fn vod_completed_reconstructed_pipe_args(
     }
     let (width, height) = super::output_size(source, plan.options().target_height)
         .ok_or("reconstructed output raster unavailable")?;
-    let mut args =
-        vod_pipe_args_with_reorder(source, plan, execution, grid, duration_seconds, false);
+    // The source soundtrack keeps the held demux origin the Encoding froze,
+    // exactly as on the ordinary route; the reconstructed video input that
+    // replaces the source decoder below carries its own verified origin.
+    let mut args = vod_pipe_args_with_source_clock(
+        source,
+        plan,
+        execution,
+        grid,
+        duration_seconds,
+        false,
+        source_clock,
+    );
     if args.iter().any(|arg| arg == "-filter_complex") {
         return Err("unsupported reconstructed filter graph");
     }
@@ -1437,6 +1582,168 @@ pub fn vod_completed_reconstructed_pipe_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_source_origin_is_precise_signed_and_distinguishes_demux_default() {
+        let reported = VodSourceClock::from_probe_start_time(Some("66271.889756"))
+            .expect("reported microsecond origin");
+        assert_eq!(reported.input_offset(), "-66271.889756");
+        assert_eq!(
+            VodSourceClock::from_probe_start_time(Some("-0.984322"))
+                .expect("negative origin")
+                .input_offset(),
+            "0.984322"
+        );
+        assert_eq!(
+            VodSourceClock::from_probe_start_time(Some("0.0000005"))
+                .expect("microsecond rounding")
+                .input_offset(),
+            "-0.000001"
+        );
+        let absent = VodSourceClock::from_probe_start_time(None).expect("AV_NOPTS demux default");
+        assert_eq!(absent, VodSourceClock::ProducerDefaultZero);
+        assert_eq!(
+            VodSourceClock::from_probe_start_time(Some("N/A")).expect("AV_NOPTS"),
+            absent
+        );
+        assert_ne!(
+            absent.identity(),
+            VodSourceClock::ReportedOrigin(0).identity()
+        );
+        for invalid in [
+            "NaN",
+            "inf",
+            "",
+            "1e3",
+            "1.2.3",
+            "9223372036854.775808",
+            "-9223372036854.775808",
+        ] {
+            assert!(
+                VodSourceClock::from_probe_start_time(Some(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn held_source_origin_precedes_media_input_without_changing_film_filters() {
+        let (source, plan, execution, _, _) = encoded_recipe_fixture(false);
+        let grid = VodFrameGrid::new(24, 1).expect("grid");
+        let baseline = vod_pipe_args(&source, &plan, &execution, grid, 12.0);
+        let corrected = vod_pipe_args_with_source_clock(
+            &source,
+            &plan,
+            &execution,
+            grid,
+            12.0,
+            false,
+            VodSourceClock::ReportedOrigin(66_271_889_756),
+        );
+        assert!(corrected
+            .windows(2)
+            .any(|pair| pair == ["-itsoffset", "-66271.889756"]));
+        let offset = corrected
+            .iter()
+            .position(|arg| arg == "-itsoffset")
+            .expect("offset");
+        let input = corrected
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("media input");
+        assert!(offset < input);
+        for option in ["-vf", "-t", "-enc_time_base:v"] {
+            let value = |args: &[String]| {
+                args.iter()
+                    .position(|arg| arg == option)
+                    .map(|i| args[i + 1].clone())
+            };
+            assert_eq!(value(&baseline), value(&corrected), "{option}");
+        }
+        assert!(!corrected.iter().any(|arg| arg == "-start_at_zero"));
+    }
+
+    #[test]
+    fn held_source_origin_offsets_video_and_audio_but_not_film_bitmap_sidecar() {
+        let (source, original, mut execution, facts, capabilities) = encoded_recipe_fixture(false);
+        let mut media = original.options().clone();
+        media.input_has_audio = true;
+        media.audio_index = Some(0);
+        media.audio_offset_ms = 175;
+        media.subtitle_burn = Some(crate::transcode::SubtitleBurn {
+            subtitle_index: 0,
+            bitmap: true,
+        });
+        let plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(crate::transcode::Encoder::Software, media),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("bitmap/audio plan");
+        execution.start_seconds = 3.0;
+        execution.subtitle_file = Some("/film-normalized-sidecar.mkv".into());
+        let args = vod_pipe_args_with_source_clock(
+            &source,
+            &plan,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            12.0,
+            false,
+            VodSourceClock::ReportedOrigin(-984_322),
+        );
+        let mut pending_offset = None;
+        let mut pending_noaccurate_seek = false;
+        let mut media_seek_policy = Vec::new();
+        let mut inputs = Vec::new();
+        for pair in args.windows(2) {
+            if pair[0] == "-noaccurate_seek" {
+                pending_noaccurate_seek = true;
+            }
+            if pair[0] == "-itsoffset" {
+                pending_offset = Some(pair[1].clone());
+            }
+            if pair[0] == "-i" {
+                inputs.push((pair[1].clone(), pending_offset.take()));
+                media_seek_policy.push(pending_noaccurate_seek);
+                pending_noaccurate_seek = false;
+            }
+        }
+        assert_eq!(
+            inputs,
+            vec![
+                (
+                    execution.source_path.to_string_lossy().into_owned(),
+                    Some("0.984322".into())
+                ),
+                (
+                    execution.source_path.to_string_lossy().into_owned(),
+                    Some("0.984322".into())
+                ),
+                ("/film-normalized-sidecar.mkv".into(), None)
+            ]
+        );
+        assert_eq!(media_seek_policy, vec![true, true, false],
+            "both source inputs defer accurate landing to film/sample trim; bitmap already has film timestamps");
+        let audio = VodSharedAudioRecipe::from_plan(&plan).expect("same soundtrack");
+        let corrected = audio
+            .args_with_source_clock(&execution, 12.0, VodSourceClock::ReportedOrigin(-984_322))
+            .expect("shared soundtrack");
+        let baseline = audio.args(&execution, 12.0).expect("baseline soundtrack");
+        assert!(corrected
+            .windows(2)
+            .any(|pair| pair == ["-itsoffset", "0.984322"]));
+        let filter = |args: &[String]| {
+            args.iter()
+                .position(|arg| arg == "-af")
+                .map(|i| args[i + 1].clone())
+        };
+        assert_eq!(filter(&baseline), filter(&corrected));
+    }
 
     fn chaptered_source() -> crate::domain::MediaFile {
         encoded_recipe_source(false)
@@ -1628,6 +1935,7 @@ mod tests {
             0.25,
             "/dev/fd/3",
             "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(0),
         )
         .expect("reconstructed recipe");
         assert_eq!(
@@ -1658,9 +1966,67 @@ mod tests {
             VodFrameGrid::new(24, 1).expect("grid"),
             0.25,
             "/dev/fd/3",
-            "/dev/fd/4"
+            "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(0),
         )
         .is_err());
+    }
+
+    #[test]
+    fn reconstructed_soundtrack_keeps_the_held_source_origin_of_the_ordinary_route() {
+        let (source, ordinary, execution, facts, capabilities) = encoded_recipe_fixture(true);
+        let mut media = ordinary.options().clone();
+        media.input_has_audio = true;
+        media.audio_index = Some(0);
+        let plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(crate::transcode::Encoder::Software, media),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("audio HDR10 recipe");
+        let grid = VodFrameGrid::new(24, 1).expect("grid");
+        let clock = super::VodSourceClock::ReportedOrigin(1_500_000);
+        let offsets = |args: &[String]| {
+            args.windows(2)
+                .filter(|p| p[0] == "-itsoffset")
+                .map(|p| p[1].clone())
+                .collect::<Vec<_>>()
+        };
+        let ordinary =
+            vod_pipe_args_with_source_clock(&source, &plan, &execution, grid, 0.25, false, clock);
+        // Ordinary: one offset on the video input, one on the soundtrack.
+        assert_eq!(offsets(&ordinary), ["-1.500000", "-1.500000"]);
+        let reconstructed = vod_reconstructed_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            grid,
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+            clock,
+        )
+        .expect("reconstructed recipe");
+        // Reconstructed: the RGB video input replaces the source decoder and
+        // its offset; the source soundtrack keeps the ordinary held origin.
+        assert_eq!(offsets(&reconstructed), ["-1.500000"]);
+        let zero = vod_reconstructed_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            grid,
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("zero-origin recipe");
+        assert_eq!(offsets(&zero), ["0.000000"]);
     }
 
     #[test]
@@ -1678,6 +2044,7 @@ mod tests {
             0.25,
             "/dev/fd/3",
             "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(0),
         )
         .expect("reconstructed hardware recipe");
         assert!(args.windows(2).any(|pair| pair == ["-c:v", "hevc_nvenc"]));

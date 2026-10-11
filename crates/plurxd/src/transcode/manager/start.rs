@@ -1624,7 +1624,7 @@ impl TranscodeManager {
         }
         if let Err(reason) = session
             .spawn_and_install_prepublication_child(generation, || {
-                spawn_ffmpeg_at(
+                spawn_ffmpeg_at_with_env(
                     macos_executable
                         .as_ref()
                         .map(|executable| executable.path.as_path())
@@ -1664,6 +1664,10 @@ impl TranscodeManager {
                         descriptors
                     },
                     observation.clone(),
+                    &macos_executable
+                        .as_ref()
+                        .map(|executable| executable.processing_child_env())
+                        .unwrap_or_default(),
                 )
             })
             .await

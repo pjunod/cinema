@@ -5868,13 +5868,15 @@ test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerPanel
 test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
 
 # PR920 baseline correction: the Android status now names the real Gradle
-# build 152. The source anchor follows the current build 159 after integration;
-# this maps the documentation correction, not a new playback claim.
+# build 152. The anchor stops before the build number: the number moves with
+# every versionCode bump and is already pinned to build.gradle.kts by
+# test_mobile_build_claims, so repeating it here only broke each bump. This
+# maps the documentation correction, not a new playback claim.
 [[fixes]]
 id = "android.build-152-baseline-claim"
 commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
 source = "clients/android/README.md"
-source_anchor = "> Status: **v0.3.0**, build `162`"
+source_anchor = "> Status: **v0.3.0**, build `"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
