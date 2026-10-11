@@ -3420,6 +3420,14 @@ percentage is a hard ceiling rounded down. A refused scan still records new and
 changed files, but keeps every apparently missing row and reports the refusal
 in library status and logs.
 
+Removing a library path is not a missing-file case, and neither the prune
+bound nor the root identity applies to it. The scan the edit queues removes
+every entry no configured path covers, and the items that leaves empty, once
+it has walked the library's paths without an error — so media moved to a path
+added in the same edit keeps its items and watch state, and a path the scan
+cannot read keeps the old entries until it can. Every complete scan makes the
+same removal, which clears what removals made before this rule left behind.
+
 The limit counts catalog file entries missing from disk, not files still in
 the directory. An empty directory can therefore trigger the limit when the
 catalog still contains older entries. Explicit DVR deletions take a separate
