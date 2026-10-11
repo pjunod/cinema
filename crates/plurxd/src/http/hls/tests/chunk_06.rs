@@ -5434,6 +5434,86 @@ async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
     ));
 }
 
+/// The prepared-owner lookup runs inside a VOD prime whose deadline is the
+/// whole 45 s prime budget. Its catalog is the same work ordinary create bounds
+/// as one 2 s stage, so a stalled admission read must cost that stage, not the
+/// prime: passing the prime deadline straight through held a stuck read for
+/// the full 45 s and left nothing of the budget for the attachment itself.
+#[tokio::test]
+async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    let state = resolver_state();
+    state.serving.validation_set_ready(true).await;
+    let digest = [0x5a; 32];
+    let candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest(digest),
+        recipe_digest: digest,
+        route: CandidateRoute::Encode,
+        planned_codec: None,
+        normalized_geometry: false,
+        width: 1920,
+        height: 1080,
+        target_height: 1080,
+        average_bps: None,
+        peak_bps: None,
+        grade: plurx_core::transcode::OutputGrade::Sdr,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    };
+    let remote = RemoteStartRequest {
+        retained_output: None,
+        retained_output_receiver: Some(1),
+        candidate_catalog: Some(crate::media_sessions::CandidateCatalogContext {
+            caps: serde_json::from_value(serde_json::json!({
+                "v": 2, "video": [{"codec": "h264", "present": ["sdr"]}],
+                "audio": ["aac"], "containers": ["mp4"], "transports": ["hls"]
+            }))
+            .expect("valid caps"),
+            candidate: candidate.clone(),
+            binding: crate::media_pool::PlanningBinding {
+                generation: 1,
+                source_digest: "0".repeat(64),
+            },
+        }),
+        candidate_id: Some(candidate.id),
+        presentation_target: None,
+        decoder_caps: None,
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        incarnation_id: uuid::Uuid::new_v4().to_string(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+        source_size: 4_096,
+        source_mtime: 1_700_000_000,
+        typeless_playlist: false,
+        library_channel: None,
+        request: staged_candidate_request(),
+    };
+    // Every `accepting_new_media` read now waits: the catalog cannot finish.
+    let held = state.serving.hold_planned_outage_reads_for_test().await;
+    let started = tokio::time::Instant::now();
+    let owner = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::media_pool::prepared_vod_owner(
+            &state,
+            &remote,
+            started + super::preparation::PREPARATION_PRIME_BUDGET,
+        ),
+    )
+    .await
+    .expect("the lookup answers within its create-stage bound, not the 45 s prime budget");
+    let elapsed = started.elapsed();
+    drop(held);
+    assert!(owner.is_none(), "a stalled catalog is a conservative miss");
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "the lookup must reach the held admission read, answered in {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "bounded like create's 2 s catalog stage, took {elapsed:?}"
+    );
+}
+
 #[tokio::test]
 async fn required_legacy_auto_discovery_reports_overflow_but_copy_and_manual_survive() {
     let state = resolver_state();
