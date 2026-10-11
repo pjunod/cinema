@@ -536,7 +536,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setPlaybackInfoMode(mode: String) = updatePreferences { copy(playbackInfoMode = mode) }
 
     /**
-     * Settings → Developer → "Prepared replacement".
+     * Settings → Playback → "Prepared replacement".
      *
      * The switch is never gated on the requirements shown beside it: they are
      * measurements, and an operator who can read them is better placed than a

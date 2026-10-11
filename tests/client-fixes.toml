@@ -1630,7 +1630,7 @@ test_anchor = "lifecycleRefillLoadedWaitClaimsOneReevaluationWithoutCreatingAnot
 # beside the switch and must never disable it.
 id = "apple.prepared-handoff-readiness-truth-is-advisory"
 commits = ["491aac64"]
-source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source = "clients/apple/Sources/SettingsView.swift"
 source_anchor = "Fleet and link evidence: Not met · Checked during playback"
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
@@ -5874,7 +5874,7 @@ test_anchor = "lightPlaybackPanelHasVisibleUnselectedRowsAndSwitchLabels"
 id = "android.build-152-baseline-claim"
 commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
 source = "clients/android/README.md"
-source_anchor = "> Status: **v0.3.0**, build `161`"
+source_anchor = "> Status: **v0.3.0**, build `162`"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 

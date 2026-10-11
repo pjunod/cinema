@@ -436,7 +436,7 @@ of never storing it.
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
 | POST | `/api/v1/system/storage` | admin | Re-measures storage. Costs real I/O |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
-| GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Cluster and Developer settings; never gates controls |
+| GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
@@ -941,6 +941,19 @@ that fingerprint. On a mismatch — or on an existing library with no recorded
 identity whose scan saw no media — vanished-file cleanup is **skipped** and
 the scan reports a note instead. That is what stops an unmounted NAS or a
 container path mix-up from wiping a library.
+
+Removing a path from a library is not that case: it is configuration, not an
+observation of the disk, so neither the identity check nor the prune bound
+applies. The library's files that no remaining path covers — a path as
+configured, normalised, or canonicalised on the scanning node — leave the
+catalog with the items that leaves empty (a file a Dolby Vision conversion is
+rewriting stays until the conversion ends). The scan `PUT /libraries/{id}`
+queues does this once it has walked every path without an error: the walk
+re-attaches media moved to a newly added path to its items first, so they
+keep their identity and watch state, and a path it could not read keeps the
+old entries until it can. Every complete scan makes the same removal, and a
+scan that started before an edit removes nothing and records no identity —
+the scan the edit queued covers the new paths.
 
 `POST /api/v1/libraries/{id}/root-identity/reset` deletes that row so the next
 scan can establish a new identity, for the case where an operator genuinely
@@ -2693,7 +2706,7 @@ A session capability still names its worker for routing:
 The parser requires exactly three canonical parts. The worker additionally
 checks the current configuration, boot identity, claim epoch and lease. The
 legacy `owner_node_id` response field is compatibility metadata, not a device
-placement setting. Enablement lives in Settings → Developer; readiness never
+placement setting. Enablement lives in Settings → Live TV; readiness never
 disables that control. Configuration changes increment the generation and
 fence old operations without a physical-fencing checkbox.
 
@@ -2922,8 +2935,8 @@ client resolves once more rather than starting stale media.
 
 The runtime switch `library_channels_enabled` is always compiled and affects
 resolve/session admission only. Listing, preview, authoring, empty-state help,
-and existing schedules stay inspectable while it is off. Its Developer
-readiness rows are advisory and cannot veto an administrator's explicit save.
+and existing schedules stay inspectable while it is off. Its readiness rows
+(Settings → Live TV → Library channels) are advisory and cannot veto an administrator's explicit save.
 
 Preview cursors bind the caller, normalized recipe, candidate-content digest,
 and offset. Guide cursors bind the caller, channel-generation state, requested

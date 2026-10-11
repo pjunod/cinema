@@ -10,7 +10,7 @@ import tv.plurx.app.data.PlaybackQuality
  * switches, and settles. Every rule about *when* an acknowledgement may be sent
  * and *which* one lives here rather than beside the ExoPlayer instances,
  * because none of those rules needs a player to be wrong. Android advertises
- * the path by default; Settings → Developer owns the explicit opt-out and
+ * the path by default; Settings → Playback owns the explicit opt-out and
  * shows device/session evidence as advice rather than changing that choice.
  *
  * `docs/playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md` §C7 and §C8 are what this encodes.

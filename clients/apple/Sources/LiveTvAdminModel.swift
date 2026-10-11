@@ -1,45 +1,15 @@
 import Foundation
 
-/// The server's Live TV settings as Settings → Live TV and Settings → Developer
-/// both edit them. Load, save and the advisory reads have one owner, so moving
-/// a card from one screen to the other moves where it is drawn and nothing
-/// else: the same requests, the same generation CAS, the same messages.
+/// The server's Live TV settings as Settings → Live TV edits them: the enable
+/// switch, the tuner, the guide, recording and Library channels. Load, save and
+/// the advisory reads have one owner, so the screen draws and this decides
+/// nothing: the same requests, the same generation CAS, the same messages.
+/// (Developer drew the enable card until 2026-10-10; no Developer card reads
+/// server Live TV settings any more, so there is one surface and no switch on it.)
 ///
 /// The server enforces administrator access and the saved generation; enabling
 /// is a separate runtime mutation, never a build switch. Nothing here reads a
 /// readiness value back into an enable or a save.
-/// Which settings screen a `LiveTvAdminModel` serves: what it reads and how it speaks.
-enum LiveTvAdminSurface: Sendable {
-    case liveTvSettings
-    case developer
-
-    /// Only Settings → Live TV draws the guide, so only it reads the guide.
-    var readsGuide: Bool { self == .liveTvSettings }
-    /// Only Developer draws the enable card, so only it reads its prerequisites.
-    var readsEnablePrerequisites: Bool { self == .developer }
-
-    var loadedMessage: String {
-        switch self {
-        case .liveTvSettings: return "Settings loaded. Save the configuration, then check it."
-        case .developer: return "Settings loaded. The prerequisites are advisory; enabling is a separate action."
-        }
-    }
-
-    var readyMessage: String {
-        switch self {
-        case .liveTvSettings: return "The saved configuration is ready. Live TV is switched on or off in Settings → Developer."
-        case .developer: return "Ready. Enable is a separate action."
-        }
-    }
-
-    var needsAttentionMessage: String {
-        switch self {
-        case .liveTvSettings: return "Some checks need attention. They are advisory and never block the switch in Settings → Developer."
-        case .developer: return "Some prerequisites need attention. They never prevent enabling."
-        }
-    }
-}
-
 @MainActor
 final class LiveTvAdminModel: ObservableObject {
     @Published private(set) var api: LiveTvAPI?
@@ -58,11 +28,10 @@ final class LiveTvAdminModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var message = "Administrator access is required."
     private var revision = UUID()
-    private let surface: LiveTvAdminSurface
 
-    init(surface: LiveTvAdminSurface) {
-        self.surface = surface
-    }
+    nonisolated static let loadedMessage = "Settings loaded. The prerequisites are advisory; enabling is a separate action. Save the configuration, then check it."
+    nonisolated static let readyMessage = "The saved configuration is ready. Live TV is switched on or off under Enable Live TV at the top of this screen."
+    nonisolated static let needsAttentionMessage = "Some checks need attention. They are advisory and never block the Enable Live TV switch at the top of this screen."
 
     var dirty: Bool {
         guard let saved else { return false }
@@ -102,7 +71,7 @@ final class LiveTvAdminModel: ObservableObject {
             // A failed read is a sentence on the card, never this load's
             // failure and never a reason the enable cannot be pressed.
             await loadPrerequisites()
-            message = surface.loadedMessage
+            message = Self.loadedMessage
         } catch {
             guard revision == expected else { return }
             saved = nil
@@ -119,7 +88,19 @@ final class LiveTvAdminModel: ObservableObject {
             do {
                 let settings = try await api.update(change, generation: saved.liveTvConfigGeneration)
                 guard revision == expected else { return }
+                // The tuner form is a draft the operator owns until they save
+                // it. A switch on the same screen (enable, recording, Library
+                // channels) answers with the whole snapshot; take its saved
+                // values but leave an unsaved tuner edit where it was.
+                var keepsDraft = dirty
+                if case .configure = change { keepsDraft = false }
+                let draft = (ipv4: ipv4, sessions: sessions, height: height)
                 apply(settings)
+                if keepsDraft {
+                    ipv4 = draft.ipv4
+                    sessions = draft.sessions
+                    height = draft.height
+                }
                 await loadGuideReadiness()
                 await loadPrerequisites()
                 message = "Saved. Recording is \(settings.dvrEnabled ? "enabled" : "disabled"); Library channels are \(settings.libraryChannelsEnabled ? "enabled" : "disabled"); Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."
@@ -147,7 +128,7 @@ final class LiveTvAdminModel: ObservableObject {
                     throw LiveTvFailure(code: "settings_conflict")
                 }
                 readiness = result
-                message = result.ready ? surface.readyMessage : surface.needsAttentionMessage
+                message = result.ready ? Self.readyMessage : Self.needsAttentionMessage
             } catch {
                 guard revision == expected else { return }
                 readiness = nil
@@ -162,13 +143,13 @@ final class LiveTvAdminModel: ObservableObject {
     /// saving or enabling. A non-owner node answers `owner_unavailable` here
     /// and that is a normal, expected answer.
     func loadGuideReadiness() async {
-        guard surface.readsGuide, let api else { return }
+        guard let api else { return }
         guideReadiness = try? await api.guideReadiness()
     }
 
-    /// The Developer enable card's prerequisites, as the web card reads them.
+    /// The Settings → Live TV enable card's prerequisites, as the web card reads them.
     func loadPrerequisites() async {
-        guard surface.readsEnablePrerequisites, let api else { return }
+        guard let api else { return }
         do {
             prerequisites = try await api.currentReadiness()
             prerequisitesError = nil
