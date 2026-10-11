@@ -458,7 +458,9 @@ class InstallerCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         module = engine / "plurx-source-parser.wasm"
         self.assertTrue(module.read_bytes().startswith(b"\0asm"), "the module sits beside the pinned ffprobe")
-        self.assertEqual((engine / "plurx-source-parser.wasm.abi").read_text().strip(), abi)
+        stamp = (engine / "plurx-source-parser.wasm.abi").read_text().split()
+        self.assertEqual(stamp, [abi, MAC_FFMPEG_SHA256["arm64"]], "the stamp is the ABI and the builder's digest")
+        self.assertIn(f"shasum -a 256 {builder}", self.host.calls())
         builds = [c for c in self.host.calls() if c.startswith("python3 ")]
         self.assertEqual(len(builds), 1, self.host.calls())
         self.assertIn(f"python3 {builder} --output", builds[0])
@@ -471,13 +473,22 @@ class InstallerCase(unittest.TestCase):
         self.assertFalse([c for c in self.host.calls() if c.startswith("python3 ")])
         self.assertIn(f"source parser ({abi}) already in", result.stdout)
 
-        # A module built for another ABI is rebuilt rather than trusted.
-        (engine / "plurx-source-parser.wasm.abi").write_text("an-older-abi\n")
+        # A module stamped by another builder is rebuilt rather than trusted.
+        (engine / "plurx-source-parser.wasm.abi").write_text(f"{abi} an-older-builder-digest\n")
         self.host.log.write_text("")
         result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len([c for c in self.host.calls() if c.startswith("python3 ")]), 1)
-        self.assertEqual((engine / "plurx-source-parser.wasm.abi").read_text().strip(), abi)
+        self.assertEqual((engine / "plurx-source-parser.wasm.abi").read_text().split(), stamp)
+
+        # A failed build names why and leaves nothing behind in TMPDIR.
+        self.host.stub("python3", 'echo "checksum mismatch for wasi-sdk"; exit 1\n')
+        (engine / "plurx-source-parser.wasm.abi").unlink()
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("checksum mismatch for wasi-sdk", result.stderr)
+        self.assertIn("could not build plurx-source-parser.wasm", result.stderr)
+        self.assertFalse(list(self.tmp.glob("plurx-source-parser.*")), "the build directory is cleaned up")
 
     def test_macos_installs_a_given_source_parser_and_refuses_one_that_is_not_webassembly(self):
         self.host.stub("launchctl", "")

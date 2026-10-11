@@ -129,12 +129,12 @@ claim_for_user() {
   done
 }
 
-# Temporary files are removed however the script ends, including a declined
-# sudo prompt under `set -e`.
+# Temporary files and directories are removed however the script ends,
+# including a declined sudo prompt under `set -e` or an interrupted build.
 temp_files=
 cleanup_temp_files() {
   local f
-  for f in $temp_files; do rm -f "$f"; done
+  for f in $temp_files; do rm -rf "$f"; done
 }
 trap cleanup_temp_files EXIT
 # `new_temp_file VAR` creates one and stores its path in VAR (not printed,
@@ -548,15 +548,16 @@ macos_ensure_jellyfin_ffmpeg() {
 # refused, so it is part of the media engine and installed with it. It is
 # built by scripts/build-macos-source-parser from the same pinned Jellyfin
 # source with checksum-verified inputs; a release archive ships one built the
-# same way. The builder's ABI is recorded beside a module built here, so a
-# checkout whose parser ABI changed rebuilds it and an unchanged one does not.
+# same way. A module built here is stamped with the builder's parser ABI and
+# the builder's own digest, so a checkout whose builder changed in any way
+# (ABI, pins, configure flags) rebuilds it and an unchanged one does not.
 source_parser_name=plurx-source-parser.wasm
+source_parser_builder=$root/scripts/build-macos-source-parser
 
 # The parser ABI this checkout's builder produces; empty outside a checkout.
 source_parser_builder_abi() {
-  local builder=$root/scripts/build-macos-source-parser
-  [ -f "$builder" ] || return 0
-  sed -n 's/^ABI_ID = "\(.*\)"$/\1/p' "$builder"
+  [ -f "$source_parser_builder" ] || return 0
+  sed -n 's/^ABI_ID = "\(.*\)"$/\1/p' "$source_parser_builder"
 }
 
 # True when $1 starts with the WebAssembly magic.
@@ -565,7 +566,7 @@ is_wasm_module() {
 }
 
 macos_ensure_source_parser() {
-  local dir=$1 dest module stamp abi candidate work= recorded
+  local dir=$1 dest module stamp abi built_by= candidate work= recorded
   dest=$(macos_ffmpeg_dir "$dir")
   module=$dest/$source_parser_name
   stamp=$dest/$source_parser_name.abi
@@ -578,35 +579,35 @@ macos_ensure_source_parser() {
     candidate=$here/$source_parser_name
   elif [ -z "$abi" ]; then
     die "no $source_parser_name to install: run from a checkout or a release archive, or pass --source-parser <file>"
-  elif is_wasm_module "$module" && [ "$(cat "$stamp" 2>/dev/null || true)" = "$abi" ]; then
-    say "source parser ($abi) already in $dest"
-    return
   elif [ "$dry_run" = 1 ]; then
-    say "would build $source_parser_name ($abi) with scripts/build-macos-source-parser into $dest"
+    say "would build $source_parser_name ($abi) with scripts/build-macos-source-parser into $dest, unless this builder's module is already there"
+    return
+  elif built_by="$abi $(sha256_of "$source_parser_builder")" \
+      && is_wasm_module "$module" && [ "$(cat "$stamp" 2>/dev/null || true)" = "$built_by" ]; then
+    say "source parser ($abi) already in $dest"
     return
   else
     work=$(mktemp -d "${TMPDIR:-/tmp}/plurx-source-parser.XXXXXX")
+    temp_files="$temp_files $work"
     say "building $source_parser_name ($abi) from the pinned Jellyfin source; this takes a few minutes"
-    python3 "$root/scripts/build-macos-source-parser" --output "$work/parser" --jobs 4 >/dev/null \
-      || { rm -rf "$work"; die "could not build $source_parser_name (pass --source-parser <file> to install a built one)"; }
+    if ! python3 "$source_parser_builder" --output "$work/parser" --jobs 4 >"$work/build.log" 2>&1; then
+      tail -20 "$work/build.log" >&2 || true
+      die "could not build $source_parser_name (pass --source-parser <file> to install a built one)"
+    fi
     candidate=$work/parser/bin/$source_parser_name
   fi
   if [ "$dry_run" = 1 ]; then
     say "would install $candidate into $dest"
     return
   fi
-  if ! is_wasm_module "$candidate"; then
-    [ -z "$work" ] || rm -rf "$work"
-    die "$candidate is not a WebAssembly module"
-  fi
+  is_wasm_module "$candidate" || die "$candidate is not a WebAssembly module"
   run_for_dir "$dest" install -d "$dest"
   run_for_dir "$dest" install -m 0444 "$candidate" "$module"
   if command -v xattr >/dev/null 2>&1; then xattr -d com.apple.quarantine "$module" 2>/dev/null || true; fi
   if [ -n "$work" ]; then
     new_temp_file recorded
-    printf '%s\n' "$abi" > "$recorded"
+    printf '%s\n' "$built_by" > "$recorded"
     run_for_dir "$dest" install -m 0644 "$recorded" "$stamp"
-    rm -rf "$work"
   else
     run_for_dir "$dest" rm -f "$stamp"
   fi

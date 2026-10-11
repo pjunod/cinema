@@ -448,6 +448,14 @@ jobs:
           reported=$(curl -fsS http://127.0.0.1:32400/api/v1/server)
           echo "$reported"
           printf '%s' "$reported" | grep -Fq "\"$VERSION\""
+          # The archive's source parser must be installed and actually bind:
+          # discovery runs before the tone-map probe, so once that probe has
+          # logged, a missing or unusable module has already said so.
+          test -f "$RUNNER_TEMP/prefix/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/plurx-source-parser.wasm"
+          log="$HOME/Library/Logs/plurxd.log"
+          for _ in $(seq 1 120); do grep -q "plurxd::pipeprobe" "$log" && break; sleep 1; done
+          grep -q "plurxd::pipeprobe" "$log"
+          if grep -E "FFprobe identity is unavailable|source parser is unavailable" "$log"; then exit 1; fi
           ./install --uninstall --prefix "$RUNNER_TEMP/prefix"
           test ! -e "$RUNNER_TEMP/prefix/bin/plurxd"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
