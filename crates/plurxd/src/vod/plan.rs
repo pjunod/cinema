@@ -392,7 +392,7 @@ pub(super) fn now_ms() -> i64 {
 }
 
 pub(super) fn sub_saturating(counter: &AtomicU64, bytes: u64) {
-    let _ = counter.fetch_update(Relaxed, Relaxed, |current| {
+    let _ = counter.try_update(Relaxed, Relaxed, |current| {
         Some(current.saturating_sub(bytes))
     });
 }

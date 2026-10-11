@@ -39,8 +39,10 @@ make install-macos
 
 That one command:
 
-1. builds `plurxd` from this checkout (`cargo build --locked --release`) —
-   the first build takes several minutes;
+1. builds `plurxd` from this checkout (`cargo build --locked --release`) on
+   the Rust release [`rust-toolchain.toml`](../rust-toolchain.toml) pins,
+   through rustup, even when another Rust (Homebrew's `rust`) comes first on
+   `PATH` — the first build takes several minutes;
 2. downloads **Jellyfin FFmpeg 8.1.3-1** for your Mac's architecture,
    verifies its SHA-256 against the pinned value, and installs it next to the
    binary (below);
@@ -226,6 +228,7 @@ awake. For a Mac that is mainly a server:
 | Symptom | Look at |
 |---|---|
 | `make install-macos` says `is not the pinned Jellyfin FFmpeg` | The download was cut short or the file is a different build. Rerun, or fetch the exact archive named in [the media engine](#the-media-engine-jellyfin-ffmpeg-813-1) and pass `--ffmpeg-archive`. |
+| `make install-macos` notes that a `rustc` `comes before rustup on PATH` | Homebrew's `rust` formula is shadowing rustup. The install itself used the pinned release, but every other `cargo` and `make` build on this Mac uses Homebrew's: `brew uninstall rust`. |
 | `make install-macos` says `cargo is not on PATH` | Run `source "$HOME/.cargo/env"` (or open a new terminal) after installing Rust, or pass `--binary`. |
 | `make install-macos` times out waiting for `/readyz` | `tail -100 ~/Library/Logs/plurxd.log`. A port already in use on `32400` is the usual cause. |
 | Agent is loaded but `state` is not `running` | `launchctl print gui/$(id -u)/com.plurx.plurxd` shows `last exit code`; the log shows why. |

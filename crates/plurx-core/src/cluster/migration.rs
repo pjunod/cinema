@@ -11021,7 +11021,7 @@ pub mod status {
     }
 
     fn saturating_increment(value: &AtomicU64) {
-        let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = value.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             Some(current.saturating_add(1))
         });
     }
