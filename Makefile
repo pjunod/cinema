@@ -1634,13 +1634,23 @@ version: ## Print the version and git build stamp a build would report
 	@echo "$(VERSION) ($(BUILD_REF))"
 
 .PHONY: docker
-docker: ## Build the container image
+#
+# Without PLURX_LINUX_DOLBY_PACKAGE this builds the `runtime` stage on either
+# architecture: the same image `make docker-up` (Compose) builds and the fleet
+# runs. The audited amd64 Dolby media package is an input, not a precondition:
+# its producer (`linux-dolby-package-export`) is not yet qualified, so a node
+# cannot make one, and a `make docker` that refuses until it can is a build
+# nobody can run. When the package is supplied, amd64 installs it through
+# scripts/build-linux-dolby-ffmpeg --step docker-build.
+docker: ## Build the container image (amd64 + PLURX_LINUX_DOLBY_PACKAGE adds the audited Dolby media package)
 	@set -eu; platform="$${DOCKER_DEFAULT_PLATFORM:-linux/$$(uname -m)}"; \
-	case "$$platform" in linux/amd64|linux/x86_64) \
-	  test -n "$${PLURX_LINUX_DOLBY_PACKAGE:-}" || { echo 'Audited amd64 package required: set PLURX_LINUX_DOLBY_PACKAGE to build-linux-dolby-ffmpeg output' >&2; exit 1; }; \
-	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --source-date-epoch "$(SOURCE_DATE_EPOCH)" ;; \
-	linux/arm64|linux/aarch64) docker build --target runtime --platform linux/arm64 --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest . ;; \
-	*) echo "Unsupported container platform $$platform" >&2; exit 1 ;; esac
+	case "$$platform" in linux/amd64|linux/x86_64) arch=amd64 ;; linux/arm64|linux/aarch64) arch=arm64 ;; \
+	*) echo "Unsupported container platform $$platform" >&2; exit 1 ;; esac; \
+	if test "$$arch" = amd64 && test -n "$${PLURX_LINUX_DOLBY_PACKAGE:-}"; then \
+	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --source-date-epoch "$(SOURCE_DATE_EPOCH)"; \
+	else \
+	  docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .; \
+	fi
 
 .PHONY: container-smoke
 container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
