@@ -753,11 +753,21 @@ pub(crate) async fn held_source_index_probe_json(
     Ok(stamped_with_this_reporter(document).await)
 }
 
+/// How far past its start an EOF packet probe's interval ends: about 31
+/// years, so the read still stops at the file's natural end.
+///
+/// The end is spelled out because ffprobe 8.0 does not honour an open-ended
+/// interval: `-read_intervals "0%"` returned no packets at all, or every
+/// packet, depending on which `-show_entries` fields accompanied it, while
+/// the same interval with an explicit end returned every packet each time.
+const EOF_PROBE_SPAN_SECONDS: i64 = 1_000_000_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HeldPacketProbeRequest {
     pub stream_index: u32,
     /// `None` means the prefix. A value means an approximate seek followed by
-    /// an open-ended read to natural EOF.
+    /// a read to natural EOF, spelled with an explicit end far past any file
+    /// ([`EOF_PROBE_SPAN_SECONDS`]).
     pub start_seconds: Option<i64>,
     /// The prefix uses an explicit selected-packet count. EOF probes must use
     /// `None`; a capped tail is not EOF evidence.
@@ -832,7 +842,7 @@ pub(crate) async fn held_source_packet_probe_json(
     ]);
     let interval = match (request.start_seconds, request.packet_limit) {
         (None, Some(limit)) => Some(format!("%+#{limit}")),
-        (Some(start), None) => Some(format!("{}%", start.max(0))),
+        (Some(start), None) => Some(format!("{}%+{EOF_PROBE_SPAN_SECONDS}", start.max(0))),
         (None, None) => None,
         (Some(_), Some(_)) => {
             return Err(HeldPacketProbeError::Process(
