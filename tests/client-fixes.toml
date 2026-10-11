@@ -6199,3 +6199,19 @@ source = "clients/apple/Sources/HLSFragmentCadence.swift"
 source_anchor = "let index = try await fragmentIndex(fragmentURL, deadline: deadline, session: session, loads: loads)"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
 test_anchor = "func testLargeCopySegmentIsReadThroughItsIndexNotItsPayload()"
+
+[[fixes]]
+id = "apple.prepared-hls-cadence-unranged-walk"
+commits = ["eaaa25c2b382b0cbc60e1436ba91165271b667ff"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "guard offset == 0, response.expectedContentLength >= 0 else { throw Invalid.media }"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "func testServerIgnoringRangeIsWalkedContiguouslyWithinTheCap()"
+
+[[fixes]]
+id = "apple.prepared-hls-cadence-ts-complete-prefix"
+commits = ["6d8d7e7a87f0c156c777314472f11d7fb88c0fef"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "let complete = times.filter { $0 < lastDTS }.sorted()"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "func testTransportStreamSuccessorStopsAtACompletePrefix()"
