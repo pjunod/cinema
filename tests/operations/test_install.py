@@ -69,7 +69,7 @@ class Host:
         self.sysbin = tmp / "sysbin"
         self.sysbin.mkdir()
         for tool in (
-            "awk", "bash", "cat", "chmod", "cp", "dirname", "env", "grep", "head", "mkdir", "mktemp", "mv",
+            "awk", "bash", "cat", "chmod", "cp", "dirname", "env", "find", "grep", "head", "mkdir", "mktemp", "mv",
             "printf", "rm", "sed", "sh", "sleep", "tail", "tr", "uname",
         ):
             found = shutil.which(tool)
@@ -86,9 +86,15 @@ class Host:
         # Every stub appends `name args...` to the log; specific stubs add
         # behaviour on top.
         self.stub("sudo", 'exec "$@"\n')
-        # A fixed non-root identity, so "sudo only where needed" is provable
-        # even when the suite itself runs as root (CI containers do).
-        self.stub("id", 'case "$1" in -u) echo 1000 ;; -g) echo 1000 ;; *) echo "uid=1000(test) gid=1000(test)" ;; esac\n')
+        # Ownership is logged, never applied: the suite cannot hand a file to
+        # another user, and the assertions are about which paths get claimed.
+        self.stub("chown", "")
+        # A non-root identity that owns every fixture, so "sudo only where
+        # needed" is provable even when the suite itself runs as root (CI
+        # containers do): then the identity is 1000 and `run` hands the tree
+        # to it, so the installer never mistakes a fixture for a root leftover.
+        self.uid = os.getuid() or 1000
+        self.stub("id", f'case "$1" in -u|-g) echo {self.uid} ;; *) echo "uid={self.uid}(test) gid={self.uid}(test)" ;; esac\n')
         # The PATH ffmpeg is a stand-in for Homebrew's: not a Jellyfin build.
         self.stub("ffmpeg", 'echo "ffmpeg version 8.0 Copyright (c) the FFmpeg developers"\n')
         self.stub("ffprobe", 'echo "ffprobe version 8.0 Copyright (c) the FFmpeg developers"\n')
@@ -134,7 +140,20 @@ class Host:
     def calls(self) -> list[str]:
         return [line for line in self.log.read_text(encoding="utf-8").splitlines() if line]
 
-    def run(self, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *args: str, env: dict[str, str] | None = None, installer: Path = INSTALL, unprivileged: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        """Run the installer. `unprivileged` makes file permissions real: a
+        suite running as root (CI containers do) runs the installer as the
+        stub identity over a tree it owns, so an unwritable directory is unwritable."""
+        preexec = None
+        if os.geteuid() == 0:
+            for path in [self.tmp, *self.tmp.rglob("*")]:
+                os.lchown(path, self.uid, self.uid)
+            if unprivileged:
+                def preexec():
+                    os.setgid(self.uid)
+                    os.setuid(self.uid)
         merged = {
             "PATH": f"{self.bin}:{self.sysbin}",
             "HOME": str(self.home),
@@ -144,12 +163,13 @@ class Host:
         }
         merged.update(env or {})
         return subprocess.run(
-            [str(INSTALL), *args],
+            [str(installer), *args],
             cwd=self.tmp,
             env=merged,
             capture_output=True,
             text=True,
             timeout=60,
+            preexec_fn=preexec,
         )
 
 
@@ -349,7 +369,7 @@ class InstallerCase(unittest.TestCase):
         self.assertEqual(plist["StandardOutPath"], f"{self.host.home}/Library/Logs/plurxd.log")
         self.assertTrue((self.host.home / "Library/Application Support/plurx").is_dir())
         self.assertTrue((prefix / "bin" / "plurxd").exists())
-        uid = 1000
+        uid = self.host.uid
         self.assertOrdered(
             self.host.calls(),
             f"launchctl bootout gui/{uid}/com.plurx.plurxd",
@@ -459,11 +479,146 @@ class InstallerCase(unittest.TestCase):
         # No --prefix: the uninstall reads the binary's path from the plist.
         result = self.host.run("macos", "--uninstall")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f"launchctl bootout gui/{1000}/com.plurx.plurxd", self.host.calls())
+        self.assertIn(f"launchctl bootout gui/{self.host.uid}/com.plurx.plurxd", self.host.calls())
         self.assertFalse((agents / "com.plurx.plurxd.plist").exists())
         self.assertFalse((prefix / "bin" / "plurxd").exists())
         self.assertFalse((prefix / "libexec/plurx").exists(), "the agent's Jellyfin FFmpeg goes with it")
         self.assertEqual((support / "plurx.db").read_text(), "precious")
+
+    def test_macos_refuses_to_run_as_root_before_building_or_touching_anything(self):
+        # Under sudo the agent would be bootstrapped into gui/0, which launchd
+        # refuses with "125: Domain does not support specified action", after
+        # a full release build and with root-owned files left in the user's
+        # Library. The installer asks for sudo itself where it needs it.
+        self.host.stub("launchctl", "")
+        self.host.stub("id", 'case "$1" in -u|-g) echo 0 ;; *) echo "uid=0(root) gid=0(wheel)" ;; esac\n')
+        self.host.stub("cargo", "")
+        for extra in (["--binary", str(self.host.fake_binary)], [], ["--uninstall"]):
+            self.host.log.write_text("")
+            result = self.host.run("macos", "--prefix", str(self.tmp / "hb"), *extra)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("not as root or through sudo", result.stderr)
+            self.assertEqual([c for c in self.host.calls() if not c.startswith(("id ", "uname "))], [], extra)
+            self.assertFalse((self.tmp / "hb").exists(), extra)
+            self.assertFalse((self.host.home / "Library").exists(), extra)
+
+    def test_macos_writes_the_agent_through_sudo_when_launchagents_is_not_writable(self):
+        # A root-owned ~/Library/LaunchAgents (what an earlier `sudo` run
+        # leaves behind) must not fail the install: the plist step, and only
+        # it, goes through sudo, and the plist it writes belongs to the user.
+        checkout = self.tmp / "checkout"
+        shutil.copytree(ROOT / "deploy", checkout / "deploy")
+        agents = self.host.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        agents.chmod(0o555)
+        self.addCleanup(agents.chmod, 0o755)
+        # The stub sudo grants what real sudo would: write access.
+        self.host.stub("sudo", f'[ "$1" = install ] && chmod u+w "{agents}"\n"$@"\n')
+        self.host.stub("launchctl", "")
+        prefix = self.tmp / "homebrew"
+        result = self.host.run(
+            "macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix),
+            installer=checkout / "deploy" / "install", unprivileged=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plist_path = agents / "com.plurx.plurxd.plist"
+        with plist_path.open("rb") as handle:
+            self.assertEqual(plistlib.load(handle)["Label"], "com.plurx.plurxd")
+        uid = self.host.uid
+        sudo = [c for c in self.host.calls() if c.startswith("sudo ")]
+        self.assertEqual(len(sudo), 1, sudo)
+        self.assertRegex(sudo[0], rf"^sudo install -m 0644 -o {uid} -g {uid} \S+ {re.escape(str(plist_path))}$")
+        self.assertIn(f"launchctl bootstrap gui/{uid} {plist_path}", self.host.calls())
+        self.assertEqual([p.name for p in self.tmp.glob("plurxd-agent.*")], [], "no temporary file is left behind")
+        self.assertTrue((prefix / "bin" / "plurxd").exists())
+
+    def test_macos_upgrade_repoints_the_engine_through_sudo_when_launchagents_is_not_writable(self):
+        # The repoint is a replace, which is a rename into the directory, so
+        # a root-owned LaunchAgents needs sudo even for a plist the user owns.
+        self.host.stub("launchctl", "")
+        agents = self.host.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        plist_path = agents / "com.plurx.plurxd.plist"
+        with plist_path.open("wb") as handle:
+            plistlib.dump({
+                "Label": "com.plurx.plurxd",
+                "EnvironmentVariables": {"PLURX_FFMPEG": str(self.host.bin / "ffmpeg"), "PLURX_BIND": "127.0.0.1:32400"},
+            }, handle)
+        agents.chmod(0o555)
+        self.addCleanup(agents.chmod, 0o755)
+        self.host.stub("sudo", f'[ "$1" = install ] && chmod u+w "{agents}"\n"$@"\n')
+        checkout = self.tmp / "checkout"
+        shutil.copytree(ROOT / "deploy", checkout / "deploy")
+        prefix = self.tmp / "hb"
+        result = self.host.run(
+            "macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix),
+            installer=checkout / "deploy" / "install", unprivileged=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with plist_path.open("rb") as handle:
+            env = plistlib.load(handle)["EnvironmentVariables"]
+        engine = prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}"
+        self.assertEqual(env["PLURX_FFMPEG"], str(engine / "ffmpeg"))
+        self.assertEqual(env["PLURX_BIND"], "127.0.0.1:32400", "every other operator choice is kept")
+        uid = self.host.uid
+        sudo = [c for c in self.host.calls() if c.startswith("sudo ")]
+        self.assertEqual(len(sudo), 1, sudo)
+        self.assertRegex(sudo[0], rf"^sudo install -m 0644 -o {uid} -g {uid} \S+ {re.escape(str(plist_path))}$")
+        self.assertEqual([p.name for p in self.tmp.glob("plurxd-agent.*")], [], "no temporary file is left behind")
+
+    def test_macos_hands_back_what_an_earlier_root_run_left_before_using_it(self):
+        # macOS sudo keeps HOME, so `sudo make install-macos` leaves root-owned
+        # files in the build tree, the cargo cache, the Homebrew prefix and the
+        # user's Library, and every later run as the user trips over them. The
+        # suite's files belong to the real user, so a stub identity of 4242
+        # sees them as someone else's -- exactly how a root-owned file looks.
+        self.host.stub("id", 'case "$1" in -u|-g) echo 4242 ;; *) echo "uid=4242(test) gid=4242(test)" ;; esac\n')
+        self.host.stub("launchctl", "")
+        checkout = self.tmp / "checkout"
+        shutil.copytree(ROOT / "deploy", checkout / "deploy")
+        target = checkout / "target"
+        (target / "release").mkdir(parents=True)
+        self.host.stub("cargo", f'cp "{self.host.fake_binary}" "{target}/release/plurxd"\n')
+        cargo_home = self.tmp / "cargo-home"
+        (cargo_home / "registry").mkdir(parents=True)
+        prefix = self.tmp / "homebrew"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "plurxd").write_text("old")
+        engine = prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}"
+        engine.mkdir(parents=True)
+        agents = self.host.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        plist_path = agents / "com.plurx.plurxd.plist"
+        plist_path.write_text("<plist version=\"1.0\"><dict></dict></plist>\n")
+        support = self.host.home / "Library/Application Support/plurx"
+        support.mkdir(parents=True)
+        log = self.host.home / "Library/Logs/plurxd.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("")
+        installer = checkout / "deploy" / "install"
+        result = self.host.run("macos", "--prefix", str(prefix), installer=installer, env={"CARGO_HOME": str(cargo_home)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.host.calls()
+        for path in (target, cargo_home / "registry", prefix / "bin" / "plurxd", prefix / "libexec/plurx", plist_path, support, log):
+            self.assertIn(f"sudo chown -R 4242:4242 {path}", calls)
+            self.assertIn(f"gave {path} back to uid 4242", result.stdout)
+        # The LaunchAgents folder holds other tools' agents: only the folder.
+        self.assertIn(f"sudo chown 4242:4242 {agents}", calls)
+        self.assertNotIn(f"sudo chown -R 4242:4242 {agents}", calls)
+        self.assertOrdered(calls, f"sudo chown -R 4242:4242 {target}", "cargo build --locked --release -p plurxd")
+        self.assertOrdered(calls, f"sudo chown -R 4242:4242 {prefix / 'libexec/plurx'}", f"install -m 0755 {target}/release/plurxd")
+        self.assertOrdered(calls, f"sudo chown -R 4242:4242 {plist_path}", f"launchctl bootstrap gui/4242 {plist_path}")
+
+        # Uninstall claims the prefix's pieces before removing them, so a
+        # root-owned engine cannot leave it half done.
+        self.host.log.write_text("")
+        plist_path.write_text(
+            f"<plist><dict><key>ProgramArguments</key><array><string>{prefix}/bin/plurxd</string></array></dict></plist>\n"
+        )
+        result = self.host.run("macos", "--uninstall", installer=installer)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertOrdered(self.host.calls(), f"sudo chown -R 4242:4242 {prefix / 'libexec/plurx'}", "launchctl bootout")
+        self.assertFalse((prefix / "libexec/plurx").exists())
 
     # ---- docker ----------------------------------------------------------------
 
@@ -495,14 +650,14 @@ class InstallerCase(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         env_file = (fake_root / "deploy" / ".env").read_text(encoding="utf-8")
-        self.assertIn(f"PUID={1000}\n", env_file)
-        self.assertIn(f"PGID={1000}\n", env_file)
+        self.assertIn(f"PUID={self.host.uid}\n", env_file)
+        self.assertIn(f"PGID={self.host.uid}\n", env_file)
         self.assertIn(f"PLURX_DATA={data}", env_file)
         self.assertTrue((fake_root / "deploy" / "docker-compose.override.yml").exists())
         self.assertOrdered(
             self.host.calls(),
             "docker compose version",
-            f"install -d -o {1000} -g {1000} {data}",
+            f"install -d -o {self.host.uid} -g {self.host.uid} {data}",
             "make docker-up",
             "curl",
         )
@@ -596,7 +751,14 @@ class InstallerCase(unittest.TestCase):
         # systemctl, or launchctl to exist, and must not create anything.
         for stale in ("sudo", "curl", "install"):
             os.remove(self.host.bin / stale)
+        agents = self.host.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        plist_path = agents / "com.plurx.plurxd.plist"
+        with plist_path.open("wb") as handle:
+            plistlib.dump({"Label": "com.plurx.plurxd", "EnvironmentVariables": {"PLURX_FFMPEG": str(self.host.bin / "ffmpeg")}}, handle)
+        agent_before = plist_path.read_bytes()
         before = sorted(str(p) for p in self.host.destdir.rglob("*"))
+        tmp_before = sorted(p.name for p in self.tmp.iterdir())
         fake_root = self.tmp / "checkout"
         shutil.copytree(ROOT / "deploy", fake_root / "deploy")
         for mode in ("linux", "macos", "docker", "binary"):
@@ -608,14 +770,22 @@ class InstallerCase(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, f"{mode}: " + result.stdout + result.stderr)
             self.assertTrue(any(line.startswith("+ ") for line in result.stdout.splitlines()), mode)
+            if mode == "macos":
+                self.assertIn(f"would repoint PLURX_FFMPEG in {plist_path}", result.stdout)
             if mode == "binary":
                 self.assertIn("plurxd run", result.stdout, mode)
             else:
                 self.assertIn("would wait for http://127.0.0.1:32400/readyz", result.stdout, mode)
         after = sorted(str(p) for p in self.host.destdir.rglob("*"))
         self.assertEqual(before, after)
-        # `id` and `uname` only read who and what this host is.
-        self.assertEqual([c for c in self.host.calls() if not c.startswith(("id ", "uname "))], [], "a dry run invokes no host tool")
+        self.assertEqual(plist_path.read_bytes(), agent_before)
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir() if p.name != "checkout"), tmp_before, "a dry run writes no temporary file")
+        # `id` and `uname` only read who and what this host is, and
+        # `<engine> -version` only reads which build an existing agent runs.
+        self.assertEqual(
+            [c for c in self.host.calls() if not c.startswith(("id ", "uname ")) and not c.endswith(" -version")],
+            [], "a dry run invokes no host tool",
+        )
 
     # ---- the make targets and the docs --------------------------------------
 
