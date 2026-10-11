@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Reconcile registered Forgejo guest budgets without replacing credentials."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import socket
+import subprocess
+
+
+def run(*args, **kwargs):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=2100, **kwargs)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr.strip()}")
+    return result.stdout
+
+
+def field(section, key, value):
+    pattern = rf"^  {key}:.*\n(?:[ \t]{{4,}}.*\n|\n)*"
+    replacement = f"  {key}: {value}\n"
+    if re.search(pattern, section, re.M):
+        return re.sub(pattern, lambda match: replacement, section, flags=re.M)
+    return section.rstrip() + "\n" + replacement
+
+
+def section_update(source, name, update):
+    match = re.search(rf"^{name}:\s*\n", source, re.M)
+    if not match:
+        raise ValueError(f"missing block-style {name} configuration")
+    end = re.search(r"^[a-zA-Z_][\w-]*:", source[match.end():], re.M)
+    stop = match.end() + end.start() if end else len(source)
+    return source[:match.end()] + update(source[match.end():stop]) + source[stop:]
+
+
+def configuration(source, labels, cpus):
+    memory_gib = 6 if "ci-coverage" in labels else 7
+    def runner(section):
+        section = field(field(section, "capacity", "1"), "shutdown_timeout", "30m")
+        section = field(section, "labels", "\n" + "".join(f"    - {label}:host\n" for label in labels).rstrip())
+        match = re.search(r"^  envs:(.*)\n", section, re.M)
+        if not match:
+            section += "  envs:\n"
+        elif match[1].strip() in {"{}", "null", "~"}:
+            section = section[:match.start()] + "  envs:\n" + section[match.end():]
+        elif match[1].strip():
+            raise ValueError("envs must be a block mapping; refusing to rewrite it")
+        for key in ("CARGO_BUILD_JOBS", "RUST_TEST_THREADS"):
+            pattern = rf"^    {key}:.*$"
+            if re.search(pattern, section, re.M):
+                section = re.sub(pattern, f'    {key}: "{1 if key == "CARGO_BUILD_JOBS" else 2}"', section, flags=re.M)
+            else:
+                section = section.replace("  envs:\n", f'  envs:\n    {key}: "{1 if key == "CARGO_BUILD_JOBS" else 2}"\n', 1)
+        return section
+    source = section_update(source, "runner", runner)
+    return section_update(source, "container", lambda section: field(section, "options", f"--cpus {cpus} --memory {memory_gib}g --memory-swap 10g --pids-limit 4096"))
+
+
+def ensure_swap(path=Path("/var/lib/plurx-ci/runner.swap"), fstab=Path("/etc/fstab"), swaps=Path("/proc/swaps"), execute=run, disk=shutil.disk_usage):
+    """Give bounded compiler jobs real backing without consuming the disk reserve."""
+    size = 4 * 1024 ** 3
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise RuntimeError("refusing symlink swap file")
+    if not path.exists():
+        if disk(path.parent).free < size + 8 * 1024 ** 3:
+            raise RuntimeError("guest swap requires 4 GiB plus 8 GiB free disk reserve")
+        temporary = path.with_name(path.name + ".creating")
+        # Exclusive creation prevents overwriting an interrupted or unrelated file.
+        fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        try:
+            execute("fallocate", "-l", str(size), str(temporary))
+            execute("mkswap", str(temporary))
+            os.replace(temporary, path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    if not path.is_file() or path.stat().st_size != size:
+        raise RuntimeError("unexpected existing runner swap file; refusing to replace it")
+    path.chmod(0o600)
+    entry = f"{path} none swap sw 0 0"
+    source = fstab.read_text()
+    if not any(line.split() and line.split()[0] == str(path) for line in source.splitlines() if not line.lstrip().startswith("#")):
+        write_owned(fstab, source.rstrip() + "\n" + entry + "\n")
+    active = {line.split()[0] for line in swaps.read_text().splitlines()[1:] if line.split()}
+    if str(path) not in active:
+        execute("swapon", str(path))
+
+
+def write_owned(path, content):
+    old = path.stat() if path.exists() else None
+    if old and path.read_text() == content:
+        return False
+    temporary = path.with_name(path.name + ".resource-budget.tmp")
+    temporary.write_text(content)
+    temporary.chmod(old.st_mode & 0o777 if old else 0o644)
+    if old:
+        os.chown(temporary, old.st_uid, old.st_gid)
+    os.replace(temporary, path)
+    return True
+
+
+def guest(spec):
+    unit, labels = spec["unit"], spec["labels"]
+    if not re.fullmatch(r"forgejo-runner-gha-[a-z0-9-]+\.service", unit):
+        raise ValueError("invalid runner unit")
+    if not labels or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", label) for label in labels):
+        raise ValueError("invalid runner labels")
+    coverage = "ci-coverage" in labels
+    if coverage and any(label in labels for label in ("general", "high-cpu")):
+        raise ValueError("coverage cannot share general labels")
+    retired = list(spec.get("retire_units", []))
+    if coverage:
+        retired += [line.split()[0] for line in run("systemctl", "list-unit-files", "actions.runner.*.service", "--no-legend").splitlines() if line.startswith("actions.runner.")]
+        # GitHub service termination does not provide Forgejo's drain contract.
+        workers = subprocess.run(["pgrep", "-f", "[R]unner.Worker"], capture_output=True)
+        if workers.returncode == 0:
+            raise RuntimeError("GitHub job active; retry reconciliation after it finishes")
+        if workers.returncode != 1:
+            raise RuntimeError("could not verify GitHub job inactivity")
+    for other in retired:
+        if other == unit or not re.fullmatch(r"(?:forgejo-runner-gha-|actions\.runner\.)[A-Za-z0-9_.-]+\.service", other):
+            raise ValueError("invalid retired runner unit")
+    retired = [other for other in retired if run("systemctl", "show", other, "-p", "LoadState", "--value").strip() != "not-found"]
+    command = run("systemctl", "show", unit, "-p", "ExecStart", "--value")
+    match = re.search(r"(?:^|\s)(?:-c|--config)\s+([^\s;]+)", command)
+    if not match:
+        raise ValueError("cannot locate existing runner config")
+    path = Path(match[1])
+    ensure_swap()
+    source = path.read_text()
+    updated = configuration(source, labels, 2 if coverage else 3)
+    backup = path.with_name(path.name + ".before-resource-budget")
+    if not backup.exists():
+        backup.write_text(source)
+        backup.chmod(0o600)
+    changed = write_owned(path, updated)
+    directory = Path("/etc/systemd/system") / (unit + ".d")
+    directory.mkdir(exist_ok=True)
+    cpus = 2 if coverage else 3
+    memory_gib = 6 if coverage else 7
+    changed |= write_owned(directory / "20-resource-budget.conf", f"[Service]\nMemoryHigh={memory_gib - 1}G\nMemoryMax={memory_gib}G\nMemorySwapMax={10 - memory_gib}G\nCPUQuota={cpus * 100}%\nRestart=always\nRestartSec=5\nTimeoutStopSec=30min\nEnvironment=CARGO_BUILD_JOBS=1\nEnvironment=RUST_TEST_THREADS=2\n")
+    for other in set(retired):
+        directory = Path("/etc/systemd/system") / (other + ".d")
+        directory.mkdir(exist_ok=True)
+        write_owned(directory / "20-drain.conf", "[Service]\nTimeoutStopSec=30min\n")
+    run("systemctl", "daemon-reload")
+    for other in set(retired):
+        run("systemctl", "disable", "--now", other)
+    run("systemctl", "enable", unit)
+    if changed:
+        run("systemctl", "restart", "--no-block", unit)
+    for name in run("docker", "ps", "--filter", "name=ACTIONS-TASK-", "--format", "{{.Names}}").splitlines():
+        run("docker", "update", "--cpus", str(cpus), "--memory", f"{memory_gib}g", "--memory-swap", "10g", name)
+    print(json.dumps({"unit": unit, "changed": changed, "retired": sorted(set(retired))}))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="/etc/plurx-ci/runner-vms.json")
+    parser.add_argument("--guest", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit("run as root")
+    if args.guest:
+        guest(json.loads(args.guest))
+        return
+    config = json.loads(Path(args.config).read_text())
+    project = config.get("project", "github-runners")
+    host = socket.gethostname().split(".")[0]
+    instances = {i["name"]: i for i in json.loads(run("incus", "list", "--project", project, "--format", "json"))}
+    for spec in config["runners"]:
+        instance = instances.get(spec["vm"])
+        if not instance or instance["location"] != host or instance["status"] != "Running":
+            raise RuntimeError("reconciliation requires an existing local running guest")
+        result = run("incus", "exec", "--project", project, spec["vm"], "--", "python3", "-", "--guest", json.dumps(spec), input=Path(__file__).read_text())
+        print(result.strip())
+
+
+if __name__ == "__main__":
+    main()
