@@ -268,6 +268,9 @@ const SETTINGS_METHODS: &[&str] = &[
     "get_setting_pair",
     "get_settings",
     "settings_snapshot",
+    // The replica-local read the idle observers use to decide whether a
+    // consistent read is owed; `local_setting_hint_reads_this_replicas_copy`.
+    "local_setting_hint",
     "put_setting",
     "put_setting_if_absent",
     "put_setting_if_absent_if_artwork_repair_current",
@@ -567,6 +570,10 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    // Covered on both backends by
+    // `background_jobs_transcription_publication_is_atomic_namespaced_and_stop_fenced`
+    // (store_contract/background_jobs.rs).
+    "publish_transcription_job",
     "publish_copy_output_job",
     "publish_encoded_output_job",
     "media_preparation_history",
@@ -740,6 +747,8 @@ const COORDINATION_METHODS: &[&str] = &[
     "lease_expiry_hint",
 ];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    // `first_preparation_output_seal_is_exact_and_idempotent_on_every_backend`.
+    "seal_prepared_output",
     "observe_candidate_recovery",
     "candidate_recovery_memory",
     "record_desired_selection",
@@ -2338,6 +2347,217 @@ async fn a_newer_ask_reconciles_against_a_commit_that_landed_first() {
             // the newer ask, nothing else in the suite would notice.
             "{backend}: the viewer's current ask is not discarded because a \
              commit landed before it"
+        );
+    })
+    .await;
+}
+
+/// `local_setting_hint` is this replica's copy of one setting, read without
+/// consensus. A follower may lag a save, so the replicated backend is asked
+/// until it converges; SQLite's one database answers at once. An absent key
+/// is `None`, and the hint never invents a value the authority does not hold.
+#[tokio::test]
+async fn local_setting_hint_reads_this_replicas_copy() {
+    async fn converges(store: &dyn Store, key: &str, expected: Option<&str>, backend: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let hint = store
+                .local_setting_hint(key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: hint {key}: {error}"));
+            if hint.as_deref() == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{backend}: the local hint for {key} stayed {hint:?}, expected {expected:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    for_each_backend(|store, backend| async move {
+        let key = "contract.local_setting_hint";
+        assert_eq!(
+            store
+                .local_setting_hint(key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: absent hint: {error}")),
+            None,
+            "{backend}: an absent key has no hint"
+        );
+        store
+            .put_setting(key, "first")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first write: {error}"));
+        converges(store.as_ref(), key, Some("first"), backend).await;
+        store
+            .put_setting(key, "second")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second write: {error}"));
+        converges(store.as_ref(), key, Some("second"), backend).await;
+        assert_eq!(
+            store
+                .get_setting(key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: authority read: {error}"))
+                .as_deref(),
+            Some("second"),
+            "{backend}: the hint agrees with the authority once converged"
+        );
+        assert_eq!(
+            store
+                .local_setting_hint("contract.local_setting_hint.other")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: other hint: {error}")),
+            None,
+            "{backend}: one key's value is not another's hint"
+        );
+    })
+    .await;
+}
+
+/// The first private output choice of a reserved successor is sealed exactly
+/// once: the pending marker becomes complete with the receipt in the recipe, an
+/// identical replay succeeds without changing it, a different receipt is
+/// refused without touching either session, and a seal that does not carry
+/// the pending marker is invalid rather than a capture.
+#[tokio::test]
+async fn first_preparation_output_seal_is_exact_and_idempotent_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("prepared-output-seal", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-prepared-output-seal";
+        let predecessor = "11111111-1111-4111-8111-111111111401";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "11111111-1111-4111-8111-111111111402",
+            backend,
+        )
+        .await;
+        let mut staged = staged_preparation(
+            user.id,
+            playback,
+            "11111111-1111-4111-8111-111111111403",
+            "11111111-1111-4111-8111-111111111404",
+            predecessor,
+        );
+        staged.recipe_json =
+            r#"{"retained_output_receiver":1,"request":{"presentation":"vod"}}"#.to_owned();
+        staged.response_json =
+            r#"{"prepared_output_capture_pending":true,"height":720}"#.to_owned();
+        store
+            .prepare_media_session(&staged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the successor reserves"));
+        let before_predecessor = store
+            .media_session_route_by_incarnation(predecessor)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read predecessor: {error}"));
+        let receipt = serde_json::json!({
+            "artifact_id": "22222222-2222-4222-8222-222222222401",
+            "output_identity": "ab".repeat(32),
+            "average_bps": 8000,
+            "peak_bps": 12000
+        });
+        let seal = plurx_core::store::PreparedOutputSeal {
+            incarnation_id: staged.incarnation_id.clone(),
+            session_id: staged.session_id.clone(),
+            user_id: user.id,
+            playback_id: playback.to_owned(),
+            owner_node_id: "staged-node".to_owned(),
+            owner_epoch: 1,
+            expected_recipe_json: staged.recipe_json.clone(),
+            expected_response_json: staged.response_json.clone(),
+            predecessor_incarnation_id: predecessor.to_owned(),
+            predecessor_owner_node_id: "staged-node".to_owned(),
+            predecessor_owner_epoch: 1,
+            deadline_ms: staged.deadline_ms,
+            now_ms: staged.now_ms + 1,
+            already_complete: false,
+            retained_output: Some(receipt.clone()),
+        };
+        assert!(
+            store
+                .seal_prepared_output(&seal)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: first seal: {error}")),
+            "{backend}: the first seal lands"
+        );
+        let sealed = store
+            .media_session_route_by_incarnation(&staged.incarnation_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read sealed: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: sealed route"));
+        let recipe: serde_json::Value =
+            serde_json::from_str(&sealed.recipe_json).expect("sealed recipe");
+        assert_eq!(
+            recipe["retained_output"], receipt,
+            "{backend}: receipt sealed"
+        );
+        assert_eq!(
+            recipe["request"]["presentation"], "vod",
+            "{backend}: recipe kept"
+        );
+        let response: serde_json::Value =
+            serde_json::from_str(&sealed.response_json).expect("sealed response");
+        assert_eq!(
+            response["prepared_output_capture_complete"], true,
+            "{backend}"
+        );
+        assert!(
+            response.get("prepared_output_capture_pending").is_none(),
+            "{backend}: the pending marker is consumed"
+        );
+        assert_eq!(response["height"], 720, "{backend}: response kept");
+
+        assert!(
+            store
+                .seal_prepared_output(&seal)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay: {error}")),
+            "{backend}: the identical seal replays"
+        );
+        let mut changed = seal.clone();
+        changed.retained_output = Some(serde_json::json!({
+            "artifact_id": "22222222-2222-4222-8222-222222222402",
+            "output_identity": "cd".repeat(32),
+            "average_bps": 9000,
+            "peak_bps": 13000
+        }));
+        assert!(
+            !store
+                .seal_prepared_output(&changed)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: changed seal: {error}")),
+            "{backend}: a different receipt is refused"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&staged.incarnation_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reread: {error}")),
+            Some(sealed),
+            "{backend}: replay and refusal left the sealed successor unchanged"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(predecessor)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reread predecessor: {error}")),
+            before_predecessor,
+            "{backend}: sealing never touches the predecessor"
+        );
+        let mut unmarked = seal.clone();
+        unmarked.expected_response_json = "{}".to_owned();
+        assert!(
+            store.seal_prepared_output(&unmarked).await.is_err(),
+            "{backend}: a seal without the pending marker cannot authorize capture"
         );
     })
     .await;
@@ -19346,7 +19566,13 @@ fn contract_inventory_matches_every_store_method() {
     // the row still being SDR. Both are named in `MEDIA_METHODS` and covered
     // on both backends by `unsignalled_transfer_candidates_and_writes_are_exactly_fenced`.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 480, "review the Store method count");
+    // 480 -> 483: three methods that landed without an inventory entry are now
+    // listed with the scenarios that cover them on both backends:
+    // `local_setting_hint` (3d87c8966) in `SETTINGS_METHODS`,
+    // `publish_transcription_job` (6fae0a350) in `BACKGROUND_JOB_METHODS` and
+    // `seal_prepared_output` (265bc560a) in `MEDIA_SESSION_METHODS`.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 483, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
