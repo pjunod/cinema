@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-11, plurx has 358 routes declared by the ordinary listener's
+As of 2026-10-11, plurx has 359 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -22,7 +22,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 358 routes across the registered routers.
+plurx has 359 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2409,6 +2409,7 @@ The preparation status read requires an authenticated viewer; every other route 
 | GET | `/api/v1/files/{id}/preparation` | Read-only per-file preparation facts; authenticated viewers, no work enqueued |
 | POST | `/api/v1/files/{id}/analysis` | Durably requests analysis for one or both components. 202 |
 | GET | `/api/v1/analysis/summary` | Counters plus a queue-health verdict |
+| GET | `/api/v1/analysis/coverage` | Copy-identity index coverage of this node's video libraries, by dynamic-range class; on demand, one at a time per node (409 while one runs) |
 | GET | `/api/v1/analysis/jobs` | Keyset history page with server-side filter and search |
 | GET | `/api/v1/analysis/jobs/{id}` | One job's exact durable state and attempt history |
 | DELETE | `/api/v1/analysis/jobs/{id}` | Cooperative cancellation |
@@ -2586,6 +2587,24 @@ rows that never reach `published` mean the artifact exists but is not on
 `target_node_id`. `stale` rows are not failures at all. The unambiguous alarm
 is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 — is `POST /analysis/reopen`, dry run first.
+
+### 16.6 Index coverage
+
+The queue says what is moving; `GET /analysis/coverage` says how much of the
+library the result already covers. It judges every file in this node's Movies,
+Shows, Home and Recordings libraries by item detail's `vod_index_status` rule —
+`indexed` only when every copy identity a client can ask for has a local exact
+index or a cluster artifact this node's source attestation reaches — and
+counts the answers per class: `sdr`, `hdr10`, `hlg`, `dolby_vision_p5`,
+`dolby_vision_p7`, `dolby_vision_p8`, `dolby_vision_other`.
+
+Each class carries `files`, `bytes`, `identities`, `identities_indexed`, and
+the per-file states `indexed`, `partial`, `pending`, `refused` and
+`unsupported`. `unobserved` counts files whose source the node could not stat
+within the report's wait; their cluster artifacts were not consulted, as on
+the detail page. The answer is per node and computed on request by walking the
+catalogue, so it is not something to poll: one runs at a time per node, and a
+second answers 409.
 
 ---
 
