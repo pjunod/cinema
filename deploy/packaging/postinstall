@@ -1,0 +1,49 @@
+#!/bin/sh
+# plurxd package post-install, shared by the .deb (postinst) and .rpm (%post).
+# dpkg passes `configure <previous version>` (empty on a first install); rpm
+# passes the number of installed instances (1 on a first install).
+#
+# The service is enabled and started when the package arrives on a host where
+# it is not installed: a first install, or an install after a removal. A
+# removed .deb stays configured, so dpkg then passes the old version exactly as
+# on an upgrade; the marker pre-removal leaves in the kept state directory is
+# what tells the two apart. An upgrade only restarts a service that is running,
+# so an operator's disable survives it.
+set -e
+
+state=/var/lib/plurx
+marker=$state/.plurxd-package-removed
+
+arriving=0
+case "${1:-}" in
+  configure) [ -n "${2:-}" ] || arriving=1 ;;
+  1) arriving=1 ;;
+  # A removal that failed after pre-removal stopped the service: put it back.
+  abort-remove) arriving=1 ;;
+  abort-*) exit 0 ;;
+esac
+[ -e "$marker" ] && arriving=1
+
+# The service user the unit names. Its home is the state directory.
+if ! getent group plurx >/dev/null 2>&1; then
+  groupadd --system plurx
+fi
+if ! getent passwd plurx >/dev/null 2>&1; then
+  useradd --system --gid plurx --home-dir /var/lib/plurx --no-create-home \
+    --shell /usr/sbin/nologin --comment "noirr cinema media server" plurx
+fi
+# Created once; an operator's later mode or group on it is theirs to keep.
+[ -d "$state" ] || install -d -o plurx -g plurx -m 0750 "$state"
+rm -f "$marker"
+
+# No systemd (a container, a chroot): the files are in place and the operator
+# starts plurxd however that environment runs services.
+[ -d /run/systemd/system ] || exit 0
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+if [ "$arriving" = 1 ]; then
+  systemctl enable --now plurxd.service
+  echo "plurxd is running: open http://$(hostname):32400 to create the first administrator."
+else
+  systemctl try-restart plurxd.service
+fi

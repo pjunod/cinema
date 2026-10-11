@@ -131,7 +131,7 @@ impl Metrics {
 
     fn record(&self, operation: Operation, severity: Discard, error: bool) {
         let cell = &self.cells[Self::index(operation, severity, error)];
-        let _ = cell.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = cell.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != u64::MAX).then(|| current + 1)
         });
     }

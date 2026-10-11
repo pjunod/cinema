@@ -12,4 +12,9 @@ disallowed-methods = [
     { path = "std::process::Command::spawn", reason = "start children through plurx_core::process::spawn_job_owned so they get a priority class and an Activity row" },
     { path = "std::process::Command::output", reason = "use plurx_core::process::output_job_owned" },
     { path = "std::process::Command::status", reason = "use plurx_core::process::status_job_owned" },
+    # Not a spawn rule. Rust 1.99 deprecates the atomic `fetch_update` in favour
+    # of `try_update` (same signature, already stable at the pinned 1.97.1), so
+    # every use warns on any build newer than the pin -- an operator's Homebrew
+    # cargo, say. Refusing it here keeps the tree clean ahead of the pin.
+    { path = "core::sync::atomic::Atomic::fetch_update", reason = "renamed to try_update; fetch_update is deprecated from Rust 1.99" },
 ]

@@ -167,6 +167,65 @@ change supplies neither the secret nor a first tag. See
 [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
 correction 1 for the trigger decision.
 
+### GitHub release downloads
+
+The public GitHub repository is a push mirror of Forgejo, so the weekly tag
+reaches it when the mirror next syncs, and there it starts
+`.github/workflows/github-release.yml` on GitHub-hosted runners (free for a
+public repository; nothing runs on the lab fleet). From the tagged commit it
+builds and publishes the GitHub release for that tag:
+
+| Download | For | Checked before publishing |
+|---|---|---|
+| `plurxd_X.Y.Z-1_amd64.deb`, `_arm64.deb` | Debian 12+, Ubuntu 24.04+ | installed, started as `plurx` to `/readyz`, removed and reinstalled on Debian 12 and Ubuntu 24.04 |
+| `plurxd-X.Y.Z-1.x86_64.rpm`, `.aarch64.rpm` | Fedora, RHEL 9+ (ffmpeg from RPM Fusion) | the same on Fedora 42; scriptlets and binary on AlmaLinux 9 |
+| `plurxd-X.Y.Z-macos-universal.tar.gz` | macOS, Apple Silicon and Intel | each slice runs on its own hardware; `./install` from the unpacked archive readies the agent |
+| `plurxd-X.Y.Z-windows-x86_64.zip` | Windows x64 | `scripts/package-windows`; `plurxd.exe --version` on Windows Server 2022 |
+| `SHA256SUMS` | all of the above | computed over exactly the files published |
+
+The Linux binary is built in AlmaLinux 8, so it needs only glibc 2.28; the
+distribution list is set by the packages' ffmpeg dependency instead: 5.1 is
+the floor plurx paces streams on (`-readrate`; 6.1 adds the initial burst, see
+[OPERATIONS.md](OPERATIONS.md)), which Debian 12 and Ubuntu 24.04 ship and
+Ubuntu 22.04 does not. Both packages come from one nfpm description,
+[`deploy/packaging/nfpm.yaml`](../deploy/packaging/nfpm.yaml), assembled by
+`scripts/package-linux`: the binary and its `.dwp` in `/usr/lib/plurx`, a
+`/usr/bin/plurxd` symlink, and `deploy/plurxd.service` with only `ExecStart`
+repointed at `/usr/bin`. Installing creates the `plurx` user and
+`/var/lib/plurx` (a directory the package does not own, so no upgrade resets
+it and no removal deletes it), then enables and starts the service; an upgrade
+restarts it only if it is running; removing stops and disables it and keeps
+the state, and installing again re-enables it. The macOS archive is the
+universal binary beside `deploy/install` and the agent template, so `./install`
+in the unpacked folder is the whole install.
+
+The build jobs hold a read-only token and pass their output on as one-day
+workflow artifacts. Only the last job can write, and it compiles nothing: it
+checks that it holds exactly the six expected files, computes `SHA256SUMS`, and
+creates the release in one `gh release create`, which publishes only once
+every file is attached. A release that is already published is never rebuilt
+over; a draft an interrupted publish left behind is replaced. The tag is
+validated as `publish-release.yml` validates it: annotated `vX.Y.Z`, equal to
+the workspace version, with a `## [X.Y.Z]` heading in `CHANGELOG.md`.
+
+Two manual entry points, both **Run workflow** on GitHub's Actions tab: with
+`release_tag` set it back-fills an existing tag (built from the tag, packaged
+by the current workflow, marked *latest* only if it is the highest tag); with
+it empty it is a dry run of the dispatched ref, which builds and checks
+everything and publishes nothing. GitHub starts no workflow for a push that
+carries more than three tags, so a mirror catching up on several releases at
+once needs the back-fill dispatch for each.
+
+Forgejo reads `.github/workflows` too. Every job's whole condition is
+`github.server_url == 'https://github.com'`, which Forgejo evaluates on the
+server and records as skipped without a runner. The contract
+`test_github_only_workflows_never_reach_the_fleet` holds the file to that
+exact gate, to GitHub-hosted runners, to local actions plus GitHub's two
+pinned artifact actions, to tag-push and dispatch triggers only, and to one
+writing job that builds nothing. On GitHub, the fleet workflows are disabled,
+Actions may run only local actions and those two, outside contributors' runs
+need approval, and the default token is read-only.
+
 ### The release pull request is the gate the cut depends on
 
 Two `v0.3.0` failures shared a lesson: some gates only fire in regimes the

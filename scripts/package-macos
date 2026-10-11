@@ -33,6 +33,11 @@ def recipe():
     return module
 
 
+
+def validate_font_tools(package, facts):
+    return recipe().validate_font_tools(package, facts)
+
+
 def validate_native_package(package):
     tool = recipe()
     parser = package / "plurx-source-parser.wasm"
@@ -71,6 +76,9 @@ def validate_native_package(package):
     if (not parser_fact or parser_fact.get("sha256") != manifest["module_sha256"]
             or parser_fact.get("parser_abi") != manifest["parser_abi"]):
         raise ValueError("native package does not attest its canonical parser companion")
+    font_tools = native_manifest.get("font_tools")
+    if font_tools is not None or any((package / name).exists() for name in ["fc-list", "fc-conflist", "fontconfig"]):
+        validate_font_tools(package, font_tools)
     return manifest
 
 

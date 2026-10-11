@@ -604,12 +604,17 @@ replacement = "the rate-control refresh schedule remains a named lifecycle timer
 
 [[symbols]]
 id = "all-ffmpeg-process-starts"
-pattern = "\\bspawn_ffmpeg(?:_at)?\\("
+pattern = "\\bspawn_ffmpeg(?:_at(?:_with_env)?)?\\("
+# Video-processing follow-ups: the two initial launches now pass the captured
+# processing environment through spawn_ffmpeg_at_with_env, the same owned
+# executor path; the pattern follows them so they stay in this scan.
 # Review59: preserve the ordinary/fallback wrapper; include its exact-path
 # delegate and definition. The NEW executable fixture is outside this source
 # row's scope; its bounded child lifecycle is counted in the module sentinel.
 # The two initial launches moved to _at, not outside this ownership scan.
-expected_occurrences = 8
+# +2 with the follow-ups: the definition of spawn_ffmpeg_at_with_env and
+# spawn_ffmpeg_at delegating to it (spawn.rs); call sites are unchanged.
+expected_occurrences = 10
 kind = "process_start_scan"
 replacement = "one session executor acquires process capacity and cleanup registration before every rolling spawn"
 
@@ -2898,13 +2903,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # tests spawn settings_observer_loop and cancel then await it; vod/tests/
 # chunk_03.rs and vodencode_tests.rs each spawn one parked serve_segment GET
 # that the test awaits inside a 5 s timeout after advancing paused time.
+# Video-processing follow-ups (reviewed 2026-10-10, +2): one awaited
+# `tokio::task::spawn_blocking` in ffmpeg.rs reads the macOS clock package's
+# bounded provenance bytes and returns them to the caller, and the admin
+# `POST /system/video-processing/reprobe` handler spawns the existing serial
+# compatibility owner (`try_lock`, so at most one generation) bound to the
+# server shutdown token. Neither owns a producer or process.
+# Merge with main 1d3765776: the effort +2 and main #844 +1 add together.
+# Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
 # F4 fleet repair: +1 production, the unsignalled-transfer re-probe spawned
 # from the per-tick maintenance block beside the luminance frame walk. Like
 # it, a leased catalogue job (`catalogue:unsignalled-transfer`) that walks a
 # node-local cursor, runs its bounded frame reads through the scanner's
 # owned child and releases the lease before it returns; it owns no producer
 # and no timer.
-expected_occurrences = 936
+expected_occurrences = 938
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4439,6 +4452,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # session end; the hung-read interval sleep), two in transcode/tests/chunk_05.rs
 # (the first-snapshot poll and its 30 s bound), and one 5 s timeout each in
 # vod/tests/chunk_03.rs and vodencode_tests.rs around the parked GET.
+# Video-processing follow-ups (reviewed 2026-10-10, +2): the Linux strict
+# probe bounds its fixture preparation with one 5-second `tokio::time::timeout`,
+# and source preparation bounds clock-reporter capture with `timeout_at` on
+# the operation's own deadline. Both are deadlines on awaited work; neither
+# decides producer recovery.
+# Merge with main 1d3765776: the effort +2 and main #844 +2 add together.
+# Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
 # K-03 takeover gate held on change signals: +2, test-only, in
 # media_sessions::takeover_gate_tests. The remote-enable test's 3 s sleep
 # (the save lands while the gate sleeps, joined with the gate's own loop,
@@ -4466,7 +4486,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the cap, one across it and one long hold, then the shutdown token. Production
 # adds no timer: the follower's existing 10 s interval reads the held answer's
 # age.
-expected_occurrences = 1710
+expected_occurrences = 1712
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4887,9 +4907,15 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # DV/subtitle main union; measured by the focused ownership census.
 # Acceptance root-cause batch: +2, the test-only `/bin/sleep 60` producer
 # children reviewed under method-spawn; ProducerSlot reaps both.
+# Video-processing follow-ups (reviewed 2026-10-10, +3): linux_dolby.rs builds
+# the strict probe graph, its reporter query and its delivered-pixel decode.
+# Each runs through bounded_command_*_cancellable under
+# ChildWork::background: bounded time and output, cancelled with the probe,
+# reaped before the result is used. No rolling producer is started.
+# Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same `true` child, constructed with
 # `std::process::Command::new` so it is not registered at spawn.
-expected_occurrences = 257
+expected_occurrences = 260
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5499,9 +5525,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # prepare_authorized; no process is launched.
 # Acceptance root-cause batch: +2, the `.spawn()` of the same two test-only
 # sleep producers reviewed under method-spawn; no production launch is added.
+# Startup pending fallback: +3 false positives. The pending-socket regression
+# reads `response.status()` on three in-process `oneshot` responses; the
+# fallback itself launches nothing.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's `.spawn()`; not a second
 # child.
-expected_occurrences = 746
+expected_occurrences = 749
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

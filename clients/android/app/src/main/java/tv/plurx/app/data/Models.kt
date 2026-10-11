@@ -46,6 +46,20 @@ data class User(
 @Serializable
 data class LoginResp(val token: String, val user: User)
 
+/**
+ * `GET /api/v1/features` — which optional sections the server has switched
+ * on, readable by any signed-in user (the switches themselves live in the
+ * admin-only `/settings`). Every field defaults to `true`: a server that
+ * predates the route, or omits a field, must never hide anything.
+ */
+@Serializable
+data class Features(
+    val live_tv: Boolean = true,
+    val recordings: Boolean = true,
+    val shared_libraries: Boolean = true,
+    val library_channels: Boolean = true,
+)
+
 @Serializable
 data class Library(
     val id: Long,

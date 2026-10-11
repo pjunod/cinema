@@ -29,6 +29,38 @@ struct User: Codable {
     var isAdmin: Bool?
 }
 
+/// `GET /api/v1/features`: which optional areas an administrator has switched
+/// on, readable by any signed-in user (the switches themselves live behind the
+/// admin-only `/settings`). The client only uses it to decide which top-level
+/// navigation entries to show. A key an older server does not send decodes as
+/// `true`, so a server that predates a switch never hides anything.
+struct ServerFeatures: Codable, Equatable {
+    var liveTv: Bool
+    var recordings: Bool
+    var sharedLibraries: Bool
+    var libraryChannels: Bool
+
+    static let all = ServerFeatures(liveTv: true, recordings: true, sharedLibraries: true, libraryChannels: true)
+
+    init(liveTv: Bool, recordings: Bool, sharedLibraries: Bool, libraryChannels: Bool) {
+        self.liveTv = liveTv
+        self.recordings = recordings
+        self.sharedLibraries = sharedLibraries
+        self.libraryChannels = libraryChannels
+    }
+
+    // Decoded with `.convertFromSnakeCase`: `live_tv` → `liveTv`, etc.
+    private enum CodingKeys: String, CodingKey { case liveTv, recordings, sharedLibraries, libraryChannels }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        liveTv = try values.decodeIfPresent(Bool.self, forKey: .liveTv) ?? true
+        recordings = try values.decodeIfPresent(Bool.self, forKey: .recordings) ?? true
+        sharedLibraries = try values.decodeIfPresent(Bool.self, forKey: .sharedLibraries) ?? true
+        libraryChannels = try values.decodeIfPresent(Bool.self, forKey: .libraryChannels) ?? true
+    }
+}
+
 struct LoginResponse: Codable {
     let token: String
     let user: User

@@ -301,7 +301,7 @@ impl CapturedDriver {
             identity.registration_sequence = self
                 .0
                 .next_registration
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                     (value < 9_007_199_254_740_991).then_some(value + 1)
                 })
                 .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "ingress.prepare_obligation", error_class = "ordinal_exhausted", "Ingress reservation refused"); })?;
@@ -477,7 +477,7 @@ impl AcceptedDriverRegistry {
         }
         let sequence = self
             .next_sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 (value < 9_007_199_254_740_991).then_some(value + 1)
             })
             .map_err(|_| ())?;

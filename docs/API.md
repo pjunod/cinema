@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-10, plurx has 356 routes declared by the ordinary listener's
+As of 2026-10-10, plurx has 357 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -22,7 +22,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 356 routes across the registered routers.
+plurx has 357 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -300,6 +300,20 @@ perfectly valid request can 503 on one node and succeed on its neighbour.
 `learner_route_ineligible` carries no `Retry-After` on purpose: the refusal is
 a role, not a transient.
 
+**Before the router exists.** The listener is bound before the store is
+selected, so a joining learner can answer clock observation. Until startup
+hands the socket to the application, every other route answers `503
+server_starting` with `Retry-After: 2` and `Cache-Control: no-store`. This
+window is seconds on a standalone server and can last as long as a snapshot
+transfer on a cluster node. A request whose `Accept` names `text/html` gets a
+small page that says the server is starting and reloads itself, so a browser
+tab opened during startup lands in the app without a manual refresh.
+`/readyz` keeps its plain-text contract and answers `503 starting` (§22.1).
+`/healthz` is part of the window too and answers 503 until startup completes,
+so a liveness probe must allow for it: the container image's `HEALTHCHECK`
+start period does. Several lab scripts read `/healthz` 200 as "the app is up",
+which is why it is not answered early.
+
 **The maintenance allowlist** keeps enough surface alive to administer the
 node and to drain capabilities already issued: `/healthz`, `/readyz`,
 `/metrics`, `/`, the web assets, `GET`/`POST` of `/api/v1/auth/login` and
@@ -331,6 +345,7 @@ families. No `/api/v1/cluster/*` path matches either.
 | POST | `/api/v1/auth/login` | public | Verifies credentials, mints a token |
 | POST | `/api/v1/auth/logout` | bearer | Deletes this token's digest, cluster-wide |
 | GET | `/api/v1/me` | bearer | The caller's own user record |
+| GET | `/api/v1/features` | bearer | Which optional sections to list in navigation: `live_tv`, `recordings` (the DVR switch), `shared_libraries`, `library_channels`. Presentation only — the routes stay reachable |
 | GET | `/api/v1/me/devices` | bearer | This account's bounded token inventory; eight-hex digest prefixes only, plus `expires_at` (null while sign-ins do not expire) and `expired` |
 | DELETE | `/api/v1/me/devices/{prefix}` | bearer | Revokes one other device through the cluster revocation fence; the current device must use logout |
 | GET | `/api/v1/users` | admin | Every user; never any password hash |
@@ -431,6 +446,7 @@ of never storing it.
 | GET | `/api/v1/system` | admin | Environment diagnostics and counters |
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
+| POST | `/api/v1/system/video-processing/reprobe` | admin | Requests a new node-local video-processing compatibility generation (macOS processing graphs, or Linux strict Dolby graphs with their per-graph refusal reasons) and returns the current reports. Saved preferences and running plans are unchanged |
 | GET | `/api/v1/system/logs` | admin | Tail of the in-memory log ring |
 | GET | `/api/v1/system/playback-events` | admin | Node-local playback observations |
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
@@ -941,6 +957,19 @@ that fingerprint. On a mismatch — or on an existing library with no recorded
 identity whose scan saw no media — vanished-file cleanup is **skipped** and
 the scan reports a note instead. That is what stops an unmounted NAS or a
 container path mix-up from wiping a library.
+
+Removing a path from a library is not that case: it is configuration, not an
+observation of the disk, so neither the identity check nor the prune bound
+applies. The library's files that no remaining path covers — a path as
+configured, normalised, or canonicalised on the scanning node — leave the
+catalog with the items that leaves empty (a file a Dolby Vision conversion is
+rewriting stays until the conversion ends). The scan `PUT /libraries/{id}`
+queues does this once it has walked every path without an error: the walk
+re-attaches media moved to a newly added path to its items first, so they
+keep their identity and watch state, and a path it could not read keeps the
+old entries until it can. Every complete scan makes the same removal, and a
+scan that started before an edit removes nothing and records no identity —
+the scan the edit queued covers the new paths.
 
 `POST /api/v1/libraries/{id}/root-identity/reset` deletes that row so the next
 scan can establish a new identity, for the case where an operator genuinely
@@ -3526,10 +3555,12 @@ two paths that survive a fenced node.
 
 `GET /healthz` returns `ok\n` and **never touches storage**, so it stays 200
 on a node whose store is unreachable. That is the point: it is liveness, not
-readiness.
+readiness. The one exception is the startup window before the application
+router exists (§3.2), when it answers `503 server_starting`.
 
 `GET /readyz` returns `ready\n`, or 503 with a one-word reason —
-`maintenance`, `quorum unavailable`, `store unavailable`, `readiness unknown`.
+`maintenance`, `quorum unavailable`, `store unavailable`, `readiness unknown`,
+or `starting` while the startup window of §3.2 lasts.
 Maintenance is checked first. On a quorum-managed node the fresh quorum
 watermark *is* the recent store proof and **no store ping is issued**: turning
 readiness into another multi-second store request is exactly wrong at the

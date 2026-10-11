@@ -1980,6 +1980,87 @@ impl StartupObservationHttp {
     }
 }
 
+/// Seconds a client is told to wait before asking a still-starting server again.
+const STARTUP_PENDING_RETRY_SECS: u64 = 2;
+
+/// The page a browser gets while the server is still starting: it says so and
+/// reloads itself, so a tab opened during startup lands in the app on its own.
+const STARTUP_PENDING_HTML: &str = concat!(
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+    "<meta http-equiv=\"refresh\" content=\"3\"><title>Starting…</title>",
+    "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;",
+    "background:#111;color:#ddd;font:16px/1.5 system-ui,sans-serif}",
+    "main{max-width:32em;padding:24px;text-align:center}h1{font-size:22px;margin:0 0 8px}",
+    "p{margin:0;color:#aaa}</style></head><body><main role=\"status\">",
+    "<h1>The server is starting</h1>",
+    "<p>This page reloads by itself when it is ready.</p></main></body></html>",
+);
+
+/// Every route but the clock observation while the store is still coming up.
+///
+/// The listener is bound before the store is selected so a joining learner can
+/// answer clock observation, which leaves a window — seconds on a standalone
+/// server, as long as a snapshot transfer on a cluster node — in which the
+/// socket accepts connections the application cannot serve yet. Axum's default
+/// fallback answered those with an empty 404: a browser saw a blank page,
+/// `/readyz` said "not found" rather than "not ready", and a client probing
+/// `/api/v1/server` was told there was no plurx server here. A 503 with
+/// Retry-After is the truthful answer, and it carries the typed code every
+/// client already dispatches on.
+async fn startup_pending(headers: axum::http::HeaderMap) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    let browser = headers
+        .get(header::ACCEPT)
+        .and_then(|accept| accept.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"));
+    let response = if browser {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            STARTUP_PENDING_HTML,
+        )
+            .into_response()
+    } else {
+        http::error::ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "server_starting",
+            message: "the server is starting; retry shortly".into(),
+            retry_after_seconds: STARTUP_PENDING_RETRY_SECS,
+        }
+        .into_response()
+    };
+    startup_pending_headers(response)
+}
+
+/// `/readyz` keeps its own contract while pending: plain text, 503, and a
+/// one-word reason (API.md §22.1), so status tables that print the body show
+/// `starting` rather than a JSON object.
+async fn startup_pending_readyz() -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    startup_pending_headers(
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "starting\n",
+        )
+            .into_response(),
+    )
+}
+
+fn startup_pending_headers(mut response: axum::response::Response) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    let headers = response.headers_mut();
+    headers.insert(
+        header::RETRY_AFTER,
+        HeaderValue::from(STARTUP_PENDING_RETRY_SECS),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 impl Drop for StartupObservationHttp {
     fn drop(&mut self) {
         self.stop.cancel();
@@ -2012,11 +2093,13 @@ impl StartupClockObserver for StartupObservationHttp {
                     http::internal_clock::PATH,
                     axum::routing::get(http::internal_clock::observation_snapshot),
                 )
+                .route("/readyz", axum::routing::get(startup_pending_readyz))
                 .with_state(http::internal_clock::ObservationContext {
                     membership: membership.clone(),
                     node_id,
                     observer: observer.clone(),
-                });
+                })
+                .fallback(startup_pending);
             *self.router.write().map_err(|_| {
                 plurx_core::error::StoreError::Database("startup router ownership poisoned".into())
             })? = pending;
@@ -3316,7 +3399,7 @@ fn spawn_background_loops(
         let manager = Arc::clone(&state.transcode);
         let cancelled = background_shutdown.clone();
         async move {
-            manager.reprobe_macos_video(&cancelled).await;
+            manager.reprobe_video_processing(&cancelled).await;
         }
     });
     tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());
@@ -4865,8 +4948,8 @@ mod startup_tests {
             "unsigned observation refuses"
         );
         assert!(
-            request(&mut stream, "/active").await.contains("404"),
-            "no application route while pending"
+            request(&mut stream, "/active").await.contains("503"),
+            "no application route while pending, and it says the server is starting"
         );
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
         let normal_owner = Arc::clone(&owner);
@@ -4909,6 +4992,95 @@ mod startup_tests {
             tokio::net::TcpListener::bind(address).await.is_ok(),
             "drained listener releases the port"
         );
+    }
+
+    /// The 2026-10-10 report: a page opened during startup was blank and
+    /// `/readyz` answered 404. While pending, every non-clock route says the
+    /// server is starting — typed JSON for clients, a self-reloading page for
+    /// browsers — and never that the route does not exist.
+    #[tokio::test]
+    async fn pending_socket_answers_starting_not_not_found() {
+        use axum::http::{header, Request, StatusCode};
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve");
+        let address = reservation.local_addr().expect("address");
+        drop(reservation);
+        let owner = Arc::new(StartupObservationHttp::new(address));
+        owner
+            .start(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+                "pending-node".into(),
+            )
+            .await
+            .expect("pending socket");
+        let app = owner.router.read().expect("router").clone();
+        for path in ["/api/v1/server", "/healthz", "/web/index.html"] {
+            let response = tower::ServiceExt::oneshot(
+                app.clone(),
+                Request::get(path)
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(response.headers()[header::RETRY_AFTER], "2", "{path}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store",
+                "{path}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("typed JSON");
+            assert_eq!(json["code"], "server_starting", "{path}");
+        }
+        let ready = tower::ServiceExt::oneshot(
+            app.clone(),
+            Request::get("/readyz")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("infallible");
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ready.headers()[header::RETRY_AFTER], "2");
+        let body = axum::body::to_bytes(ready.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"starting\n", "readyz keeps its one-word reason");
+        let page = tower::ServiceExt::oneshot(
+            app,
+            Request::get("/")
+                .header(header::ACCEPT, "text/html,application/xhtml+xml,*/*;q=0.8")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("infallible");
+        assert_eq!(page.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(page.headers()[header::RETRY_AFTER], "2");
+        assert_eq!(
+            page.headers()[header::CACHE_CONTROL],
+            "no-store",
+            "the starting page must never be cached as the app shell"
+        );
+        assert!(page.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .expect("type")
+            .starts_with("text/html"));
+        let body = axum::body::to_bytes(page.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let html = std::str::from_utf8(&body).expect("utf-8");
+        assert!(
+            html.contains("http-equiv=\"refresh\""),
+            "the page reloads itself"
+        );
+        assert!(html.contains("The server is starting"));
+        // The clock route keeps its own answer; k06 above pins it over a
+        // real socket, where the connection info it needs exists.
+        owner.stop_and_drain().await;
     }
 
     /// Real learner/catchup -> authenticated observation -> committed vote.

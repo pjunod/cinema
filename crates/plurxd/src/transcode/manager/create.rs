@@ -36,7 +36,7 @@ fn trace_prepared_capture(
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     static START: OnceLock<Instant> = OnceLock::new();
     let sequence = SEQUENCE
-        .fetch_update(Relaxed, Relaxed, |value| Some(value.saturating_add(1)))
+        .try_update(Relaxed, Relaxed, |value| Some(value.saturating_add(1)))
         .expect("saturating sequence always updates");
     let monotonic_us = START
         .get_or_init(Instant::now)
@@ -1372,6 +1372,17 @@ impl TranscodeManager {
         .map_err(|error| {
             start_infrastructure_error(format!("reading the stored source probe: {error}"))
         })?;
+        let needs_legacy_reporter =
+            source_evidence.is_none() && self.decode_probe_identity.is_none();
+        let legacy_clock_reporter = if needs_legacy_reporter {
+            Some(
+                crate::ffmpeg::EncodedExecutable::capture_program(&crate::ffmpeg::ffprobe_bin())
+                    .await
+                    .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?,
+            )
+        } else {
+            None
+        };
         let phase_started = std::time::Instant::now();
         let (held_probe, held_decode_facts) = if let Some((evidence, _)) = source_evidence {
             // Source's actual operation supplied this evidence; no Local cache
@@ -1390,21 +1401,56 @@ impl TranscodeManager {
                 // Platforms without a sealed probe keep their existing source
                 // verification and stored-facts planning behavior.
                 None => (
-                    crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
-                        .await
-                        .map_err(|error| {
-                            vod_refusal_error(
-                                "vod_source_rescan_required",
-                                format!(
+                    crate::ffmpeg::held_source_probe_json_bound(
+                        &source.handle,
+                        VOD_START_HELD_PROBE,
+                        legacy_clock_reporter
+                            .as_ref()
+                            .expect("legacy held reporter captured"),
+                    )
+                    .await
+                    .map_err(|error| {
+                        vod_refusal_error(
+                            "vod_source_rescan_required",
+                            format!(
                                 "the held source could not be verified against its scan: {error}"
                             ),
-                            )
-                        })?,
+                        )
+                    })?,
                     None,
                 ),
             }
         };
         note_phase("held_source_probe", phase_started);
+        let clock_reporter = if let Some((evidence, _)) = source_evidence {
+            evidence.clock_reporter().clone()
+        } else if let Some(probe) = self.decode_probe_identity.as_ref() {
+            let captured =
+                crate::ffmpeg::EncodedExecutable::capture_at(probe.executable().to_owned())
+                    .await
+                    .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+            if captured.digest != probe.content_digest() {
+                return Err(vod_refusal_error(
+                    "vod_engine_unattested",
+                    "the held source timing reporter changed",
+                ));
+            }
+            captured
+        } else {
+            legacy_clock_reporter.expect("native fallback captures its reporter before the query")
+        };
+        if !clock_reporter.is_current().await {
+            return Err(vod_refusal_error(
+                "vod_engine_unattested",
+                "the held source timing reporter changed",
+            ));
+        }
+        let source_clock = if let Some((evidence, _)) = source_evidence {
+            evidence.source_clock()
+        } else {
+            crate::transcode::source_preparation::held_source_clock(&held_probe)
+                .map_err(|error| vod_refusal_error("vod_source_rescan_required", error))?
+        };
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -1669,12 +1715,43 @@ impl TranscodeManager {
             )
         })?;
         let phase_started = std::time::Instant::now();
-        let plan = if let Some(prepared) = held_decode_facts {
-            self.resolve_vod_prepared_source(file, &options, encoder, held_plan_handle, prepared)
-                .await?
+        let engine = if let Some((evidence, _)) = source_evidence {
+            evidence.engine()
         } else {
-            self.resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
-                .await?
+            crate::ffmpeg::EncodedEngine::capture(
+                options
+                    .subtitle_burn
+                    .as_ref()
+                    .is_some_and(|burn| !burn.bitmap)
+                    .then_some(self.runtime_cache.as_path()),
+            )
+            .await
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?
+        };
+        note_phase("encoded_engine_capture", phase_started);
+        // The engine retained by Encoding is also the font authority for this plan.
+        // Local finite VOD has no shared Source evidence, but owns the same capture.
+        let held_font_digest = engine.font_digest();
+        let phase_started = std::time::Instant::now();
+        let plan = if let Some(prepared) = held_decode_facts {
+            self.resolve_vod_prepared_source(
+                file,
+                &options,
+                encoder,
+                held_plan_handle,
+                prepared,
+                held_font_digest,
+            )
+            .await?
+        } else {
+            self.resolve_vod_movie_plan_with_fonts(
+                file,
+                &options,
+                encoder,
+                held_plan_handle,
+                held_font_digest,
+            )
+            .await?
         };
         note_phase("execution_decoder_plan", phase_started);
         // Encoding retains these execution options for publication and
@@ -1752,21 +1829,6 @@ impl TranscodeManager {
         } else {
             None
         };
-        let phase_started = std::time::Instant::now();
-        let engine = if let Some((evidence, _)) = source_evidence {
-            evidence.engine()
-        } else {
-            crate::ffmpeg::EncodedEngine::capture(
-                options
-                    .subtitle_burn
-                    .as_ref()
-                    .is_some_and(|burn| !burn.bitmap)
-                    .then_some(self.runtime_cache.as_path()),
-            )
-            .await
-            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?
-        };
-        note_phase("encoded_engine_capture", phase_started);
         if !source.unchanged() {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
@@ -1776,12 +1838,20 @@ impl TranscodeManager {
         let executable = crate::ffmpeg::EncodedExecutable::capture()
             .await
             .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        let executable = executable
+            .bind_linux_plan(&plan)
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
         if !executable.matches_macos_plan(&plan) {
             return Err(vod_refusal_error(
                 "vod_engine_unattested",
                 "the encoder differs from the frozen Mac processing plan; check compatibility again",
             ));
         }
+        let mut engine = engine;
+        engine
+            .bind_clock_pair(&clock_reporter, &executable)
+            .await
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
         #[cfg(target_os = "linux")]
         let (plan, options, resources, dv_processing, dv_runtime) = {
             let mut retained = (plan, options, resources, dv_processing, None);
@@ -1819,7 +1889,7 @@ impl TranscodeManager {
                     let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
                     let processed_encoder = if worker_encoder == Encoder::Nvenc { Encoder::Nvenc } else { Encoder::Software };
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
-                        source_tick, native_bl, preferences,
+                        source_tick, native_bl, source_clock, preferences,
                         destination, mode, encoder: processed_encoder, runtime_cache: self.runtime_cache.clone(), prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
                         report_revision: std::sync::atomic::AtomicU64::new(0),
                         published_receipt: std::sync::Mutex::new(None) };
@@ -1862,6 +1932,7 @@ impl TranscodeManager {
             retained
         };
         Ok(Some(Arc::new(crate::vodencode::Encoding {
+            source_clock,
             shared_audio,
             source_object_version,
             dv_processing,
