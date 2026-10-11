@@ -2923,7 +2923,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # owned child and releases the lease before it returns; it owns no producer
 # and no timer.
 # +8 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
-expected_occurrences = 946
+# Index coverage (+1 production): `POST /analysis/coverage` spawns one walk
+# of the catalogue that owns no producer, process or timer. It holds the
+# per-process `CoverageRuns` slot (one walk at a time) through a drop guard,
+# so a finished, failed or panicked walk frees it; its stats run in the
+# walk's own bounded AvailabilityCache, never item detail's.
+expected_occurrences = 947
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
