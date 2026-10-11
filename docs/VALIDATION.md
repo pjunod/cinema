@@ -301,6 +301,13 @@ labels it needs. There is no hosted-runner switch or automatic fallback. A
 missing local capability therefore leaves a visible queued job instead of
 moving trusted repository code to an external execution boundary.
 
+The one exception is not CI: `.github/workflows/github-release.yml` runs only
+on the public GitHub mirror, on GitHub-hosted runners, to build the release
+downloads ([RELEASING.md](RELEASING.md) "GitHub release downloads"). Every one
+of its jobs is gated on `github.server_url`, so Forgejo skips it without a
+runner, and `test_github_only_workflows_never_reach_the_fleet` holds it to
+that; the self-hosted contracts exempt exactly that file.
+
 ### The runner roster — a label is a claim about a machine
 
 [`validation/runner-fleet.toml`](../validation/runner-fleet.toml) lists every

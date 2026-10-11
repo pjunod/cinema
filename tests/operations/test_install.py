@@ -388,6 +388,42 @@ class InstallerCase(unittest.TestCase):
         self.assertFalse([call for call in self.host.calls() if call.startswith("curl") and " -o " in call])
         self.assertIn("already in", result.stdout)
 
+    def test_macos_release_archive_installs_its_own_plurxd_and_clears_quarantine(self):
+        # The GitHub release's macOS archive is this script, the agent template
+        # and a built plurxd side by side; `./install` alone must install that
+        # binary -- not try to build a checkout that is not there -- and clear
+        # the browser-download quarantine Gatekeeper would otherwise enforce.
+        self.host.stub("launchctl", "")
+        self.host.stub("xattr", "")
+        archive = self.tmp / "plurxd-0.0.0-macos-universal"
+        archive.mkdir()
+        shutil.copy2(INSTALL, archive / "install")
+        shutil.copy2(ROOT / "deploy/com.plurx.plurxd.plist", archive / "com.plurx.plurxd.plist")
+        shutil.copy2(self.host.fake_binary, archive / "plurxd")
+        prefix = self.tmp / "homebrew"
+        result = self.host.run("--prefix", str(prefix), installer=archive / "install")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("installing the plurxd shipped beside this script", result.stdout)
+        self.assertEqual(
+            (prefix / "bin/plurxd").read_bytes(), self.host.fake_binary.read_bytes()
+        )
+        self.assertNotIn("cargo", "\n".join(self.host.calls()))
+        self.assertIn(f"xattr -d com.apple.quarantine {prefix}/bin/plurxd", self.host.calls())
+        plist = self.host.home / "Library/LaunchAgents/com.plurx.plurxd.plist"
+        self.assertTrue(plist.exists(), "the archive's own agent template was rendered")
+
+        # A checkout has no plurxd beside the script, so it still builds one
+        # unless --binary names it; Linux never touches quarantine.
+        self.assertFalse((ROOT / "deploy/plurxd").exists())
+        self.host.log.write_text("")
+        self.host.stub("uname", 'case "$1" in -m) echo x86_64 ;; *) echo Linux ;; esac\n')
+        self.host.stub("systemctl", "")
+        self.host.stub("getent", "exit 2\n")
+        self.host.stub("useradd", "")
+        result = self.host.run("linux", "--binary", str(self.host.fake_binary))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([call for call in self.host.calls() if call.startswith("xattr")])
+
     def test_macos_refuses_an_engine_archive_that_is_not_the_pinned_build(self):
         self.host.stub("launchctl", "")
         self.host.stub("shasum", 'echo "0000000000000000000000000000000000000000000000000000000000000000  $3"\n')

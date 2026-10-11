@@ -20,6 +20,15 @@ ROOT = Path(__file__).resolve().parents[2]
 # resolve to Docker Hub (an empty registry means docker.io to `docker login`
 # and to `docker/login-action`).
 FLEET_REGISTRY_EXPR = "${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"
+# Workflows that run only on the public GitHub mirror, on GitHub-hosted
+# runners. Every other workflow is Forgejo CI on the self-hosted fleet and is
+# held to that boundary below; these are held to their own contract instead
+# (test_github_only_workflows_never_reach_the_fleet), which is what makes the
+# exemption safe rather than a hole.
+GITHUB_ONLY_WORKFLOWS = frozenset({".github/workflows/github-release.yml"})
+GITHUB_HOSTED_RUNNERS = frozenset(
+    {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "macos-15-intel", "windows-2022"}
+)
 
 
 def read(path: str) -> str:
@@ -3668,6 +3677,8 @@ assert.equal(context.ACT_TIMER, null);
         workflow_dir = ROOT / ".github/workflows"
         paths = sorted((*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")))
         for path in paths:
+            if path.relative_to(ROOT).as_posix() in GITHUB_ONLY_WORKFLOWS:
+                continue  # GitHub honours permissions; the GitHub-only contract scopes them
             with self.subTest(path=path.relative_to(ROOT)):
                 workflow = path.read_text(encoding="utf-8")
                 self.assertNotRegex(workflow, r"(?m)^\s*permissions:\s*$")
@@ -3898,6 +3909,8 @@ assert.equal(context.ACT_TIMER, null);
                 f"{path} selects a self-hosted runner in a shape this test "
                 "cannot parse; teach self_hosted_label_sets to read it",
             )
+            if path in GITHUB_ONLY_WORKFLOWS:
+                continue  # GitHub-hosted by design; see the GitHub-only contract
             for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", read(path)):
                 self.assertTrue(
                     declaration.startswith("[self-hosted, ")
@@ -3990,7 +4003,117 @@ assert.equal(context.ACT_TIMER, null);
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             workflow = path.read_text(encoding="utf-8")
             self.assertNotIn("CI_RUNNER_MODE", workflow)
+            if path.relative_to(ROOT).as_posix() in GITHUB_ONLY_WORKFLOWS:
+                continue  # GitHub-hosted by design; see the GitHub-only contract
             self.assertNotRegex(workflow, r"(?m)^ +runs-on: (?:ubuntu|macos)-")
+
+    def test_github_only_workflows_never_reach_the_fleet(self):
+        # Forgejo runs every file in .github/workflows, and the GitHub mirror
+        # is public. A GitHub-only workflow is safe on both sides only while
+        # (1) every job's whole condition is the github.com gate, which Forgejo
+        # evaluates on the server and skips without a runner, (2) nothing in
+        # it can select a self-hosted runner or a container, (3) it runs only
+        # local actions and GitHub's two pinned artifact actions, (4) nothing
+        # but a tag push or a dispatch can start it, so fork code never runs,
+        # and (5) only the one job that builds nothing holds a write token.
+        # Every check is an exact match: a gate that merely contains the
+        # condition (`... || true`) or a permission set that merely starts
+        # with the allowed scope must fail.
+        gate = "github.server_url == 'https://github.com'"
+        artifact_action = re.compile(r"actions/(?:upload|download)-artifact@[0-9a-f]{40}")
+        for path in sorted(GITHUB_ONLY_WORKFLOWS):
+            with self.subTest(path=path):
+                workflow = read(path)
+                code = "\n".join(
+                    line for line in workflow.splitlines()
+                    if not line.lstrip().startswith("#")
+                ) + "\n"
+                on = re.search(r"(?m)^on:\n((?:(?:  .*)?\n)*)", code)
+                self.assertIsNotNone(on, path)
+                triggers = re.findall(r"(?m)^  ([a-z_]+):", on.group(1))
+                self.assertEqual(["push", "workflow_dispatch"], triggers, path)
+                push = on.group(1).split("  workflow_dispatch:", 1)[0]
+                self.assertEqual(["tags"], re.findall(r"(?m)^    ([a-z_]+):", push), path)
+                self.assertEqual(
+                    ["  contents: read\n"],
+                    re.findall(r"(?m)^permissions:\n((?:  .*\n)*)", code),
+                    path,
+                )
+                for forbidden in ("self-hosted", "pull_request", "workflow_run"):
+                    self.assertFalse(forbidden in code, f"{path} names {forbidden}")
+                self.assertIsNone(re.search(r"(?m)^\s+(?:container|services):", code), path)
+                for action in re.findall(r"(?m)^\s*(?:-\s+)?uses:\s+(\S+)", code):
+                    self.assertTrue(
+                        action.startswith("./.github/actions/")
+                        or artifact_action.fullmatch(action),
+                        f"{path} uses {action}",
+                    )
+                jobs = workflow_job_blocks(path)
+                self.assertTrue(jobs)
+                writers = []
+                for name, block in jobs.items():
+                    conditions = re.findall(r"(?m)^    if: (.+)$", block)
+                    self.assertEqual([gate], conditions, f"{path}:{name}")
+                    self.assertIn("\n    timeout-minutes:", block, f"{path}:{name}")
+                    runs_on = re.search(r"(?m)^    runs-on: (.+)$", block).group(1)
+                    if runs_on == "${{ matrix.runner }}":
+                        runners = set(re.findall(r"(?m)^ +runner: (\S+)$", block))
+                    else:
+                        runners = {runs_on}
+                    self.assertTrue(runners, f"{path}:{name}")
+                    self.assertLessEqual(runners, GITHUB_HOSTED_RUNNERS, f"{path}:{name}")
+                    grants = re.findall(r"(?m)^    permissions:(.*)\n((?:      .*\n)*)", block)
+                    if grants:
+                        self.assertEqual([("", "      contents: write\n")], grants, f"{path}:{name}")
+                        writers.append(name)
+                        # The writer runs nothing it was handed: no build, and
+                        # nothing unpacked or executed from the artifacts.
+                        for builder in (
+                            "cargo", "./.github/actions/", "scripts/", "docker run",
+                            "tar -x", "tar x", "unzip", "Expand-Archive", "dpkg",
+                            "rpm -", "chmod", "bash assets", "sh assets", "./assets",
+                        ):
+                            self.assertNotIn(builder, block, f"{path}:{name} writes and runs {builder}")
+                self.assertLessEqual(len(writers), 1, f"{path} has several writing jobs")
+
+    def test_github_release_packages_what_the_workflow_publishes(self):
+        workflow = read(".github/workflows/github-release.yml")
+        self.assertIn('tags: ["v*.*.*"]', workflow)
+        # The release is the tag's source, validated the way publish-release.yml
+        # validates it, built with the stamp `plurxd --version` reports.
+        self.assertIn('[[ "$tag" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]', workflow)
+        self.assertIn('test "$(git cat-file -t "refs/tags/$tag")" = tag', workflow)
+        self.assertIn('grep -Fq "## [$version]" CHANGELOG.md', workflow)
+        for key in ("PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"):
+            self.assertGreaterEqual(workflow.count(f"      {key}: ${{{{ needs.resolve.outputs."), 3, key)
+        # One packager per format, each pinned by digest or checksum.
+        self.assertIn("scripts/package-linux --arch", workflow)
+        self.assertIn("CARGO_TARGET_DIR=\"$PWD/release-source/target\" \\\n          PLURX_PKG_SOURCE_ROOT=\"$PWD/release-source\" \\\n            scripts/package-windows", workflow)
+        self.assertIn("compile-workspace: \"false\"", workflow)
+        self.assertRegex(workflow, r"BUILD_IMAGE: almalinux:8@sha256:[0-9a-f]{64}")
+        self.assertEqual(len(re.findall(r"(?m)^ +rustup_sha256: [0-9a-f]{64}$", workflow)), 2)
+        self.assertEqual(len(re.findall(r"(?m)^ +nfpm_sha256: [0-9a-f]{64}$", workflow)), 2)
+        # The finished release holds exactly the six artifacts plus checksums,
+        # and a back-filled older tag never becomes "latest".
+        for asset in (
+            "plurxd_${VERSION}-1_amd64.deb", "plurxd_${VERSION}-1_arm64.deb",
+            "plurxd-${VERSION}-1.x86_64.rpm", "plurxd-${VERSION}-1.aarch64.rpm",
+            "plurxd-${VERSION}-macos-universal.tar.gz",
+            "plurxd-${VERSION}-windows-x86_64.zip",
+        ):
+            self.assertIn(asset, workflow)
+        self.assertIn("SHA256SUMS", workflow)
+        self.assertIn('--notes-file notes.md --latest="$latest"', workflow)
+        packaging = read("deploy/packaging/nfpm.yaml")
+        self.assertIn("dst: /usr/lib/systemd/system/plurxd.service", packaging)
+        self.assertIn("dst: /usr/lib/plurx/plurxd.dwp", packaging)
+        self.assertNotIn("dst: /var/lib/plurx", packaging)
+        self.assertIn("ffmpeg (>= 7:5.1)", packaging)
+        self.assertIn('install -d -o plurx -g plurx -m 0750 "$state"', read("deploy/packaging/postinstall"))
+        self.assertIn("ExecStart=/usr/local/bin/plurxd run", read("deploy/plurxd.service"))
+        windows = read(".github/actions/windows-cross/action.yml")
+        self.assertIn("if: inputs.compile-workspace != 'false'", windows)
+        self.assertIn('default: "true"', windows)
 
     def test_every_ffmpeg_lane_pins_the_build_it_asserts_against(self):
         # An unpinned `apt-get install -y ffmpeg` on `ubuntu-latest` made the

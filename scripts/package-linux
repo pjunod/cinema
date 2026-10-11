@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Package a built Linux plurxd as a .deb and an .rpm with nfpm.
+#
+#   scripts/package-linux --arch amd64|arm64 --version X.Y.Z \
+#     --binary target/release/plurxd --out DIR
+#
+# The paired split-debug file is read from beside the binary (BINARY.dwp, which
+# the release profile's packed split-debuginfo produces). The two packages come from one description,
+# deploy/packaging/nfpm.yaml; this script stages what it names, derives the
+# packaged unit from deploy/plurxd.service, and prints the two paths it wrote.
+# nfpm must be on PATH (the GitHub release workflow installs a pinned build).
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+arch= version= binary= out=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --arch) arch=${2:?}; shift ;;
+    --version) version=${2:?}; shift ;;
+    --binary) binary=${2:?}; shift ;;
+    --out) out=${2:?}; shift ;;
+    *) echo "package-linux: unknown argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+case $arch in amd64|arm64) ;; *) echo "package-linux: --arch must be amd64 or arm64" >&2; exit 2 ;; esac
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "package-linux: --version must be X.Y.Z" >&2; exit 2; }
+[ -x "$binary" ] || { echo "package-linux: no executable at $binary" >&2; exit 1; }
+[ -f "$binary.dwp" ] || { echo "package-linux: no $binary.dwp beside the binary" >&2; exit 1; }
+[ -n "$out" ] || { echo "package-linux: --out is required" >&2; exit 2; }
+command -v nfpm >/dev/null || { echo "package-linux: nfpm is not on PATH" >&2; exit 1; }
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/plurx-package-linux.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+install -m 0755 "$binary" "$stage/plurxd"
+install -m 0644 "$binary.dwp" "$stage/plurxd.dwp"
+# The example configuration ships from the tree the binary was built from;
+# PLURX_PKG_SOURCE_ROOT names it when that is not this checkout.
+install -m 0644 "${PLURX_PKG_SOURCE_ROOT:-$root}/plurx.example.toml" "$stage/plurx.example.toml"
+for script in postinstall preremove postremove; do
+  install -m 0755 "$root/deploy/packaging/$script" "$stage/$script"
+done
+# The package installs the executable under /usr, not /usr/local; everything
+# else in the unit is the documented one.
+grep -q '^ExecStart=/usr/local/bin/plurxd run$' "$root/deploy/plurxd.service" || {
+  echo "package-linux: deploy/plurxd.service no longer has the ExecStart this script repoints" >&2
+  exit 1
+}
+sed 's|^ExecStart=/usr/local/bin/plurxd run$|ExecStart=/usr/bin/plurxd run|' \
+  "$root/deploy/plurxd.service" > "$stage/plurxd.service"
+
+repository=${PLURX_PKG_REPOSITORY:-https://github.com/pjunod/cinema}
+owner=${repository%/*}; owner=${owner##*/}
+export PLURX_PKG_ARCH=$arch PLURX_PKG_VERSION=$version
+export PLURX_PKG_HOMEPAGE=$repository
+export PLURX_PKG_MAINTAINER="noirr cinema <$owner@users.noreply.github.com>"
+
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+for packager in deb rpm; do
+  # nfpm resolves the config's ./ sources against its working directory.
+  (cd "$stage" && nfpm package --config "$root/deploy/packaging/nfpm.yaml" \
+    --packager "$packager" --target "$out/" >&2)
+done
+case $arch in amd64) rpm_arch=x86_64 ;; arm64) rpm_arch=aarch64 ;; esac
+deb="$out/plurxd_${version}-1_${arch}.deb"
+rpm="$out/plurxd-${version}-1.${rpm_arch}.rpm"
+for package in "$deb" "$rpm"; do
+  [ -f "$package" ] || { echo "package-linux: nfpm did not write $package" >&2; ls -l "$out" >&2; exit 1; }
+  printf '%s\n' "$package"
+done

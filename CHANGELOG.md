@@ -10,6 +10,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **GitHub release downloads.** Each release tag, mirrored to the public
+  GitHub repository, builds and publishes a GitHub release carrying `.deb`
+  and `.rpm` server packages for x86_64 and arm64 (the `plurxd` systemd
+  service under its own `plurx` user; Debian 12+, Ubuntu 24.04+, Fedora,
+  RHEL 9+), a universal macOS archive that installs with `./install`, the
+  Windows x64 archive, and `SHA256SUMS`. Every artifact is installed or run
+  on its target system before the release is published. See
+  docs/RELEASING.md "GitHub release downloads".
 - **Jellyfin client compatibility (experimental, off by default).** Settings →
   Developer → *Allow Jellyfin clients* opens a Jellyfin facade, reachable by
   the server's address alone on Jellyfin's standard port 8096 or at
