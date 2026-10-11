@@ -1800,13 +1800,49 @@ pub(super) async fn successor_owner_captures_output(
     presentation: crate::transcode::Presentation,
     prime_worker: bool,
 ) -> bool {
-    prime_worker
-        && presentation == crate::transcode::Presentation::Vod
-        && (successor_owner == state.node_id
-            || state
-                .media_pool
-                .prepared_output_capture_receiver(successor_owner)
-                .await)
+    if !prime_worker || presentation != crate::transcode::Presentation::Vod {
+        return false;
+    }
+    if successor_owner == state.node_id {
+        return true;
+    }
+    let captures = state
+        .media_pool
+        .prepared_output_capture_receiver(successor_owner)
+        .await;
+    if !captures {
+        // The rolling-upgrade path: the peer does not advertise capture, or
+        // its advertisement expired. It primes the ordinary attachment, so
+        // this prime's output is not captured for reuse.
+        tracing::debug!(
+            owner = successor_owner,
+            "prepared VOD successor primes without output capture on a peer that does not advertise it"
+        );
+    }
+    captures
+}
+
+/// The request that primes a remote successor owner. The admitted
+/// predecessor epoch travels only with a capture reservation: the same
+/// negotiation decides both, and an older peer denies the unknown field.
+pub(super) fn remote_prepare_request(
+    incarnation_id: &str,
+    session_id: &str,
+    local_user_id: i64,
+    admitted_predecessor_owner_epoch: i64,
+    captures_output: bool,
+) -> RemotePrepareRequest {
+    RemotePrepareRequest {
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        incarnation_id: incarnation_id.to_owned(),
+        session_id: session_id.to_owned(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: local_user_id,
+        },
+        expected_owner_epoch: 1,
+        expected_predecessor_owner_epoch: captures_output
+            .then_some(admitted_predecessor_owner_epoch),
+    }
 }
 
 #[cfg(test)]
@@ -2278,19 +2314,13 @@ pub(super) async fn stage_prepared_successor_with_prime(
                     .media_sessions
                     .prepare_remote(
                         successor_owner,
-                        &RemotePrepareRequest {
-                            protocol_version: crate::media_pool::PROTOCOL_VERSION,
-                            incarnation_id: preparation.incarnation_id.clone(),
-                            session_id: preparation.session_id.clone(),
-                            principal:
-                                plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                                    user_id: local_user_id,
-                                },
-                            expected_owner_epoch: 1,
-                            // Only a capture receiver understands the field.
-                            expected_predecessor_owner_epoch: captures_output
-                                .then_some(preparation.expected_predecessor_owner_epoch),
-                        },
+                        &remote_prepare_request(
+                            &preparation.incarnation_id,
+                            &preparation.session_id,
+                            local_user_id,
+                            preparation.expected_predecessor_owner_epoch,
+                            captures_output,
+                        ),
                         prime_deadline.into(),
                     )
                     .await
