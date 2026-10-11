@@ -6183,3 +6183,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAttach
 source_anchor = "return onScreenLoads(observed).singleOrNull()?.resource?.row?.text(\"candidate_id\")"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
 test_anchor = "// A lost presentation report left 480p; the frame on screen is 720p."
+
+[[fixes]]
+id = "android.qr-scanner-lazy-startup"
+commits = ["2672df3191434f32a21beaef3ec63e285110d12b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"
+source_anchor = "GmsBarcodeScanning.getClient(context, options).startScan()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/ConnectScreenStartupTest.kt"
+test_anchor = "connectionScreenOpensWithoutStartingQrScanner"
