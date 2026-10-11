@@ -3124,7 +3124,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # still_answers_producer_failed and its vodencode_tests.rs expired-verdict
 # counterpart). Each is attached to the rendition's ProducerSlot and reaped
 # by Step::Terminate before the test ends; kill_on_drop is the unwind backstop.
-expected_occurrences = 68
+# P-02 zombie read-back (process/priority.rs): +1, test-only: the P-02 exited-before-registration test's
+# `true` child (`std::process::Command::spawn`) in process::priority::tests.
+# It is never registered by the launcher, the test reaps it with `wait()`
+# after the assertion, and production gains no launch.
+expected_occurrences = 69
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4442,7 +4446,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and then cancel its shutdown token. Production is net zero: the follower's
 # one 10 s Skip-mode `tokio::time::interval` moved from `run` into
 # `follow_stored_enforcement`, still ended by the same shutdown token.
-expected_occurrences = 1703
+# P-02 zombie read-back (process/priority.rs): +1, test-only: that test's 5 ms `std::thread::sleep` while
+# it polls /proc for the child's zombie state, bounded by a 10 s deadline.
+expected_occurrences = 1704
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4863,7 +4869,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # DV/subtitle main union; measured by the focused ownership census.
 # Acceptance root-cause batch: +2, the test-only `/bin/sleep 60` producer
 # children reviewed under method-spawn; ProducerSlot reaps both.
-expected_occurrences = 256
+# P-02 zombie read-back (process/priority.rs): +1, test-only: the same `true` child, constructed with
+# `std::process::Command::new` so it is not registered at spawn.
+expected_occurrences = 257
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5473,7 +5481,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # prepare_authorized; no process is launched.
 # Acceptance root-cause batch: +2, the `.spawn()` of the same two test-only
 # sleep producers reviewed under method-spawn; no production launch is added.
-expected_occurrences = 745
+# P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's `.spawn()`; not a second
+# child.
+expected_occurrences = 746
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5751,7 +5761,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # PR #947 ownership additions above; neither history is discarded.
 # #844: +1 false positive. end_for_owner awaits `cleanup.wait()` on the
 # existing TerminalCleanup; it is not a child-process wait.
-expected_occurrences = 325
+# P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's reaping `wait()`.
+expected_occurrences = 326
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
