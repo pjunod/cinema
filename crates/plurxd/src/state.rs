@@ -1490,6 +1490,23 @@ pub struct EnrichOutcome {
     pub books: Option<BookEnrichReport>,
 }
 
+impl EnrichOutcome {
+    /// Put a provider outage into the scan's own problems.
+    ///
+    /// The enrichment report lives only in this node's memory, and a finished
+    /// library's status is read back from the durable work row, which keeps
+    /// the `ScanReport` alone — so a pass with TMDB unreachable used to finish
+    /// as a clean scan with zero problems (LAB2-EVIDENCE-2026-10-11 §5). The
+    /// one line per unreachable provider host is the part an operator must
+    /// see; per-title detail stays in the enrichment report and the log.
+    fn report_provider_outage(&self, scan: &mut ScanReport) {
+        for line in self.enrich.iter().flat_map(|r| &r.provider_unavailable) {
+            scan.errors += 1;
+            scan.add_problem(line.clone());
+        }
+    }
+}
+
 /// Point-in-time view of a running scan's counters.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct ProgressSnapshot {
@@ -5141,6 +5158,7 @@ impl JobManager {
                 None,
             )
             .await;
+        outcome.report_provider_outage(&mut out.report);
         for request in requests {
             library_work::check_active()?;
             self.apply_book_hints(request, &out.items, publisher).await;
@@ -5797,6 +5815,9 @@ impl JobManager {
         let outcome = self
             .enrich(&publisher, &library, force_metadata, None, None, None)
             .await;
+        if let Some(scan) = status.last_scan.as_mut() {
+            outcome.report_provider_outage(scan);
+        }
         status.last_enrich = outcome.enrich;
         status.last_local_art = outcome.local_art;
 
@@ -14173,6 +14194,81 @@ mod tests {
             .current_by_stage
             .iter()
             .all(|value| value.load(Ordering::Relaxed) == 0));
+    }
+
+    /// LAB2 C-02: with TMDB unreachable the scan finished with zero problems,
+    /// because the failures lived only in the in-memory enrichment report and
+    /// the status a finished library shows is read back from the durable work
+    /// row. The outage is now one line in the scan's own problems, and the
+    /// titles stay queued for the next scan.
+    #[tokio::test]
+    async fn a_scan_with_tmdb_unreachable_reports_it_once_in_its_problems() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
+        for n in 1..=3 {
+            std::fs::write(
+                media.path().join(format!("Blocked Title {n} (200{n}).mkv")),
+                b"video",
+            )
+            .expect("movie file");
+        }
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Blocked".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        store
+            .put_setting(keys::TMDB_API_KEY, "c02-fixture-key")
+            .await
+            .expect("key");
+        // Nothing listens on port 1: every connect is refused.
+        let jobs = manager_with_tmdb(store.clone(), artwork.path(), "http://127.0.0.1:1");
+
+        assert!(jobs.trigger_scan(library.id).await, "scan admitted");
+        drain_library(&jobs, library.id).await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while jobs
+                .all_statuses()
+                .await
+                .get(&library.id)
+                .is_none_or(|status| status.running)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("scan finished");
+
+        let status = jobs
+            .all_statuses()
+            .await
+            .remove(&library.id)
+            .expect("scan status");
+        let report = status.last_scan.expect("durable scan report");
+        assert_eq!(report.added, 3, "{report:?}");
+        let outage: Vec<&String> = report
+            .problems
+            .iter()
+            .filter(|line| line.contains("TMDB could not be reached"))
+            .collect();
+        assert_eq!(outage.len(), 1, "{:?}", report.problems);
+        assert!(outage[0].contains("3 titles stay queued"), "{}", outage[0]);
+        assert!(!outage[0].contains("c02-fixture-key"), "{}", outage[0]);
+        assert!(report.errors >= 1);
+        assert_eq!(
+            store
+                .items_needing_metadata(Some(library.id), false, None)
+                .await
+                .expect("retry candidates")
+                .len(),
+            3,
+            "every title is left for the next scan"
+        );
     }
 
     fn manager_with_tmdb(
