@@ -4454,7 +4454,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # a future joined with the gate's own wait (no spawn) and ends with it.
 # Production adds no timer: the idle sleep's watch arm loops on the same
 # watch until the applied index moves.
-expected_occurrences = 1706
+# K-03 advisory cap on the clock-enforcement follower: +4, test-only, in
+# clock_offset::tests::a_lagging_replica_cannot_hold_enforcement_off_past_its_cap,
+# joined with the follower (no spawn): a 1 ms settle, one wait just short of
+# the cap, one across it and one long hold, then the shutdown token. Production
+# adds no timer: the follower's existing 10 s interval reads the held answer's
+# age.
+expected_occurrences = 1710
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.

@@ -819,10 +819,15 @@ read at start, then a look every 10 seconds that costs a consistent read only
 when this node's replica has applied an entry and its own copy of the row
 then disagrees with the value held (`CLOCK_ENFORCEMENT_REFRESH` and
 `follow_stored_enforcement` in `crates/plurxd/src/clock_offset.rs`; since
-2026-10-10, before which every look was a consistent read). A node whose read
-fails keeps its current mode, so voters can run different policies for up to
-one look after the save is applied there, or longer — the state this section
-rules out. While it is off, every guarded
+2026-10-10, before which every look was a consistent read). Apply lag has no
+upper bound, so a held "off" is also proved again once it is two minutes old
+(`CLOCK_ADVISORY_MAX_HOLD`, since 2026-10-11): a node slow to apply an enable
+saved elsewhere stays advisory for at most two minutes and one look after
+the save commits, which is the direction that lets a skewed node act. A node
+slow to apply a disable keeps enforcing until it applies it, which refuses
+more, never less. A node whose read fails keeps its current mode, so voters
+can run different policies for up to those bounds, or longer while the read
+keeps failing — the state this section rules out. While it is off, every guarded
 decision is admitted and what would have been refused is counted in
 `plurx_cluster_clock_advisory_refusals_total`; while it is on, the guard
 refuses takeover, the expired-session scan and membership changes when the

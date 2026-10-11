@@ -601,6 +601,16 @@ impl Filter {
 /// saved on another node reaches this node's guard without a restart.
 const CLOCK_ENFORCEMENT_REFRESH: Duration = Duration::from_secs(10);
 
+/// How long an advisory answer (enforcement off) is held before a consistent
+/// read proves it again, change signal or not. A held answer otherwise lasts
+/// until this replica applies the save that changes it, and apply lag has no
+/// upper bound: a node slow to apply an enable saved elsewhere would keep
+/// admitting guarded decisions on an unbounded clock for as long as it lags.
+/// This caps that at two minutes and one look after the save commits, for
+/// 720 consistent reads a day while enforcement is off and none while it is
+/// on. A held "on" needs no cap: holding it past a disable only refuses more.
+const CLOCK_ADVISORY_MAX_HOLD: Duration = Duration::from_secs(120);
+
 /// The Store reads that follow the enforcement switch, parsed by the same
 /// `stored_switch` as the settings page (missing is off): an authority read
 /// on the replicated backend, and the value this node's own replica holds,
@@ -637,9 +647,11 @@ impl<T: Store + ?Sized> EnforcementSwitch for T {
 /// switch agrees after the index moves (`SettingsChangeSource::confirms`);
 /// only a disagreement costs the consistent read. The settings route is the
 /// only writer, it applies a save on its own node at once, and every save is
-/// a Raft entry that moves each node's applied index. Without a change source
-/// that reports saves made elsewhere, every look reads, as before. A failed
-/// read keeps the current mode, so an unreadable store never turns
+/// a Raft entry that moves each node's applied index. An advisory answer is
+/// also proved again once it is `CLOCK_ADVISORY_MAX_HOLD` old, so a lagging
+/// replica cannot keep a node advisory after an enable. Without a change
+/// source that reports saves made elsewhere, every look reads, as before. A
+/// failed read keeps the current mode, so an unreadable store never turns
 /// enforcement on, and holds nothing, so the next look reads again.
 async fn follow_stored_enforcement<S, F>(
     store: &S,
@@ -652,22 +664,24 @@ async fn follow_stored_enforcement<S, F>(
 {
     let mut interval = tokio::time::interval(CLOCK_ENFORCEMENT_REFRESH);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut held: Option<Proved<bool>> = None;
+    let mut held: Option<(Proved<bool>, tokio::time::Instant)> = None;
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
             _ = interval.tick() => {}
         }
-        if let Some(held) = held.as_mut() {
-            if changes.confirms(held, || store.enforcement_hint()).await {
+        if let Some((held, proved_at)) = held.as_mut() {
+            let advisory_expired = !held.value && proved_at.elapsed() >= CLOCK_ADVISORY_MAX_HOLD;
+            if !advisory_expired && changes.confirms(held, || store.enforcement_hint()).await {
                 continue;
             }
         }
         let mark = changes.mark();
+        let proved_at = tokio::time::Instant::now();
         held = match store.enforcement().await {
             Ok(enforced) => {
                 set_enforced(enforced);
-                Some(mark.proved(enforced))
+                Some((mark.proved(enforced), proved_at))
             }
             Err(error) => {
                 tracing::debug!(%error, "clock guard enforcement setting unreadable; keeping current mode");
@@ -870,13 +884,15 @@ mod tests {
         }
     }
 
-    /// K-03 regression: ten idle minutes of unrelated applied entries cost
-    /// the boot read and nothing else (the old follower read every 10 s:
-    /// sixty reads); a save made on another node reaches the guard within
-    /// one refresh of being applied here, for one consistent read.
+    /// K-03 regression: with enforcement on (the fleet's state), ten idle
+    /// minutes of unrelated applied entries cost the boot read and nothing
+    /// else (the old follower read every 10 s: sixty reads); a save made on
+    /// another node reaches the guard within one refresh of being applied
+    /// here, for one consistent read.
     #[tokio::test(start_paused = true)]
     async fn the_enforcement_follower_reads_only_when_the_switch_may_have_changed() {
         let store = Enforcement::default();
+        store.save(true);
         let mode = std::sync::Mutex::new(None);
         let (applied, changes) = watch::channel(1u64);
         let shutdown = tokio_util::sync::CancellationToken::new();
@@ -889,20 +905,63 @@ mod tests {
         let driver = async {
             tokio::time::sleep(Duration::from_millis(1)).await;
             assert_eq!(store.reads(), 1, "the boot read");
-            assert_eq!(*mode.lock().expect("mode"), Some(false));
+            assert_eq!(*mode.lock().expect("mode"), Some(true));
             for _ in 0..120 {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 applied.send_modify(|index| *index += 1);
             }
             assert_eq!(store.reads(), 1, "idle minutes cost no consistent read");
 
-            store.save(true);
+            store.save(false);
             applied.send_modify(|index| *index += 1);
             tokio::time::sleep(CLOCK_ENFORCEMENT_REFRESH).await;
-            assert_eq!(*mode.lock().expect("mode"), Some(true));
+            assert_eq!(*mode.lock().expect("mode"), Some(false));
             assert_eq!(store.reads(), 2, "a save elsewhere costs one read");
-            tokio::time::sleep(CLOCK_ENFORCEMENT_REFRESH * 30).await;
+            tokio::time::sleep(CLOCK_ADVISORY_MAX_HOLD / 2).await;
             assert_eq!(store.reads(), 2, "and is then held");
+            shutdown.cancel();
+        };
+        tokio::join!(follower, driver);
+    }
+
+    /// An enable saved on another node that this replica has not applied:
+    /// its own copy still says off and its applied index has not moved, so
+    /// no change signal fires. The advisory answer is proved again once it is
+    /// two minutes old, which turns enforcement on; the "on" is then held.
+    #[tokio::test(start_paused = true)]
+    async fn a_lagging_replica_cannot_hold_enforcement_off_past_its_cap() {
+        let store = Enforcement::default();
+        let mode = std::sync::Mutex::new(None);
+        let (_applied, changes) = watch::channel(1u64);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let follower = follow_stored_enforcement(
+            &store,
+            SettingsChangeSource::Test(changes),
+            |enforced| *mode.lock().expect("mode") = Some(enforced),
+            shutdown.clone(),
+        );
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert_eq!(*mode.lock().expect("mode"), Some(false));
+            store
+                .stored
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(CLOCK_ADVISORY_MAX_HOLD - CLOCK_ENFORCEMENT_REFRESH).await;
+            assert_eq!(
+                *mode.lock().expect("mode"),
+                Some(false),
+                "held within the cap"
+            );
+            assert_eq!(store.reads(), 1);
+            tokio::time::sleep(CLOCK_ENFORCEMENT_REFRESH * 2).await;
+            assert_eq!(
+                *mode.lock().expect("mode"),
+                Some(true),
+                "proved again at the cap"
+            );
+            assert_eq!(store.reads(), 2);
+            tokio::time::sleep(CLOCK_ADVISORY_MAX_HOLD * 5).await;
+            assert_eq!(store.reads(), 2, "an \"on\" is held without a cap");
             shutdown.cancel();
         };
         tokio::join!(follower, driver);
