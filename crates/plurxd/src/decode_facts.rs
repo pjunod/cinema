@@ -7443,6 +7443,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
         );
     }
 
+    #[cfg(unix)]
     fn generation_probe_fixture(root: &std::path::Path) -> std::path::PathBuf {
         let probe = root.join("ffprobe-generation");
         executable(
