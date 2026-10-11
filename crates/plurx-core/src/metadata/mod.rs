@@ -148,7 +148,16 @@ pub(crate) fn provider_client(
     })
 }
 
+/// A transport failure as a `MetadataError`, with the request URL removed.
+///
+/// reqwest's `Display` for an error names the full URL, and TMDB's v3
+/// credential is a query parameter, so every TMDB timeout used to write the
+/// API key into the ERROR log and the enrichment report's problem lines
+/// (LAB2-EVIDENCE-2026-10-11 N1). The URL tells an operator nothing the line
+/// does not already say — the provider and the title are on it — so it never
+/// leaves the client layer, for any provider.
 pub(crate) fn request_error(error: reqwest::Error) -> crate::error::MetadataError {
+    let error = error.without_url();
     if error.is_timeout() {
         crate::error::MetadataError::Timeout(error.to_string())
     } else {
@@ -2272,6 +2281,24 @@ mod tests {
         assert_eq!(show.poster_path.as_deref(), Some("local-show.jpg"));
         assert_eq!(show.backdrop_path.as_deref(), Some("local-backdrop.jpg"));
         assert_eq!(show.overview.as_deref(), Some("Keep this copy"));
+    }
+
+    /// LAB2 N1 at the surface an operator reads: a pass whose provider cannot
+    /// be reached reports the failure without the key that was in the URL.
+    #[tokio::test]
+    async fn an_unreachable_provider_keeps_the_api_key_out_of_the_report() {
+        const KEY: &str = "n1fixture0123456789abcdefabcdef0";
+        let (store, lib, _) = one_movie("Clip scan2 003").await;
+        let tmdb = TmdbClient::new(KEY).with_base("http://127.0.0.1:1", "http://127.0.0.1:1");
+        let artwork = canonical_tempdir();
+
+        let report = enrich_library(&store, &tmdb, artwork.path(), Some(lib), false, None).await;
+
+        assert!(report.errors >= 1, "{report:?}");
+        assert!(!report.problems.is_empty(), "{report:?}");
+        let rendered = serde_json::to_string(&report).expect("report serializes");
+        assert!(!rendered.contains(KEY), "{rendered}");
+        assert!(!rendered.contains("api_key"), "{rendered}");
     }
 
     /// A movie library with one movie in it, titled however you like.

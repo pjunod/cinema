@@ -183,10 +183,7 @@ impl TmdbClient {
         let url = format!("{}{path}", self.base);
         let response = self
             .send_with_retry(|| {
-                let mut req = self
-                    .http
-                    .get(&url)
-                    .query(&[("api_key", self.api_key.as_str())]);
+                let mut req = self.authorize(self.http.get(&url));
                 for (k, v) in query {
                     req = req.query(&[(*k, v.as_str())]);
                 }
@@ -209,6 +206,23 @@ impl TmdbClient {
                 .unwrap_or_else(provider_outcome),
         );
         result
+    }
+
+    /// Attach the configured credential.
+    ///
+    /// TMDB's API settings page issues two credentials. The v3 "API Key" is
+    /// accepted by the v3 endpoints only as the `api_key` query parameter, so
+    /// it is part of every request URL; the v4 "API Read Access Token" (a JWT)
+    /// is accepted by the same v3 endpoints as `Authorization: Bearer`, which
+    /// never appears in a URL and is marked sensitive by reqwest. Whichever
+    /// one the setting holds is sent the only way it works. A URL carrying a
+    /// v3 key still never reaches a log line: [`request_error`] strips it.
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if is_read_access_token(&self.api_key) {
+            request.bearer_auth(&self.api_key)
+        } else {
+            request.query(&[("api_key", self.api_key.as_str())])
+        }
     }
 
     /// Send a request, retrying the failures that are about TMDB's mood
@@ -234,12 +248,15 @@ impl TmdbClient {
                     "provider call retry budget exhausted".to_owned(),
                 ));
             }
+            // Without the URL from here on: the retry line below logs this
+            // error, and the URL can carry the v3 key (see `authorize`).
             let resp = super::budget::cancellable(
                 build()
                     .timeout(remaining.min(PROVIDER_TOTAL_TIMEOUT))
                     .send(),
             )
-            .await?;
+            .await?
+            .map_err(reqwest::Error::without_url);
             if let Ok(response) = &resp {
                 super::budget::observe(&self.budget, Provider::Tmdb, response).await?;
             }
@@ -548,6 +565,13 @@ impl TmdbClient {
 /// Full image URL for a TMDB-relative path.
 pub fn image_url(tmdb_path: &str, size: &str) -> String {
     format!("{IMAGE_BASE}/{size}{tmdb_path}")
+}
+
+/// Whether a configured TMDB credential is a v4 API Read Access Token rather
+/// than a v3 API key. The token is a JWT — three dot-separated segments — and
+/// a v3 key is 32 hexadecimal characters, so a dot is never ambiguous.
+fn is_read_access_token(credential: &str) -> bool {
+    credential.split('.').count() == 3 && credential.split('.').all(|part| !part.is_empty())
 }
 
 /// Is this status worth sending the same request again?
@@ -1045,6 +1069,122 @@ mod tests {
             Err(MetadataError::Timeout(_))
         ));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// LAB2 N1: a blackholed TMDB put
+    /// `…/search/movie?api_key=<the key>&query=…` into every ERROR line and
+    /// every enrichment problem, because reqwest's error `Display` names the
+    /// URL. The key is captured at the mock first, so the absence below is
+    /// the stripping and not a request that never carried it.
+    #[tokio::test]
+    async fn a_provider_timeout_never_names_the_api_key() {
+        use axum::extract::RawQuery;
+        use axum::routing::get;
+
+        const KEY: &str = "n1fixture0123456789abcdefabcdef0";
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mock_seen = std::sync::Arc::clone(&seen);
+        let base = serve(axum::Router::new().route(
+            "/search/movie",
+            get(move |RawQuery(query): RawQuery| {
+                let seen = std::sync::Arc::clone(&mock_seen);
+                async move {
+                    seen.lock()
+                        .expect("query log")
+                        .push(query.unwrap_or_default());
+                    std::future::pending::<String>().await
+                }
+            }),
+        ))
+        .await;
+        let mut client = TmdbClient::new(KEY).with_base(&base, &base);
+        client.http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(50))
+            .read_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_millis(50))
+            .build()
+            .expect("short-timeout client");
+
+        let error = client
+            .find_movie("Clip scan2 003", Some(2001))
+            .await
+            .expect_err("the provider never answers");
+        assert!(matches!(error, MetadataError::Timeout(_)), "{error:?}");
+        assert!(
+            seen.lock()
+                .expect("query log")
+                .iter()
+                .any(|query| query.contains(&format!("api_key={KEY}"))),
+            "the v3 key is a query parameter on the wire"
+        );
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains(KEY), "{text}");
+            assert!(!text.contains("api_key"), "{text}");
+        }
+
+        // A refused connection takes the other transport branch.
+        let refused = TmdbClient::new(KEY).with_base("http://127.0.0.1:1", "http://127.0.0.1:1");
+        let error = refused
+            .find_movie("Refused", None)
+            .await
+            .expect_err("nothing listens on port 1");
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains(KEY), "{text}");
+        }
+    }
+
+    /// A v4 API Read Access Token is accepted by the v3 endpoints as a bearer
+    /// header, so it is sent that way and never appears in a URL; a v3 key
+    /// can only be a query parameter and stays one.
+    #[tokio::test]
+    async fn a_read_access_token_travels_in_a_header_and_a_v3_key_in_the_query() {
+        use axum::extract::RawQuery;
+        use axum::http::HeaderMap;
+        use axum::routing::get;
+        use axum::Json;
+
+        type Seen = std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, String)>>>;
+        let seen: Seen = Default::default();
+        let mock_seen = std::sync::Arc::clone(&seen);
+        let base = serve(axum::Router::new().route(
+            "/search/movie",
+            get(move |headers: HeaderMap, RawQuery(query): RawQuery| {
+                let seen = std::sync::Arc::clone(&mock_seen);
+                async move {
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    seen.lock()
+                        .expect("request log")
+                        .push((auth, query.unwrap_or_default()));
+                    Json(json!({ "results": [] }))
+                }
+            }),
+        ))
+        .await;
+
+        const TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJmaXh0dXJlIn0.c2lnbmF0dXJl";
+        const KEY: &str = "0123456789abcdef0123456789abcdef";
+        assert!(is_read_access_token(TOKEN));
+        assert!(!is_read_access_token(KEY));
+        for credential in [TOKEN, KEY] {
+            TmdbClient::new(credential)
+                .with_base(&base, &base)
+                .find_movie("Heat", None)
+                .await
+                .expect("the mock answers");
+        }
+        let seen = seen.lock().expect("request log");
+        let (auth, query) = &seen[0];
+        assert_eq!(auth.as_deref(), Some(format!("Bearer {TOKEN}").as_str()));
+        assert!(
+            !query.contains("api_key") && !query.contains(TOKEN),
+            "{query}"
+        );
+        let (auth, query) = &seen[1];
+        assert_eq!(auth, &None);
+        assert!(query.contains(&format!("api_key={KEY}")), "{query}");
     }
 
     #[tokio::test]
