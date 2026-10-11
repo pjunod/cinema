@@ -1,6 +1,6 @@
 # Recover from link pressure even when no lower rung fits, and climb back below the display
 
-Build: 229
+Build: 230
 Issue: #994
 
 Under link pressure Auto used to admit only a lower rung whose cost fitted
