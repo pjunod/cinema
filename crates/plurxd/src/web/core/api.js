@@ -29,7 +29,21 @@ function observeReadAfter(value,request){
     READ_AFTER.expires=performance.now()+60000;
   }
 }
+// `body` is the request's JSON value; api() serializes it. Hand it the
+// object, never a string: a pre-serialized body is encoded a second time, the
+// server receives a JSON string where it expects an object, refuses it with a
+// plain-text 422, and the caller can only say "request failed" — which is what
+// the transcoding backend's Optimize and Save buttons did (2026-10-11). The
+// type below makes scripts/web-types refuse a string it can see; the check at
+// the top of the body refuses one it cannot (a value typed `any`, a wrapper
+// that passes its argument through), before anything is sent.
+/**
+ * @param {string} path
+ * @param {{method?:string, body?:Record<string, unknown>|unknown[]|null, raw?:boolean, signal?:AbortSignal|null, keepSessionOn401?:boolean, linkReceipt?:string|null}} [options]
+ */
 async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false, linkReceipt=null}={}){
+  if(typeof body==="string"||body instanceof String)
+    throw new TypeError(`api(${path}): pass the body value, not a JSON string; api() serializes it`);
   const authGeneration=AUTH_GENERATION;
   const readAfter=readAfterRequest();
   const headers={};
@@ -96,7 +110,10 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
   // both, or a typed refusal — "this server's ffmpeg has no subtitles filter"
   // — reaches the viewer as the useless "request failed".
   if(!res.ok){
-    let m="request failed", responseBody="", code=null;
+    // A body with no sentence in it — an extractor's plain-text rejection, a
+    // proxy's HTML error page — still names the status, so "request failed"
+    // is never the whole story.
+    let m=`request failed (HTTP ${res.status})`, responseBody="", code=null;
     try{
       responseBody=await res.text();
       const b=JSON.parse(responseBody);

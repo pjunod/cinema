@@ -232,7 +232,7 @@ async function optimizeNodeTranscoder(button){
   const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), node_id=field.dataset.nodeId;
   button.disabled=true;
   try{
-    await api("/system/transcoder",{method:"POST",body:JSON.stringify({node_id})});
+    await api("/system/transcoder",{method:"POST",body:{node_id}});
     if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){
       SETTINGS_DATA.sys.transcoder_optimization={...(SETTINGS_DATA.sys.transcoder_optimization||{}),running:true,error:null};
       const card=document.getElementById("transcoder-card");
@@ -264,7 +264,7 @@ async function saveNodeHwaccel(button){
   const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), preference=field.value, node_id=field.dataset.nodeId;
   button.disabled=true;
   try{
-    const result=await api("/system/transcoder",{method:"PUT",body:JSON.stringify({node_id,preference})});
+    const result=await api("/system/transcoder",{method:"PUT",body:{node_id,preference}});
     if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){SETTINGS_DATA.sys.hwaccel_requested=preference;SETTINGS_DATA.sys.hwaccel_restart_required=result.restart_required;}
     document.getElementById("node-hwaccel-status").textContent=result.restart_required?"Saved. Restart this node to apply the backend and test its HDR capabilities.":"Saved. This backend preference is already active.";
     toast("Transcoding preference saved");

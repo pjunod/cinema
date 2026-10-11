@@ -157,7 +157,10 @@ test("node transcoder save binds the request to the displayed node and preserves
   const calls=[];
   const save = new Function("document","api","SETTINGS_DATA","toast", `${shippedSource("saveNodeHwaccel")}\nreturn saveNodeHwaccel;`)(
     {getElementById:id=>id==="node-hwaccel"?{value:"qsv",dataset:{nodeId:"rog"}}:status},
-    async (url,options)=>{calls.push([url,JSON.parse(options.body)]);return {restart_required:true};},
+    // The value api() receives, not a parse of it: api() serializes `body`
+    // itself. This fake once JSON.parse'd it, which made the test demand the
+    // double-encoded string that broke Save and Optimize (2026-10-11).
+    async (url,options)=>{calls.push([url,options.body]);return {restart_required:true};},
     {sys},()=>{});
   await save(button);
   assert.deepEqual(calls, [["/system/transcoder",{node_id:"rog",preference:"qsv"}]]);
