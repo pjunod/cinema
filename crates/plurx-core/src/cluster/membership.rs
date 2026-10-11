@@ -3033,8 +3033,9 @@ const EXACT_REDUCTION_FENCE_SQL: &str = "SELECT COUNT(*) AS count \
       AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $4 AND owner.value = '1')";
 
 const READ_REDUCTION_REFERENCE_SQL: &str = "SELECT frozen.value AS reference_json, \
-    node.raft_id, node.last_seen_at, node.last_applied_index \
+    node.raft_id, node.last_seen_at, progress.last_applied_index \
     FROM settings AS frozen JOIN cluster_nodes AS node ON frozen.key = $1 AND node.node_id = $2 \
+    LEFT JOIN cluster_node_progress AS progress ON progress.node_id = node.node_id \
     JOIN cluster_node_removals AS fence ON fence.node_id = node.node_id \
     JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = node.node_id \
     WHERE attempt.attempt_id = $3 AND node.removed_at IS NULL \
@@ -14257,20 +14258,27 @@ mod tests {
         let node = "00000000-0000-0000-0000-000000000002";
         let attempt = "00000000-0000-0000-0000-000000000010";
         let other = "00000000-0000-0000-0000-000000000011";
-        let db = rusqlite::Connection::open_in_memory().expect("sqlite");
-        db.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);
-            CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, last_seen_at INTEGER,
-                last_applied_index INTEGER, removed_at INTEGER);
-            CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY);
-            CREATE TABLE cluster_node_removal_attempts (node_id TEXT, attempt_id TEXT,
-                PRIMARY KEY(node_id, attempt_id));").expect("fixture tables");
+        let db = production_membership_tables();
         db.execute(
-            "INSERT INTO cluster_nodes VALUES (?1, 2, 100, 42, NULL)",
+            "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at) \
+             VALUES (?1, 2, 'node-2:32401', 'node-2:32402', 100)",
             [node],
         )
         .expect("target");
-        db.execute("INSERT INTO cluster_node_removals VALUES (?1)", [node])
-            .expect("route fence");
+        // The applied index is the target's own heartbeat progress, which
+        // lives beside its roster row, not in it.
+        db.execute(
+            "INSERT INTO cluster_node_progress (node_id, current_term, last_applied_index, \
+               bounded_read_ready, voter_storage_ready, voter_role_persisted, observed_at) \
+             VALUES (?1, 1, 42, 1, 1, 1, 100)",
+            [node],
+        )
+        .expect("target progress");
+        db.execute(
+            "INSERT INTO cluster_node_removals (node_id, started_at) VALUES (?1, 100)",
+            [node],
+        )
+        .expect("route fence");
         db.execute(
             "INSERT INTO settings VALUES (?1, '1', 100)",
             [removed_job_owner_key(node)],
@@ -14642,14 +14650,14 @@ mod tests {
 
     #[test]
     fn snapshot_floor_requires_current_process_heartbeat_proof() {
-        let database = rusqlite::Connection::open_in_memory().expect("floor SQL fixture");
+        let database = production_membership_tables();
         database.execute_batch(
-            "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, role TEXT, last_seen_at INTEGER, removed_at INTEGER); \
-             CREATE TABLE cluster_node_removals (node_id TEXT); \
-             CREATE TABLE cluster_node_capabilities (node_id TEXT, capability TEXT, last_seen_at INTEGER, PRIMARY KEY(node_id,capability)); \
-             CREATE TABLE cluster_node_progress (node_id TEXT, last_applied_index INTEGER, apply_lag_entries INTEGER, bounded_read_ready INTEGER, voter_storage_ready INTEGER, storage_headroom_bytes INTEGER, storage_probe_observed_at INTEGER, voter_role_persisted INTEGER, observed_at INTEGER); \
-             INSERT INTO cluster_nodes VALUES ('target',1,'learner',50,NULL); \
-             INSERT INTO cluster_node_progress VALUES ('target',10,0,1,1,536870912,50,0,50);"
+            "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at, role) \
+               VALUES ('target', 1, 'target:32401', 'target:32402', 50, 'learner'); \
+             INSERT INTO cluster_node_progress (node_id, current_term, last_applied_index, \
+               apply_lag_entries, bounded_read_ready, voter_storage_ready, storage_headroom_bytes, \
+               storage_probe_observed_at, voter_role_persisted, observed_at) \
+               VALUES ('target', 1, 10, 0, 1, 1, 536870912, 50, 0, 50);"
         ).expect("seed legacy readiness rows");
         let proven = || {
             database
@@ -18765,17 +18773,18 @@ mod tests {
 
     #[test]
     fn maintenance_exit_is_one_atomic_current_process_and_drain_proof() {
-        let mut connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        let mut connection = production_membership_tables();
+        // `media_sessions` belongs to the store schema, not this module's;
+        // the stand-in carries the three columns the statement reads.
         connection
             .execute_batch(
-                "CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL, acknowledged_at INTEGER); \
-                 CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
-                 CREATE TABLE cluster_node_progress (node_id TEXT PRIMARY KEY, observed_at INTEGER NOT NULL, apply_lag_entries INTEGER); \
-                 CREATE TABLE cluster_node_capabilities (node_id TEXT, capability TEXT, last_seen_at INTEGER, PRIMARY KEY(node_id, capability)); \
-                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, lease_expires_at_ms INTEGER); \
+                "CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_node_maintenance VALUES ('node-a', 90, NULL); \
-                 INSERT INTO cluster_nodes VALUES ('node-a', 100, NULL); \
-                 INSERT INTO cluster_node_progress VALUES ('node-a', 100, 0); \
+                 INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at) \
+                   VALUES ('node-a', 1, 'node-a:32401', 'node-a:32402', 100); \
+                 INSERT INTO cluster_node_progress (node_id, current_term, apply_lag_entries, \
+                   bounded_read_ready, voter_storage_ready, voter_role_persisted, observed_at) \
+                   VALUES ('node-a', 1, 0, 1, 1, 1, 100); \
                  INSERT INTO cluster_node_capabilities VALUES ('node-a', 'node_maintenance_v1', 100);",
             )
             .expect("maintenance exit fixture");
@@ -21411,6 +21420,264 @@ mod tests {
             .expect("the test module")
             .0
             .to_owned()
+    }
+
+    /// An in-memory database holding the production declarations of the
+    /// replicated auth tables (`settings`, `users`, `tokens`) and of every
+    /// replicated membership table:
+    /// `MEMBERSHIP_SCHEMA`'s table statements plus its additive columns. A
+    /// SQL fixture built on it fails the way the deployed cluster does when a
+    /// statement names a column production does not have. Triggers are left
+    /// out because they need the coordinator's intent rows; a test that
+    /// exercises one installs it itself.
+    fn production_membership_tables() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(crate::store::replicated_auth_schema())
+            .expect("replicated auth tables");
+        for statement in MEMBERSHIP_SCHEMA
+            .iter()
+            .filter(|statement| statement.starts_with("CREATE TABLE"))
+        {
+            connection.execute(statement, []).expect("membership table");
+        }
+        for column in MEMBERSHIP_ADDITIVE_COLUMNS {
+            connection
+                .execute(column.statement, [])
+                .expect("additive column");
+        }
+        connection
+    }
+
+    fn production_columns(connection: &rusqlite::Connection, table: &str) -> BTreeSet<String> {
+        connection
+            .prepare("SELECT name FROM pragma_table_info(?1)")
+            .expect("table info")
+            .query_map([table], |row| row.get(0))
+            .expect("table columns")
+            .collect::<Result<_, _>>()
+            .expect("table column names")
+    }
+
+    /// A Rust string literal's value, from its opening quote: escapes and
+    /// `\`-newline continuations resolved the way rustc resolves them.
+    fn rust_string_literal(source: &str) -> Option<String> {
+        let mut characters = source.strip_prefix('"')?.chars().peekable();
+        let mut value = String::new();
+        while let Some(character) = characters.next() {
+            match character {
+                '"' => return Some(value),
+                '\\' => match characters.next()? {
+                    '\n' => {
+                        while characters.peek().is_some_and(|next| next.is_whitespace()) {
+                            characters.next();
+                        }
+                    }
+                    'n' => value.push('\n'),
+                    't' => value.push('\t'),
+                    other => value.push(other),
+                },
+                other => value.push(other),
+            }
+        }
+        None
+    }
+
+    /// CLUSTER-DRILLS-2026-10-11 F2: every SQL constant this module defines
+    /// must compile against the production membership tables. A reference
+    /// read that selected `node.last_applied_index` from `cluster_nodes`
+    /// passed its unit test (whose hand-built table had that column) while
+    /// every voter removal on the deployed schema answered `no such column`.
+    /// A statement that also reads a table another schema owns cannot be
+    /// compiled here; those are listed so a new one is a visible decision.
+    #[test]
+    fn membership_sql_constants_compile_against_the_production_schema() {
+        let connection = production_membership_tables();
+        let source = production_source();
+        let mut compiled = 0;
+        let mut foreign = BTreeSet::new();
+        for (offset, _) in source.match_indices("_SQL: &str =") {
+            let line_start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+            let name = source[line_start..offset]
+                .rsplit(' ')
+                .next()
+                .expect("constant name")
+                .to_owned()
+                + "_SQL";
+            let initializer = source[offset + "_SQL: &str =".len()..].trim_start();
+            let Some(sql) = rust_string_literal(initializer) else {
+                continue;
+            };
+            match connection.prepare(&sql) {
+                Ok(_) => compiled += 1,
+                Err(error) => {
+                    let message = error.to_string();
+                    let table = message
+                        .strip_prefix("no such table: ")
+                        .map(|table| table.trim_start_matches("main."));
+                    match table {
+                        Some(table) if production_columns(&connection, table).is_empty() => {
+                            foreign.insert(format!("{name}:{table}"));
+                        }
+                        _ => panic!("{name} does not compile on the production schema: {message}"),
+                    }
+                }
+            }
+        }
+        assert!(compiled >= 40, "the constant scan found only {compiled}");
+        let foreign = foreign.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            foreign,
+            [
+                "BEGIN_REMOVAL_MEDIA_FENCE_SQL:media_sessions",
+                "EXIT_MAINTENANCE_SQL:media_sessions",
+            ],
+            "statements reading another schema's tables"
+        );
+    }
+
+    /// The hand-built fixtures in this module may declare a subset of a
+    /// membership table's production columns, never a column production
+    /// does not have (the F2 fixture invented `cluster_nodes.last_applied_index`).
+    #[test]
+    fn membership_fixtures_declare_only_production_columns() {
+        let production = production_membership_tables();
+        let tests = include_str!("membership.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module")
+            .1;
+        let needle = concat!("CREATE TABLE ", "cluster_");
+        let mut checked = 0;
+        let mut rest = tests;
+        while let Some(at) = rest.find(needle) {
+            let declaration = &rest[at + "CREATE TABLE ".len()..];
+            let open = declaration.find('(').expect("fixture column list");
+            let table = declaration[..open].trim();
+            let mut depth = 0usize;
+            let mut close = None;
+            for (index, character) in declaration[open..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(open + index);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let close = close.expect("closed fixture column list");
+            rest = &declaration[close..];
+            let columns = production_columns(&production, table);
+            if columns.is_empty() {
+                // Another module's table (the sharing schema's, say).
+                continue;
+            }
+            let body = declaration[open + 1..close].replace('\\', " ");
+            let mut depth = 0usize;
+            let mut definitions = vec![String::new()];
+            for character in body.chars() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        definitions.push(String::new());
+                        continue;
+                    }
+                    _ => {}
+                }
+                definitions.last_mut().expect("definition").push(character);
+            }
+            for definition in definitions {
+                let Some(name) = definition.split_whitespace().next() else {
+                    continue;
+                };
+                if ["PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT"]
+                    .contains(&name.to_ascii_uppercase().as_str())
+                {
+                    continue;
+                }
+                assert!(
+                    columns.contains(name),
+                    "a fixture declares {table}.{name}, which production does not have"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 20, "the fixture scan found only {checked}");
+    }
+
+    /// CLUSTER-DRILLS-2026-10-11 F2: the applied index a removal proof waits
+    /// on is the target's heartbeat progress, joined from
+    /// `cluster_node_progress`. A target that has not published progress yet
+    /// is still bound but reads as unknown, never as applied.
+    #[test]
+    fn reduction_reference_reads_applied_index_from_heartbeat_progress() {
+        use rusqlite::OptionalExtension;
+        let node = "00000000-0000-0000-0000-000000000002";
+        let attempt = "00000000-0000-0000-0000-000000000010";
+        let reference = hiqlite::ReductionFenceReference {
+            version: 1,
+            target_node_id: node.into(),
+            target_raft_id: 2,
+            attempt_id: attempt.into(),
+            barrier_index: 41,
+        };
+        let key = reduction_reference_key(&reference);
+        let db = production_membership_tables();
+        db.execute(
+            "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at) \
+             VALUES (?1, 2, 'node-2:32401', 'node-2:32402', 100)",
+            [node],
+        )
+        .expect("target");
+        db.execute(
+            "INSERT INTO cluster_node_removals (node_id, started_at) VALUES (?1, 100)",
+            [node],
+        )
+        .expect("route fence");
+        db.execute(
+            "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) VALUES (?1, ?2)",
+            [node, attempt],
+        )
+        .expect("owned reference");
+        db.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, '1', 100)",
+            [removed_job_owner_key(node)],
+        )
+        .expect("owner fence");
+        db.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, 100)",
+            [
+                key.clone(),
+                serde_json::to_string(&reference).expect("json"),
+            ],
+        )
+        .expect("frozen reference");
+        let read = || {
+            db.query_row(
+                READ_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![key, node, attempt, removed_job_owner_key(node)],
+                |row| row.get::<_, Option<i64>>("last_applied_index"),
+            )
+            .optional()
+            .expect("the production read runs on the production schema")
+        };
+        assert_eq!(
+            read(),
+            Some(None),
+            "a target without published progress is bound but not applied"
+        );
+        db.execute(
+            "INSERT INTO cluster_node_progress (node_id, current_term, last_applied_index, \
+               bounded_read_ready, voter_storage_ready, voter_role_persisted, observed_at) \
+             VALUES (?1, 1, 41, 1, 1, 1, 100)",
+            [node],
+        )
+        .expect("target progress");
+        assert_eq!(read(), Some(Some(41)));
     }
 
     /// One method's body, ending where the method does.

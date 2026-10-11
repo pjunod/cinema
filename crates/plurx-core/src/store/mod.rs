@@ -151,6 +151,13 @@ pub use scan_identity_repair::{
 
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
+/// The replicated auth schema (`settings`, `users`, `tokens`, ...) the cluster
+/// bootstrap installs, for tests that run production SQL against the
+/// production table definitions.
+#[cfg(all(test, feature = "hiqlite-store"))]
+pub(crate) fn replicated_auth_schema() -> &'static str {
+    hiqlite::AUTH_SCHEMA
+}
 #[cfg(feature = "hiqlite-store")]
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;
