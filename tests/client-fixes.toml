@@ -6199,3 +6199,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousReserv
 source_anchor = "unreached.getAndSet(null)?.let { return@withLock it }"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousReservationsTest.kt"
 test_anchor = "aChangeCancelledWhileWaitingForTheOwnerIsReportedRetained"
+
+[[fixes]]
+id = "apple.prepared-hls-cadence-index-and-ts"
+commits = ["12a6c7a4fc0c47eaa82eb77731a35ff6f91ef33d"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "let index = try await fragmentIndex(fragmentURL, deadline: deadline, session: session, loads: loads)"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "func testLargeCopySegmentIsReadThroughItsIndexNotItsPayload()"
