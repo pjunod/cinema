@@ -215,14 +215,21 @@ with the latch set, `next_step(Absent, Suspend { Ahead })` is `Nothing`
 **Amended 2026-10-11 (lab F5).** A running producer only met `yield_step` at
 the horizon, so on a node whose budget fits one encode a live start waited
 for a producer climbing towards 180 s at ~15× realtime — 7–16 s in the lab.
-`Position` now also carries `permit_wanted` (a live start is queued for the
-permit this producer holds, read once per pass from the same `Contention`
-`yield_step` uses), and the low-water mark applies while either it or
-`ahead_held` is set. A running producer whose lead is past
-`AHEAD_RESUME_SECONDS` therefore gets `Suspend { Ahead }` → `Stop` →
-`Terminate { YieldToWaiter }`, sets the latch, and re-admits at the low-water
-mark like any yielded producer. A lead at or under the mark, and a blocked
-request, are untouched: the waiter never takes the reader's own runway.
+`Position` now also carries `permit_wanted`: this producer holds a permit
+(`prodexec::holds_permit` — Running or Stopped, never Absent) **and** another
+registered encoded rendition is queued as a new start that this permit's
+release would admit (`Encoding::live_start_fits_after_release`, the capacity
+arithmetic of `speculative_fits_after_release` without its priority guards)
+**and** that waiter is not itself a yielded producer re-admitting at its
+low-water mark (its `ahead_hold` latch is clear). While it is set, a lead past
+`AHEAD_RESUME_SECONDS + AHEAD_YIELD_MARGIN_SECONDS` (90 + 30 s) gets
+`Suspend { Ahead }` → `Stop` → `Terminate { YieldToWaiter }`; the latch then
+re-admits the producer at the low-water mark like any yielded producer. The
+margin is the hysteresis: a re-admitted producer must rebuild 30 s of lead
+before it can be yielded early again. A re-admission, a waiter the release
+would not admit, and a rolling-live start (which the VOD registry cannot see)
+still get the permit the old way, when the producer stops at its horizon. A
+lead inside the margin and a blocked request are untouched.
 
 ### 3.2 `prodexec`: an explicit stopped→release transition on contention
 

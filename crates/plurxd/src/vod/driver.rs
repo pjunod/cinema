@@ -345,6 +345,38 @@ async fn request_predecessor_handoff(
     Ok((predecessor.key.clone(), fresh))
 }
 
+/// Is a new viewer's live start queued for capacity this producer's permit
+/// would admit? (`prodsched::Position::permit_wanted`.)
+///
+/// Three things the node-wide `live_is_waiting` count cannot say, each of
+/// which turned an early yield into churn: whether this producer holds a
+/// permit at all (an `Absent` one may be the waiter itself); whether the
+/// waiter would fit once this permit came back (one that would not buys a
+/// kill and a respawn for nothing); and whether the waiter is a new start
+/// rather than another yielded producer coming back at its low-water mark
+/// (two viewers on one encoder would otherwise hand the permit back and
+/// forth). A re-admission still gets the permit the old way, when this
+/// producer stops at its horizon.
+async fn new_start_wants_permit(shared: &Shared, rendition: &Rendition, belief: Producer) -> bool {
+    let Some(encoding) = rendition.recipe.encoding.as_ref() else {
+        return false;
+    };
+    if !crate::prodexec::holds_permit(belief, true) {
+        return false;
+    }
+    let released = encoding.resources();
+    let renditions = shared.renditions.lock().await;
+    renditions.values().any(|other| {
+        !std::ptr::eq(other.as_ref(), rendition)
+            && !other.ahead_hold.load(Acquire)
+            && other
+                .recipe
+                .encoding
+                .as_ref()
+                .is_some_and(|waiting| waiting.live_start_fits_after_release(&released))
+    })
+}
+
 /// The handoff this rendition is still bound to, if any: the request is live,
 /// its successor still exists, and a session reading this rendition is still
 /// being replaced by exactly that incarnation. Anything else releases it.
@@ -478,6 +510,10 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         // snapshot before the manifest lock so cached GET publication never
         // waits behind policy or admission I/O.
         let windows = eviction_windows(shared, rendition).await;
+        // Other renditions' wait state, read before this one's manifest lock
+        // for the same reason: no lock of another rendition is ever taken
+        // while this one's manifest is held.
+        let permit_wanted = new_start_wants_permit(shared, rendition, belief).await;
         let manifest = rendition.manifest.lock().await;
         let (demands, prewarm_ledgers) = {
             let readers = rendition.readers.lock().await;
@@ -492,9 +528,6 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 .collect::<Vec<_>>();
             (demands, ledgers)
         };
-        // Observed before deciding: a live start queued for this producer's
-        // permit lowers its ahead hold to the low-water mark (`prodsched`'s
-        // `permit_wanted`), and the same observation then decides the yield.
         let handoff_requested = handoff.is_some();
         let contention = rendition.recipe.encoding.as_ref().map_or(
             Contention {
@@ -504,7 +537,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             },
             |encoding| Contention {
                 live_waiting: encoding.admissions.live_is_waiting(),
-                holds_permit: true,
+                holds_permit: crate::prodexec::holds_permit(belief, true),
                 handoff_waiting: handoff_requested,
             },
         );
@@ -513,7 +546,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             positioned_at: belief.positioned_at(),
             seconds_per_segment: rendition.seconds_per_segment,
             ahead_held: rendition.ahead_hold.load(Acquire),
-            permit_wanted: contention.holds_permit && contention.live_waiting,
+            permit_wanted,
             working_set: WorkingSet {
                 used_bytes: shared.working_set.load(Relaxed),
                 budget_bytes: rendition.working_set_budget,

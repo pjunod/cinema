@@ -992,6 +992,28 @@ impl Encoding {
             )
     }
 
+    /// Whether this rendition is queued as a live start that returning a
+    /// permit of `released`'s size would admit, under the limits its last
+    /// refusal read. False for a plan no release can admit.
+    pub(crate) fn live_start_fits_after_release(
+        &self,
+        released: &TranscodeResourceEstimate,
+    ) -> bool {
+        if !self.has_live_wait() {
+            return false;
+        }
+        let Some(refusal) = self.last_refusal() else {
+            return false;
+        };
+        !refusal.over_budget
+            && self.admissions.live_fits_after_release(
+                refusal.hardware_limit,
+                refusal.software_budget,
+                &self.resources(),
+                released,
+            )
+    }
+
     /// Whether this exact rendition has registered a foreground pool waiter.
     /// Kept separate from policy retry so only a real capacity wait wakes
     /// other renditions to consider yielding their permit.

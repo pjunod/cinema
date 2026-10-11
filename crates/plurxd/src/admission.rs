@@ -87,6 +87,30 @@ impl From<Priority> for PermitOwner {
     }
 }
 
+/// The pool arithmetic both after-release questions share: what is in use
+/// once `released` is returned, against what `wanted` needs.
+fn fits_after_release(
+    permits: &PermitState,
+    hardware_max: usize,
+    software_budget: usize,
+    wanted: &TranscodeResourceEstimate,
+    released: &TranscodeResourceEstimate,
+) -> bool {
+    let hardware_used = permits
+        .hardware_used()
+        .saturating_sub(usize::from(released.hardware_slot));
+    if wanted.hardware_slot && hardware_used >= hardware_max {
+        return false;
+    }
+    if wanted.cpu_threads > 0 {
+        let used = permits.software_used().saturating_sub(released.cpu_threads);
+        if used > 0 && used + wanted.cpu_threads > software_budget {
+            return false;
+        }
+    }
+    true
+}
+
 /// Ownership is one state machine, not several counters sampled in sequence.
 ///
 /// The distinction is what makes the priority policy durable. A live waiter
@@ -1165,19 +1189,29 @@ impl Admissions {
         if permits.live_waiting > 0 || permits.background_active() {
             return false;
         }
-        let hardware_used = permits
-            .hardware_used()
-            .saturating_sub(usize::from(released.hardware_slot));
-        if wanted.hardware_slot && hardware_used >= hardware_max {
-            return false;
-        }
-        if wanted.cpu_threads > 0 {
-            let used = permits.software_used().saturating_sub(released.cpu_threads);
-            if used > 0 && used + wanted.cpu_threads > software_budget {
-                return false;
-            }
-        }
-        true
+        fits_after_release(&permits, hardware_max, software_budget, wanted, released)
+    }
+
+    /// Would a queued live start for `wanted` be granted if a permit sized
+    /// `released` were returned first?
+    ///
+    /// The capacity half of [`Self::speculative_fits_after_release`] without
+    /// its priority guards: the one asking on the waiter's behalf is deciding
+    /// whether to give its own permit to that waiter, and background work
+    /// already yields to it. A holder that would release a permit nobody
+    /// queued can use is spending a restart for nothing.
+    pub fn live_fits_after_release(
+        &self,
+        hardware_max: usize,
+        software_budget: usize,
+        wanted: &TranscodeResourceEstimate,
+        released: &TranscodeResourceEstimate,
+    ) -> bool {
+        let permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        fits_after_release(&permits, hardware_max, software_budget, wanted, released)
     }
 
     /// Take a live hardware slot within the cap while background work still
@@ -1512,6 +1546,40 @@ mod tests {
         assert!(pool
             .try_admit_bundle(1, 4, &software, Priority::Background)
             .is_some());
+    }
+
+    /// Review of lab F5's fix: a running VOD producer gives its permit to a
+    /// queued live start only when that start would then be admitted. One
+    /// that still could not fit would buy a kill and a respawn for nothing.
+    #[test]
+    fn a_live_fit_after_release_counts_only_capacity_the_release_frees() {
+        let pool = Admissions::new();
+        let software = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 4,
+            decoder_threads: None,
+        };
+        let hardware = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 0,
+            decoder_threads: None,
+        };
+        let _software_held = pool
+            .try_admit_bundle(1, 4, &software, Priority::Live)
+            .expect("the only software share");
+        let _hardware_held = pool
+            .try_admit_bundle(1, 4, &hardware, Priority::Live)
+            .expect("the only hardware slot");
+        let _waiter = pool.wait_for_slot();
+        assert!(
+            pool.live_fits_after_release(1, 4, &software, &software),
+            "a waiting start fits in the share a release returns"
+        );
+        assert!(
+            !pool.live_fits_after_release(1, 4, &hardware, &software),
+            "returning software admits nothing to a start that needs hardware"
+        );
+        assert!(pool.live_fits_after_release(1, 4, &hardware, &hardware));
     }
 
     #[test]
