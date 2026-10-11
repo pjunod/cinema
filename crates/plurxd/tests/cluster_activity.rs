@@ -125,6 +125,14 @@ impl Daemon {
     }
 }
 
+impl Daemon {
+    /// SIGKILL: the node vanishes without a goodbye, as a lost machine does.
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Drop for Daemon {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
@@ -1571,6 +1579,138 @@ async fn join_voter(
     (daemon, format!("http://127.0.0.1:{http}"))
 }
 
+/// Three joined voters: the leader, and a follower to remove.
+struct ThreeVoters {
+    voters: TwoVoters,
+    node_c: Daemon,
+    leader_base: String,
+    target: String,
+    /// Which of node A, B and C (0, 1, 2) the target is.
+    target_index: usize,
+}
+
+impl ThreeVoters {
+    async fn start(client: &reqwest::Client, root: &Path) -> Self {
+        let mut voters = start_two_voters(client, root).await;
+        let (node_c, c_base) = join_voter(client, root, &voters, "node-c").await;
+        let roster =
+            wait_for_voters(client, &mut voters.node_a, &voters.a_base, &voters.token, 3).await;
+        let mut bases = Vec::new();
+        for base in [&voters.a_base, &voters.b_base, &c_base] {
+            let own: Value = client
+                .get(format!("{base}/api/v1/cluster/nodes"))
+                .bearer_auth(&voters.token)
+                .send()
+                .await
+                .expect("own roster")
+                .json()
+                .await
+                .expect("own roster JSON");
+            let node_id = own["local_node_id"]
+                .as_str()
+                .expect("local node id")
+                .to_owned();
+            bases.push((node_id, base.clone()));
+        }
+        let leader = roster["nodes"]
+            .as_array()
+            .expect("node rows")
+            .iter()
+            .find(|node| node["is_leader"].as_bool() == Some(true))
+            .and_then(|node| node["node_id"].as_str())
+            .expect("a leader")
+            .to_owned();
+        let leader_base = bases
+            .iter()
+            .find(|(node_id, _)| *node_id == leader)
+            .map(|(_, base)| base.clone())
+            .expect("the leader's base");
+        let target_index = bases
+            .iter()
+            .position(|(node_id, _)| *node_id != leader)
+            .expect("a follower");
+        Self {
+            voters,
+            node_c,
+            leader_base,
+            target: bases[target_index].0.clone(),
+            target_index,
+        }
+    }
+
+    fn target_daemon(&mut self) -> &mut Daemon {
+        match self.target_index {
+            0 => &mut self.voters.node_a,
+            1 => &mut self.voters.node_b,
+            _ => &mut self.node_c,
+        }
+    }
+
+    fn diagnostics(&self) -> String {
+        format!(
+            "node A: {}\nnode B: {}\nnode C: {}",
+            self.voters.node_a.diagnostics(),
+            self.voters.node_b.diagnostics(),
+            self.node_c.diagnostics()
+        )
+    }
+
+    /// Remove the target through the leader's operator route. Answers that
+    /// name a condition the cluster clears on its own are retried until
+    /// `within`; anything else, the old `no such column` included, fails at
+    /// once.
+    async fn remove_target(
+        &self,
+        client: &reqwest::Client,
+        retryable: &[&str],
+        within: Duration,
+    ) -> Value {
+        let ready_by = Instant::now() + within;
+        let removed = loop {
+            let response = client
+                .delete(format!(
+                    "{}/api/v1/cluster/nodes/{}",
+                    self.leader_base, self.target
+                ))
+                .bearer_auth(&self.voters.token)
+                .send()
+                .await
+                .expect("remove a follower");
+            let status = response.status();
+            let body: Value = response.json().await.unwrap_or_default();
+            if status == StatusCode::OK {
+                break body;
+            }
+            let code = body["code"].as_str().unwrap_or_default();
+            assert!(
+                retryable.contains(&code) && Instant::now() < ready_by,
+                "voter removal answered {status} {body}\n{}",
+                self.diagnostics()
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+        assert_eq!(
+            removed["capacity"]["voting_nodes"].as_u64(),
+            Some(2),
+            "{removed}"
+        );
+        assert!(
+            removed["nodes"]
+                .as_array()
+                .expect("node rows")
+                .iter()
+                .all(|node| node["node_id"] != self.target.as_str() || node["is_voter"] == false),
+            "the removed follower is still a voter: {removed}"
+        );
+        removed
+    }
+}
+
+/// A cluster this young may not have published every member's removal
+/// capability and clock observation yet; those answers name themselves.
+const YOUNG_CLUSTER_REFUSALS: [&str; 2] =
+    ["membership_upgrade_required", "cluster_clock_unbounded"];
+
 /// CLUSTER-DRILLS-2026-10-11 F2: an operator removes a follower from three
 /// voters, on the schema the daemon really creates. The removal proof once
 /// read `last_applied_index` from `cluster_nodes`, which has no such column,
@@ -1579,92 +1719,25 @@ async fn join_voter(
 async fn an_operator_removes_a_follower_from_three_voters() {
     let root = canonical_tempdir();
     let client = two_voter_client();
-    let mut voters = start_two_voters(&client, root.path()).await;
-    let (node_c, c_base) = join_voter(&client, root.path(), &voters, "node-c").await;
-    let roster = wait_for_voters(
-        &client,
-        &mut voters.node_a,
-        &voters.a_base,
-        &voters.token,
-        3,
-    )
-    .await;
-    let mut bases = Vec::new();
-    for base in [&voters.a_base, &voters.b_base, &c_base] {
-        let own: Value = client
-            .get(format!("{base}/api/v1/cluster/nodes"))
-            .bearer_auth(&voters.token)
-            .send()
-            .await
-            .expect("own roster")
-            .json()
-            .await
-            .expect("own roster JSON");
-        let node_id = own["local_node_id"]
-            .as_str()
-            .expect("local node id")
-            .to_owned();
-        bases.push((node_id, base.clone()));
-    }
-    let leader = roster["nodes"]
-        .as_array()
-        .expect("node rows")
-        .iter()
-        .find(|node| node["is_leader"].as_bool() == Some(true))
-        .and_then(|node| node["node_id"].as_str())
-        .expect("a leader")
-        .to_owned();
-    let leader_base = bases
-        .iter()
-        .find(|(node_id, _)| *node_id == leader)
-        .map(|(_, base)| base.clone())
-        .expect("the leader's base");
-    let target = bases
-        .iter()
-        .map(|(node_id, _)| node_id.clone())
-        .find(|node_id| *node_id != leader)
-        .expect("a follower");
+    let cluster = ThreeVoters::start(&client, root.path()).await;
+    cluster
+        .remove_target(&client, &YOUNG_CLUSTER_REFUSALS, Duration::from_secs(60))
+        .await;
+}
 
-    // A cluster this young may not have published every member's removal
-    // capability and clock observation yet; those answers name themselves.
-    // Anything else, the old `no such column` included, fails at once.
-    let ready_by = Instant::now() + Duration::from_secs(60);
-    let removed = loop {
-        let response = client
-            .delete(format!("{leader_base}/api/v1/cluster/nodes/{target}"))
-            .bearer_auth(&voters.token)
-            .send()
-            .await
-            .expect("remove a follower");
-        let status = response.status();
-        let body: Value = response.json().await.unwrap_or_default();
-        if status == StatusCode::OK {
-            break body;
-        }
-        let code = body["code"].as_str().unwrap_or_default();
-        assert!(
-            matches!(
-                code,
-                "membership_upgrade_required" | "cluster_clock_unbounded"
-            ) && Instant::now() < ready_by,
-            "voter removal answered {status} {body}\nnode A: {}\nnode B: {}\nnode C: {}",
-            voters.node_a.diagnostics(),
-            voters.node_b.diagnostics(),
-            node_c.diagnostics()
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    };
-    assert_eq!(
-        removed["capacity"]["voting_nodes"].as_u64(),
-        Some(2),
-        "{removed}"
-    );
-    assert!(
-        removed["nodes"]
-            .as_array()
-            .expect("node rows")
-            .iter()
-            .all(|node| node["node_id"] != target.as_str() || node["is_voter"] == false),
-        "the removed follower is still a voter: {removed}"
-    );
+/// The drill's real case: the follower is gone (killed, not stopped), so it
+/// can never apply the removal barrier. The removal is proved instead by its
+/// heartbeat going stale on the real schema, and until then answers that the
+/// removal is pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operator_removes_a_killed_follower_from_three_voters() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut cluster = ThreeVoters::start(&client, root.path()).await;
+    cluster.target_daemon().kill();
+    let mut retryable = YOUNG_CLUSTER_REFUSALS.to_vec();
+    retryable.push("membership_removal_pending");
+    cluster
+        .remove_target(&client, &retryable, Duration::from_secs(150))
+        .await;
 }
