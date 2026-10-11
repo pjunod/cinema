@@ -433,6 +433,13 @@ impl ProducerSlot {
         .await;
         (registration, writers)
     }
+    /// Hold the slot's lock, as a step in progress does, until the returned
+    /// guard drops.
+    #[cfg(test)]
+    pub(crate) async fn hold(&self) -> Box<dyn Send> {
+        Box::new(Arc::clone(&self.inner).lock_owned().await)
+    }
+
     #[cfg(test)]
     pub(crate) async fn set_reap_hooks(&self, hooks: Arc<dyn ProducerReapHooks>) {
         self.inner.lock().await.hooks = hooks;

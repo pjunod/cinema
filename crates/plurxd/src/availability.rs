@@ -38,8 +38,79 @@ const PROBE_BUCKETS_US: [u64; 7] = [
     u64::MAX,
 ];
 
+#[cfg(test)]
 type ProbeFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+#[cfg(test)]
 type Probe = dyn Fn(PathBuf) -> ProbeFuture + Send + Sync;
+type StatFuture = Pin<Box<dyn Future<Output = Probed> + Send>>;
+type StatProbe = dyn Fn(PathBuf) -> StatFuture + Send + Sync;
+
+/// What one bounded stat answered.
+#[derive(Clone, Copy)]
+enum Probed {
+    Absent,
+    Present(Option<SourceStat>),
+}
+
+/// The stat facts behind an `Available` observation: enough for item detail
+/// to name the source object a VOD index attestation is bound to without
+/// statting the file a second time, outside this cache's deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceStat {
+    pub len: u64,
+    /// Whole seconds since the epoch, as the scanner records `mtime`.
+    pub modified_secs: i64,
+    /// The object identity, where a stat exposes it (Unix). Windows names an
+    /// object by an open handle, so it has none here.
+    pub object: Option<StatObject>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatObject {
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub mtime: i64,
+    pub mtime_nsec: i64,
+    pub ctime: i64,
+    pub ctime_nsec: i64,
+}
+
+impl SourceStat {
+    pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified_secs: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+                .unwrap_or(0),
+            object: StatObject::from_metadata(metadata),
+        }
+    }
+}
+
+impl StatObject {
+    #[cfg(unix)]
+    pub fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            size: metadata.size(),
+            mtime: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub fn from_metadata(_: &std::fs::Metadata) -> Option<Self> {
+        None
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Availability {
@@ -62,12 +133,16 @@ impl Availability {
 pub struct Observation {
     pub state: Availability,
     pub observed_at_ms: Option<i64>,
+    /// The stat that answered an `Available` observation, when the probe
+    /// keeps one. Never set on `Unknown`: a stale fact is not evidence.
+    pub stat: Option<SourceStat>,
 }
 
 impl Observation {
     const UNKNOWN: Self = Self {
         state: Availability::Unknown,
         observed_at_ms: None,
+        stat: None,
     };
 
     /// A client with only the legacy boolean may try playback; the real open
@@ -122,18 +197,43 @@ pub struct AvailabilityCache {
     inner: Mutex<Inner>,
     permits: Arc<Semaphore>,
     limits: Limits,
-    probe: Arc<Probe>,
+    probe: Arc<StatProbe>,
 }
 
 impl AvailabilityCache {
     pub fn new() -> Arc<Self> {
-        Self::with_probe(
+        Self::with_stat_probe(
             Limits::default(),
-            Arc::new(|path| Box::pin(async move { tokio::fs::metadata(path).await.is_ok() })),
+            Arc::new(|path| {
+                Box::pin(async move {
+                    match tokio::fs::metadata(path).await {
+                        Ok(metadata) => Probed::Present(Some(SourceStat::from_metadata(&metadata))),
+                        Err(_) => Probed::Absent,
+                    }
+                })
+            }),
         )
     }
 
+    /// A presence-only probe: its observations carry no stat.
+    #[cfg(test)]
     fn with_probe(limits: Limits, probe: Arc<Probe>) -> Arc<Self> {
+        Self::with_stat_probe(
+            limits,
+            Arc::new(move |path| {
+                let present = probe(path);
+                Box::pin(async move {
+                    if present.await {
+                        Probed::Present(None)
+                    } else {
+                        Probed::Absent
+                    }
+                })
+            }),
+        )
+    }
+
+    fn with_stat_probe(limits: Limits, probe: Arc<StatProbe>) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner::default()),
             permits: Arc::new(Semaphore::new(limits.probes)),
@@ -216,6 +316,7 @@ impl AvailabilityCache {
             Some(entry) => Observation {
                 state: Availability::Unknown,
                 observed_at_ms: entry.observation.observed_at_ms,
+                stat: None,
             },
             None => Observation::UNKNOWN,
         };
@@ -233,6 +334,7 @@ impl AvailabilityCache {
                 Observation {
                     state: Availability::Unknown,
                     observed_at_ms: answer.observed_at_ms,
+                    stat: None,
                 },
                 None,
             );
@@ -264,7 +366,7 @@ impl AvailabilityCache {
         let probe = (self.probe)(path.clone());
         tokio::pin!(probe);
         let mut warning = Box::pin(tokio::time::sleep(WARN_AFTER));
-        let present = loop {
+        let probed = loop {
             tokio::select! {
                 result = &mut probe => break result,
                 () = &mut warning => {
@@ -282,12 +384,13 @@ impl AvailabilityCache {
                 count.fetch_add(1, Ordering::Relaxed);
             }
         }
+        let (state, stat) = match probed {
+            Probed::Present(stat) => (Availability::Available, stat),
+            Probed::Absent => (Availability::Unavailable, None),
+        };
         let observation = Observation {
-            state: if present {
-                Availability::Available
-            } else {
-                Availability::Unavailable
-            },
+            state,
+            stat,
             observed_at_ms: Some(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -523,6 +626,7 @@ mod tests {
         assert!(!Observation {
             state: Availability::Unavailable,
             observed_at_ms: Some(1),
+            stat: None,
         }
         .available());
     }
@@ -534,6 +638,7 @@ mod tests {
         let missing = Observation {
             state: Availability::Unavailable,
             observed_at_ms: Some(1),
+            stat: None,
         };
         assert_eq!(missing.missing_path(false, path), None);
         assert_eq!(

@@ -1840,6 +1840,27 @@ fn a_pending_sidecar_is_a_named_not_yet_answer() {
     ));
 }
 
+/// P-02: a Dolby Vision pixel proof that did not finish is a named not-yet,
+/// never the `unsupported_build` verdict a refuted proof earns.
+#[test]
+fn an_unfinished_dovi_pixel_proof_is_a_named_not_yet() {
+    let pending =
+        crate::transcode::source_proof_pending_error("Dolby Vision pixel probe timed out");
+    match session_start_error(5296, pending) {
+        ApiError::TypedRetry {
+            status,
+            code,
+            retry_after_seconds,
+            ..
+        } => {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(code, "startup_timeout");
+            assert_eq!(retry_after_seconds, SOURCE_PROOF_PENDING_RETRY_AFTER_SECS);
+        }
+        _ => panic!("an unfinished proof must be a named not-yet answer"),
+    }
+}
+
 /// C-08 M5 row 4 (#559 review, finding 1): every create answer the
 /// clients' retry ladder waits out carries a code the start ledger keeps
 /// pending, so the retry that plays is one `ok`; a refusal that is not a

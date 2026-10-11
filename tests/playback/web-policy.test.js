@@ -6561,6 +6561,12 @@ test("web HLS startup has one bounded manifest policy and terminal precedence", 
   for (const code of policy.HLS_STARTUP_TERMINAL_CODES) {
     assert.equal(policy.hlsStartupResponseAction({ status: 503, code }), "terminal", code);
   }
+  // A segment the producer delivered but publication never made servable is
+  // the same terminal startup answer as the producer failing (502).
+  for (const code of ["producer_failed", "segment_publication_failed"]) {
+    assert.ok(policy.HLS_STARTUP_TERMINAL_CODES.includes(code), code);
+    assert.equal(policy.hlsStartupResponseAction({ status: 502, code }), "terminal", code);
+  }
   assert.equal(policy.hlsStartupResponseAction({ status: 503 }), "retry",
     "a generic 503 may consume the bounded retry but is not called startup");
   assert.equal(policy.hlsStartupResponseAction({ status: 503, code: "startup_timeout" }), "retry");

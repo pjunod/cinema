@@ -618,7 +618,12 @@ first two have a recorded result per graph.
 3. **Advertise, per proven graph only.** `activate_local` returns a master
    playlist URL whose body is
    `#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="cc",NAME="English",INSTREAM-ID="CC1",LANGUAGE="en"`
-   (and `INSTREAM-ID="SERVICE1"` when 708 was proven) plus one
+   (and `INSTREAM-ID="SERVICE1"` when 708 was proven **and the viewer's
+   player decodes it** — *as built 2026-10-10:* the start's capability
+   document carries `caption_decoders`; the web claims `["cea608"]` under
+   hls.js, which has no 708 decoder and folded `SERVICE1` onto CC1's text
+   track as a phantom "English 708", and a client that makes no claim is
+   advertised every proven service) plus one
    `#EXT-X-STREAM-INF:...,CLOSED-CAPTIONS="cc"` line pointing at the media
    playlist — only when the session's admitted encoder is in the proven
    set; otherwise `CLOSED-CAPTIONS=NONE` (the VOD master's existing

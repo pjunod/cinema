@@ -319,6 +319,12 @@ the client's retry ladder and the viewer gets a raw transport error instead of
 the typed refusal this contract designed: hls.js gives 7 attempts over roughly
 31.6 s and then a fatal `fragLoadError` (§12.7). M4 sizes the web retry ladder
 explicitly so its total — attempts × backoff — exceeds this budget.
+The typed answer at expiry names the phase the deadline caught (2026-10-10):
+`transcode_capacity_pending` 503 when the rendition was still waiting for an
+encoder permit and no producer ran, `producer_failed` 502 when a producer ran
+and never delivered the entry, `segment_publication_failed` 502 when the
+fragment arrived but publication did not finish
+([MEDIA-BODY-BUFFERS §2.3](MEDIA-BODY-BUFFERS.md#23-current-causal-boundary--the-demand-clock-is-not-total-startup)).
 
 Bounding the wait pool (review B4's operational half): a client disconnect
 **cancels** the server-side wait (response-body drop aborts it); blocked

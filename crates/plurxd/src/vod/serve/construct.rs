@@ -202,6 +202,7 @@ impl VodServe {
             handoff: StdMutex::new(None),
             handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
+            fragment_received: StdMutex::new(None),
         });
 
         let lifecycle = self.shared.session_lifecycle(session_id);
@@ -430,6 +431,56 @@ impl VodServe {
                     && artifact.source_sha256 == observation.source_sha256
                     && artifact.pipeline_sha256 == pipeline
             }))
+    }
+
+    /// Item detail's cluster-artifact fallback, batched. Each lookup names a
+    /// file, a copy pipeline and the source object version taken from a stat
+    /// the caller already made; the answer is [`Self::cluster_index_available`]'s
+    /// for each, in order, from one Store read per
+    /// [`plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK`] lookups and no
+    /// filesystem access at all.
+    pub(crate) async fn cluster_index_availability(
+        &self,
+        lookups: &[(&MediaFile, CopyVideoOptions, String)],
+    ) -> Result<Vec<bool>, String> {
+        let Some(node_id) = self.shared.cluster_node_id.as_deref() else {
+            return Ok(vec![false; lookups.len()]);
+        };
+        if lookups.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return Ok(vec![false; lookups.len()]);
+        }
+        let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+        let probes: Vec<plurx_core::store::ClusterIndexAvailabilityProbe> = lookups
+            .iter()
+            .map(
+                |(file, video, object_version)| plurx_core::store::ClusterIndexAvailabilityProbe {
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    object_version: object_version.clone(),
+                    pipeline_sha256: crate::fragment_index_cluster::pipeline_digest(
+                        file, &engine, *video,
+                    ),
+                },
+            )
+            .collect();
+        let mut present = Vec::with_capacity(probes.len());
+        for chunk in probes.chunks(plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK) {
+            let answers = self
+                .shared
+                .store
+                .cluster_fragment_index_availability(node_id, chunk)
+                .await
+                .map_err(|error| format!("reading cluster index catalog: {error}"))?;
+            if answers.len() != chunk.len() {
+                return Err("cluster index availability batch lost input order".to_owned());
+            }
+            present.extend(answers);
+        }
+        Ok(present)
     }
 
     pub(super) async fn try_cluster_fragment_index(

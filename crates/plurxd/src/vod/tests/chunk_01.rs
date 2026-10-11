@@ -937,6 +937,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         handoff: StdMutex::new(None),
         handoff_expiry_armed: AtomicBool::new(false),
         demand_since: StdMutex::new(HashMap::new()),
+        fragment_received: StdMutex::new(None),
     })
 }
 
