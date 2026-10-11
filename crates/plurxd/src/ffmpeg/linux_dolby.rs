@@ -757,6 +757,47 @@ const GRAPH_GLOBAL_ARGS: &[&str] = &[
 /// and validation refusals keep their own reason so a node that observes no
 /// hardware graph says why each candidate failed.
 #[cfg(target_os = "linux")]
+/// How a discovery graph's loaded object relates to the audited package.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum LoadedObjectRole<'a> {
+    /// Not a packaged runtime role (libc, the kernel's own objects, ...).
+    Unrelated,
+    /// The package's own file; its bytes must equal the audited digest.
+    Packaged { expected: &'a str },
+    /// A file outside the package that carries a packaged runtime's name:
+    /// a different library, never evidence about the package's bytes.
+    Foreign,
+}
+
+/// Classify one followed loader object. Roles are file names, so the path
+/// decides whether a packaged role is the package's file at all: only a file
+/// under the package root can confirm or contradict the audited digest.
+#[cfg(any(target_os = "linux", test))]
+fn loaded_object_role<'a>(
+    path: &std::path::Path,
+    package_root: &std::path::Path,
+    runtime_objects: &'a std::collections::BTreeMap<String, String>,
+) -> Result<LoadedObjectRole<'a>, &'static str> {
+    let role = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("invalid_loader_trace")?;
+    if !(role.starts_with("libav")
+        || role.ends_with("_drv_video.so")
+        || runtime_objects.contains_key(role))
+    {
+        return Ok(LoadedObjectRole::Unrelated);
+    }
+    if !path.starts_with(package_root) {
+        return Ok(LoadedObjectRole::Foreign);
+    }
+    runtime_objects
+        .get(role)
+        .map(|expected| LoadedObjectRole::Packaged { expected })
+        .ok_or("loaded_package_object_unbound")
+}
+
 fn graph_refusal(case: GraphCase<'_>, stage: &str, reason: &str) -> Value {
     json!({"decoder": format!("{:?}", case.decoder), "encoder": format!("{:?}", case.encoder),
            "stage": stage, "reason": reason})
@@ -1332,30 +1373,38 @@ async fn qualify_generation(
                     return Err("loaded_driver_mismatch");
                 }
             }
+            let package_root = package
+                .producer
+                .path
+                .parent()
+                .ok_or("package_provenance_missing")?;
+            let mut foreign = false;
             for object in &closure.objects {
                 if object.kind != plurx_core::transcode::LinuxExecutionObjectKind::FollowedFile {
                     continue;
                 }
-                let role = object
-                    .path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or("invalid_loader_trace")?;
-                if role.starts_with("libav")
-                    || role.ends_with("_drv_video.so")
-                    || package.runtime_objects.contains_key(role)
-                {
-                    let expected = package
-                        .runtime_objects
-                        .get(role)
-                        .ok_or("loaded_package_object_unbound")?;
-                    let (actual, _) = super::hash_engine_object(&object.path)
-                        .await
-                        .map_err(|_| "loaded_object_changed")?;
-                    if hex::encode(actual) != *expected {
-                        return Err("loaded_package_object_mismatch");
+                match loaded_object_role(&object.path, package_root, &package.runtime_objects)? {
+                    LoadedObjectRole::Unrelated => {}
+                    // This graph's loader closure mixed in a different copy of
+                    // a packaged runtime (the oneVPL dispatcher enumerates the
+                    // system library directories, for one). The graph is not
+                    // an exact-package graph, so it contributes no capability;
+                    // the package itself is unchanged and the other graphs
+                    // still stand.
+                    LoadedObjectRole::Foreign => foreign = true,
+                    LoadedObjectRole::Packaged { expected } => {
+                        let (actual, _) = super::hash_engine_object(&object.path)
+                            .await
+                            .map_err(|_| "loaded_object_changed")?;
+                        if hex::encode(actual) != *expected {
+                            return Err("loaded_package_object_mismatch");
+                        }
                     }
                 }
+            }
+            if foreign {
+                refusals.push(graph_refusal(case, "discovery", "foreign_runtime_object"));
+                continue;
             }
             closure_digests.push(closure.digest);
             objects.extend(closure.objects);
@@ -1634,6 +1683,54 @@ mod tests {
         ] {
             assert!(candidate_refusal_is_fatal(reason), "{reason}");
         }
+    }
+
+    /// Intel QSV discovery loads the system Media SDK beside the packaged one
+    /// (the oneVPL dispatcher enumerates the system library directories), so
+    /// a packaged role name appears at a path outside the package. That is a
+    /// different library: it refuses its graph, it does not contradict the
+    /// package, and only the package's own file is held to the audited digest.
+    #[test]
+    fn a_packaged_role_outside_the_package_is_foreign_not_a_package_mismatch() {
+        use std::path::Path;
+        let root = Path::new("/usr/lib/jellyfin-ffmpeg");
+        let inventory = std::collections::BTreeMap::from([
+            ("libmfxhw64.so.1.35".to_owned(), "a".repeat(64)),
+            ("libavcodec.so.62".to_owned(), "b".repeat(64)),
+        ]);
+        let role = |path: &str| loaded_object_role(Path::new(path), root, &inventory);
+        assert_eq!(
+            role("/usr/lib/x86_64-linux-gnu/libmfxhw64.so.1.35"),
+            Ok(LoadedObjectRole::Foreign)
+        );
+        assert_eq!(
+            role("/usr/lib/x86_64-linux-gnu/libavcodec.so.59"),
+            Ok(LoadedObjectRole::Foreign)
+        );
+        let expected = "a".repeat(64);
+        assert_eq!(
+            role("/usr/lib/jellyfin-ffmpeg/lib/libmfxhw64.so.1.35"),
+            Ok(LoadedObjectRole::Packaged {
+                expected: &expected
+            })
+        );
+        // A library the package does not name, wherever it lives, is not
+        // package evidence either way.
+        assert_eq!(
+            role("/usr/lib/x86_64-linux-gnu/libc.so.6"),
+            Ok(LoadedObjectRole::Unrelated)
+        );
+        // Inside the package, an engine module the audit never inventoried
+        // is still unbound: the package itself is wrong.
+        assert_eq!(
+            role("/usr/lib/jellyfin-ffmpeg/lib/libavfilter.so.11"),
+            Err("loaded_package_object_unbound")
+        );
+        // A sibling directory that merely shares the prefix is outside.
+        assert_eq!(
+            role("/usr/lib/jellyfin-ffmpeg-old/lib/libmfxhw64.so.1.35"),
+            Ok(LoadedObjectRole::Foreign)
+        );
     }
 
     #[cfg(target_os = "linux")]
