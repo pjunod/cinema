@@ -7836,6 +7836,75 @@ test("parsed master survives level loads and early Pause/Play", () => {
   assert.equal(h.episode.manifestState, "parsed", "a retired attachment cannot change readiness");
 });
 
+// #978: a parsed master is not a loaded level playlist. A level failure or
+// timeout before media is diagnosed as the playlist it is, not as media lost.
+function levelPlaylistStartupHarness() {
+  return new PlaybackContextFunction("PlaybackPolicy", [
+    "let now=0;const performance={now:()=>now};",
+    "let STREAM_FAILURE=null;function clientLog(){}function playbackContext(){return {};}function resetPlaybackTransportEvents(){}function applyPlaybackTransportIntent(){}",
+    "function clearStreamFailureFor(){}function retuneBuffer(){}function markEvent(){}",
+    "function noteStreamFailure(){return null;}function streamFailureResponseBodyNow(){return null;}function observeStreamFailureResponse(){return Promise.resolve(null);}",
+    "function exhaustHlsStartup(){throw Error('unexpected exhaustion');}",
+    "const Hls={Events:{MANIFEST_LOADING:'loading',MANIFEST_LOADED:'loaded',MANIFEST_PARSED:'parsed',LEVEL_LOADED:'level_loaded',FRAG_LOADED:'frag_loaded'}};",
+    "const events=new Map();const hls={on(event,fn){events.set(event,fn);},loadSource(){},startLoad(){},stopLoad(){}};",
+    "const attachment={current:()=>true},video={currentTime:0};",
+    "let PLAYER={hls,mediaAttachment:attachment,wantsPlayback:true,controlIntentGeneration:1};",
+    "const episode={player:PLAYER,attachment,mediaAttachment:attachment,hls,transport:'hlsjs',state:'active',manifestState:'unknown',levelState:'unknown',mediaLoaded:false,playlistUrl:'/master.m3u8',startedAt:0,deadlineMs:40000,dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',timer:null}};PLAYER.hlsStartup=episode;",
+    "class StockLoader{openAndSendXhr(xhr,context){this.loader=xhr;this.context=context;}readystatechange(){}abort(){}destroy(){}}",
+    shippedSource("playbackAttemptTerminallyStopped"), shippedSource("hlsStartupCurrent"),
+    shippedSource("hlsStartupManifestRequest"), shippedSource("abortHlsStartupLoaders"),
+    shippedSource("createHlsStartupLoader"), shippedSource("wireHlsObservers"),
+    shippedSource("diagnoseHlsStartup"),
+    "wireHlsObservers(hls,episode,video,()=>true);const Loader=createHlsStartupLoader(StockLoader,episode);",
+    "function request(type,url){const loader=new Loader();loader.plurxIntentGeneration=PLAYER.controlIntentGeneration;const xhr={readyState:1,status:0};loader.openAndSendXhr(xhr,{type,url},{});return {answer(status){xhr.readyState=4;xhr.status=status;loader.readystatechange();}};}",
+    "return {episode,request,emit(event,data){events.get(event)(event,data||{});},diagnose:()=>diagnoseHlsStartup(PLAYER)};",
+  ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+}
+
+test("startup diagnosis names a failed level playlist, not missing media (#978)", () => {
+  {
+    const h = levelPlaylistStartupHarness();
+    h.request("manifest", "/master.m3u8").answer(200);
+    h.emit("parsed");
+    assert.equal(h.episode.manifestState, "parsed");
+    h.request("level", "/720/index.m3u8").answer(500);
+    const diagnosis = h.diagnose();
+    assert.equal(diagnosis.title, "The video playlist could not be loaded.",
+      "LEVEL_LOAD_ERROR before media is a playlist failure");
+    assert.match(diagnosis.detail, /video playlist request failed with HTTP 500/);
+    assert.equal(h.episode.manifestState, "parsed", "a level failure leaves master readiness intact");
+    assert.equal(h.episode.levelState, "failed");
+  }
+  {
+    const h = levelPlaylistStartupHarness();
+    h.request("manifest", "/master.m3u8").answer(200);
+    h.emit("parsed");
+    h.request("level", "/720/index.m3u8");
+    const diagnosis = h.diagnose();
+    assert.equal(diagnosis.title, "The video playlist could not be loaded.",
+      "LEVEL_LOAD_TIMEOUT before media is a playlist failure");
+    assert.equal(h.episode.levelState, "loading");
+    assert.match(diagnosis.detail, /video playlist did not load before the startup deadline\.$/);
+  }
+  {
+    const h = levelPlaylistStartupHarness();
+    h.request("manifest", "/master.m3u8").answer(200);
+    h.emit("parsed");
+    h.request("level", "/720/index.m3u8").answer(200);
+    h.emit("level_loaded", { details: {} });
+    h.request("level", "/720/index.m3u8");
+    assert.equal(h.episode.levelState, "loaded", "a level refresh does not undo a loaded level");
+    assert.equal(h.diagnose().title, "The video data did not arrive in time.",
+      "only a loaded level playlist makes missing media the diagnosis");
+  }
+  {
+    const h = levelPlaylistStartupHarness();
+    h.request("manifest", "/master.m3u8").answer(503);
+    assert.equal(h.diagnose().title, "The stream playlist could not be loaded.",
+      "a master failure keeps its own diagnosis");
+  }
+});
+
 // Cached window delivery regressions run in the required web-control lane.
 function subtitleWindowFixture(url="/api/v1/files/42/subs/0?token=viewer"){
   const track={mode:"disabled",items:[],get cues(){return this.mode==="disabled"?null:this.items;},
