@@ -232,14 +232,18 @@ impl TranscodeManager {
 
     /// Choose the encoder given the admin preference setting (empty = auto).
     pub(super) async fn encoder(&self) -> Encoder {
-        let prefer = self
-            .store
+        self.encoder_for_preference(&self.hwaccel_preference().await)
+    }
+
+    /// The stored [`keys::HWACCEL`] preference; empty (auto) when unset or
+    /// unreadable.
+    async fn hwaccel_preference(&self) -> String {
+        self.store
             .get_setting(keys::HWACCEL)
             .await
             .ok()
             .flatten()
-            .unwrap_or_default();
-        self.encoder_for_preference(&prefer)
+            .unwrap_or_default()
     }
 
     /// The conservative whole-node projection retained for legacy readers.
@@ -981,6 +985,17 @@ impl TranscodeManager {
         Ok(())
     }
 
+    /// The Auto rung for a source height, reading the HWACCEL preference.
+    #[cfg(test)]
+    pub async fn auto_height(
+        &self,
+        source_height: Option<i64>,
+        prior: Option<&plurx_core::domain::NetworkPrior>,
+    ) -> i64 {
+        let prefer = self.hwaccel_preference().await;
+        self.auto_height_with_preference(source_height, prior, &prefer)
+    }
+
     /// The rung "Auto" means, given what this server can actually encode with.
     ///
     /// Auto was 720p for everything, which was the right answer when every
@@ -998,17 +1013,21 @@ impl TranscodeManager {
     /// The server decides this, not the player, because only the server knows
     /// which encoder won — the player learns that from the response it gets
     /// back *after* the height has been chosen (PERF-PLAN §4.7).
-    pub async fn auto_height(
+    ///
+    /// The caller holds the [`keys::HWACCEL`] preference, so this reads
+    /// nothing.
+    fn auto_height_with_preference(
         &self,
         source_height: Option<i64>,
         prior: Option<&plurx_core::domain::NetworkPrior>,
+        prefer: &str,
     ) -> i64 {
         // Software's ceiling is lower; the shape is the same. It used to
         // return its ceiling unconditionally, which never *upscaled* — the
         // filter caps at the source — but advertised 720p bitrate and
         // response metadata for a 480p stream (review §3.1). The rung is a
         // promise about the output; it follows the source on both encoders.
-        let encoder = self.encoder().await;
+        let encoder = self.encoder_for_preference(prefer);
         let max = if encoder == Encoder::Software {
             AUTO_SOFTWARE_HEIGHT
         } else {
@@ -1044,15 +1063,30 @@ impl TranscodeManager {
         prior: Option<&plurx_core::domain::NetworkPrior>,
         hdr10_requested: bool,
     ) -> i64 {
+        let prefer = self.hwaccel_preference().await;
+        self.auto_height_for_preference(file, prior, hdr10_requested, &prefer)
+            .await
+    }
+
+    /// [`Self::auto_height_for_request`] for a caller that already holds the
+    /// [`keys::HWACCEL`] preference — a create's own planning snapshot — so
+    /// the preference is not read again.
+    pub async fn auto_height_for_preference(
+        &self,
+        file: Option<&plurx_core::domain::MediaFile>,
+        prior: Option<&plurx_core::domain::NetworkPrior>,
+        hdr10_requested: bool,
+        prefer: &str,
+    ) -> i64 {
         let Some(file) = file else {
-            return self.auto_height(None, prior).await;
+            return self.auto_height_with_preference(None, prior, prefer);
         };
         let source_height = file.height;
         // Follow the encoder and filter graph this exact file can reach. This
         // used to apply only to Dolby Vision reshapes, leaving every ordinary
         // 4K SDR hardware transcode under a global 1080p policy cap.
         let max = self
-            .capability_height_ceiling_for_request(Some(file), hdr10_requested)
+            .capability_height_ceiling_for_preference(Some(file), hdr10_requested, prefer)
             .await;
         let current = source_height
             .filter(|height| *height > 0)
@@ -1092,7 +1126,21 @@ impl TranscodeManager {
         file: Option<&plurx_core::domain::MediaFile>,
         hdr10_requested: bool,
     ) -> i64 {
-        let preferred = self.encoder().await;
+        let prefer = self.hwaccel_preference().await;
+        self.capability_height_ceiling_for_preference(file, hdr10_requested, &prefer)
+            .await
+    }
+
+    /// [`Self::capability_height_ceiling_for_request`] for a caller that
+    /// already holds the [`keys::HWACCEL`] preference. One preference decides
+    /// every encoder question below; this used to read it once per question.
+    pub async fn capability_height_ceiling_for_preference(
+        &self,
+        file: Option<&plurx_core::domain::MediaFile>,
+        hdr10_requested: bool,
+        prefer: &str,
+    ) -> i64 {
+        let preferred = self.encoder_for_preference(prefer);
         let hdr10_renderer_proved =
             match (file.and_then(plurx_core::playback::hdr_route), preferred) {
                 (Some(plurx_core::playback::HdrRoute::DolbyVisionRpu), Encoder::Qsv) => {
@@ -1129,9 +1177,10 @@ impl TranscodeManager {
         // the remembered pixel verdict and never opens the proof itself.
         let encoder = match file {
             Some(file) if Self::needs_dovi_reshape(file) == Ok(true) => {
-                self.dovi_reshape_encoder_advisory(file).await
+                self.dovi_reshape_encoder_advisory_with_preference(file, prefer)
+                    .await
             }
-            _ => self.encoder().await,
+            _ => preferred,
         };
         capability_height_for_encoder(file, encoder)
     }

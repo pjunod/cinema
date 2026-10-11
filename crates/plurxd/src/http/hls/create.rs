@@ -1378,21 +1378,34 @@ pub(super) fn admit_restart(
 /// network prior — see
 /// [M6-CALLER-HANDOFF.md](../../../../docs/playback-control/M6-CALLER-HANDOFF.md) §3.3 on why
 /// the rest of `resolve_plan` is not what a candidate wants.
+///
+/// `hwaccel` is the [`plurx_core::store::keys::HWACCEL`] preference when the
+/// caller already holds it — a create's own planning snapshot, read in the
+/// same task with nothing in between — and `None` to read it here.
 pub(crate) async fn resolve_height(
     state: &AppState,
     source: Option<&MediaFile>,
     network_prior: Option<&plurx_core::domain::NetworkPrior>,
     hdr10_requested: bool,
     asked: Option<i64>,
+    hwaccel: Option<&str>,
 ) -> i64 {
     let source_height = source.and_then(|f| f.height);
     match asked {
-        None => {
-            state
-                .transcode
-                .auto_height_for_request(source, network_prior, hdr10_requested)
-                .await
-        }
+        None => match hwaccel {
+            Some(prefer) => {
+                state
+                    .transcode
+                    .auto_height_for_preference(source, network_prior, hdr10_requested, prefer)
+                    .await
+            }
+            None => {
+                state
+                    .transcode
+                    .auto_height_for_request(source, network_prior, hdr10_requested)
+                    .await
+            }
+        },
         Some(h) if Some(h) == source_height => h,
         Some(h) => crate::transcode::snap_height(h),
     }
@@ -1564,8 +1577,16 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .as_ref()
         .map(|review| review.hdr10)
         .unwrap_or(body.hdr10 == Some(true));
-    let mut height =
-        resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
+    let hwaccel = snapshot.map(crate::transcode::planning_hwaccel_preference);
+    let mut height = resolve_height(
+        state,
+        source,
+        network_prior,
+        hdr10_requested,
+        body.height,
+        hwaccel,
+    )
+    .await;
     let mut candidate_context = None;
     let mut continuous_media = None;
     let mut candidate_route = None;
@@ -1666,6 +1687,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     super::super::stream::prior_for_candidate_policy(network_prior, true),
                     hdr10_requested,
                     body.height,
+                    hwaccel,
                 )
                 .await;
             }
@@ -2809,10 +2831,26 @@ async fn create_with_purpose_inner(
         .map(|review| review.hdr10)
         .unwrap_or(req.hdr10 == Some(true));
     let source_height = source.as_ref().and_then(|f| f.height);
-    let ladder_ceiling = state
-        .transcode
-        .capability_height_ceiling_for_request(source.as_ref(), hdr10_requested)
-        .await;
+    // The HWACCEL preference is in the snapshot read above, in this task,
+    // with nothing in between: decide from it rather than reading it again.
+    let ladder_ceiling = match planning_snapshot.as_ref() {
+        Some(snapshot) => {
+            state
+                .transcode
+                .capability_height_ceiling_for_preference(
+                    source.as_ref(),
+                    hdr10_requested,
+                    crate::transcode::planning_hwaccel_preference(snapshot),
+                )
+                .await
+        }
+        None => {
+            state
+                .transcode
+                .capability_height_ceiling_for_request(source.as_ref(), hdr10_requested)
+                .await
+        }
+    };
     let mut identity = super::super::network::identity(&headers, remote);
     if let Some(ref mut id) = identity {
         id.user_id = Some(user.id);

@@ -1406,6 +1406,19 @@ pub(crate) const QUALITY_PLANNING_KEYS: [&str; 24] = [
     keys::VOD_ROLLING_RETENTION,
 ];
 
+/// The [`keys::HWACCEL`] preference a planning snapshot carries; empty
+/// (auto) when unset, exactly as a direct read of the setting answers. A
+/// caller that holds the snapshot decides the encoder from this rather than
+/// reading the preference again.
+pub(crate) fn planning_hwaccel_preference(
+    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+) -> &str {
+    snapshot
+        .settings
+        .get(keys::HWACCEL)
+        .map_or("", String::as_str)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
