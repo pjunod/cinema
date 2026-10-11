@@ -609,11 +609,19 @@ where
 
     let mut verdicts = Vec::new();
     let mut selected = Pipeline::Cpu;
+    // Once a graph is proved the race is over and nothing else runs, but what
+    // this build cannot express is still a fact about the node: it costs no
+    // subprocess to state, and leaving it out would read as "never checked".
+    let mut decided = false;
     for candidate in PIPELINE_CANDIDATES.iter().copied() {
         if candidate == Pipeline::Cpu || !candidate.pairs_with(encoder) {
             continue;
         }
-        if let Err(why) = available(candidate) {
+        let availability = available(candidate);
+        if decided && availability.is_ok() {
+            continue;
+        }
+        if let Err(why) = availability {
             tracing::info!(pipeline = candidate.name(), reason = %why, "tone-map graph not available");
             verdicts.push(PipelineVerdict {
                 pipeline: candidate.name().to_owned(),
@@ -639,7 +647,7 @@ where
             if !candidate.requires_macos_context() {
                 selected = candidate;
             }
-            break;
+            decided = true;
         }
     }
 
@@ -1673,6 +1681,23 @@ mod tests {
         assert_eq!(
             report.parity(Pipeline::TonemapOpencl),
             CpuParity::NotMeasured
+        );
+        let vulkan = report
+            .verdicts
+            .iter()
+            .find(|v| v.pipeline == Pipeline::Libplacebo.name())
+            .expect("a graph this build cannot express is reported even after the race ended");
+        assert!(vulkan.unavailable && !vulkan.passed);
+        assert_eq!(
+            vulkan.rejected.as_deref(),
+            Some("not available on this platform — this FFmpeg build has no vulkan support")
+        );
+        assert!(
+            !report
+                .verdicts
+                .iter()
+                .any(|v| v.pipeline == Pipeline::TonemapOpencl.name()),
+            "an expressible graph after the decision is neither run nor reported"
         );
 
         let loses = Recorder::new(vec![
