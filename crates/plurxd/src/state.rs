@@ -1708,6 +1708,11 @@ pub struct JobManager {
     /// The subtitle-source store's own sweep cursor: `f<id>` of the last
     /// directory examined, or empty once a walk has wrapped.
     subtitle_source_sweep_cursor: Mutex<Option<String>>,
+    /// Files the last scans added or changed, oldest first, which the
+    /// node-local fragment-index pass examines before its round-robin
+    /// backlog. Without it a changed title waited for the cursor to wrap the
+    /// whole library — about 56 hours behind 900 files (lab N4, 2026-10-11).
+    fresh_index_files: std::sync::Mutex<std::collections::VecDeque<i64>>,
     /// Process-local discovery count shown in the Developer backfill item.
     subtitle_backfill_enqueued_process: AtomicU64,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
@@ -2271,6 +2276,37 @@ fn index_file_budget(duration_ms: Option<i64>) -> Duration {
 /// Stable, wrapping order for one bounded pass. The cursor is the last file a
 /// prior pass examined, successful or not; starting after it prevents a few
 /// permanently slow/unsupported rows from starving every later title.
+/// The local pass's examination order: files a refused start demanded (newest
+/// first), then files the scans added or changed (oldest first), then the
+/// round-robin backlog from the cursor. Only files still in a library are
+/// returned, each once; the flag marks the backlog entries, the only ones
+/// that advance the cursor.
+fn prioritised_index_paths(
+    paths: Vec<(i64, PathBuf)>,
+    cursor: Option<i64>,
+    demanded: &[i64],
+    fresh: &[i64],
+) -> Vec<(i64, PathBuf, bool)> {
+    let wanted: HashSet<i64> = demanded.iter().chain(fresh).copied().collect();
+    let mut found = HashMap::new();
+    let mut backlog = Vec::new();
+    for (file_id, path) in ordered_index_paths(paths, cursor) {
+        if wanted.contains(&file_id) {
+            found.insert(file_id, path);
+        } else {
+            backlog.push((file_id, path, true));
+        }
+    }
+    let mut ordered = Vec::with_capacity(found.len() + backlog.len());
+    for file_id in demanded.iter().chain(fresh) {
+        if let Some(path) = found.remove(file_id) {
+            ordered.push((*file_id, path, false));
+        }
+    }
+    ordered.extend(backlog);
+    ordered
+}
+
 fn ordered_index_paths(mut paths: Vec<(i64, PathBuf)>, cursor: Option<i64>) -> Vec<(i64, PathBuf)> {
     paths.sort_unstable_by_key(|(file_id, _)| *file_id);
     let split = cursor.map_or(0, |cursor| {
@@ -3423,6 +3459,7 @@ impl JobManager {
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
             subtitle_source_sweep_cursor: Mutex::new(None),
+            fresh_index_files: std::sync::Mutex::new(std::collections::VecDeque::new()),
             subtitle_backfill_enqueued_process: AtomicU64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
@@ -5094,6 +5131,7 @@ impl JobManager {
             "targeted scan requested"
         );
         let mut out = scan::scan_path_with_publication(publisher, &library, &req.path).await?;
+        self.note_fresh_index_files(out.items.iter().map(|placed| placed.file_id).collect());
         for request in requests {
             library_work::check_active()?;
             for problem in self.apply_ids(request, &out.items, publisher).await {
@@ -5786,7 +5824,15 @@ impl JobManager {
         )
         .await
         {
-            Ok(report) => status.last_scan = Some(report),
+            Ok(report) => {
+                self.note_fresh_index_files(std::mem::take(
+                    &mut *progress
+                        .changed_files
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ));
+                status.last_scan = Some(report);
+            }
             Err(e) => {
                 tracing::warn!(
                     library = library_id,
@@ -7903,6 +7949,37 @@ impl JobManager {
         }
     }
 
+    /// A pass has examined `file_id`: it no longer goes ahead of the backlog.
+    fn settle_index_priority(&self, transcode: &TranscodeManager, file_id: i64) {
+        transcode.settle_local_index_demand(file_id);
+        self.fresh_index_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|fresh| *fresh != file_id);
+    }
+
+    /// Queue the files a scan added or changed for the local index pass.
+    ///
+    /// Bounded like the demand list: the oldest fall back to the backlog,
+    /// which is where they would have been without this. On a node whose
+    /// pass runs the cluster queue instead, nothing consumes this and the
+    /// bound is all that keeps it.
+    fn note_fresh_index_files(&self, changed: Vec<i64>) {
+        const FRESH_INDEX_CAP: usize = 4_096;
+        if changed.is_empty() {
+            return;
+        }
+        let mut fresh = self
+            .fresh_index_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        fresh.retain(|file_id| !changed.contains(file_id));
+        fresh.extend(changed);
+        while fresh.len() > FRESH_INDEX_CAP {
+            fresh.pop_front();
+        }
+    }
+
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         if self.indexing.swap(true, Ordering::Relaxed) {
             return;
@@ -7967,13 +8044,24 @@ impl JobManager {
         }
         let cursor_key = self.local_job_key(keys::JOB_VOD_INDEX_CURSOR);
         let cursor = self.job_stamp(&cursor_key).await;
-        let paths = ordered_index_paths(paths, cursor);
+        // Demand drives order, not throughput: the same bounds below apply,
+        // a refused title and a new one are simply examined before the
+        // backlog.
+        let fresh: Vec<i64> = self
+            .fresh_index_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .copied()
+            .collect();
+        let paths = prioritised_index_paths(paths, cursor, &transcode.local_index_demand(), &fresh);
 
         let mut built = 0usize;
         let mut built_file_ids = Vec::new();
         let mut attempted = 0usize;
         let mut last_examined = None;
-        for (examined, (file_id, _path)) in paths.into_iter().enumerate() {
+        let mut cursor_at = None;
+        for (examined, (file_id, _path, backlog)) in paths.into_iter().enumerate() {
             // Both bounds stop different runaways: attempts bound the
             // whole-file reads a pass will start, while examined bounds a
             // fully indexed library's queries. Attempts count identities
@@ -7989,10 +8077,15 @@ impl JobManager {
                 return;
             }
             last_examined = Some(file_id);
+            if backlog {
+                cursor_at = Some(file_id);
+            }
             let Ok(Some(file)) = self.store.get_file(file_id).await else {
+                self.settle_index_priority(&transcode, file_id);
                 continue;
             };
             if !crate::copyseg::supports(file.video_codec.as_deref()) {
+                self.settle_index_priority(&transcode, file_id);
                 continue;
             }
             let videos = match fragment_index_video_identities(
@@ -8006,6 +8099,7 @@ impl JobManager {
                 Ok(videos) => videos,
                 Err(error) => {
                     tracing::warn!(file_id, %error, "reading probe for fragment index");
+                    self.settle_index_priority(&transcode, file_id);
                     continue;
                 }
             };
@@ -8208,6 +8302,7 @@ impl JobManager {
                     ),
                 }
             }
+            self.settle_index_priority(&transcode, file_id);
         }
         // The scheduler can tick before a first-run library has been created
         // or before its initial scan has published any files. Stamping that
@@ -8215,7 +8310,7 @@ impl JobManager {
         // for a full cadence. A pass that examined media is complete even when
         // everything was already current or unsupported; an empty or
         // preempted pass remains due for the next minute tick.
-        if let Some(file_id) = last_examined {
+        if let Some(file_id) = cursor_at {
             if let Err(error) = self
                 .store
                 .put_setting(&cursor_key, &file_id.to_string())
@@ -8223,6 +8318,8 @@ impl JobManager {
             {
                 tracing::warn!(error = %error, key = cursor_key, "recording VOD index cursor failed");
             }
+        }
+        if last_examined.is_some() {
             self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
         }
         if attempted > 0 {
@@ -15931,6 +16028,111 @@ mod tests {
         );
     }
 
+    /// Lab N4 (2026-10-11): a changed title waited for the round-robin
+    /// cursor to wrap the whole library, 4 files a pass. A file a scan just
+    /// added or changed is now examined before the backlog, under the same
+    /// per-pass bound, and does not move the cursor: the backlog resumes
+    /// where it stood.
+    #[tokio::test]
+    async fn a_fresh_file_is_indexed_before_the_round_robin_backlog() {
+        use plurx_core::store::FragmentIndexStore as _;
+        let media = crate::test_tempdir().expect("media");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "0")
+            .await
+            .expect("local indexing");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Backlog".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let mut files = Vec::new();
+        for n in 0..INDEX_MAX_PER_PASS + 2 {
+            let source = media.path().join(format!("film-{n}.mkv"));
+            std::fs::copy(plurx_core::testfixtures::source("h264"), &source)
+                .expect("copy H.264 fixture");
+            let metadata = std::fs::metadata(&source).expect("stat");
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Film {n}"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let probe = ProbeResult {
+                video_codec: Some("h264".into()),
+                duration_ms: Some(12_000),
+                ..Default::default()
+            };
+            let mtime = metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_secs() as i64;
+            let id = store
+                .upsert_file(
+                    item,
+                    &source.to_string_lossy(),
+                    metadata.len() as i64,
+                    mtime,
+                    &probe,
+                )
+                .await
+                .expect("file");
+            files.push(id);
+        }
+        let work = crate::test_tempdir().expect("work");
+        let jobs = manager(store.clone(), work.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("transcode"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let indexed = async |id: i64| {
+            let file = store.get_file(id).await.expect("read").expect("file");
+            let identity = crate::fragindex::identity_for(
+                &file,
+                plurx_core::transcode::CopyVideoOptions::new(false, false),
+            );
+            store
+                .fragment_index(id, &identity)
+                .await
+                .expect("read")
+                .is_some()
+        };
+        let fresh = *files.last().expect("files");
+        jobs.note_fresh_index_files(vec![fresh]);
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        assert!(indexed(fresh).await, "the fresh file is indexed first");
+        for &id in &files[..INDEX_MAX_PER_PASS - 1] {
+            assert!(indexed(id).await, "the backlog fills the rest of the pass");
+        }
+        let next = files[INDEX_MAX_PER_PASS - 1];
+        assert!(!indexed(next).await, "the per-pass bound still holds");
+        assert!(
+            jobs.fresh_index_files.lock().expect("fresh").is_empty(),
+            "an examined fresh file goes back to the backlog's order"
+        );
+
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        assert!(
+            indexed(next).await,
+            "the backlog resumes where it stood, not after the fresh file"
+        );
+    }
+
     #[tokio::test]
     async fn local_hevc_index_refreshes_object_proof_without_cluster_queue() {
         use plurx_core::store::FragmentIndexStore as _;
@@ -16380,6 +16582,31 @@ mod tests {
         assert!(
             !claim_was_lost,
             "foreground cancellation is a no-charge retry, not claim loss"
+        );
+    }
+
+    /// Lab N4: demand, then fresh files, then the backlog from its cursor —
+    /// each file once, and only files a library still lists.
+    #[test]
+    fn index_demand_and_fresh_files_go_before_the_backlog() {
+        let paths = [1, 9, 17, 120, 5910]
+            .into_iter()
+            .map(|file_id| (file_id, PathBuf::from(format!("/{file_id}.mkv"))))
+            .collect();
+        let ordered: Vec<(i64, bool)> =
+            prioritised_index_paths(paths, Some(17), &[9, 404], &[1, 9, 5910])
+                .into_iter()
+                .map(|(file_id, _, backlog)| (file_id, backlog))
+                .collect();
+        assert_eq!(
+            ordered,
+            [
+                (9, false),
+                (1, false),
+                (5910, false),
+                (120, true),
+                (17, true)
+            ]
         );
     }
 

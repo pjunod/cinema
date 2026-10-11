@@ -359,6 +359,7 @@ impl VodServe {
                 base,
                 runtime_cache,
                 store,
+                local_index_demand: StdMutex::new(VecDeque::new()),
                 obsolete_encoded_generations: Mutex::new(VecDeque::from(
                     obsolete_encoded_generations,
                 )),
