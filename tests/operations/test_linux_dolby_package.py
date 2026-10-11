@@ -2,6 +2,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 import tempfile
@@ -219,13 +220,49 @@ printf '%s\n' "$cc" "$cxx" "$pkg_config"
             self.assertFalse((root / "provenance/linux-dolby-package.json").exists())
 
 
-    def test_normal_docker_caller_requires_audited_amd64_package_and_keeps_arm_incumbent(self):
+    def run_make_docker(self, machine, package=None):
+        """Run the real `make docker` recipe with docker and the package step recorded."""
         root = Path(__file__).resolve().parents[2]
-        make = (root / "Makefile").read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake, calls = Path(tmp) / "bin", Path(tmp) / "calls"
+            fake.mkdir()
+            real_python = subprocess.run(["sh", "-c", "command -v python3"], capture_output=True, text=True, check=True).stdout.strip()
+            real_uname = subprocess.run(["sh", "-c", "command -v uname"], capture_output=True, text=True, check=True).stdout.strip()
+            scripts = {
+                "docker": f'printf "docker %s\\n" "$*" >> "{calls}"',
+                "uname": f'if [ "$1" = -m ]; then echo {machine}; else exec {real_uname} "$@"; fi',
+                "python3": f'if [ "$1" = scripts/build-linux-dolby-ffmpeg ]; then printf "package %s\\n" "$*" >> "{calls}"; else exec {real_python} "$@"; fi',
+            }
+            for name, body in scripts.items():
+                (fake / name).write_text("#!/bin/sh\n" + body + "\n")
+                (fake / name).chmod(0o755)
+            env = {key: value for key, value in os.environ.items() if key not in ["PLURX_LINUX_DOLBY_PACKAGE", "DOCKER_DEFAULT_PLATFORM", "MAKEFLAGS", "MAKELEVEL"]}
+            env["PATH"] = f"{fake}:{env.get('PATH', '')}"
+            if package is not None:
+                env["PLURX_LINUX_DOLBY_PACKAGE"] = package
+            result = subprocess.run(["make", "-s", "-C", str(root), "docker"], env=env, capture_output=True, text=True, timeout=60)
+            return result, calls.read_text().splitlines() if calls.exists() else []
+
+    def test_normal_docker_caller_builds_runtime_without_package_and_installs_supplied_amd64_package(self):
+        # The package is an input, never a precondition: amd64 without one
+        # builds the same runtime stage Compose and arm64 build.
+        for machine, platform in [("x86_64", "linux/amd64"), ("aarch64", "linux/arm64")]:
+            result, calls = self.run_make_docker(machine)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(calls), 1, calls)
+            self.assertTrue(calls[0].startswith(f"docker build --target runtime --platform {platform} "), calls)
+            self.assertIn("-t plurx/plurxd:latest", calls[0])
+        result, calls = self.run_make_docker("x86_64", package="/srv/audited-package")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertTrue(calls[0].startswith("package scripts/build-linux-dolby-ffmpeg --step docker-build "), calls)
+        self.assertIn("--output /srv/audited-package", calls[0])
+        # docker-build compiles plurxd; a package-phase deadline would kill it.
+        root = Path(__file__).resolve().parents[2]
         docker = (root / "Dockerfile").read_text()
-        assert "PLURX_LINUX_DOLBY_PACKAGE" in make
-        assert "--step docker-build" in make
-        assert "--target runtime --platform linux/arm64" in make
+        builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()
+        invocation = builder.split('"docker", "buildx", "build"', 1)[1].split("\n    elif", 1)[0]
+        assert "timeout=" not in invocation
         assert "FROM runtime AS runtime-dolby-amd64" in docker
         assert "--mount=from=linux-dolby-package" in docker
         assert "--step install-shipping" in docker
