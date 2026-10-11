@@ -4543,6 +4543,27 @@ mod tests {
         assert!(encode.iter().any(|a| a == "main10"));
     }
 
+    /// The two QSV Main10 probes must keep taking their graph from the proof
+    /// builder: an inline frame size in either one is how the 64x64 proof
+    /// that refused Intel's 4K HDR10 rung came about.
+    #[test]
+    fn qsv_main10_probes_take_their_graph_from_the_proof_builder() {
+        let source = include_str!("ffmpeg.rs");
+        for probe in [
+            "pub async fn has_hdr10_passthrough_qsv(",
+            "pub async fn has_dovi_passthrough_with(",
+        ] {
+            let start = source.find(probe).expect("probe is defined");
+            let body = &source[start..];
+            let end = body[probe.len()..]
+                .find("\npub ")
+                .map_or(body.len(), |offset| offset + probe.len());
+            let body = &body[..end];
+            assert!(body.contains("hardware_main10_probe_args("), "{probe}");
+            assert!(!body.contains("color=size="), "{probe}");
+        }
+    }
+
     #[tokio::test]
     async fn held_clock_reporter_bytes_enter_existing_engine_identity_and_publication_fence() {
         use super::*;

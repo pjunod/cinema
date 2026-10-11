@@ -753,12 +753,7 @@ const GRAPH_GLOBAL_ARGS: &[&str] = &[
     "file,pipe",
 ];
 
-/// One refused candidate graph, as the operator report shows it. Discovery
-/// and validation refusals keep their own reason so a node that observes no
-/// hardware graph says why each candidate failed.
-#[cfg(target_os = "linux")]
 /// How a discovery graph's loaded object relates to the audited package.
-#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum LoadedObjectRole<'a> {
     /// Not a packaged runtime role (libc, the kernel's own objects, ...).
@@ -766,16 +761,16 @@ enum LoadedObjectRole<'a> {
     /// The package's own file; its bytes must equal the audited digest.
     Packaged { expected: &'a str },
     /// A file outside the package that carries a packaged runtime's name:
-    /// a different library, never evidence about the package's bytes.
-    Foreign,
+    /// a different library, never evidence about the package's bytes. The
+    /// role is the file name only; no directory crosses the operator report.
+    Foreign { role: &'a str },
 }
 
 /// Classify one followed loader object. Roles are file names, so the path
 /// decides whether a packaged role is the package's file at all: only a file
 /// under the package root can confirm or contradict the audited digest.
-#[cfg(any(target_os = "linux", test))]
 fn loaded_object_role<'a>(
-    path: &std::path::Path,
+    path: &'a std::path::Path,
     package_root: &std::path::Path,
     runtime_objects: &'a std::collections::BTreeMap<String, String>,
 ) -> Result<LoadedObjectRole<'a>, &'static str> {
@@ -790,7 +785,7 @@ fn loaded_object_role<'a>(
         return Ok(LoadedObjectRole::Unrelated);
     }
     if !path.starts_with(package_root) {
-        return Ok(LoadedObjectRole::Foreign);
+        return Ok(LoadedObjectRole::Foreign { role });
     }
     runtime_objects
         .get(role)
@@ -798,9 +793,23 @@ fn loaded_object_role<'a>(
         .ok_or("loaded_package_object_unbound")
 }
 
+/// One refused candidate graph, as the operator report shows it. Discovery
+/// and validation refusals keep their own reason so a node that observes no
+/// hardware graph says why each candidate failed.
+#[cfg(target_os = "linux")]
 fn graph_refusal(case: GraphCase<'_>, stage: &str, reason: &str) -> Value {
     json!({"decoder": format!("{:?}", case.decoder), "encoder": format!("{:?}", case.encoder),
            "stage": stage, "reason": reason})
+}
+
+/// A discovery graph refused for loading a foreign copy of a packaged
+/// runtime, naming which one: a stray Media SDK and a misdirected VA driver
+/// are different operator problems.
+#[cfg(target_os = "linux")]
+fn foreign_object_refusal(case: GraphCase<'_>, role: &str) -> Value {
+    let mut refusal = graph_refusal(case, "discovery", "foreign_runtime_object");
+    refusal["object"] = Value::from(role);
+    refusal
 }
 
 /// A failed control refuses only its own candidate graph, so later candidates
@@ -1378,7 +1387,7 @@ async fn qualify_generation(
                 .path
                 .parent()
                 .ok_or("package_provenance_missing")?;
-            let mut foreign = false;
+            let mut foreign = None;
             for object in &closure.objects {
                 if object.kind != plurx_core::transcode::LinuxExecutionObjectKind::FollowedFile {
                     continue;
@@ -1391,7 +1400,9 @@ async fn qualify_generation(
                     // an exact-package graph, so it contributes no capability;
                     // the package itself is unchanged and the other graphs
                     // still stand.
-                    LoadedObjectRole::Foreign => foreign = true,
+                    LoadedObjectRole::Foreign { role } => {
+                        foreign.get_or_insert_with(|| role.to_owned());
+                    }
                     LoadedObjectRole::Packaged { expected } => {
                         let (actual, _) = super::hash_engine_object(&object.path)
                             .await
@@ -1402,8 +1413,8 @@ async fn qualify_generation(
                     }
                 }
             }
-            if foreign {
-                refusals.push(graph_refusal(case, "discovery", "foreign_runtime_object"));
+            if let Some(role) = foreign {
+                refusals.push(foreign_object_refusal(case, &role));
                 continue;
             }
             closure_digests.push(closure.digest);
@@ -1698,14 +1709,18 @@ mod tests {
             ("libmfxhw64.so.1.35".to_owned(), "a".repeat(64)),
             ("libavcodec.so.62".to_owned(), "b".repeat(64)),
         ]);
-        let role = |path: &str| loaded_object_role(Path::new(path), root, &inventory);
+        let role = |path: &'static str| loaded_object_role(Path::new(path), root, &inventory);
         assert_eq!(
             role("/usr/lib/x86_64-linux-gnu/libmfxhw64.so.1.35"),
-            Ok(LoadedObjectRole::Foreign)
+            Ok(LoadedObjectRole::Foreign {
+                role: "libmfxhw64.so.1.35"
+            })
         );
         assert_eq!(
             role("/usr/lib/x86_64-linux-gnu/libavcodec.so.59"),
-            Ok(LoadedObjectRole::Foreign)
+            Ok(LoadedObjectRole::Foreign {
+                role: "libavcodec.so.59"
+            })
         );
         let expected = "a".repeat(64);
         assert_eq!(
@@ -1729,7 +1744,40 @@ mod tests {
         // A sibling directory that merely shares the prefix is outside.
         assert_eq!(
             role("/usr/lib/jellyfin-ffmpeg-old/lib/libmfxhw64.so.1.35"),
-            Ok(LoadedObjectRole::Foreign)
+            Ok(LoadedObjectRole::Foreign {
+                role: "libmfxhw64.so.1.35"
+            })
+        );
+    }
+
+    /// The operator report names the foreign runtime by file name, never by
+    /// the directory it was loaded from.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_foreign_runtime_refusal_names_the_file_not_its_directory() {
+        use plurx_core::transcode::{DecodeBackend, Encoder};
+        let case = GraphCase {
+            bytes: UHD_MEDIA[0].1,
+            decoder: DecodeBackend::Vaapi,
+            encoder: Encoder::Qsv,
+            uhd24: true,
+            negative: false,
+            seek_seconds: 0,
+        };
+        let path = std::path::Path::new("/usr/lib/x86_64-linux-gnu/libmfxhw64.so.1.35");
+        let inventory =
+            std::collections::BTreeMap::from([("libmfxhw64.so.1.35".to_owned(), "a".repeat(64))]);
+        let Ok(LoadedObjectRole::Foreign { role }) = loaded_object_role(
+            path,
+            std::path::Path::new("/usr/lib/jellyfin-ffmpeg"),
+            &inventory,
+        ) else {
+            panic!("a system copy of a packaged runtime is foreign");
+        };
+        assert_eq!(
+            foreign_object_refusal(case, role),
+            json!({"decoder": "Vaapi", "encoder": "Qsv", "stage": "discovery",
+                   "reason": "foreign_runtime_object", "object": "libmfxhw64.so.1.35"})
         );
     }
 
