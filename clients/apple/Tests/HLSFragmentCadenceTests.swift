@@ -180,8 +180,9 @@ final class HLSFragmentCadenceTests: XCTestCase {
 
     // MARK: - The network path
 
-    func testLargeCopySegmentIsReadThroughItsIndexNotItsPayload() async throws {
-        // A 21 Mb/s copy segment of six seconds is ~16 MB; this one is 40 MB.
+    /// The real copy segment's `moof`, then one `mdat` whose payload is
+    /// `payload` zero bytes, served lazily.
+    private func largeCopySegment(payload: Int, ranges: Bool) throws -> CadenceStub.Resource {
         let real = Fixtures.copySegment
         var at = 0, mdat = 0
         while at + 8 <= real.count {
@@ -190,44 +191,50 @@ final class HLSFragmentCadenceTests: XCTestCase {
             at += size
         }
         XCTAssertGreaterThan(mdat, 0)
-        let payload = 40_000_000
-        let length = mdat + 8 + payload
         var built = Data(real.prefix(mdat))
         built.append(contentsOf: [UInt8((payload + 8) >> 24), UInt8(((payload + 8) >> 16) & 255), UInt8(((payload + 8) >> 8) & 255), UInt8((payload + 8) & 255)])
         built.append(contentsOf: Array("mdat".utf8))
         let head = built
-        let segment = CadenceStub.Resource(length: length, ranges: true) { range in
+        return CadenceStub.Resource(length: mdat + 8 + payload, ranges: ranges) { range in
             var out = Data()
             if range.lowerBound < head.count { out.append(head[range.lowerBound..<min(range.upperBound, head.count)]) }
             out.append(Data(count: range.count - out.count))
             return out
         }
+    }
+
+    private func inspectCopy(_ segment: CadenceStub.Resource) async throws -> (host: String, cadence: PreparedDecodedCadence?) {
         let host = CadenceStub.host()
         CadenceStub.install(host, [
             "/hls/s1/index.m3u8": .text(Self.playlist(map: true)),
             "/hls/s1/init.mp4": .bytes(Fixtures.initMP4),
             "/hls/s1/seg0.m4s": segment,
         ])
-        let inspected = await HLSFragmentCadence.inspect(
+        let cadence = await HLSFragmentCadence.inspect(
             url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 4_000,
             configuration: CadenceStub.configuration())
-        let cadence = try XCTUnwrap(inspected)
+        return (host, cadence)
+    }
+
+    func testLargeCopySegmentIsReadThroughItsIndexNotItsPayload() async throws {
+        // A 21 Mb/s copy segment of six seconds is ~16 MB; this one is 40 MB.
+        let inspected = try await inspectCopy(try largeCopySegment(payload: 40_000_000, ranges: true))
+        let cadence = try XCTUnwrap(inspected.cadence)
         XCTAssertEqual(cadence.frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
         XCTAssertEqual(cadence.itemInterval, 0..<6)
-        XCTAssertLessThanOrEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), HLSFragmentCadence.indexWindowBytes)
+        XCTAssertLessThanOrEqual(CadenceStub.served(inspected.host, "/hls/s1/seg0.m4s"), HLSFragmentCadence.indexWindowBytes)
+    }
 
-        // A server that ignores Range for that segment answers with the whole
-        // object; it does not fit one window, so the proof is refused unread.
-        let ignoring = CadenceStub.host()
-        CadenceStub.install(ignoring, [
-            "/hls/s1/index.m3u8": .text(Self.playlist(map: true)),
-            "/hls/s1/init.mp4": .bytes(Fixtures.initMP4),
-            "/hls/s1/seg0.m4s": CadenceStub.Resource(length: length, ranges: false, bytes: segment.bytes),
-        ])
-        let refused = await HLSFragmentCadence.inspect(
-            url: try XCTUnwrap(URL(string: "http://\(ignoring)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 4_000,
-            configuration: CadenceStub.configuration())
-        XCTAssertNil(refused)
+    /// A server that ignores Range answers with the whole object. Its body is
+    /// walked as it arrives, keeping only `moof` bytes, up to the byte cap
+    /// the earlier whole-segment read allowed; past the cap it is refused.
+    func testServerIgnoringRangeIsWalkedContiguouslyWithinTheCap() async throws {
+        let walked = try await inspectCopy(try largeCopySegment(payload: 12_000_000, ranges: false))
+        let cadence = try XCTUnwrap(walked.cadence)
+        XCTAssertEqual(cadence.frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        XCTAssertEqual(cadence.itemInterval, 0..<6)
+        let refused = try await inspectCopy(try largeCopySegment(payload: HLSFragmentCadence.maximumUnrangedFragmentBytes, ranges: false))
+        XCTAssertNil(refused.cadence)
     }
 
     func testTransportStreamSuccessorWithoutAMapResolvesItsCadence() async throws {

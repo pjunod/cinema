@@ -165,6 +165,9 @@ enum HLSFragmentCadence {
     static let maximumIndexBytes = 4_194_304
     /// Windows per segment: one per `moof`/`mdat` pair in practice.
     static let maximumIndexRequests = 64
+    /// A segment from a server that ignores Range is walked contiguously as
+    /// it arrives; this bounds the bytes such a server may cost.
+    static let maximumUnrangedFragmentBytes = 16_777_216
     /// An MPEG-TS segment has no index, so it is read once, in the order it
     /// arrives, keeping only timestamps. This bounds the bytes it may cost.
     static let maximumTransportStreamBytes = 67_108_864
@@ -210,7 +213,7 @@ enum HLSFragmentCadence {
     /// cancellation are checked per chunk.
     private static func fetch(_ url: URL, range: Range<Int>? = nil, limit: Int, deadline: TimeInterval,
                               session: URLSession, loads: ChunkedLoads,
-                              chunk: (Data) throws -> Bool) async throws -> HTTPURLResponse {
+                              chunk: (HTTPURLResponse, Data) throws -> Bool) async throws -> HTTPURLResponse {
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
         guard remaining > 0, !Task.isCancelled else { throw Invalid.media }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: remaining)
@@ -232,7 +235,7 @@ enum HLSFragmentCadence {
                 guard let response else { throw Invalid.media }
                 received += data.count
                 guard received <= limit else { throw Invalid.media }
-                if try !chunk(data) { return response }
+                if try !chunk(response, data) { return response }
             }
         }
         guard let response, !Task.isCancelled, ProcessInfo.processInfo.systemUptime < deadline,
@@ -242,7 +245,7 @@ enum HLSFragmentCadence {
 
     private static func load(_ url: URL, limit: Int, deadline: TimeInterval, session: URLSession, loads: ChunkedLoads) async throws -> Data {
         var data = Data()
-        _ = try await fetch(url, limit: limit, deadline: deadline, session: session, loads: loads) { data.append($0); return true }
+        _ = try await fetch(url, limit: limit, deadline: deadline, session: session, loads: loads) { data.append($1); return true }
         return data
     }
 
@@ -259,23 +262,33 @@ enum HLSFragmentCadence {
 
     /// Walk the segment's top-level boxes through bounded range windows,
     /// retaining every `moof` and stepping over each `mdat`. A server that
-    /// ignores the range answers 200 with the whole object, which is accepted
-    /// only when it fits one window.
+    /// ignores the range answers 200 with the whole object: that body is
+    /// walked contiguously as it arrives — still keeping only `moof` bytes —
+    /// and the transfer stops as soon as the boxes tile the segment.
     private static func fragmentIndex(_ url: URL, deadline: TimeInterval, session: URLSession, loads: ChunkedLoads) async throws -> FragmentIndex {
         var walk: FragmentIndex?
         var offset = 0
         for _ in 0..<maximumIndexRequests {
             var window = Data()
-            let response = try await fetch(url, range: offset..<(offset + indexWindowBytes), limit: indexWindowBytes,
-                                           deadline: deadline, session: session, loads: loads) { window.append($0); return true }
-            let total: Int
-            if response.statusCode == 206 {
-                guard let ranged = contentRange(response.value(forHTTPHeaderField: "Content-Range"), offset: offset, count: window.count) else { throw Invalid.media }
-                total = ranged
-            } else {
-                guard offset == 0 else { throw Invalid.media }
-                total = window.count
+            var whole: FragmentIndex?
+            let response = try await fetch(url, range: offset..<(offset + indexWindowBytes), limit: maximumUnrangedFragmentBytes,
+                                           deadline: deadline, session: session, loads: loads) { response, chunk in
+                if response.statusCode == 206 {
+                    window.append(chunk)
+                    guard window.count <= indexWindowBytes else { throw Invalid.media }
+                    return true
+                }
+                guard offset == 0, response.expectedContentLength >= 0 else { throw Invalid.media }
+                var current = whole ?? FragmentIndex(total: Int(response.expectedContentLength))
+                try current.consume(chunk, at: current.needed)
+                whole = current
+                return !current.finished
             }
+            guard response.statusCode == 206 else {
+                guard let whole, whole.finished else { throw Invalid.media }
+                return whole
+            }
+            guard let total = contentRange(response.value(forHTTPHeaderField: "Content-Range"), offset: offset, count: window.count) else { throw Invalid.media }
             var current = walk ?? FragmentIndex(total: total)
             guard current.total == total else { throw Invalid.media }
             try current.consume(window, at: offset)
@@ -290,7 +303,7 @@ enum HLSFragmentCadence {
     private static func transportStreamDuration(_ url: URL, deadline: TimeInterval, session: URLSession, loads: ChunkedLoads) async throws -> Double? {
         var stream = TransportStreamCadence()
         _ = try await fetch(url, limit: maximumTransportStreamBytes, deadline: deadline, session: session, loads: loads) {
-            try stream.consume($0); return true
+            try stream.consume($1); return true
         }
         return stream.minimumDuration()
     }
