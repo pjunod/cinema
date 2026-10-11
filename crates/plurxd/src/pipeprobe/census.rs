@@ -1011,7 +1011,7 @@ fn still_args(raw: &Path, png: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission::{Admissions, Priority};
+    use crate::admission::Admissions;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -1383,7 +1383,7 @@ mod tests {
         let census = Arc::new(ToneMapCensus::default());
         let admissions = Admissions::new();
         let viewer = admissions
-            .try_acquire(2, Priority::Live)
+            .try_acquire(2, crate::admission::Priority::Live)
             .expect("a viewer plays");
         let tools = Arc::new(FakeTools::new(|_| 100));
         let (generation, stop) = census.begin().expect("test fixture");
@@ -1633,7 +1633,9 @@ mod tests {
         assert!(!admissions.background_is_active());
         drop(wait);
         assert!(
-            admissions.try_acquire(2, Priority::Live).is_some(),
+            admissions
+                .try_acquire(2, crate::admission::Priority::Live)
+                .is_some(),
             "the viewer gets the slot"
         );
     }
