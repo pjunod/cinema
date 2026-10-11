@@ -5546,9 +5546,11 @@ impl TakeoverGate {
     /// On: one `TAKEOVER_INTERVAL` tick, exactly as before. Off (the fleet
     /// default): the rest of an idle period is slept here, so the caller
     /// never reaches the inventory read. The sleep is cut short by a local
-    /// switch write and, while an "off" is held, by this replica applying an
-    /// entry, which may be an enable saved elsewhere; the next tick then looks
-    /// at the replica's switches. With nothing held (a failed read) only the
+    /// switch write and, while an "off" is held, by this replica's applied
+    /// index moving past the one the held answer covers, which may be an
+    /// enable saved elsewhere; the next tick then looks at the replica's
+    /// switches. Any other change the Raft watch reports (leader, term,
+    /// membership) leaves the index where it was and does not end the sleep. With nothing held (a failed read) only the
     /// idle period and a local write end the sleep, so a failing read keeps
     /// its existing cadence. A wake only ends the sleep: whether the held
     /// answer is stale is the generation's and the replica's call.
@@ -5563,12 +5565,12 @@ impl TakeoverGate {
         if self.enabled(store).await {
             return true;
         }
-        let watching = self.held.is_some() && self.changes.live();
-        let changes = &mut self.changes;
+        let held = self.held.as_ref().map(|held| &held.proof);
+        let watching = held.is_some() && self.changes.live();
         tokio::select! {
             () = tokio::time::sleep(TAKEOVER_IDLE_TICK.saturating_sub(TAKEOVER_INTERVAL)) => {}
             () = self.signal.wake.notified() => {}
-            _ = changes.changed(), if watching => {}
+            () = self.changes.applied_past(held), if watching => {}
         }
         false
     }
@@ -11114,6 +11116,51 @@ mod takeover_gate_tests {
     /// value `Switches::set` already put in the replica.
     fn apply_entry(applied: &tokio::sync::watch::Sender<u64>) {
         applied.send_modify(|index| *index += 1);
+    }
+
+    /// The Raft watch wakes on any metrics change. One that leaves the applied
+    /// index where it was (a leader lease, a term) cannot have changed a
+    /// switch, so it must not cut the 10 s idle sleep short: on a busy
+    /// cluster it would shrink every idle sleep to the 2 s tick.
+    #[tokio::test(start_paused = true)]
+    async fn an_off_gate_sleeps_through_metrics_changes_that_do_not_apply_an_entry() {
+        let switches = Switches::default();
+        let (mut gate, _signal, applied) = watched_gate();
+        let mut interval = takeover_interval();
+        assert!(!gate.wait_for_tick(&mut interval, &switches).await);
+        let started = tokio::time::Instant::now();
+        let nudges = async {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                applied.send_modify(|_| {});
+            }
+        };
+        let (acted, ()) = tokio::join!(gate.wait_for_tick(&mut interval, &switches), nudges);
+        assert!(!acted);
+        assert!(
+            started.elapsed() >= TAKEOVER_IDLE_TICK.saturating_sub(TAKEOVER_INTERVAL),
+            "woken after {:?} by changes that applied nothing",
+            started.elapsed()
+        );
+
+        // An applied entry still ends the sleep at once.
+        let started = tokio::time::Instant::now();
+        let entry = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            apply_entry(&applied);
+        };
+        let (acted, ()) = tokio::join!(gate.wait_for_tick(&mut interval, &switches), entry);
+        assert!(!acted);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "an applied entry ends the sleep, slept {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            switches.reads(),
+            1,
+            "and the replica agreeing costs no read"
+        );
     }
 
     /// A disable saved on another node that this replica has not applied:

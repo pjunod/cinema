@@ -69,6 +69,23 @@ impl SettingsChangeSource {
         }
     }
 
+    /// Wait until this replica's applied index differs from the one `held`
+    /// covers, or until the source can report nothing more. The Raft watch
+    /// wakes on any metrics change (a heartbeat's leader lease, a term, a
+    /// membership snapshot); one that leaves the applied index where it was
+    /// cannot have changed a setting, so it does not end the wait. With
+    /// nothing held there is no index to move past, and this never returns.
+    pub(crate) async fn applied_past<T>(&mut self, held: Option<&Proved<T>>) {
+        let Some(held) = held else {
+            return std::future::pending().await;
+        };
+        while self.applied_index() == held.applied {
+            if !self.changed().await {
+                return;
+            }
+        }
+    }
+
     /// Mark a value as proved by a consistent read that starts now. The mark
     /// is taken before the read because the read covers every entry applied
     /// before it; an entry applied during the read moves the index past the

@@ -4448,7 +4448,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `follow_stored_enforcement`, still ended by the same shutdown token.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: that test's 5 ms `std::thread::sleep` while
 # it polls /proc for the child's zombie state, bounded by a 10 s deadline.
-expected_occurrences = 1704
+# K-03 off-gate wake on applied-index moves only: +2, test-only, in
+# media_sessions::takeover_gate_tests. One 250 ms sleep paces metrics changes
+# that apply nothing and one 500 ms sleep paces an applied entry; each runs in
+# a future joined with the gate's own wait (no spawn) and ends with it.
+# Production adds no timer: the idle sleep's watch arm loops on the same
+# watch until the applied index moves.
+expected_occurrences = 1706
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
