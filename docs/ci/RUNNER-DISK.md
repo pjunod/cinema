@@ -21,18 +21,21 @@ general/high-cpu pool while six more measurements waited behind it.
 | `lab6` and `lab4` | Two 8 GiB runner VMs per host, one active Forgejo daemon per VM. Duplicate `lab6` daemons are disabled. |
 | Host user workloads | `user-1000.slice`: `MemoryHigh=4G`, `MemoryMax=6G`, `MemorySwapMax=4G`; this limits all operator processes in that slice, including direct compiles. Docker production services have separate cgroups. |
 | `lab4` swap | The existing 8 GiB swap file is activated and restored in fstab; no new disk allocation. |
-| General VM jobs | Runner container options: `--cpus 3 --memory 6g --memory-swap 10g --pids-limit 4096`; one Cargo job and two Rust test threads. Host-mode runner services also have a 6 GiB cgroup cap and 300% CPU quota. |
+| General VM jobs | Runner container options: `--cpus 3 --memory 7g --memory-swap 10g --pids-limit 4096`; one Cargo job and two Rust test threads. Host-mode runner services also have a 7 GiB cgroup cap and 300% CPU quota. |
 | Coverage | Reserved `lab6` second VM, `ci-coverage` label only, two CPUs and 6 GiB memory. Manual dispatch replaces push-triggered coverage. |
 | `lab3` | Both runner VMs retired, `boot.autostart=false`; neither belongs to a recovery allowlist. Production and observability retain its disk. |
 | Apple janitor | Fixed 25 GiB job reserve, no reset for a cache below 1 GiB, verified bounded bootstrap retries, unloaded-daemon recovery before cache inspection, five-minute checks. Intentional `launchctl disable` is respected. |
 
 Each active guest has a persistent 4 GiB swap file. Reconciliation creates it
 only with at least 12 GiB free, leaving an 8 GiB disk reserve; existing files
-are never replaced. A 6 GiB resident-memory cap plus 4 GiB swap lets large
-compiler processes finish while the VM allocation remains 8 GiB. Without
+are never replaced. General jobs have 7 GiB resident memory plus 3 GiB swap;
+coverage has 6 GiB plus 4 GiB swap. The VM allocation remains 8 GiB. Without
 guest swap, two concurrent compiler processes were killed by the 6 GiB cap.
 Jobs beyond this combined budget fail inside the guest instead of removing
-the VM. The retired `lab3` guests receive no swap allocation.
+the VM. A single daemon compiler reached about 7 GiB, so the general resident
+cap was raised from 6 GiB to avoid paging its working set constantly. The
+retired `lab3` guests receive no swap allocation. Both `lab4` root disks are
+100 GiB so toolchains, Cargo caches and swap leave the 25 GiB job reserve.
 
 The host user budget is persistent systemd configuration:
 
@@ -43,8 +46,9 @@ sudo systemctl set-property user-1000.slice MemoryHigh=4G MemoryMax=6G MemorySwa
 Each guest runner's `config.yml` keeps `capacity: 1`,
 `shutdown_timeout: 30m`, `CARGO_BUILD_JOBS: "1"` and `RUST_TEST_THREADS: "2"`
 under `runner.envs`, plus the table's resource flags under `container.options`.
-Its `20-resource-budget.conf` systemd drop-in sets `MemoryHigh=5G`,
-`MemoryMax=6G`, `MemorySwapMax=4G`, `CPUQuota=300%` (200% for coverage),
+Its `20-resource-budget.conf` systemd drop-in sets `MemoryHigh=6G`,
+`MemoryMax=7G`, `MemorySwapMax=3G`, `CPUQuota=300%`. Coverage uses 5G/6G/4G
+and 200% CPU. Both set
 `Restart=always`, `RestartSec=5` and `TimeoutStopSec=30min`. Request a graceful
 restart after changing configuration; do not reboot a VM with a live job.
 

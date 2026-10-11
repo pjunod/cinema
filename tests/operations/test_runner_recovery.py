@@ -137,6 +137,16 @@ class RunnerReconcileCase(unittest.TestCase):
         self.assertIn('--cpus 2 --memory 6g --memory-swap 10g', updated)
         self.assertEqual(updated, module.configuration(updated, ["self-hosted", "ci-coverage"], 2))
 
+    def test_general_compiler_budget_keeps_coverage_separate(self):
+        module = self.swap_module()
+        source = "runner:\n  envs: {}\ncontainer:\n  options: old\n"
+        general = module.configuration(source, ["self-hosted", "general", "high-cpu"], 3)
+        coverage = module.configuration(source, ["self-hosted", "ci-coverage"], 2)
+        self.assertIn('--cpus 3 --memory 7g --memory-swap 10g', general)
+        self.assertIn('--cpus 2 --memory 6g --memory-swap 10g', coverage)
+        self.assertIn('CARGO_BUILD_JOBS: "1"', general)
+        self.assertIn('CARGO_BUILD_JOBS: "1"', coverage)
+
     def swap_module(self):
         loader = importlib.machinery.SourceFileLoader("runner_swap", str(ROOT / "deploy/runner-recovery/plurx-runner-reconcile"))
         spec = importlib.util.spec_from_loader(loader.name, loader)
