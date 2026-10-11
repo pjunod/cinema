@@ -69,6 +69,31 @@ async function logout({revoke=true,notice=""}={}){
   finally{ if(SIGN_OUT_RUN&&SIGN_OUT_RUN.promise===run) SIGN_OUT_RUN=null; }
 }
 let SERVER=null;   // last /server response (name, version, android_app, …)
+// Last /features answer: the four section enable switches, readable by any
+// signed-in user (the switches themselves live in admin-only /settings).
+// null means "not known": every section is shown, which is what a server
+// without the route — or one we could not reach — must keep getting.
+/** @type {{live_tv?:boolean,recordings?:boolean,shared_libraries?:boolean,library_channels?:boolean}|null} */
+let FEATURES=null;
+async function loadFeatures(){
+  try{
+    const value=await api("/features");
+    if(value&&typeof value==="object"&&!Array.isArray(value)) FEATURES=value;
+  }catch(e){ void e; }   // keep the previous answer; null still shows everything
+  return FEATURES;
+}
+// /features is the only source of truth for the nav: an admin's own settings
+// carry the same switches, but mapping them here would be a second copy of the
+// server's rule that could drift. cacheSettings() calls this after every
+// settings read or save, so a switch the admin just flipped reaches their nav
+// without a reload. Never rejects; repaints only when the answer changed.
+async function refreshFeatures(){
+  const before=JSON.stringify(FEATURES);
+  const after=await loadFeatures();
+  if(JSON.stringify(after)===before) return false;
+  if(typeof layoutNavChanged==="function") layoutNavChanged();
+  return true;
+}
 async function boot(){
   // Before anything can build a /decision URL: the MediaCapabilities refinement
   // of PLAY_CAPS is async, and the server hears one capability answer per
@@ -92,6 +117,9 @@ async function boot(){
     return renderLogin(server);
   }
   try{ ME=await api("/me"); }catch(e){ return NATIVE_READER_BOOT?undefined:renderLogin(server); }
+  // Before the first chrome paint, so a disabled section never flashes in
+  // the nav. Never throws: a failed read leaves every section showing.
+  await loadFeatures();
   location.hash=location.hash||"#/";
   render();
 }
@@ -128,7 +156,7 @@ function renderSetup(){
       if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
       if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
-      refreshClientErrorReporterAuth(); location.hash="#/"; render();
+      refreshClientErrorReporterAuth(); await loadFeatures(); location.hash="#/"; render();
     });
   markBootReady();
 }
@@ -150,7 +178,7 @@ function renderLogin(){
       if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
       if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
-      refreshClientErrorReporterAuth(); location.hash="#/"; render();
+      refreshClientErrorReporterAuth(); await loadFeatures(); location.hash="#/"; render();
     });
   markBootReady();
 }

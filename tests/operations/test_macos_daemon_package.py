@@ -96,6 +96,53 @@ class MacosDaemonPackageCase(unittest.TestCase):
                     self.assertFalse(self.output.exists())
         (self.package / "provenance/manifest.json").write_text(json.dumps(self.native_manifest))
 
+    def test_font_tools_and_relocatable_rules_are_hash_bound_before_copy(self):
+        facts = {"schema_version": 1, "source_role": "fc",
+                 "source_commit": "6d0a98982ec351c165c9224c8b7dbdfca3010e47",
+                 "source_sha256": "00a589ef0a455d9cf3db55a13e1aa15090a96e65b18a3fe89c182b7be277576d",
+                 "binaries": {}, "configuration": {}, "provenance_sha256": {}}
+        for name in ["fc-list", "fc-conflist"]:
+            image = self.package / name
+            image.write_bytes(struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0) + name.encode())
+            facts["binaries"][name] = {"sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "bytes": image.stat().st_size,
+                                      "architecture": "arm64", "linked_libraries": ["/usr/lib/libSystem.B.dylib"]}
+        for directory, key, name, content in [
+                ("fontconfig", "configuration", "fonts.conf", b"<fontconfig><include>conf.d</include></fontconfig>"),
+                ("fontconfig", "configuration", "conf.d/10-original.conf", b"<fontconfig/>"),
+                ("provenance/font-tools", "provenance_sha256", "source.json", b"pinned source receipt")]:
+            path = self.package / directory / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            facts[key][name] = hashlib.sha256(content).hexdigest()
+        self.native_manifest["font_tools"] = facts
+        manifest = self.package / "provenance/manifest.json"
+        manifest.write_text(json.dumps(self.native_manifest))
+        real_recipe = TOOL.recipe
+        def inspected_recipe():
+            tool = real_recipe()
+            tool.run = lambda argv: "binary:\n  /usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+            return tool
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(TOOL, "recipe", side_effect=inspected_recipe).start()
+        mock.patch("platform.machine", return_value="arm64").start()
+        self.assertEqual(TOOL.validate_native_package(self.package), self.manifest)
+        for relative in ["fc-list", "fc-conflist", "fontconfig/conf.d/10-original.conf", "provenance/font-tools/source.json"]:
+            member = self.package / relative
+            original = member.read_bytes()
+            member.write_bytes(original + b"changed")
+            with self.assertRaisesRegex(ValueError, "Fontconfig"):
+                TOOL.validate_native_package(self.package)
+            member.write_bytes(original)
+        unlisted = self.package / "fontconfig/conf.d/99-unlisted.conf"
+        unlisted.write_bytes(b"<fontconfig/>")
+        with self.assertRaisesRegex(ValueError, "inventory"):
+            TOOL.validate_native_package(self.package)
+        unlisted.unlink()
+        facts["source_sha256"] = "0" * 64
+        manifest.write_text(json.dumps(self.native_manifest))
+        with self.assertRaisesRegex(ValueError, "pinned recipe"):
+            TOOL.validate_native_package(self.package)
+
     def test_symbol_uuid_mismatch_cannot_publish_a_candidate(self):
         symbols = self.root / "plurxd.dSYM"
         dwarf = symbols / "Contents/Resources/DWARF/plurxd"

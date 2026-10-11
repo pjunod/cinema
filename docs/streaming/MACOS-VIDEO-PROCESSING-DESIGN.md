@@ -1,9 +1,10 @@
 # macOS video processing — accelerate the work, measure the memory cost
 
-**Status:** proposed; one adversarial review completed, author corrections applied ·
+**Status:** design baseline; implementation and required follow-ups active ·
 **Written:** 2026-10-07 ·
-**Source inspected:** `890bca0fc186d00f7b10a379cd7dd2f1a37dc37c` ·
-**Decision owner:** Paul after review · **Runtime changes:** none.
+**Original source inspected:** `890bca0fc186d00f7b10a379cd7dd2f1a37dc37c` ·
+**Decision owner:** Paul · **Current execution:**
+[status and evidence](MACOS-VIDEO-PROCESSING-STATUS.md).
 
 This document answers which native macOS processing paths plurx should add,
 why, and what evidence would justify them. The companion
@@ -12,7 +13,9 @@ milestones, code ownership, tests and review handoff. Read both before building.
 The source locations below describe the inspected checkout; re-verify their
 symbols against the implementation base. The [review record](MACOS-VIDEO-PROCESSING-REVIEW.md)
 preserves the original request-changes verdict and the author dispositions.
-The revised documents have not received a second independent review.
+That record describes the proposal review. Implementation reviews and their
+exact source scope are recorded separately in the execution ledger; this
+design is not evidence that a route has shipped or passed qualification.
 
 ## 1. Decision proposed — optimize processing before buffer movement
 
@@ -275,8 +278,11 @@ path before concluding that QSV hardware cannot help P5. Keep decoder and
 encoder families independent. Reuse the four-way experiment and its RPU,
 frame association, pixel and actual-hardware checks, using the appropriate
 renderer instead of Metal. Do not lift restrictions for unmeasured tuples.
-This observation does not widen the Mac effort's code ownership to all
-backends; it is a separate follow-up with shared contract lessons.
+On 2026-10-08 the user authorized this investigation and implementation in
+the separate `effort/video-processing-followups` effort. Its native-decoder
+observations and strict metadata policy share the existing processing owners;
+Mac qualification remains distinct from every non-Mac tuple. See the
+[execution ledger](MACOS-VIDEO-PROCESSING-STATUS.md) for current ownership.
 
 ## 4. Proposed architecture — freeze a complete processing choice
 
@@ -521,8 +527,9 @@ output policies remain distinct; do not double the rate without updating
 its presentation contract and bitrate calculation. YADIF replacing BWDIF
 requires motion-quality acceptance, not just matching dimensions.
 
-Initially retain CPU subtitle rendering/compositing. Later benchmark an
-explicit download after GPU processing versus a qualified GPU overlay path.
+The initial implementation retains CPU subtitle rendering/compositing. The
+2026-10-08 follow-up now implements and compares an explicit download after
+GPU processing against a qualified GPU overlay path.
 Text shaping/font behavior remains libass's responsibility; GPU compositing
 does not replace it. Test colored PGS cues, ASS positioning, alpha, seeked
 cues and end-of-subtitle behavior. Compose SDR subtitle white in the SDR

@@ -1,0 +1,1254 @@
+#!/usr/bin/env python3
+"""Stage immutable SDK source/recipe inputs and official runtime imports.
+
+Staging does not download, compile, install or qualify a runtime. The explicit
+--generate stage runs only hash-bound project generators on a private Linux SDK.
+The source lock names actual public archive inputs and exact consumed members;
+No generated headers or pkg-config substitutions are fabricated. A later bounded
+CPU generation/configure stage must hash its actual outputs before link readiness.
+"""
+import argparse
+import configparser
+import hashlib
+import io
+import json
+from pathlib import Path, PurePosixPath
+import re
+import shlex
+import shutil
+import struct
+import sys
+import subprocess
+import os
+import signal
+import platform
+import threading
+import time
+import tarfile
+import tempfile
+from urllib.parse import urlsplit
+
+SOURCE_SHA = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140"
+SOURCE_COMMIT = "253db2a7b0a8045c54ce68ce33d7f601229b1822"
+OFFICIAL_SHA = "4829b34df16843ecf1aca8b1a600874b5c767396e1d1990c889c761fd143d928"
+PATCH_SHA = "467cecbbf0e70a406cb6bc47130ad49cdda2d81adcdf4d6d4e2d960c5e3b9fe8"
+EXPECTED_CONFIGURE = ('--prefix=/usr/lib/jellyfin-ffmpeg', '--target-os=linux', '--extra-version=Jellyfin', '--disable-unstable', '--disable-doc', '--disable-ffplay', '--disable-static', '--disable-libxcb', '--disable-libxcb-shm', '--disable-libxcb-xfixes', '--disable-libxcb-shape', '--disable-xlib', '--disable-sdl2', '--enable-lto=auto', '--enable-gpl', '--enable-version3', '--enable-shared', '--enable-gmp', '--enable-gnutls', '--enable-chromaprint', '--enable-opencl', '--enable-libdrm', '--enable-libxml2', '--enable-libass', '--enable-libfreetype', '--enable-libfribidi', '--enable-libfontconfig', '--enable-libharfbuzz', '--enable-libbluray', '--enable-libmp3lame', '--enable-libopus', '--enable-libtheora', '--enable-libvorbis', '--enable-libopenmpt', '--enable-libdav1d', '--enable-libsvtav1', '--enable-libwebp', '--enable-libvpx', '--enable-libx264', '--enable-libx265', '--enable-libzvbi', '--enable-libzimg', '--enable-libfdk-aac', '--enable-libshaderc', '--enable-libplacebo', '--enable-vulkan', '--enable-vulkan-static', '--enable-vaapi', '--enable-ffnvcodec', '--enable-cuda', '--enable-cuda-llvm', '--enable-cuvid', '--enable-nvdec', '--enable-nvenc', '--arch=amd64', '--enable-libvpl', '--enable-amf')
+MAX_ARCHIVE = 256 * 1024 * 1024
+MAX_MEMBER = 128 * 1024 * 1024
+MAX_EXPANDED = 1024 * 1024 * 1024
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def checked_bytes(path, expected):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_ARCHIVE:
+        raise ValueError("input must be a bounded regular archive")
+    data = path.read_bytes()
+    if digest(data) != expected:
+        raise ValueError("input checksum mismatch")
+    return data
+
+
+def member_path(name):
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError("unsafe archive member")
+    return str(path)
+
+
+def ar_members(data):
+    if data[:8] != b"!<arch>\n":
+        raise ValueError("invalid Debian ar image")
+    result = {}
+    offset = 8
+    while offset < len(data):
+        header = data[offset:offset + 60]
+        if len(header) != 60 or header[58:] != b"`\n":
+            raise ValueError("invalid ar member header")
+        name = header[:16].decode("ascii").strip().rstrip("/")
+        size_text = header[48:58].decode("ascii").strip()
+        if not size_text.isdecimal() or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            raise ValueError("invalid ar member")
+        size = int(size_text)
+        offset += 60
+        if size > MAX_ARCHIVE or offset + size > len(data) or name in result:
+            raise ValueError("duplicate or truncated ar member")
+        result[name] = data[offset:offset + size]
+        offset += size + size % 2
+    if result.get("debian-binary") != b"2.0\n":
+        raise ValueError("unsupported Debian archive")
+    return result
+
+
+def tar_members(data, allow_unresolved=False):
+    regular, links = {}, {}
+    total = 0
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+        for member in archive:
+            if member.isdir():
+                if member.name not in {".", "./"}:
+                    member_path(member.name)
+                continue
+            name = member_path(member.name)
+            if name in regular or name in links:
+                raise ValueError("duplicate tar member")
+            if member.isfile():
+                total += member.size
+                if member.size > MAX_MEMBER or total > MAX_EXPANDED:
+                    raise ValueError("expanded archive exceeds its bound")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError("missing tar member contents")
+                regular[name] = stream.read()
+            elif member.issym() or member.islnk():
+                target = PurePosixPath(member.linkname)
+                if target.is_absolute():
+                    if not allow_unresolved or ".." in target.parts:
+                        raise ValueError("external archive link")
+                    # Inventory only. This target is never followed on the
+                    # host; the distribution importer may map it solely to
+                    # an authenticated regular member in its private sysroot.
+                    links[name] = str(target)
+                    continue
+                combined = target if member.islnk() else PurePosixPath(name).parent / target
+                parts = []
+                for part in combined.parts:
+                    if part == "..":
+                        if not parts:
+                            raise ValueError("escaping archive link")
+                        parts.pop()
+                    elif part != ".":
+                        parts.append(part)
+                links[name] = str(PurePosixPath(*parts))
+            else:
+                raise ValueError("unsupported archive member type")
+    for name in links:
+        target, seen = name, set()
+        while target in links:
+            if target in seen or len(seen) > 32:
+                raise ValueError("cyclic archive link")
+            seen.add(target)
+            target = links[target]
+        if target not in regular and not allow_unresolved:
+            raise ValueError("unresolved archive link")
+    return regular, links
+
+
+def resolved(name, regular, links):
+    original = name
+    while name in links:
+        name = links[name]
+    return regular[name], name if name != original else original
+
+
+def package_members(data, allow_unresolved=False):
+    members = ar_members(data)
+    names = [name for name in members if name.startswith("data.tar.")]
+    controls = [name for name in members if name.startswith("control.tar.")]
+    if len(names) != 1 or len(controls) != 1:
+        raise ValueError("ambiguous Debian payload")
+    return tar_members(members[names[0]], allow_unresolved), tar_members(members[controls[0]])
+
+
+def configure_contract(text):
+    lines = [line[len("configuration: "):] for line in text.splitlines()
+             if line.startswith("configuration: ")]
+    if len(lines) != 1:
+        raise ValueError("one actual official build configuration is required")
+    flags = shlex.split(lines[0])
+    if tuple(flags) != EXPECTED_CONFIGURE:
+        raise ValueError("official configure tokens must be preserved exactly")
+    for flag in ["--target-os=linux", "--arch=amd64", "--enable-vulkan-static",
+                 "--enable-vaapi", "--enable-cuda-llvm", "--enable-libvpl",
+                 "--enable-libass", "--enable-libx264", "--enable-libx265"]:
+        if flag not in flags:
+            raise ValueError("official complete feature contract was reduced")
+    return flags
+
+
+def control_fields(data):
+    fields, previous = {}, None
+    for line in data.decode("utf-8").splitlines():
+        if line.startswith(" "):
+            if previous is None:
+                raise ValueError("invalid Debian control continuation")
+            fields[previous] += "\n" + line[1:]
+        elif line:
+            previous, value = line.split(":", 1)
+            if previous in fields:
+                raise ValueError("duplicate Debian control field")
+            fields[previous] = value.strip()
+    return fields
+
+
+def validate_debian_source_offer(offer, originals):
+    descriptors = [name for name in originals if name.endswith(".dsc")]
+    if len(descriptors) != 1:
+        raise ValueError("one authenticated Debian source descriptor is required")
+    text = originals[descriptors[0]].decode("utf-8")
+    if text.startswith("-----BEGIN PGP SIGNED MESSAGE-----"):
+        text = text.split("\n\n", 1)[1].split("-----BEGIN PGP SIGNATURE-----", 1)[0]
+        text = "\n".join(line[2:] if line.startswith("- ") else line for line in text.splitlines())
+    fields = control_fields(text.encode())
+    if fields.get("Source") != offer["package"] or fields.get("Version") != offer["version"]:
+        raise ValueError("source descriptor package/version differs from authenticated offer")
+    declared = {}
+    for line in fields.get("Checksums-Sha256", "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]) or not parts[1].isdigit():
+            raise ValueError("invalid source descriptor SHA256 declaration")
+        name = member_path(parts[2])
+        if "/" in name or name in declared:
+            raise ValueError("unsafe or duplicate source descriptor member")
+        declared[name] = (parts[0], int(parts[1]))
+    actual = {name: (digest(data), len(data)) for name, data in originals.items() if name != descriptors[0]}
+    if actual != declared:
+        raise ValueError("source descriptor archive identities differ from authenticated offer")
+    original = [name for name in declared if ".orig.tar." in name and not name.endswith(".asc")]
+    patches = [name for name in declared if ".debian.tar." in name]
+    differences = [name for name in declared if name.endswith(".diff.gz")]
+    if fields.get("Format") == "1.0":
+        valid = len(original) == 1 and len(differences) == 1 and not patches
+    elif fields.get("Format") == "3.0 (quilt)":
+        valid = bool(original) and len(patches) == 1 and not differences
+    else:
+        valid = False
+    if not valid:
+        raise ValueError("unsupported or incomplete Debian source format contract")
+    return fields["Format"]
+
+
+def role_archive(directory, row):
+    name = Path(row["archive"])
+    return name if name.is_absolute() else Path(directory) / member_path(row["archive"])
+
+
+def materialize_distribution_aliases(sysroot, all_files, all_links, records, file_roles, link_roles):
+    unresolved, alias_witness = {}, {}
+    for name, target in sorted(all_links.items()):
+        endpoint, seen = target.lstrip("/") if target.startswith("/") else target, set()
+        while endpoint in all_links:
+            if endpoint in seen:
+                raise ValueError("cross-package relative link cycle")
+            seen.add(endpoint)
+            endpoint = all_links[endpoint]
+            if endpoint.startswith("/"):
+                endpoint = endpoint.lstrip("/")
+        if endpoint not in all_files:
+            unresolved[name] = target
+            continue  # Inventory only; never follow a host filesystem target.
+        contents = all_files[endpoint]
+        for role in file_roles[endpoint]:
+            if records[role]["consumed"][endpoint]["sha256"] != digest(contents):
+                raise ValueError("authenticated alias target content changed")
+        for role in link_roles[name]:
+            if records[role]["archive_aliases"][name] != target:
+                raise ValueError("authenticated archive alias target changed")
+        alias_witness[name] = {"archive_target": target, "regular_endpoint": endpoint,
+            "source_roles": {role: records[role]["archive_sha256"] for role in link_roles[name]},
+            "target_roles": {role: records[role]["archive_sha256"] for role in file_roles[endpoint]},
+            "content_sha256": digest(contents), "resolution": "authenticated archive namespace only"}
+        path = sysroot / name
+        if path.exists():
+            if path.read_bytes() != contents:
+                raise ValueError("alias conflicts with an imported regular file")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+            path.chmod(0o444)
+    return unresolved, alias_witness
+
+
+def stage_distribution_packages(lock, sdk, provenance, archive_directory):
+    rows = lock.get("distribution_packages", {})
+    if not isinstance(rows, dict):
+        raise ValueError("invalid immutable distribution package roles")
+    all_files, all_links, records, supplied = {}, {}, {}, set()
+    file_roles, link_roles = {}, {}
+    for role, row in sorted(rows.items()):
+        if not re.fullmatch(r"[A-Za-z0-9_.+-]+", role):
+            raise ValueError("unsafe distribution role")
+        data = checked_bytes(role_archive(archive_directory, row), row["archive_sha256"])
+        (regular, links), (control, control_links) = package_members(data, allow_unresolved=True)
+        if control_links or "control" not in control:
+            raise ValueError("package must retain its regular actual control metadata")
+        actual = control_fields(control["control"])
+        if actual.get("Package") != role or actual.get("Version") != row["version"] or actual.get("Architecture") not in ["amd64", "all"]:
+            raise ValueError("actual Debian package role/version/architecture mismatch")
+        source = actual.get("Source", role)
+        match = re.fullmatch(r"([^ ]+)(?: \(([^)]+)\))?", source)
+        if match is None:
+            raise ValueError("invalid actual binary/source association")
+        source_package, source_version = match[1], match[2] or actual["Version"]
+        offer = row["source_offer"]
+        if offer["package"] != source_package or offer["version"] != source_version:
+            raise ValueError("package source version differs from its immutable source offer")
+        destination = provenance / "distribution-sources" / role
+        destination.mkdir(parents=True)
+        (destination / "original-package.deb").write_bytes(data)
+        (destination / "control").write_bytes(control["control"])
+        source_hashes, original_sources = {}, {}
+        for name, member in sorted(offer["files"].items()):
+            name = member_path(name)
+            if "/" in name:
+                raise ValueError("source offer archive must use a plain filename")
+            original = checked_bytes(Path(archive_directory) / name, member["sha256"])
+            if len(original) != member["bytes"]:
+                raise ValueError("source offer archive size mismatch")
+            (destination / name).write_bytes(original)
+            source_hashes[name] = member["sha256"]
+            original_sources[name] = original
+        validate_debian_source_offer(offer, original_sources)
+        consumed = {}
+        for name, contents in regular.items():
+            header = name.startswith("usr/include/") and name.endswith((".h", ".hpp"))
+            metadata = name.startswith("usr/lib/") and "/pkgconfig/" in name and name.endswith(".pc")
+            runtime = name.startswith(("usr/lib/", "lib/")) and contents.startswith(b"\x7fELF")
+            copyright_file = name.startswith("usr/share/doc/") and name.endswith("/copyright")
+            if not any([header, metadata, runtime, copyright_file]):
+                continue
+            if metadata and re.search(rb"@[A-Za-z_][A-Za-z0-9_]*@", contents):
+                raise ValueError("distributed pkg-config file is an unconfigured template")
+            if runtime and (len(contents) < 64 or contents[4:6] != b"\x02\x01" or struct.unpack_from("<H", contents, 18)[0] != 62):
+                raise ValueError("distribution runtime import must retain amd64 ELF ABI")
+            if name in all_files and all_files[name] != contents:
+                raise ValueError("distribution roles disagree on an imported file")
+            all_files[name] = contents
+            file_roles.setdefault(name, []).append(role)
+            consumed[name] = {"sha256": digest(contents), "bytes": len(contents), "kind": "runtime" if runtime else "header" if header else "pkg-config" if metadata else "copyright"}
+        for name, target in links.items():
+            # Keep only header/PC/library/copyright aliases relevant to consumed
+            # roles. Absolute aliases retain their original target text; no
+            # filesystem lookup is performed outside these retained members.
+            if name.startswith(("usr/include/", "usr/lib/", "lib/", "usr/share/doc/")):
+                if name in all_links and all_links[name] != target:
+                    raise ValueError("distribution roles disagree on a relative link")
+                all_links[name] = target
+                link_roles.setdefault(name, []).append(role)
+        supplied.update(row.get("configure_flags", []))
+        records[role] = {"archive_sha256": digest(data), "version": actual["Version"], "source_package": source_package,
+                         "source_version": source_version, "source_offer_sha256": source_hashes, "control_sha256": digest(control["control"]),
+                         "consumed": consumed, "archive_aliases": links,
+                         "state": "actual distributed headers/pkg-config; no local generation claim"}
+    sysroot = sdk / "sysroot"
+    for name, contents in sorted(all_files.items()):
+        target = sysroot / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+        target.chmod(0o444)
+    unresolved, alias_witness = materialize_distribution_aliases(
+        sysroot, all_files, all_links, records, file_roles, link_roles)
+    for role, row in records.items():
+        copyright_path = "usr/share/doc/" + role + "/copyright"
+        if not (sysroot / copyright_path).is_file():
+            raise ValueError("every consumed binary role needs its authentic distributed copyright")
+        row["copyright_sha256"] = digest((sysroot / copyright_path).read_bytes())
+        row["unresolved_archive_aliases"] = {name: target for name, target in unresolved.items() if name in row["archive_aliases"]}
+    projections = project_distribution_pkgconfig(sysroot, all_files, file_roles, records)
+    inventory = {str(path.relative_to(sysroot)): {"sha256": digest(path.read_bytes()), "bytes": path.stat().st_size}
+                 for path in sorted(sysroot.rglob("*")) if path.is_file()} if sysroot.exists() else {}
+    return {"roles": records, "sysroot_members": inventory, "unresolved_relative_links":
+            {name: target for name, target in unresolved.items() if not target.startswith("/")},
+            "unresolved_absolute_aliases": {name: target for name, target in unresolved.items() if target.startswith("/")},
+            "materialized_archive_aliases": alias_witness, "pkg_config_projections": projections}, supplied
+
+
+def project_distribution_pkgconfig(sysroot, all_files, file_roles, records):
+    """Expose original Debian PCs at the prefix-relative pkg-config depth.
+
+    pkgconf --define-prefix derives a prefix two directories above a PC. A
+    Debian multiarch lib/<triplet>/pkgconfig location otherwise adds lib to
+    /usr. Keep every original byte/member and record the layout projection;
+    generated private SDK PCs remain in their independent SDK prefix.
+    """
+    projections = {}
+    for name, contents in sorted(all_files.items()):
+        if not re.fullmatch(r"usr/lib/x86_64-linux-gnu/pkgconfig/[^/]+\.pc", name):
+            continue
+        if re.search(rb"(?m)^prefix=/usr\s*$", contents) is None:
+            raise ValueError("distribution pkg-config projection requires authentic /usr prefix")
+        target_name = "usr/lib/pkgconfig/" + Path(name).name
+        target = sysroot / target_name
+        if target.exists() or target.is_symlink():
+            raise ValueError("distribution pkg-config projection must not replace an existing member")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+        target.chmod(0o444)
+        projections[target_name] = {"source_member": name, "sha256": digest(contents),
+            "bytes": len(contents), "source_roles": {role: records[role]["archive_sha256"]
+                for role in sorted(file_roles[name])}}
+    return projections
+
+
+def validate_distribution_pkgconfig_projections(distribution):
+    for target, row in distribution.get("pkg_config_projections", {}).items():
+        source = row["source_member"]
+        if not re.fullmatch(r"usr/lib/x86_64-linux-gnu/pkgconfig/[^/]+\.pc", source) or target != "usr/lib/pkgconfig/" + Path(source).name:
+            raise ValueError("invalid distribution pkg-config projection layout")
+        expected = {"sha256": row["sha256"], "bytes": row["bytes"]}
+        inventory = distribution["sysroot_members"]
+        if inventory.get(source) != expected or inventory.get(target) != expected or not row["source_roles"]:
+            raise ValueError("distribution pkg-config projection differs from authentic member bytes")
+        for role, archive in row["source_roles"].items():
+            original = distribution["roles"][role]
+            if original["archive_sha256"] != archive or original["consumed"].get(source) != {**expected, "kind": "pkg-config"}:
+                raise ValueError("distribution pkg-config projection source association changed")
+
+
+def normalized_source_tree(data, source_root):
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+        for member in archive:
+            if member.isdir():
+                continue
+            name = PurePosixPath(member_path(member.name.removeprefix("./")))
+            if source_root != ".":
+                name = name.relative_to(source_root)
+            if str(name) in files:
+                raise ValueError("duplicate normalized source-tree member")
+            if member.isfile():
+                value = {"kind": "regular", "sha256": digest(archive.extractfile(member).read()), "exec": bool(member.mode & 0o111)}
+            elif member.issym():
+                value = {"kind": "symlink", "target": member.linkname, "exec": bool(member.mode & 0o111)}
+            else:
+                raise ValueError("unsupported normalized source-tree object")
+            files[str(name)] = value
+    return digest(json.dumps(files, sort_keys=True, separators=(",", ":")).encode())
+
+
+def stage_submodules(row, regular, offer, archives):
+    if not row.get("submodules"):
+        return {}
+    evidence = row["submodule_tree_evidence"]
+    parent_url = urlsplit(evidence["url"])
+    if (evidence["parent_commit"] != row["commit"] or parent_url.scheme != "https" or parent_url.hostname != "api.github.com"
+            or parent_url.username or parent_url.password or parent_url.query != "recursive=1"
+            or not parent_url.path.endswith("/git/trees/" + row["commit"])):
+        raise ValueError("submodule evidence must identify immutable public parent")
+    tree_bytes = checked_bytes(Path(archives) / member_path(evidence["archive"]), evidence["sha256"])
+    tree = json.loads(tree_bytes)
+    if tree.get("truncated"):
+        raise ValueError("incomplete parent gitlink evidence")
+    source_root = row["generator"]["source_root"]
+    descriptor = ".gitmodules" if source_root == "." else source_root + "/.gitmodules"
+    declaration = configparser.ConfigParser()
+    declaration.read_string(regular[descriptor].decode())
+    urls = {declaration[section]["path"]: declaration[section]["url"].removesuffix(".git") for section in declaration.sections()}
+    records = {}
+    for module in row["submodules"]:
+        name = member_path(module["path"])
+        if name in records or urls.get(name) != module["repository_url"].removesuffix(".git"):
+            raise ValueError("submodule path/repository differs from parent descriptor")
+        links = [entry for entry in tree["tree"] if entry["path"] == name and entry["mode"] == "160000" and entry["type"] == "commit"]
+        if len(links) != 1 or links[0]["sha"] != module["commit"]:
+            raise ValueError("submodule revision differs from pinned parent gitlink")
+        url = urlsplit(module["url"])
+        if url.scheme != "https" or url.hostname != "codeload.github.com" or url.username or url.password or not url.path.endswith("/" + module["commit"]):
+            raise ValueError("submodule archive must identify exact public revision")
+        data = checked_bytes(Path(archives) / member_path(module["archive"]), module["archive_sha256"])
+        files, links = tar_members(data)
+        destination = offer / "submodules" / name
+        destination.mkdir(parents=True)
+        (destination / "original-source.tar").write_bytes(data)
+        (destination / "parent-git-tree.json").write_bytes(tree_bytes)
+        licenses = {}
+        for license_name in module["license_members"]:
+            contents, _ = resolved(member_path(license_name), files, links)
+            target = destination / "licenses" / member_path(license_name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            licenses[license_name] = digest(contents)
+        if not licenses:
+            raise ValueError("authentic submodule license required")
+        records[name] = {**module, "licenses": licenses, "parent_descriptor_sha256": digest(regular[descriptor]), "parent_tree_sha256": digest(tree_bytes)}
+    return records
+
+
+def compose_submodules(offer, source, work, modules):
+    for name, module in modules.items():
+        unpacked = work / "submodule-archives" / member_path(name)
+        unpacked.mkdir(parents=True)
+        extract_role(checked_bytes(offer / "submodules" / name / "original-source.tar", module["archive_sha256"]), unpacked)
+        original = unpacked / member_path(module["source_root"])
+        if not original.is_dir() or original.is_symlink():
+            raise ValueError("authentic submodule root missing")
+        target = source / member_path(name)
+        if target.exists():
+            if not target.is_dir() or any(target.iterdir()):
+                raise ValueError("submodule composition cannot replace existing parent bytes")
+            target.rmdir()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(original, target)
+
+
+def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_directory=None, supplied_flags=()):
+    if lock.get("schema_version") != 1 or not isinstance(lock.get("sources"), dict):
+        raise ValueError("missing immutable consumed-source lock")
+    supplied = set(supplied_flags)
+    records = {}
+    for role, row in sorted(lock["sources"].items()):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", role):
+            raise ValueError("unsafe SDK role")
+        public_url = urlsplit(row.get("url", ""))
+        if public_url.scheme != "https" or not public_url.hostname or public_url.username or public_url.password or public_url.query or public_url.fragment or not row.get("ref"):
+            raise ValueError("public credential-free source URL/ref missing")
+        if row.get("kind") == "git" and not re.fullmatch(r"[0-9a-f]{40}", row.get("commit", "")):
+            raise ValueError("consumed Git source requires an immutable commit")
+        archive = Path(row["archive"])
+        if not archive.is_absolute():
+            archive = Path(archive_directory or ".") / member_path(row["archive"])
+        data = checked_bytes(archive, row["archive_sha256"])
+        regular, links = tar_members(data)
+        if row.get("source_tree_sha256") and normalized_source_tree(data, row["generator"]["source_root"]) != row["source_tree_sha256"]:
+            raise ValueError("canonical archive differs from verified immutable source tree")
+        role_offer = provenance / "consumed-sources" / role
+        role_offer.mkdir(parents=True)
+        (role_offer / "original-source.tar").write_bytes(data)
+        licenses = {}
+        for name in row.get("license_members", []):
+            contents, origin = resolved(member_path(name), regular, links)
+            destination = role_offer / "licenses" / member_path(name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(contents)
+            licenses[name] = digest(contents)
+        if not licenses:
+            raise ValueError("consumed source has no retained license")
+        binding = row.get("recipe_binding", {})
+        fragment = binding.get("fragment", "").encode()
+        if len(fragment) < 20 or digest(fragment) != binding.get("sha256") or fragment not in upstream_recipe:
+            raise ValueError("role must bind exact pinned upstream recipe bytes")
+        files = {}
+        for destination, source in sorted(row.get("files", {}).items()):
+            destination = member_path(destination)
+            if not destination.startswith(("include/", "lib/pkgconfig/", "share/vulkan/registry/", "share/cmake/VulkanHeaders/")):
+                raise ValueError("SDK consumption must name headers, pkg-config or the Vulkan registry")
+            contents, origin = resolved(member_path(source["member"]), regular, links)
+            if digest(contents) != source["sha256"]:
+                raise ValueError("consumed source member checksum mismatch")
+            # Retain templates unchanged. Do not manufacture generated headers,
+            # ABI macros, prefix substitutions or compiler observations here.
+            target = role_offer / "pending-inputs" / destination
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            files[destination] = {"source_member": origin, "source_sha256": digest(contents),
+                                  "state": "generation/configuration witness pending"}
+        submodules = stage_submodules(row, regular, role_offer, archive_directory or ".")
+        patches = []
+        for index, patch in enumerate(row.get("patches", [])):
+            if patch["recipe_reference"].encode() not in fragment:
+                raise ValueError("source patch must be named by the actual pinned upstream recipe")
+            original = checked_bytes(role_archive(archive_directory or ".", patch), patch["sha256"])
+            (role_offer / ("patch-" + str(index) + ".patch")).write_bytes(original)
+            patches.append({"sha256": digest(original), "recipe_reference": patch["recipe_reference"]})
+        for addition in row.get("source_append", []):
+            contents, _ = resolved(member_path(addition["member"]), regular, links)
+            if digest(contents) != addition["before_sha256"] or digest(contents + addition["text"].encode()) != addition["after_sha256"]:
+                raise ValueError("upstream source-template transformation does not match authentic bytes")
+            if any(line.encode() not in fragment for line in addition["recipe_lines"]):
+                raise ValueError("template transformation must preserve the pinned recipe's literal operations")
+        for replacement in row.get("source_replace", []):
+            contents, _ = resolved(member_path(replacement["member"]), regular, links)
+            if replacement["recipe_line"].encode() not in fragment or digest(contents) != replacement["before_sha256"] or digest(contents.replace(replacement["old"].encode(), replacement["new"].encode())) != replacement["after_sha256"]:
+                raise ValueError("source replacement differs from the actual pinned recipe and authentic input")
+        for addition in row.get("output_append", {}).values():
+            if addition["recipe_line"].encode() not in fragment:
+                raise ValueError("generated-output transformation is not in the actual upstream recipe")
+        records_generation = {"recipe_fragment_sha256": digest(fragment),
+                              "generated_outputs": {}, "link_ready": False}
+        supplied.update(row.get("configure_flags", []))
+        records[role] = {"url": row["url"], "ref": row["ref"], "commit": row.get("commit"),
+                         "archive_sha256": digest(data), "source_tree_sha256": row.get("source_tree_sha256"), "historical_archive_equivalence": row.get("historical_archive_equivalence"), "licenses": licenses,
+                         "files": files, "recipe_binding": binding, "generation": records_generation,
+                         "generator": row.get("generator"), "submodules": submodules, "python_source_paths": row.get("python_source_paths", []), "patches": patches,
+                         "source_append": row.get("source_append", []), "source_replace": row.get("source_replace", []), "output_append": row.get("output_append", {})}
+    needed = {flag for flag in flags if flag.startswith("--enable-lib")}
+    needed.update(flag for flag in flags if flag in {"--enable-gmp", "--enable-gnutls",
+                  "--enable-chromaprint", "--enable-opencl", "--enable-vulkan",
+                  "--enable-vaapi", "--enable-ffnvcodec", "--enable-amf"})
+    if needed - supplied:
+        raise ValueError("missing consumed SDK roles: " + ",".join(sorted(needed - supplied)))
+    return records
+
+
+def ffmpeg_owned_library(name):
+    return bool(re.match(r"(?:libavcodec|libavdevice|libavfilter|libavformat|libavutil|libswresample|libswscale)\.so(?:\.|$)", Path(name).name))
+
+
+MESON_SOURCE_SHA = "ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743"
+MESON_LAUNCHER = '''#!/usr/bin/env -S /usr/bin/python3 -I -S -B
+import sys
+import sysconfig
+from pathlib import Path
+sys.path = [str(Path(__file__).resolve().parent / "source/meson-1.12.1"),
+            sysconfig.get_path("stdlib"), sysconfig.get_config_var("DESTSHARED")]
+from mesonbuild.mesonmain import main
+sys.argv[0] = str(Path(__file__).resolve())
+sys.exit(main())
+'''
+
+
+def bootstrap_tool_components(regular, links, control, row):
+    actual = control_fields(control)
+    if (actual.get("Package") != "gperf" or actual.get("Version") != row["version"]
+            or actual.get("Architecture") != "amd64" or row["architecture"] != "amd64"):
+        raise ValueError("bootstrap package role/version/architecture mismatch")
+    member = row["executable_member"]
+    if member != "usr/bin/gperf" or member in links or member not in regular:
+        raise ValueError("bootstrap executable must be an authentic regular package member")
+    binary = regular[member]
+    if (digest(binary) != row["executable_sha256"] or len(binary) < 64
+            or binary[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", binary, 18)[0] != 62):
+        raise ValueError("bootstrap executable bytes or amd64 ELF ABI mismatch")
+    copyright_member = row["copyright_member"]
+    if copyright_member != "usr/share/doc/gperf/copyright" or copyright_member not in regular or copyright_member in links:
+        raise ValueError("authentic bootstrap package copyright required")
+    return {"gperf": binary, "copyright": regular[copyright_member], "control": control}
+
+
+def stage_build_tools(lock, provenance, archive_directory):
+    roles = lock.get("build_tools", {})
+    if set(roles) - {"meson", "gperf"}:
+        raise ValueError("unsupported consumed private bootstrap tool")
+    result = stage_meson_build_tool({"build_tools": {"meson": roles["meson"]}}, provenance, archive_directory) if "meson" in roles else {}
+    if "gperf" in roles:
+        row = roles["gperf"]
+        distribution = lock.get("distribution_packages", {}).get(row["distribution_role"], {})
+        if row["distribution_role"] != "gperf" or any(row[key] != distribution.get(key) for key in ["archive", "archive_sha256", "url", "version"]):
+            raise ValueError("private bootstrap must bind the authenticated distribution source offer")
+        package = checked_bytes(role_archive(archive_directory, row), row["archive_sha256"])
+        (regular, links), (control, control_links) = package_members(package, allow_unresolved=True)
+        if control_links or "control" not in control:
+            raise ValueError("bootstrap control metadata must be regular")
+        contents = bootstrap_tool_components(regular, links, control["control"], row)
+        base = provenance / "build-tools/gperf"
+        base.mkdir(parents=True)
+        contents["original-package.deb"] = package
+        for name, data in contents.items():
+            (base / name).write_bytes(data)
+            (base / name).chmod(0o555 if name == "gperf" else 0o444)
+        result["gperf"] = {**row, "files": {name: digest(data) for name, data in contents.items()},
+            "launcher": "provenance/build-tools/gperf/gperf", "license_member": "copyright",
+            "license_sha256": digest(contents["copyright"]), "source_offer": "provenance/distribution-sources/gperf"}
+    return result
+
+
+def verify_build_tools(root, tools):
+    if set(tools) - {"meson", "gperf"}:
+        raise ValueError("unsupported private bootstrap inventory")
+    if "meson" in tools:
+        verify_meson_build_tool(root, {"meson": tools["meson"]})
+    if "gperf" in tools:
+        row = tools["gperf"]
+        if (row["source_offer"] != "provenance/distribution-sources/gperf"
+                or row["launcher"] != "provenance/build-tools/gperf/gperf"):
+            raise ValueError("bootstrap authority must remain in the staged source offer")
+        base = root / "provenance/build-tools/gperf"
+        if any(path.is_symlink() for path in [base, *base.rglob("*")]):
+            raise ValueError("private bootstrap tree contains a filesystem link")
+        package = checked_bytes(base / "original-package.deb", row["archive_sha256"])
+        checked_bytes(root / row["source_offer"] / "original-package.deb", row["archive_sha256"])
+        (regular, links), (control, control_links) = package_members(package, allow_unresolved=True)
+        if control_links or "control" not in control:
+            raise ValueError("bootstrap control metadata changed")
+        expected = bootstrap_tool_components(regular, links, control["control"], row)
+        if (base / "gperf").stat().st_mode & 0o777 != 0o555:
+            raise ValueError("private bootstrap executable permissions changed")
+        expected["original-package.deb"] = package
+        actual = {str(path.relative_to(base)): digest(path.read_bytes()) for path in base.rglob("*") if path.is_file()}
+        if actual != row["files"] or actual != {name: digest(data) for name, data in expected.items()}:
+            raise ValueError("private bootstrap bytes differ from their authenticated package")
+
+
+def stage_meson_build_tool(lock, provenance, archive_directory):
+    roles = lock.get("build_tools", {})
+    if not roles:
+        return {}
+    if set(roles) != {"meson"}:
+        raise ValueError("only the consumed private Meson provider is supported")
+    row = roles["meson"]
+    if row["archive_sha256"] != MESON_SOURCE_SHA or row["version"] != "1.12.1":
+        raise ValueError("private Meson must use the pinned authentic source")
+    original = checked_bytes(role_archive(archive_directory, row), MESON_SOURCE_SHA)
+    files, links = tar_members(original)
+    if links or b"python_requires = >= 3.10" not in files["meson-1.12.1/setup.cfg"]:
+        raise ValueError("private Meson source/interpreter contract changed")
+    root = provenance / "build-tools/meson"
+    root.mkdir(parents=True)
+    (root / "original-source.tar.gz").write_bytes(original)
+    source = root / "source"
+    source.mkdir()
+    extract_role(original, source)
+    for path in source.rglob("*"):
+        if path.is_file():
+            path.chmod(0o444)
+    (root / "meson").write_text(MESON_LAUNCHER)
+    (root / "meson").chmod(0o555)
+    inventory = {str(path.relative_to(root)): digest(path.read_bytes())
+                 for path in root.rglob("*") if path.is_file()}
+    return {"meson": {"version": row["version"], "url": row["url"],
+        "archive_sha256": MESON_SOURCE_SHA, "python_requires": ">=3.10",
+        "license_member": "source/meson-1.12.1/COPYING",
+        "license_sha256": digest(files["meson-1.12.1/COPYING"]),
+        "files": inventory, "tree_sha256": digest(json.dumps(inventory, sort_keys=True,
+            separators=(",", ":")).encode()), "launcher": "provenance/build-tools/meson/meson",
+        "import_policy": "isolated interpreter; stdlib plus pinned module tree only; no site/bytecode"}}
+
+
+def verify_meson_build_tool(root, tools):
+    for name, tool in tools.items():
+        if name != "meson" or tool["archive_sha256"] != MESON_SOURCE_SHA:
+            raise ValueError("unsupported private build-tool source")
+        base = root / "provenance/build-tools" / name
+        paths = list(base.rglob("*"))
+        if base.is_symlink() or any(path.is_symlink() for path in paths):
+            raise ValueError("private build-tool tree contains a filesystem link")
+        actual = {str(path.relative_to(base)): digest(path.read_bytes()) for path in paths if path.is_file()}
+        if actual != tool["files"]:
+            raise ValueError("private Meson source/module/launcher tree changed")
+        if digest(json.dumps(actual, sort_keys=True, separators=(",", ":")).encode()) != tool["tree_sha256"]:
+            raise ValueError("private build-tool module-tree digest mismatch")
+        original = checked_bytes(base / "original-source.tar.gz", MESON_SOURCE_SHA)
+        source, links = tar_members(original)
+        expected = {"source/" + member: digest(contents) for member, contents in source.items()}
+        expected.update({"original-source.tar.gz": MESON_SOURCE_SHA, "meson": digest(MESON_LAUNCHER.encode())})
+        if links or actual != expected:
+            raise ValueError("private Meson module bytes differ from their authentic source")
+        checked_bytes(base / tool["license_member"], tool["license_sha256"])
+
+
+def prepare(source_archive, official_package, buildconf, lock_path, lock_sha, output, archive_directory=None):
+    if not output.is_absolute() or output.exists() or any(output.is_relative_to(Path(p)) for p in
+            ["/Applications", "/Library", "/System", "/usr", "/opt"]):
+        raise ValueError("output must be a new private absolute directory")
+    source_data = checked_bytes(source_archive, SOURCE_SHA)
+    source_files, source_links = tar_members(source_data)
+    recipe_names = {}
+    for suffix in ["docker-build.sh", "debian/control", "debian/patches/series"]:
+        names = [name for name in source_files if name.endswith("/" + suffix)]
+        if len(names) != 1:
+            raise ValueError("ambiguous pinned upstream recipe")
+        recipe_names[suffix] = names[0]
+    flags = configure_contract(buildconf.read_text())
+    lock_data = checked_bytes(lock_path, lock_sha)
+    lock = json.loads(lock_data)
+    official_data = checked_bytes(official_package, OFFICIAL_SHA)
+    (regular, links), (control, control_links) = package_members(official_data)
+    prefix = "usr/lib/jellyfin-ffmpeg/lib/"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".linux-sdk-", dir=output.parent) as temporary:
+        stage = Path(temporary) / "stage"
+        sdk = stage / "sdk"
+        provenance = stage / "provenance"
+        sdk.mkdir(parents=True)
+        provenance.mkdir()
+        imports = {}
+        for name in sorted(set(regular) | set(links)):
+            if name.startswith(prefix):
+                relative = name[len(prefix):]
+                if ffmpeg_owned_library(relative):
+                    continue  # Modified FFmpeg owns all of its own library images.
+                contents, origin = resolved(name, regular, links)
+                if not contents.startswith(b"\x7fELF"):
+                    continue
+                if len(contents) < 64 or contents[4:6] != b"\x02\x01" or struct.unpack_from("<H", contents, 18)[0] != 62:
+                    raise ValueError("official SDK import has unexpected ELF architecture")
+                target = sdk / "lib" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(contents)
+                target.chmod(0o444)
+                imports["lib/" + relative] = {"sha256": digest(contents), "bytes": len(contents),
+                    "resolved_member": origin, "kind": "opaque-driver" if "/dri/" in name or "libvulkan_" in name else "shared-library"}
+            elif name.startswith("usr/share/doc/jellyfin-ffmpeg"):
+                contents, origin = resolved(name, regular, links)
+                target = provenance / "official-distribution" / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(contents)
+                imports[name] = {"sha256": digest(contents), "bytes": len(contents),
+                                 "resolved_member": origin, "kind": "copyright"}
+        if not any(row["kind"] == "copyright" and "copyright" in name for name, row in imports.items()):
+            raise ValueError("official distributed copyright must be retained")
+        control_hashes = {}
+        for name in sorted(control):
+            target = provenance / "official-control" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(control[name])
+            control_hashes[name] = digest(control[name])
+        (provenance / "original-ffmpeg-source.tar.gz").write_bytes(source_data)
+        (provenance / "consumed-source-lock.json").write_bytes(lock_data)
+        recipe_hashes = {}
+        for name, member in recipe_names.items():
+            target = provenance / "upstream-recipes" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source_files[member])
+            recipe_hashes[name] = digest(source_files[member])
+        quilt = {}
+        series_root = str(PurePosixPath(recipe_names["debian/patches/series"]).parent)
+        for line in source_files[recipe_names["debian/patches/series"]].decode().splitlines():
+            patch = line.split("#", 1)[0].strip()
+            if not patch:
+                continue
+            if len(shlex.split(patch)) != 1:
+                raise ValueError("unsupported upstream quilt options")
+            name = member_path(patch)
+            contents, _ = resolved(series_root + "/" + name, source_files, source_links)
+            target = provenance / "upstream-quilt" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            quilt[name] = digest(contents)
+        distribution, supplied_flags = stage_distribution_packages(lock, sdk, provenance, archive_directory or lock_path.parent)
+        sources = stage_sources(lock, sdk, provenance, flags, source_files[recipe_names["docker-build.sh"]], archive_directory or lock_path.parent, supplied_flags)
+        build_tools = stage_build_tools(lock, provenance, archive_directory or lock_path.parent)
+        (provenance / "executed-sdk-helper.py").write_bytes(Path(__file__).read_bytes())
+        facts = {"helper_sha256": digest(Path(__file__).read_bytes()), "official_control_sha256": control_hashes, "schema_version": 1, "kind": "source-only-sdk", "state": "immutable-inputs-staged", "link_ready": False,
+            "generated_sdk_outputs": {},
+            "remaining": "actual bounded header/pkg-config generation and full configure/link witness",
+            "qualification": "none; imported or declared dependencies do not qualify a runtime",
+            "source": {"archive_sha256": SOURCE_SHA, "commit": SOURCE_COMMIT,
+                       "required_local_patch_sha256": PATCH_SHA, "local_patch_applied": False,
+                       "recipe_sha256": recipe_hashes, "upstream_quilt": quilt,
+                       "quilt_digest": digest(json.dumps(quilt, sort_keys=True, separators=(",", ":")).encode())},
+            "preserved_configure": flags,
+            "imported_official": {"package_sha256": OFFICIAL_SHA, "members": imports,
+                 "unresolved_source_refs": {"i965": "upstream recipe clones default branch; no corresponding build commit claimed",
+                      "mesa": "upstream recipe uses26.0-backport branch; no corresponding build commit claimed"}},
+            "distribution_inputs": distribution,
+            "build_tools": build_tools,
+            "consumed_sources": sources,
+            "consumed_source_lock_sha256": lock_sha}
+        facts["source_offer_digest"] = digest(json.dumps({"sources": sources, "copyright": imports,
+            "recipes": recipe_hashes, "distribution": distribution, "build_tools": build_tools}, sort_keys=True, separators=(",", ":")).encode())
+        facts["sdk_digest"] = digest(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode())
+        (provenance / "sdk-manifest.json").write_text(json.dumps(facts, indent=2) + "\n")
+        stage.rename(output)
+    return facts
+
+
+def validate_generator(generator):
+    if not isinstance(generator, dict) or not isinstance(generator.get("outputs"), dict) or not generator["outputs"]:
+        raise ValueError("every consumed role needs explicit authentic header/pkg-config outputs")
+    if generator["source_root"] != ".":
+        member_path(generator["source_root"])
+    if not isinstance(generator.get("commands"), list) or len(generator["commands"]) > 16:
+        raise ValueError("bounded project generator commands required")
+    for command in generator["commands"]:
+        if command.get("cwd") not in ["source", "build"] or not isinstance(command.get("argv"), list) or not command["argv"]:
+            raise ValueError("invalid generator command")
+        for token in command["argv"]:
+            if not isinstance(token, str) or not token or "\x00" in token or "\n" in token:
+                raise ValueError("generator argv must be literal tokens")
+            if token in ["install", "--install", "test", "check"] and command["argv"] != ["cmake", "--install", "{build}", "--prefix", "{build}/installed"]:
+                raise ValueError("header generation must not install or replace official runtime libraries")
+            if token.startswith(("--prefix=", "-DCMAKE_INSTALL_PREFIX=", "PREFIX=")) and token.split("=", 1)[1] != "{sdk}":
+                raise ValueError("project configuration prefix must be the private SDK")
+        executable = command["argv"][0]
+        if executable not in ["cmake", "meson", "ninja", "make", "autoreconf", "python3"] and not executable.startswith("./"):
+            raise ValueError("generator must invoke the actual project tool without a shell wrapper")
+        if executable.startswith("./"):
+            member_path(executable[2:])
+    for destination, row in generator["outputs"].items():
+        if not member_path(destination).startswith(("include/", "lib/pkgconfig/", "share/vulkan/registry/", "share/cmake/VulkanHeaders/")):
+            raise ValueError("generated SDK output outside consumed header/pkg-config/registry roles")
+        if row.get("root") not in ["source", "build"]:
+            raise ValueError("output must come from actual project source or generator build")
+        member_path(row["path"])
+        if destination.endswith(".pc") and row["path"].endswith((".in", ".cmake", ".meson")):
+            raise ValueError("pkg-config templates are not generated outputs")
+
+
+def extract_role(data, destination):
+    regular, links = tar_members(data)  # Validate the complete archive before writing.
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+        modes = {member_path(m.name): m.mode & 0o755 for m in archive if m.isfile()}
+    for name, contents in regular.items():
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+        target.chmod(modes[name])
+    for name in links:
+        contents, _ = resolved(name, regular, links)
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)  # No uncontrolled symlink survives extraction.
+        target.chmod(0o644)
+
+
+def bounded_generator(argv, cwd, environment, log, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError("SDK generation deadline exceeded")
+    child = subprocess.Popen(argv, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    overflow = threading.Event()
+    count = 0
+    def drain():
+        nonlocal count
+        with log.open("wb") as output:
+            while True:
+                block = child.stdout.read(65536)
+                if not block:
+                    return
+                count += len(block)
+                if count > 8 * 1024 * 1024:
+                    overflow.set()
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    return
+                output.write(block)
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        try:
+            status = child.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=10)
+            raise ValueError("SDK generator exceeded finite deadline")
+    finally:
+        reader.join(timeout=3)
+        child.stdout.close()
+    if reader.is_alive() or overflow.is_set() or status != 0:
+        raise ValueError("project generator failed or exceeded bounded log capture")
+    return {"argv": argv, "status": status, "log_name": log.name,
+            "log_sha256": digest(log.read_bytes())}
+
+
+def validate_build_tool_claims(declared, observed):
+    if set(declared) != set(observed) or set(declared) - {"meson", "gperf"}:
+        raise ValueError("private build-tool role inventory changed")
+    for name, claims in declared.items():
+        if name == "meson":
+            # Archive filename is a transport label and consumed_by is a human
+            # rationale. Actual bytes/module inventory are independently fenced.
+            expected = {key: claims[key] for key in ["version", "url", "archive_sha256"]}
+            expected["license_member"] = "source/" + member_path(claims["license_member"])
+        else:
+            expected = claims
+        if any(observed[name].get(key) != value for key, value in expected.items()):
+            raise ValueError("bootstrap tool/source claims changed from immutable lock")
+
+
+def verified_staging(root):
+    root = root.resolve(strict=True)
+    if not root.is_absolute() or any(root.is_relative_to(Path(p)) for p in ["/Applications", "/Library", "/System", "/usr", "/opt"]):
+        raise ValueError("SDK generation must remain in a private prepared directory")
+    manifest = root / "provenance/sdk-manifest.json"
+    facts = json.loads(checked_bytes(manifest, digest(manifest.read_bytes())))
+    supplied_digest = facts.pop("sdk_digest")
+    if digest(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()) != supplied_digest:
+        raise ValueError("staged SDK manifest digest mismatch")
+    facts["sdk_digest"] = supplied_digest
+    checked_bytes(root / "provenance/executed-sdk-helper.py", facts["helper_sha256"])
+    if digest(Path(__file__).read_bytes()) != facts["helper_sha256"]:
+        raise ValueError("generation must use the exact helper which staged these inputs")
+    checked_bytes(root / "provenance/original-ffmpeg-source.tar.gz", SOURCE_SHA)
+    for name, sha in facts["source"]["recipe_sha256"].items():
+        checked_bytes(root / "provenance/upstream-recipes" / name, sha)
+    for name, sha in facts["source"]["upstream_quilt"].items():
+        checked_bytes(root / "provenance/upstream-quilt" / name, sha)
+    for name, sha in facts["official_control_sha256"].items():
+        checked_bytes(root / "provenance/official-control" / name, sha)
+    lock_data = checked_bytes(root / "provenance/consumed-source-lock.json", facts["consumed_source_lock_sha256"])
+    lock = json.loads(lock_data)
+    if set(lock["sources"]) != set(facts["consumed_sources"]):
+        raise ValueError("consumed role inventory changed after staging")
+    validate_build_tool_claims(lock.get("build_tools", {}), facts.get("build_tools", {}))
+    verify_build_tools(root, facts.get("build_tools", {}))
+    distribution = facts.get("distribution_inputs", {})
+    validate_distribution_pkgconfig_projections(distribution)
+    for role, row in distribution.get("roles", {}).items():
+        base = root / "provenance/distribution-sources" / role
+        checked_bytes(base / "original-package.deb", row["archive_sha256"])
+        checked_bytes(base / "control", row["control_sha256"])
+        for name, sha in row["source_offer_sha256"].items():
+            checked_bytes(base / name, sha)
+    for name, row in distribution.get("sysroot_members", {}).items():
+        checked_bytes(root / "sdk/sysroot" / name, row["sha256"])
+    for role, row in facts["consumed_sources"].items():
+        checked_bytes(root / "provenance/consumed-sources" / role / "original-source.tar", row["archive_sha256"])
+        if row.get("source_tree_sha256") != lock["sources"][role].get("source_tree_sha256"):
+            raise ValueError("canonical source-tree identity differs from source lock")
+        if lock["sources"][role].get("generator") != row.get("generator"):
+            raise ValueError("generator differs from immutable consumed-source lock")
+        validate_generator(row["generator"])
+        expected_modules = {module["path"]: module for module in lock["sources"][role].get("submodules", [])}
+        if set(expected_modules) != set(row.get("submodules", {})) or row.get("python_source_paths", []) != lock["sources"][role].get("python_source_paths", []):
+            raise ValueError("submodule composition differs from immutable source lock")
+        for name, module in row.get("submodules", {}).items():
+            if any(module.get(key) != value for key, value in expected_modules[name].items()):
+                raise ValueError("submodule identity changed from source lock")
+            base = root / "provenance/consumed-sources" / role / "submodules" / name
+            checked_bytes(base / "original-source.tar", module["archive_sha256"])
+            checked_bytes(base / "parent-git-tree.json", module["parent_tree_sha256"])
+            for license_name, sha in module["licenses"].items():
+                checked_bytes(base / "licenses" / license_name, sha)
+        for index, patch in enumerate(row.get("patches", [])):
+            checked_bytes(root / "provenance/consumed-sources" / role / ("patch-" + str(index) + ".patch"), patch["sha256"])
+        for name, sha in row["licenses"].items():
+            checked_bytes(root / "provenance/consumed-sources" / role / "licenses" / name, sha)
+    for name, row in facts["imported_official"]["members"].items():
+        path = root / "sdk" / name if name.startswith("lib/") else root / "provenance/official-distribution" / name
+        checked_bytes(path, row["sha256"])
+    expected_sdk = {name for name in facts["imported_official"]["members"] if name.startswith("lib/")}
+    expected_sdk.update("sysroot/" + name for name in distribution.get("sysroot_members", {}))
+    if facts["state"] == "project-generators-executed":
+        outputs = facts["generated_sdk_outputs"]
+        if set(facts["generation_execution"]) != set(facts["consumed_sources"]):
+            raise ValueError("generated SDK requires every consumed project's execution witness")
+        declared_outputs = {name for row in facts["consumed_sources"].values()
+                            for name in row["generator"]["outputs"]}
+        if set(outputs) != declared_outputs:
+            raise ValueError("generated SDK output inventory differs from the immutable role lock")
+        for role, execution in facts["generation_execution"].items():
+            if execution["archive_sha256"] != facts["consumed_sources"][role]["archive_sha256"]:
+                raise ValueError("generator witness used a different source archive")
+            for command in execution["commands"]:
+                if command["status"] != 0 or Path(command["log_name"]).name != command["log_name"]:
+                    raise ValueError("invalid retained generator command witness")
+                checked_bytes(root / "provenance/generation" / role / command["log_name"], command["log_sha256"])
+        for command in facts["generator_tool_versions"].values():
+            checked_bytes(root / "provenance/generation" / command["log_name"], command["log_sha256"])
+        for name, row in outputs.items():
+            checked_bytes(root / "sdk" / member_path(name), row["sha256"])
+        expected_sdk.update(outputs)
+    elif facts["state"] != "immutable-inputs-staged":
+        raise ValueError("unsupported SDK preparation state")
+    actual_sdk = {str(path.relative_to(root / "sdk")) for path in (root / "sdk").rglob("*") if path.is_file()}
+    if actual_sdk != expected_sdk or any(path.is_symlink() for path in (root / "sdk").rglob("*")):
+        raise ValueError("unlisted or linked SDK content cannot enter generator configuration")
+    return facts
+
+
+def publish_generated_output(sdk, name, base, selected, addition=None):
+    name = member_path(name)
+    origin = (base / member_path(selected["path"])).resolve(strict=True)
+    if not origin.is_relative_to(base) or not origin.is_file() or origin.stat().st_size > MAX_MEMBER:
+        raise ValueError("generated output must be a bounded contained project file")
+    contents = origin.read_bytes()
+    if name.startswith("share/cmake/VulkanHeaders/") and str(base).encode() in contents:
+        raise ValueError("installed CMake export must not retain the generator build path")
+    if name.endswith(".pc") and re.search(rb"@[A-Za-z_][A-Za-z0-9_]*@", contents):
+        raise ValueError("unconfigured pkg-config template cannot enter the SDK")
+    transform = None
+    if addition:
+        # This is an exact operation from the immutable upstream recipe, after
+        # the project has generated its real .pc file; it is not a substitute.
+        if not name.endswith(".pc") or addition["text"] != "Libs.private: -lstdc++\n":
+            raise ValueError("unsupported upstream generated-output transformation")
+        before = digest(contents)
+        contents += addition["text"].encode()
+        transform = {"before_sha256": before, "after_sha256": digest(contents), "recipe_line": addition["recipe_line"]}
+    target = sdk / name
+    if target.exists() or target.is_symlink():
+        raise ValueError("generator must not replace an imported or prior SDK file")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(contents)
+    target.chmod(0o444)
+    return {"sha256": digest(contents), "bytes": len(contents), "root": selected["root"], "path": selected["path"], "upstream_transform": transform}
+
+
+def generate(root, jobs, seconds):
+    # This phase is intentionally explicit: source staging never runs it, and
+    # a host/CPU lease is an operator responsibility rather than an automatic job.
+    if platform.system() != "Linux" or platform.machine() not in ["x86_64", "amd64"]:
+        raise ValueError("official Bookworm amd64 SDK generation requires the matching Linux host")
+    release = Path("/etc/os-release").read_text()
+    if 'ID=debian' not in release or 'VERSION_ID="12"' not in release:
+        raise ValueError("generated ABI must use the official Debian12 build environment")
+    if not 1 <= jobs <= 2 or not 1 <= seconds <= 600:
+        raise ValueError("SDK generation requires a finite <=600s deadline and <=2 jobs")
+    root = root.resolve(strict=True)
+    facts = verified_staging(root)
+    if facts["state"] != "immutable-inputs-staged":
+        raise ValueError("generation must consume a fresh staged SDK; previous execution is retained")
+    execution = root / "provenance/generation"
+    execution.mkdir()  # Existing/failed attempts are never silently overwritten.
+    deadline = time.monotonic() + seconds
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(execution), "TMPDIR": str(execution),
+                   "LC_ALL": "C", "PKG_CONFIG_LIBDIR": os.pathsep.join(str(root / p) for p in ["sdk/lib/pkgconfig", "sdk/sysroot/usr/lib/pkgconfig", "sdk/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig", "sdk/sysroot/usr/share/pkgconfig"]),
+                   "PKG_CONFIG": "/usr/bin/pkg-config --define-prefix",
+                   "CFLAGS": " ".join("-I" + str(root / p) for p in ["sdk/include", "sdk/sysroot/usr/include", "sdk/sysroot/usr/include/x86_64-linux-gnu"]),
+                   "LDFLAGS": " ".join("-L" + str(root / p) for p in ["sdk/lib", "sdk/sysroot/usr/lib/x86_64-linux-gnu"]), "CC": "/usr/bin/gcc", "CXX": "/usr/bin/g++"}
+    if "gperf" in facts.get("build_tools", {}):
+        environment["PATH"] = str(root / "provenance/build-tools/gperf") + os.pathsep + environment["PATH"]
+    outputs, completed, records = {}, set(), {}
+    tool_versions = {}
+    try:
+        for tool in ["gcc", "g++", "cmake", "meson", "ninja", "make", "pkg-config", "python3", "env"] + (["gperf"] if "gperf" in facts.get("build_tools", {}) else []):
+            located = (root / facts["build_tools"]["meson"]["launcher"] if tool == "meson"
+                       and "meson" in facts.get("build_tools", {}) else shutil.which(tool, path=environment["PATH"]))
+            if not located:
+                raise ValueError("required Bookworm project generator tool is unavailable: " + tool)
+            executable = Path(located).resolve(strict=True)
+            tool_versions[tool] = bounded_generator([str(executable), "--version"], execution, environment, execution / (tool + "-version.log"), deadline)
+            tool_versions[tool]["sha256"] = digest(executable.read_bytes())
+        gcc_version = (execution / "gcc-version.log").read_text()
+        if not re.search(r"\b12\.[0-9]+", gcc_version):
+            raise ValueError("official Bookworm compiler ABI requires GCC12")
+        if sys.version_info < (3, 10):
+            raise ValueError("pinned Meson source requires Python>=3.10")
+        python_version = (execution / "python3-version.log").read_text()
+        version = re.search(r"Python (\d+)\.(\d+)", python_version)
+        if version is None or (int(version[1]), int(version[2])) < (3, 10):
+            raise ValueError("private Meson interpreter requires Python>=3.10")
+        pending = dict(facts["consumed_sources"])
+        while pending:
+            available = [role for role, row in pending.items() if set(row["generator"].get("depends_on", [])) <= completed]
+            if not available:
+                raise ValueError("cyclic or missing generated SDK dependency")
+            for role in sorted(available):
+                row = pending.pop(role)
+                work = execution / role
+                unpacked, build = work / "archive", work / "build"
+                unpacked.mkdir(parents=True)
+                build.mkdir()
+                extract_role(checked_bytes(root / "provenance/consumed-sources" / role / "original-source.tar", row["archive_sha256"]), unpacked)
+                source = (unpacked / row["generator"]["source_root"]).resolve(strict=True)
+                if not source.is_relative_to(unpacked):
+                    raise ValueError("generator source root escapes its authentic archive")
+                compose_submodules(root / "provenance/consumed-sources" / role, source, work, row.get("submodules", {}))
+                role_environment = dict(environment)
+                if row.get("python_source_paths"):
+                    paths = [(source / member_path(name)).resolve(strict=True) for name in row["python_source_paths"]]
+                    if any(not path.is_relative_to(source) for path in paths):
+                        raise ValueError("private Python source path escaped project")
+                    role_environment.update(PYTHONPATH=os.pathsep.join(map(str, paths)), PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
+                substitutions = {"source": str(source), "build": str(build), "sdk": str(root / "sdk"), "jobs": str(jobs)}
+                commands = []
+                for index, patch in enumerate(row.get("patches", [])):
+                    path = root / "provenance/consumed-sources" / role / ("patch-" + str(index) + ".patch")
+                    result = bounded_generator(["/usr/bin/patch", "--batch", "-p1", "-i", str(path)], source, environment, work / ("patch-" + str(index) + ".log"), deadline)
+                    result["patch_sha256"] = patch["sha256"]
+                    commands.append(result)
+                transformations = []
+                for addition in row.get("source_append", []):
+                    member = PurePosixPath(addition["member"])
+                    project_path = member if row["generator"]["source_root"] == "." else member.relative_to(row["generator"]["source_root"])
+                    target = (source / str(project_path)).resolve(strict=True)
+                    if not target.is_relative_to(source):
+                        raise ValueError("source-template transformation escaped its authentic project")
+                    original = checked_bytes(target, addition["before_sha256"])
+                    result = original + addition["text"].encode()
+                    if digest(result) != addition["after_sha256"]:
+                        raise ValueError("source-template transformation changed from the pinned recipe")
+                    target.write_bytes(result)
+                    transformations.append({"member": addition["member"], "before_sha256": digest(original), "after_sha256": digest(result), "recipe_lines": addition["recipe_lines"]})
+                for replacement in row.get("source_replace", []):
+                    member = PurePosixPath(replacement["member"])
+                    project_path = member if row["generator"]["source_root"] == "." else member.relative_to(row["generator"]["source_root"])
+                    target = (source / str(project_path)).resolve(strict=True)
+                    if not target.is_relative_to(source):
+                        raise ValueError("source replacement escaped its authentic project")
+                    original = checked_bytes(target, replacement["before_sha256"])
+                    result = original.replace(replacement["old"].encode(), replacement["new"].encode())
+                    if digest(result) != replacement["after_sha256"]:
+                        raise ValueError("source replacement differs from the pinned recipe")
+                    target.write_bytes(result)
+                    transformations.append({"member": replacement["member"], "before_sha256": digest(original), "after_sha256": digest(result), "recipe_line": replacement["recipe_line"]})
+                for index, command in enumerate(row["generator"]["commands"]):
+                    argv = [token.format_map(substitutions) for token in command["argv"]]
+                    cwd = source if command["cwd"] == "source" else build
+                    if argv[0] == "cmake" and "-P" not in argv and "--install" not in argv:
+                        # Packages/libraries/headers belong to the authenticated
+                        # SDK, while bootstrap programs use the fixed tool PATH.
+                        argv[1:1] = [
+                            "-DCMAKE_PREFIX_PATH=" + str(root / "sdk") + ";" + str(root / "sdk/sysroot/usr"),
+                            "-DCMAKE_FIND_ROOT_PATH=" + str(root / "sdk") + ";" + str(root / "sdk/sysroot"),
+                            "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+                            "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+                            "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+                            "-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER",
+                            "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
+                            "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF",
+                        ]
+                    program = ((root / facts["build_tools"]["meson"]["launcher"]) if argv[0] == "meson"
+                        and "meson" in facts.get("build_tools", {}) else
+                        (cwd / argv[0]).resolve(strict=True) if argv[0].startswith("./") else
+                        Path(shutil.which(argv[0], path=environment["PATH"]) or ""))
+                    if not program.is_file():
+                        raise ValueError("required authentic generator tool is unavailable")
+                    program = program.resolve(strict=True)
+                    argv[0] = str(program)
+                    tool_hash = digest(program.read_bytes())
+                    result = bounded_generator(argv, cwd, role_environment, work / (str(index) + ".log"), deadline)
+                    if digest(program.read_bytes()) != tool_hash:
+                        raise ValueError("generator tool changed during execution")
+                    result["tool_sha256"] = tool_hash
+                    commands.append(result)
+                role_outputs = {}
+                for name, selected in row["generator"]["outputs"].items():
+                    base = source if selected["root"] == "source" else build
+                    role_outputs[name] = publish_generated_output(root / "sdk", name, base, selected, row.get("output_append", {}).get(name))
+                    outputs[name] = {"role": role, **role_outputs[name]}
+                records[role] = {"commands": commands, "outputs": role_outputs, "archive_sha256": row["archive_sha256"], "recipe_fragment_sha256": row["recipe_binding"]["sha256"], "source_transformations": transformations}
+                completed.add(role)
+                # Rebuilding an external library/driver instead of using the
+                # official bytes is forbidden, even if a project install wrote it.
+                for name, imported in facts["imported_official"]["members"].items():
+                    if name.startswith("lib/"):
+                        checked_bytes(root / "sdk" / name, imported["sha256"])
+        for name, generated in outputs.items():
+            checked_bytes(root / "sdk" / name, generated["sha256"])
+        verify_build_tools(root, facts.get("build_tools", {}))
+        expected_sdk = {name for name in facts["imported_official"]["members"] if name.startswith("lib/")}
+        expected_sdk.update("sysroot/" + name for name in facts.get("distribution_inputs", {}).get("sysroot_members", {}))
+        expected_sdk.update(outputs)
+        actual_sdk = {str(path.relative_to(root / "sdk")) for path in (root / "sdk").rglob("*") if path.is_file()}
+        if actual_sdk != expected_sdk or any(path.is_symlink() for path in (root / "sdk").rglob("*")):
+            raise ValueError("generator produced unlisted SDK files or filesystem links")
+        facts["state"] = "project-generators-executed"
+        facts["generated_sdk_outputs"] = outputs
+        facts["generation_execution"] = records
+        facts["generator_tool_versions"] = tool_versions
+        facts["generator_environment"] = environment
+        verify_build_tools(root, facts.get("build_tools", {}))
+        facts["staged_source_offer_digest"] = facts["source_offer_digest"]
+        facts["source_offer_digest"] = digest(json.dumps({"staged_sources": facts["staged_source_offer_digest"], "helper_sha256": facts["helper_sha256"], "executed_generators": records}, sort_keys=True, separators=(",", ":")).encode())
+        facts["remaining"] = "full unchanged FFmpeg configure/compiler/link/ELF closure witness"
+        # Actual generated headers are necessary but not sufficient. The final
+        # FFmpeg build owner supplies the independent configure/link witness.
+        facts["link_ready"] = False
+    except Exception as error:
+        (execution / "failure.json").write_text(json.dumps({"error": str(error), "completed_roles": sorted(completed), "records": records, "runtime_qualification": False}, indent=2) + "\n")
+        raise
+    facts.pop("sdk_digest")
+    facts["sdk_digest"] = digest(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode())
+    (root / "provenance/sdk-manifest.json").write_text(json.dumps(facts, indent=2) + "\n")
+    return facts
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--generate", type=Path, help="run the staged immutable role generators (Linux amd64 only)")
+    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--deadline-seconds", type=int, default=600)
+    parser.add_argument("--source-archive", type=Path)
+    parser.add_argument("--official-package", type=Path)
+    parser.add_argument("--official-buildconf", type=Path)
+    parser.add_argument("--source-lock", type=Path)
+    parser.add_argument("--archive-directory", type=Path, help="directory containing immutable source-lock archive filenames")
+    parser.add_argument("--source-lock-sha256")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    if args.generate:
+        if any([args.source_archive, args.official_package, args.official_buildconf, args.source_lock, args.output]):
+            parser.error("generation consumes only the previously staged, verified inputs")
+        facts = generate(args.generate, args.jobs, args.deadline_seconds)
+        print(json.dumps({"state": facts["state"], "sdk_digest": facts["sdk_digest"], "link_ready": facts["link_ready"]}))
+        return
+    if not all([args.source_archive, args.official_package, args.official_buildconf, args.source_lock, args.source_lock_sha256, args.output]):
+        parser.error("staging requires all archive, lock and output arguments")
+    facts = prepare(args.source_archive, args.official_package, args.official_buildconf,
+                    args.source_lock, args.source_lock_sha256, args.output, args.archive_directory)
+    print(json.dumps({"sdk_digest": facts["sdk_digest"], "source_offer_digest": facts["source_offer_digest"],
+                      "qualification": facts["qualification"]}))
+
+
+if __name__ == "__main__":
+    main()
