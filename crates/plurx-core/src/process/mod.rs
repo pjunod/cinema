@@ -178,7 +178,28 @@ async fn status_with_diagnostics(
         child.wait(),
         bounded::drain_capped(stderr, STATUS_DIAGNOSTIC_BYTES)
     );
-    Ok((status?, diagnostics?))
+    settle_status(status, diagnostics, work)
+}
+
+/// The exit status is the answer; the diagnostics only explain it. A failure
+/// to read the child's stderr is logged and leaves the status standing, so a
+/// broken pipe cannot turn a probe that passed into one that errored.
+fn settle_status(
+    status: io::Result<std::process::ExitStatus>,
+    diagnostics: io::Result<Vec<u8>>,
+    work: ChildWork,
+) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
+    let status = status?;
+    let diagnostics = diagnostics.unwrap_or_else(|error| {
+        tracing::warn!(
+            purpose = work.purpose,
+            %status,
+            %error,
+            "reading a child process's stderr failed; its exit status stands"
+        );
+        Vec::new()
+    });
+    Ok((status, diagnostics))
 }
 
 /// [`output_job_owned`] for synchronous code that already runs off the async
@@ -503,6 +524,28 @@ mod tests {
         let diagnostics = String::from_utf8_lossy(&diagnostics);
         assert!(diagnostics.contains("err-bytes"));
         assert!(!diagnostics.contains("out-bytes"), "stdout is discarded");
+    }
+
+    #[tokio::test]
+    async fn a_stderr_read_error_leaves_the_exit_status_standing() {
+        let status = output_job_owned(&mut child("echo"), TEST_WORK)
+            .await
+            .expect("child output")
+            .status;
+        let (settled, diagnostics) = settle_status(
+            Ok(status),
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "stderr closed")),
+            TEST_WORK,
+        )
+        .expect("the status wins over a diagnostics read error");
+        assert!(settled.success());
+        assert!(diagnostics.is_empty());
+        assert!(settle_status(
+            Err(io::Error::other("wait failed")),
+            Ok(b"text".to_vec()),
+            TEST_WORK
+        )
+        .is_err());
     }
 
     #[tokio::test]
