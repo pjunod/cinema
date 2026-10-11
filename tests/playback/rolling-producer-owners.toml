@@ -4493,7 +4493,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # K-04 browse authority bar (50ffc340e): +2, test-only, in
 # http::browse::tests::browse_routes_k04_bar: one 10 s timeout around a 50 ms
 # poll for the bounded-read proof, both awaited in place. No production timer.
-expected_occurrences = 1714
+# K-03 clock roster held on change signals: +3, test-only, in clock_offset::
+# tests: two paused-time sleeps pacing the heartbeat entries of simulated
+# observation rounds and one pacing the failed-read retries, each awaited in
+# place (no spawn). Production adds no timer: both roster reads keep their
+# existing two-second bounds around the held proof.
+expected_occurrences = 1717
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.

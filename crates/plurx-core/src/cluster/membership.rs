@@ -2510,6 +2510,7 @@ pub struct MembershipManager {
     clock: Arc<super::clock::ClusterClockGuard>,
 }
 
+#[derive(Clone)]
 pub struct ClockPeerRoster {
     pub membership: Option<ClockMembershipIdentity>,
     pub peers: Vec<ActivityPeer>,
@@ -8452,7 +8453,24 @@ impl MembershipManager {
     /// Missing identity or endpoint invalidates the whole round; reachability
     /// never shortens clock coverage. No credential-guard mutation is involved.
     pub async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
-        self.clock_peers_for_request(None).await
+        self.clock_peers_for_request(None, true).await
+    }
+
+    /// The same roster as this node's own replica holds it: the same applied
+    /// member set, query and fail-closed directory as [`Self::clock_peers`],
+    /// read locally with no consensus. A hint that says whether a held
+    /// `clock_peers` proof is still current, never a proof itself.
+    pub async fn clock_peers_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
+        self.clock_peers_for_request(None, false).await
+    }
+
+    /// This node's in-process applied-index watch, the signal that a held
+    /// replicated read may have changed; `None` without a replicated store.
+    #[must_use]
+    pub fn local_db_raft_metrics(&self) -> Option<hiqlite::LocalDbRaftMetrics> {
+        self.inner
+            .as_deref()
+            .map(|inner| inner.local_metrics.clone())
     }
 
     /// Last awaited response check after ordinary exact-request authorization.
@@ -8465,7 +8483,9 @@ impl MembershipManager {
         if !self.authenticated_clock_request_still_fresh(auth)? {
             return Err(MembershipError::Internal("clock request expired".into()));
         }
-        let roster = self.clock_peers_for_request(Some(&auth.node_id)).await?;
+        let roster = self
+            .clock_peers_for_request(Some(&auth.node_id), true)
+            .await?;
         if !self.authenticated_clock_request_still_fresh(auth)? {
             return Err(MembershipError::Internal("clock request expired".into()));
         }
@@ -8475,6 +8495,7 @@ impl MembershipManager {
     async fn clock_peers_for_request(
         &self,
         sender: Option<&str>,
+        consistent: bool,
     ) -> Result<ClockPeerRoster, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(ClockPeerRoster {
@@ -8509,10 +8530,18 @@ impl MembershipManager {
                 ));
             }
             rows.into_iter().map(|row| row.peer).collect()
-        } else {
+        } else if consistent {
             inner
                 .client
                 .query_consistent_map::<ActivityPeerRow, _>(
+                    CACHE_ADMIN_REVOCATION_PEERS_SQL,
+                    params!(inner.identity.node_id.as_str(), members_json),
+                )
+                .await?
+        } else {
+            inner
+                .client
+                .query_map::<ActivityPeerRow, _>(
                     CACHE_ADMIN_REVOCATION_PEERS_SQL,
                     params!(inner.identity.node_id.as_str(), members_json),
                 )
