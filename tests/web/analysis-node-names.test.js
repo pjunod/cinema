@@ -344,7 +344,7 @@ test("the workspace and the Now playing table share one naming helper", () => {
 test("a live index row names the PGS tracks its pass is also keeping", () => {
   const live = new Function(
     "return (function(){" +
-      ["esc", "fmtBytes", "fmtDur", "nodeLabel", "analysisNodeCell", "analysisRideAlong", "analysisLiveProgress"]
+      ["esc", "fmtBytes", "fmtDur", "nodeLabel", "analysisNodeCell", "analysisSharedRead", "analysisRideAlong", "analysisLiveProgress"]
         .map(shippedSource)
         .join("\n") +
       "\nreturn analysisLiveProgress;})()",
@@ -367,7 +367,7 @@ test("a live index row names the PGS tracks its pass is also keeping", () => {
 test("a subtitle_source progress row names text and PGS tracks and bytes read", () => {
   const live = new Function(
     "return (function(){" +
-      ["esc", "fmtBytes", "fmtDur", "nodeLabel", "analysisNodeCell", "analysisRideAlong", "analysisLiveProgress"]
+      ["esc", "fmtBytes", "fmtDur", "nodeLabel", "analysisNodeCell", "analysisSharedRead", "analysisRideAlong", "analysisLiveProgress"]
         .map(shippedSource).join("\n") +
       "\nreturn analysisLiveProgress;})()",
   )();

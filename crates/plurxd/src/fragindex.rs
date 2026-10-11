@@ -1338,20 +1338,42 @@ fn dolby_vision_pass_for(
 /// individually correct. The only way to get the argv is to get both.
 struct IndexPass {
     args: Vec<String>,
-    dolby_vision: DolbyVisionPass,
+    /// Every identity this pass writes, in argv order: `outputs[0]` on stdout
+    /// with the HEVC header trace, `outputs[i]` on inherited fd `3 + i`
+    /// ([`transcode::copy_index_shared_args_with_input`]). One read of the
+    /// source, one index per output.
+    outputs: Vec<IndexOutput>,
     expectation: VideoCompletionExpectation,
-    /// The options all three of the above were derived from, carried so the
-    /// index key is derived from them too. Passed separately, a caller could
-    /// hand the runner a recipe built from one set of options and an identity
-    /// computed from another — the rows would be byte counts for one stream
-    /// filed under another's key, which is the same class of mismatch as the
-    /// argv and the record answer disagreeing.
-    video: transcode::CopyVideoOptions,
     /// The PGS tracks this pass also keeps, and the stage it keeps them in.
     /// Its argv is already at the end of `args`; the plan rides with the pass
     /// so the verdict and the stage's removal belong to the same owner.
     ride_along: Option<RideAlongPlan>,
 }
+
+/// One identity's half of an index pass: what to do about the Dolby Vision
+/// record its muxer leaves behind, and the options both that answer and the
+/// argv block were derived from — carried so the index key is derived from
+/// them too. Passed separately, a caller could hand the runner a recipe built
+/// from one set of options and an identity computed from another — the rows
+/// would be byte counts for one stream filed under another's key, which is
+/// the same class of mismatch as the argv and the record answer disagreeing.
+struct IndexOutput {
+    video: transcode::CopyVideoOptions,
+    dolby_vision: DolbyVisionPass,
+}
+
+impl IndexOutput {
+    fn new(file: &MediaFile, video: transcode::CopyVideoOptions) -> Result<Self, String> {
+        Ok(Self {
+            video,
+            dolby_vision: dolby_vision_pass_for(file, video)?,
+        })
+    }
+}
+
+/// The most identities one pass writes. A file has at most three (stripped,
+/// preserved, converted); the bound keeps the child's fd plumbing fixed-size.
+const MAX_PASS_OUTPUTS: usize = 4;
 
 fn index_pass(
     file: &MediaFile,
@@ -1360,13 +1382,32 @@ fn index_pass(
     expectation: VideoCompletionExpectation,
     ride_along: Option<RideAlongPlan>,
 ) -> Result<IndexPass, String> {
-    Ok(IndexPass {
-        args: index_argv(file, video, input, ride_along.as_ref()),
-        dolby_vision: dolby_vision_pass_for(file, video)?,
+    Ok(shared_index_pass(
+        file,
+        vec![IndexOutput::new(file, video)?],
+        input,
         expectation,
-        video,
         ride_along,
-    })
+    ))
+}
+
+fn shared_index_pass(
+    file: &MediaFile,
+    outputs: Vec<IndexOutput>,
+    input: Option<&str>,
+    expectation: VideoCompletionExpectation,
+    ride_along: Option<RideAlongPlan>,
+) -> IndexPass {
+    let videos = outputs
+        .iter()
+        .map(|output| output.video)
+        .collect::<Vec<_>>();
+    IndexPass {
+        args: shared_index_argv(file, &videos, input, ride_along.as_ref()),
+        outputs,
+        expectation,
+        ride_along,
+    }
 }
 
 /// The whole argv of an index pass.
@@ -1383,9 +1424,22 @@ pub(crate) fn index_argv(
     input: Option<&str>,
     ride_along: Option<&RideAlongPlan>,
 ) -> Vec<String> {
+    shared_index_argv(file, &[video], input, ride_along)
+}
+
+/// [`index_argv`] for several identities read once: the ride-along follows
+/// the last output block, so the tracks are kept once per pass.
+fn shared_index_argv(
+    file: &MediaFile,
+    videos: &[transcode::CopyVideoOptions],
+    input: Option<&str>,
+    ride_along: Option<&RideAlongPlan>,
+) -> Vec<String> {
     let mut args = match input {
-        Some(path) => transcode::copy_index_pipe_args_with_input(file, path, video),
-        None => transcode::copy_index_pipe_args(file, video),
+        Some(path) => transcode::copy_index_shared_args_with_input(file, path, videos),
+        None => {
+            transcode::copy_index_shared_args_with_input(file, &file.path.to_string_lossy(), videos)
+        }
     };
     if let Some(plan) = ride_along {
         args.extend(plan.args());
@@ -1835,19 +1889,21 @@ pub(crate) fn start_source_index(
                 deadline,
                 hooks: &hooks,
             };
-            build_with_args_owned(
-                &file,
-                pass,
-                fd,
-                handoff,
-                &runtime_cache,
-                deadline.saturating_duration_since(Instant::now()),
-                Instant::now(),
-                None,
-                Some(&owned_cancel),
-                Some(&execution),
+            first_build(
+                build_with_args_owned(
+                    &file,
+                    pass,
+                    fd,
+                    handoff,
+                    &runtime_cache,
+                    deadline.saturating_duration_since(Instant::now()),
+                    Instant::now(),
+                    None,
+                    Some(&owned_cancel),
+                    Some(&execution),
+                )
+                .await,
             )
-            .await
         };
         result.source_unchanged = source.unchanged();
         *owned.result.lock().expect("Source index result") = Some(result);
@@ -1903,19 +1959,41 @@ pub(crate) async fn build_riding(
     ride_along: Option<&RideAlongGate>,
     progress: Option<SharedIndexProgress>,
 ) -> IndexBuild {
+    first_build(
+        build_riding_shared(file, &[video], runtime_cache, budget, ride_along, progress).await,
+    )
+}
+
+/// [`build_riding`] for several identities from one read of the held source,
+/// in `videos` order. Every build carries the same `source_unchanged`: one
+/// held source, one fence.
+pub(crate) async fn build_riding_shared(
+    file: &MediaFile,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    ride_along: Option<&RideAlongGate>,
+    progress: Option<SharedIndexProgress>,
+) -> Vec<IndexBuild> {
     let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
         Ok(source) => source,
         Err(reason) => {
-            return IndexBuild::plain(IndexOutcome::Failed(Box::new(
-                IndexFailure::new(IndexFailureCode::IndexSourceIo, reason, 0).transient(true),
-            )));
+            return videos
+                .iter()
+                .map(|_| {
+                    IndexBuild::plain(IndexOutcome::Failed(Box::new(
+                        IndexFailure::new(IndexFailureCode::IndexSourceIo, reason.clone(), 0)
+                            .transient(true),
+                    )))
+                })
+                .collect();
         }
     };
-    let mut built = build_attested(
+    let mut builds = build_shared_attested(
         file,
         &source.handle,
         source.object_version(),
-        video,
+        videos,
         runtime_cache,
         budget,
         progress,
@@ -1923,8 +2001,11 @@ pub(crate) async fn build_riding(
         None,
     )
     .await;
-    built.source_unchanged = source.unchanged();
-    built
+    let unchanged = source.unchanged();
+    for built in &mut builds {
+        built.source_unchanged = unchanged;
+    }
+    builds
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
@@ -1953,9 +2034,10 @@ pub async fn build_from_attested_file(
     .outcome
 }
 
-/// The cluster worker's build: progress reported, and the file's PGS tracks
-/// kept when `ride_along` allows. The worker publishes the harvest only after
-/// its own `source_still_matches` and `still_current` checks.
+/// One identity, progress reported and PGS tracks kept: the shape tests drive
+/// a single pass through. The worker builds through
+/// [`build_shared_from_attested_file_with_progress`].
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_from_attested_file_with_progress<F>(
     file: &MediaFile,
@@ -1985,10 +2067,42 @@ where
     .await
 }
 
-/// The one place every index build passes through — the cluster worker and
-/// the non-cluster pass alike — after the held-fd probe and before the pass.
-/// That is where the ride-along's latch is checked: the first point at which
-/// the file's PGS ordinals exist, read from the descriptor the pass will read.
+/// The cluster worker's build: every identity in `videos` from one read of the
+/// held source ([`build_shared_attested`]), in `videos` order, with progress
+/// reported and the file's PGS tracks kept when `ride_along` allows. The
+/// worker publishes the harvest only after its own `source_still_matches` and
+/// `still_current` checks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_shared_from_attested_file_with_progress<F>(
+    file: &MediaFile,
+    source: &std::fs::File,
+    source_object_version: &str,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: F,
+    ride_along: Option<&RideAlongGate>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Vec<IndexBuild>
+where
+    F: Fn(&PassProgress) + Send + Sync + 'static,
+{
+    build_shared_attested(
+        file,
+        source,
+        source_object_version,
+        videos,
+        runtime_cache,
+        budget,
+        Some(Arc::new(progress)),
+        ride_along,
+        Some(cancel),
+    )
+    .await
+}
+
+/// One identity from one read of the held source: [`build_attested_pass`]
+/// with a single output, which is today's pass byte for byte.
 #[allow(clippy::too_many_arguments)]
 async fn build_attested(
     file: &MediaFile,
@@ -2001,52 +2115,218 @@ async fn build_attested(
     ride_along: Option<&RideAlongGate>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> IndexBuild {
-    #[cfg(windows)]
-    let path = match crate::ffmpeg::windows_source_path(source) {
-        Ok(path) => path,
-        Err(reason) => return IndexBuild::plain(IndexOutcome::Unsupported(reason)),
-    };
-    let (probed, started) =
-        match probe_completion_expectation(source, source_object_version, budget, cancel).await {
-            Ok(value) => value,
-            Err(failure) => return IndexBuild::plain(IndexOutcome::Failed(Box::new(failure))),
-        };
-    let plan = match ride_along {
-        Some(gate) => {
-            crate::subtitle_ride_along::plan_tracks(gate, file.id, source, &probed.subtitle_tracks)
-                .await
-        }
-        None => None,
-    };
-    #[cfg(unix)]
-    let input = "/dev/fd/3".to_owned();
-    #[cfg(windows)]
-    let input = path.to_string_lossy().into_owned();
-    let pass = match index_pass(file, video, Some(&input), probed.expectation, plan) {
-        Ok(pass) => pass,
-        Err(reason) => return IndexBuild::plain(IndexOutcome::Unsupported(reason)),
-    };
-    #[cfg(unix)]
-    let (source_fd, source_handoff) = {
-        use std::os::fd::AsRawFd;
-        (Some(source.as_raw_fd()), None)
-    };
-    #[cfg(windows)]
-    let (source_fd, source_handoff) = (None, Some((source, path.as_path())));
-    build_with_args(
+    first_build(
+        build_attested_pass(
+            file,
+            source,
+            source_object_version,
+            &[video],
+            runtime_cache,
+            budget,
+            progress,
+            ride_along,
+            cancel,
+        )
+        .await,
+    )
+}
+
+/// The one build of a one-identity pass.
+fn first_build(builds: Vec<IndexBuild>) -> IndexBuild {
+    builds.into_iter().next().unwrap_or_else(|| {
+        IndexBuild::plain(IndexOutcome::Failed(Box::new(IndexFailure::new(
+            IndexFailureCode::IndexProcessFailed,
+            "an index pass returned no build for its identity",
+            0,
+        ))))
+    })
+}
+
+/// Every identity in `videos` from one read of the held source: one probe,
+/// one ffmpeg child with an output per identity, one index per output, in
+/// `videos` order.
+///
+/// What changes is execution, never identity. Each output block is the
+/// one-identity argv's, so each index is keyed, proved and published exactly
+/// as a pass of its own would be — `pipeline_digest_for_transform` still
+/// hashes the one-identity argv. An identity whose Dolby Vision record
+/// cannot be described is refused alone; the rest still share the read.
+#[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_shared_attested(
+    file: &MediaFile,
+    source: &std::fs::File,
+    source_object_version: &str,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: Option<SharedIndexProgress>,
+    ride_along: Option<&RideAlongGate>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Vec<IndexBuild> {
+    build_attested_pass(
         file,
-        pass,
-        source_fd,
-        source_handoff,
+        source,
+        source_object_version,
+        videos,
         runtime_cache,
         budget,
-        started,
         progress,
+        ride_along,
         cancel,
     )
     .await
 }
 
+/// Windows builds one identity per pass: its source reaches ffmpeg by path,
+/// not by inherited descriptor, and so would the extra outputs. Only the
+/// first pass rides along, so the tracks are still kept once.
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_shared_attested(
+    file: &MediaFile,
+    source: &std::fs::File,
+    source_object_version: &str,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: Option<SharedIndexProgress>,
+    ride_along: Option<&RideAlongGate>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Vec<IndexBuild> {
+    let mut builds = Vec::with_capacity(videos.len());
+    for (at, video) in videos.iter().enumerate() {
+        builds.extend(
+            build_attested_pass(
+                file,
+                source,
+                source_object_version,
+                std::slice::from_ref(video),
+                runtime_cache,
+                budget,
+                progress.clone(),
+                ride_along.filter(|_| at == 0),
+                cancel,
+            )
+            .await,
+        );
+    }
+    builds
+}
+
+/// The one place every index build passes through — the cluster worker and
+/// the non-cluster pass alike — after the held-fd probe and before the pass.
+/// That is where the ride-along's latch is checked: the first point at which
+/// the file's PGS ordinals exist, read from the descriptor the pass will read.
+#[allow(clippy::too_many_arguments)]
+async fn build_attested_pass(
+    file: &MediaFile,
+    source: &std::fs::File,
+    source_object_version: &str,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: Option<SharedIndexProgress>,
+    ride_along: Option<&RideAlongGate>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Vec<IndexBuild> {
+    let refuse_all = |outcome: IndexOutcome| {
+        videos
+            .iter()
+            .map(|_| IndexBuild::plain(outcome.clone()))
+            .collect::<Vec<_>>()
+    };
+    if videos.is_empty() {
+        return Vec::new();
+    }
+    if videos.len() > MAX_PASS_OUTPUTS {
+        return refuse_all(IndexOutcome::Unsupported(format!(
+            "one index pass writes at most {MAX_PASS_OUTPUTS} identities, not {}",
+            videos.len()
+        )));
+    }
+    #[cfg(windows)]
+    let path = match crate::ffmpeg::windows_source_path(source) {
+        Ok(path) => path,
+        Err(reason) => return refuse_all(IndexOutcome::Unsupported(reason)),
+    };
+    let (probed, started) =
+        match probe_completion_expectation(source, source_object_version, budget, cancel).await {
+            Ok(value) => value,
+            Err(failure) => return refuse_all(IndexOutcome::Failed(Box::new(failure))),
+        };
+    // An identity whose recipe cannot be described is refused on its own;
+    // that says nothing about its siblings, which still share the read.
+    let mut builds: Vec<Option<IndexBuild>> = videos.iter().map(|_| None).collect();
+    let mut outputs = Vec::with_capacity(videos.len());
+    let mut slots = Vec::with_capacity(videos.len());
+    for (slot, video) in videos.iter().enumerate() {
+        match IndexOutput::new(file, *video) {
+            Ok(output) => {
+                outputs.push(output);
+                slots.push(slot);
+            }
+            Err(reason) => {
+                builds[slot] = Some(IndexBuild::plain(IndexOutcome::Unsupported(reason)));
+            }
+        }
+    }
+    if !outputs.is_empty() {
+        let plan = match ride_along {
+            Some(gate) => {
+                crate::subtitle_ride_along::plan_tracks(
+                    gate,
+                    file.id,
+                    source,
+                    &probed.subtitle_tracks,
+                )
+                .await
+            }
+            None => None,
+        };
+        #[cfg(unix)]
+        let input = "/dev/fd/3".to_owned();
+        #[cfg(windows)]
+        let input = path.to_string_lossy().into_owned();
+        let pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
+        #[cfg(unix)]
+        let (source_fd, source_handoff) = {
+            use std::os::fd::AsRawFd;
+            (Some(source.as_raw_fd()), None)
+        };
+        #[cfg(windows)]
+        let (source_fd, source_handoff) = (None, Some((source, path.as_path())));
+        let built = build_with_args_shared(
+            file,
+            pass,
+            source_fd,
+            source_handoff,
+            runtime_cache,
+            budget,
+            started,
+            progress,
+            cancel,
+        )
+        .await;
+        for (slot, build) in slots.into_iter().zip(built) {
+            builds[slot] = Some(build);
+        }
+    }
+    builds
+        .into_iter()
+        .map(|build| {
+            build.unwrap_or_else(|| {
+                IndexBuild::plain(IndexOutcome::Failed(Box::new(IndexFailure::new(
+                    IndexFailureCode::IndexProcessFailed,
+                    "the shared index pass returned no build for this identity",
+                    0,
+                ))))
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn build_with_args(
     file: &MediaFile,
@@ -2059,6 +2339,34 @@ async fn build_with_args(
     progress: Option<SharedIndexProgress>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> IndexBuild {
+    first_build(
+        build_with_args_shared(
+            file,
+            pass,
+            source_fd,
+            source_handoff,
+            runtime_cache,
+            budget,
+            started,
+            progress,
+            cancel,
+        )
+        .await,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_with_args_shared(
+    file: &MediaFile,
+    pass: IndexPass,
+    source_fd: Option<SourceFd>,
+    source_handoff: Option<(&std::fs::File, &Path)>,
+    runtime_cache: &Path,
+    budget: Duration,
+    started: Instant,
+    progress: Option<SharedIndexProgress>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Vec<IndexBuild> {
     build_with_args_owned(
         file,
         pass,
@@ -2086,15 +2394,34 @@ async fn build_with_args_owned(
     progress: Option<SharedIndexProgress>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
     source_owned: Option<&SourceIndexExecution<'_>>,
-) -> IndexBuild {
+) -> Vec<IndexBuild> {
     let IndexPass {
         args,
-        dolby_vision,
+        outputs,
         expectation,
-        video,
         ride_along,
     } = pass;
-    let identity = identity_for(file, video);
+    let identities = outputs
+        .iter()
+        .map(|output| identity_for(file, output.video))
+        .collect::<Vec<_>>();
+    // Every output of one pass ends the same way unless its own stream says
+    // otherwise: one child, one exit status, one budget.
+    let all = |outcome: IndexOutcome| {
+        identities
+            .iter()
+            .map(|_| IndexBuild::plain(outcome.clone()))
+            .collect::<Vec<_>>()
+    };
+    if outputs.is_empty() {
+        return Vec::new();
+    }
+    if outputs.len() > MAX_PASS_OUTPUTS || (source_owned.is_some() && outputs.len() > 1) {
+        return all(IndexOutcome::Unsupported(format!(
+            "this index pass cannot write {} identities at once",
+            outputs.len()
+        )));
+    }
     if let Some(plan) = &ride_along {
         tracing::info!(
             file_id = file.id,
@@ -2102,31 +2429,63 @@ async fn build_with_args_owned(
             "the fragment-index pass is also keeping this file's PGS tracks"
         );
     }
+    if outputs.len() > 1 {
+        tracing::info!(
+            file_id = file.id,
+            identities = outputs.len(),
+            "one fragment-index pass is building every identity of this file from one read"
+        );
+    }
 
     if cancel.is_some_and(|token| token.is_cancelled()) {
-        return IndexBuild::plain(IndexOutcome::Unsupported("index cancelled".into()));
+        return all(IndexOutcome::Unsupported("index cancelled".into()));
+    }
+    // The siblings' pipes: output `i` writes to fd `3 + i` in the child.
+    // Both ends are close-on-exec, so no other child inherits a writer and
+    // keeps a reader here from ever seeing EOF; the child gets its writers
+    // only through the explicit `dup2` below.
+    #[cfg(unix)]
+    let mut sibling_pipes = Vec::with_capacity(outputs.len().saturating_sub(1));
+    #[cfg(unix)]
+    for _ in 1..outputs.len() {
+        match sibling_pipe() {
+            Ok(pipe) => sibling_pipes.push(pipe),
+            Err(error) => {
+                return all(IndexOutcome::Failed(Box::new(
+                    IndexFailure::new(
+                        IndexFailureCode::IndexProcessFailed,
+                        format!("creating a shared index pass's output pipe: {error}"),
+                        0,
+                    )
+                    .transient(true),
+                )));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if outputs.len() > 1 {
+        return all(IndexOutcome::Unsupported(
+            "this platform builds one identity per index pass".into(),
+        ));
     }
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
-    if let Some(source_fd) = source_fd {
-        unsafe {
-            command.pre_exec(move || {
-                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
-                if duplicate == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::dup2(duplicate, 3) == -1 {
-                    libc::close(duplicate);
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(duplicate);
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+    {
+        use std::os::fd::AsRawFd;
+        let mut inherited = InheritedFds::default();
+        if let Some(source_fd) = source_fd {
+            inherited.push(source_fd, 3);
+        }
+        for (at, (_, writer)) in sibling_pipes.iter().enumerate() {
+            inherited.push(writer.as_raw_fd(), 4 + at as SourceFd);
+        }
+        if inherited.len > 0 {
+            // SAFETY: `inherit` makes only async-signal-safe calls (`fcntl`,
+            // `dup2`, `close`) over a fixed-size array; it allocates nothing.
+            unsafe {
+                command.pre_exec(move || inherited.inherit());
+            }
         }
     }
     #[cfg(not(unix))]
@@ -2140,7 +2499,7 @@ async fn build_with_args_owned(
     #[cfg(windows)]
     if let Some((source, path)) = source_handoff {
         if let Err(reason) = crate::ffmpeg::verify_windows_source_path(source, path) {
-            return IndexBuild::plain(IndexOutcome::Failed(Box::new(IndexFailure::new(
+            return all(IndexOutcome::Failed(Box::new(IndexFailure::new(
                 IndexFailureCode::IndexSourceIo,
                 reason,
                 0,
@@ -2159,7 +2518,7 @@ async fn build_with_args_owned(
                 .validate_observation_freshness(now)
                 .is_err()
         {
-            return IndexBuild::plain(IndexOutcome::Unsupported(
+            return all(IndexOutcome::Unsupported(
                 "Source scan permission expired before spawn".into(),
             ));
         }
@@ -2169,7 +2528,7 @@ async fn build_with_args_owned(
         )
         .await;
         if physical.is_err() {
-            return IndexBuild::plain(IndexOutcome::Unsupported(
+            return all(IndexOutcome::Unsupported(
                 "Source scan physical identity changed".into(),
             ));
         }
@@ -2186,7 +2545,7 @@ async fn build_with_args_owned(
             || Instant::now() >= execution.deadline
             || cancel.is_some_and(|token| token.is_cancelled())
         {
-            return IndexBuild::plain(IndexOutcome::Unsupported(
+            return all(IndexOutcome::Unsupported(
                 "Source scan current authority unavailable".into(),
             ));
         }
@@ -2204,7 +2563,7 @@ async fn build_with_args_owned(
                     | std::io::ErrorKind::WouldBlock
                     | std::io::ErrorKind::OutOfMemory
             );
-            return IndexBuild::plain(IndexOutcome::Failed(Box::new(
+            return all(IndexOutcome::Failed(Box::new(
                 IndexFailure::new(
                     IndexFailureCode::IndexProcessFailed,
                     format!("spawning the job-owned index pipe: {error}"),
@@ -2214,6 +2573,16 @@ async fn build_with_args_owned(
             )));
         }
     };
+    // The child holds its own copies now. Ours must close, or a sibling's
+    // reader would wait forever for the EOF our copy keeps from it.
+    #[cfg(unix)]
+    let sibling_readers = sibling_pipes
+        .into_iter()
+        .map(|(reader, writer)| {
+            drop(writer);
+            tokio::net::unix::pipe::Receiver::from_owned_fd(reader)
+        })
+        .collect::<Result<Vec<_>, _>>();
     if let Some(execution) = source_owned {
         execution
             .hooks
@@ -2222,7 +2591,15 @@ async fn build_with_args_owned(
             .after_spawn(child.id().unwrap_or(0))
             .await;
     }
-    let Some(stdout) = child.stdout.take() else {
+    let stdout = child.stdout.take();
+    #[cfg(unix)]
+    let sibling_readers = match (stdout.is_some(), sibling_readers) {
+        (true, Ok(readers)) => Some(readers),
+        _ => None,
+    };
+    #[cfg(not(unix))]
+    let sibling_readers: Option<Vec<tokio::process::ChildStdout>> = stdout.is_some().then(Vec::new);
+    let (Some(stdout), Some(sibling_readers)) = (stdout, sibling_readers) else {
         if source_owned.is_some() {
             let _ = child.start_kill();
             loop {
@@ -2232,9 +2609,9 @@ async fn build_with_args_owned(
                 }
             }
         }
-        return IndexBuild::plain(IndexOutcome::Failed(Box::new(IndexFailure::new(
+        return all(IndexOutcome::Failed(Box::new(IndexFailure::new(
             IndexFailureCode::IndexProcessFailed,
-            "the index pipe started without a stdout",
+            "the index pipe started without every output it was given",
             0,
         ))));
     };
@@ -2294,31 +2671,68 @@ async fn build_with_args_owned(
             });
         }
     };
+    // Every output is read at once: ffmpeg writes them in lockstep from one
+    // demuxer, so an output nobody reads would stall the others behind a full
+    // pipe. The lead's stream reports progress for the pass.
+    //
+    // In a shared pass an output whose own stream is refused — a converting
+    // identity over a stream with no RPUs, say — keeps being read to EOF, so
+    // its refusal stays its own and its siblings still build, exactly as each
+    // would have in a pass of its own. A one-identity pass keeps today's
+    // behaviour: its reader closes with the refusal and the child ends early.
+    let shared = identities.len() > 1;
+    let mut dolby_vision = outputs.into_iter().map(|output| output.dolby_vision);
+    let mut streams: Vec<OutputRead<'_>> = Vec::with_capacity(identities.len());
+    streams.push(Box::pin(index_output(
+        stdout,
+        identities[0].clone(),
+        &expectation,
+        dolby_vision.next().unwrap_or_default(),
+        Some(&record_progress),
+        shared,
+    )));
+    for (reader, identity) in sibling_readers.into_iter().zip(identities.iter().skip(1)) {
+        streams.push(Box::pin(index_output(
+            reader,
+            identity.clone(),
+            &expectation,
+            dolby_vision.next().unwrap_or_default(),
+            None,
+            shared,
+        )));
+    }
     let stream = tokio::time::timeout(
         budget.saturating_sub(started.elapsed()),
-        index_stream_with_progress(
-            stdout,
-            identity,
-            Some(&expectation),
-            dolby_vision,
-            Some(&record_progress),
-        ),
+        futures_util::future::join_all(streams),
     );
     tokio::pin!(stream);
     let result = tokio::select! {
         result = &mut stream => Some(result),
         () = async { match cancel { Some(token) => token.cancelled().await, None => std::future::pending().await } } => None,
     };
-    let (mut outcome, deadline_fired) = match result {
-        Some(Ok(outcome)) => (outcome, false),
+    let mut early = vec![false; identities.len()];
+    let (mut outcomes, deadline_fired) = match result {
+        Some(Ok(answers)) => {
+            let mut outcomes = Vec::with_capacity(answers.len());
+            for (at, (outcome, refused_early)) in answers.into_iter().enumerate() {
+                early[at] = refused_early;
+                outcomes.push(outcome);
+            }
+            (outcomes, false)
+        }
         Some(Err(_)) | None => {
             let rows = observed.lock().map(|value| value.2).unwrap_or_default();
             (
-                IndexOutcome::Failed(Box::new(IndexFailure::new(
-                    IndexFailureCode::IndexBudgetExceeded,
-                    format!("exceeded the {}s index budget", budget.as_secs()),
-                    rows,
-                ))),
+                identities
+                    .iter()
+                    .map(|_| {
+                        IndexOutcome::Failed(Box::new(IndexFailure::new(
+                            IndexFailureCode::IndexBudgetExceeded,
+                            format!("exceeded the {}s index budget", budget.as_secs()),
+                            rows,
+                        )))
+                    })
+                    .collect::<Vec<_>>(),
                 true,
             )
         }
@@ -2335,36 +2749,54 @@ async fn build_with_args_owned(
         } else {
             tokio::time::timeout(Duration::from_secs(5), child.wait()).await
         };
+    let rows = observed.lock().map(|value| value.2).unwrap_or_default();
     let exit_category = match status {
         Ok(Ok(status)) if status.success() => Some("success".to_owned()),
         Ok(Ok(status)) => {
             if !deadline_fired {
-                let rows = observed.lock().map(|value| value.2).unwrap_or_default();
-                outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
-                    IndexFailureCode::IndexProcessFailed,
-                    format!("index pipe exited with {status}"),
-                    rows,
-                )));
+                // One exit status for every output: a pass that failed did
+                // not build any of them, whatever a stream managed to parse.
+                // A stream's own refusal stands: it is a statement about the
+                // content, and a reader that refused closes its pipe, which is
+                // itself why ffmpeg exits non-zero.
+                for outcome in outcomes
+                    .iter_mut()
+                    .zip(&early)
+                    .filter(|(outcome, early)| !is_refusal(outcome, **early))
+                    .map(|(outcome, _)| outcome)
+                {
+                    *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
+                        IndexFailureCode::IndexProcessFailed,
+                        format!("index pipe exited with {status}"),
+                        rows,
+                    )));
+                }
             }
             Some(format!("{status}"))
         }
         Ok(Err(error)) => {
             if !deadline_fired {
-                let rows = observed.lock().map(|value| value.2).unwrap_or_default();
                 let transient = matches!(
                     error.kind(),
                     std::io::ErrorKind::Interrupted
                         | std::io::ErrorKind::TimedOut
                         | std::io::ErrorKind::WouldBlock
                 );
-                outcome = IndexOutcome::Failed(Box::new(
-                    IndexFailure::new(
-                        IndexFailureCode::IndexProcessFailed,
-                        format!("waiting for the index pipe: {error}"),
-                        rows,
-                    )
-                    .transient(transient),
-                ));
+                for outcome in outcomes
+                    .iter_mut()
+                    .zip(&early)
+                    .filter(|(outcome, early)| !is_refusal(outcome, **early))
+                    .map(|(outcome, _)| outcome)
+                {
+                    *outcome = IndexOutcome::Failed(Box::new(
+                        IndexFailure::new(
+                            IndexFailureCode::IndexProcessFailed,
+                            format!("waiting for the index pipe: {error}"),
+                            rows,
+                        )
+                        .transient(transient),
+                    ));
+                }
             }
             Some("wait_failed".to_owned())
         }
@@ -2375,12 +2807,18 @@ async fn build_with_args_owned(
             // abandoned below.
             let _ = child.wait().await;
             if !deadline_fired {
-                let rows = observed.lock().map(|value| value.2).unwrap_or_default();
-                outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
-                    IndexFailureCode::IndexProcessFailed,
-                    "index pipe did not exit within the five-second grace",
-                    rows,
-                )));
+                for outcome in outcomes
+                    .iter_mut()
+                    .zip(&early)
+                    .filter(|(outcome, early)| !is_refusal(outcome, **early))
+                    .map(|(outcome, _)| outcome)
+                {
+                    *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
+                        IndexFailureCode::IndexProcessFailed,
+                        "index pipe did not exit within the five-second grace",
+                        rows,
+                    )));
+                }
             }
             Some("exit_grace_exceeded".to_owned())
         }
@@ -2418,84 +2856,229 @@ async fn build_with_args_owned(
         },
         None => (Vec::new(), None, None),
     };
-    finish_header_scan(
-        &mut outcome,
+    finish_header_scans(
+        &mut outcomes,
         matches!(file.video_codec.as_deref(), Some("hevc" | "h265")),
         hevc_trace,
         &expectation,
     );
-    if let IndexOutcome::Failed(failure) = &mut outcome {
-        let (output_bytes, covered_ms, rows) =
-            observed.lock().map(|value| *value).unwrap_or_default();
-        failure.rows = failure.rows.max(rows);
-        failure.diagnostic.fragment_count = Some(u32::try_from(failure.rows).unwrap_or(u32::MAX));
-        failure.diagnostic.output_bytes = Some(output_bytes);
-        failure.diagnostic.covered_ms = Some(covered_ms);
-        failure.diagnostic.expected_ms = expectation.duration_ms_floor();
-        failure.diagnostic.container_ms = file.duration_ms;
-        failure.diagnostic.selected_stream = Some(expectation.stream_index);
-        failure.diagnostic.expectation_provenance =
-            Some(expectation.provenance.as_str().to_owned());
-        failure.diagnostic.elapsed_ms =
-            Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
-        failure.diagnostic.budget_ms = Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));
-        failure.diagnostic.exit_category = exit_category;
-        failure.diagnostic.stderr_tail = stderr_tail;
-    }
-    if let IndexOutcome::Built(ref index) = outcome {
-        tracing::info!(
-            file_id = file.id,
-            fragments = index.rows.len(),
-            timescale = index.timescale,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "built a fragment index"
-        );
+    for outcome in &mut outcomes {
+        if let IndexOutcome::Failed(failure) = outcome {
+            // The lead's progress stands for the pass: every output is cut
+            // from the same packets, in lockstep.
+            let (output_bytes, covered_ms, rows) =
+                observed.lock().map(|value| *value).unwrap_or_default();
+            failure.rows = failure.rows.max(rows);
+            failure.diagnostic.fragment_count =
+                Some(u32::try_from(failure.rows).unwrap_or(u32::MAX));
+            failure.diagnostic.output_bytes = Some(output_bytes);
+            failure.diagnostic.covered_ms = Some(covered_ms);
+            failure.diagnostic.expected_ms = expectation.duration_ms_floor();
+            failure.diagnostic.container_ms = file.duration_ms;
+            failure.diagnostic.selected_stream = Some(expectation.stream_index);
+            failure.diagnostic.expectation_provenance =
+                Some(expectation.provenance.as_str().to_owned());
+            failure.diagnostic.elapsed_ms =
+                Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            failure.diagnostic.budget_ms =
+                Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));
+            failure.diagnostic.exit_category = exit_category.clone();
+            failure.diagnostic.stderr_tail = stderr_tail.clone();
+        }
+        if let IndexOutcome::Built(index) = &*outcome {
+            tracing::info!(
+                file_id = file.id,
+                fragments = index.rows.len(),
+                timescale = index.timescale,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "built a fragment index"
+            );
+        }
     }
     // The child has been reaped (a `Built` outcome means it exited 0 within
     // the grace), so no slave can still be flushing; the verdict itself is
-    // the caller's, outside this future. Any other outcome discards the stage
-    // with the plan, and the file's next pass does not ride: a riding pass
-    // that failed must not be able to fail the same way on every retry.
-    let ride_along = match (ride_along, &outcome) {
-        (Some(plan), IndexOutcome::Built(_)) => Some(PendingRideAlong::new(plan, scan)),
-        (Some(plan), _) => {
+    // the caller's, outside this future. The tracks belong to the pass, and
+    // they travel with its first built output: kept when one built,
+    // discarded with the plan otherwise, and the file's next pass does not ride — a riding
+    // pass that failed must not be able to fail the same way on every retry.
+    let carrier = outcomes
+        .iter()
+        .position(|outcome| matches!(outcome, IndexOutcome::Built(_)));
+    let mut ride_along = match (ride_along, carrier) {
+        (Some(plan), Some(_)) => Some(PendingRideAlong::new(plan, scan)),
+        (Some(plan), None) => {
             crate::subtitle_ride_along::record_failed_ride(&plan);
             None
         }
         (None, _) => None,
     };
-    IndexBuild {
-        outcome,
-        ride_along,
-        source_unchanged: true,
+    outcomes
+        .into_iter()
+        .enumerate()
+        .map(|(at, outcome)| IndexBuild {
+            outcome,
+            ride_along: if Some(at) == carrier {
+                ride_along.take()
+            } else {
+                None
+            },
+            source_unchanged: true,
+        })
+        .collect()
+}
+
+/// One output's read, boxed so a pass can read stdout and pipe outputs side
+/// by side: the outcome, and whether it was a refusal before the output ended.
+type OutputRead<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = (IndexOutcome, bool)> + Send + 'a>>;
+
+/// One output of an index pass: its index, and — in a shared pass — the rest
+/// of its pipe read and discarded once the index has its answer, so a refused
+/// output never holds its siblings behind a full pipe.
+async fn index_output<R: AsyncRead + Unpin>(
+    mut reader: R,
+    identity: SourceIdentity,
+    expectation: &VideoCompletionExpectation,
+    dolby_vision: DolbyVisionPass,
+    progress: Option<&IndexProgress>,
+    drain: bool,
+) -> (IndexOutcome, bool) {
+    let outcome = index_stream_with_progress(
+        &mut reader,
+        identity,
+        Some(expectation),
+        dolby_vision,
+        progress,
+    )
+    .await;
+    // Whether the stream answered before its output ended: a refusal of
+    // content the stream saw, not the empty or short output of a child that
+    // failed. Only the former may stand against a failed exit status.
+    let early = !matches!(outcome, IndexOutcome::Built(_)) && {
+        let mut byte = [0_u8; 1];
+        matches!(reader.read(&mut byte).await, Ok(read) if read > 0)
+    };
+    if drain {
+        let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+    }
+    (outcome, early)
+}
+
+/// A stream's own refusal of content it saw before its output ended, which
+/// no exit status overrides: the refusing reader closing its pipe is itself
+/// why a one-identity child exits non-zero.
+fn is_refusal(outcome: &IndexOutcome, early: bool) -> bool {
+    early && matches!(outcome, IndexOutcome::Unsupported(_))
+}
+
+/// The read and write ends of one sibling output's pipe, both close-on-exec
+/// (`std::io::pipe` sets it on every platform, including macOS, which has no
+/// `pipe2`).
+#[cfg(unix)]
+fn sibling_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    let (reader, writer) = std::io::pipe()?;
+    Ok((reader.into(), writer.into()))
+}
+
+/// The descriptors an index child receives at fixed numbers: the held source
+/// at 3 and each sibling output's writer at 4, 5, …. Fixed-size, so the
+/// `pre_exec` hook that installs them allocates nothing.
+#[cfg(unix)]
+#[derive(Clone, Copy, Default)]
+struct InheritedFds {
+    from: [SourceFd; MAX_PASS_OUTPUTS + 1],
+    to: [SourceFd; MAX_PASS_OUTPUTS + 1],
+    len: usize,
+}
+
+#[cfg(unix)]
+impl InheritedFds {
+    fn push(&mut self, from: SourceFd, to: SourceFd) {
+        self.from[self.len] = from;
+        self.to[self.len] = to;
+        self.len += 1;
+    }
+
+    /// Runs in the child between `fork` and `exec`. Every source is first
+    /// duplicated above the target range, so installing one target can never
+    /// close another's source — a writer that happens to be fd 4 is not lost
+    /// when the held source lands on 3.
+    fn inherit(&self) -> std::io::Result<()> {
+        let mut high = [0 as SourceFd; MAX_PASS_OUTPUTS + 1];
+        for (slot, from) in high.iter_mut().zip(&self.from).take(self.len) {
+            // SAFETY: plain descriptor syscalls on descriptors this process
+            // holds; async-signal-safe.
+            let duplicate = unsafe { libc::fcntl(*from, libc::F_DUPFD_CLOEXEC, 10) };
+            if duplicate == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            *slot = duplicate;
+        }
+        for (duplicate, to) in high.iter().zip(&self.to).take(self.len) {
+            // SAFETY: as above.
+            unsafe {
+                if libc::dup2(*duplicate, *to) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(*duplicate);
+                let flags = libc::fcntl(*to, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(*to, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
+/// Attach the pass's one HEVC header proof to every index it built. The
+/// trace was taken from the lead output, before any other filter in its
+/// chain, so it describes the source's parameter sets — which every output
+/// of the pass copies.
+fn finish_header_scans(
+    outcomes: &mut [IndexOutcome],
+    hevc: bool,
+    trace: Option<plurx_core::hevc_configuration::Trace>,
+    expectation: &VideoCompletionExpectation,
+) {
+    if !outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, IndexOutcome::Built(_)))
+    {
+        return;
+    }
+    let proof = trace.map(|trace| {
+        trace.finish(
+            expectation.source_object_version.clone(),
+            expectation.stream_index,
+        )
+    });
+    for outcome in outcomes {
+        if let IndexOutcome::Built(index) = outcome {
+            if hevc && proof.is_none() {
+                *outcome = IndexOutcome::Failed(Box::new(
+                    IndexFailure::new(
+                        IndexFailureCode::IndexProcessFailed,
+                        "HEVC header scan did not reach stderr EOF; no proof can be published",
+                        index.rows.len(),
+                    )
+                    .transient(true),
+                ));
+            } else {
+                index.promotion.hevc_configuration = proof.clone();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 fn finish_header_scan(
     outcome: &mut IndexOutcome,
     hevc: bool,
     trace: Option<plurx_core::hevc_configuration::Trace>,
     expectation: &VideoCompletionExpectation,
 ) {
-    if let IndexOutcome::Built(index) = outcome {
-        if hevc && trace.is_none() {
-            *outcome = IndexOutcome::Failed(Box::new(
-                IndexFailure::new(
-                    IndexFailureCode::IndexProcessFailed,
-                    "HEVC header scan did not reach stderr EOF; no proof can be published",
-                    index.rows.len(),
-                )
-                .transient(true),
-            ));
-        } else {
-            index.promotion.hevc_configuration = trace.map(|trace| {
-                trace.finish(
-                    expectation.source_object_version.clone(),
-                    expectation.stream_index,
-                )
-            });
-        }
-    }
+    finish_header_scans(std::slice::from_mut(outcome), hevc, trace, expectation);
 }
 
 /// Drain the index child's stderr: a bounded tail for diagnostics and, when
@@ -3014,6 +3597,335 @@ mod tests {
         }
     }
 
+    /// What a differential compares of an outcome: everything but the
+    /// diagnostic, whose elapsed time and stderr tail are the run's own.
+    fn comparable(outcome: &IndexOutcome) -> IndexOutcome {
+        match outcome {
+            IndexOutcome::Failed(failure) => IndexOutcome::Failed(Box::new(IndexFailure {
+                diagnostic: IndexDiagnostic::default(),
+                ..(**failure).clone()
+            })),
+            other => other.clone(),
+        }
+    }
+
+    /// The shared-read differential (proposal §8.2, M0). One pass that writes
+    /// every identity of a file must build, for each, exactly the index a
+    /// pass of its own builds: rows, init, identity, promotion inputs and the
+    /// HEVC header proof — or fail exactly as that pass fails.
+    ///
+    /// The sources are chosen for where a shared pass could plausibly differ:
+    /// a stream carrying real Profile 7 RPUs, labelled P7, so strip, preserve
+    /// and convert are three different byte streams and the convert rewrite
+    /// runs on a sibling output; the same stream without RPUs, so the strip
+    /// is a no-op and the converting sibling is refused while its siblings
+    /// build; an H.264 source with one identity; and a truncated source,
+    /// which every identity must fail the same way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shared_pass_builds_exactly_what_each_identity_builds_alone() {
+        use std::process::Command;
+        testfixtures::require_ffmpeg();
+        let temp = crate::test_tempdir().expect("tempdir");
+        let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
+
+        // A closed-GOP HEVC stream as an MP4, then the same stream with a
+        // real P7 RPU in every access unit.
+        let mut plain_file = hevc_file(None, None);
+        plain_file.path = testfixtures::source("closed-gop");
+        let plain_mp4 = Command::new(testfixtures::ffmpeg())
+            .args(transcode::copy_index_pipe_args(
+                &plain_file,
+                transcode::CopyVideoOptions::new(false, false),
+            ))
+            .output()
+            .expect("plain fixture");
+        assert!(plain_mp4.status.success());
+        let rpu_path = temp.path().join("p7-rpu.mp4");
+        std::fs::write(
+            &rpu_path,
+            testfixtures::with_dolby_vision_rpus(&plain_mp4.stdout),
+        )
+        .expect("RPU fixture");
+        let plain_path = temp.path().join("plain.mp4");
+        std::fs::write(&plain_path, &plain_mp4.stdout).expect("plain fixture");
+        let truncated_path = temp.path().join("truncated.mp4");
+        std::fs::write(
+            &truncated_path,
+            &plain_mp4.stdout[..plain_mp4.stdout.len() * 2 / 5],
+        )
+        .expect("truncated fixture");
+
+        let p7 = |path: &Path| {
+            let mut file = hevc_file(
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+            );
+            file.dolby_vision.profile = Some(7);
+            file.dolby_vision.level = Some(6);
+            file.dolby_vision.bl_compat_id = Some(1);
+            file.path = path.to_owned();
+            file.size = std::fs::metadata(path).expect("fixture").len() as i64;
+            file.duration_ms = Some(12_000);
+            file
+        };
+        let mut h264 = hevc_file(None, None);
+        h264.video_codec = Some("h264".into());
+        h264.path = testfixtures::source("h264");
+        h264.size = std::fs::metadata(&h264.path).expect("fixture").len() as i64;
+        h264.duration_ms = Some(12_000);
+
+        for (name, file, must_build) in [
+            ("P7 with RPUs", p7(&rpu_path), 3),
+            ("P7 label, no RPUs", p7(&plain_path), 2),
+            ("H.264", h264, 1),
+            ("truncated", p7(&truncated_path), 0),
+        ] {
+            let videos = video_identities(&file, None, have_dovi, true);
+            let source = std::fs::File::open(&file.path).expect("fixture");
+            let mut alone = Vec::with_capacity(videos.len());
+            for video in &videos {
+                alone.push(
+                    build_from_attested_file(
+                        &file,
+                        &source,
+                        "differential",
+                        *video,
+                        temp.path(),
+                        Duration::from_secs(60),
+                    )
+                    .await,
+                );
+            }
+            let shared = build_shared_attested(
+                &file,
+                &source,
+                "differential",
+                &videos,
+                temp.path(),
+                Duration::from_secs(60),
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(shared.len(), videos.len(), "{name}");
+            for ((video, alone), shared) in videos.iter().zip(&alone).zip(&shared) {
+                assert_eq!(
+                    comparable(&shared.outcome),
+                    comparable(alone),
+                    "{name}: {video:?}"
+                );
+            }
+            let built = alone
+                .iter()
+                .filter(|outcome| matches!(outcome, IndexOutcome::Built(_)))
+                .count();
+            assert_eq!(
+                built,
+                must_build.min(videos.len()),
+                "{name}: the fixture must exercise what it claims: {alone:?}"
+            );
+        }
+    }
+
+    /// The §8.2 real-source run: each identity in a pass of its own against
+    /// one shared pass, over a real file, with wall time and the children's
+    /// CPU and peak RSS. Ignored; run it on the slowest storage with
+    /// `PLURX_SHARED_READ_SOURCE=<file> cargo test -p plurxd --bin plurxd --
+    /// --ignored real_source_shared_read_differential --nocapture`.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "reads a whole real source several times; run by hand on the target storage"]
+    async fn real_source_shared_read_differential() {
+        use plurx_core::store::{LibraryStore, MediaStore};
+        let Some(path) = std::env::var_os("PLURX_SHARED_READ_SOURCE").map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        fn children() -> (f64, i64) {
+            // SAFETY: getrusage fills the zeroed struct it is given.
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+            let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
+            (
+                seconds(usage.ru_utime) + seconds(usage.ru_stime),
+                usage.ru_maxrss,
+            )
+        }
+        let probe = plurx_core::scan::probe::probe(&path).await.expect("probe");
+        let metadata = std::fs::metadata(&path).expect("source");
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("store");
+        let library = store
+            .create_library(&plurx_core::domain::NewLibrary {
+                name: "real".into(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: vec![path.parent().expect("parent").to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&plurx_core::domain::NewItem {
+                library_id: library.id,
+                kind: plurx_core::domain::ItemKind::Movie,
+                parent_id: None,
+                title: "real".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |time| time.as_secs() as i64);
+        let id = store
+            .upsert_file(
+                item,
+                &path.to_string_lossy(),
+                metadata.len() as i64,
+                mtime,
+                &probe,
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read").expect("file");
+        let raw = store.get_file_probe_json(id).await.expect("probe json");
+        let videos = video_identities(
+            &file,
+            raw.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            true,
+        );
+        let source = std::fs::File::open(&path).expect("source");
+        let temp = crate::test_tempdir().expect("tempdir");
+        let budget = Duration::from_secs(6 * 60 * 60);
+        let mut alone = Vec::new();
+        let mut report = Vec::new();
+        for video in &videos {
+            let (cpu, _) = children();
+            let started = Instant::now();
+            let outcome = build_from_attested_file(
+                &file,
+                &source,
+                "real-source",
+                *video,
+                temp.path(),
+                budget,
+            )
+            .await;
+            let (cpu_after, rss) = children();
+            report.push(serde_json::json!({
+                "wall_s": started.elapsed().as_secs_f64(),
+                "cpu_s": cpu_after - cpu,
+                "max_child_rss_kb": rss,
+                "built": matches!(outcome, IndexOutcome::Built(_)),
+            }));
+            alone.push(outcome);
+        }
+        let (cpu, _) = children();
+        let started = Instant::now();
+        let shared = build_shared_attested(
+            &file,
+            &source,
+            "real-source",
+            &videos,
+            temp.path(),
+            budget,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let (cpu_after, rss) = children();
+        let equal = shared.len() == alone.len()
+            && shared
+                .iter()
+                .zip(&alone)
+                .all(|(shared, alone)| comparable(&shared.outcome) == comparable(alone));
+        println!(
+            "{}",
+            serde_json::json!({
+                "source": path,
+                "bytes": metadata.len(),
+                "video_codec": file.video_codec,
+                "dolby_vision_profile": plurx_core::playback::dolby_vision_profile(&file),
+                "identities": videos.len(),
+                "alone": report,
+                "shared": {
+                    "wall_s": started.elapsed().as_secs_f64(),
+                    "cpu_s": cpu_after - cpu,
+                    "max_child_rss_kb": rss,
+                    "built": shared.iter().filter(|build| matches!(build.outcome, IndexOutcome::Built(_))).count(),
+                },
+                "equal": equal,
+            })
+        );
+        assert!(
+            equal,
+            "a shared pass built something a pass of its own did not"
+        );
+    }
+
+    /// Every output of a shared pass is bounded by the one budget: a pass that
+    /// cannot finish in time fails every identity, promptly, and leaves no
+    /// child behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
+        testfixtures::require_ffmpeg();
+        let temp = crate::test_tempdir().expect("tempdir");
+        let mut file = hevc_file(Some("dolby_vision"), Some("Dolby Vision · Profile 8.1"));
+        file.dolby_vision.profile = Some(8);
+        file.path = testfixtures::source("closed-gop");
+        file.duration_ms = Some(12_000);
+        let videos = video_identities(&file, None, true, false);
+        assert_eq!(videos.len(), 2);
+        let mut pass = shared_index_pass(
+            &file,
+            videos
+                .iter()
+                .map(|video| IndexOutput::new(&file, *video).expect("describable"))
+                .collect(),
+            Some(&file.path.to_string_lossy()),
+            VideoCompletionExpectation {
+                stream_index: 0,
+                duration_num: 12,
+                duration_den: 1,
+                provenance: CompletionProvenance::StreamSeconds,
+                source_object_version: "budget".to_owned(),
+            },
+            None,
+        );
+        // Paced to real time, a twelve-second film cannot be read in one.
+        let input = pass.args.iter().position(|arg| arg == "-i").expect("-i");
+        pass.args.insert(input, "-re".to_owned());
+        let started = Instant::now();
+        let builds = build_with_args_shared(
+            &file,
+            pass,
+            None,
+            None,
+            temp.path(),
+            Duration::from_secs(1),
+            Instant::now(),
+            None,
+            None,
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(builds.len(), 2);
+        for build in builds {
+            let IndexOutcome::Failed(failure) = build.outcome else {
+                panic!("{:?}", build.outcome);
+            };
+            assert_eq!(failure.code, IndexFailureCode::IndexBudgetExceeded);
+        }
+    }
+
     fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
         MediaFile {
             downloaded_subtitles: Vec::new(),
@@ -3415,7 +4327,7 @@ mod tests {
                             let leaves_a_record =
                                 filter.contains("62-63") && !filter.contains("dovi_rpu");
                             assert_eq!(
-                                pass.dolby_vision == DolbyVisionPass::Remove,
+                                pass.outputs[0].dolby_vision == DolbyVisionPass::Remove,
                                 leaves_a_record,
                                 "hdr={hdr:?} label={label:?} dovi={have_dovi} convert={convert} \
                                  promote={} rendered {filter}",
