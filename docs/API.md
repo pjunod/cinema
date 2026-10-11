@@ -300,6 +300,20 @@ perfectly valid request can 503 on one node and succeed on its neighbour.
 `learner_route_ineligible` carries no `Retry-After` on purpose: the refusal is
 a role, not a transient.
 
+**Before the router exists.** The listener is bound before the store is
+selected, so a joining learner can answer clock observation. Until startup
+hands the socket to the application, every other route answers `503
+server_starting` with `Retry-After: 2` and `Cache-Control: no-store`. This
+window is seconds on a standalone server and can last as long as a snapshot
+transfer on a cluster node. A request whose `Accept` names `text/html` gets a
+small page that says the server is starting and reloads itself, so a browser
+tab opened during startup lands in the app without a manual refresh.
+`/readyz` keeps its plain-text contract and answers `503 starting` (§22.1).
+`/healthz` is part of the window too and answers 503 until startup completes,
+so a liveness probe must allow for it: the container image's `HEALTHCHECK`
+start period does. Several lab scripts read `/healthz` 200 as "the app is up",
+which is why it is not answered early.
+
 **The maintenance allowlist** keeps enough surface alive to administer the
 node and to drain capabilities already issued: `/healthz`, `/readyz`,
 `/metrics`, `/`, the web assets, `GET`/`POST` of `/api/v1/auth/login` and
@@ -3541,10 +3555,12 @@ two paths that survive a fenced node.
 
 `GET /healthz` returns `ok\n` and **never touches storage**, so it stays 200
 on a node whose store is unreachable. That is the point: it is liveness, not
-readiness.
+readiness. The one exception is the startup window before the application
+router exists (§3.2), when it answers `503 server_starting`.
 
 `GET /readyz` returns `ready\n`, or 503 with a one-word reason —
-`maintenance`, `quorum unavailable`, `store unavailable`, `readiness unknown`.
+`maintenance`, `quorum unavailable`, `store unavailable`, `readiness unknown`,
+or `starting` while the startup window of §3.2 lasts.
 Maintenance is checked first. On a quorum-managed node the fresh quorum
 watermark *is* the recent store proof and **no store ping is issued**: turning
 readiness into another multi-second store request is exactly wrong at the

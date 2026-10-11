@@ -199,7 +199,7 @@ static SCAN_PHASE_METRICS: ScanPhaseMetrics = ScanPhaseMetrics {
 };
 
 fn saturating_add(target: &AtomicU64, amount: u64) {
-    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = target.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         (current != u64::MAX).then(|| current.saturating_add(amount))
     });
 }

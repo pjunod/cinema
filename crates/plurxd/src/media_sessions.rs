@@ -2555,7 +2555,7 @@ impl MediaSessionCoordinator {
         }
         if self
             .release_fence_count
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
                 |count| {
