@@ -2322,7 +2322,7 @@ impl AutoQualityRateProfile {
     /// Wire peak includes the actual resolved audio budget. Input pacing is
     /// excluded from encode sustainability and never turns this into link proof.
     pub fn peak_bitrate_bps(self, audio_bitrate_kbps: u32) -> u64 {
-        u64::from(self.video_bitrate_kbps()) * 1500 + u64::from(audio_bitrate_kbps) * 1000
+        super::vbv_maxrate_bps(self.video_bitrate_kbps()) + u64::from(audio_bitrate_kbps) * 1000
     }
 
     pub fn bandwidth(self, audio_bitrate_kbps: u32) -> OutputBandwidth {
@@ -2958,6 +2958,13 @@ impl ResolvedTranscode {
             options.tone_map_peak_source.name().as_bytes(),
         );
         feed("renderer", options.pipeline.name().as_bytes());
+        // Conditional: a graph that names no operator terms keeps its exact
+        // digest. One that does is keyed by them, read from the same source
+        // its filter string is built from, so a rendition cached under one
+        // curve is never served for another under the same renderer name.
+        if let Some(terms) = options.pipeline.tone_map_terms(self.input_hdr_format()) {
+            feed("renderer_tone_map_terms", terms.as_bytes());
+        }
         feed("deinterlace", self.deinterlace.name().as_bytes());
         let subtitle = match options.subtitle_burn.as_ref() {
             None => "none".to_owned(),

@@ -883,6 +883,20 @@ impl ScratchLedger {
         state.touch();
     }
 
+    /// Retirement fenced this allocation and the allocation still exists.
+    ///
+    /// Narrower than [`Self::writers_fenced`], which also says yes for an
+    /// allocation the ledger no longer has — right for a writer deciding to
+    /// stop waiting, wrong for classifying a write failure: a collected
+    /// allocation with a live writer is not evidence the session ended, and an
+    /// ENOSPC or EIO under it must stay loud.
+    pub(crate) fn retirement_fenced(&self, key: ScratchKey) -> bool {
+        self.lock()
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.writers_fenced)
+    }
+
     pub(crate) fn writers_fenced(&self, key: ScratchKey) -> bool {
         self.lock()
             .entries

@@ -590,6 +590,7 @@ paths = [
   "validation/store_shard.py",
   "crates/plurxd/src/{cachekeep,job_lease,main,manifest_cache,serving_fence,state,transcode}.rs",
   "crates/plurxd/src/media_sessions.rs",
+  "crates/plurxd/src/settings_changes.rs",
   "crates/plurxd/src/shared_cache.rs",
   "crates/plurxd/src/store_result.rs",
   "crates/plurxd/src/http/{cluster,background_jobs,internal_media_sessions,peer_transport}.rs",

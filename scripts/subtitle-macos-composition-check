@@ -67,7 +67,9 @@ def main():
     blue = bytes([0, 1, 1, 81, 240, 90, 128, 2, 41, 110, 240, 255])
     sup = b''.join([seg(1, 22, pc(1, 128, objects)), seg(1, 23, windows), seg(1, 20, palette), seg(1, 21, obj(1, 80, 30, 1)), seg(1, 21, obj(2, 40, 20, 2)), seg(1, 128, b''), seg(3, 22, pc(2, 0, objects)), seg(3, 20, blue), seg(3, 128, b''), seg(5, 22, pc(3, 0, [])), seg(5, 128, b'')])
     (root / 'semantic.sup').write_bytes(sup)
-    metal = 'scale_vt=w=160:h=90:format=p010le,tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12:apply_dovi=0'
+    # Production spelling per source family (Pipeline::tone_map_terms): PQ takes the
+    # CPU chain's operator, HLG keeps BT.2390/ITP.
+    metal = {family: 'scale_vt=w=160:h=90:format=p010le,tonemap_videotoolbox=' + terms + ':transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12:apply_dovi=0' for family, terms in (('hdr10', 'tonemap=hable:tonemap_mode=max:desat=0'), ('hlg', 'tonemap=bt2390:tonemap_mode=itp'))}
     sdr = 'scale_vt=w=160:h=90:format=nv12'
     inputs = {}
     for family in ['sdr8', 'hdr10', 'hlg']:
@@ -78,7 +80,7 @@ def main():
         run(family + '-pgs-mux', ['-i', str(src), '-itsoffset', '1', '-i', str(root / 'semantic.sup'), '-map', '0:v', '-map', '1:s', '-c', 'copy', str(pgs)])
     outputs = {}
     for family, src in inputs.items():
-        process = sdr if family == 'sdr8' else metal
+        process = sdr if family == 'sdr8' else metal[family]
         for op in ['plain', 'text', 'bitmap']:
             args = ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox_vld', '-i', str(src if op != 'bitmap' else root / (family + '-semantic.mkv')), '-an', '-sn', '-dn']
             if op == 'bitmap':
@@ -136,10 +138,12 @@ def main():
         if r.returncode:
             raise RuntimeError(name + ': ' + r.stderr.decode()[-2000:])
         return r.stdout
-    metal = 'scale_vt=w=160:h=90:format=p010le,tonemap_videotoolbox=tonemap=bt2390:tonemap_mode=itp:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12:apply_dovi=0'
+    # Production spelling per source family (Pipeline::tone_map_terms): PQ takes the
+    # CPU chain's operator, HLG keeps BT.2390/ITP.
+    metal = {family: 'scale_vt=w=160:h=90:format=p010le,tonemap_videotoolbox=' + terms + ':transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=nv12:apply_dovi=0' for family, terms in (('hdr10', 'tonemap=hable:tonemap_mode=max:desat=0'), ('hlg', 'tonemap=bt2390:tonemap_mode=itp'))}
     sdr = 'scale_vt=w=160:h=90:format=nv12'
     for family in ['sdr8', 'hdr10', 'hlg']:
-        process = sdr if family == 'sdr8' else metal
+        process = sdr if family == 'sdr8' else metal[family]
         sidecar = root / (family + '-full.mks')
         run(family + '-sidecar', ['-copyts', '-i', str(root / (family + '-semantic.mkv')), '-map', '0:s:0', '-c', 'copy', '-f', 'matroska', str(sidecar)])
         for target in [2.5, 4.5, 6.5]:
@@ -172,7 +176,7 @@ def main():
             assert text_delta > 5 and bitmap_delta > 5 if target < 5 else text_delta == 0 and bitmap_delta == 0, (family, target, text_delta, bitmap_delta)
             rows.append({'name': f'{family}-seek-{target}-semantic-assertion', 'text_region_delta': text_delta, 'bitmap_region_delta': bitmap_delta, 'active': target < 5})
     for family in ['sdr8', 'hdr10', 'hlg']:
-        process = sdr if family == 'sdr8' else metal
+        process = sdr if family == 'sdr8' else metal[family]
         args = ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox_vld', '-i', str(root / (family + '-8s.mp4')), '-an', '-sn', '-dn', '-vf', process + ",hwdownload,format=nv12,subtitles='" + str(root / 'semantic.ass') + "',trim=start=7.5,setpts=PTS-STARTPTS", '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']
         end = run(family + '-active-eof', args)
         assert len(end) == 6 * 160 * 90 * 3, (family, len(end))
@@ -192,9 +196,9 @@ def main():
         target = root / (operation + '-cancel.ts')
         args = [ff, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-re', '-stream_loop', '-1', '-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox_vld', '-i', str(root / ('hlg-semantic.mkv' if operation == 'bitmap' else 'hlg-8s.mp4')), '-an', '-sn', '-dn']
         if operation == 'bitmap':
-            args += ['-filter_complex', '[0:v]' + metal + ',hwdownload,format=nv12[v];[0:s:0]scale=160:90[s];[v][s]overlay=eof_action=pass[o]', '-map', '[o]']
+            args += ['-filter_complex', '[0:v]' + metal['hlg'] + ',hwdownload,format=nv12[v];[0:s:0]scale=160:90[s];[v][s]overlay=eof_action=pass[o]', '-map', '[o]']
         else:
-            args += ['-vf', metal + ",hwdownload,format=nv12,subtitles='" + str(root / 'semantic.ass') + "'"]
+            args += ['-vf', metal['hlg'] + ",hwdownload,format=nv12,subtitles='" + str(root / 'semantic.ass') + "'"]
         args += ['-c:v', 'h264_videotoolbox', '-allow_sw', '0', '-bf', '0', '-b:v', '500k', '-f', 'mpegts', str(target)]
         with (root / (operation + '-cancel.stderr')).open('wb') as log:
             child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)

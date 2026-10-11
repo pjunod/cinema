@@ -2911,21 +2911,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # server shutdown token. Neither owns a producer or process.
 # Merge with main 1d3765776: the effort +2 and main #844 +1 add together.
 # Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
-# +4 with the tone-map census (C-M0, pipeprobe/census.rs): one
-# production `tokio::spawn` in `http/system.rs::start_tone_map_census`, the
-# admin-started census task. It owns no producer and no session: it holds one
-# background admission permit, runs every ffmpeg through pipeprobe's existing
-# Spawn seam (job-owned, kill-on-drop), polls `background_must_yield` and the
-# stop token, and drops its permit and child before it returns. Three are
-# test-only: the census driven on a test task in the queued, stop and yield
-# regressions, each joined before the test ends.
-# +1 test-only: `rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt`
-# (vodencode_manager_tests.rs) drives the create on one spawned task that the
-# test holds at the fallback hook and then awaits; it owns no producer.
-# +1 test-only: its candidate-route twin drives the same way.
-# +2 test-only for the census review: the heavy-gate queue test and the
-# stopped-run test each drive the census on one joined task.
-expected_occurrences = 945
+# F4 fleet repair: +1 production, the unsignalled-transfer re-probe spawned
+# from the per-tick maintenance block beside the luminance frame walk. Like
+# it, a leased catalogue job (`catalogue:unsignalled-transfer`) that walks a
+# node-local cursor, runs its bounded frame reads through the scanner's
+# owned child and releases the lease before it returns; it owns no producer
+# and no timer.
+# +8 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
+expected_occurrences = 946
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3151,7 +3144,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # still_answers_producer_failed and its vodencode_tests.rs expired-verdict
 # counterpart). Each is attached to the rendition's ProducerSlot and reaped
 # by Step::Terminate before the test ends; kill_on_drop is the unwind backstop.
-expected_occurrences = 68
+# P-02 zombie read-back (process/priority.rs): +1, test-only: the P-02 exited-before-registration test's
+# `true` child (`std::process::Command::spawn`) in process::priority::tests.
+# It is never registered by the launcher, the test reaps it with `wait()`
+# after the assertion, and production gains no launch.
+expected_occurrences = 69
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4463,17 +4460,35 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # decides producer recovery.
 # Merge with main 1d3765776: the effort +2 and main #844 +2 add together.
 # Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
-# +8 with the tone-map census (C-M0, pipeprobe/census.rs). Two
-# production: the queued census's `tokio::time::sleep(POLL)` between
-# admission retries, and `guarded`'s `tokio::time::interval(POLL)` that polls
-# `background_must_yield` while a census child runs. Both are local to the
-# census task, end with it, and own no producer. Six are test-only: the
-# `settle` and two child-started waits' `sleep`, the queued test's
-# `sleep(POLL * 3)`, and two `timeout`s bounding the stop and yield tests.
-# +4 test-only for the census review: the heavy-gate test's `sleep(POLL * 3)`,
-# the stopped-run test's polling sleep and its `timeout`, and the
-# no-hardware test's `timeout` that proves it fails without waiting.
-expected_occurrences = 1705
+# K-03 takeover gate held on change signals: +2, test-only, in
+# media_sessions::takeover_gate_tests. The remote-enable test's 3 s sleep
+# (the save lands while the gate sleeps, joined with the gate's own loop,
+# no spawn) and the unwatched-cadence test's one sleep past the 60 s off
+# hold. Production adds no timer: the off sleep gains a select arm on the
+# applied-index watch that the gate already owns, and no task.
+# K-03 clock-enforcement follower on the same signals: +10, test-only, in
+# clock_offset::tests. Each test joins the follower with a driver future
+# (no spawn) whose paused-time sleeps (three 1 ms settles, two 5 s
+# applied-entry paces, and five whole-refresh waits) observe the follower
+# and then cancel its shutdown token. Production is net zero: the follower's
+# one 10 s Skip-mode `tokio::time::interval` moved from `run` into
+# `follow_stored_enforcement`, still ended by the same shutdown token.
+# P-02 zombie read-back (process/priority.rs): +1, test-only: that test's 5 ms `std::thread::sleep` while
+# it polls /proc for the child's zombie state, bounded by a 10 s deadline.
+# K-03 off-gate wake on applied-index moves only: +2, test-only, in
+# media_sessions::takeover_gate_tests. One 250 ms sleep paces metrics changes
+# that apply nothing and one 500 ms sleep paces an applied entry; each runs in
+# a future joined with the gate's own wait (no spawn) and ends with it.
+# Production adds no timer: the idle sleep's watch arm loops on the same
+# watch until the applied index moves.
+# K-03 advisory cap on the clock-enforcement follower: +4, test-only, in
+# clock_offset::tests::a_lagging_replica_cannot_hold_enforcement_off_past_its_cap,
+# joined with the follower (no spawn): a 1 ms settle, one wait just short of
+# the cap, one across it and one long hold, then the shutdown token. Production
+# adds no timer: the follower's existing 10 s interval reads the held answer's
+# age.
+# +12 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
+expected_occurrences = 1724
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4900,14 +4915,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # ChildWork::background: bounded time and output, cancelled with the probe,
 # reaped before the result is used. No rolling producer is started.
 # Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
-# +0 with the tone-map census (C-M0, pipeprobe/census.rs): every ffmpeg it
-# starts (signal encode, graph runs, stills) goes through pipeprobe's existing
-# `Spawn::command` constructor and its two `output_job_owned` calls, under its
-# own Activity purpose ("tone-map census"). No new constructor or launcher.
-# +1 test-only: the same regression writes its replacement source with one
-# awaited `Command::new(ffmpeg())` through `testfixtures::run`; no producer.
-# +1 test-only: the candidate-route twin writes its replacement the same way.
-expected_occurrences = 261
+# P-02 zombie read-back (process/priority.rs): +1, test-only: the same `true` child, constructed with
+# `std::process::Command::new` so it is not registered at spawn.
+# +2 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
+expected_occurrences = 262
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5520,10 +5531,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Startup pending fallback: +3 false positives. The pending-socket regression
 # reads `response.status()` on three in-process `oneshot` responses; the
 # fallback itself launches nothing.
-# +0 with the tone-map census: it reuses pipeprobe's two awaited
-# `output_job_owned` launches; cancelling a step drops that future, which
-# kills the kill-on-drop, job-owned child.
-expected_occurrences = 748
+# P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's `.spawn()`; not a second
+# child.
+expected_occurrences = 749
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5801,7 +5811,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # PR #947 ownership additions above; neither history is discarded.
 # #844: +1 false positive. end_for_owner awaits `cleanup.wait()` on the
 # existing TerminalCleanup; it is not a child-process wait.
-expected_occurrences = 325
+# P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's reaping `wait()`.
+expected_occurrences = 326
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

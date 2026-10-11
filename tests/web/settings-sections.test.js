@@ -157,7 +157,10 @@ test("node transcoder save binds the request to the displayed node and preserves
   const calls=[];
   const save = new Function("document","api","SETTINGS_DATA","toast", `${shippedSource("saveNodeHwaccel")}\nreturn saveNodeHwaccel;`)(
     {getElementById:id=>id==="node-hwaccel"?{value:"qsv",dataset:{nodeId:"rog"}}:status},
-    async (url,options)=>{calls.push([url,JSON.parse(options.body)]);return {restart_required:true};},
+    // The value api() receives, not a parse of it: api() serializes `body`
+    // itself. This fake once JSON.parse'd it, which made the test demand the
+    // double-encoded string that broke Save and Optimize (2026-10-11).
+    async (url,options)=>{calls.push([url,options.body]);return {restart_required:true};},
     {sys},()=>{});
   await save(button);
   assert.deepEqual(calls, [["/system/transcoder",{node_id:"rog",preference:"qsv"}]]);
@@ -1876,6 +1879,36 @@ test("tone-map probe failures stay collapsed beneath the selected pipeline", () 
     "no empty disclosure when no probe was rejected");
   assert.match(render({ran:false,selected:"cpu",verdicts:[{rejected:"software encoder"}]}), /software encoder/,
     "an unprobed node keeps its short explanation");
+});
+
+test("a Mac node reports the Metal tone-map through Mac video processing and never calls a missing build feature a fallback", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\nreturn toneMapHtml;`)(esc);
+  const vulkan = {pipeline:"libplacebo",label:"GPU tone-map (Vulkan)",passed:false,unavailable:true,
+    rejected:"not available on this platform — this FFmpeg build has no vulkan support"};
+  const metal = {pipeline:"vt_tonemap_metal",label:"GPU tone-map (Metal)",passed:true,speedup:2.16};
+  // A passing Metal graph ends the race with node routing on the CPU chain.
+  const tm = {ran:true,selected:"cpu",selected_label:"CPU tone-map",
+    verdicts:[metal,vulkan,{pipeline:"cpu",label:"CPU tone-map",passed:true,speedup:1}]};
+  const visible = (html) => html.replace(/<details\b[\s\S]*?<\/details>/, "");
+
+  const off = render(tm, {enabled:false,hdr10_metal:{availability:"available",reason:"available"}});
+  assert.match(visible(off), /^CPU tone-map /);
+  assert.match(visible(off), /GPU tone-map \(Metal\) matched the CPU picture at 2\.16× the CPU chain; HDR uses it once Mac video processing is on in Settings → Developer/);
+  assert.doesNotMatch(off, /fell back|Cannot allocate/);
+  assert.match(off, /<details[\s\S]*GPU tone-map \(Vulkan\): not available on this platform — this FFmpeg build has no vulkan support/);
+  assert.match(render(tm), /HDR uses it once Mac video processing is on/, "no Mac data reads as off");
+
+  const on = render(tm, {enabled:true,hdr10_metal:{availability:"available",reason:"available"}});
+  assert.match(visible(on), /^<span style="color:var\(--good\)">GPU tone-map \(Metal\)<\/span>/);
+  assert.doesNotMatch(visible(on), /matched the CPU picture|fell back/);
+
+  const refused = render(tm, {enabled:true,hdr10_metal:{availability:"unavailable",reason:"cpu_parity_failed"}});
+  assert.match(visible(refused), /Mac video processing reports it unavailable \(cpu_parity_failed\)/);
+  const pending = render(tm, {enabled:true,hdr10_metal:{availability:"pending",reason:"probe_pending"}});
+  assert.match(visible(pending), /Mac video processing is still checking it/);
+
+  const cpu = render({ran:true,selected:"cpu",selected_label:"CPU tone-map",verdicts:[vulkan]}, null);
+  assert.doesNotMatch(cpu, /fell back/, "a candidate the build cannot express is not a fallback");
 });
 
 test("a standalone server keeps every local switch; cluster switches live only in Cluster", () => {

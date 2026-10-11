@@ -890,6 +890,7 @@
             positioned_at: None,
             seconds_per_segment: rendition.seconds_per_segment,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         let readers = rendition.readers.lock().await;
@@ -1441,7 +1442,8 @@
         let position = Position {
             produced_through: None, positioned_at: None,
             seconds_per_segment: rendition.seconds_per_segment,
-            ahead_held: false, working_set: WorkingSet::default(),
+            ahead_held: false, permit_wanted: false,
+            working_set: WorkingSet::default(),
         };
         {
             let readers = rendition.readers.lock().await;
@@ -1522,6 +1524,7 @@
             positioned_at: Some(45),
             seconds_per_segment: rendition.seconds_per_segment,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
@@ -1609,6 +1612,7 @@
             positioned_at: Some(45),
             seconds_per_segment: rendition.seconds_per_segment,
             ahead_held: false,
+            permit_wanted: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
@@ -1756,9 +1760,22 @@
         let horizon = ((f64::from(AHEAD_HORIZON_SECONDS) / rendition.seconds_per_segment).ceil()
             as u32)
             .max(1);
+        park_running_through(serve, rendition, permit, horizon).await;
+    }
+
+    /// Materialize a rendition through `through`, give it a fake running
+    /// producer holding `permit` that has produced exactly that far, and
+    /// register it.
+    #[cfg(unix)]
+    async fn park_running_through(
+        serve: &VodServe,
+        rendition: &Arc<Rendition>,
+        permit: crate::vodencode::EncodePermit,
+        through: u32,
+    ) {
         {
             let mut manifest = rendition.manifest.lock().await;
-            for index in 0..=horizon {
+            for index in 0..=through {
                 manifest.materialize(index, 1_000, 0);
             }
         }
@@ -1771,7 +1788,7 @@
             .slot
             .attach_owned(child, 0, Some(Box::new(permit)))
             .await;
-        rendition.slot.produced(horizon).await;
+        rendition.slot.produced(through).await;
         serve
             .shared
             .renditions
@@ -2104,6 +2121,224 @@
         held.release();
         rendition.kick();
         driver.await.expect("test driver exits");
+    }
+
+    /// A running encoded producer holding the node's only encode permit with
+    /// `lead` segments produced past its reader, and a second encoded
+    /// rendition registered beside it whose start the pool refused for that
+    /// permit — queued, as a new viewer's start is.
+    #[cfg(unix)]
+    async fn running_with_a_queued_start(
+        base: &Path,
+        lead_past_yield_line: i64,
+    ) -> (
+        Arc<VodServe>,
+        Arc<Rendition>,
+        Arc<crate::vodencode::Encoding>,
+        Arc<Rendition>,
+        Arc<crate::vodencode::Encoding>,
+        u32,
+    ) {
+        let serve = bare_serve(base);
+        let (file, encoding) = encoded_fixture(base).await;
+        let contender = encoding
+            .clone_with_admissions_for_test(encoding.admissions.clone())
+            .await;
+        encoding
+            .store
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &encoding.resources.cpu_threads.max(1).to_string(),
+            )
+            .await
+            .expect("one-encoder software budget");
+        let permit = encoding.try_permit().await.expect("encoder permit");
+        let mut rendition = synthetic_rendition(base).await;
+        let mutable = Arc::get_mut(&mut rendition).expect("unshared rendition");
+        mutable.recipe.file = file.clone();
+        mutable.recipe.encoding = Some(Arc::clone(&encoding));
+        let segments = |seconds: u32| {
+            ((f64::from(seconds) / rendition.seconds_per_segment).ceil() as u32).max(1)
+        };
+        let resume = segments(crate::prodsched::AHEAD_RESUME_SECONDS);
+        let yield_line = resume + segments(crate::prodsched::AHEAD_YIELD_MARGIN_SECONDS);
+        let lead = u32::try_from(i64::from(yield_line) + lead_past_yield_line).expect("a lead");
+        assert!(
+            lead < segments(AHEAD_HORIZON_SECONDS),
+            "the lead must sit short of the horizon"
+        );
+        park_running_through(&serve, &rendition, permit, lead).await;
+        rendition.attach_reader("viewer", 0).await;
+
+        let mut waiter = synthetic_rendition(base).await;
+        let mutable = Arc::get_mut(&mut waiter).expect("unshared waiter");
+        mutable.key = "queued-start".to_string();
+        mutable.recipe.file = file;
+        mutable.recipe.encoding = Some(Arc::clone(&contender));
+        serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .insert(waiter.key.clone(), Arc::clone(&waiter));
+        assert!(
+            contender.try_permit().await.is_none(),
+            "the second start queues behind the held permit"
+        );
+        assert!(contender.has_live_wait());
+        (serve, rendition, encoding, waiter, contender, resume)
+    }
+
+    /// Lab F5 (2026-10-11): with one encode's worth of budget, a live start
+    /// waited 7-16 s for a RUNNING producer that was climbing towards its
+    /// horizon at ~15x realtime, because only a stopped producer yielded.
+    /// Once that producer's lead is past the low-water mark plus the yield
+    /// margin, a queued new start that the release admits stops it and takes
+    /// its permit; it comes back for its own reader at the low-water mark,
+    /// exactly as a producer yielded while stopped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_encoder_with_a_lead_yields_to_a_queued_live_start() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, rendition, encoding, _waiter, contender, resume) =
+            running_with_a_queued_start(base.path(), 1).await;
+
+        driver_pass(&serve.shared, &rendition).await;
+        assert!(
+            matches!(rendition.slot.belief().await, Producer::Absent { .. }),
+            "a running producer with a lead past the yield line yields"
+        );
+        assert!(rendition.ahead_hold.load(Acquire));
+        assert!(serve
+            .shared
+            .pool
+            .metrics_handle()
+            .prometheus()
+            .contains("plurx_vod_producer_terminations_total{why=\"yield_to_waiter\"} 1"));
+        let contender_permit = contender
+            .try_permit()
+            .await
+            .expect("the queued start takes the yielded producer's permit");
+        drop(contender_permit);
+        contender.cancel_wait();
+
+        let through = rendition
+            .slot
+            .belief()
+            .await
+            .produced_through()
+            .expect("yield preserves progress");
+        // It does not take the permit back while its reader still has more
+        // than the low-water mark in hand...
+        let admission = encoding.pause_next_admission();
+        tokio::time::pause();
+        let driver = spawn_driver(Arc::clone(&serve.shared), Arc::clone(&rendition));
+        rendition.kick();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !admission.was_reached(),
+            "the yielded producer must not re-admit above the low-water line"
+        );
+        // ...and asks for it again once its reader reaches that line.
+        rendition
+            .readers
+            .lock()
+            .await
+            .get_mut("viewer")
+            .expect("reader")
+            .frontier = through - resume;
+        rendition.kick();
+        let held = admission.reached().await;
+        rendition.closed.store(true, Release);
+        held.release();
+        rendition.kick();
+        driver.await.expect("test driver exits");
+    }
+
+    /// Inside the margin the producer keeps its permit: a producer that was
+    /// just re-admitted at the low-water mark cannot be yielded again a
+    /// segment later.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_encoder_inside_the_yield_margin_keeps_its_permit() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, rendition, _encoding, _waiter, contender, _) =
+            running_with_a_queued_start(base.path(), 0).await;
+        driver_pass(&serve.shared, &rendition).await;
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Running { .. }
+        ));
+        assert!(!rendition.ahead_hold.load(Acquire));
+        contender.cancel_wait();
+        cleanup_running(&serve, &rendition).await;
+    }
+
+    /// Review scenario A: a queued start the release would not admit (here,
+    /// one whose plan no release can admit) must not cost the producer a
+    /// kill and a respawn — once per segment, as the first cut of this fix
+    /// did.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_encoder_keeps_its_permit_for_a_start_it_cannot_admit() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, rendition, _encoding, _waiter, contender, _) =
+            running_with_a_queued_start(base.path(), 1).await;
+        contender
+            .last_refusal
+            .lock()
+            .expect("refusal")
+            .as_mut()
+            .expect("the queued start was refused")
+            .over_budget = true;
+        driver_pass(&serve.shared, &rendition).await;
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Running { .. }
+        ));
+        assert!(!rendition.ahead_hold.load(Acquire));
+        contender.cancel_wait();
+        cleanup_running(&serve, &rendition).await;
+    }
+
+    /// Review scenario B: another yielded producer coming back at its
+    /// low-water mark is not a new viewer's start. Yielding to it early is
+    /// how two viewers on one encoder alternated with a segment of lead per
+    /// restart; it gets the permit when this producer stops at its horizon.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_encoder_does_not_yield_early_to_a_readmission() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, rendition, _encoding, waiter, contender, _) =
+            running_with_a_queued_start(base.path(), 1).await;
+        waiter.ahead_hold.store(true, Release);
+        driver_pass(&serve.shared, &rendition).await;
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Running { .. }
+        ));
+        assert!(!rendition.ahead_hold.load(Acquire));
+        contender.cancel_wait();
+        cleanup_running(&serve, &rendition).await;
+    }
+
+    #[cfg(unix)]
+    async fn cleanup_running(serve: &VodServe, rendition: &Arc<Rendition>) {
+        perform_driver_step(
+            &serve.shared,
+            rendition,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        )
+        .await
+        .expect("cleanup fake producer");
     }
 
     #[cfg(unix)]

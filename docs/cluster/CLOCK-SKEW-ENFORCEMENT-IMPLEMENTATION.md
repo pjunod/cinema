@@ -22,7 +22,7 @@ supply the required release separation.
 Paul's 2026-09-30 clarification, recorded in measurement §1, requires a switch
 only where manual on/off is meaningful. K-06 retains its accepted no-switch
 contract, automatic observation, and separate enforcement release. (`main`
-nevertheless has the switch — Developer *Cluster clock guard*,
+nevertheless has the switch — Settings → Cluster *Cluster clock guard* (Developer until the 2026-10-10 graduation pass),
 `cluster.clock_guard_enforced`, default off, advisory readiness rows; see the
 2026-10-04 note below.) Developer
 facts remain read-only and advisory. Enforcement still waits for the merged
@@ -293,7 +293,8 @@ and enforcement itself are untouched; their ruling is separate):
    learner above 2 s refuses only its own routes and promotion (amended
    2026-10-10: counting it cluster-wide let a ~9.7 s learner step refuse
    every voter's expiry scan for ~16 minutes; design §3.3); fenced removal
-   excuses only unobserved *learner* survivors; and `promote_learner` plus the leader-side Raft
+   is gated only by surviving *voters*, so a learner survivor, unobserved or
+   out of bound, never refuses it (2026-10-10); and `promote_learner` plus the leader-side Raft
    `Promote` admission require the promoted learner's own bound
    (`admit_promotion_for` / `revalidate_promotion_for`). The role comes only
    from the exact applied directory. Focused tests:

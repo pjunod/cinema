@@ -587,6 +587,19 @@ impl EffectiveRateControl {
     }
 }
 
+/// The VBV rate cap, in kbit/s, that every bounded encode is configured with
+/// for a `bitrate_kbps` target. Over any window the encoder keeps its output
+/// within this rate plus one VBV buffer, so it is the rate a rendition needs
+/// from a link, not the per-object worst case.
+pub fn vbv_maxrate_kbps(bitrate_kbps: u32) -> u32 {
+    bitrate_kbps * 3 / 2
+}
+
+/// [`vbv_maxrate_kbps`] in bit/s.
+pub fn vbv_maxrate_bps(bitrate_kbps: u32) -> u64 {
+    u64::from(vbv_maxrate_kbps(bitrate_kbps)) * 1000
+}
+
 impl Encoder {
     /// Stable queue/capability family name.
     pub fn family_name(self) -> &'static str {
@@ -854,7 +867,7 @@ impl Encoder {
             return self.hdr10_encode_args(bitrate_kbps, force_idr, software_threads);
         }
         let br = format!("{bitrate_kbps}k");
-        let maxrate = format!("{}k", bitrate_kbps * 3 / 2);
+        let maxrate = format!("{}k", vbv_maxrate_kbps(bitrate_kbps));
         let bufsize = format!("{}k", bitrate_kbps * 2);
         let idr = force_idr.then(|| self.forced_idr_flag()).flatten();
         let bounded = |v: Vec<&str>, include_target: bool| -> Vec<String> {
@@ -1016,7 +1029,7 @@ impl Encoder {
             "-b:v".to_owned(),
             format!("{bitrate_kbps}k"),
             "-maxrate".to_owned(),
-            format!("{}k", bitrate_kbps * 3 / 2),
+            format!("{}k", vbv_maxrate_kbps(bitrate_kbps)),
             "-bufsize".to_owned(),
             format!("{}k", bitrate_kbps * 2),
             "-color_primaries".to_owned(),

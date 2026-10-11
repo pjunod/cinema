@@ -5933,7 +5933,7 @@ the loading overlay a few seconds longer, then playback).
 | `plurx_sharing_receiver_orphan_total{outcome="stranded"}` rises, or Settings → Sharing → This node lists stranded playback routes | A shared-playback route whose receiver owner crashed (or whose retirement stalled) was taken over by this node's recovery owner but cannot be retired. The reason says why: `source_refused` or `budget_exhausted` (the Source never confirmed End), `unopenable_capsule` (this node lacks the key that sealed it), `dispatch_unknown` or `partial_binding` (no authenticatable End and no no-send proof) | The rows are kept on purpose: nothing deletes a Source obligation without a confirmed End. `GET /api/v1/sharing/status` → `receiver_recovery` lists them per node with a WARN in `plurxd::sharing` naming import and incarnation. A transient Source outage clears on a later look once the claimed lease lapses; a key or dispatch reason needs the node that holds the key, or operator review ([SHARED-LIBRARIES-IMPLEMENTATION](features/SHARED-LIBRARIES-IMPLEMENTATION.md), "B orphaned receiver crash recovery") |
 | `plurx_transcode_output_enqueue_dropped_total{reason}` is rising | A started VOD session could not hand its complete-output preparation to the output-enqueue worker: `queue_full` means the worker is behind, `worker_stopped` means it has exited (normally only at shutdown) | Each increment has an INFO `complete output preparation not handed off` in `plurxd::transcode` naming the file and reason. Nothing is lost: the title's next start offers the same deduplicated job again, so a drop delays the complete output rather than refusing anything. A steady `queue_full` rate means queue publication itself is slow; read the worker's `complete output preparation queued` / `not queued` lines for `waited_ms` and `elapsed_ms` |
 | Live TV answers `encoder_capacity` ("the tuner owner's encoder is busy") | The tuners were free but the owner's video encoder pool refused the transcode this route needs. Distinct from `tuner_capacity`, which lists what holds the tuners | `GET /api/v1/system` → `hw_slots_in_use` / `hw_slots_max` on the owner; a copy route on the same channel (a client that decodes MPEG-2 or HEVC itself) starts without this |
-| 4K HDR is slow but plays | The tone-map is running on the CPU. `GET /api/v1/system` → `tone_map` names the graph in use and why each candidate was rejected — no GPU device, a driver that refused the filter, output that didn't match the reference, or a graph that wasn't faster than the CPU chain | A rejection naming a missing device is usually a container passthrough (`--device /dev/dri`) or a missing driver package. HLG and Dolby Vision always use the CPU chain by design |
+| 4K HDR is slow but plays | The tone-map is running on the CPU. `GET /api/v1/system` → `tone_map` names the graph in use and why each candidate was rejected — no GPU device, a driver that refused the filter, output that didn't match the reference, or a graph that wasn't faster than the CPU chain. A candidate marked *not available on this platform* is one this FFmpeg build was compiled without; on a Mac, the Metal graph is used only with Mac video processing on (Settings → Developer) | A rejection naming a missing device is usually a container passthrough (`--device /dev/dri`) or a missing driver package. HLG and Dolby Vision always use the CPU chain by design |
 | "All hardware transcode slots are in use" | The cap (`transcode.max_hw_sessions`, default 2) is doing its job. A start waits up to 5 s for a slot, then runs in software *only if this server has measured that class of stream above realtime there* — never because the output is small, since the decode and the tone-map happen at source resolution whatever size you ask for | `GET /api/v1/system` → `hw_slots_in_use` / `hw_slots_max`. Refused at 0 of 2 is a bug; refused at 2 of 2 is the design. A 4K HDR source is the shape software cannot carry, so it is refused rather than started to stall |
 | A GPU tone-map worked and then stopped | The pipeline downgrades once, per session, to the CPU chain and logs it | Look for `pipeline=` on the session's ffmpeg log line: it names what actually ran, not what the box can do |
 | 4K HDR / Dolby Vision won't play | Heavy HEVC is hardware-decoded (Intel too); if the GPU can't decode it and software can't either, the session now fails fast with a clear log line instead of hanging gray | Read `plurxd::transcode` — the last ffmpeg line names the real cause (decode vs tone-map). DV profile 5 is the hardest case |
@@ -5982,6 +5982,20 @@ hardware frame mapping), then the existing `libplacebo` path with CPU frame
 transfers, then OpenCL. Unsupported mapping, incorrect output or insufficient
 speed declines only that candidate. Subtitle burns still download the mapped
 SDR frames for composition and upload them to the encoder afterward.
+
+With a VideoToolbox encoder (an Apple Silicon node) the probe tries the Metal
+tone-map (`vt_tonemap_metal`) first, under the same picture and speed checks;
+OpenCL is tried only if Metal fails. A passing Metal graph ends the race with
+the node's own routing left on the CPU chain, because Mac video processing
+takes over exactly the sessions the node would send to the CPU chain. GPU
+graphs are given the same peak as the CPU chain (MaxCLL, else mastering
+maximum, else 1,000 nits). A candidate this FFmpeg build cannot express — the macOS
+Jellyfin build has no Vulkan and no libplacebo — is listed as *not available
+on this platform* and never run, so it neither shows an allocation error nor
+makes a CPU result a fallback. Sessions reach the Metal graph only through
+Mac video processing (Settings → Developer): when that is off the System row
+says the Metal graph matched the CPU picture and HDR stays on the CPU chain;
+when it is on, its HDR10 Metal graphs are offered only if this probe passed.
 
 ### Library channel search and classification
 

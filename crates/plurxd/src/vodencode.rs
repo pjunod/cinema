@@ -994,6 +994,28 @@ impl Encoding {
             )
     }
 
+    /// Whether this rendition is queued as a live start that returning a
+    /// permit of `released`'s size would admit, under the limits its last
+    /// refusal read. False for a plan no release can admit.
+    pub(crate) fn live_start_fits_after_release(
+        &self,
+        released: &TranscodeResourceEstimate,
+    ) -> bool {
+        if !self.has_live_wait() {
+            return false;
+        }
+        let Some(refusal) = self.last_refusal() else {
+            return false;
+        };
+        !refusal.over_budget
+            && self.admissions.live_fits_after_release(
+                refusal.hardware_limit,
+                refusal.software_budget,
+                &self.resources(),
+                released,
+            )
+    }
+
     /// Whether this exact rendition has registered a foreground pool waiter.
     /// Kept separate from policy retry so only a real capacity wait wakes
     /// other renditions to consider yielding their permit.
@@ -1063,6 +1085,26 @@ impl Encoding {
         };
         u64::try_from(rate + (burst * u128::from(plan.timescale)).div_ceil(u128::from(shortest)))
             .ok()
+    }
+
+    /// The rate this continuous rendition needs from a link: the encoder's
+    /// VBV cap for video, the configured rate for the shared soundtrack. It is
+    /// the same figure the candidate catalog advertises for the encode route,
+    /// split by role. [`Self::continuous_peak_bps`] stays the publication
+    /// ceiling; nothing enforces this value, and it is always below it.
+    pub(crate) fn continuous_sustained_bps(&self) -> Option<u64> {
+        if self.shared_audio.is_some() {
+            return Some(u64::from(self.options.audio_bitrate_kbps) * 1000);
+        }
+        if self.plan.options().input_has_audio
+            || self.options.video_sample_envelope
+                != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+        {
+            return None;
+        }
+        Some(plurx_core::transcode::vbv_maxrate_bps(
+            self.options.video_bitrate_kbps,
+        ))
     }
 
     pub(crate) fn continuous_object_fits(

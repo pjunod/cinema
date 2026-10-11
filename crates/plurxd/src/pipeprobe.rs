@@ -7,8 +7,14 @@
 //! still be slower than the CPU chain it replaced. Exit status zero proves
 //! none of it (PERF-PLAN §5, review R5).
 //!
-//! So the gate is a real encode of real HDR10, per candidate, per node, checked
-//! four ways:
+//! A candidate this FFmpeg build cannot express at all — a device type or a
+//! filter it was compiled without, such as Vulkan in the macOS Jellyfin build
+//! — is reported as *not available on this platform* and never run. Running it
+//! anyway only produced the build's allocation failure (`Device creation
+//! failed: -12 … Cannot allocate memory`), which read as a fault.
+//!
+//! Everything else gets a real encode of real HDR10, per candidate, per node,
+//! checked four ways:
 //!
 //! 1. it runs at all, with the exact production graph;
 //! 2. `ffprobe` says the output is tagged BT.709 — transfer, primaries, matrix;
@@ -99,6 +105,10 @@ pub struct PipelineVerdict {
     pub speedup: Option<f64>,
     /// Why it was rejected. `None` when it passed.
     pub rejected: Option<String>,
+    /// This FFmpeg build cannot express the graph at all (no such device type
+    /// or filter), so it was not run. A platform fact, not a failure: it does
+    /// not make a CPU selection a fallback.
+    pub unavailable: bool,
 }
 
 /// This node's tone-map capability, as measured.
@@ -140,6 +150,7 @@ impl PipelineReport {
                 passed: true,
                 speedup: None,
                 rejected: Some(reason.to_owned()),
+                unavailable: false,
             }],
             ran: false,
             census: None,
@@ -149,6 +160,30 @@ impl PipelineReport {
     pub fn selected(&self) -> Pipeline {
         Pipeline::parse(&self.selected).unwrap_or(Pipeline::Cpu)
     }
+
+    /// Whether `pipeline` matched the CPU reference's picture, fast enough,
+    /// on this node. The macOS compatibility context reads this for the Metal
+    /// tone-map, so the graph it routes sessions to is held to the same
+    /// parity as every GPU graph the probe selects.
+    pub fn parity(&self, pipeline: Pipeline) -> CpuParity {
+        match self.verdicts.iter().find(|v| v.pipeline == pipeline.name()) {
+            Some(verdict) if verdict.passed => CpuParity::Passed,
+            Some(_) => CpuParity::Failed,
+            None => CpuParity::NotMeasured,
+        }
+    }
+}
+
+/// The boot probe's finding about one graph against the CPU reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CpuParity {
+    Passed,
+    /// It ran and was rejected, or this build cannot express it.
+    Failed,
+    /// The probe never got to it: the reference failed, the node's encoder
+    /// does not pair with it, or an earlier candidate won the race.
+    #[default]
+    NotMeasured,
 }
 
 /// Probe every candidate that could pair with `encoder`, and return what this
@@ -188,6 +223,115 @@ trait Tools {
         &self,
         args: Vec<String>,
     ) -> impl std::future::Future<Output = Result<std::process::Output, String>>;
+
+    /// What this build can express: its hardware device types and filters.
+    /// `None` when either listing could not be read — and an unread listing
+    /// excludes nothing, so every candidate runs exactly as it did before.
+    fn inventory(&self) -> impl std::future::Future<Output = Option<Inventory>> {
+        async {
+            let ask = |flag: &str| {
+                self.ffmpeg(
+                    vec!["-hide_banner".to_owned(), flag.to_owned()],
+                    Stdout::Capture,
+                )
+            };
+            let listing = |out: std::process::Output| {
+                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                text.push_str(&String::from_utf8_lossy(&out.stderr));
+                text
+            };
+            let devices = listing(ask("-hwaccels").await.ok()?);
+            let filters = listing(ask("-filters").await.ok()?);
+            Inventory::from_listings(&devices, &filters)
+        }
+    }
+}
+
+/// The hardware device types and filters one FFmpeg build was compiled with.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Inventory {
+    devices: Vec<String>,
+    filters: String,
+}
+
+impl Inventory {
+    /// From `ffmpeg -hwaccels` (which lists every compiled `AVHWDeviceType`)
+    /// and `ffmpeg -filters`. A device listing with no header, or a filter
+    /// listing without `scale` — which every build has — is a spawn or parse
+    /// that went wrong, not a capability report, so it yields `None`.
+    pub(crate) fn from_listings(hwaccels: &str, filters: &str) -> Option<Inventory> {
+        let mut lines = hwaccels.lines().map(str::trim);
+        lines.find(|line| line.eq_ignore_ascii_case("Hardware acceleration methods:"))?;
+        let devices = lines
+            .take_while(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !declares_filters(filters, &["scale"]) {
+            return None;
+        }
+        Some(Inventory {
+            devices,
+            filters: filters.to_owned(),
+        })
+    }
+
+    /// Why this build cannot run `args` at all, or `None` when it can.
+    ///
+    /// Read from the probe's own argv — every `-init_hw_device` and `-hwaccel`
+    /// device type, and every filter in `-vf` — so what is checked is exactly
+    /// what would be run, with no second list of requirements to drift from it.
+    fn missing(&self, args: &[String]) -> Option<String> {
+        let mut pairs = args.windows(2);
+        while let Some([flag, value]) = pairs.next() {
+            let device = match flag.as_str() {
+                "-init_hw_device" => value.split(['=', ':', '@']).next().unwrap_or(value),
+                "-hwaccel" if !matches!(value.as_str(), "none" | "auto") => value.as_str(),
+                _ => continue,
+            };
+            if !self.devices.iter().any(|known| known == device) {
+                return Some(format!(
+                    "not available on this platform — this FFmpeg build has no {device} support"
+                ));
+            }
+        }
+        let graph = args
+            .windows(2)
+            .find(|pair| pair[0] == "-vf")
+            .map(|pair| pair[1].as_str())
+            .unwrap_or_default();
+        graph_filter_names(graph)
+            .into_iter()
+            .find(|name| !declares_filters(&self.filters, &[name]))
+            .map(|name| {
+                format!("not available on this platform — this FFmpeg build has no {name} filter")
+            })
+    }
+}
+
+/// The filter names in a simple `-vf` chain. Commas inside single-quoted
+/// arguments (`scale=-2:'min(1080,ih)'`) do not separate filters.
+fn graph_filter_names(graph: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (index, ch) in graph
+        .char_indices()
+        .chain(std::iter::once((graph.len(), ',')))
+    {
+        match ch {
+            '\'' => quoted = !quoted,
+            ',' if !quoted => {
+                let filter = graph[start..index].trim();
+                let name = filter.split('=').next().unwrap_or_default().trim();
+                if !name.is_empty() {
+                    names.push(name);
+                }
+                start = (index + 1).min(graph.len());
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 /// What an ffmpeg run's stdout is for. The encodes write a file and their
@@ -413,9 +557,25 @@ async fn probe_with<T: Tools>(tools: &T, work_dir: &Path, encoder: Encoder) -> P
     };
 
     let out = work_dir.join("pipeprobe-out.mp4");
-    let report = probe_candidates(encoder, |candidate| {
-        run(tools, &fixture, &out, candidate, encoder)
-    })
+    let inventory = tools.inventory().await;
+    if inventory.is_none() {
+        tracing::warn!(
+            "could not read this ffmpeg's device and filter listings; every tone-map \
+             candidate will be run rather than ruled out"
+        );
+    }
+    let report = probe_candidates(
+        encoder,
+        |candidate| {
+            inventory
+                .as_ref()
+                .and_then(|inventory| {
+                    inventory.missing(&probe_args(&fixture, &out, candidate, encoder))
+                })
+                .map_or(Ok(()), Err)
+        },
+        |candidate| run(tools, &fixture, &out, candidate, encoder),
+    )
     .await;
     let _ = tokio::fs::remove_file(&out).await;
     report
@@ -429,8 +589,9 @@ async fn probe_with<T: Tools>(tools: &T, work_dir: &Path, encoder: Encoder) -> P
 /// the rule that the first proof wins, what happens when the reference itself
 /// cannot run, and the fact that the CPU chain is always in the report are all
 /// decisions, and none of them needs a subprocess to check.
-async fn probe_candidates<F, Fut>(encoder: Encoder, run_one: F) -> PipelineReport
+async fn probe_candidates<A, F, Fut>(encoder: Encoder, available: A, run_one: F) -> PipelineReport
 where
+    A: Fn(Pipeline) -> Result<(), String>,
     F: Fn(Pipeline) -> Fut,
     Fut: std::future::Future<Output = Result<Sample, String>>,
 {
@@ -452,12 +613,33 @@ where
         if candidate == Pipeline::Cpu || !candidate.pairs_with(encoder) {
             continue;
         }
+        if let Err(why) = available(candidate) {
+            tracing::info!(pipeline = candidate.name(), reason = %why, "tone-map graph not available");
+            verdicts.push(PipelineVerdict {
+                pipeline: candidate.name().to_owned(),
+                label: candidate.label().to_owned(),
+                passed: false,
+                speedup: None,
+                rejected: Some(why),
+                unavailable: true,
+            });
+            continue;
+        }
         let verdict = judge_sample(candidate, run_one(candidate).await, &reference);
         let passed = verdict.passed;
         verdicts.push(verdict);
         if passed {
-            selected = candidate;
-            break; // candidates are in preference order; the first proof wins
+            // Candidates are in preference order; the first proof wins. A
+            // graph sessions reach only through the macOS context is proved
+            // here for that context and ends the race too — it is this
+            // encoder's platform path — but node routing keeps the CPU chain:
+            // the context takes over only sessions the node would send to the
+            // CPU chain, so selecting a vendor-neutral graph beside it would
+            // take the very sessions it exists to route.
+            if !candidate.requires_macos_context() {
+                selected = candidate;
+            }
+            break;
         }
     }
 
@@ -467,12 +649,21 @@ where
         passed: true,
         speedup: Some(1.0),
         rejected: None,
+        unavailable: false,
     });
 
     if selected.on_gpu() {
         tracing::info!(
             pipeline = selected.name(),
             "tone-map runs on the GPU for HDR10 sources"
+        );
+    } else if let Some(proved) = verdicts.iter().find(|v| {
+        v.passed && Pipeline::parse(&v.pipeline).is_some_and(Pipeline::requires_macos_context)
+    }) {
+        tracing::info!(
+            pipeline = %proved.pipeline,
+            "the platform tone-map graph matched the CPU reference; HDR sessions use it \
+             through Mac video processing and otherwise the CPU chain"
         );
     } else {
         tracing::info!(
@@ -531,6 +722,7 @@ fn judge_sample(
         passed: false,
         speedup,
         rejected: Some(why),
+        unavailable: false,
     };
 
     let sample = match outcome {
@@ -557,6 +749,7 @@ fn judge_sample(
         passed: true,
         speedup: Some(speedup),
         rejected: None,
+        unavailable: false,
     }
 }
 
@@ -690,7 +883,9 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
     args.push("-i".into());
     args.push(fixture.to_string_lossy().into_owned());
 
-    let mut vf = match candidate.filters(None, PROBE_HEIGHT, Some("hdr10")) {
+    // At the CPU reference's 1,000-nit policy peak, as production passes the
+    // source's peak to both.
+    let mut vf = match candidate.filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(1_000)) {
         Some(g) => g,
         // The CPU reference: the tone map `video_filters` builds for an
         // HDR10 source at the 1,000-nit policy peak, taken from the one
@@ -1243,6 +1438,7 @@ mod tests {
         ffprobe_args: std::cell::RefCell<Vec<Vec<String>>>,
         next_ffmpeg: std::cell::Cell<usize>,
         next_ffprobe: std::cell::Cell<usize>,
+        inventory: Option<Inventory>,
     }
 
     fn ok_output(stdout: &str) -> Result<std::process::Output, String> {
@@ -1291,6 +1487,235 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| Err("no recorded ffprobe run".to_owned()))
         }
+
+        async fn inventory(&self) -> Option<Inventory> {
+            self.inventory.clone()
+        }
+    }
+
+    /// `ffmpeg -hwaccels` from the Jellyfin 8.1.3 macOS build plurxd runs on an
+    /// Apple Silicon node: no Vulkan, so no libplacebo either.
+    const MACOS_HWACCELS: &str = "Hardware acceleration methods:\nvideotoolbox\nopencl\n\n";
+    /// The rows of that build's `-filters` the candidates use, as printed.
+    const MACOS_FILTERS: &str = " .. format            V->V       Convert the input video to one of the specified pixel formats.\n \
+         .. hwdownload        V->V       Download a hardware frame to a normal frame\n \
+         .. hwupload          V->V       Upload a normal frame to a hardware frame\n \
+         .S scale             V->V       Scale the input video size and/or convert the image format.\n \
+         .. scale_vt          V->V       Scale Videotoolbox frames\n \
+         .. tonemap_opencl    V->V       Perform HDR to SDR conversion with tonemapping.\n \
+         .. tonemap_videotoolbox V->V       Perform HDR to SDR conversion with Metal.\n \
+         .S zscale            V->V       Apply resizing, colorspace and bit depth conversion.\n";
+
+    fn args_for(candidate: Pipeline, encoder: Encoder) -> Vec<String> {
+        probe_args(
+            Path::new("hdr.mkv"),
+            Path::new("out.mp4"),
+            candidate,
+            encoder,
+        )
+    }
+
+    /// What the macOS build cannot express is named as such; what it can is
+    /// left to the real run. The Vulkan line used to be this build's
+    /// `Device creation failed: -12 … Cannot allocate memory`.
+    #[test]
+    fn the_inventory_names_what_this_build_cannot_express() {
+        let mac = Inventory::from_listings(MACOS_HWACCELS, MACOS_FILTERS).expect("readable");
+        let vulkan = mac
+            .missing(&args_for(Pipeline::Libplacebo, Encoder::VideoToolbox))
+            .expect("no Vulkan on this build");
+        assert_eq!(
+            vulkan,
+            "not available on this platform — this FFmpeg build has no vulkan support"
+        );
+        assert_eq!(
+            mac.missing(&args_for(Pipeline::VtToneMapMetal, Encoder::VideoToolbox)),
+            None
+        );
+        assert_eq!(
+            mac.missing(&args_for(Pipeline::TonemapOpencl, Encoder::VideoToolbox)),
+            None
+        );
+
+        // A build with the device but not the filter is refused on the filter.
+        let devices_only = Inventory::from_listings(
+            "Hardware acceleration methods:\nvaapi\nvulkan\n",
+            MACOS_FILTERS,
+        )
+        .expect("readable");
+        assert_eq!(
+            devices_only.missing(&args_for(Pipeline::Libplacebo, Encoder::Vaapi)),
+            Some(
+                "not available on this platform — this FFmpeg build has no libplacebo filter"
+                    .to_owned()
+            )
+        );
+
+        // Unreadable listings rule nothing out.
+        assert!(Inventory::from_listings("", MACOS_FILTERS).is_none());
+        assert!(Inventory::from_listings(MACOS_HWACCELS, "").is_none());
+    }
+
+    /// The production listing read: the two flags, stdout and stderr merged.
+    #[tokio::test]
+    async fn the_default_inventory_reads_both_listings_through_the_spawn_seam() {
+        struct Listings(std::cell::RefCell<Vec<Vec<String>>>);
+        impl Tools for Listings {
+            async fn ffmpeg(
+                &self,
+                args: Vec<String>,
+                stdout: Stdout,
+            ) -> Result<std::process::Output, String> {
+                assert_eq!(stdout, Stdout::Capture);
+                self.0.borrow_mut().push(args.clone());
+                match args.last().map(String::as_str) {
+                    // Older builds print the device list on stderr.
+                    Some("-hwaccels") => Ok(std::process::Output {
+                        status: exit_status(0),
+                        stdout: Vec::new(),
+                        stderr: MACOS_HWACCELS.as_bytes().to_vec(),
+                    }),
+                    Some("-filters") => ok_output(MACOS_FILTERS),
+                    _ => Err("unexpected".to_owned()),
+                }
+            }
+            async fn ffprobe(&self, _: Vec<String>) -> Result<std::process::Output, String> {
+                Err("unused".to_owned())
+            }
+        }
+        let tools = Listings(std::cell::RefCell::new(Vec::new()));
+        let inventory = tools.inventory().await.expect("both listings read");
+        assert!(inventory
+            .missing(&args_for(Pipeline::Libplacebo, Encoder::VideoToolbox))
+            .is_some());
+        assert_eq!(
+            *tools.0.borrow(),
+            vec![
+                vec!["-hide_banner".to_owned(), "-hwaccels".to_owned()],
+                vec!["-hide_banner".to_owned(), "-filters".to_owned()]
+            ]
+        );
+    }
+
+    #[test]
+    fn graph_filter_names_ignore_commas_inside_quoted_arguments() {
+        assert_eq!(
+            graph_filter_names(
+                "scale=-2:'min(1080,ih)',format=p010,hwupload,tonemap_opencl=tonemap=hable,hwdownload"
+            ),
+            vec!["scale", "format", "hwupload", "tonemap_opencl", "hwdownload"]
+        );
+        assert!(graph_filter_names("").is_empty());
+    }
+
+    /// The probe runs the Metal graph with the production decode flags and
+    /// the CPU reference's operator, and hands its surfaces straight to the
+    /// VideoToolbox encoder.
+    #[test]
+    fn the_metal_candidate_is_measured_with_its_production_graph() {
+        let args = args_for(Pipeline::VtToneMapMetal, Encoder::VideoToolbox);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-hwaccel", "videotoolbox"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-hwaccel_output_format", "videotoolbox_vld"]));
+        let vf = args
+            .windows(2)
+            .find(|pair| pair[0] == "-vf")
+            .map(|pair| pair[1].clone())
+            .expect("a filter graph");
+        assert_eq!(
+            Some(vf.as_str()),
+            Pipeline::VtToneMapMetal
+                .filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(1_000))
+                .as_deref()
+        );
+        assert!(
+            vf.contains("tonemap_videotoolbox=tonemap=hable:tonemap_mode=max:desat=0:"),
+            "{vf}"
+        );
+    }
+
+    /// A Mac node: Vulkan is not in the build, so it is reported unavailable
+    /// and never run, and a CPU outcome is not called a fallback for it. The
+    /// Metal graph is tried first and its parity is what the Mac context reads.
+    #[tokio::test]
+    async fn a_candidate_this_build_cannot_express_is_reported_unavailable_and_never_run() {
+        let mac = Inventory::from_listings(MACOS_HWACCELS, MACOS_FILTERS).expect("readable");
+        let available = |p: Pipeline| {
+            mac.missing(&args_for(p, Encoder::VideoToolbox))
+                .map_or(Ok(()), Err)
+        };
+
+        let wins = Recorder::new(vec![
+            (Pipeline::Cpu, Ok(sample(119.0, 0.93))),
+            (Pipeline::VtToneMapMetal, Ok(sample(108.7, 0.43))),
+        ]);
+        let r = &wins;
+        let report = probe_candidates(
+            Encoder::VideoToolbox,
+            available,
+            |p| async move { r.run(p) },
+        )
+        .await;
+        assert_eq!(
+            report.selected(),
+            Pipeline::Cpu,
+            "node routing cannot run the Metal graph; the Mac context does"
+        );
+        assert_eq!(
+            *wins.asked.borrow(),
+            vec![Pipeline::Cpu, Pipeline::VtToneMapMetal],
+            "a proved platform graph ends the race"
+        );
+        assert_eq!(report.parity(Pipeline::VtToneMapMetal), CpuParity::Passed);
+        assert_eq!(
+            report.parity(Pipeline::TonemapOpencl),
+            CpuParity::NotMeasured
+        );
+
+        let loses = Recorder::new(vec![
+            (Pipeline::Cpu, Ok(sample(119.0, 0.93))),
+            // The production bt2390/ITP spelling, as measured: a different picture.
+            (Pipeline::VtToneMapMetal, Ok(sample(148.5, 0.43))),
+            (Pipeline::TonemapOpencl, Ok(sample(108.7, 0.58))),
+        ]);
+        let r = &loses;
+        let report = probe_candidates(
+            Encoder::VideoToolbox,
+            available,
+            |p| async move { r.run(p) },
+        )
+        .await;
+        assert_eq!(
+            *loses.asked.borrow(),
+            vec![
+                Pipeline::Cpu,
+                Pipeline::VtToneMapMetal,
+                Pipeline::TonemapOpencl
+            ],
+            "Vulkan is never run on a build without it"
+        );
+        assert_eq!(report.selected(), Pipeline::TonemapOpencl);
+        assert_eq!(report.parity(Pipeline::VtToneMapMetal), CpuParity::Failed);
+        let vulkan = report
+            .verdicts
+            .iter()
+            .find(|v| v.pipeline == Pipeline::Libplacebo.name())
+            .expect("reported");
+        assert!(vulkan.unavailable && !vulkan.passed);
+        assert_eq!(vulkan.speedup, None);
+        assert!(!report.verdicts.iter().any(|v| v
+            .rejected
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Cannot allocate")));
+        assert!(report
+            .verdicts
+            .iter()
+            .filter(|v| v.pipeline != Pipeline::Libplacebo.name())
+            .all(|v| !v.unavailable));
     }
 
     fn sample(y: f64, secs: f64) -> Sample {
@@ -1471,9 +1896,11 @@ mod tests {
             (Pipeline::Cpu, Ok(sample(84.0, 4.0))),
             (Pipeline::LibplaceboSoftware, Ok(sample(85.0, 2.0))),
         ]);
-        let report = probe_candidates(Encoder::Software, |pipeline| {
-            std::future::ready(recorder.run(pipeline))
-        })
+        let report = probe_candidates(
+            Encoder::Software,
+            |_| Ok(()),
+            |pipeline| std::future::ready(recorder.run(pipeline)),
+        )
         .await;
         assert_eq!(report.selected(), Pipeline::LibplaceboSoftware);
         assert_eq!(
@@ -1822,7 +2249,8 @@ mod tests {
             Err("no such filter: zscale".to_owned()),
         )]);
         let r = &rec;
-        let report = probe_candidates(Encoder::Nvenc, |p| async move { r.run(p) }).await;
+        let report =
+            probe_candidates(Encoder::Nvenc, |_| Ok(()), |p| async move { r.run(p) }).await;
 
         assert_eq!(report.selected(), Pipeline::Cpu);
         assert!(!report.ran, "an unvalidated node must not claim it probed");
@@ -1849,7 +2277,8 @@ mod tests {
             (Pipeline::TonemapOpencl, Ok(sample(84.0, 1.0))),
         ]);
         let r = &rec;
-        let report = probe_candidates(Encoder::Nvenc, |p| async move { r.run(p) }).await;
+        let report =
+            probe_candidates(Encoder::Nvenc, |_| Ok(()), |p| async move { r.run(p) }).await;
 
         assert_eq!(report.selected(), Pipeline::TonemapCuda);
         assert!(report.ran);
@@ -1879,7 +2308,8 @@ mod tests {
             (Pipeline::TonemapOpencl, Err("no opencl device".to_owned())),
         ]);
         let r = &rec;
-        let report = probe_candidates(Encoder::Nvenc, |p| async move { r.run(p) }).await;
+        let report =
+            probe_candidates(Encoder::Nvenc, |_| Ok(()), |p| async move { r.run(p) }).await;
 
         assert_eq!(
             *rec.asked.borrow(),
@@ -2041,7 +2471,8 @@ mod tests {
                 (Pipeline::Libplacebo, Ok(sample(86.0, 3.0))),
             ]);
             let r = &rec;
-            let report = probe_candidates(Encoder::Vaapi, |p| async move { r.run(p) }).await;
+            let report =
+                probe_candidates(Encoder::Vaapi, |_| Ok(()), |p| async move { r.run(p) }).await;
             assert_eq!(
                 report.selected(),
                 if passes {

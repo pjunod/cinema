@@ -2325,6 +2325,14 @@ pub mod keys {
     pub const JOB_LUMINANCE_FRAME_BACKFILL_DONE: &str = "jobs.luminance_frame_backfilled";
     /// Node-local strictly-after cursor for the first-frame luminance walk.
     pub const JOB_LUMINANCE_FRAME_BACKFILL_CURSOR: &str = "jobs.luminance_frame_backfill_cursor";
+    /// The leaf probe pipeline digest (`scan::probe::pipeline_digest`) the
+    /// unsignalled-transfer re-probe last completed for. A different digest —
+    /// another classification version or another FFprobe build — reruns it.
+    pub const JOB_UNSIGNALLED_TRANSFER_BACKFILL_DONE: &str = "jobs.unsignalled_transfer_backfilled";
+    /// Node-local `<digest>:<id>` strictly-after cursor for that walk; a
+    /// cursor written for another digest restarts at the beginning.
+    pub const JOB_UNSIGNALLED_TRANSFER_BACKFILL_CURSOR: &str =
+        "jobs.unsignalled_transfer_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
     /// object from decimal library id to `off`, `manual`, or `auto`. Missing
     /// libraries are always off: an upgrade must never rewrite media by
@@ -3418,6 +3426,25 @@ pub trait MediaStore: Send + Sync + 'static {
         max_cll: Option<i64>,
         max_fall: Option<i64>,
         mastering_max_luminance: Option<i64>,
+    ) -> Result<bool, StoreError>;
+    /// Rows catalogued SDR that could be HDR signalled only in the bitstream
+    /// (`hdr IS NULL`, a stored probe, and a 10-bit-or-deeper video or BT.2020
+    /// in the document), strictly after `after_id` in ascending id order. A
+    /// coarse superset: the caller applies
+    /// `scan::probe::stored_document_leaves_transfer_to_bitstream`. Same
+    /// identity projection, so the write below is fenced to this snapshot.
+    async fn files_with_unsignalled_transfer(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError>;
+    /// Record the first frame's HDR classification and luminance, only while
+    /// the row is still SDR and still the exact source and probe snapshot
+    /// `files_with_unsignalled_transfer` returned.
+    async fn set_file_frame_dynamic_range(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        observed: &crate::scan::probe::FrameDynamicRange,
     ) -> Result<bool, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.
@@ -5553,12 +5580,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// exclusive keyset cursor in `(lease_expires_at_ms, incarnation_id)`
     /// order, allowing a bounded caller to make progress past routes it must
     /// refuse without mutating those still-authoritative routes.
+    ///
+    /// The same statement reads both takeover switches and answers
+    /// [`TakeoverInventory::Disabled`](crate::domain::TakeoverInventory) when
+    /// either is off, so a caller whose own view of the switches is stale
+    /// cannot start work the authority has switched off.
     async fn expired_media_sessions(
         &self,
         now_ms: i64,
         after: Option<crate::domain::MediaSessionTakeoverCursor>,
         limit: usize,
-    ) -> Result<Vec<MediaSessionRoute>, StoreError>;
+    ) -> Result<crate::domain::TakeoverInventory, StoreError>;
 
     /// Atomically transfer an exact expired owner epoch and its lease fence.
     /// A racing survivor, delete, renewal, or maintenance pass makes the CAS

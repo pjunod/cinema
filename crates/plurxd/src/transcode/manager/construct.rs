@@ -208,6 +208,13 @@ impl TranscodeManager {
         }
     }
 
+    /// The boot probe's CPU-parity finding for the Metal tone-map. The macOS
+    /// compatibility context offers its PQ Metal graphs only when it passed.
+    pub fn with_metal_tone_map_parity(self, parity: crate::pipeprobe::CpuParity) -> Self {
+        self.macos_video_probe.set_pq_tone_map_parity(parity);
+        self
+    }
+
     pub fn with_dovi_reshape(mut self, dovi_reshape: bool) -> Self {
         self.dovi_reshape = dovi_reshape;
         self
@@ -318,9 +325,8 @@ impl TranscodeManager {
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
-        self.macos_video_probe = Arc::new(crate::macos_video::MacosVideoProbe::new(
-            self.runtime_cache.clone(),
-        ));
+        self.macos_video_probe =
+            Arc::new(self.macos_video_probe.rebuilt(self.runtime_cache.clone()));
         self.subtitle_cache = subtitle_cache;
         self.subtitle_membership = cluster_membership.clone();
         // Renditions are durable state — admitted ones are the copy cache the

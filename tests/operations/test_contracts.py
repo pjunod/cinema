@@ -1859,12 +1859,59 @@ assert.equal(context.ACT_TIMER, null);
         fast_gate = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
             "promotion_gate"
         ]
-        self.assertIn("Require the reviewed head and base to remain current", fast_gate)
+        step = "Require the reviewed head to remain current"
+        self.assertIn(step, fast_gate)
+        # Behaviour, not text: run the step itself against scratch repositories.
+        # The jobs build the PR head alone, so the gate refuses a moved head
+        # and accepts any movement of the base branch.
+        currency = workflow_step_blocks(fast_gate)[step]
+        script = textwrap.dedent(currency.split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+
+            def git(*args: str, cwd: Path = root / "work") -> str:
+                return subprocess.run(
+                    ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                    cwd=cwd, check=True, capture_output=True, text=True,
+                ).stdout.strip()
+
+            (root / "work").mkdir()
+            git("init", "-q", "-b", "main")
+            git("commit", "-q", "--allow-empty", "-m", "base")
+            git("checkout", "-q", "-b", "topic")
+            git("commit", "-q", "--allow-empty", "-m", "tested head")
+            tested = git("rev-parse", "HEAD")
+            git("init", "-q", "--bare", str(root / "origin.git"), cwd=root)
+            git("remote", "add", "origin", str(root / "origin.git"))
+            git("push", "-q", "origin", "topic:refs/pull/7/head")
+
+            def gate(pr_number: str = "7", head: str = tested) -> int:
+                return subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                    cwd=root / "work", capture_output=True, text=True,
+                    env={**os.environ, "PR_NUMBER": pr_number,
+                         "EVENT_HEAD_SHA": head, "GITHUB_TOKEN": "token"},
+                ).returncode
+
+            self.assertEqual(gate(), 0, "an unchanged head passes")
+            git("checkout", "-q", "main")
+            git("commit", "-q", "--allow-empty", "-m", "main advanced")
+            git("push", "-q", "origin", "main")
+            self.assertEqual(gate(), 0, "an advanced base does not invalidate the lane")
+            git("checkout", "-q", "--orphan", "rewritten")
+            git("commit", "-q", "--allow-empty", "-m", "rewritten main")
+            git("push", "-q", "--force", "origin", "rewritten:main")
+            self.assertEqual(gate(), 0, "the base is not what the jobs built")
+            git("checkout", "-q", "topic")
+            git("commit", "-q", "--allow-empty", "-m", "untested push")
+            git("push", "-q", "--force", "origin", "topic:refs/pull/7/head")
+            self.assertNotEqual(gate(), 0, "a head pushed after the lane started is refused")
+            self.assertNotEqual(gate(pr_number="", head=""), 0, "only a pull request can pass")
         self.assertIn("--branch badges-pr-ci", fast_gate)
         self.assertIn("--branch badges-pr-lint", fast_gate)
         self.assertIn("if: needs.rust_compile.result == 'success'", fast_gate)
         self.assertLess(
-            fast_gate.index("Require the reviewed head and base to remain current"),
+            fast_gate.index(step),
             fast_gate.index("Publish the qualified PR gate badge"),
         )
 
