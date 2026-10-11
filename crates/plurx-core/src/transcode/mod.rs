@@ -1188,10 +1188,11 @@ fn video_filters_for_contract(
     // Always give GPU scalers the same explicit even, no-upscale dimensions
     // the CPU path promises. `w=-1` can resolve to an odd NV12 width.
     let gpu_size = output_size;
-    if let Some(mut gpu) = opts.pipeline.filters(
+    if let Some(mut gpu) = opts.pipeline.filters_at_peak(
         gpu_size.map(|(w, _)| w),
         gpu_size.map_or(opts.target_height, |(_, h)| h),
         input_dynamic_range,
+        Some(tone_map_peak.0),
     ) {
         // The exact Mac interlace tuple retains file send-frame cadence and
         // progressive bypass. Deinterlace the full raster before scaling;
