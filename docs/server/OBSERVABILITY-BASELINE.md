@@ -698,14 +698,19 @@ On media1 and lab1, with the build carrying PRs <M1..M4 numbers>:
    Run it five times per host after at least an hour of normal use and
    paste all ten lines. If any scrape exceeds 2 MB or 500 ms, say so.
 2. Label hygiene — this must print nothing on both hosts:
-     curl -s http://<host>:32400/metrics | grep -v '^#' | grep -oE '\{[^}]*\}' \
-       | sed -E 's/(peer|owner_node)="[^"]*"//g' \
-       | grep -E '[0-9a-f]{8}-[0-9a-f]{4}-|token|/mnt/|file_id|session_id|playback_id'
+     curl -s http://<host>:32400/metrics | grep -v '^#' \
+       | sed -nE 's/^[^{ ]*(\{.*\}) [^}]*$/\1/p' \
+       | sed -E 's/(^|[{,])(peer|owner_node)="([^"\\]|\\.)*"/\1/g' \
+       | grep -iE '[0-9a-f]{8}-[0-9a-f]{4}-|token|/mnt/|file_id|session_id|playback_id'
    It searches label sets only, so metric names (plurx_media_session_*) and
-   fixed enum values (outcome="session_gone") cannot match, after dropping
-   the peer and owner_node labels, which name cluster nodes by UUID by
-   design. Paste the command's output (expected: empty) and its exit status
-   (expected: 1, grep's "no match").
+   fixed enum values (outcome="session_gone") cannot match. A label set runs
+   from a sample's first `{` to its last `}`, so a `}` inside a value does
+   not cut it short. Only the labels named peer and owner_node are dropped
+   (anchored at a label boundary, so a label whose name merely ends in
+   "peer" is still searched); they name cluster nodes by UUID by design. The match
+   ignores case, so an upper-case UUID is caught too. Paste the command's
+   output (expected: empty) and its exit status (expected: 1, grep's "no
+   match").
 3. ANSI in journald, on each host:
      journalctl -u plurxd -n 200 --output=cat | grep -c $'\e\['
    Expected 0. Report the number.
