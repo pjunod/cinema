@@ -2248,7 +2248,6 @@ source_anchor = "// This was `#if os(iOS)` and tvOS took the"
 test = "tests/web/live-tv.test.js"
 test_anchor = "no client's guide cell branches on airing — the defect was on all three"
 
-
 [[fixes]]
 id = "web.library-channel-create-draft-and-preview-fences"
 commits = ["c1d80a47"]
@@ -2256,7 +2255,6 @@ source = "crates/plurxd/src/web/pages/library-channels-page.js"
 source_anchor = "function libraryChannelDraftKey("
 test = "tests/web/library-channels.test.js"
 test_anchor = "Create never resumes an old edit ID, including legacy stored drafts"
-
 
 [[fixes]]
 id = "clients.subject-save-attempt-survives-late-preview"
@@ -2373,7 +2371,6 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "case sameDeliveryRepair"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testPresentationStallRepairPreservesTheRecipeWithoutAQualityTicket"
-
 
 [[fixes]]
 id = "clients.original-native-home"
@@ -4610,7 +4607,6 @@ source_anchor = "static let shared = DisplayWakeOwner { UIApplication.shared.isI
 test = "clients/apple/Tests/DisplayWakeTests.swift"
 test_anchor = "func testTheClaimFollowsItsPlayersTransportState() async"
 
-
 [[fixes]]
 # The web drew guide station logos from #755 while Apple and Android drew
 # callsigns only: the rule lived in the web page, outside the shared guide
@@ -4660,7 +4656,6 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvStationLog
 source_anchor = "fun shouldLoad(address: String, nowMs: Long = System.currentTimeMillis()): Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvGuideTest.kt"
 test_anchor = "fun aFailedStationLogoBacksOffAndASuccessClearsIt()"
-
 
 [[fixes]]
 id = "apple.native-library-group-membership"
@@ -5919,7 +5914,6 @@ source_anchor = "Cinema remotes · advisory enablement"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
 
-
 [[fixes]]
 id = "android.dolby-vision-profile-badge-parity"
 commits = ["6990f8791d827652f3c1f1c6f8738e0aea771916"]
@@ -5927,7 +5921,6 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFact
 source_anchor = "get() = if (state != FactState.Source && activeLabel != null)"
 test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
 test_anchor = "aConvertedProfileSevenTitleShowsBothHalvesLit"
-
 
 [[fixes]]
 id = "android.hls-copy-target-arrival"
@@ -5946,7 +5939,6 @@ source_anchor = 'code in setOf("control_unavailable", "serving_fenced")'
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "temporaryServingFenceReplaysThenResumesFreshControl"
 
-
 [[fixes]]
 id = "apple.temporary-serving-fence-control-retry"
 commits = ["bf956ba589c37c96a8985b5e8a4ea6a058faa3cb"]
@@ -5954,7 +5946,6 @@ source = "clients/apple/Sources/PlaybackControlReporter.swift"
 source_anchor = 'code == "control_unavailable" || code == "serving_fenced"'
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testARetryHonoursTheServersRetryAfter"
-
 
 [[fixes]]
 id = "android.serving-fence-retry-after-header"
@@ -6150,3 +6141,45 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "private fun applyQualityIntent(body: CreateSessionReq): CreateSessionReq {"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
 test_anchor = "manualSessionCarriesIntentWithDisplayAwareAutoDisabled"
+
+# Continuous Auto link cost (#844 follow-up) corrective client anchors: source/test witnesses, not execution receipts.
+[[fixes]]
+id = "android.link-recovery-cheapest-costed-rung"
+commits = ["afacb6dbf0a625e110366cf3da3c96fe72d4cb5f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "?: costed.minByOrNull { it.peak_bps!! }?.takeIf { cheapest -> currentCost == null || cheapest.peak_bps!! < currentCost }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "linkPressureTakesTheCheapestCostedRungWhenNoLowerRungFits"
+
+[[fixes]]
+id = "android.continuous-cost-declared-link-rate"
+commits = ["c889f7df76658392a839967ab8e0285cf726203a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousEnrollment.kt"
+source_anchor = "internal fun continuousLinkRate(row: JsonObject): Long? = row.number(\"sustained_bps\") ?: row.number(\"peak_bps\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "continuousAutoCostsAreTheDeclaredLinkRateNotThePublicationCeiling"
+
+[[fixes]]
+id = "android.continuous-presented-rung-over-session-candidate"
+commits = ["52f63b8bb8a3e5924ffeb2f540ba5286e4f07b9a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoCandidateAfterEffectiveSelection(current: String?, effective: String?, continuousMember: Boolean,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "aContinuousMemberKeepsThePresentedRungOverTheSessionCandidate"
+
+[[fixes]]
+id = "android.display-upgrade-largest-affordable-rung"
+commits = ["115bf7de65e42a75ea057d810cc32a64f6b298d3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "}.minByOrNull { it.width.toLong() * it.height } ?: candidates.maxByOrNull { it.width.toLong() * it.height }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "aLadderBelowTheDisplayClimbsToItsLargestAffordableRung"
+
+
+[[fixes]]
+id = "android.continuous-rung-from-frame-on-screen"
+commits = ["3eca9584ea93c7e55f2619ef334f4b3099e30e10"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAttachment.kt"
+source_anchor = "return onScreenLoads(observed).singleOrNull()?.resource?.row?.text(\"candidate_id\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "// A lost presentation report left 480p; the frame on screen is 720p."

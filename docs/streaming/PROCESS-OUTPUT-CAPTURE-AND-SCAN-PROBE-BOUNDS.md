@@ -109,6 +109,10 @@ helper as it was.
 `has_hdr10_passthrough_qsv`, `has_dovi_passthrough_with`) reads only the exit
 status; its children inherit the daemon's stdout/stderr at `-loglevel error`,
 which is the pre-09-13 behaviour of `Command::status` and is unchanged here.
+(Superseded 2026-10-11, lab F7: an inherited stderr put libva banners and
+FFmpeg errors raw into the JSON log, so `status_job_owned` now nulls stdin and
+stdout and drains stderr, bounded at 16 KiB, into `tracing` — `warn` with the
+text on failure, `debug` on success.)
 
 Consequences of the two stdout breaks, from the callers:
 
@@ -325,7 +329,9 @@ cancellation).
   new finding, not something to patch here.
 - **`status_job_owned` stays unpiped.** Its callers want an exit status and
   the child's `-loglevel error` output in the journal; piping and dropping
-  would hide it.
+  would hide it. (Superseded 2026-10-11, lab F7: it now pipes stderr and
+  logs it through `tracing` rather than dropping it, so the output stays in
+  the log and the log stays JSON.)
 - **The supervised producer paths are untouched**: `transcode.rs:2217/2311`,
   `stream.rs:1961/3243`, `live_tv.rs:5819/5920`, `decode_facts.rs`,
   `fragindex.rs`, `dv_disk.rs`, `ffmpeg.rs:156/176/501/1916` all use

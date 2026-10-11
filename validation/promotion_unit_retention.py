@@ -22,10 +22,8 @@ PROTOCOL_PATHS = {
     '.github/workflows/ci.yml', 'validation/qualification.py',
     'validation/promotion_unit_retention.py',
     'tests/validation/test_promotion_unit_retention.py',
-    # Separately reviewed zero-execution receipt recovery, not unit inputs.
+    # Receipt adoption machinery decides what runs, not what a unit proves.
     'validation/main_preflight_adoption.py', 'validation/main_unit_receipts.py',
-    'validation/main_source_skew4513.py', 'validation/main-source-skew4513.json',
-    'tests/validation/test_main_source_skew4513.py',
 }
 DIGEST = re.compile(r'[0-9a-f]{64}')
 

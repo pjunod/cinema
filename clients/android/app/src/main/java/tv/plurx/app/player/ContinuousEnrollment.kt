@@ -127,12 +127,22 @@ internal fun continuousFamilyMember(family: JsonObject?, candidateId: String?): 
     family != null && candidateId != null &&
         (family["video"] as? JsonArray)?.any { (it as? JsonObject)?.text("candidate_id") == candidateId } == true
 
+/**
+ * Auto compares a measured link against this cost, so it is the rate each role
+ * needs from a link: video plus the shared soundtrack. `peak_bps` is one
+ * object's publication ceiling, several times that rate; costing a rung by it
+ * left no lower rung that fitted an ordinary link, and Auto held a rung the
+ * link could not carry. The ceiling is the cost only when the server declares
+ * no sustained rate.
+ */
+internal fun continuousLinkRate(row: JsonObject): Long? = row.number("sustained_bps") ?: row.number("peak_bps")
+
 internal fun continuousQualityBoundCatalog(candidates: List<QualityCandidate>, family: JsonObject?): List<QualityCandidate> {
     if (family == null) return candidates
-    val audio = family.obj("audio")?.number("peak_bps") ?: 0L
+    val audio = family.obj("audio")?.let(::continuousLinkRate) ?: 0L
     val costs = family.getValue("video").jsonArray.associate { value ->
         val row = value.jsonObject
-        val video = row.number("peak_bps") ?: throw IOException("Continuous video delivery budget")
+        val video = continuousLinkRate(row) ?: throw IOException("Continuous video delivery budget")
         val peak = video + audio
         if (video <= 0 || audio < 0 || peak !in 1..ContinuousQualityWire.MAX_SAFE_INTEGER) {
             throw IOException("Continuous delivery budget bound")

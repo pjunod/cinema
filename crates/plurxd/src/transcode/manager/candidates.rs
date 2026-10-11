@@ -679,8 +679,9 @@ impl TranscodeManager {
             };
             let average_bps =
                 (u64::from(plan.options().video_bitrate_kbps) + u64::from(audio_budget)) * 1000;
-            let peak_bps = u64::from(plan.options().video_bitrate_kbps) * 1500
-                + u64::from(audio_budget) * 1000;
+            let peak_bps =
+                plurx_core::transcode::vbv_maxrate_bps(plan.options().video_bitrate_kbps)
+                    + u64::from(audio_budget) * 1000;
             let candidate = QualityCandidate {
                 id: CandidateId::for_recipe_digest(recipe_digest),
                 recipe_digest,

@@ -71,15 +71,28 @@ function buildLabel(){
 // graph" — which are the difference between shrugging and installing a package.
 // Rejected candidates remain available in a collapsed disclosure, so a working
 // GPU selection is not buried under diagnostics from the other probes.
-function toneMapHtml(tm){
+//
+// The Metal graph is proved here like any other, but sessions reach it only
+// through Mac video processing, so node selection stays on the CPU chain when
+// it passes. The HDR line follows that context: green Metal when it is on and
+// has observed the graph; otherwise the node's own selection, with a note that
+// Metal matched the CPU picture and what it is waiting on.
+function toneMapHtml(tm, mac){
   if(!tm) return `<span class="muted">—</span>`;
-  const gpu = tm.selected && tm.selected!=="cpu";
+  const verdicts=tm.verdicts||[];
+  const metal=verdicts.find(v=>v.pipeline==="vt_tonemap_metal"&&v.passed);
+  const macMetal=mac&&mac.hdr10_metal||{};
+  const macReady=!!(metal&&mac&&mac.enabled&&macMetal.availability==="available");
+  const gpu=macReady||!!(tm.selected&&tm.selected!=="cpu");
   // Everything the probe rejected. The CPU chain is the reference the others
   // are measured against rather than a candidate, so it never appears as one —
   // "CPU tone-map: 1.0× — not selected" is a line that tells nobody anything.
-  const rejected=(tm.verdicts||[]).filter(v=>!v.passed && v.pipeline!==tm.selected);
+  // A candidate this FFmpeg build cannot express is a platform fact, listed
+  // after the rejections and never counted as a reason for falling back.
+  const rejected=verdicts.filter(v=>!v.passed && !v.unavailable && v.pipeline!==tm.selected);
+  const unavailable=verdicts.filter(v=>v.unavailable);
   const head = gpu
-    ? `<span style="color:var(--good)">${esc(tm.selected_label)}</span>`
+    ? `<span style="color:var(--good)">${esc(macReady?metal.label:tm.selected_label)}</span>`
     : esc(tm.selected_label||"CPU tone-map");
   if(!tm.ran){
     // Not probed is not the same as everything failing, and the reason says
@@ -92,8 +105,19 @@ function toneMapHtml(tm){
   // whole point of this line: everything still plays, 4K just stays slow, and
   // without this there is nothing on screen to distinguish a box with no GPU
   // tone-map from one whose driver refused the graph.
-  const note = !gpu && rejected.length ? ` <span class="muted">— fell back</span>` : "";
-  const rows=rejected.map(v=>
+  let note="";
+  if(metal&&!macReady){
+    const speed=Number.isFinite(metal.speedup)?` at ${metal.speedup.toFixed(2)}× the CPU chain`:"";
+    const waiting=!(mac&&mac.enabled)
+      ? "HDR uses it once Mac video processing is on in Settings → Developer"
+      : macMetal.availability==="unavailable"
+        ? `Mac video processing reports it unavailable (${esc(macMetal.reason||"unknown")})`
+        : "Mac video processing is still checking it";
+    note=` <span class="muted">— ${esc(metal.label)} matched the CPU picture${speed}; ${waiting}</span>`;
+  } else if(!gpu && rejected.length){
+    note=` <span class="muted">— fell back</span>`;
+  }
+  const rows=rejected.concat(unavailable).map(v=>
     `<div class="muted" style="font-size:12px">${esc(v.label)}: ${esc(v.rejected||"rejected")}</div>`
   ).join("");
   const details=rows
@@ -221,7 +245,7 @@ function transcoderCard(sys){
     <label for="node-hwaccel">Preferred backend</label>
     <select id="node-hwaccel" data-node-id="${esc(sys.node_id)}">${choices.map(([value,label])=>`<option value="${value}"${value===(available?requested:"auto")?" selected":""}>${esc(label)}</option>`).join("")}</select>
     ${available?"":`<p class="muted">The saved backend is unavailable. Choose and save an available option.</p>`}
-    <p>Active: <b>${esc(sys.encoder_selected||active)}</b> · HDR: ${toneMapHtml(sys.tone_map)}</p>
+    <p>Active: <b>${esc(sys.encoder_selected||active)}</b> · HDR: ${toneMapHtml(sys.tone_map, sys.macos_video_processing)}</p>
     <p class="muted" id="node-hwaccel-status">${pending?"Saved choice or new benchmark is waiting for this node to restart.":"Changes apply after restarting this node, when its HDR capabilities are tested again."}</p>
     <p class="muted">720p H.264 encoding, 4 Mb/s, 240 frames; median of three runs after warm-up. CPU is 1.00×. Results include encoder startup and frame upload; HDR and source decoding can change real playback speeds.${report?` Last measured: ${esc(new Date(report.measured_at*1000).toLocaleString())}.`:""}</p>
     <p class="muted" role="status" aria-live="polite">${optimization.running?"Checking capabilities and benchmarking… Playback will stop the benchmark.":optimization.error?esc(optimization.error):"Optimize reruns support checks, benchmarks each backend and checks HDR pipelines. Run while the node is idle."}</p>
@@ -232,7 +256,7 @@ async function optimizeNodeTranscoder(button){
   const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), node_id=field.dataset.nodeId;
   button.disabled=true;
   try{
-    await api("/system/transcoder",{method:"POST",body:JSON.stringify({node_id})});
+    await api("/system/transcoder",{method:"POST",body:{node_id}});
     if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){
       SETTINGS_DATA.sys.transcoder_optimization={...(SETTINGS_DATA.sys.transcoder_optimization||{}),running:true,error:null};
       const card=document.getElementById("transcoder-card");
@@ -264,7 +288,7 @@ async function saveNodeHwaccel(button){
   const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), preference=field.value, node_id=field.dataset.nodeId;
   button.disabled=true;
   try{
-    const result=await api("/system/transcoder",{method:"PUT",body:JSON.stringify({node_id,preference})});
+    const result=await api("/system/transcoder",{method:"PUT",body:{node_id,preference}});
     if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){SETTINGS_DATA.sys.hwaccel_requested=preference;SETTINGS_DATA.sys.hwaccel_restart_required=result.restart_required;}
     document.getElementById("node-hwaccel-status").textContent=result.restart_required?"Saved. Restart this node to apply the backend and test its HDR capabilities.":"Saved. This backend preference is already active.";
     toast("Transcoding preference saved");
@@ -280,7 +304,7 @@ function systemPanel(sys,playbackEvents){
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
         <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>
         <dt>Transcoder</dt><dd>${esc(sys.encoder_selected)} <span class="muted">(preference: ${esc(sys.hwaccel_pref)})</span></dd>
-        <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map)}</dd>
+        <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map, sys.macos_video_processing)}</dd>
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
         <dt>On this node</dt><dd><div class="system-now">
           <div class="system-now-counts">${sys.active_transcodes} managed transcode/remux session${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>

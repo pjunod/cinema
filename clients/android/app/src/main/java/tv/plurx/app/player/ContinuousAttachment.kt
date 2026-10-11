@@ -172,15 +172,30 @@ internal class ContinuousAttachment(
         wake.trySend(Unit)
     }
 
-    /** Read only, sampled by the controller's existing metrics cadence. */
-    fun probeDetail(): String? {
-        if (closed.get() || output.owner() !== owner) return null
-        val observed = frame.get() ?: return null
-        val matching = queues.queuedArtifacts().filter { load ->
+    /** The queued video artifacts whose raster and interval explain [observed]. */
+    private fun onScreenLoads(observed: ContinuousOutputEvidence.Event.Frame): List<ContinuousLoadContext.Verified> =
+        queues.queuedArtifacts().filter { load ->
             load.resource.role == "video" && observed.format.width.toLong() == load.resource.row.number("width") &&
                 observed.format.height.toLong() == load.resource.row.number("height") &&
                 frameTick(load.resource.row, observed.positionUs)?.let { contains(load.authorized.interval, it) } == true
         }
+
+    /**
+     * The family candidate whose frame is on screen now, when exactly one
+     * queued video artifact explains the last observed frame. Read only, and
+     * independent of whether that presentation was ever reported.
+     */
+    fun onScreenCandidateId(): String? {
+        if (closed.get()) return null
+        val observed = frame.get() ?: return null
+        return onScreenLoads(observed).singleOrNull()?.resource?.row?.text("candidate_id")
+    }
+
+    /** Read only, sampled by the controller's existing metrics cadence. */
+    fun probeDetail(): String? {
+        if (closed.get() || output.owner() !== owner) return null
+        val observed = frame.get() ?: return null
+        val matching = onScreenLoads(observed)
         if (matching.size != 1) return null
         val load = matching.single()
         val tick = frameTick(load.resource.row, observed.positionUs) ?: return null
@@ -279,11 +294,7 @@ internal class ContinuousAttachment(
     private suspend fun reportPresented() {
         val observed = frame.get()
         if (observed != null) {
-            val matching = queues.queuedArtifacts().filter { load ->
-                load.resource.role == "video" && observed.format.width.toLong() == load.resource.row.number("width") &&
-                    observed.format.height.toLong() == load.resource.row.number("height") &&
-                    frameTick(load.resource.row, observed.positionUs)?.let { contains(load.authorized.interval, it) } == true
-            }
+            val matching = onScreenLoads(observed)
             if (matching.size == 1) {
                 val load = matching.single()
                 val tick = requireNotNull(frameTick(load.resource.row, observed.positionUs))

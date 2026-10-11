@@ -180,6 +180,31 @@ class ContinuousQualityProtocolTest {
         assertFalse(ContinuousQualityWire.family(family(listOf(first, JsonObject(second + ("timescale" to JsonPrimitive(48)))))))
         assertFalse(ContinuousQualityWire.family(family(listOf(first, JsonObject(second + ("playlist" to JsonPrimitive("https://foreign.invalid/video.m3u8")))))))
     }
+
+    @Test fun familyLinkRateIsOptionalAndNeverAboveThePublicationCeiling() {
+        fun video(height: Int, index: Int, sustained: Long?) = buildJsonObject {
+            put("candidate_id", index.toString().repeat(32)); put("rendition_id", index.toString().repeat(64))
+            put("init_id", "c".repeat(64)); put("codec", "avc1.640032"); put("width", if (height == 720) 1280 else 1920)
+            put("height", height); put("timescale", 24); put("frame_ticks", 1); put("segment_ticks", 48)
+            put("peak_bps", 1_000_000); sustained?.let { put("sustained_bps", it) }
+            put("playlist", "video/${index.toString().repeat(64)}/index.m3u8")
+        }
+        fun family(sustained: Long?, audioSustained: Long?) = buildJsonObject {
+            put("version", 1); put("mode", "controlled"); put("family_id", "a".repeat(64)); put("master", "master.m3u8")
+            put("video", JsonArray(listOf(video(720, 1, sustained), video(1080, 2, sustained))))
+            put("audio", buildJsonObject {
+                put("rendition_id", "d".repeat(64)); put("init_id", "e".repeat(64)); put("codec", "mp4a.40.2")
+                put("timescale", 48_000); put("channels", 2); put("peak_bps", 400_000)
+                audioSustained?.let { put("sustained_bps", it) }; put("playlist", "audio/${"d".repeat(64)}/index.m3u8")
+            })
+        }
+        assertTrue(ContinuousQualityWire.family(family(null, null)))
+        assertTrue(ContinuousQualityWire.family(family(250_000, 128_000)))
+        assertTrue(ContinuousQualityWire.family(family(1_000_000, 400_000)))
+        assertFalse(ContinuousQualityWire.family(family(1_000_001, 128_000)))
+        assertFalse(ContinuousQualityWire.family(family(250_000, 400_001)))
+        assertFalse(ContinuousQualityWire.family(family(0, 128_000)))
+    }
     @Test fun reservationCapsApplyAcrossTransactionsAndAppendsNeedTheirExactPin() {
         val request = JsonObject(identity + ("transition" to buildJsonObject {
             identity.forEach { (key, value) -> put(key, value) }

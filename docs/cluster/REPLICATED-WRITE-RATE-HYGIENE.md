@@ -215,10 +215,32 @@ change, the `UPDATE … RETURNING` still admits one claimant per row.
 
 The takeover loop gets the same treatment for its *reads*: one
 `get_setting_pair(CLUSTER_MEDIA_POOL_ENABLED, CLUSTER_SESSION_TAKEOVER_ENABLED)`,
-an "off" answer cached for 60 s and dropped by a local switch write, and the
-loop sleeps at `IDLE_TICK_MAX` while either is off. An "on" answer is never
-cached (§4): with takeover on, each 2 s tick reads the pair again, so turning
-it off stops the scan and CAS on the next tick on every node. It does **not** become a singleton:
+and the loop sleeps at `IDLE_TICK_MAX` while either is off. A proved answer,
+on or off, is held until a change signal says it may be stale (2026-10-10;
+M3 first held only an "off", for 60 s, and re-read an "on" every 2 s tick,
+which left an enabled node at ~43,000 authority reads a day — lab4 measured
+3,435 in 6,872 s — so the §5.5 bar was reachable only with a switch off).
+The signals are the ones the Live TV settings observer uses
+(`crates/plurxd/src/settings_changes.rs`): a local switch write bumps a
+generation and wakes the loop, so a local disable stops the scan and CAS on
+the next tick; and
+this node's in-process Raft applied-index watch, on which the loop compares
+its own replica's switches (a local read, no consensus) with the held
+answer and takes one consistent read only when they differ. A save on any
+node is therefore acted on within one tick of this node applying it. The
+settings route is the only writer of either switch and every write it makes
+is a Raft entry. A node slow to apply a disable saved elsewhere keeps its
+"on" until it does, but can start no takeover work on it: the inventory read
+an enabled tick makes, a consistent read on the leader and the step before
+any offer or spawn, reads both switches in the same statement and answers
+`TakeoverInventory::Disabled` while either is off (2026-10-11); the gate then
+drops what it held and proves the switches again. Only an attempt already
+past its inventory read when the disable commits can still reach its CAS,
+within its 8 s `TAKEOVER_DEADLINE`, as it could when every tick re-read the
+pair. Where no change made elsewhere could be seen (a replicated
+store applied in another process, or a stopped Raft watch) the old cadence
+stands: an "on" is re-read every tick, an "off" held for at most 60 s. A
+failed read holds nothing and is retried on the idle cadence. It does **not** become a singleton:
 every candidate must independently prove eligibility and the store CAS
 admits one successor (its doc comment at `:4348-4352`), and takeover latency
 when the feature is on stays at the 2 s tick.
@@ -232,7 +254,8 @@ day), `plurx_store_operations_total{class="authority_read"}` rate,
 from `plurx_raft_snapshot_seconds_count{operation="build"}`. Expected: the
 outbox's share falls from ~86,400 proposals/node/day to ≤ 8,640 (30 s forced
 claims on one node) plus real work; the takeover loop's authority reads fall
-from ~86,400/node/day to ≤ 1,440. The number that matters is the
+from ~86,400/node/day to the reads its switch saves cause (zero on an idle
+node, whichever state the switches are in). The number that matters is the
 commit-index delta on an idle fleet overnight.
 
 New series: `plurx_watched_outbox_ticks_total{outcome="skipped_hint"|
@@ -259,9 +282,13 @@ values. An outer deadline or caller cancellation records `cancelled`; it
 does not prove remote execution stopped. Starts count local client attempts,
 not leader executions, Raft proposals or independent fsyncs.
 
-For the disabled-state bound, retain the two switch states and show that at
-least one is off; the existing cache, 60 s refresh, local wake and 10 s idle
-cadence are unchanged. Over a fresh admitted, continuously idle 12-hour
+Retain the two switch states with every observation; the local wake and 10 s
+idle cadence are unchanged. Since 2026-10-10 an enabled pair is held on the
+same change signals, so on/on is no longer above the bar by construction
+(paused-clock test
+`an_idle_takeover_gate_takes_no_consistent_reads_after_its_first_proof`), and
+the observer and evaluator below admit every boolean pair, on/on included,
+reading out per node each pair it ran under. Over a fresh admitted, continuously idle 12-hour
 window compute `Δstarted × 86,400 / actual_elapsed_seconds` per node. Require
 the deployed attribution source, stable build/role, uptime/counter continuity
 and unsaturated counters; a missing series is not zero. Starts already
@@ -284,7 +311,8 @@ costs and the watched-outbox WAL attribution remain separate proof obligations.
   read-once.
 - **Proposal counts are reported as proposals**, never as fsyncs.
 - **The takeover CAS is not made a singleton** and its 2 s cadence when
-  enabled is unchanged; only its disabled-state settings reads are cached.
+  enabled is unchanged; only its settings reads are held, and only between
+  change signals.
 - **No change to `claim_until` (60 s), `BATCH`, or the backoff ladder** —
   they are the delivery contract with Curator.
 - **No new settings key.** Constants are documented in code; nothing here
@@ -402,8 +430,8 @@ not deploy, change a switch, or authorize a capture. The exact schema is:
   `build`, `source_commit`, integer UTC `epoch`, boolean
   `cluster_media_pool_enabled` and boolean `cluster_session_takeover_enabled`.
 - Every build/full-source binding must match the independently verified
-  expected deployment. At least one switch must actually be off on each
-  node; missing values, strings such as `"false"`, and on/on are refused.
+  expected deployment. Any boolean pair is admitted, on/on included;
+  missing values and strings such as `"false"` are refused.
 - Every observation must be no more than95 seconds old and not future-dated
   at the actual metrics observation. A one-time starting receipt goes stale
   and cannot qualify a twelve-hour capture. Refresh at least every60 seconds
@@ -433,8 +461,8 @@ from a prefix. All three nodes must bind the same expected source/build.
 The private regular credential file maps the three node names to bearer
 tokens; do not put tokens in argv or publish the file. The observer GETs
 each actual `/metrics` and authenticated `/api/v1/settings`, selects only
-the two actual boolean switches, and refuses a changed build, missing or
-malformed pair, or on/on. It never retains the full settings DTO (which can
+the two actual boolean switches, and refuses a changed build or a missing or
+malformed pair. It never retains the full settings DTO (which can
 contain credentials), HTTP exception details or tokens. Sanitized immutable
 per-tick manifests remain alongside atomically replaced `manifest.json`,
 which the existing sampler consumes. Each complete request is bounded to
@@ -542,10 +570,17 @@ records them here so review can overrule them:
    delivered by the owner within its idle ceiling (10 s) plus replication
    lag — the bound §3.3 already states for an event enqueued on another node.
 7. The takeover loop keeps §3.4's fail-closed read: an unreadable switch is
-   off for that tick and the next tick reads again. Only "off" is cached
-   (§4); an "on" is re-read every tick. (The first M3 build cached "on" for
-   60 s as well, which let a local disable go unheeded for up to a minute;
-   the PR #405 review caught it and it was changed to match §4.)
+   off for that tick and the next tick reads again. (The first M3 build
+   cached "on" for 60 s as well, which let a local disable go unheeded for up
+   to a minute; the PR #405 review caught it and M3 then re-read an "on"
+   every tick. Since 2026-10-10 an "on" is held again, but only between
+   change signals: a local write invalidates it, and a save elsewhere does
+   once this replica applies it, so neither a local nor a remote disable is
+   held past one tick of being applied here. Apply lag has no upper bound,
+   so the hold is not what enforces a disable: the takeover inventory reads
+   both switches on the leader in its own statement and refuses while either
+   is off, so a node still holding "on" starts nothing, and an attempt
+   already under way finishes or fails within its 8 s deadline, as before.)
 
 ---
 
@@ -568,6 +603,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-30 | gpt-6.1-sol | agent:/root/remaining_executable_sol61 | M4 attribution source | #646 (draft) | Delegated continuation: fixed exact unordered settings-pair attribution through the production consistent-read retry path counts first-polled attempts, including retries and in-flight work, with fixed terminal outcomes. SQL, retry policy and M3 cache/cadence are unchanged. Pinned rustc 1.97.1 affected baseline check passed on effort base `3f4999c4` before Rust edits; After synchronizing actual effort `32561d613`, the three attribution regressions and two retained authority retry/budget tests pass with `--features hiqlite-store`; affected all-target core check and Clippy `-D warnings`, formatting and four docs-index tests pass. Initial local Clippy rejected one redundant test closure, corrected before push; macOS test linking reports a nonfatal compact-unwind size warning. Normal pinned hook remains mandatory. Future admitted deployment and a fresh attributed window are required; current passive capture cannot retroactively gain this numerator. M4 remains open. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/remaining_executable_sol61 | M4 attribution source — sole-review P2 | #646 (draft) | Review 18 / comment 6614 found the isolated selector/retry tests did not pin both production handoffs. `takeover_authority_attribution_settings_pair_reaches_timed_client_retries` now calls actual `HiqliteAuthStore::get_setting_pair` through scoped `TimedClient`, its real timeout and retry path, in both key orders and for an unrelated pair. Only consistent-query I/O is injected; the local metric sink starts at zero and receives real attempt increments. Each pair executes timeout, quorum failure and empty success; takeover starts are 3, unrelated retries add 0. Independent temporary mutations of the actual getter scope to `Unattributed` and actual TimedClient retry scope to `None` each fail this test at starts 0 versus 3 (exit 101). Neither mutation is committed; restored source SHA-256 `8efacd8ceb1285ad2730ccf655f05ffaf0ca2854a0e35127394f125f3a2e06e3` matches the positive source. Raw logs retained in agent-owned `/private/tmp/k03-attribution-mutations-20260930.c7TQYJ/`. Restored attribution tests 4/4 and retained authority retry/budget tests 2/2 pass on current effort `32561d613`; affected core `hiqlite-store` all-target check and Clippy `-D warnings`, fmt and four docs-index tests pass. Exact committed-head recheck follows the normal hook; root owns disposition, gate and integration. No fleet, capture, WAL or M4 acceptance added. |
 | 2026-10-02 | gpt-6.1-sol | agent:/root/k06_pr725_adversarial_sol61 | M4 strict AFTER tooling | Task PR forthcoming | Opt-in sampler/evaluator and one combined offline control; legacy M0/WAL functions remain unchanged. Per-tick sanitized externally refreshed switch/build/full-source receipts and selected metrics are hash-bound; missing, stale, reset, saturated, gapped or mismatched evidence is refused. Actual elapsed integer rate arithmetic is separate from measurement completeness; WAL shares stay unassessed. Current source/hook/once-only control evidence is recorded in the task PR and real hash-named local proof. No observer, live capture, credential read, deployment, Rust behavior or original M4 qualification supplied. |
+| 2026-10-10 | claude-opus-5-5 | https://claude.ai/code/session_0158MVmDzgMccTLGCMdYLHXA | M3 follow-up | `claude/arch-followups-2` (task PR forthcoming) | lab4 showed 3,435 takeover-settings authority reads in 6,872 s (~43,000/day) with takeover on: M3 re-read an "on" every 2 s tick, so §5.5's bar held only with a switch off. The gate now holds a proved answer, on or off, on the Live TV observer's change signals (moved to `crates/plurxd/src/settings_changes.rs`): the local write generation, and the applied-index watch with a replica read of both switches compared against the held answer; one consistent read only on disagreement. The settings route is the only writer of either key. Without a watch the M3 cadence stands; a failed read holds nothing. Paused-clock tests: ten idle minutes on or off cost 1 read; a local save 1 read, applied on the next tick; a remote save 1 read within one tick of being applied; a lagging replica re-reads until it agrees; a failing read retries on the idle cadence. Separate commit: the 10 s `cluster.clock_guard_enforced` follower (`clock_offset.rs`, a consistent read every look, 8,640/day per node) is held on the same signals; it is outside the takeover numerator but in the aggregate authority-read rate. |
 
 ### needs: M4 fleet after-measurement (GPT)
 

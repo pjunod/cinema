@@ -542,6 +542,17 @@ integration alone. Combined commit `070ac8814` integrates the Linux runtime
 and shipping source, preserving the same captured engine and font authority.
 Its portable source check and corrected normal hook passed without unit tests.
 
+As of `fix(build): make docker builds the runtime on amd64 without a Dolby
+package` (2026-10-11), the package is an input to `make docker`, not a
+prerequisite. Without `PLURX_LINUX_DOLBY_PACKAGE` both architectures build the
+`runtime` stage, the same image `make docker-up` builds; with it, amd64 installs
+the package through `--step docker-build`, which no longer runs under the 600 s
+package-phase deadline. The prerequisite had made `make docker` fail on every
+amd64 node, because no node can produce a package yet: on an amd64 node at `fb4397c44` the
+`linux-dolby-package-export` producer stops at its first download, where the
+`fc` (fontconfig) role's URL is the repository page rather than an archive and
+cannot match its pinned digest.
+
 The local build seam did not cover published images or CI smoke images: both
 used a separate runtime-assets/renderer path. The current shipping candidate
 adds one reusable Bookworm package-export stage and connects both paths to
@@ -808,6 +819,7 @@ compiler load to avoid contaminating measurements.
 | Scale HDR at 10-bit precision before the Metal mapper | Original graph performed tone mapping on four times as many pixels as the production CPU comparator | Revised full comparison and temporal/visual acceptance |
 | Fix stale MDCV/CLL only on the shared CPU + zscale HDR-to-SDR chain | That route reproduced incorrect residual HDR signaling; `tonemapx` already removes it, so unrelated Dolby/Metal paths need no change | Separate corrective commit and focused regression review |
 | Version identity only for routes changed by consumed-HDR metadata cleanup | This root-cause fix changes legacy output bytes; preserving their previous cache key would be incorrect | Verify unaffected SDR and HDR-preserving hashes remain stable |
+| PQ through Metal takes the CPU chain's operator (Hable, max-channel, desat 0), and the HDR10 Metal graphs require the boot tone-map probe's CPU parity (2026-10-10) | The smoke contract (ordered patches, black-to-peak spread, neutral greys) passes any monotone curve. On an Apple M4 node's probe fixture the BT.2390/ITP spelling measured Y/U/V 148.5/125.4/112.5 against the CPU's 119.0/135.5/137.9 — outside the 24-level gate every GPU graph meets — and the CPU operator's terms 108.7/135.0/136.7 at about 2.2× the CPU chain. The curve terms enter plan identity (`renderer_tone_map_terms`), so BT.2390 renditions are not reused. HLG keeps BT.2390/ITP under its reference-white check | The house tone-map operator ruling (R2) |
 
 ## 4. Validation and handoff ledger
 

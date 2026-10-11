@@ -193,7 +193,7 @@ today decodes on the CPU, filters on the CPU (or uploads to OpenCL/Vulkan
 and downloads again), and encodes on the GPU — at least two full-frame
 copies per frame that a CUDA graph would not make.
 
-`tonemap_opencl`'s operator, verbatim (`pipeline.rs:359-368`):
+`tonemap_opencl`'s operator as it stood when this was written:
 
 ```rust
                     format!(
@@ -203,9 +203,16 @@ copies per frame that a CUDA graph would not make.
                     )
 ```
 
-Compare `Libplacebo` at `:346-353`, which already uses `bt.2390`, and
-`DoviTonemapx` at `:373-380`, which already uses `bt2390`. `tonemap_opencl`
-is the only operator in the file still on `hable`.
+Compare `Libplacebo`, which uses `bt.2390`, and `DoviTonemapx`, which uses
+`bt2390`.
+
+**2026-10-10:** naming `hable` alone left Jellyfin's `tonemap_mode` at
+`auto` (ITP on capable GPUs) and desaturation on, so the graph was not the
+CPU chain's Hable at all — on an Apple M4 node it measured 59 levels from
+the CPU reference at the boot probe. CUDA, OpenCL and the Metal graph on PQ
+input now take one set of terms from `Pipeline::tone_map_terms`, the CPU
+chain's operator (`tonemap=hable:tonemap_mode=max:desat=0`, `range=tv`), and
+those terms enter plan identity. See Q8c.
 
 ### 2.4 The rolling argument list, where Q8's first two items live
 
@@ -570,6 +577,16 @@ the `4k-hdr10`, `4k-hlg` and new `dark-gradient` fixtures, on a node where
 `tonemap_opencl` is the selected pipeline. **This changes recipe identity**
 (`Pipeline::name()` is unchanged but the filter string is in the argv), so
 it invalidates cached entries produced on OpenCL nodes.
+
+*Superseded in part, 2026-10-10.* Every GPU graph is admitted by matching the
+CPU reference at the boot probe (24 levels per channel), and the CPU chain is
+Hable. A GPU graph whose filter exposes the controls therefore takes the CPU
+chain's operator rather than `bt2390`: measured on an Apple M4 node, OpenCL
+and Metal with those terms land within 10.3 levels, and Metal's BT.2390/ITP
+spelling 29.5 levels away. Moving the house operator to BT.2390 is the R2
+ruling of the startup and tone-map build handoff and would move the CPU
+chain and every GPU graph together; this question no longer applies to
+OpenCL alone.
 
 ## 4. Guardrails (non-goals)
 

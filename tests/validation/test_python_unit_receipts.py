@@ -1,8 +1,11 @@
 """Small fake suites only: do not execute the repository suites here."""
 
+import copy
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -216,8 +219,13 @@ class Case(Helper, unittest.TestCase):
                             "suite": "validation", "sha256": digest})}
 
                 stale_local = local(old_source, changed)
-                with self.assertRaisesRegex(receipts.ReceiptError, "Null-source"):
-                    receipts.restore(FakeAPI(comments=[stale_local]), SCOPE, 12, applicability=guard())
+                with patch("sys.stdout", new=io.StringIO()) as log:
+                    stale = receipts.restore(FakeAPI(comments=[stale_local]), SCOPE, 12,
+                                             applicability=guard())
+                self.assertEqual(stale, {unchanged: old_pass, other: old_pass},
+                                 "a changed null-source file is not adopted; it runs again")
+                self.assertIn("Null-source unit file changed", log.getvalue())
+                self.assertIn("  " + changed + "\n", log.getvalue())
                 repaired = receipts.restore(FakeAPI({changed: new_pass}, [stale_local]),
                                             SCOPE, 12, applicability=guard())
                 self.assertEqual(repaired[changed], new_pass)
@@ -245,7 +253,11 @@ class Case(Helper, unittest.TestCase):
             finally:
                 os.chdir(previous)
 
-        # Unknown input is not a green or permission to replay all methods.
+        # Unknown input is never adopted: the method executes, nothing refuses.
+        def unresolved(checker, passes=None):
+            with patch("sys.stdout", new=io.StringIO()) as log:
+                result = checker.finish(passes or {})
+            return result, log.getvalue()
         for broken in (b"def load_tests(*args): pass\n" + current_source,
                        current_source.replace(b"Helper, unittest.TestCase", b"ForeignBase"),
                        current_source.replace(b"def setUp(self):", b"def run(self):")):
@@ -253,19 +265,26 @@ class Case(Helper, unittest.TestCase):
             current_files[module_path] = broken
             unknown = guard()
             self.assertFalse(unknown(unchanged, old_pass))
-            with self.assertRaises(receipts.ReceiptError):
-                unknown.finish({})
+            self.assertEqual(unresolved(unknown)[0], [unchanged])
         sources[current_commit, module_path] = current_source
         current_files[module_path] = current_source
         missing = guard()
         self.assertFalse(missing(unchanged, {"commit": "c" * 40, "run": 9}))
-        with self.assertRaisesRegex(receipts.ReceiptError, "missing historical"):
-            missing.finish({})
+        self.assertFalse(missing(unchanged, {"commit": "c" * 40, "run": 9}))
+        self.assertEqual(reads.count(("c" * 40, module_path)), 1,
+                         "an absent historical blob is asked for once, not once per test")
+        result, log = unresolved(missing)
+        self.assertEqual(result, [unchanged])
+        self.assertIn("missing historical", log)
+        # A later authenticated candidate that proves the method resolves it.
+        self.assertTrue(missing(unchanged, old_pass))
+        self.assertEqual(unresolved(missing, {unchanged: old_pass})[0], [])
+        # The current checkout differing from the dispatched commit is this
+        # run's own integrity: it refuses instead of becoming "not adopted".
         current_files[module_path] = old_source
         dirty = guard()
-        self.assertFalse(dirty(unchanged, old_pass))
-        with self.assertRaisesRegex(receipts.ReceiptError, "worktree differs"):
-            dirty.finish({})
+        with self.assertRaisesRegex(receipts.IntegrityError, "worktree differs"):
+            dirty(unchanged, old_pass)
         current_files[module_path] = current_source
         for limit, value in (("MAX_TEST_SOURCE", 1), ("MAX_SOURCE_CACHE_BYTES", 1),
                              ("MAX_SOURCE_AST_NODES", 1), ("MAX_SOURCE_CACHE_AST_NODES", 1),
@@ -273,22 +292,40 @@ class Case(Helper, unittest.TestCase):
             with patch.object(receipts, limit, value):
                 bounded = guard()
                 self.assertFalse(bounded(unchanged, old_pass))
-                with self.assertRaises(receipts.ReceiptError):
-                    bounded.finish({})
+                self.assertEqual(unresolved(bounded)[0], [unchanged])
         with patch.object(receipts, "discover") as discovery:
             with tempfile.TemporaryDirectory() as root:
                 with self.assertRaisesRegex(receipts.ReceiptError, "CLI applicability"):
                     receipts.execute(journal(), Path(root) / "receipt.json")
             discovery.assert_not_called()
+        # The run step re-proves every prepared pass. A pass that now differs,
+        # or whose recheck cannot complete (a git timeout), is executed; it is
+        # neither retained nor a refusal.
+        timed_out = {"commit": "e" * 40, "run": 8}
+
+        def slow_reader(commit, path):
+            if commit == timed_out["commit"]:
+                with patch.object(receipts.subprocess, "check_output",
+                                  side_effect=subprocess.TimeoutExpired("git", 5)):
+                    return receipts.read_git_test_source(commit, path)
+            return source_reader(commit, path)
         raw_state = {**journal(), "commit": current_commit,
                      "applicability_commit": current_commit,
-                     "passes": {changed: old_pass}}
-        with patch.object(receipts, "SourceApplicability", return_value=guard()), \
-                patch.object(receipts, "discover") as discovery:
+                     "passes": {changed: old_pass, unchanged: old_pass, other: timed_out}}
+        events = []
+        inventory = {"validation": [Fake(changed.split(":", 1)[1], events),
+                                    Fake(unchanged.split(":", 1)[1], events)],
+                     "operations": [Fake(other.split(":", 1)[1], events)]}
+        with patch.object(receipts, "SourceApplicability", return_value=receipts.SourceApplicability(
+                    current_commit, slow_reader, current_files.__getitem__)), \
+                patch.object(receipts, "discover", side_effect=inventory.__getitem__), \
+                patch("sys.stderr", new=io.StringIO()), patch("sys.stdout", new=io.StringIO()) as log:
             with tempfile.TemporaryDirectory() as root:
-                with self.assertRaisesRegex(receipts.ReceiptError, "lack current applicability"):
-                    receipts.execute(raw_state, Path(root) / "receipt.json")
-            discovery.assert_not_called()
+                self.assertEqual(receipts.execute(raw_state, Path(root) / "receipt.json"), 0)
+        self.assertEqual(events, [changed.split(":", 1)[1], other.split(":", 1)[1]])
+        self.assertEqual(raw_state["passes"][unchanged], old_pass)
+        self.assertEqual(raw_state["passes"][other], {"commit": current_commit, "run": 10})
+        self.assertIn("unavailable in this checkout", log.getvalue())
         source = Path(receipts.__file__).read_text()
         self.assertIn("applicability=SourceApplicability(commit)", source)
         self.assertIn('"applicability_commit": commit', source)
@@ -388,6 +425,7 @@ class Case(unittest.TestCase):
         self.assertIn("if: always() && steps.receipts.outcome == 'success'", workflow)
 
     def test_missing_expired_and_concurrent_attempts_refuse_before_units(self):
+        """History never refuses; this run's own published journal always does."""
         class FakeAPI:
             def __init__(self, mode):
                 self.mode = mode
@@ -397,14 +435,21 @@ class Case(unittest.TestCase):
                     if self.mode == "expired":
                         return [{"id": 1, "run_id": 9, "name": receipts.key(SCOPE),
                                  "expired": True, "size_in_bytes": 1}]
+                    if self.mode == "current":
+                        return [{"id": 1, "run_id": 10, "name": receipts.key(SCOPE),
+                                 "expired": False, "size_in_bytes": 1}]
                     return []
                 if path == "/actions/runs":
                     return [{"id": 9, "commit_sha": COMMIT}]
                 return [{"name": receipts.job_name(SCOPE), "repo_id": 7,
                          "attempt": 1, "status": "running" if self.mode == "concurrent" else "failure"}]
         for mode in ("missing", "expired", "concurrent"):
-            with self.assertRaises(receipts.ReceiptError):
-                receipts.restore(FakeAPI(mode), SCOPE, 10)
+            with patch("sys.stdout", new=io.StringIO()) as log:
+                self.assertEqual(receipts.restore(FakeAPI(mode), SCOPE, 10), {})
+            if mode == "expired":
+                self.assertIn("Run 9: journal not adopted — final artifact 1 is expired", log.getvalue())
+        with self.assertRaisesRegex(receipts.IntegrityError, "already published"):
+            receipts.restore(FakeAPI("current"), SCOPE, 10)
 
     def test_manual_dispatch_rejects_wrong_repo_head_base_and_ambiguity(self):
         class FakeAPI:
@@ -464,9 +509,13 @@ class Case(unittest.TestCase):
                 os.chdir(root)
                 passed = receipts.local_receipts(FakeAPI(), SCOPE)
                 self.assertIsNone(passed["validation:test_fixture.Case.test_ok"]["commit"])
-                for api in (FakeAPI("read"), FakeAPI(attested=False)):
-                    with self.assertRaises(receipts.ReceiptError):
-                        receipts.local_receipts(api, SCOPE)
+                # A reader's attestation, or none at all, is not adopted: the
+                # receipt's tests run again rather than wedging the PR.
+                for api, reason in ((FakeAPI("read"), "not an authenticated repository writer"),
+                                    (FakeAPI(attested=False), "no authenticated PR hash attestation")):
+                    with patch("sys.stdout", new=io.StringIO()) as log:
+                        self.assertEqual(receipts.local_receipts(api, SCOPE), {})
+                    self.assertIn(reason, log.getvalue())
                 self.assertEqual(receipts.local_receipts(FakeAPI(), {**SCOPE, "pr": 99,
                                                                   "branch": "codex/other"}), {})
             finally:
@@ -516,29 +565,6 @@ class Case(unittest.TestCase):
         self.assertNotIn("needs.scope.outputs.receipt_key", preflight)
         self.assertEqual(receipts.job_name(SCOPE), "Python unit receipts")
         self.assertNotEqual(receipts.key(SCOPE), receipts.key({**SCOPE, "pr": 99}))
-
-    def test_failed_prepare_recovery_requires_exact_run_job_source_and_log(self):
-        proof = json.loads((Path(__file__).resolve().parents[2] /
-                            "validation/python-unit-preunit-failure3705.json").read_text())
-        prior = {"id": proof["run"], "commit_sha": proof["commit"]}
-        job = {"id": proof["job"], "run_id": proof["run"], "repo_id": 1,
-               "attempt": 1, "name": "", "status": "failure"}
-        class FakeAPI:
-            def __init__(self, mismatch):
-                self.mismatch = mismatch
-            def get(self, path):
-                return {"repository": {"id": 1}, "commit_sha": proof["commit"],
-                        "prettyref": proof["scope"]["branch"], "workflow_id": "effort-ci.yml",
-                        "status": "success" if self.mismatch == "run" else "failure"}
-            def bytes(self, path, query=None):
-                return b"contradictory-source-or-log"
-        for mismatch in ("run", "source"):
-            with self.assertRaises(receipts.ReceiptError):
-                receipts.pre_unit_recovery(FakeAPI(mismatch), proof["scope"], prior, [job])
-        self.assertFalse(receipts.pre_unit_recovery(FakeAPI("source"), SCOPE, prior, [job]))
-        with self.assertRaises(receipts.ReceiptError):
-            receipts.pre_unit_recovery(FakeAPI("source"), proof["scope"], prior,
-                                      [{**job, "attempt": 2}])
 
     def test_effort_node_units_have_only_the_existing_web_lane(self):
         root = Path(__file__).resolve().parents[2]
@@ -605,6 +631,288 @@ class Case(unittest.TestCase):
                 receipts.execute(state, Path(root) / "receipt.json", {
                     "validation": [Fixture("test_method")], "operations": [Fake("ops", events)]})
         self.assertEqual(events, ["method", "ops"])
+
+
+def archived(value):
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr("receipt.json", json.dumps(value))
+    return data.getvalue()
+
+
+class HistoryAPI:
+    """Fake forge holding this PR's runs, jobs, markers and final journals."""
+
+    def __init__(self):
+        self.runs, self.jobs, self.finals, self.markers, self.zips = [], {}, [], {}, {}
+        self.identities = iter(range(1000, 100000))
+
+    def artifact(self, label, run, value, overrides):
+        identity = next(self.identities)
+        raw = archived(value)
+        self.zips[f"/actions/artifacts/{identity}/zip"] = raw
+        return {"id": identity, "run_id": run, "name": label, "expired": False,
+                "size_in_bytes": len(raw), **(overrides or {})}
+
+    def add(self, run, commit, passes=None, *, attempt=1, job=True, start=True, final=True,
+            start_edit=None, final_edit=None, start_item=None, final_item=None, jobs_edit=None):
+        """One effort-ci run; by default it published an authentic journal."""
+        self.runs.append({"id": run, "commit_sha": commit})
+        self.jobs[run] = [{"name": receipts.job_name(SCOPE) if job else "", "repo_id": 7,
+                           "attempt": attempt, "status": "failure"}]
+        (jobs_edit or (lambda value: None))(self.jobs[run])
+        passes = dict(passes or {})
+        marker = {**journal(), "run": run, "commit": commit, "complete": False,
+                  "applicability_commit": commit,
+                  "passes": {k: v for k, v in passes.items() if v["run"] != run}}
+        complete = {**marker, "complete": True, "passes": passes}
+        (start_edit or (lambda value: None))(marker)
+        (final_edit or (lambda value: None))(complete)
+        if start:
+            name = receipts.key(SCOPE) + f"-start-{run}"
+            self.markers.setdefault(name, []).append(
+                self.artifact(name, run, marker, start_item))
+        if final:
+            self.finals.append(self.artifact(receipts.key(SCOPE), run, complete, final_item))
+        return self
+
+    def pages(self, path, query=None, field=None):
+        if path == "/actions/artifacts":
+            if query["name"] == receipts.key(SCOPE):
+                return list(self.finals)
+            return list(self.markers.get(query["name"], []))
+        if path == "/actions/runs":
+            assert query == {"workflow_id": "effort-ci.yml", "ref": "refs/heads/codex/fix"}
+            return list(self.runs)
+        if path.startswith("/actions/runs/") and path.endswith("/jobs"):
+            return list(self.jobs.get(int(path.split("/")[3]), []))
+        if path == "/issues/42/comments":
+            return []
+        raise AssertionError("unexpected fake API path " + path)
+
+    def bytes(self, path, query=None):
+        return self.zips[path]
+
+    def get(self, path):
+        raise AssertionError("history needs no single-document reads: " + path)
+
+
+OLD, NEW = "1" * 40, "2" * 40
+
+
+def ok(name, run, commit):
+    return {"validation:test_fixture.Case." + name: {"commit": commit, "run": run}}
+
+
+class ReceiptHistoryCase(unittest.TestCase):
+    """Earlier evidence is adopted only when authentic; it never refuses."""
+
+    def restore(self, api, run=99, applicability=None):
+        with tempfile.TemporaryDirectory() as root, patch("sys.stdout", new=io.StringIO()) as log:
+            previous = os.getcwd()
+            os.chdir(root)  # no committed local receipts: only the fake forge
+            try:
+                return receipts.restore(api, SCOPE, run, applicability), log.getvalue()
+            finally:
+                os.chdir(previous)
+
+    def test_prepare_crash_without_marker_or_journal_does_not_block(self):
+        api = HistoryAPI().add(20, OLD, ok("test_a", 20, OLD))
+        # Run 21 crashed in prepare: receipt job exists, no marker, no journal.
+        api.add(21, NEW, start=False, final=False)
+        # Run 22 never reached the receipt job at all.
+        api.add(22, NEW, job=False, start=False, final=False)
+        api.add(23, NEW, {**ok("test_a", 20, OLD), **ok("test_b", 23, NEW)})
+        restored, log = self.restore(api)
+        self.assertEqual(restored, {**ok("test_a", 20, OLD), **ok("test_b", 23, NEW)})
+        self.assertNotIn("not adopted", log)
+
+    def test_journal_whose_commit_is_absent_locally_is_not_adopted(self):
+        """A force-pushed-away journal commit: git cat-file fails for it."""
+        def git(*args, cwd):
+            return subprocess.check_output(
+                ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", *args], cwd=cwd, text=True,
+                stderr=subprocess.DEVNULL).strip()
+        source = (b"import unittest\nclass Case(unittest.TestCase):\n"
+                  b"    def test_a(self):\n        pass\n    def test_b(self):\n        pass\n")
+        with tempfile.TemporaryDirectory() as root:
+            git("init", "-q", cwd=root)
+            Path(root, "tests/validation").mkdir(parents=True)
+            Path(root, "tests/validation/test_fixture.py").write_bytes(source)
+            git("add", ".", cwd=root)
+            git("commit", "-q", "-m", "old", cwd=root)
+            old = git("rev-parse", "HEAD", cwd=root)
+            Path(root, "unrelated").write_text("current\n")
+            git("add", ".", cwd=root)
+            git("commit", "-q", "-m", "current", cwd=root)
+            current = git("rev-parse", "HEAD", cwd=root)
+            gone = "d" * 40
+            with self.assertRaises(subprocess.CalledProcessError):
+                git("cat-file", "-e", gone + "^{commit}", cwd=root)
+            api = HistoryAPI().add(30, old, ok("test_a", 30, old))
+            api.add(31, gone, {**ok("test_a", 30, old), **ok("test_b", 31, gone)})
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                with patch("sys.stdout", new=io.StringIO()) as log:
+                    restored = receipts.restore(api, SCOPE, 99, receipts.SourceApplicability(current))
+            finally:
+                os.chdir(previous)
+        self.assertEqual(restored, ok("test_a", 30, old),
+                         "inherited record from an adopted run stays; the absent commit's pass runs again")
+        self.assertIn(f"Unit source {gone}:tests/validation/test_fixture.py unavailable", log.getvalue())
+        self.assertIn("  validation:test_fixture.Case.test_b\n", log.getvalue())
+
+    # Each case is rejected by exactly one authentication proof.
+    UNAUTHENTIC = {
+        "start marker missing": dict(start=False),
+        "start marker expired": dict(start_item={"expired": True}),
+        "start marker for another source": dict(start_edit=lambda v: v.update(commit=OLD)),
+        "start marker already complete": dict(start_edit=lambda v: v.update(complete=True)),
+        "receipt job re-run": dict(attempt=2),
+        "receipt job ambiguous": dict(jobs_edit=lambda jobs: jobs.append(dict(jobs[0]))),
+        "receipt job in another repository": dict(jobs_edit=lambda jobs: jobs[0].update(repo_id=8)),
+        "receipt job absent": dict(job=False),
+        "receipt job still running": dict(jobs_edit=lambda jobs: jobs[0].update(status="running")),
+        "final journal expired": dict(final_item={"expired": True}),
+        "final journal under another name": dict(final_item={"name": receipts.key(SCOPE) + "-x"}),
+        "final journal from another producer": dict(final_edit=lambda v: v.update(scope={**SCOPE, "pr": 43})),
+        "final journal incomplete": dict(final_edit=lambda v: v.update(complete=False)),
+        "final journal with fixture errors": dict(final_edit=lambda v: v.update(
+            fixture_errors=["validation:test_fixture.Case.tearDownClass"])),
+    }
+
+    def unauthentic(self, case):
+        api = HistoryAPI().add(40, OLD, ok("test_a", 40, OLD))
+        api.add(41, NEW, {**ok("test_a", 40, OLD), **ok("test_b", 41, NEW)}, **self.UNAUTHENTIC[case])
+        return api
+
+    def test_unauthenticated_journal_is_not_adopted_while_its_sibling_is(self):
+        for case in self.UNAUTHENTIC:
+            with self.subTest(case=case):
+                restored, log = self.restore(self.unauthentic(case))
+                self.assertEqual(restored, ok("test_a", 40, OLD))
+                self.assertRegex(log, r"Run 41: journal not adopted — .+; its tests run again")
+        for edit in ("duplicate", "unlisted"):
+            api = HistoryAPI().add(40, OLD, ok("test_a", 40, OLD)).add(41, NEW, ok("test_b", 41, NEW))
+            if edit == "duplicate":
+                api.finals.append(dict(api.finals[-1], id=api.finals[-1]["id"]))
+            else:
+                api.runs.pop()
+            with self.subTest(edit=edit):
+                restored, log = self.restore(api)
+                self.assertEqual(restored, ok("test_a", 40, OLD))
+                self.assertIn("Run 41: journal not adopted", log)
+
+    def test_every_authentication_proof_is_load_bearing(self):
+        """Mutation control: deleting any one proof lets an unauthentic journal in."""
+        import ast
+        import inspect
+        import textwrap
+        source = textwrap.dedent(inspect.getsource(receipts.authenticate_journal))
+        tree = ast.parse(source)
+        body = tree.body[0].body
+        proofs = [index for index, node in enumerate(body) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                  and node.value.func.id in ("require", "validate_journal")]
+        self.assertGreaterEqual(len(proofs), 8)
+        for index in proofs:
+            statement = ast.unparse(body[index])
+            # Without a listed run there is no commit to bind; that lookup
+            # still fails, so this proof only names the reason.
+            if "no effort-ci run" in statement:
+                continue
+            mutant = copy.deepcopy(tree)
+            mutant.body[0].body[index] = ast.Pass()
+            namespace = dict(vars(receipts))
+            exec(compile(ast.fix_missing_locations(mutant), "mutant", "exec"), namespace)
+            with self.subTest(removed=statement), \
+                    patch.object(receipts, "authenticate_journal", namespace["authenticate_journal"]):
+                adopted = [case for case in self.UNAUTHENTIC
+                           if "validation:test_fixture.Case.test_b" in self.restore(self.unauthentic(case))[0]]
+                self.assertTrue(adopted, "no control notices this proof is missing")
+
+    def test_inherited_record_from_an_unadopted_run_is_dropped(self):
+        api = HistoryAPI().add(49, OLD, ok("test_x", 49, OLD))
+        api.add(50, OLD, ok("test_y", 50, OLD), start=False)  # not adopted
+        api.add(51, NEW, {**ok("test_x", 49, OLD), **ok("test_y", 50, OLD), **ok("test_z", 51, NEW)})
+        restored, log = self.restore(api)
+        self.assertEqual(restored, {**ok("test_x", 49, OLD), **ok("test_z", 51, NEW)})
+        self.assertIn("Run 50: journal not adopted — start marker missing", log)
+        self.assertIn("Run 51: 1 inherited record(s) not adopted — no adopted run recorded it as its own pass", log)
+
+    def test_inherited_record_the_named_run_never_recorded_is_dropped(self):
+        api = HistoryAPI().add(59, OLD, ok("test_r", 59, OLD))
+        api.add(60, OLD, {**ok("test_p", 60, OLD), **ok("test_r", 59, OLD)})
+        # Run 61 credits run 60 with a pass run 60 never recorded, and with
+        # one that run 60 only inherited from run 59.
+        api.add(61, NEW, {**ok("test_q", 60, OLD), **ok("test_r", 60, OLD),
+                          **ok("test_p", 60, OLD), **ok("test_s", 61, NEW)})
+        restored, log = self.restore(api)
+        self.assertEqual(restored, {**ok("test_p", 60, OLD), **ok("test_r", 59, OLD),
+                                    **ok("test_s", 61, NEW)})
+        self.assertIn("Run 61: 2 inherited record(s) not adopted", log)
+
+    def test_transport_failure_fetching_old_journal_is_not_adopted(self):
+        """The real API transport: a reset or a truncated body never refuses."""
+        import http.client
+        import urllib.parse
+        history = HistoryAPI().add(70, OLD, ok("test_a", 70, OLD))
+        history.add(71, NEW, ok("test_b", 71, NEW))
+        broken = f"/actions/artifacts/{history.finals[0]['id']}/zip"
+
+        for failure in (ConnectionResetError("reset by fixture-token peer"),
+                        http.client.IncompleteRead(b"partial-secret")):
+            class Opener:
+                def open(self, request, timeout):
+                    self.headers = dict(request.header_items())
+                    url = urllib.parse.urlsplit(request.full_url)
+                    path = url.path.removeprefix("/api/v1/repos/owner/repo")
+                    query = dict(urllib.parse.parse_qsl(url.query))
+                    if path == broken:
+                        raise failure
+                    if path in history.zips:
+                        return io.BytesIO(history.zips[path])
+                    page = int(query.pop("page"))
+                    query.pop("limit")
+                    if path == "/actions/runs":
+                        body = {"workflow_runs": history.pages(path, query) if page == 1 else []}
+                    else:
+                        body = history.pages(path, query) if page == 1 else []
+                    return io.BytesIO(json.dumps(body).encode())
+            api = receipts.API("https://forge.example.test/api/v1", "owner/repo", "fixture-token")
+            api.opener = Opener()
+            with self.subTest(failure=type(failure).__name__):
+                restored, log = self.restore(api)
+                self.assertEqual(restored, ok("test_b", 71, NEW))
+                self.assertIn(f"Run 70: journal not adopted — {type(failure).__name__} at "
+                              f"/repos/owner/repo{broken}; evidence unavailable", log)
+                self.assertNotIn("secret", log)
+                self.assertNotIn("fixture-token", log)
+
+    def test_current_run_integrity_still_refuses(self):
+        api = HistoryAPI().add(40, OLD, ok("test_a", 40, OLD)).add(99, NEW, ok("test_b", 99, NEW))
+        with self.assertRaisesRegex(receipts.IntegrityError, "already published"):
+            self.restore(api, run=99)
+        environment = {"GITHUB_API_URL": "https://forge.example.test/api/v1",
+                       "GITHUB_SERVER_URL": "https://forge.example.test",
+                       "GITHUB_REPOSITORY": "owner/repo", "GITHUB_TOKEN": "fixture-token",
+                       "GITHUB_SHA": COMMIT, "GITHUB_RUN_ID": "99", "GITHUB_REF_NAME": "codex/fix"}
+        for overrides, message in (({"GITHUB_RUN_ATTEMPT": "2"}, "never re-run"),
+                                   ({"GITHUB_SERVER_URL": "https://other.example.test"},
+                                    "refuse credential forwarding")):
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as root, \
+                    patch.dict(os.environ, {**environment, **overrides}), \
+                    patch.object(receipts.subprocess, "check_output", return_value=COMMIT + "\n"), \
+                    patch.object(receipts, "identity", side_effect=AssertionError("no forge request")):
+                previous = os.getcwd()
+                os.chdir(root)
+                try:
+                    with self.assertRaisesRegex(receipts.ReceiptError, message):
+                        receipts.main(["prepare"])
+                finally:
+                    os.chdir(previous)
 
 
 if __name__ == "__main__":

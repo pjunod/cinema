@@ -2,6 +2,9 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# The tree the binary was built from, when that is not this checkout (the
+# GitHub release packages a tag's build with the current scripts).
+source_root="${PLURX_PKG_SOURCE_ROOT:-$root}"
 target="${CARGO_TARGET_DIR:-$root/target}/x86_64-pc-windows-msvc/release"
 stage="$root/target/windows-package/plurx-windows-x86_64"
 archive="$root/target/windows-package/plurxd-windows-x86_64.zip"
@@ -12,12 +15,15 @@ test -f "$target/plurxd.exe" || {
 }
 pdb_name=$(PYTHONPATH="$root" python3 -m validation.release_pdb \
   "$target/plurxd.exe" "$target/plurxd.pdb")
+# Windows refuses to start an executable whose manifest a linker mangled.
+PYTHONPATH="$root" python3 -m validation.release_manifest >&2 \
+  "$target/plurxd.exe" "$source_root/crates/plurxd/plurxd.manifest"
 
 rm -rf "$stage"
 mkdir -p "$stage"
 cp "$target/plurxd.exe" "$stage/plurxd.exe"
 cp "$target/plurxd.pdb" "$stage/$pdb_name"
-cp "$root/plurx.example.toml" "$stage/plurx.example.toml"
+cp "$source_root/plurx.example.toml" "$stage/plurx.example.toml"
 cp "$root/deploy/windows/README.md" "$stage/README.md"
 
 mkdir -p "$(dirname "$archive")"
