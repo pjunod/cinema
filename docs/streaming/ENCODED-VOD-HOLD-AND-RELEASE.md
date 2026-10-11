@@ -134,8 +134,9 @@ dependency closure, plus the font closure for text burns —
 [FONT-ATTESTATION-AND-BLOCKING-IO.md](FONT-ATTESTATION-AND-BLOCKING-IO.md)),
 `reopen_encoded_audio`, and a fresh ffmpeg with decoder init and the
 preroll VOD-ENCODING.md §"Audio owns a global sample lattice" describes.
-The log line is `"spawned a producer generation"` (`:6860`) with
-`rendition = <key>`.
+The log line is `"spawned a producer generation"` (`vod/generation.rs`,
+`spawn_generation`) with `rendition = <key>`, `start_entry = <plan entry>` and
+`generation = <epoch>`.
 
 ### 2.4 The waiting signal exists, but the stopped producer never hears it
 
