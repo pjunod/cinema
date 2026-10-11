@@ -257,6 +257,18 @@ impl AvailabilityCache {
     /// Start all uncached stats before waiting. A stale but still honest
     /// observation answers immediately while its refresh continues.
     pub async fn observe_many(self: &Arc<Self>, paths: &[PathBuf]) -> Vec<Observation> {
+        self.observe_many_within(paths, REQUEST_BUDGET).await
+    }
+
+    /// [`Self::observe_many`] with the caller's wait instead of the detail
+    /// page's. A library-wide reader (the index coverage report) waits longer
+    /// per batch so a cold cache answers rather than reading `Unknown`; the
+    /// probe concurrency and in-flight caps are the same either way.
+    pub async fn observe_many_within(
+        self: &Arc<Self>,
+        paths: &[PathBuf],
+        budget: Duration,
+    ) -> Vec<Observation> {
         let mut answers = Vec::with_capacity(paths.len());
         let mut pending = Vec::new();
         for (index, path) in paths.iter().enumerate() {
@@ -270,7 +282,7 @@ impl AvailabilityCache {
         if !pending.is_empty() {
             // One page budget, not 250 ms multiplied by audiobook part count.
             let _ = tokio::time::timeout(
-                REQUEST_BUDGET,
+                budget,
                 join_all(pending.iter_mut().map(|(_, receiver)| async move {
                     if receiver.borrow().is_none() {
                         let _ = receiver.changed().await;
