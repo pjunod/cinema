@@ -242,6 +242,13 @@ function analysisRideAlong(row){
   if(!tracks) return "";
   return `<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/maintenance/subsrccard" title="Turning stored subtitle tracks off lets this pass finish its index and discards the tracks it kept">stored subtitle tracks setting</a></div>`;
 }
+// A shared read builds several copy identities of one file from one pass over
+// its source, in one background slot. Every identity has its own row; this
+// line says the rows are one read, so the work stays attributable.
+function analysisSharedRead(row){
+  const identities=Number(row.shared_read_identities||0);
+  return identities>1?`<div class="analysis-sub">Shared read · ${identities} identities from one pass over the source</div>`:"";
+}
 function analysisLiveProgress(value,names){
   const rows=(value&&value.progress)||[];
   if(!rows.length) return "";
@@ -252,7 +259,7 @@ function analysisLiveProgress(value,names){
     const rate=row.throughput_bps?`${fmtBytes(row.throughput_bps)}/s`:"—";
     const eta=row.eta_ms!=null?fmtDur(row.eta_ms):"—";
     return `<tr><td><b>${title}</b><div class="analysis-sub">File ${row.file_id} · ${esc(row.component||"analysis")}</div></td>
-      <td><span class="analysis-state running">${esc((row.stage||"running").replace(/_/g," "))}</span>${row.component==="subtitle_source"?"":`<div class="analysis-sub">${row.fragments_indexed||0} fragments</div>`}${analysisRideAlong(row)}</td>
+      <td><span class="analysis-state running">${esc((row.stage||"running").replace(/_/g," "))}</span>${row.component==="subtitle_source"?"":`<div class="analysis-sub">${row.fragments_indexed||0} fragments</div>`}${analysisSharedRead(row)}${analysisRideAlong(row)}</td>
       <td><b>${bytes}</b><div class="analysis-sub">Media ${media} · ${rate} · elapsed ${fmtDur(row.elapsed_ms)||"0s"} · ETA ${eta}</div></td>
       <td>${analysisNodeCell(names,row.node_id)}</td></tr>`;
   }).join("")}</tbody></table></div>`;
