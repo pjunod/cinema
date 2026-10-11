@@ -274,12 +274,13 @@ values. An outer deadline or caller cancellation records `cancelled`; it
 does not prove remote execution stopped. Starts count local client attempts,
 not leader executions, Raft proposals or independent fsyncs.
 
-For the disabled-state bound, retain the two switch states and show that at
-least one is off; the local wake and 10 s idle cadence are unchanged. Since
-2026-10-10 an enabled pair is held on the same change signals, so on/on is no
-longer above the bar by construction (paused-clock test
-`an_idle_takeover_gate_takes_no_consistent_reads_after_its_first_proof`); the
-observer below still refuses on/on, and admitting it is a separate decision. Over a fresh admitted, continuously idle 12-hour
+Retain the two switch states with every observation; the local wake and 10 s
+idle cadence are unchanged. Since 2026-10-10 an enabled pair is held on the
+same change signals, so on/on is no longer above the bar by construction
+(paused-clock test
+`an_idle_takeover_gate_takes_no_consistent_reads_after_its_first_proof`), and
+the observer and evaluator below admit every boolean pair, on/on included,
+reading out per node each pair it ran under. Over a fresh admitted, continuously idle 12-hour
 window compute `Δstarted × 86,400 / actual_elapsed_seconds` per node. Require
 the deployed attribution source, stable build/role, uptime/counter continuity
 and unsaturated counters; a missing series is not zero. Starts already
@@ -421,8 +422,8 @@ not deploy, change a switch, or authorize a capture. The exact schema is:
   `build`, `source_commit`, integer UTC `epoch`, boolean
   `cluster_media_pool_enabled` and boolean `cluster_session_takeover_enabled`.
 - Every build/full-source binding must match the independently verified
-  expected deployment. At least one switch must actually be off on each
-  node; missing values, strings such as `"false"`, and on/on are refused.
+  expected deployment. Any boolean pair is admitted, on/on included;
+  missing values and strings such as `"false"` are refused.
 - Every observation must be no more than95 seconds old and not future-dated
   at the actual metrics observation. A one-time starting receipt goes stale
   and cannot qualify a twelve-hour capture. Refresh at least every60 seconds
@@ -452,8 +453,8 @@ from a prefix. All three nodes must bind the same expected source/build.
 The private regular credential file maps the three node names to bearer
 tokens; do not put tokens in argv or publish the file. The observer GETs
 each actual `/metrics` and authenticated `/api/v1/settings`, selects only
-the two actual boolean switches, and refuses a changed build, missing or
-malformed pair, or on/on. It never retains the full settings DTO (which can
+the two actual boolean switches, and refuses a changed build or a missing or
+malformed pair. It never retains the full settings DTO (which can
 contain credentials), HTTP exception details or tokens. Sanitized immutable
 per-tick manifests remain alongside atomically replaced `manifest.json`,
 which the existing sampler consumes. Each complete request is bounded to
