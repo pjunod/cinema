@@ -1268,6 +1268,16 @@ pub enum MembershipError {
     QuorumLoss,
     #[error("node maintenance operation for {0} conflicts with another cluster lifecycle change")]
     MaintenanceConflict(String),
+    /// This node's Raft log still begins at the restore that installed its
+    /// image, so a joiner would replicate from that first entry and never be
+    /// sent the restored rows. It clears once a snapshot is published.
+    #[error(
+        "this cluster was restored from a backup and this node has not published a snapshot \
+         that covers the restored database, so a joining node would start with an empty \
+         database; restart the restored voter while it is the only member (it publishes the \
+         snapshot before serving), or run `plurxd cluster backup` against the leader, then retry"
+    )]
+    RestoredImageNotTransferable,
     #[error("another node already owns the cluster's planned-outage lease")]
     ClusterOperationPending,
     #[error(
@@ -1351,6 +1361,7 @@ impl MembershipError {
             Self::LocalNodeNotActive => "local_node_not_active",
             Self::QuorumLoss => "removal_would_lose_quorum",
             Self::MaintenanceConflict(_) => "maintenance_conflict",
+            Self::RestoredImageNotTransferable => "restored_image_not_transferable",
             Self::ClusterOperationPending => "cluster_operation_pending",
             Self::MaintenanceWouldLoseQuorum(_) => "maintenance_would_lose_quorum",
             Self::MaintenanceResumeUnsafe(_) => "maintenance_resume_unsafe",
@@ -5691,6 +5702,10 @@ impl MembershipManager {
         if role.is_learner() && !(active_min..=active_max).contains(&AUTH_LEARNER_PROTOCOL) {
             return Err(MembershipError::LearnerProtocolInactive);
         }
+        // A token is only worth minting for a node this cluster can seed.
+        if restored_image_lacks_join_snapshot(&inner.client).await? {
+            return Err(MembershipError::RestoredImageNotTransferable);
+        }
         let now = unix_ms()?;
         let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
         let expires_at = now.saturating_add(ttl_ms.clamp(1_000, 86_400_000));
@@ -5848,6 +5863,11 @@ impl MembershipManager {
             return Err(MembershipError::MaintenanceConflict(
                 request.node_id.clone(),
             ));
+        }
+        // Issuance refuses too; this covers a token minted before the
+        // condition arose and a coordinator other than the issuer.
+        if restored_image_lacks_join_snapshot(&inner.client).await? {
+            return Err(MembershipError::RestoredImageNotTransferable);
         }
         // The same rule the boot-time guard applies, from the coordinator's
         // side: the joiner has to implement every protocol this cluster is
@@ -13088,6 +13108,44 @@ impl From<&mut Row<'_>> for MembershipSchemaRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             schema_version: row.get("schema_version"),
+        }
+    }
+}
+
+/// Whether a node joining now would be replicated an empty database.
+///
+/// `restore` installs the archive's image beneath a brand-new, empty Raft log
+/// and binds `cluster.restore_generation` into that image. OpenRaft sends a
+/// joiner a snapshot only once the entries it would otherwise replicate from
+/// are purged, so until this node's log is purged a joiner applies the
+/// post-restore entries to a database that has none of the restored schema or
+/// rows. Every snapshot purges the log beneath it (Hiqlite keeps one entry),
+/// and a node that installed one starts purged, so this is true only between
+/// a restore and its first snapshot. A cluster that was never restored has no
+/// restore generation and is never refused.
+pub(crate) async fn restored_image_lacks_join_snapshot(
+    client: &Client,
+) -> Result<bool, hiqlite::Error> {
+    if client.metrics_db().await?.purged.is_some() {
+        return Ok(false);
+    }
+    let rows = client
+        .query_map::<SettingValueRow, _>(
+            "SELECT value FROM settings WHERE key = $1",
+            params!(crate::store::keys::CLUSTER_RESTORE_GENERATION),
+        )
+        .await?;
+    Ok(!rows.is_empty())
+}
+
+struct SettingValueRow {
+    _value: Option<String>,
+}
+
+impl From<&mut Row<'_>> for SettingValueRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            _value: row.get("value"),
         }
     }
 }

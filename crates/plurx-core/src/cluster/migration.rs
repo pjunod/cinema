@@ -3089,7 +3089,42 @@ async fn open_active_store_with_key(
             sync_directory(&active)?;
         }
         if read_readdress_record(&config.storage.data_dir)?.is_some() {
-            materialize_readdress_join_snapshot(&client, &identity.node_id).await?;
+            materialize_join_snapshot(&client, &identity.node_id, "sole-voter readdress").await?;
+        } else if super::membership::restored_image_lacks_join_snapshot(&client)
+            .await
+            .map_err(|error| {
+                StoreError::Database(format!(
+                    "checking whether the restored image can seed a joining node: {error}"
+                ))
+            })?
+        {
+            // `restore` installs the archive's image beneath a brand-new,
+            // empty Raft log, exactly as readdress does, so that log cannot
+            // reconstruct the restored rows for a later joiner either. The
+            // sole restored voter publishes the covering snapshot here,
+            // before this open returns and anything is served, so no join
+            // token can be minted against an image the log cannot transfer.
+            let sole_member = client
+                .metrics_db()
+                .await
+                .map_err(|error| {
+                    StoreError::Database(format!("reading restored voter membership: {error}"))
+                })?
+                .membership_config
+                .nodes()
+                .count()
+                == 1;
+            if sole_member {
+                materialize_join_snapshot(&client, &identity.node_id, "restore").await?;
+            } else {
+                tracing::warn!(
+                    node_id = %identity.node_id,
+                    "this restored cluster admitted members before its leader published a \
+                     snapshot covering the restored image; those members may hold an empty \
+                     database. Joins are refused until a snapshot exists: run `plurxd cluster \
+                     backup` against the leader, then replace each affected member"
+                );
+            }
         }
         activation_admission
             .revalidate()
@@ -3129,60 +3164,68 @@ async fn open_active_store_with_key(
     result
 }
 
-/// Complete a sole-voter readdress with a transferable state-machine image.
+/// Complete a sole voter whose state machine predates its Raft log with a
+/// transferable state-machine image.
 ///
-/// Readdressing deliberately preserves the imported SQLite database while it
-/// rebuilds Raft metadata. That new log cannot reconstruct the pre-existing
-/// rows for a later learner, so the readdress recovery record remains live
-/// until a snapshot containing the preserved image is published. A crash
-/// after publication is idempotent: the next boot observes the snapshot at the
-/// current applied index and finishes without rebuilding it.
+/// Readdress and restore both install an existing SQLite image beneath a
+/// brand-new Raft log. That log cannot reconstruct the pre-existing rows for
+/// a later joiner: OpenRaft replicates a joiner from the first entry it still
+/// holds and sends a snapshot only once that entry is purged. So the open
+/// waits until a snapshot at or past the current applied index is published
+/// *and* the log beneath it is purged, which is the point at which a joiner
+/// starting from nothing is sent the image. A crash after publication is
+/// idempotent: the next boot observes both and finishes without rebuilding.
 #[cfg(feature = "hiqlite-store")]
-async fn materialize_readdress_join_snapshot(
+async fn materialize_join_snapshot(
     client: &Client,
     node_id: &str,
+    cause: &'static str,
 ) -> Result<(), StoreError> {
     let initial = client.metrics_db().await.map_err(|error| {
         StoreError::Database(format!(
-            "reading readdressed voter progress before snapshot: {error}"
+            "reading voter progress before the {cause} snapshot: {error}"
         ))
     })?;
     let target = initial.last_applied.as_ref().map_or(0, |log| log.index);
-    if initial
-        .snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.index >= target)
-    {
+    let transferable = |purged: bool, snapshot: Option<u64>, target: u64| {
+        purged && snapshot.is_some_and(|snapshot| snapshot >= target)
+    };
+    if transferable(
+        initial.purged.is_some(),
+        initial.snapshot.as_ref().map(|log| log.index),
+        target,
+    ) {
         return Ok(());
     }
     let target = client.trigger_db_snapshot().await.map_err(|error| {
         StoreError::Database(format!(
-            "anchoring and triggering readdressed voter snapshot for node {node_id}: {error}"
+            "anchoring and triggering the {cause} snapshot for node {node_id}: {error}"
         ))
     })?;
     let deadline = tokio::time::Instant::now() + HIQLITE_HEALTH_TIMEOUT;
     loop {
         let metrics = client.metrics_db().await.map_err(|error| {
             StoreError::Database(format!(
-                "reading readdressed voter snapshot progress for node {node_id}: {error}"
+                "reading {cause} snapshot progress for node {node_id}: {error}"
             ))
         })?;
-        if metrics
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.index >= target)
-        {
+        if transferable(
+            metrics.purged.is_some(),
+            metrics.snapshot.as_ref().map(|log| log.index),
+            target,
+        ) {
             tracing::info!(
                 node_id,
                 snapshot_index = target,
-                "published transferable state-machine snapshot after sole-voter readdress"
+                cause,
+                "published transferable state-machine snapshot"
             );
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(StoreError::Database(format!(
-                "readdressed voter {node_id} did not publish state-machine snapshot at index \
-                 {target} within {HIQLITE_HEALTH_TIMEOUT:?}"
+                "voter {node_id} did not publish a transferable state-machine snapshot at index \
+                 {target} after {cause} within {HIQLITE_HEALTH_TIMEOUT:?}"
             )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -6007,6 +6050,309 @@ mod tests {
         restored.shutdown().await.expect("restored voter shutdown");
     }
 
+    /// Every table and row the restored image holds, read through the local
+    /// replica (never the leader) so a joiner is judged on what it applied.
+    #[cfg(feature = "hiqlite-store")]
+    async fn local_tables_and_marker(client: &Client) -> (BTreeSet<String>, Option<String>) {
+        struct Text(Option<String>);
+        impl From<&mut hiqlite::Row<'_>> for Text {
+            fn from(row: &mut hiqlite::Row<'_>) -> Self {
+                Self(row.get("text"))
+            }
+        }
+        let tables = client
+            .query_map::<Text, _>(
+                "SELECT name AS text FROM sqlite_master WHERE type = 'table'",
+                hiqlite::params!(),
+            )
+            .await
+            .map(|rows| rows.into_iter().filter_map(|row| row.0).collect())
+            .unwrap_or_default();
+        let marker = client
+            .query_map::<Text, _>(
+                "SELECT value AS text FROM settings WHERE key = 'restore.join.marker'",
+                hiqlite::params!(),
+            )
+            .await
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.0);
+        (tables, marker)
+    }
+
+    /// Drill F4 (2026-10-11): a restored first voter installed its image under
+    /// a brand-new Raft log and published no snapshot, so OpenRaft replicated
+    /// a joiner from that log's first entry and never sent it the image. The
+    /// joiner became a voter with 32 of 163 tables and no `users`. The
+    /// restored voter must publish a transferable snapshot before it serves,
+    /// and a voter joining it must hold every table and the restored rows.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn restored_first_voter_seeds_a_joining_voter_with_the_restored_image() {
+        startup_observer::run_plural_fixture("f4-restore-join", restored_voter_join_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn restored_voter_join_fixture() {
+        install_default_crypto_provider();
+        let observed = startup_observer::MeasuredPeers::default();
+
+        let source_dir = tempfile::tempdir().expect("source data dir");
+        let source_config = membership_test_config(source_dir.path());
+        drop(
+            SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME))
+                .expect("legacy source store"),
+        );
+        let source = startup_observer::select_applied_singleton(&source_config)
+            .await
+            .expect("source voter");
+        source
+            .store
+            .put_setting("restore.join.marker", "restored")
+            .await
+            .expect("restored marker row");
+        let client = source.local_client().expect("source local client");
+        let applied = client
+            .trigger_db_snapshot()
+            .await
+            .expect("trigger snapshot");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let metrics = client.metrics_db().await.expect("snapshot metrics");
+                if metrics
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|log| log.index >= applied)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("snapshot publication deadline");
+        let snapshots = source_dir
+            .path()
+            .join(HIQLITE_ACTIVE_DIRNAME)
+            .join("state_machine/snapshots");
+        let snapshot_id =
+            std::fs::read_to_string(snapshots.join("current")).expect("snapshot pointer");
+        let destination = tempfile::tempdir().expect("backup destination");
+        let key_path = source_dir
+            .path()
+            .join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        let (artifact, _) = build_cluster_backup_artifact(
+            File::open(snapshots.join(snapshot_id.trim())).expect("published snapshot"),
+            destination.path(),
+            source_dir.path(),
+            Some(&key_path),
+            &source.identity.node_id,
+            Some(source.credential_key.id()),
+            "test-build",
+            applied,
+        )
+        .expect("portable artefact from real snapshot");
+        source.shutdown().await.expect("source voter shutdown");
+        drop(source);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("restored coordinator listener");
+        let coordinator_addr = listener.local_addr().expect("coordinator address");
+        let target_parent = tempfile::tempdir().expect("target parent");
+        let target = target_parent.path().join("restored");
+        let mut target_config = membership_test_config(&target);
+        target_config.server.bind = coordinator_addr;
+        target_config.cluster.join_url = format!("http://{coordinator_addr}");
+        restore_cluster_backup_archive(&artifact, &target_config, &[], None)
+            .await
+            .expect("restore real snapshot");
+        let restored = observed
+            .select(&target_config, false)
+            .await
+            .expect("restored voter starts");
+        let restored_client = restored.local_client().expect("restored client");
+        let metrics = restored_client
+            .metrics_db()
+            .await
+            .expect("restored metrics");
+        assert!(
+            metrics.purged.is_some() && metrics.snapshot.is_some(),
+            "the restored voter opened without a transferable snapshot: snapshot {:?}, purged {:?}",
+            metrics.snapshot,
+            metrics.purged
+        );
+        assert!(
+            !super::super::membership::restored_image_lacks_join_snapshot(&restored_client)
+                .await
+                .expect("restored admission check")
+        );
+        let (restored_tables, restored_marker) = local_tables_and_marker(&restored_client).await;
+        assert_eq!(restored_marker.as_deref(), Some("restored"));
+        assert!(restored_tables.contains("users"));
+
+        let coordinator = restored.membership_manager();
+        let app = Router::new()
+            .route("/api/v1/cluster/join/redeem", post(redeem_join_for_test))
+            .route(
+                "/api/v1/cluster/join/finalize",
+                post(finalize_join_for_test),
+            )
+            .with_state(coordinator.clone())
+            .merge(startup_observer::MeasuredPeers::route(coordinator.clone()));
+        let http_task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve restored join coordinator");
+        });
+
+        let issued = coordinator
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("a restored voter with a transferable snapshot issues join tokens");
+        let joining_dir = tempfile::tempdir().expect("joining data dir");
+        let token_path = joining_dir.path().join("join.token");
+        std::fs::write(&token_path, format!("{}\n", issued.token)).expect("joining token file");
+        let mut joining_config = membership_test_config(joining_dir.path());
+        joining_config.server.bind = format!("127.0.0.1:{}", free_test_port())
+            .parse()
+            .expect("joining clock bind");
+        joining_config.cluster.join_token_file = token_path;
+        // Without a transferable snapshot the joiner never finishes opening
+        // a store whose schema it was never sent; bound that instead of
+        // hanging the suite.
+        let joined = tokio::time::timeout(
+            Duration::from_secs(90),
+            observed.select(&joining_config, true),
+        )
+        .await
+        .expect("the joiner never finished joining the restored cluster")
+        .expect("join the restored cluster");
+        let joined_client = joined.local_client().expect("joined client");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let (joined_tables, joined_marker) = loop {
+            let observed = local_tables_and_marker(&joined_client).await;
+            if (observed.0 == restored_tables && observed.1.is_some())
+                || tokio::time::Instant::now() >= deadline
+            {
+                break observed;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert!(
+            joined_tables.contains("users"),
+            "the joiner became a member without the restored image: {} of {} tables",
+            joined_tables.len(),
+            restored_tables.len()
+        );
+        assert_eq!(joined_tables, restored_tables);
+        assert_eq!(joined_marker.as_deref(), Some("restored"));
+
+        http_task.abort();
+        joined.shutdown().await.expect("drain joined voter");
+        restored.shutdown().await.expect("drain restored voter");
+    }
+
+    /// The join-admission half of F4, as defence in depth behind the startup
+    /// snapshot: while a node's Raft log still begins at a restore, neither
+    /// issuance nor redemption admits a node, and both resume once a snapshot
+    /// has purged the log beneath it. A cluster without a restore generation
+    /// is never refused, snapshot or not.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn join_admission_refuses_a_restored_image_until_a_snapshot_covers_it() {
+        startup_observer::run_full_hiqlite_fixture(
+            "f4-restore-admission",
+            restored_join_admission_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn restored_join_admission_fixture() {
+        install_default_crypto_provider();
+        let source_dir = tempfile::tempdir().expect("source data dir");
+        let mut config = membership_test_config(source_dir.path());
+        // No advertised address: no readdress, so no snapshot at open.
+        config.cluster.advertise_host.clear();
+        drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let source = startup_observer::select_applied_singleton(&config)
+            .await
+            .expect("activate source voter");
+        let client = source.local_client().expect("source client");
+        assert!(
+            client
+                .metrics_db()
+                .await
+                .expect("source metrics")
+                .purged
+                .is_none(),
+            "fixture precondition: a fresh voter's log still begins at its first entry"
+        );
+        let coordinator = source.membership_manager();
+        let issued = coordinator
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("an unrestored cluster is never refused for lacking a snapshot");
+
+        source
+            .store
+            .put_setting(crate::store::keys::CLUSTER_RESTORE_GENERATION, "1")
+            .await
+            .expect("simulate a restored lineage");
+        assert!(matches!(
+            coordinator.issue_token(Duration::from_secs(120)).await,
+            Err(crate::cluster::membership::MembershipError::RestoredImageNotTransferable)
+        ));
+        let joining_dir = tempfile::tempdir().expect("joining data dir");
+        let joining_config = membership_test_config(joining_dir.path());
+        let staged = configured_local_peer(&joining_config, issued.raft_id).expect("staged peer");
+        let request = RedeemJoinRequest {
+            token_digest: join_token_digest(&issued.token),
+            raft_id: issued.raft_id,
+            node_id: uuid::Uuid::now_v7().to_string(),
+            hostname: "restored-joiner".to_owned(),
+            raft_address: staged.raft_address,
+            api_address: staged.api_address,
+            http_base: configured_artwork_url(&joining_config).expect("joining origin"),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+            protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
+            live_tv_v1: true,
+        };
+        assert!(matches!(
+            coordinator.redeem(&request).await,
+            Err(crate::cluster::membership::MembershipError::RestoredImageNotTransferable)
+        ));
+
+        let applied = client
+            .trigger_db_snapshot()
+            .await
+            .expect("trigger snapshot");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let metrics = client.metrics_db().await.expect("snapshot metrics");
+                if metrics.purged.is_some()
+                    && metrics
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|log| log.index >= applied)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("snapshot and purge deadline");
+        coordinator
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("a snapshot covering the restored image re-admits joins");
+        source.shutdown().await.expect("drain source voter");
+    }
+
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test]
     async fn an_accepted_join_that_never_answers_is_reported_as_ambiguous() {
@@ -6605,7 +6951,7 @@ mod tests {
             .0;
         assert!(
             open.contains("read_readdress_record(&config.storage.data_dir)?.is_some()")
-                && open.contains("materialize_readdress_join_snapshot(&client"),
+                && open.contains("materialize_join_snapshot(&client"),
             "an in-progress readdress must publish a snapshot before open succeeds"
         );
         let selection = source

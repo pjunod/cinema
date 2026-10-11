@@ -527,6 +527,8 @@ pub(crate) fn api_error(error: MembershipError) -> ApiError {
         // request, there is simply no leader to commit it right now.
         MembershipError::LeaderUnavailable
         | MembershipError::LeaderChanged(_)
+        // Clears on its own once the restored leader publishes a snapshot.
+        | MembershipError::RestoredImageNotTransferable
         | MembershipError::Internal(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     ApiError::typed(status, error.code(), error.to_string())

@@ -54,7 +54,15 @@ vendored `backup` feature are not what the tree does.
    `verify_state_machine_snapshot_identity` (`:1371-1402`) checks
    `settings.instance.id`. The single-voter readdress path builds a one-voter
    Raft around exactly such an image. Restore reuses that path rather than
-   writing a second one.
+   writing a second one. *(Corrected 2026-10-11, drill F4: restore reused the
+   directory build but not the readdress path's join snapshot, so a restored
+   voter's new Raft log — which cannot replay the image — was all a joiner was
+   sent, and joiners became voters with an empty database. The first boot of
+   a restored sole voter now publishes a snapshot covering the image, with
+   the log beneath it purged, before it serves (`materialize_join_snapshot`
+   in migration.rs, shared with readdress), and join-token issue and redeem
+   answer `restored_image_not_transferable` while a node with a restore
+   generation still has an unpurged log.)*
 
 ## 1. Objective
 
