@@ -27,6 +27,8 @@ class RunnerRecoveryCase(unittest.TestCase):
         self.commands.append(args)
         if args[1] == "list":
             return json.dumps([self.instance])
+        if args[1] == "query":
+            return json.dumps({"memory": {"usage": watchdog.GIB}})
         if "show" in args:
             return self.active
         return ""
@@ -92,3 +94,43 @@ class RunnerRecoveryCase(unittest.TestCase):
             self.commands.clear()
             self.run_pass()
             self.assertFalse(any("start" in c for c in self.commands))
+
+    def test_two_boots_reserve_full_allocations(self):
+        second = dict(self.instance, name="gha-lab6-general-02")
+        self.config["runners"].append(dict(self.config["runners"][0], vm=second["name"], unit=f"forgejo-runner-{second['name']}.service"))
+        def execute(*args):
+            if args[1] == "list":
+                return json.dumps([self.instance, second])
+            return self.execute(*args)
+        result = watchdog.recover(self.config, self.state, execute=execute,
+                                  memory=lambda: 13 * watchdog.GIB, host="lab6", now=10000)
+        self.assertEqual(sum(c[1] == "start" for c in self.commands), 1)
+        self.assertIn("insufficient host memory", result["deferred"][0])
+
+    def test_running_guest_unused_allocation_is_reserved_on_later_pass(self):
+        running = dict(self.instance, name="gha-lab6-general-02", status="Running")
+        def execute(*args):
+            if args[1] == "list":
+                return json.dumps([self.instance, running])
+            return self.execute(*args)
+        result = watchdog.recover(self.config, self.state, execute=execute,
+                                  memory=lambda: 13 * watchdog.GIB, host="lab6", now=10000)
+        self.assertFalse(any(c[1] == "start" for c in self.commands))
+        self.assertIn("insufficient host memory", result["deferred"][0])
+
+
+class RunnerReconcileCase(unittest.TestCase):
+    def test_resource_update_preserves_other_environment_and_credentials(self):
+        loader = importlib.machinery.SourceFileLoader("runner_reconcile", str(ROOT / "deploy/runner-recovery/plurx-runner-reconcile"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        source = "runner:\n  capacity: 4\n  envs:\n    OTHER_ENV: keep-me\n    CARGO_BUILD_JOBS: 12\n  labels:\n    - general:host\ncache:\n  enabled: true\ncontainer:\n  options: old-options\n  docker_host: unix:///var/run/docker.sock\ncredentials:\n  token: existing-registration-secret\n"
+        updated = module.configuration(source, ["self-hosted", "ci-coverage"], 2)
+        self.assertIn('    OTHER_ENV: keep-me', updated)
+        self.assertIn('  token: existing-registration-secret', updated)
+        self.assertIn('  docker_host: unix:///var/run/docker.sock', updated)
+        self.assertNotIn('general:host', updated)
+        self.assertNotIn('CARGO_BUILD_JOBS: 12', updated)
+        self.assertIn('--cpus 2 --memory 6g --memory-swap 8g', updated)
+        self.assertEqual(updated, module.configuration(updated, ["self-hosted", "ci-coverage"], 2))

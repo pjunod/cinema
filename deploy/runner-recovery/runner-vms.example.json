@@ -2,7 +2,40 @@
   "project": "github-runners",
   "reserve_gib": 4,
   "runners": [
-    {"vm": "gha-lab6-general-01", "unit": "forgejo-runner-gha-lab6-general-01.service", "memory_gib": 8},
-    {"vm": "gha-lab6-general-02", "unit": "forgejo-runner-gha-lab6-general-02.service", "memory_gib": 8}
+    {
+      "vm": "gha-lab6-general-01",
+      "unit": "forgejo-runner-gha-lab6-general-01.service",
+      "memory_gib": 8,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "lab",
+        "incus",
+        "ubuntu-24.04",
+        "ffmpeg-6",
+        "general",
+        "high-cpu"
+      ],
+      "retire_units": [
+        "forgejo-runner-gha-lab6-general-03.service",
+        "forgejo-runner-gha-lab6-general-04.service"
+      ]
+    },
+    {
+      "vm": "gha-lab6-general-02",
+      "unit": "forgejo-runner-gha-lab6-general-02.service",
+      "memory_gib": 8,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "lab",
+        "incus",
+        "ubuntu-24.04",
+        "ffmpeg-6",
+        "ci-coverage"
+      ]
+    }
   ]
 }

@@ -50,13 +50,24 @@ two-minute watchdog on each VM host. Supply a host-specific JSON shaped like
 
 ```bash
 sudo bash deploy/runner-recovery/install /path/to/runner-vms.json
+sudo plurx-runner-reconcile --config /path/to/runner-vms.json
 systemctl status plurx-runner-watchdog.timer --no-pager
 cat /var/lib/plurx-runner-watchdog/state.json
 ```
 
+The reconciliation command keeps each existing registration and config credentials,
+backs up config with mode 0600, applies capacity/build/container/service budgets,
+and requests a graceful restart only when configuration changed. The JSON carries
+explicit labels and retired duplicate units. A coverage guest retires all GitHub
+runner services as well; reconciliation refuses while a GitHub worker is active.
+Ansible skips GitHub registration for this guest so a later registration run
+cannot restore an old general runner.
+
 Only listed local VMs are eligible. A stopped VM boots when available memory
 exceeds its entire configured allocation plus 4 GiB host reserve; an allocation
-different from the JSON is an error. Restarts have a ten-minute cooldown and
+different from the JSON is an error. Admission also reserves the unused
+allocation of running guests and every start accepted in the same pass, because
+QEMU commits its pages gradually. Restarts have a ten-minute cooldown and
 a ceiling of three attempts per hour. Setting `boot.autostart=false` suspends
 recovery for maintenance. Active, starting and draining daemons are never
 restarted; inactive or failed daemons are started inside a running guest.

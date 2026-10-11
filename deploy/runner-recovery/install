@@ -6,6 +6,7 @@ here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
 install -d /etc/plurx-ci
 install -m 0644 "$1" /etc/plurx-ci/runner-vms.json
 install -m 0755 "$here/plurx-runner-watchdog" /usr/local/sbin/plurx-runner-watchdog
+install -m 0755 "$here/plurx-runner-reconcile" /usr/local/sbin/plurx-runner-reconcile
 install -m 0644 "$here/plurx-runner-watchdog.service" "$here/plurx-runner-watchdog.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now plurx-runner-watchdog.timer

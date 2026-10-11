@@ -35,6 +35,32 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
     instances = {i["name"]: i for i in json.loads(execute("incus", "list", "--project", project, "--format", "json"))}
     receipt = {"finished": now, "host": host, "recovered": [], "errors": [], "deferred": []}
     attempts = state.setdefault("attempts", {})
+    admission = None
+    # MemAvailable includes pages QEMU has not committed yet. Reserve the
+    # unused part of every running local guest, including on later passes.
+    def boot_headroom():
+        nonlocal admission
+        if admission is None:
+            unused = 0
+            for other in instances.values():
+                if other.get("location") != host or other["status"] == "Stopped":
+                    continue
+                allocation = other["expanded_config"].get("limits.memory", "")
+                if not re.fullmatch(r"[1-9][0-9]*GiB", allocation):
+                    raise RuntimeError("cannot account for local VM allocation")
+                committed = 0
+                if other["status"] == "Running":
+                    name = other["name"]
+                    if not re.fullmatch(r"gha-[a-z0-9-]+", name):
+                        raise RuntimeError("invalid local VM identity")
+                    usage = json.loads(execute("incus", "query", f"/1.0/instances/{name}/state?project={project}"))["memory"]["usage"]
+                    if not isinstance(usage, int) or usage < 0:
+                        raise RuntimeError("cannot account for local VM memory usage")
+                    committed = usage
+                unused += max(0, int(allocation[:-3]) * GIB - committed)
+            admission = memory() - unused
+        # A later reading may be lower; never enlarge this pass's budget.
+        return min(admission, memory())
     for managed in config["runners"]:
         name, unit = managed["vm"], managed["unit"]
         if not re.fullmatch(r"gha-[a-z0-9-]+", name) or not re.fullmatch(r"forgejo-runner-gha-[a-z0-9-]+\.service", unit):
@@ -60,9 +86,10 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
                     receipt["deferred"].append(f"{name}: restart backoff")
                     continue
                 # Boot only when the full configured allocation leaves host headroom.
-                if memory() < (managed["memory_gib"] * GIB + reserve):
+                if boot_headroom() < (managed["memory_gib"] * GIB + reserve):
                     receipt["deferred"].append(f"{name}: insufficient host memory")
                     continue
+                admission -= managed["memory_gib"] * GIB
                 history.append(now)
                 # Retain the attempt before an external command: a timeout or
                 # killed watchdog must not reset the OOM retry budget.
@@ -78,7 +105,7 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
             if status in {"inactive", "failed"}:
                 execute(*prefix, "systemctl", "start", unit)
                 receipt["recovered"].append(f"{name}: daemon started")
-        except (RuntimeError, subprocess.TimeoutExpired) as error:
+        except (RuntimeError, subprocess.TimeoutExpired, KeyError, ValueError) as error:
             receipt["errors"].append(f"{name}: {error}")
     state["last_run"] = receipt
     return receipt
