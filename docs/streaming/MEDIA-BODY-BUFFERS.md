@@ -208,7 +208,7 @@ verdict for the whole episode:
 
 | What the rendition was doing | Answer |
 |---|---|
-| Waiting for an encoder permit the pool refused; no producer ran for the entry | 503 `transcode_capacity_pending`, carrying the pool's refusal (priority, hardware and software use against their limits, live waiters, whether background work holds a permit) |
+| Waiting for an encoder permit the pool refused; no producer ran for the entry | 503 `segment_pending`, the segment wait every client retries, with `cause: transcode_capacity_pending` and the pool's refusal (priority, hardware and software use against their limits, live waiters, whether background work holds a permit) in the body; the log keeps the precise code |
 | A producer ran and never delivered the entry | 502 `producer_failed`, naming where the producer started and its last delivered fragment |
 | The producer delivered the entry's fragment; publication did not finish | 502 `segment_publication_failed` |
 

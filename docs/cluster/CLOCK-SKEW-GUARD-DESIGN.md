@@ -20,7 +20,7 @@ unclaimed pending measurement fleet evidence. Paul clarified on 2026-09-30
 that switches apply only where manual on/off is meaningful, rather than to
 every unfinished feature. K-06 therefore retains the accepted no-switch
 design, read-only Developer facts and separate releases. (Since 2026-10-04
-`main` has the switch anyway — Settings → Developer *Cluster clock guard*,
+`main` has the switch anyway — Settings → Cluster *Cluster clock guard* (moved out of Developer by the 2026-10-10 graduation pass),
 `cluster.clock_guard_enforced`, default off, with advisory readiness rows;
 see the §3.8 note.) Runtime work is now
 authorized; production rollout and clock-step drills remain separate actions.
@@ -541,7 +541,10 @@ grant — so a skewed learner measures its own offset instead of seeing the
 leader as `Unknown`.
 
 The excuse is about votes, so it covers membership changes and the surviving
-set of a fenced removal, never a lease. A learner owns delegated media
+set of a fenced removal, never a lease. In a fenced removal only surviving
+voters' bounds gate it: a surviving learner is excused whether unobserved or
+measured out of bound, so a stepped learner never blocks removing a dead voter
+(amended 2026-10-10); removing that learner itself is unaffected. A learner owns delegated media
 sessions, and their lease expiry was written by its clock, so takeover and the
 expiry scan also require the route's **owner** to be bounded
 (`ClusterClockGuard::owner_policy`, through `acquire_owned_for_owner` for a
@@ -811,11 +814,20 @@ design above is unchanged; this note records the code on `main` since
 `4cfd1bdd1` (#793). `main` has a Developer switch, *Enforce the cluster clock
 guard* on the *Cluster clock guard* card, stored as the replicated setting `cluster.clock_guard_enforced`
 (`crates/plurx-core/src/store/mod.rs`, read with `stored_switch(.., false)`,
-so missing is off). Each node applies it to its own guard from a 10-second
-poll of that row (`CLOCK_ENFORCEMENT_REFRESH` and `apply_stored_enforcement`
-in `crates/plurxd/src/clock_offset.rs`); a node whose read fails keeps its
-current mode, so voters can run different policies for up to one poll or
-longer — the state this section rules out. While it is off, every guarded
+so missing is off). Each node applies it to its own guard: one consistent
+read at start, then a look every 10 seconds that costs a consistent read only
+when this node's replica has applied an entry and its own copy of the row
+then disagrees with the value held (`CLOCK_ENFORCEMENT_REFRESH` and
+`follow_stored_enforcement` in `crates/plurxd/src/clock_offset.rs`; since
+2026-10-10, before which every look was a consistent read). Apply lag has no
+upper bound, so a held "off" is also proved again once it is two minutes old
+(`CLOCK_ADVISORY_MAX_HOLD`, since 2026-10-11): a node slow to apply an enable
+saved elsewhere stays advisory for at most two minutes and one look after
+the save commits, which is the direction that lets a skewed node act. A node
+slow to apply a disable keeps enforcing until it applies it, which refuses
+more, never less. A node whose read fails keeps its current mode, so voters
+can run different policies for up to those bounds, or longer while the read
+keeps failing — the state this section rules out. While it is off, every guarded
 decision is admitted and what would have been refused is counted in
 `plurx_cluster_clock_advisory_refusals_total`; while it is on, the guard
 refuses takeover, the expired-session scan and membership changes when the

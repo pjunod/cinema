@@ -106,10 +106,17 @@ class GateCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             capture.observe_after_tick(deployment, "0" * 64, credentials, fetch, lambda: now)
         self.assertEqual(len(calls), 6)  # refuses before any HTTP adapter call
-        for replacement in (None, "false", True):
+        for replacement in (None, "false"):
             settings["cluster_media_pool_enabled"] = replacement
             with self.assertRaises(ValueError):
                 capture.observe_after_tick(deployment, digest, credentials, fetch, lambda: now)
+        # Both switches on is admitted and recorded, not refused.
+        settings["cluster_media_pool_enabled"] = True
+        both_on = capture.observe_after_tick(deployment, digest, credentials, fetch, lambda: now)
+        for node in capture.NODES:
+            fact = capture.after_acquisition(both_on, now, node, build, source)
+            self.assertIs(fact["cluster_media_pool_enabled"], True)
+            self.assertIs(fact["cluster_session_takeover_enabled"], True)
         settings["cluster_media_pool_enabled"] = False
         changed = json.loads(deployment)
         changed["observations"][0]["source_commit"] = "b" * 40
@@ -241,6 +248,8 @@ class GateCase(unittest.TestCase):
                 self.assertEqual(rate["per_day_numerator"], 720 * 86400)
                 self.assertEqual(rate["per_day_denominator"], 43207)
                 self.assertAlmostEqual(rate["per_day"], 720 * 86400 / 43207)
+                self.assertEqual(result["per_node"][node]["switch_pairs"], [
+                    {"cluster_media_pool_enabled": False, "cluster_session_takeover_enabled": True}])
             self.assertIn("not assessed", result["outbox_wal_proposal_bound"])
             self.assertFalse(evaluate(rows[:6])["measurement_eligible"])
 
@@ -283,8 +292,18 @@ class GateCase(unittest.TestCase):
                 candidate = copy.deepcopy(rows)
                 acquisition_change(candidate, 0, lambda data, offset=offset: data["observations"][0].update(epoch=epoch0 + offset))
                 refuse(label, candidate)
+            # Both switches on is admitted and every pair a node ran under
+            # is read out, so a window spanning a switch change says so.
+            both_on = copy.deepcopy(rows)
+            acquisition_change(both_on, 0, lambda data: data["observations"][0].update(cluster_media_pool_enabled=True))
+            switched = evaluate(both_on)
+            self.assertTrue(switched["takeover_bound_met"])
+            self.assertEqual(switched["per_node"][capture.NODES[0]]["switch_pairs"], [
+                {"cluster_media_pool_enabled": False, "cluster_session_takeover_enabled": True},
+                {"cluster_media_pool_enabled": True, "cluster_session_takeover_enabled": True}])
+            for node in capture.NODES[1:]:
+                self.assertEqual(len(switched["per_node"][node]["switch_pairs"]), 1)
             for label, mutation in (
-                ("on-on", {"cluster_media_pool_enabled": True}),
                 ("non-boolean", {"cluster_media_pool_enabled": "false"}),
                 ("source", {"source_commit": "b" * 40}),
                 ("build", {"build": "unknown"}),
