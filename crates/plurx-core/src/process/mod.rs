@@ -134,12 +134,51 @@ pub async fn output_job_owned(
     child.wait_with_output().await
 }
 
+/// Bytes of a status-only child's stderr retained for the daemon log: room
+/// for an FFmpeg refusal and the libva lines printed ahead of it.
+const STATUS_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+
+/// Run a child for its exit status alone.
+///
+/// The child never writes to the daemon's own descriptors. Its stdin and
+/// stdout are null and its stderr is drained, bounded, into the daemon's log
+/// through `tracing`: `debug` when it succeeds, `warn` with what it wrote when
+/// it fails. An inherited stderr put the startup capability probes' libva
+/// banners and FFmpeg errors raw into a log that is otherwise JSON
+/// (`PLURX_LOG_FORMAT=json`), 21 of 80 lines at boot on the 2026-10-11 lab.
 pub async fn status_job_owned(
     command: &mut tokio::process::Command,
     work: ChildWork,
 ) -> io::Result<std::process::ExitStatus> {
+    let (status, diagnostics) = status_with_diagnostics(command, work).await?;
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    let diagnostics = diagnostics.trim();
+    if !status.success() {
+        tracing::warn!(purpose = work.purpose, %status, diagnostics, "child process failed");
+    } else if !diagnostics.is_empty() {
+        tracing::debug!(purpose = work.purpose, %status, diagnostics, "child process diagnostics");
+    }
+    Ok(status)
+}
+
+async fn status_with_diagnostics(
+    command: &mut tokio::process::Command,
+    work: ChildWork,
+) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
     let (mut child, _job) = spawn_job_owned(command, work)?;
-    child.wait().await
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("status child stderr was not piped"))?;
+    let (status, diagnostics) = tokio::join!(
+        child.wait(),
+        bounded::drain_capped(stderr, STATUS_DIAGNOSTIC_BYTES)
+    );
+    Ok((status?, diagnostics?))
 }
 
 /// [`output_job_owned`] for synchronous code that already runs off the async
@@ -391,6 +430,17 @@ mod tests {
                 std::io::stderr().write_all(b"reason").expect("stderr");
                 std::process::exit(3);
             }
+            // A daemon stand-in: runs a failing status child and reports only
+            // its exit code, so the test can read this process's own stderr.
+            Ok("status-parent") => {
+                let status = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime")
+                    .block_on(status_job_owned(&mut child("fail"), TEST_WORK))
+                    .expect("status child");
+                print!("status={}", status.code().unwrap_or(-1));
+            }
             Ok("sleep") => {
                 if let Ok(path) = std::env::var("PLURX_CHILD_PID_FILE") {
                     let path = Path::new(&path);
@@ -421,6 +471,38 @@ mod tests {
             .expect("child output");
         assert_eq!(output.status.code(), Some(3));
         assert!(String::from_utf8_lossy(&output.stderr).contains("reason"));
+    }
+
+    /// Lab F7: a status child inherited the daemon's stderr, so libva and
+    /// FFmpeg wrote raw lines into the JSON log.
+    #[tokio::test]
+    async fn a_status_child_writes_nothing_to_the_daemons_stderr() {
+        let output = output_job_owned(&mut child("status-parent"), TEST_WORK)
+            .await
+            .expect("daemon stand-in");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("status=3"));
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("reason"),
+            "the status child's stderr reached the parent's own stderr: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_status_childs_stderr_is_captured_for_the_log() {
+        let (status, diagnostics) = status_with_diagnostics(&mut child("fail"), TEST_WORK)
+            .await
+            .expect("failing child");
+        assert_eq!(status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&diagnostics).contains("reason"));
+        let (status, diagnostics) = status_with_diagnostics(&mut child("echo"), TEST_WORK)
+            .await
+            .expect("succeeding child");
+        assert!(status.success());
+        let diagnostics = String::from_utf8_lossy(&diagnostics);
+        assert!(diagnostics.contains("err-bytes"));
+        assert!(!diagnostics.contains("out-bytes"), "stdout is discarded");
     }
 
     #[tokio::test]
