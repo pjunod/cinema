@@ -4217,6 +4217,114 @@ fn cache_admin_rejection_requires_release_receipt(saw_ambiguous_response: bool) 
     saw_ambiguous_response
 }
 
+/// Whether any node holds the cluster-wide cache-admin exclusion, read from
+/// this replica as a hint for when to offer again; the offer decides.
+const CACHE_ADMIN_EXCLUSION_HELD_SQL: &str =
+    "SELECT COUNT(*) AS count FROM cluster_cache_admin_revocation_leases";
+
+/// How one cache-admin exclusion fared inside its caller's admission deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheAdminExclusionAdmission {
+    /// This exact claim holds the cluster-wide exclusion.
+    Acquired,
+    /// The exclusion stayed held elsewhere (another node's sign-out, or a
+    /// membership change) until the deadline; nothing of this claim landed.
+    DeadlinePassed,
+}
+
+/// One cache-admin exclusion claim as [`admit_cache_admin_exclusion`] drives it.
+trait CacheAdminExclusionSlot {
+    /// Offer the exact claim once. `Ok(false)` is a definitive refusal that
+    /// left nothing of this claim in the replicated state.
+    async fn offer(&mut self) -> Result<bool, MembershipError>;
+
+    /// Wait until this replica has applied an entry, after the last offer
+    /// began, that leaves no exclusion row. `Ok(false)` once `deadline` passes.
+    async fn released_by(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool, MembershipError>;
+}
+
+async fn admit_cache_admin_exclusion(
+    slot: &mut impl CacheAdminExclusionSlot,
+    deadline: tokio::time::Instant,
+) -> Result<CacheAdminExclusionAdmission, MembershipError> {
+    loop {
+        if slot.offer().await? {
+            return Ok(CacheAdminExclusionAdmission::Acquired);
+        }
+        if !slot.released_by(deadline).await? {
+            return Ok(CacheAdminExclusionAdmission::DeadlinePassed);
+        }
+    }
+}
+
+struct ReplicatedCacheAdminSlot<'a> {
+    manager: &'a MembershipManager,
+    client: &'a Client,
+    metrics: hiqlite::LocalDbRaftMetrics,
+    /// This replica's applied index when the last offer began.
+    observed: Option<u64>,
+    lease: &'a mut CacheAdminRevocationLease,
+}
+
+impl CacheAdminExclusionSlot for ReplicatedCacheAdminSlot<'_> {
+    async fn offer(&mut self) -> Result<bool, MembershipError> {
+        // Marked before the offer: an entry applied while it is in flight,
+        // the holder's release included, moves the index past this mark.
+        self.observed = self.metrics.snapshot().last_applied_index;
+        match self
+            .manager
+            .commit_cache_admin_revocation_lease(self.lease)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(MembershipError::ClusterOperationPending) if !self.lease.retain_release_receipt => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn released_by(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool, MembershipError> {
+        loop {
+            let observed = self.observed;
+            let metrics = &mut self.metrics;
+            let moved = tokio::time::timeout_at(deadline, async move {
+                while metrics.snapshot().last_applied_index == observed {
+                    if !metrics.wait_for_change().await {
+                        return false;
+                    }
+                }
+                true
+            })
+            .await;
+            match moved {
+                Err(_) => return Ok(false),
+                Ok(false) => {
+                    return Err(MembershipError::Internal(
+                        "the local Raft watch closed while the cache-admin exclusion was held"
+                            .into(),
+                    ))
+                }
+                Ok(true) => {}
+            }
+            self.observed = self.metrics.snapshot().last_applied_index;
+            let held = self
+                .client
+                .query_map::<CountRow, _>(CACHE_ADMIN_EXCLUSION_HELD_SQL, params!())
+                .await?;
+            if held.first().is_none_or(|row| row.count == 0) {
+                return Ok(true);
+            }
+        }
+    }
+}
+
 const CLUSTER_OPERATION_RETRY_INITIAL: Duration = Duration::from_millis(50);
 const CLUSTER_OPERATION_RETRY_MAX: Duration = Duration::from_secs(2);
 
@@ -7478,6 +7586,10 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let mut retry_delay = CLUSTER_OPERATION_RETRY_INITIAL;
         let mut saw_ambiguous_response = false;
+        // Every offer starts as conservative as a freshly prepared claim: a
+        // claim offered again after a definitive refusal may meet an
+        // ambiguous response this time, and that must keep its receipt.
+        lease.retain_release_receipt = true;
         loop {
             let now = unix_ms()?;
             let result = inner
@@ -7574,6 +7686,33 @@ impl MembershipManager {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+
+    /// Acquire one prepared cache-admin exclusion, waiting inside the
+    /// caller's admission `deadline` while it is held elsewhere.
+    ///
+    /// The exclusion is one cluster-wide row, so while a sign-out on another
+    /// node holds it (about a second) this node's acquire changes zero rows.
+    /// That definitive refusal leaves nothing of this claim in the replicated
+    /// state, so the same exact claim is offered again once this replica
+    /// applies an entry after which no exclusion row remains: the holder's
+    /// release, or the heartbeat expiry of a holder that crashed. The fence is
+    /// the offer itself, unchanged. An ambiguous refusal is still an error,
+    /// because that claim may yet land and needs its receipt-bearing cleanup.
+    pub async fn admit_cache_admin_revocation_lease(
+        &self,
+        lease: &mut CacheAdminRevocationLease,
+        deadline: tokio::time::Instant,
+    ) -> Result<CacheAdminExclusionAdmission, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let mut slot = ReplicatedCacheAdminSlot {
+            manager: self,
+            client: &inner.client,
+            metrics: inner.local_metrics.clone(),
+            observed: None,
+            lease,
+        };
+        admit_cache_admin_exclusion(&mut slot, deadline).await
     }
 
     /// Release one exact failed claim. A successor claim, even for the same
@@ -21678,6 +21817,188 @@ mod tests {
         )
         .expect("target progress");
         assert_eq!(read(), Some(Some(41)));
+    }
+
+    /// The cluster-wide exclusion row and two members, on the production
+    /// tables, with a counter standing in for this replica's applied index:
+    /// every write below is one applied entry.
+    struct SqlCacheAdminSlot {
+        db: Arc<Mutex<rusqlite::Connection>>,
+        applied: Arc<tokio::sync::watch::Sender<u64>>,
+        seen: tokio::sync::watch::Receiver<u64>,
+        observed: u64,
+        node: &'static str,
+        claim: String,
+    }
+
+    impl SqlCacheAdminSlot {
+        fn fixture() -> (
+            Arc<Mutex<rusqlite::Connection>>,
+            Arc<tokio::sync::watch::Sender<u64>>,
+        ) {
+            let db = production_membership_tables();
+            db.execute_batch(
+                "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at) \
+                   VALUES ('node-a', 1, 'node-a:32401', 'node-a:32402', 100), \
+                          ('node-b', 2, 'node-b:32401', 'node-b:32402', 100);",
+            )
+            .expect("two members");
+            (
+                Arc::new(Mutex::new(db)),
+                Arc::new(tokio::sync::watch::channel(0).0),
+            )
+        }
+
+        fn new(
+            fixture: &(
+                Arc<Mutex<rusqlite::Connection>>,
+                Arc<tokio::sync::watch::Sender<u64>>,
+            ),
+            node: &'static str,
+        ) -> Self {
+            Self {
+                db: Arc::clone(&fixture.0),
+                applied: Arc::clone(&fixture.1),
+                seen: fixture.1.subscribe(),
+                observed: 0,
+                node,
+                claim: uuid::Uuid::new_v4().to_string(),
+            }
+        }
+
+        fn release(&self) {
+            self.db
+                .lock()
+                .expect("fixture database")
+                .execute(
+                    RELEASE_CACHE_ADMIN_REVOCATION_LEASE_SQL,
+                    rusqlite::params![self.node, self.claim],
+                )
+                .expect("exact release");
+            self.applied.send_modify(|index| *index += 1);
+        }
+
+        fn holder(&self) -> Option<String> {
+            use rusqlite::OptionalExtension;
+            self.db
+                .lock()
+                .expect("fixture database")
+                .query_row(
+                    "SELECT node_id FROM cluster_cache_admin_revocation_leases",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .expect("exclusion row")
+        }
+    }
+
+    impl CacheAdminExclusionSlot for SqlCacheAdminSlot {
+        async fn offer(&mut self) -> Result<bool, MembershipError> {
+            self.observed = *self.seen.borrow();
+            let changed = self
+                .db
+                .lock()
+                .expect("fixture database")
+                .execute(
+                    &acquire_cache_admin_revocation_lease_sql(),
+                    rusqlite::params![self.node, self.claim, 4_000_000_000_000_i64, 1_i64],
+                )
+                .expect("production acquire");
+            self.applied.send_modify(|index| *index += 1);
+            Ok(changed == 1)
+        }
+
+        async fn released_by(
+            &mut self,
+            deadline: tokio::time::Instant,
+        ) -> Result<bool, MembershipError> {
+            loop {
+                let observed = self.observed;
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.seen.wait_for(|index| *index != observed),
+                )
+                .await
+                {
+                    Err(_) => return Ok(false),
+                    Ok(Err(_)) => return Err(MembershipError::Internal("watch closed".into())),
+                    Ok(Ok(_)) => {}
+                }
+                self.observed = *self.seen.borrow();
+                let held: i64 = self
+                    .db
+                    .lock()
+                    .expect("fixture database")
+                    .query_row(CACHE_ADMIN_EXCLUSION_HELD_SQL, [], |row| row.get(0))
+                    .expect("exclusion hint");
+                if held == 0 {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    /// CLUSTER-DRILLS-2026-10-11 F6: two users sign out at the same moment
+    /// through two different nodes. The exclusion is one cluster-wide row,
+    /// so the second node's acquire changes zero rows; it waits inside its
+    /// own admission deadline for the first to release, rather than answering
+    /// 503 with its user's token still valid.
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_sign_outs_on_two_nodes_both_take_the_exclusion_inside_the_deadline() {
+        let fixture = SqlCacheAdminSlot::fixture();
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(2_500);
+        let sign_out = |node| {
+            let mut slot = SqlCacheAdminSlot::new(&fixture, node);
+            async move {
+                let admitted = admit_cache_admin_exclusion(&mut slot, deadline)
+                    .await
+                    .expect("admission");
+                let held_from = tokio::time::Instant::now();
+                assert_eq!(slot.holder().as_deref(), Some(node), "exclusion holder");
+                // The revocation's own two fanouts and Store mutation.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                slot.release();
+                (admitted, held_from - start)
+            }
+        };
+        let ((first, first_at), (second, second_at)) =
+            tokio::join!(sign_out("node-a"), sign_out("node-b"));
+        assert_eq!(first, CacheAdminExclusionAdmission::Acquired);
+        assert_eq!(second, CacheAdminExclusionAdmission::Acquired);
+        assert_eq!(first_at, Duration::ZERO);
+        assert_eq!(second_at, Duration::from_millis(600));
+    }
+
+    /// A holder that never releases still ends a waiter at its deadline,
+    /// with nothing of the waiter's claim in the replicated state, however
+    /// many unrelated entries this replica applies meanwhile.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_exclusion_still_refuses_at_the_admission_deadline() {
+        let fixture = SqlCacheAdminSlot::fixture();
+        let mut holder = SqlCacheAdminSlot::new(&fixture, "node-a");
+        assert!(holder.offer().await.expect("holder offer"));
+        let heartbeats = {
+            let applied = Arc::clone(&fixture.1);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    applied.send_modify(|index| *index += 1);
+                }
+            })
+        };
+        let mut waiter = SqlCacheAdminSlot::new(&fixture, "node-b");
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2_500);
+        assert_eq!(
+            admit_cache_admin_exclusion(&mut waiter, deadline)
+                .await
+                .expect("admission"),
+            CacheAdminExclusionAdmission::DeadlinePassed
+        );
+        assert_eq!(tokio::time::Instant::now(), deadline);
+        assert_eq!(waiter.holder().as_deref(), Some("node-a"));
+        heartbeats.abort();
     }
 
     /// One method's body, ending where the method does.

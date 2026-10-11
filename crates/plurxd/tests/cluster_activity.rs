@@ -1262,26 +1262,35 @@ fn two_voter_config(
     config
 }
 
-/// CLUSTER-DRILLS-2026-10-11 F1: the `backup:cluster` lease can land on any
-/// voter, and a follower cannot propose the leader-only `RTT` entry that
-/// anchored the cut. A backup requested on the follower must build there,
-/// and its cut must cover a write the leader committed before the request.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_follower_builds_the_portable_cluster_backup() {
-    let root = canonical_tempdir();
-    let mut reserved = reserved_ports(6);
-    let [a_http, a_raft, a_api, b_http, b_raft, b_api] =
-        std::array::from_fn(|index| reserved[index].port);
-    let client = reqwest::Client::builder()
+fn two_voter_client() -> reqwest::Client {
+    reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(60))
         .build()
-        .expect("test client");
+        .expect("test client")
+}
 
-    let a_data = root.path().join("node-a");
+/// Two joined voters on loopback: node A bootstrapped with the `owner`
+/// admin, node B joined through a one-use token.
+struct TwoVoters {
+    node_a: Daemon,
+    node_b: Daemon,
+    a_base: String,
+    b_base: String,
+    token: String,
+    /// Node A's roster once both voters are listed.
+    roster: Value,
+}
+
+async fn start_two_voters(client: &reqwest::Client, root: &Path) -> TwoVoters {
+    let mut reserved = reserved_ports(6);
+    let [a_http, a_raft, a_api, b_http, b_raft, b_api] =
+        std::array::from_fn(|index| reserved[index].port);
+
+    let a_data = root.join("node-a");
     std::fs::create_dir_all(&a_data).expect("node A data");
     drop(SqliteStore::open(&a_data.join("plurx.db")).expect("legacy SQLite source"));
-    let a_config = root.path().join("node-a.toml");
+    let a_config = root.join("node-a.toml");
     std::fs::write(
         &a_config,
         two_voter_config(a_http, &a_data, a_raft, a_api, None),
@@ -1290,8 +1299,8 @@ async fn a_follower_builds_the_portable_cluster_backup() {
     for port in &mut reserved[..3] {
         port.release();
     }
-    let mut node_a = Daemon::spawn(&a_config, root.path().join("node-a.log"), "plurx-node-a");
-    wait_ready(&client, &mut node_a, a_http).await;
+    let mut node_a = Daemon::spawn(&a_config, root.join("node-a.log"), "plurx-node-a");
+    wait_ready(client, &mut node_a, a_http).await;
     let a_base = format!("http://127.0.0.1:{a_http}");
     let setup = client
         .post(format!("{a_base}/api/v1/setup"))
@@ -1317,13 +1326,13 @@ async fn a_follower_builds_the_portable_cluster_backup() {
         .expect("join token")
         .to_owned();
 
-    let b_data = root.path().join("node-b");
+    let b_data = root.join("node-b");
     std::fs::create_dir_all(&b_data).expect("node B data");
-    let join_file = root.path().join("node-b.join");
+    let join_file = root.join("node-b.join");
     std::fs::write(&join_file, format!("{join_token}\n")).expect("write join token");
     std::fs::set_permissions(&join_file, Permissions::from_mode(0o600))
         .expect("protect join token");
-    let b_config = root.path().join("node-b.toml");
+    let b_config = root.join("node-b.toml");
     std::fs::write(
         &b_config,
         two_voter_config(b_http, &b_data, b_raft, b_api, Some(&join_file)),
@@ -1332,10 +1341,36 @@ async fn a_follower_builds_the_portable_cluster_backup() {
     for port in &mut reserved[3..] {
         port.release();
     }
-    let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"), "plurx-node-b");
-    wait_ready(&client, &mut node_b, b_http).await;
+    let mut node_b = Daemon::spawn(&b_config, root.join("node-b.log"), "plurx-node-b");
+    wait_ready(client, &mut node_b, b_http).await;
     let b_base = format!("http://127.0.0.1:{b_http}");
-    let roster = wait_for_two_voters(&client, &mut node_a, &a_base, &token).await;
+    let roster = wait_for_two_voters(client, &mut node_a, &a_base, &token).await;
+    TwoVoters {
+        node_a,
+        node_b,
+        a_base,
+        b_base,
+        token,
+        roster,
+    }
+}
+
+/// CLUSTER-DRILLS-2026-10-11 F1: the `backup:cluster` lease can land on any
+/// voter, and a follower cannot propose the leader-only `RTT` entry that
+/// anchored the cut. A backup requested on the follower must build there,
+/// and its cut must cover a write the leader committed before the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_builds_the_portable_cluster_backup() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let TwoVoters {
+        mut node_a,
+        mut node_b,
+        a_base,
+        b_base,
+        token,
+        roster,
+    } = start_two_voters(&client, root.path()).await;
     let local_node = roster["local_node_id"].as_str().expect("local node id");
     let nodes = roster["nodes"].as_array().expect("node rows");
     let leader = nodes
@@ -1402,4 +1437,88 @@ async fn a_follower_builds_the_portable_cluster_backup() {
     assert!(body["path"]
         .as_str()
         .is_some_and(|path| Path::new(path).is_dir()));
+}
+
+/// CLUSTER-DRILLS-2026-10-11 F6: two sign-outs at the same moment, one
+/// through each voter. Each passes its own node's admission queue, and the
+/// membership exclusion both need is one cluster-wide row, so one of them
+/// finds it held by the other. Both must succeed and both tokens must stop
+/// working; refusing the second used to leave its user signed in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_sign_outs_through_both_voters_both_revoke() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut voters = start_two_voters(&client, root.path()).await;
+    let login = |base: String| {
+        let client = client.clone();
+        async move {
+            let response = client
+                .post(format!("{base}/api/v1/auth/login"))
+                .json(&json!({"username":"owner","password":"cluster-proof-password"}))
+                .send()
+                .await
+                .expect("login");
+            assert_eq!(response.status(), StatusCode::OK);
+            response.json::<Value>().await.expect("login JSON")["token"]
+                .as_str()
+                .expect("login token")
+                .to_owned()
+        }
+    };
+    let logout = |base: String, token: String| {
+        let client = client.clone();
+        async move {
+            let response = client
+                .post(format!("{base}/api/v1/auth/logout"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("logout");
+            let status = response.status();
+            (status, response.text().await.unwrap_or_default())
+        }
+    };
+    // The revocation capability is published by the heartbeats that follow
+    // the join; a lone sign-out proves it before the contended rounds.
+    let ready_by = Instant::now() + Duration::from_secs(60);
+    loop {
+        let token = login(voters.a_base.clone()).await;
+        let (status, body) = logout(voters.a_base.clone(), token).await;
+        if status == StatusCode::OK {
+            break;
+        }
+        assert!(
+            Instant::now() < ready_by,
+            "a lone sign-out never succeeded: {status} {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    for round in 0..5 {
+        let (a_token, b_token) =
+            tokio::join!(login(voters.a_base.clone()), login(voters.b_base.clone()));
+        let ((a_status, a_body), (b_status, b_body)) = tokio::join!(
+            logout(voters.a_base.clone(), a_token.clone()),
+            logout(voters.b_base.clone(), b_token.clone())
+        );
+        voters.node_a.assert_running("after simultaneous sign-outs");
+        voters.node_b.assert_running("after simultaneous sign-outs");
+        assert_eq!(
+            (a_status, b_status),
+            (StatusCode::OK, StatusCode::OK),
+            "round {round}: node A answered {a_body}; node B answered {b_body}"
+        );
+        for (base, token) in [(&voters.a_base, &a_token), (&voters.b_base, &b_token)] {
+            let me = client
+                .get(format!("{base}/api/v1/me"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .expect("signed-out token probe");
+            assert_eq!(
+                me.status(),
+                StatusCode::UNAUTHORIZED,
+                "round {round}: a signed-out token still works on {base}"
+            );
+        }
+    }
 }

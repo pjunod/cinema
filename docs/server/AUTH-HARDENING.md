@@ -204,6 +204,22 @@ deep. The implementation drops the permit as soon as the mutex is acquired —
 the mutex is the single active slot — so the depth is the eight waiters this
 section promises. Nothing else in the sketch changed.
 
+**Correction (2026-10-11, CLUSTER-DRILLS-2026-10-11 F6).** The queue above
+is per process, but the membership exclusion each admitted operation takes is
+one cluster-wide row. Two users signing out at once through two different
+nodes both pass their local queues, and the second node's acquire changes
+zero rows; that used to answer 503 at once with its user's token still valid.
+The admission window now also covers that row:
+`RevocationAdmission` carries the deadline taken when the caller arrived
+(arrival + `REVOCATION_ADMISSION_WAIT`), and a definitive zero-row acquire,
+which leaves nothing of the claim behind, waits until this replica applies an
+entry after which no exclusion row remains (the holder's release, or its
+heartbeat expiry) and offers the same exact claim again
+(`MembershipManager::admit_cache_admin_revocation_lease`). Only the deadline
+passing refuses, with the same 503, counted as `admission_timeout`. An
+ambiguous acquire still fails as before. The acquire SQL, the singleton row,
+`MEMBERSHIP_EXCLUSION_DURATION` and every later phase are unchanged.
+
 Both failures still map to `propagation_error()` — the 503 code and the
 client behaviour on it are unchanged; what changes is how often it
 happens. The three call sites (`:253, 266, 277`) become `.await`s. The
