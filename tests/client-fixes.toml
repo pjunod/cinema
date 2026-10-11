@@ -6173,3 +6173,11 @@ source_anchor = "}.minByOrNull { it.width.toLong() * it.height } ?: candidates.m
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "aLadderBelowTheDisplayClimbsToItsLargestAffordableRung"
 
+
+[[fixes]]
+id = "android.continuous-rung-from-frame-on-screen"
+commits = ["3eca9584ea93c7e55f2619ef334f4b3099e30e10"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAttachment.kt"
+source_anchor = "return onScreenLoads(observed).singleOrNull()?.resource?.row?.text(\"candidate_id\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "// A lost presentation report left 480p; the frame on screen is 720p."
