@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::SourceIdentity;
 use plurx_core::transcode::{
-    vod_pipe_args_with_reorder, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions,
-    VodFrameGrid,
+    vod_pipe_args_with_source_clock, Pacing, ResolvedTranscode, TranscodeExecution,
+    TranscodeOptions, VodFrameGrid,
 };
 use sha2::{Digest, Sha256};
 
@@ -185,6 +185,7 @@ pub(crate) fn try_admit_frozen_bundle(
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
     pub source_object_version: String,
+    pub source_clock: plurx_core::transcode::VodSourceClock,
     pub plan: ResolvedTranscode,
     /// Worker-selected processing decision frozen with this rendition. A saved
     /// switch or catalog DV label cannot create a selected backend plan.
@@ -711,6 +712,7 @@ impl Encoding {
     ) -> Arc<Encoding> {
         Arc::new(Encoding {
             source_object_version: self.source_object_version.clone(),
+            source_clock: self.source_clock,
             plan: self.plan.clone(),
             dv_processing: self.dv_processing.clone(),
             #[cfg(target_os = "linux")]
@@ -1096,6 +1098,7 @@ impl Encoding {
                 duration_seconds,
                 "/proc/self/fd/3",
                 "/proc/self/fd/4",
+                self.source_clock,
             )
             .expect("verified reconstructed VOD recipe remains valid");
         }
@@ -1106,16 +1109,17 @@ impl Encoding {
             let end_seconds = self.grid.shared_audio_end_ticks(duration_ms) as f64
                 / f64::from(plurx_core::transcode::VOD_AUDIO_RATE);
             audio
-                .args(&execution, end_seconds)
+                .args_with_source_clock(&execution, end_seconds, self.source_clock)
                 .expect("frozen soundtrack execution remains valid")
         } else {
-            vod_pipe_args_with_reorder(
+            vod_pipe_args_with_source_clock(
                 file,
                 &self.plan,
                 &execution,
                 self.grid,
                 duration_seconds,
                 self.reorder_frames,
+                self.source_clock,
             )
         }
     }
@@ -1165,6 +1169,7 @@ impl Encoding {
         });
         hash.update((self.source_object_version.len() as u64).to_le_bytes());
         hash.update(self.source_object_version.as_bytes());
+        hash.update(self.source_clock.identity());
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());

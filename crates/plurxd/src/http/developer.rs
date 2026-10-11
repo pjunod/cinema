@@ -249,6 +249,24 @@ pub(crate) async fn reprobe_macos_video(
     )
 }
 
+/// Neutral admin entry point; saved Mac choices do not govern Linux probing.
+pub(crate) async fn reprobe_video_processing(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let manager = std::sync::Arc::clone(&state.transcode);
+    let cancelled = state.shutdown.clone();
+    let report = serde_json::json!({"macos": manager.macos_video_diagnostics(),
+        "linux_dolby": manager.linux_dolby_diagnostics()});
+    tokio::spawn(async move {
+        manager.reprobe_video_processing(&cancelled).await;
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        Json(serde_json::json!({"accepted": true, "report": report})),
+    )
+}
+
 fn macos_effective_encoder_requirement(
     id: &'static str,
     state: &AppState,
