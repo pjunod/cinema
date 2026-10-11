@@ -137,6 +137,12 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/dv_segment.rs::dv_segment::tests::"
             "actual_segment_helper_nut_encoder_preserves_owned_custody"
         ] = "requires reviewed Linux FEL helper and bounded timestamped source"
+        # The tone-map census (#1019) adds one operator-run smoke of a real
+        # census on the build host through the production spawn seam.
+        additional_fixture_reasons[
+            "crates/plurxd/src/pipeprobe/census.rs::pipeprobe::census::tests::"
+            "census_smoke_on_this_host"
+        ] = "needs real ffmpeg and, for a hardware encoder, a GPU"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -144,8 +150,8 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 6)
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 30)
+        self.assertEqual(len(additional_fixtures), 7)
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 31)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())
