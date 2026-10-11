@@ -357,7 +357,7 @@ pub(crate) fn register(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .entry((work.class, work.purpose))
         .or_default() += 1;
-    if observe(pid).applied(work.class.policy()) == Some(false) {
+    if unapplied_at_spawn(pid, work.class) {
         UNAPPLIED[work.class.index()].fetch_add(1, Ordering::Relaxed);
     }
     let program = std::path::Path::new(program)
@@ -381,6 +381,13 @@ pub(crate) fn register(
     registry.next += 1;
     registry.entries.insert(key, entry);
     Some(Registration { key })
+}
+
+/// Whether [`register`] counts a just-started child as unapplied: its
+/// kernel-reported priority read back above its class's policy. A child that
+/// cannot be observed, such as one that has already exited, is not.
+fn unapplied_at_spawn(pid: u32, class: ChildClass) -> bool {
+    observe(pid).applied(class.policy()) == Some(false)
 }
 
 /// Every child the launcher started that its owner still holds, oldest
@@ -1103,17 +1110,15 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "child never exited");
             std::thread::sleep(Duration::from_millis(5));
         }
-        let unapplied = || {
-            class_counters()
-                .into_iter()
-                .find(|row| row.class == work.class)
-                .expect("background row")
-                .unapplied
-        };
-        let before = unapplied();
+        // The verdict `register` counts by, asserted for this child alone:
+        // the per-class counter is process-wide, and a background child
+        // spawned by a concurrent test could move it.
+        assert!(
+            !unapplied_at_spawn(pid, work.class),
+            "an exited child is unobservable, not unapplied"
+        );
         let registration = register(Some(pid), std::ffi::OsStr::new("true"), work);
-        assert!(registration.is_some());
-        assert_eq!(unapplied(), before);
+        assert!(registration.is_some(), "and it is still listed");
         drop(registration);
         assert!(child.wait().expect("reap").success());
     }
